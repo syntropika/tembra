@@ -10,7 +10,7 @@
   "scripts": {
     "typecheck": "bun --bun x --no-install tsc -p tsconfig.json",
     "test": "bun run --cwd ../../packages/sdk build && bun run test:unit && bun run test:package && bun run test:tooling && bun run test:node",
-    "test:node": "bun run prepare:node && node --expose-gc --test test/node/*.test.ts",
+    "test:node": "bun run prepare:node && node --import ./scripts/require-node.ts --expose-gc --test test/node/*.test.ts",
     "test:browser": "bun run prepare:browser && bun scripts/test-browser.ts",
     "test:unit": "bun test test/*.test.ts",
     "test:package": "bun run --cwd ../../packages/sdk build && bun test test/package/*.test.ts",
