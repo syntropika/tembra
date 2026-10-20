@@ -101,7 +101,7 @@ fn main() {
                     .boxed_local()
                 })
                 .json_method("reference", |_, _| {
-                    async { Ok(Some(json!(42))) }.boxed_local()
+                    async { Ok(Some(json!(1_792_536_326_221.0))) }.boxed_local()
                 })
                 .json_method("check", |args, _| {
                     async move {
@@ -159,7 +159,7 @@ fn main() {
     assert!(remote::variant_other::Consumer::new(remote_ref.clone()).is_err());
     let remote = remote::variant_main::Consumer::new(remote_ref).unwrap();
     driver.run_until(async {
-        assert_eq!(consumer.reference().await.unwrap(), 42);
+        assert_eq!(consumer.reference().await.unwrap(), 1_792_536_326_221);
         let result = consumer
             .add(serde_json::from_value(json!({"by": 4})).unwrap())
             .await

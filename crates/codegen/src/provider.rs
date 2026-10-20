@@ -52,8 +52,8 @@ impl Provider {
                 .map(|kind| {
                     format!(
                         r#"
-                let args: super::{kind} = ::tembra::serde_json::from_value(
-                    args.ok_or_else(|| ::tembra::RuntimeError::invalid(
+                let args: super::{kind} = ::tembra::contracts::from_portable_value(
+                    &args.ok_or_else(|| ::tembra::RuntimeError::invalid(
                         "missing_arguments", "method requires arguments"
                     ))?
                 ).map_err(|error| ::tembra::RuntimeError::invalid(
