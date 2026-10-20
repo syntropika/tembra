@@ -1,0 +1,35 @@
+[workspace]
+members = ["crates/contracts", "crates/core", "crates/tembra", "crates/macros", "crates/codegen", "crates/browser-wasm", "crates/native", "crates/executor-js", "crates/hooks", "examples/rust"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["unbounded_depth"] }
+futures = "0.3"
+sha2 = "0.10"
+serde_jcs = "0.2"
+schemars = "1.2.3"
+tembra-contracts = { path = "crates/contracts" }
+tembra-core = { path = "crates/core" }
+tembra-hooks = { path = "crates/hooks" }
+tembra = { path = "crates/tembra" }
+tembra-macros = { path = "crates/macros" }
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+manual_let_else = "warn"
+redundant_closure_for_method_calls = "warn"
+missing_errors_doc = "warn"
+allow_attributes_without_reason = "warn"

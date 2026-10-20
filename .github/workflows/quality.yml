@@ -1,0 +1,33 @@
+name: Quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - name: Bootstrap command runners
+        run: |
+          cargo install just --version 1.21.0 --locked
+      - name: Install Rust quality tools
+        run: just install-tools
+      - name: Install JavaScript dependencies
+        run: just install-ts
+      - name: Check Rust, WASM and TypeScript
+        run: just check-all
+      - name: Render changelog
+        run: just changelog --output "$RUNNER_TEMP/tembra-changelog.md"

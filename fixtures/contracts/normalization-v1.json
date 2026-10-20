@@ -1,0 +1,836 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "name": "omitted additional-property policy",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4,
+            "default": 2
+          },
+          "label": {
+            "type": "string",
+            "default": "new"
+          }
+        }
+      },
+      "cases": [
+        {
+          "name": "null acquisition uses an empty object",
+          "input": null,
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new"
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "missing properties receive defaults",
+          "input": {},
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new"
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "zero remains distinct from the default",
+          "input": {
+            "count": 0
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 0,
+              "label": "new"
+            },
+            "identity": "{\"count\":0}"
+          }
+        },
+        {
+          "name": "equal defaults disappear from identity",
+          "input": {
+            "count": 2,
+            "label": "new"
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new"
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "unknown scalar nested and array properties are removed",
+          "input": {
+            "extra": true,
+            "nested": {
+              "enabled": false,
+              "extra": 1
+            },
+            "values": [
+              {
+                "count": 2,
+                "extra": 0
+              },
+              {
+                "count": 4
+              }
+            ]
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new"
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "upper bound and supplementary Unicode remain data",
+          "input": {
+            "label": "😀",
+            "count": 4
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 4,
+              "label": "😀"
+            },
+            "identity": "{\"count\":4,\"label\":\"😀\"}"
+          }
+        },
+        {
+          "name": "Unicode is not normalized",
+          "input": {
+            "label": "é"
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "é"
+            },
+            "identity": "{\"label\":\"é\"}"
+          }
+        },
+        {
+          "name": "below minimum is refused",
+          "input": {
+            "count": -1
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "above maximum is refused",
+          "input": {
+            "count": 5
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "numeric strings are not coerced",
+          "input": {
+            "count": "4"
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "explicit null does not receive a property default",
+          "input": {
+            "count": null
+          },
+          "expected": {
+            "accepted": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "closed additional-property policy",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4,
+            "default": 2
+          },
+          "label": {
+            "type": "string",
+            "default": "new"
+          }
+        },
+        "additionalProperties": false
+      },
+      "cases": [
+        {
+          "name": "null acquisition receives defaults",
+          "input": null,
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new"
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "closed input is cleaned before validation",
+          "input": {
+            "count": 2,
+            "label": "new",
+            "extra": true,
+            "nested": {
+              "enabled": false
+            },
+            "values": [
+              {
+                "count": 4
+              }
+            ]
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new"
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "zero survives cleaning",
+          "input": {
+            "count": 0,
+            "extra": true
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 0,
+              "label": "new"
+            },
+            "identity": "{\"count\":0}"
+          }
+        },
+        {
+          "name": "Unicode and upper bound survive cleaning",
+          "input": {
+            "count": 4,
+            "label": "😀",
+            "extra": true
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 4,
+              "label": "😀"
+            },
+            "identity": "{\"count\":4,\"label\":\"😀\"}"
+          }
+        },
+        {
+          "name": "cleaning cannot repair invalid declared bounds",
+          "input": {
+            "count": -1,
+            "extra": true
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "cleaning cannot coerce declared types",
+          "input": {
+            "count": "4",
+            "extra": true
+          },
+          "expected": {
+            "accepted": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "open additional-property policy",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4,
+            "default": 2
+          },
+          "label": {
+            "type": "string",
+            "default": "new"
+          }
+        },
+        "additionalProperties": true
+      },
+      "cases": [
+        {
+          "name": "missing input still receives defaults",
+          "input": {},
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new"
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "unknown scalar contributes to identity",
+          "input": {
+            "count": 2,
+            "label": "new",
+            "extra": true
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new",
+              "extra": true
+            },
+            "identity": "{\"extra\":true}"
+          }
+        },
+        {
+          "name": "unknown nested objects retain their complete data",
+          "input": {
+            "nested": {
+              "enabled": false,
+              "extra": 1
+            },
+            "extra": true
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new",
+              "nested": {
+                "enabled": false,
+                "extra": 1
+              },
+              "extra": true
+            },
+            "identity": "{\"extra\":true,\"nested\":{\"enabled\":false,\"extra\":1}}"
+          }
+        },
+        {
+          "name": "unknown arrays retain item order and undeclared fields",
+          "input": {
+            "values": [
+              {
+                "count": 2,
+                "extra": 0
+              },
+              {
+                "count": 4
+              }
+            ],
+            "extra": {
+              "keep": true
+            }
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new",
+              "values": [
+                {
+                  "count": 2,
+                  "extra": 0
+                },
+                {
+                  "count": 4
+                }
+              ],
+              "extra": {
+                "keep": true
+              }
+            },
+            "identity": "{\"extra\":{\"keep\":true},\"values\":[{\"count\":2,\"extra\":0},{\"count\":4}]}"
+          }
+        },
+        {
+          "name": "zero and Unicode retain their declared values",
+          "input": {
+            "count": 0,
+            "label": "😀"
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 0,
+              "label": "😀"
+            },
+            "identity": "{\"count\":0,\"label\":\"😀\"}"
+          }
+        },
+        {
+          "name": "retaining extras cannot repair bounds",
+          "input": {
+            "count": -1,
+            "extra": true
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "retaining extras cannot coerce types",
+          "input": {
+            "count": "4",
+            "extra": true
+          },
+          "expected": {
+            "accepted": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "required properties with defaults",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4,
+            "default": 2
+          },
+          "label": {
+            "type": "string",
+            "default": "new"
+          }
+        },
+        "required": [
+          "count"
+        ],
+        "additionalProperties": false
+      },
+      "cases": [
+        {
+          "name": "required defaults precede validation",
+          "input": {},
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new"
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "null acquisition precedes required default insertion",
+          "input": null,
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new"
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "required zero remains explicit",
+          "input": {
+            "count": 0
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 0,
+              "label": "new"
+            },
+            "identity": "{\"count\":0}"
+          }
+        },
+        {
+          "name": "required equal defaults elide after cleaning",
+          "input": {
+            "count": 2,
+            "label": "new",
+            "extra": {
+              "keep": true
+            }
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "count": 2,
+              "label": "new"
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "required explicit null is not missing",
+          "input": {
+            "count": null
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "required negative value is refused",
+          "input": {
+            "count": -1
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "required numeric string is refused",
+          "input": {
+            "count": "4"
+          },
+          "expected": {
+            "accepted": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "nested object defaults",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "nested": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": true
+              }
+            },
+            "default": {}
+          }
+        }
+      },
+      "cases": [
+        {
+          "name": "nested children expand from an absent parent default",
+          "input": {},
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "nested": {
+                "enabled": true
+              }
+            },
+            "identity": "{\"nested\":{}}"
+          }
+        },
+        {
+          "name": "top-level null still expands nested defaults",
+          "input": null,
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "nested": {
+                "enabled": true
+              }
+            },
+            "identity": "{\"nested\":{}}"
+          }
+        },
+        {
+          "name": "explicit empty parent has the same identity",
+          "input": {
+            "nested": {}
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "nested": {
+                "enabled": true
+              }
+            },
+            "identity": "{\"nested\":{}}"
+          }
+        },
+        {
+          "name": "expanded parent differs from the raw empty default",
+          "input": {
+            "nested": {
+              "enabled": true
+            }
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "nested": {
+                "enabled": true
+              }
+            },
+            "identity": "{\"nested\":{}}"
+          }
+        },
+        {
+          "name": "false is retained and nested unknown keys are removed",
+          "input": {
+            "nested": {
+              "enabled": false,
+              "extra": 1
+            },
+            "extra": true
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "nested": {
+                "enabled": false
+              }
+            },
+            "identity": "{\"nested\":{\"enabled\":false}}"
+          }
+        },
+        {
+          "name": "unknown top-level arrays do not affect nested defaults",
+          "input": {
+            "values": [
+              {
+                "count": 4
+              }
+            ],
+            "count": "4"
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "nested": {
+                "enabled": true
+              }
+            },
+            "identity": "{\"nested\":{}}"
+          }
+        },
+        {
+          "name": "nested explicit null is not acquisition null",
+          "input": {
+            "nested": null
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "nested boolean values are not coerced",
+          "input": {
+            "nested": {
+              "enabled": "false"
+            }
+          },
+          "expected": {
+            "accepted": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "arrays of closed defaulted objects",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4,
+                  "default": 2
+                }
+              },
+              "additionalProperties": false
+            },
+            "default": []
+          }
+        }
+      },
+      "cases": [
+        {
+          "name": "absent array receives an empty default",
+          "input": {},
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "values": []
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "null acquisition receives the array default",
+          "input": null,
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "values": []
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "explicit empty array elides from identity",
+          "input": {
+            "values": []
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "values": []
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "unknown top-level data does not become array items",
+          "input": {
+            "nested": {
+              "enabled": false
+            },
+            "count": -1
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "values": []
+            },
+            "identity": "{}"
+          }
+        },
+        {
+          "name": "item defaults cleaning and ordering remain observable",
+          "input": {
+            "values": [
+              {
+                "extra": 0
+              },
+              {
+                "count": 0
+              },
+              {
+                "count": 4
+              },
+              {
+                "count": 2,
+                "extra": 1
+              }
+            ],
+            "extra": {
+              "keep": true
+            }
+          },
+          "expected": {
+            "accepted": true,
+            "normalized": {
+              "values": [
+                {
+                  "count": 2
+                },
+                {
+                  "count": 0
+                },
+                {
+                  "count": 4
+                },
+                {
+                  "count": 2
+                }
+              ]
+            },
+            "identity": "{\"values\":[{},{\"count\":0},{\"count\":4},{}]}"
+          }
+        },
+        {
+          "name": "explicit null does not receive an array default",
+          "input": {
+            "values": null
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "null item does not become an empty object",
+          "input": {
+            "values": [
+              null
+            ]
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "invalid item bounds refuse the whole input",
+          "input": {
+            "values": [
+              {
+                "count": 2
+              },
+              {
+                "count": 5
+              }
+            ]
+          },
+          "expected": {
+            "accepted": false
+          }
+        },
+        {
+          "name": "invalid item types are not coerced",
+          "input": {
+            "values": [
+              {
+                "count": "4"
+              }
+            ]
+          },
+          "expected": {
+            "accepted": false
+          }
+        }
+      ]
+    }
+  ]
+}

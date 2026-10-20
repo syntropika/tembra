@@ -1,0 +1,588 @@
+{
+  "version": 1,
+  "descriptors": [
+    {
+      "name": "counter",
+      "descriptor": {
+        "descriptorVersion": 1,
+        "name": "fixture.counter",
+        "version": 1,
+        "kind": "remote",
+        "input": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        },
+        "placement": {
+          "name": "service"
+        },
+        "variants": {
+          "default": {
+            "count": {
+              "kind": "state",
+              "schema": {
+                "type": "integer"
+              }
+            },
+            "increment": {
+              "kind": "method",
+              "args": {
+                "type": "object",
+                "properties": {
+                  "by": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "by"
+                ]
+              },
+              "result": {
+                "type": "integer"
+              }
+            },
+            "read": {
+              "kind": "method",
+              "result": {
+                "type": "integer"
+              }
+            },
+            "touch": {
+              "kind": "method"
+            },
+            "nullable": {
+              "kind": "method",
+              "args": {
+                "type": "null"
+              },
+              "result": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        "fingerprint": "d4ac3f6630fdd5de1bc78fbd0d08c732e7869994e1b1ec6661d30c3e14f5ed53"
+      },
+      "canonical": "{\"descriptorVersion\":1,\"input\":{\"properties\":{\"name\":{\"type\":\"string\"}},\"required\":[\"name\"],\"type\":\"object\"},\"kind\":\"remote\",\"name\":\"fixture.counter\",\"placement\":{\"name\":\"service\"},\"variants\":{\"default\":{\"count\":{\"kind\":\"state\",\"schema\":{\"type\":\"integer\"}},\"increment\":{\"args\":{\"properties\":{\"by\":{\"type\":\"integer\"}},\"required\":[\"by\"],\"type\":\"object\"},\"kind\":\"method\",\"result\":{\"type\":\"integer\"}},\"nullable\":{\"args\":{\"type\":\"null\"},\"kind\":\"method\",\"result\":{\"type\":\"null\"}},\"read\":{\"kind\":\"method\",\"result\":{\"type\":\"integer\"}},\"touch\":{\"kind\":\"method\"}}},\"version\":1}",
+      "fingerprint": "d4ac3f6630fdd5de1bc78fbd0d08c732e7869994e1b1ec6661d30c3e14f5ed53"
+    }
+  ],
+  "validation": [
+    {
+      "name": "integer-safe-maximum",
+      "schema": {
+        "type": "integer"
+      },
+      "value": 9007199254740991,
+      "valid": true
+    },
+    {
+      "name": "integer-unsafe",
+      "schema": {
+        "type": "integer"
+      },
+      "value": 9007199254740992,
+      "valid": false
+    },
+    {
+      "name": "integer-fraction",
+      "schema": {
+        "type": "integer"
+      },
+      "value": 1.25,
+      "valid": false
+    },
+    {
+      "name": "number-fraction",
+      "schema": {
+        "type": "number"
+      },
+      "value": 1.25,
+      "valid": true
+    },
+    {
+      "name": "no-string-coercion",
+      "schema": {
+        "type": "number"
+      },
+      "value": "1",
+      "valid": false
+    },
+    {
+      "name": "unicode-code-point-length",
+      "schema": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1
+      },
+      "value": "😀",
+      "valid": true
+    },
+    {
+      "name": "unicode-two-code-points",
+      "schema": {
+        "type": "string",
+        "maxLength": 1
+      },
+      "value": "é",
+      "valid": false
+    },
+    {
+      "name": "minimum-exclusive",
+      "schema": {
+        "type": "number",
+        "exclusiveMinimum": 2
+      },
+      "value": 2,
+      "valid": false
+    },
+    {
+      "name": "maximum-inclusive",
+      "schema": {
+        "type": "number",
+        "maximum": 2
+      },
+      "value": 2,
+      "valid": true
+    },
+    {
+      "name": "nullable-null",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "value": null,
+      "valid": true
+    },
+    {
+      "name": "nullable-wrong-type",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "value": 1,
+      "valid": false
+    },
+    {
+      "name": "const-number",
+      "schema": {
+        "const": 2
+      },
+      "value": 2,
+      "valid": true
+    },
+    {
+      "name": "enum-sibling-constraint",
+      "schema": {
+        "enum": [
+          2
+        ],
+        "type": "string"
+      },
+      "value": 2,
+      "valid": false
+    },
+    {
+      "name": "empty-object-schema-open",
+      "schema": {},
+      "value": {
+        "a": "x"
+      },
+      "valid": true
+    },
+    {
+      "name": "omitted-additional-policy-validates-open",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "a": {
+            "type": "string"
+          }
+        }
+      },
+      "value": {
+        "a": "x",
+        "extra": 1
+      },
+      "valid": true
+    },
+    {
+      "name": "closed-additional-policy-rejects-extra",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "a": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "value": {
+        "a": "x",
+        "extra": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "optional-property-checked",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "b": {
+            "type": "number"
+          }
+        }
+      },
+      "value": {
+        "b": "bad"
+      },
+      "valid": false
+    },
+    {
+      "name": "required-property",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "a": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "a"
+        ]
+      },
+      "value": {},
+      "valid": false
+    },
+    {
+      "name": "array-values",
+      "schema": {
+        "type": "array",
+        "items": {
+          "type": "integer"
+        }
+      },
+      "value": [
+        1,
+        2
+      ],
+      "valid": true
+    },
+    {
+      "name": "array-bad-value",
+      "schema": {
+        "type": "array",
+        "items": {
+          "type": "integer"
+        }
+      },
+      "value": [
+        1,
+        "2"
+      ],
+      "valid": false
+    },
+    {
+      "name": "array-unique",
+      "schema": {
+        "type": "array",
+        "uniqueItems": true,
+        "items": {}
+      },
+      "value": [
+        {
+          "a": 1
+        },
+        {
+          "a": 1
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "array-count",
+      "schema": {
+        "type": "array",
+        "items": {},
+        "minItems": 2
+      },
+      "value": [
+        1
+      ],
+      "valid": false
+    },
+    {
+      "name": "false-schema",
+      "schema": false,
+      "value": {},
+      "valid": false
+    },
+    {
+      "name": "true-schema",
+      "schema": true,
+      "value": {},
+      "valid": true
+    },
+    {
+      "name": "combining-two-code-points",
+      "schema": {
+        "type": "string",
+        "minLength": 2,
+        "maxLength": 2
+      },
+      "value": "é",
+      "valid": true
+    },
+    {
+      "name": "joined-emoji-code-points",
+      "schema": {
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 3
+      },
+      "value": "👩‍💻",
+      "valid": true
+    }
+  ],
+  "normalization": [
+    {
+      "name": "additional-omitted",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "n": {
+            "type": "integer",
+            "default": 2
+          }
+        }
+      },
+      "input": {
+        "extra": "retained-only-explicit-true"
+      },
+      "normalized": {
+        "n": 2
+      },
+      "identity": "{}"
+    },
+    {
+      "name": "additional-false",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "n": {
+            "type": "integer",
+            "default": 2
+          }
+        },
+        "additionalProperties": false
+      },
+      "input": {
+        "extra": "retained-only-explicit-true"
+      },
+      "normalized": {
+        "n": 2
+      },
+      "identity": "{}"
+    },
+    {
+      "name": "additional-true",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "n": {
+            "type": "integer",
+            "default": 2
+          }
+        },
+        "additionalProperties": true
+      },
+      "input": {
+        "extra": "retained-only-explicit-true"
+      },
+      "normalized": {
+        "n": 2,
+        "extra": "retained-only-explicit-true"
+      },
+      "identity": "{\"extra\":\"retained-only-explicit-true\"}"
+    },
+    {
+      "name": "null-acquisition-fallback",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "default": "default"
+          }
+        }
+      },
+      "input": null,
+      "normalized": {
+        "name": "default"
+      },
+      "identity": "{}"
+    },
+    {
+      "name": "nested-default-and-null",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "child": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "default": "safe"
+              }
+            }
+          },
+          "nullable": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": "text"
+          }
+        }
+      },
+      "input": {
+        "child": {},
+        "nullable": null
+      },
+      "normalized": {
+        "child": {
+          "mode": "safe"
+        },
+        "nullable": null
+      },
+      "identity": "{\"child\":{},\"nullable\":null}"
+    }
+  ],
+  "canonical": [
+    {
+      "name": "key-order",
+      "value": {
+        "z": 1,
+        "a": 2
+      },
+      "bytes": "{\"a\":2,\"z\":1}"
+    },
+    {
+      "name": "negative-zero",
+      "value": -0.0,
+      "bytes": "0"
+    },
+    {
+      "name": "fraction",
+      "value": 1.25,
+      "bytes": "1.25"
+    },
+    {
+      "name": "utf16-key-order",
+      "value": {
+        "": 1,
+        "😀": 2
+      },
+      "bytes": "{\"😀\":2,\"\":1}"
+    }
+  ],
+  "rawJson": [
+    {
+      "name": "object",
+      "text": "{}",
+      "valid": true
+    },
+    {
+      "name": "duplicate-key",
+      "text": "{\"a\":1,\"a\":2}",
+      "valid": false
+    },
+    {
+      "name": "nested-duplicate",
+      "text": "{\"a\":{\"x\":1,\"x\":2}}",
+      "valid": false
+    },
+    {
+      "name": "unpaired-surrogate",
+      "text": "\"\\ud800\"",
+      "valid": false
+    },
+    {
+      "name": "paired-surrogate",
+      "text": "\"\\ud83d\\ude00\"",
+      "valid": true
+    },
+    {
+      "name": "unsafe-integer",
+      "text": "9007199254740992",
+      "valid": false
+    },
+    {
+      "name": "non-json-number",
+      "text": "NaN",
+      "valid": false
+    },
+    {
+      "name": "underflow-nonzero",
+      "text": "1e-999",
+      "valid": false
+    },
+    {
+      "name": "fraction-collapses-integer",
+      "text": "9007199254740991.1",
+      "valid": false
+    },
+    {
+      "name": "exact-zero-exponent",
+      "text": "-0.000e-999",
+      "valid": true
+    },
+    {
+      "name": "fraction-normal-rounding",
+      "text": "0.1",
+      "valid": true
+    },
+    {
+      "name": "nesting-128-scalar",
+      "text": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "valid": true
+    },
+    {
+      "name": "nesting-128-empty",
+      "text": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "valid": true
+    },
+    {
+      "name": "nesting-129-scalar",
+      "text": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "valid": false
+    },
+    {
+      "name": "nesting-129-empty",
+      "text": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "valid": false
+    }
+  ]
+}

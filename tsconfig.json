@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "lib": ["ES2023", "DOM"],
+    "types": ["bun"],
+    "allowImportingTsExtensions": true
+  },
+  "include": ["oxlint.config.ts", "oxfmt.config.ts"]
+}

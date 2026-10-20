@@ -1,0 +1,193 @@
+{
+  "fixtureVersion": 1,
+  "valid": [
+    {
+      "id": "series-unit",
+      "descriptor": {
+        "format": 1,
+        "name": "example.notify",
+        "version": 1,
+        "strategy": "series",
+        "input": null,
+        "result": null,
+        "terminal": null,
+        "fingerprint": "2375526d0255f165e8fb409b393d45e602a17a31a9d68b501a2f99a1c3ac834e"
+      },
+      "canonical": "{\"format\":1,\"input\":null,\"name\":\"example.notify\",\"result\":null,\"strategy\":\"series\",\"terminal\":null,\"version\":1}",
+      "registry": "tembra.hook/example.notify@1",
+      "member": {
+        "kind": "method",
+        "args": {
+          "native": "tembra.hook.args/2375526d0255f165e8fb409b393d45e602a17a31a9d68b501a2f99a1c3ac834e@1"
+        }
+      }
+    },
+    {
+      "id": "bail-null-false",
+      "descriptor": {
+        "format": 1,
+        "name": "example.choose",
+        "version": 1,
+        "strategy": "bail",
+        "input": null,
+        "result": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal": null,
+        "fingerprint": "2f9eadfbe778ca9a208480537d3ebe035ddd71f130b5e5796de48aacaf276bcf"
+      },
+      "canonical": "{\"format\":1,\"input\":null,\"name\":\"example.choose\",\"result\":{\"anyOf\":[{\"type\":\"boolean\"},{\"type\":\"null\"}]},\"strategy\":\"bail\",\"terminal\":null,\"version\":1}",
+      "registry": "tembra.hook/example.choose@1",
+      "member": {
+        "kind": "method",
+        "args": {
+          "native": "tembra.hook.args/2f9eadfbe778ca9a208480537d3ebe035ddd71f130b5e5796de48aacaf276bcf@1"
+        },
+        "result": {
+          "native": "tembra.hook.bail/2f9eadfbe778ca9a208480537d3ebe035ddd71f130b5e5796de48aacaf276bcf@1"
+        }
+      }
+    },
+    {
+      "id": "waterfall-integer",
+      "descriptor": {
+        "format": 1,
+        "name": "example.transform",
+        "version": 1,
+        "strategy": "waterfall",
+        "input": {
+          "type": "integer"
+        },
+        "result": {
+          "type": "integer"
+        },
+        "terminal": null,
+        "fingerprint": "951963c39bc90585203b42d68028dc7b375ed64f4f2bbd89a1562da4c4db6c95"
+      },
+      "canonical": "{\"format\":1,\"input\":{\"type\":\"integer\"},\"name\":\"example.transform\",\"result\":{\"type\":\"integer\"},\"strategy\":\"waterfall\",\"terminal\":null,\"version\":1}",
+      "registry": "tembra.hook/example.transform@1",
+      "member": {
+        "kind": "method",
+        "args": {
+          "native": "tembra.hook.args/951963c39bc90585203b42d68028dc7b375ed64f4f2bbd89a1562da4c4db6c95@1"
+        },
+        "result": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "id": "middleware-native",
+      "descriptor": {
+        "format": 1,
+        "name": "example.operation",
+        "version": 1,
+        "strategy": "middleware",
+        "input": {
+          "native": "example.input@1"
+        },
+        "result": {
+          "native": "example.result@1"
+        },
+        "terminal": {
+          "input": {
+            "native": "example.input@1"
+          },
+          "result": {
+            "native": "example.result@1"
+          }
+        },
+        "fingerprint": "b790cca5e6516c8fcfcffb6e6b6e7c20c0e7e98e037fdb960e15cf973a811eb4"
+      },
+      "canonical": "{\"format\":1,\"input\":{\"native\":\"example.input@1\"},\"name\":\"example.operation\",\"result\":{\"native\":\"example.result@1\"},\"strategy\":\"middleware\",\"terminal\":{\"input\":{\"native\":\"example.input@1\"},\"result\":{\"native\":\"example.result@1\"}},\"version\":1}",
+      "registry": "tembra.hook/example.operation@1",
+      "member": {
+        "kind": "method",
+        "args": {
+          "native": "tembra.hook.args/b790cca5e6516c8fcfcffb6e6b6e7c20c0e7e98e037fdb960e15cf973a811eb4@1"
+        },
+        "result": {
+          "native": "example.result@1"
+        }
+      }
+    },
+    {
+      "id": "parallel-portable-terminal",
+      "descriptor": {
+        "format": 1,
+        "name": "example.parallel",
+        "version": 1,
+        "strategy": "parallel",
+        "input": {
+          "type": "string"
+        },
+        "result": {
+          "type": "integer"
+        },
+        "terminal": {
+          "input": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "result": null
+        },
+        "fingerprint": "842b12486ae209ca5653139db32a131a5624cd2d96586c85f89f66daafde773c"
+      },
+      "canonical": "{\"format\":1,\"input\":{\"type\":\"string\"},\"name\":\"example.parallel\",\"result\":{\"type\":\"integer\"},\"strategy\":\"parallel\",\"terminal\":{\"input\":{\"items\":{\"type\":\"integer\"},\"type\":\"array\"},\"result\":null},\"version\":1}",
+      "registry": "tembra.hook/example.parallel@1",
+      "member": {
+        "kind": "method",
+        "args": {
+          "native": "tembra.hook.args/842b12486ae209ca5653139db32a131a5624cd2d96586c85f89f66daafde773c@1"
+        },
+        "result": {
+          "type": "integer"
+        }
+      }
+    },
+    {
+      "id": "parallel-native-terminal",
+      "descriptor": {
+        "format": 1,
+        "name": "example.native-parallel",
+        "version": 1,
+        "strategy": "parallel",
+        "input": {
+          "native": "example.input@1"
+        },
+        "result": {
+          "native": "example.item@1"
+        },
+        "terminal": {
+          "input": {
+            "native": "example.items@1"
+          },
+          "result": {
+            "type": "integer"
+          }
+        },
+        "fingerprint": "f8b0cd68afbaf8e1d8113e4c8a6324e1594c1df9276cb2078d54a840535c2d54"
+      },
+      "canonical": "{\"format\":1,\"input\":{\"native\":\"example.input@1\"},\"name\":\"example.native-parallel\",\"result\":{\"native\":\"example.item@1\"},\"strategy\":\"parallel\",\"terminal\":{\"input\":{\"native\":\"example.items@1\"},\"result\":{\"type\":\"integer\"}},\"version\":1}",
+      "registry": "tembra.hook/example.native-parallel@1",
+      "member": {
+        "kind": "method",
+        "args": {
+          "native": "tembra.hook.args/f8b0cd68afbaf8e1d8113e4c8a6324e1594c1df9276cb2078d54a840535c2d54@1"
+        },
+        "result": {
+          "native": "example.item@1"
+        }
+      }
+    }
+  ]
+}

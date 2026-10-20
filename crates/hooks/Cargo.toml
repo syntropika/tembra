@@ -1,0 +1,17 @@
+[package]
+name = "tembra-hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Typed composition over Tembra managed registry operations"
+
+[dependencies]
+tembra-core.workspace = true
+tembra-contracts.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

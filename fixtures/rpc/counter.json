@@ -1,0 +1,77 @@
+{
+  "descriptorVersion": 1,
+  "name": "tembra.counter",
+  "version": 1,
+  "kind": "remote",
+  "input": {},
+  "placement": {
+    "name": "server"
+  },
+  "variants": {
+    "default": {
+      "add": {
+        "kind": "method",
+        "args": {
+          "type": "integer"
+        },
+        "result": {
+          "type": "integer"
+        }
+      },
+      "count": {
+        "kind": "state",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "double": {
+        "kind": "state",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "nullable": {
+        "kind": "method",
+        "args": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "void": {
+        "kind": "method"
+      },
+      "wait": {
+        "kind": "method"
+      },
+      "wait_started": {
+        "kind": "state",
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      "who": {
+        "kind": "method",
+        "result": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "fingerprint": "6b62d86736a7b5f0b7feee374417af6e77c748f81715d403b45a91e5e750be76"
+}

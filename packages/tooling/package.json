@@ -1,0 +1,44 @@
+{
+  "name": "@tembra/tooling",
+  "version": "0.1.0",
+  "bin": {
+    "tembra": "./bin/tembra.ts"
+  },
+  "files": [
+    "bin",
+    "src",
+    "dist/src",
+    "dist/bin"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./browser": {
+      "types": "./dist/src/browser.d.ts",
+      "import": "./dist/src/browser.js"
+    }
+  },
+  "scripts": {
+    "build": "bun run --bun --filter @tembra/sdk build && bun --bun x --no-install tsc -p tsconfig.json",
+    "build:binary": "bun run --bun --filter @tembra/sdk build && bun run build.ts",
+    "typecheck": "bun run --bun --filter @tembra/sdk build && bun --bun x --no-install tsc -p tsconfig.json --noEmit",
+    "test": "bun run build:binary && bun test test/*.test.ts --timeout 30000"
+  },
+  "dependencies": {
+    "@tembra/sdk": "workspace:*",
+    "enhanced-resolve": "5.26.0",
+    "es-module-lexer": "3.0.3",
+    "json-schema-to-typescript": "16.0.0",
+    "typescript": "5.9.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.3",
+    "@types/node": "26.6.5"
+  },
+  "engines": {
+    "bun": ">=1.4.3"
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "tembra-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Platform-neutral distributed object runtime for Tembra"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tembra-contracts.workspace = true
+
+[lints]
+workspace = true

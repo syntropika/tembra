@@ -1,0 +1,12 @@
+[package]
+name = "tembra-example-rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tembra = { workspace = true, features = ["native"] }
+
+[lints]
+workspace = true
