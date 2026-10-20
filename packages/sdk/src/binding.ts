@@ -83,6 +83,10 @@ export type BindingPort = {
   readonly ready: Promise<void>;
   call(request: CallRequest): Promise<Payload>;
   readable(member: string): Readable<unknown>;
+  /** Associates the checked view with an existing backend-issued source.
+   * @internal
+   */
+  onReadableBound?(member: string, readable: Readable<unknown>): void;
   opaque(member: string): unknown;
   release(): void;
   onStatus(listener: (status: RefStatus, error: unknown) => void): () => void;
@@ -243,6 +247,7 @@ export function bindReference<C extends AnyContract>(
               return source.subscribe((value) => listener(checked(value)));
             },
           };
+          port.onReadableBound?.(property, readable);
           readables.set(property, readable);
         }
         return readable;

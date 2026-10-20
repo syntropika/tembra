@@ -42,11 +42,16 @@ use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 use wasm_bindgen_futures::{JsFuture, future_to_promise};
 
 pub(crate) struct Session {
+    js_opaque: std::cell::RefCell<std::collections::BTreeSet<String>>,
+    hooks: std::cell::RefCell<
+        std::collections::BTreeMap<String, tembra_hooks::portable::PortableHook>,
+    >,
     activities: activity::Cache,
     token: JsValue,
     pub host: Weak<WebHost>,
     pub native: Rc<BrowserNativeSignatures>,
     generations: Cell<u64>,
+    artifact_evaluations: Cell<u64>,
     source_bytes: Cell<u64>,
     live_generations: Cell<u64>,
     callbacks: Cell<u64>,
@@ -58,7 +63,6 @@ pub(crate) struct Session {
 }
 pub(crate) struct Generation {
     session: Rc<Session>,
-    id: u64,
 }
 impl Drop for Generation {
     fn drop(&mut self) {
@@ -195,30 +199,67 @@ impl Drop for Job {
 #[wasm_bindgen]
 pub struct WasmExecutor {
     pub(crate) session: Rc<Session>,
+    application: Rc<Generation>,
 }
 
 /// Binds a JavaScript executor to the actual existing Host, never a replacement Host.
 #[wasm_bindgen(js_name = createCheckedWasmExecutor)]
 pub fn create_checked_wasm_executor(host: &WasmHost) -> WasmExecutor {
+    let session = Rc::new(Session {
+        activities: activity::Cache::default(),
+        hooks: std::cell::RefCell::default(),
+        js_opaque: std::cell::RefCell::default(),
+        token: crate::intrinsics::fresh_context_token(),
+        host: Rc::downgrade(&host.inner),
+        native: Rc::new(BrowserNativeSignatures::default()),
+        generations: Cell::new(0),
+        artifact_evaluations: Cell::new(0),
+        source_bytes: Cell::new(0),
+        live_generations: Cell::new(1),
+        callbacks: Cell::new(0),
+        next_slot: Cell::new(0),
+        jobs: Cell::new(0),
+        queued: Cell::new(0),
+        factories: Cell::new(0),
+        callables: std::cell::RefCell::default(),
+    });
     WasmExecutor {
-        session: Rc::new(Session {
-            activities: activity::Cache::default(),
-            token: crate::intrinsics::fresh_context_token(),
-            host: Rc::downgrade(&host.inner),
-            native: Rc::new(BrowserNativeSignatures::default()),
-            generations: Cell::new(0),
-            source_bytes: Cell::new(0),
-            live_generations: Cell::new(0),
-            callbacks: Cell::new(0),
-            next_slot: Cell::new(0),
-            jobs: Cell::new(0),
-            queued: Cell::new(0),
-            factories: Cell::new(0),
-            callables: std::cell::RefCell::default(),
+        application: Rc::new(Generation {
+            session: session.clone(),
         }),
+        session,
     }
 }
 impl WasmExecutor {
+    /// Allocates a callback owner without claiming that JavaScript was evaluated here.
+    /// Closed-artifact admission and native-module admission are separate loader policies.
+    pub(super) fn callback_generation(&self) -> Result<WasmGeneration> {
+        self.host_id()?;
+        if self.session.live_generations.get() >= 64 {
+            return Err(RuntimeError::unavailable(
+                "generations_limit",
+                "live callback generation capacity exhausted",
+            ));
+        }
+        let id = self
+            .session
+            .generations
+            .get()
+            .checked_add(1)
+            .filter(|id| *id <= 9_007_199_254_740_991)
+            .ok_or_else(|| {
+                RuntimeError::unavailable("generations_limit", "generation identity exhausted")
+            })?;
+        self.session.generations.set(id);
+        self.session
+            .live_generations
+            .set(self.session.live_generations.get() + 1);
+        Ok(WasmGeneration {
+            inner: Rc::new(Generation {
+                session: self.session.clone(),
+            }),
+        })
+    }
     /// Gives embedding code the checked whole-signature adapter registry.
     pub fn native_adapters(&self) -> Rc<BrowserNativeSignatures> {
         self.session.native.clone()
@@ -236,6 +277,97 @@ impl WasmExecutor {
 }
 #[wasm_bindgen]
 impl WasmExecutor {
+    /// Registers generic adapters for a portable hook before contribution installation.
+    /// # Errors
+    /// Refuses invalid descriptors, native payloads and adapter conflicts/capacity.
+    #[wasm_bindgen(js_name = registerHook)]
+    pub fn register_hook(&self, descriptor: JsValue) -> std::result::Result<(), JsValue> {
+        let descriptor =
+            tembra_hooks::HookDescriptor::from_json(&string(&descriptor).map_err(failure)?)
+                .map_err(failure)?;
+        self.register_portable_hook(descriptor).map_err(failure)
+    }
+    /// Explicitly enables resource-backed realm-local JavaScript opaque values.
+    /// # Errors
+    /// Refuses invalid nominals, conflicts with Rust adapters and exhausted capacity.
+    #[wasm_bindgen(js_name = registerOpaque)]
+    pub fn register_opaque(&self, nominal: JsValue) -> std::result::Result<(), JsValue> {
+        let nominal = string(&nominal).map_err(failure)?;
+        if self.session.js_opaque.borrow().contains(&nominal) {
+            return Ok(());
+        }
+        self.session
+            .native
+            .register_opaque::<BrowserValue>(
+                &nominal,
+                |value| Ok(value.0.clone()),
+                |value| Ok(Rc::new(BrowserValue(value))),
+            )
+            .map_err(failure)?;
+        self.session.js_opaque.borrow_mut().insert(nominal);
+        Ok(())
+    }
+    /// Acquires a consumer through this executor's actual Host and shared reference adapter.
+    /// # Errors
+    /// Refuses invalid descriptors, input/options and closed core admission before acquisition.
+    pub fn hold(
+        &self,
+        descriptor: JsValue,
+        input: JsValue,
+        options: JsValue,
+    ) -> std::result::Result<WasmBoundReference, JsValue> {
+        let host = self.application.host().map_err(failure)?;
+        let options = strict_json(&options).map_err(failure)?;
+        let fields = options
+            .as_object()
+            .ok_or_else(|| failure(error("options", "expected acquisition options")))?;
+        if fields.keys().any(|key| key != "state") {
+            return Err(failure(error("options", "unknown acquisition option")));
+        }
+        let state = match fields.get("state") {
+            None => true,
+            Some(serde_json::Value::Bool(v)) => *v,
+            _ => return Err(failure(error("options", "state must be boolean"))),
+        };
+        let reference = host
+            .host
+            .hold(
+                contract(&descriptor).map_err(failure)?,
+                strict_json(&input).map_err(failure)?,
+                tembra_core::GetOptions {
+                    state,
+                    ..Default::default()
+                },
+            )
+            .map_err(failure)?;
+        Ok(WasmBoundReference::new(reference, &self.application))
+    }
+
+    /// Runs an application root through the same managed callback adapter as installed facets.
+    /// # Errors
+    /// Refuses closed admission and propagates callback errors after any completed effects.
+    #[wasm_bindgen(js_name = runRoot)]
+    pub fn run_root(&self, callback: Function) -> std::result::Result<Promise, JsValue> {
+        let generation = self.application.clone();
+        let host = generation.host().map_err(failure)?.host.clone();
+        let callback = generation.callback(callback).map_err(failure)?;
+        Ok(future_to_promise(async move {
+            host.root(move |context| callback.invoke(Some(context), Array::new(), None, None))
+                .await
+                .map_err(failure)
+        }))
+    }
+
+    /// Returns the core-owned registry view for this Host.
+    /// # Errors
+    /// Refuses malformed definitions, conflicting policy or a closed Host.
+    pub fn registry(
+        &self,
+        definition: JsValue,
+    ) -> std::result::Result<scope::WasmRegistryView, JsValue> {
+        scope::registry_view(&self.application, &definition).map_err(failure)
+    }
+
     /// Reserves a lifetime evaluation budget before executing source, including failed evaluations.
     /// # Errors
     /// Refuses invalid size, exhausted lifetime evaluation/source budget or an unavailable Host
@@ -249,7 +381,7 @@ impl WasmExecutor {
             )));
         }
         let bytes = bytes as u64;
-        if self.session.generations.get() >= 32
+        if self.session.artifact_evaluations.get() >= 32
             || self.session.source_bytes.get() + bytes > 8_388_608
         {
             return Err(failure(RuntimeError::unavailable(
@@ -257,21 +389,14 @@ impl WasmExecutor {
                 "execution session evaluation budget exhausted",
             )));
         }
-        self.host_id().map_err(failure)?;
-        let id = self.session.generations.get() + 1;
-        self.session.generations.set(id);
+        let generation = self.callback_generation().map_err(failure)?;
+        self.session
+            .artifact_evaluations
+            .set(self.session.artifact_evaluations.get() + 1);
         self.session
             .source_bytes
             .set(self.session.source_bytes.get() + bytes);
-        self.session
-            .live_generations
-            .set(self.session.live_generations.get() + 1);
-        Ok(WasmGeneration {
-            inner: Rc::new(Generation {
-                session: self.session.clone(),
-                id,
-            }),
-        })
+        Ok(generation)
     }
     /// Installs an explicitly preloaded trusted facet. Closed source loading uses a reserved
     /// generation.
@@ -285,12 +410,15 @@ impl WasmExecutor {
         uses: JsValue,
         setup: Function,
     ) -> std::result::Result<Promise, JsValue> {
-        self.reserve_generation(0.0)?.install(name, uses, setup)
+        self.callback_generation()
+            .map_err(failure)?
+            .install(name, uses, setup)
     }
     #[wasm_bindgen(js_name = diagnosticsJson)]
     pub fn diagnostics_json(&self) -> String {
         json!({
             "generations": self.session.generations.get(),
+            "artifactEvaluations": self.session.artifact_evaluations.get(),
             "liveGenerations": self.session.live_generations.get(),
             "sourceBytes": self.session.source_bytes.get(),
             "callbacks": self.session.callbacks.get(),
@@ -353,8 +481,5 @@ impl WasmGeneration {
             startup.await.map_err(failure)?;
             Ok(JsValue::UNDEFINED)
         }))
-    }
-    pub fn id(&self) -> f64 {
-        self.inner.id as f64
     }
 }

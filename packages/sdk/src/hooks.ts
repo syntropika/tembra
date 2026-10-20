@@ -3,7 +3,13 @@ import type { TArray, TSchema } from "typebox";
 import type { Infer, Method, NativeSchema, ValueDescriptor } from "./contracts.js";
 import { native } from "./contracts.js";
 import { ContractError } from "./error.js";
-import type { Completion, ManagedContext, ObjectDeclaration, Registry } from "./executor.js";
+import type {
+  Completion,
+  ManagedContext,
+  ObjectDeclaration,
+  Registry,
+  RegisteredOperation,
+} from "./executor.js";
 import { canonicalJson, clonePortable, fingerprint } from "./portable.js";
 import { normalizeSchema, object } from "./schema.js";
 
@@ -143,15 +149,18 @@ export function defineHook<const T extends HookTerminalProfile<undefined> | unde
     readonly terminal?: T;
   },
 ): HookDefinition<"series", undefined, undefined, T>;
-export function defineHook<const R extends HookValue = undefined>(
+export function defineHook<
+  const R extends HookValue = undefined,
+  const T extends HookTerminalProfile<undefined, NoInfer<R>> | undefined = undefined,
+>(
   name: string,
   options: {
     readonly version: number;
     readonly strategy: "bail";
     readonly input?: undefined;
-    readonly terminal?: HookTerminalProfile<undefined, NoInfer<R>>;
+    readonly terminal?: T;
   } & ResultOption<R>,
-): HookDefinition<"bail", undefined, R>;
+): HookDefinition<"bail", undefined, R, T>;
 export function defineHook<
   const I extends HookValue = undefined,
   const T extends HookTerminalProfile<NoInfer<I>> | undefined = undefined,
@@ -166,14 +175,15 @@ export function defineHook<
 export function defineHook<
   const I extends HookValue = undefined,
   const R extends HookValue = undefined,
+  const T extends HookTerminalProfile<NoInfer<I>, NoInfer<R>> | undefined = undefined,
 >(
   name: string,
   options: Base<I> &
     ResultOption<R> & {
       readonly strategy: "bail";
-      readonly terminal?: HookTerminalProfile<NoInfer<I>, NoInfer<R>>;
+      readonly terminal?: T;
     },
-): HookDefinition<"bail", I, R>;
+): HookDefinition<"bail", I, R, T>;
 export function defineHook<
   const I extends HookValue = undefined,
   const T extends HookTerminalProfile<NoInfer<I>> | undefined = undefined,
@@ -505,3 +515,25 @@ export function registerHook(
     member,
   );
 }
+
+/** A hook run returns composition output, which differs from one handler's output. */
+export type HookResult<H extends AnyHookDefinition> =
+  HookStrategy extends H["descriptor"]["strategy"]
+    ? unknown
+    : H["descriptor"]["strategy"] extends "bail"
+      ?
+          | { readonly kind: "unresolved" }
+          | { readonly kind: "resolved"; readonly value: Infer<H["result"]> }
+      : H["terminal"] extends HookTerminalProfile
+        ? Infer<H["terminal"]["result"]>
+        : H["descriptor"]["strategy"] extends "parallel"
+          ? readonly Infer<H["result"]>[]
+          : H["descriptor"]["strategy"] extends "waterfall"
+            ? Infer<H["input"]>
+            : undefined;
+/** Middleware and declared terminal profiles require an issued managed operation. */
+export type HookRunOptions<H extends AnyHookDefinition> = undefined extends H["terminal"]
+  ? HookTerminalProfile extends H["terminal"]
+    ? { readonly terminal?: RegisteredOperation }
+    : { readonly terminal?: never }
+  : { readonly terminal: RegisteredOperation };

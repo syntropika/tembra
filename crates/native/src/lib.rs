@@ -3,8 +3,6 @@
 //! Drive [`TokioDriver::run_until`] inside a Tokio current-thread runtime. The
 //! adapter carries bytes; shared `tembra_core::rpc` owns protocol and authority.
 
-pub mod counter;
-
 mod driver;
 mod websocket;
 

@@ -2,7 +2,9 @@
   "name": "@tembra/sdk",
   "version": "0.1.0",
   "files": [
-    "dist/src"
+    "dist/src",
+    "dist/native",
+    "dist/wasm"
   ],
   "type": "module",
   "exports": {
@@ -13,24 +15,43 @@
     "./browser": {
       "types": "./dist/src/browser/index.d.ts",
       "import": "./dist/src/browser/index.js"
+    },
+    "./node": {
+      "types": "./dist/src/node/index.d.ts",
+      "import": "./dist/src/node/index.js"
+    },
+    "./tooling": {
+      "types": "./dist/src/tooling/index.d.ts",
+      "import": "./dist/src/tooling/index.js"
+    },
+    "./tooling/browser": {
+      "types": "./dist/src/tooling/browser.d.ts",
+      "import": "./dist/src/tooling/browser.js"
     }
   },
   "scripts": {
-    "build": "bun --bun x --no-install tsc -p tsconfig.json",
-    "typecheck": "bun --bun x --no-install tsc -p tsconfig.json --noEmit",
-    "test": "bun test test/*.test.ts --timeout 30000"
+    "build": "bun scripts/build-sdk.ts",
+    "typecheck": "bun --bun x --no-install tsc -p tsconfig.json",
+    "test": "bun run build && bun test test/*.test.ts test/tooling/*.test.ts --timeout 30000",
+    "build:native": "node scripts/build-bindings.ts native",
+    "build:wasm": "node scripts/build-bindings.ts wasm"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
+    "enhanced-resolve": "5.26.0",
     "es-module-lexer": "3.0.3",
+    "jiti": "2.7.0",
+    "json-schema-to-typescript": "16.0.0",
     "jsonc-parser": "3.3.1",
-    "typebox": "1.3.27"
-  },
-  "devDependencies": {
-    "@types/node": "26.6.5",
+    "typebox": "1.3.27",
     "typescript": "5.9.3"
   },
+  "devDependencies": {
+    "@types/bun": "1.4.3",
+    "@types/node": "26.6.5"
+  },
   "engines": {
-    "bun": ">=1.4.3"
+    "bun": ">=1.4.3",
+    "node": ">=22"
   }
 }

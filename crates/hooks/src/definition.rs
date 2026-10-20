@@ -170,11 +170,15 @@ impl<A: 'static, R: 'static> RustHookDefinition<A, R> {
         }))
     }
 }
+type PortableInvocation<A, R> =
+    Rc<dyn Fn(A, tembra_core::Context) -> futures::future::LocalBoxFuture<'static, Result<R>>>;
+
 /// A typed terminal retaining only ordinary weak managed operation admission.
 pub struct HookTerminal<A, R> {
     pub(crate) operation: RegisteredOperation,
     pub(crate) input: HookType<A>,
     pub(crate) result: HookType<R>,
+    portable: Option<PortableInvocation<A, R>>,
     _types: PhantomData<fn(A) -> R>,
 }
 impl<A, R> Clone for HookTerminal<A, R> {
@@ -183,6 +187,7 @@ impl<A, R> Clone for HookTerminal<A, R> {
             operation: self.operation.clone(),
             input: self.input.clone(),
             result: self.result.clone(),
+            portable: self.portable.clone(),
             _types: PhantomData,
         }
     }
@@ -217,8 +222,72 @@ impl<A: 'static, R: 'static> HookTerminal<A, R> {
             operation,
             input,
             result,
+            portable: None,
             _types: PhantomData,
         })
+    }
+    /// Adapts a portable managed operation with explicit presence-preserving conversions.
+    /// The operation keeps its actual owner, epoch and validated JSON dispatch channel.
+    /// # Errors
+    /// Refuses nominal profiles, mismatched metadata and absent non-unit positions.
+    pub fn portable(
+        operation: RegisteredOperation,
+        input: HookType<A>,
+        result: HookType<R>,
+        encode: impl Fn(A) -> Result<Option<Value>> + 'static,
+        decode: impl Fn(Option<Value>) -> Result<R> + 'static,
+    ) -> Result<Self> {
+        if [&input.profile, &result.profile]
+            .into_iter()
+            .flatten()
+            .any(|p| matches!(p, ValueSchema::Native(_)))
+        {
+            return Err(invalid(
+                "hook_signature",
+                "portable terminal requires portable profiles",
+            ));
+        }
+        let mut terminal = Self::new(operation.clone(), input, result)?;
+        let encode = Rc::new(encode);
+        let decode = Rc::new(decode);
+        terminal.portable = Some(Rc::new(move |input, context| {
+            let operation = operation.clone();
+            let encode = encode.clone();
+            let decode = decode.clone();
+            async move {
+                let input =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encode(input)))
+                        .unwrap_or_else(|_| {
+                            Err(invalid(
+                                "hook_panic",
+                                "portable terminal input conversion panicked",
+                            ))
+                        })?;
+                let call = operation.call_json_tracked(&context, input);
+                let receipt = call.receipt();
+                let result = std::panic::AssertUnwindSafe(call)
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err(invalid("hook_panic", "hook terminal panicked")));
+                receipt.settled().await;
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode(result?)))
+                    .unwrap_or_else(|_| {
+                        Err(invalid(
+                            "hook_panic",
+                            "portable terminal output conversion panicked",
+                        ))
+                    })
+            }
+            .boxed_local()
+        }));
+        Ok(terminal)
+    }
+    pub(crate) fn check(&self, context: &tembra_core::Context) -> Result<()> {
+        if self.portable.is_some() {
+            self.operation.check_portable(context)
+        } else {
+            self.operation.check_native::<A, R>(context)
+        }
     }
     pub(crate) fn profile(&self) -> TerminalProfile {
         TerminalProfile {
@@ -228,6 +297,11 @@ impl<A: 'static, R: 'static> HookTerminal<A, R> {
     }
     pub(crate) async fn invoke(&self, input: A, context: &tembra_core::Context) -> Result<R> {
         self.input.check(&input)?;
+        if let Some(invoke) = &self.portable {
+            let value = invoke(input, context.clone()).await?;
+            self.result.check(&value)?;
+            return Ok(value);
+        }
         let call = self.operation.call_tracked::<A, R>(context, input);
         let receipt = call.receipt();
         let result = std::panic::AssertUnwindSafe(call)

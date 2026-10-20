@@ -2,17 +2,24 @@
 
 This reference describes Tembra's object, state, execution and transport guarantees. Read the
 [guide](guide.md) for the application model or the [tutorial](tutorial.md) for a runnable Rust example.
-Public declarations document operation-specific errors and defaults.
+The [architecture](architecture.md) maps these guarantees to their owners. Public declarations
+document operation-specific errors and defaults. The rules here describe implemented behavior;
+they do not imply that every language facade exposes every advanced core primitive.
 
 ## One core per host
 
 A host owns object identity, reference claims, contexts, resources, state and execution versions.
-Rust providers, the native V8 executor and browser JavaScript bindings use this Rust core. A host
-belongs to one execution thread or event loop; its local futures need not implement `Send`.
+Rust providers, Node-API and browser JavaScript bindings, and the optional embedded V8 executor
+use this Rust core. A host belongs to one execution thread or event loop; its local futures need not
+implement `Send`.
 
-Bindings translate values and carry checked handles. Executors run implementations; loaders accept
-executable artifacts. Scheduling, transport, compilation, package resolution and file watching
-belong to adapters or external tools.
+Node's JavaScript callbacks execute in the existing Node runtime, connected through Node-API.
+Browser callbacks execute in their browser realm, connected through `wasm-bindgen`. The optional
+embedded V8 executor is a separate Rust integration, not a dependency of the Node binding.
+
+Bindings translate values and carry checked handles. Executors run implementations; loaders prepare
+facets. Scheduling, transport, compilation, package resolution and file watching belong to adapters
+or external tools.
 
 ## Contracts and identity
 
@@ -52,6 +59,8 @@ at the same address.
 Each acquisition owns a claim. Cloning a generated Rust reference shares that claim; explicit
 `reference.core().release()` releases it for every clone. A separately acquired reference has its
 own claim. Final drop releases the claim and schedules cleanup, without synchronously joining it.
+TypeScript references expose `release()` explicitly. `hold()` returns an acquired reference before
+readiness; `get()` awaits that readiness and releases its claim if readiness fails.
 
 Referenced objects are disposed after their final claim, subject to configured linger. Host-lifetime
 objects remain pinned by the host. Readables and subscriptions are weak views and do not keep an
@@ -100,7 +109,7 @@ not have the same rollback guarantee as coordinated replacement. Registries expo
 per execution version. Hooks are explicit pipelines over managed operations and registry entries;
 they do not intercept every method automatically.
 
-Native facets remain fixed for the process lifetime. Compatible JavaScript replacement retains
+Native facets remain fixed for their Host lifetime. Compatible JavaScript replacement retains
 logical objects, surviving references and compatible state. Already admitted roots keep their old
 implementation version while new roots use the committed version. State schema changes require
 explicit state versions and supported migrations.
@@ -110,6 +119,107 @@ leaves the installed implementation and authoritative state in place; cleanup or
 external resources can itself fail and is reported. There is no promise of universal external
 rollback. The core bounds current and previous execution versions; retiring old work can request
 cancellation before its physical cleanup completes.
+
+Bindings retain generation callbacks and values while Rust execution owners or physical invocations
+still need them. A public Promise settling or an awaiter losing interest does not establish physical
+completion. This also applies to detached hook terminals. A successful reload can publish the new
+version while old physical work is still retiring; it does not promise that old modules have been
+collected when the reload Promise resolves.
+
+## Platform loading and execution profiles
+
+The shared TypeScript operations are `install`, `load`, `reload`, `get`, `hold` and `close`.
+`install` accepts a callback facet. `load` accepts a module string/URL or `EsmArtifactV1` plus an
+optional selected export, defaulting to `default`. `reload` accepts a batch of dynamic module,
+artifact or callback facet inputs and uses the existing Rust replacement mechanism.
+
+Module acquisition and evaluation produce a checked facet definition. Its registration, compatibility,
+resources and execution ownership then belong to the platform bridge and core. No artifact envelope
+is required for ordinary platform modules. The loader's execution profile remains observable:
+
+- **Node source (`node-source-v1`)** uses pinned Jiti 2.7.0 transformed evaluation. Local source
+  paths and file URLs have no query or fragment; entries must be `.ts`, `.mts`, `.cts`, `.js` or
+  `.mjs`. A preparation owns a fresh Jiti graph with module and filesystem caching disabled. The
+  profile is synchronous transformed evaluation, with CommonJS wrapper semantics rather than native
+  ESM equivalence. `require`, `module`, `exports`, `__filename`, `__dirname` and the wrapper's
+  `arguments` are observable. Top-level await, JSX and `tsconfig` aliases are unsupported. Installed
+  packages may resolve; no dependency installation is performed. Builtins and native packages retain normal
+  Node caching. Compiler bootstrap is isolated from application Error globals in a compiler-only
+  VM context; facet code runs in the main Node realm. This is not an untrusted-code sandbox.
+- **Browser modules (`browser-module-v1`)** use native ESM import. Browser URL resolution, import
+  maps, CSP, CORS and dependency caches apply. The loader does not automatically version the URL or
+  invalidate transitive modules. Loading the same URL again may return its cached namespace.
+- **Closed artifacts (`tembra-esm-v1`)** retain their format, source hash, export and closed ESM
+  validation. External imports and dynamic dependency resolution are refused. Node and browser
+  use native ESM evaluation for this profile, not the Node source transformer. The optional Rust
+  executor uses its embedded engine for this explicit delivery format.
+
+These profiles are trusted execution environments. A source profile does not silently weaken a
+closed artifact's validation or redefine its semantics. TypeScript transformation does not establish
+type safety; use the tooling typechecker separately.
+
+## Module admission and memory
+
+Retiring a Tembra code generation means releasing its managed registrations, callbacks, values and
+execution owners after required work settles. Physically unloading a JavaScript module means the
+runtime no longer retains its code and associated module graph. These are distinct events. Neither
+native ESM cache behavior nor releasing Jiti's managed references guarantees physical collection.
+Revoking a browser Blob URL also does not establish module collection.
+
+Admission is cumulative and finite in the execution environment, not refunded by reload retirement,
+Host close or construction of another Host in that environment. Evaluation already submitted to the
+runtime remains charged even if evaluation or the later core commit fails. Invalid input refused
+before submission does not consume an evaluation. Concurrent preparation is refused rather than
+allowing reservations to race. Current limits are:
+
+| Profile | Evaluations | Cumulative admitted source | Additional limits |
+| --- | --- | --- | --- |
+| Node source | 256 source entries | 64 MiB of source admitted to transformation | 4,096 transformed modules; 2 MiB per module. |
+| Node closed artifact | 32 | 8 MiB | 1 MiB per artifact. |
+| Browser module | 256 root import attempts | Not observable | One native module import in flight; transitive bytes/modules are unknown. |
+| Browser closed artifact | 32 | 8 MiB | 1 MiB per artifact; realm and Rust-session admission both apply. |
+
+Node source byte accounting measures UTF-8 source submitted to its transform, including charged
+transitive transforms; it is not emitted JavaScript size or live heap occupancy. Native package
+allocations and application effects are outside this accounting. Finite evaluation admission limits
+SDK-managed repeated loading; it is not a hard memory cap on arbitrary trusted code.
+
+Node emits a warning when a source or artifact budget reaches 75 percent. Source and browser-module
+diagnostics expose warning thresholds and exhaustion indicators. Budget refusals carry a stable
+reason and dimension/usage details where applicable. `host.diagnostics()` exposes current generation
+ownership and platform admission, and remains available as a final snapshot after close. Node process
+memory fields describe the process, not memory exclusively owned by a particular facet.
+
+When admission is exhausted, the application must explicitly rotate the relevant process or realm
+to admit fresh evaluations. The SDK never resets a Host silently. HostManagers supervise independent
+child Hosts through Node child processes or browser Workers; `replace()` shuts down an environment
+and creates another. It is not `reload()`, reference preservation, state migration or durable recovery.
+
+## Portable hooks and local capabilities
+
+TypeScript portable hooks use generic binding adapters and the Rust hook manager. Hook arguments,
+results, strategy composition and issued invocation scopes remain checked. An arbitrary JavaScript
+function cannot substitute for an issued managed hook operation or retain a valid `next` capability
+after its invocation scope ends.
+
+JavaScript opaque capabilities require explicit registration of an exact nominal native identity.
+Providers expose them through issued, object-owned resources. Forged structural handles, unknown
+identities and cross-owner handles are refused. A live local reference can observe the original
+JavaScript value identity; releasing the reference removes its authority to read that member.
+The capability does not become portable data or a generic adapter for arbitrary Rust native types.
+
+## Errors and cancellation boundaries
+
+Rust operations return typed runtime errors with a category, stable reason and optional details.
+Binding errors preserve machine-readable runtime information; SDK declaration validation can also
+throw `ContractError` with a reason and value path. Callers must not assume every thrown JavaScript
+value is a `ContractError` or every failure occurs before external effects.
+
+Cancellation is a cooperative lifecycle signal, not forced interruption of arbitrary JavaScript,
+Rust or external I/O. Managed resources and callback leases remain owned until the underlying work
+physically settles. A callback that never cooperates or settles can prevent graceful shutdown;
+an application may terminate an isolated environment explicitly, with the corresponding loss of
+its in-memory Host state.
 
 ## Remote calls and state
 
@@ -125,7 +235,10 @@ bounded coordination, without a durable distributed commit guarantee.
 
 ## Verification sources
 
-The observable behaviors above are exercised by [core lifecycle and integration tests](../crates/core/tests),
-[typed API and state tests](../crates/tembra/tests), [native transport tests](../crates/native/tests)
-and [JavaScript executor tests](../crates/executor-js/tests). `just check-all` runs the maintained
-native, TypeScript and WASM compilation checks; it does not launch a browser.
+The observable behaviors above are exercised by [core lifecycle and integration tests](../testing/rust/tests/core),
+[typed API and state tests](../testing/rust/tests/tembra), [native transport tests](../testing/rust/tests/transport.rs)
+and [JavaScript executor tests](../testing/rust/tests/executor-js). `just check-all` runs the maintained
+native, TypeScript and WASM compilation checks; it does not launch a browser. TypeScript integration
+and ownership tests live under [testing/typescript](../testing/typescript). `just test-integration`
+runs the centralized Rust, TypeScript and actual browser integrations; the browser runner requires
+its configured Chromium automation tooling. Library unit tests remain in their language packages.

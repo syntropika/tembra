@@ -10,3 +10,15 @@ tembra = { workspace = true, features = ["native"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "local"
+path = "basics/native-values.rs"
+
+[[example]]
+name = "state"
+path = "basics/state.rs"
+
+[[example]]
+name = "facets"
+path = "facets/install.rs"

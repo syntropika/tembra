@@ -1,6 +1,5 @@
-import { BrowserExecutor } from "../src/browser/executor.js";
-import type { ExecutorWasmModule } from "../src/browser/executor.js";
-import type { BrowserClient } from "../src/browser/index.js";
+import type { BrowserHost, BrowserWasmModule } from "../src/browser/index.js";
+import type { WasmExecutorPort } from "../src/host/executor.js";
 import { Type, defineFacet, local, method, opaque } from "../src/index.js";
 import type { ExplicitCapability, ManagedContext } from "../src/index.js";
 
@@ -13,8 +12,7 @@ const Counter = local("browser.types", {
     url: opaque<URL>("url@1"),
   },
 });
-async function typeChecks(client: BrowserClient, module: ExecutorWasmModule) {
-  const executor = new BrowserExecutor(client, module);
+async function typeChecks(host: BrowserHost, incomplete: Omit<WasmExecutorPort, "registerHook">) {
   const facet = defineFacet({
     name: "browser.typed",
     uses: [Counter],
@@ -43,9 +41,11 @@ async function typeChecks(client: BrowserClient, module: ExecutorWasmModule) {
       });
     },
   });
-  await executor.install(facet);
-  // @ts-expect-error: the executor consumes the actual client, not a forged Context
-  const invalid = new BrowserExecutor({ runtime: "tembra", handle: {} }, module);
-  void invalid;
+  await host.install(facet);
+  // @ts-expect-error: the private ABI requires portable hook support in every shipped binding.
+  const invalid: WasmExecutorPort = incomplete;
+  // @ts-expect-error: the SDK requires its exact options-capable WASM constructor, with no older-binding fallback.
+  const obsolete: BrowserWasmModule = { WasmHost: {} };
+  void [invalid, obsolete];
 }
 void typeChecks;

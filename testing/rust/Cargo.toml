@@ -1,0 +1,502 @@
+[package]
+name = "tembra-testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Integration fixtures and diagnostic tools for real Tembra runtimes"
+publish = false
+
+[features]
+default = ["native", "codegen"]
+native = ["tembra/native"]
+codegen = ["dep:tembra-codegen"]
+embedded-executor = ["dep:tembra-executor-js"]
+
+[dependencies]
+serde.workspace = true
+schemars.workspace = true
+tembra-contracts.workspace = true
+tembra-hooks.workspace = true
+tembra.workspace = true
+tembra-codegen = { path = "../../crates/codegen", optional = true }
+tembra-executor-js = { path = "../../crates/executor-js", optional = true }
+futures.workspace = true
+serde_json.workspace = true
+tembra-core.workspace = true
+tembra-native = { path = "../../crates/native" }
+tokio = { version = "1.53.3", features = ["rt", "time", "net", "sync", "io-util", "signal"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake", "connect"] }
+
+[lints]
+workspace = true
+
+# Execute the actual production CLI entrypoint without colliding with its distribution binary.
+[[bin]]
+name = "tembra-testing-codegen"
+path = "../../crates/codegen/src/main.rs"
+required-features = ["codegen"]
+
+[[test]]
+name = "example-counter"
+path = "tests/examples/counter.rs"
+required-features = ["native"]
+
+[[test]]
+name = "core-acceptance"
+path = "tests/core/acceptance.rs"
+
+[[test]]
+name = "core-activities"
+path = "tests/core/activities.rs"
+
+[[test]]
+name = "core-activity-backlog"
+path = "tests/core/activity_backlog.rs"
+
+[[test]]
+name = "core-adapter-ownership"
+path = "tests/core/adapter_ownership.rs"
+
+[[test]]
+name = "core-behavioral-contracts"
+path = "tests/core/behavioral_contracts.rs"
+
+[[test]]
+name = "core-conformance-deltas"
+path = "tests/core/conformance_deltas.rs"
+
+[[test]]
+name = "core-conformance-schedules"
+path = "tests/core/conformance_schedules.rs"
+
+[[test]]
+name = "core-consumer-linger"
+path = "tests/core/consumer_linger.rs"
+
+[[test]]
+name = "core-context-driver"
+path = "tests/core/context_driver.rs"
+
+[[test]]
+name = "core-contracts-binding"
+path = "tests/core/contracts_binding.rs"
+
+[[test]]
+name = "core-delta"
+path = "tests/core/delta.rs"
+
+[[test]]
+name = "core-execution-ports"
+path = "tests/core/execution_ports.rs"
+
+[[test]]
+name = "core-facet-integration"
+path = "tests/core/facet_integration.rs"
+
+[[test]]
+name = "core-facet-run-retention"
+path = "tests/core/facet_run_retention.rs"
+
+[[test]]
+name = "core-facets"
+path = "tests/core/facets.rs"
+
+[[test]]
+name = "core-factory-retirement"
+path = "tests/core/factory_retirement.rs"
+
+[[test]]
+name = "core-implementation-owners"
+path = "tests/core/implementation_owners.rs"
+
+[[test]]
+name = "core-json-order-profile"
+path = "tests/core/json_order_profile.rs"
+
+[[test]]
+name = "core-lifecycle"
+path = "tests/core/lifecycle.rs"
+
+[[test]]
+name = "core-mapped-opaque"
+path = "tests/core/mapped_opaque.rs"
+
+[[test]]
+name = "core-receipt-retirement"
+path = "tests/core/receipt_retirement.rs"
+
+[[test]]
+name = "core-registries"
+path = "tests/core/registries.rs"
+
+[[test]]
+name = "core-registry-cache-hints"
+path = "tests/core/registry_cache_hints.rs"
+
+[[test]]
+name = "core-registry-lookup"
+path = "tests/core/registry_lookup.rs"
+
+[[test]]
+name = "core-registry-operations"
+path = "tests/core/registry_operations.rs"
+
+[[test]]
+name = "core-reload-activity-review"
+path = "tests/core/reload_activity_review.rs"
+
+[[test]]
+name = "core-reload-adapter-state-views"
+path = "tests/core/reload_adapter_state_views.rs"
+
+[[test]]
+name = "core-reload-candidate-dependencies"
+path = "tests/core/reload_candidate_dependencies.rs"
+
+[[test]]
+name = "core-reload-cleanup-versions"
+path = "tests/core/reload_cleanup_versions.rs"
+
+[[test]]
+name = "core-reload-cluster"
+path = "tests/core/reload_cluster.rs"
+
+[[test]]
+name = "core-reload-cluster-review"
+path = "tests/core/reload_cluster_review.rs"
+
+[[test]]
+name = "core-reload-contracts"
+path = "tests/core/reload_contracts.rs"
+
+[[test]]
+name = "core-reload-dependency-epochs"
+path = "tests/core/reload_dependency_epochs.rs"
+
+[[test]]
+name = "core-reload-dependent-state"
+path = "tests/core/reload_dependent_state.rs"
+
+[[test]]
+name = "core-reload-discovery"
+path = "tests/core/reload_discovery.rs"
+
+[[test]]
+name = "core-reload-epochs"
+path = "tests/core/reload_epochs.rs"
+
+[[test]]
+name = "core-reload-protocol"
+path = "tests/core/reload_protocol.rs"
+
+[[test]]
+name = "core-reload-publication"
+path = "tests/core/reload_publication.rs"
+
+[[test]]
+name = "core-reload-removal"
+path = "tests/core/reload_removal.rs"
+
+[[test]]
+name = "core-reload-resource-review"
+path = "tests/core/reload_resource_review.rs"
+
+[[test]]
+name = "core-reload-table-versions"
+path = "tests/core/reload_table_versions.rs"
+
+[[test]]
+name = "core-reload-tables"
+path = "tests/core/reload_tables.rs"
+
+[[test]]
+name = "core-resource-signal"
+path = "tests/core/resource_signal.rs"
+
+[[test]]
+name = "core-rpc-authority"
+path = "tests/core/rpc_authority.rs"
+
+[[test]]
+name = "core-rpc-conformance"
+path = "tests/core/rpc_conformance.rs"
+
+[[test]]
+name = "core-rpc-flow"
+path = "tests/core/rpc_flow.rs"
+
+[[test]]
+name = "core-rpc-integration"
+path = "tests/core/rpc_integration.rs"
+
+[[test]]
+name = "core-rpc-protocol"
+path = "tests/core/rpc_protocol.rs"
+
+[[test]]
+name = "core-rpc-review"
+path = "tests/core/rpc_review.rs"
+
+[[test]]
+name = "core-rpc-roots"
+path = "tests/core/rpc_roots.rs"
+
+[[test]]
+name = "core-state-acceptance"
+path = "tests/core/state_acceptance.rs"
+
+[[test]]
+name = "core-state-lifecycle"
+path = "tests/core/state_lifecycle.rs"
+
+[[test]]
+name = "core-state-replication"
+path = "tests/core/state_replication.rs"
+
+[[test]]
+name = "core-state-review-regressions"
+path = "tests/core/state_review_regressions.rs"
+
+[[test]]
+name = "core-tracked-operations"
+path = "tests/core/tracked_operations.rs"
+
+[[test]]
+name = "core-weak-resources"
+path = "tests/core/weak_resources.rs"
+
+[[test]]
+name = "hooks-continuations"
+path = "tests/hooks/continuations.rs"
+
+[[test]]
+name = "hooks-descriptor"
+path = "tests/hooks/descriptor.rs"
+
+[[test]]
+name = "hooks-physical-runs"
+path = "tests/hooks/physical_runs.rs"
+
+[[test]]
+name = "hooks-planning"
+path = "tests/hooks/planning.rs"
+
+[[test]]
+name = "hooks-review-lifecycle"
+path = "tests/hooks/review_lifecycle.rs"
+
+[[test]]
+name = "hooks-strategies"
+path = "tests/hooks/strategies.rs"
+
+[[test]]
+name = "hooks-strategy-failures"
+path = "tests/hooks/strategy_failures.rs"
+
+[[test]]
+name = "contracts-conformance-coverage"
+path = "tests/contracts/conformance_coverage.rs"
+
+[[test]]
+name = "contracts-identity"
+path = "tests/contracts/identity.rs"
+
+[[test]]
+name = "contracts-multiplatform"
+path = "tests/contracts/multiplatform.rs"
+
+[[test]]
+name = "contracts-normalization"
+path = "tests/contracts/normalization.rs"
+
+[[test]]
+name = "contracts-review-regressions"
+path = "tests/contracts/review_regressions.rs"
+
+[[test]]
+name = "contracts-review-vectors"
+path = "tests/contracts/review_vectors.rs"
+
+[[test]]
+name = "tembra-api-integration"
+path = "tests/tembra/api_integration.rs"
+
+[[test]]
+name = "tembra-compile"
+path = "tests/tembra/compile.rs"
+
+[[test]]
+name = "tembra-descriptor-cache"
+path = "tests/tembra/descriptor_cache.rs"
+
+[[test]]
+name = "tembra-macros"
+path = "tests/tembra/macros.rs"
+
+[[test]]
+name = "tembra-managed"
+path = "tests/tembra/managed.rs"
+
+[[test]]
+name = "tembra-typed-state"
+path = "tests/tembra/typed_state.rs"
+
+[[test]]
+name = "codegen-generation"
+path = "tests/codegen/generation.rs"
+required-features = ["codegen"]
+
+[[test]]
+name = "executor-js-adapters"
+path = "tests/executor-js/adapters.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-boundaries"
+path = "tests/executor-js/boundaries.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-callable"
+path = "tests/executor-js/callable.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-callable-provenance"
+path = "tests/executor-js/callable_provenance.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-capabilities"
+path = "tests/executor-js/capabilities.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-conformance-schedules"
+path = "tests/executor-js/conformance_schedules.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-entry-limits"
+path = "tests/executor-js/entry_limits.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-execution"
+path = "tests/executor-js/execution.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-factory"
+path = "tests/executor-js/factory.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-hooks"
+path = "tests/executor-js/hooks.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-hooks-profiles"
+path = "tests/executor-js/hooks_profiles.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-isolate-order"
+path = "tests/executor-js/isolate_order.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-loader"
+path = "tests/executor-js/loader.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-physical"
+path = "tests/executor-js/physical.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-portable"
+path = "tests/executor-js/portable.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-registry-native"
+path = "tests/executor-js/registry_native.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-reload"
+path = "tests/executor-js/reload.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-reload-activity"
+path = "tests/executor-js/reload_activity.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-reload-contract-versions"
+path = "tests/executor-js/reload_contract_versions.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-reload-dependency-prepare"
+path = "tests/executor-js/reload_dependency_prepare.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-reload-hooks"
+path = "tests/executor-js/reload_hooks.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-reload-retirement"
+path = "tests/executor-js/reload_retirement.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-reload-state"
+path = "tests/executor-js/reload_state.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-review"
+path = "tests/executor-js/review.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-review-cancellation"
+path = "tests/executor-js/review_cancellation.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-review-errors"
+path = "tests/executor-js/review_errors.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-review-foreign-host"
+path = "tests/executor-js/review_foreign_host.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-review-mixed"
+path = "tests/executor-js/review_mixed.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-scope-retention"
+path = "tests/executor-js/scope_retention.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-session-restart"
+path = "tests/executor-js/session_restart.rs"
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-stabilization-reload"
+path = "tests/executor-js/stabilization_reload.rs"
+required-features = ["embedded-executor"]

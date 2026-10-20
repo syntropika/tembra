@@ -33,6 +33,13 @@ function scalar_string(value) {
       portable_failure('unicode', 'unpaired low surrogate');
   }
 }
+export function portable_bail_json_owned(value) {
+  if(value!==null && typeof value==='object' && (prototype(value)===objectPrototype||prototype(value)===null)) {
+    const kind=descriptor(value,'kind'), payload=descriptor(value,'value');
+    if(ownKeys(value).length===2 && kind && hasOwn(kind,'value') && kind.value==='stop' && payload && hasOwn(payload,'value') && payload.value===undefined) return '{"kind":"stop"}';
+  }
+  return portable_json_owned(value);
+}
 export function portable_json_owned(value) {
   const active = new SetConstructor();
   function bounded(text) {
@@ -102,6 +109,8 @@ extern "C" {
     pub(crate) fn fresh_context_token() -> JsValue;
     #[wasm_bindgen(catch)]
     pub(crate) fn object_keys_owned(value: &JsValue) -> Result<js_sys::Array, JsValue>;
+    #[wasm_bindgen(catch)]
+    pub(crate) fn portable_bail_json_owned(value: &JsValue) -> Result<String, JsValue>;
     #[wasm_bindgen(catch)]
     pub(crate) fn portable_json_owned(value: &JsValue) -> Result<String, JsValue>;
     #[wasm_bindgen(catch)]

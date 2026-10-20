@@ -21,16 +21,16 @@ install-tools:
 # Apply the repository's Rust formatting rules.
 fmt:
     cargo fmt --all
-    rustfmt --edition 2024 crates/codegen/tests/fixtures/consumer.rs crates/codegen/tests/fixtures/native_consumer.rs
+    rustfmt --edition 2024 testing/rust/tests/codegen/fixtures/consumer.rs testing/rust/tests/codegen/fixtures/native_consumer.rs
 
 # Refuse Rust formatting changes without editing files.
 fmt-check:
     @cargo fmt --all --check || { printf '%s\n' 'Rust formatting differs; run `just fmt`, then review the changes.' >&2; exit 1; }
-    @rustfmt --edition 2024 --check crates/codegen/tests/fixtures/consumer.rs crates/codegen/tests/fixtures/native_consumer.rs || { printf '%s\n' 'Rust fixture formatting differs; run `just fmt`, then review the changes.' >&2; exit 1; }
+    @rustfmt --edition 2024 --check testing/rust/tests/codegen/fixtures/consumer.rs testing/rust/tests/codegen/fixtures/native_consumer.rs || { printf '%s\n' 'Rust fixture formatting differs; run `just fmt`, then review the changes.' >&2; exit 1; }
 
 # Check every native Rust target with warnings treated as errors.
 lint:
-    cargo clippy --locked --workspace --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets --features tembra-testing/embedded-executor -- -D warnings
 
 # Refuse unused Rust dependencies.
 deps:
@@ -38,7 +38,25 @@ deps:
 
 # Run Rust tests; optional arguments are forwarded to Cargo.
 test *args:
-    cargo test --locked --workspace "$@"
+    cargo test --locked --workspace --features tembra-testing/embedded-executor "$@"
+
+# Run every non-unit suite managed by the root testing directory.
+test-integration:
+    cargo test --locked -p tembra-testing --features embedded-executor
+    bun run --filter @tembra/testing test
+    bun run --filter @tembra/testing test:browser
+
+# Run the centralized Rust integrations, optionally filtering Cargo test targets.
+test-integration-rust *args:
+    cargo test --locked -p tembra-testing --features embedded-executor "$@"
+
+# Run centralized TypeScript package, tooling and actual Node integrations.
+test-integration-typescript:
+    bun run --filter @tembra/testing test
+
+# Run centralized browser integrations in real Chromium, including Web Workers.
+test-integration-browser:
+    bun run --filter @tembra/testing test:browser
 
 # Run executable Rust documentation examples.
 test-doc:
@@ -47,10 +65,12 @@ test-doc:
 # Verify the public typed Rust facade and declarative contract expansion.
 test-dx *args:
     cargo test --locked -p tembra --all-features "$@"
+    cargo test --locked -p tembra-testing --features embedded-executor --test 'tembra-*' "$@"
 
 # Verify external Rust binding generation and compiled consumers.
 test-codegen *args:
     cargo test --locked -p tembra-codegen "$@"
+    cargo test --locked -p tembra-testing --test 'codegen-*' "$@"
 
 # Run the native typed Rust example using the platform-neutral driver.
 run-rust-example:
@@ -62,7 +82,7 @@ lint-dx:
 
 # Execute native runner acceptance without repeating default facade tests.
 test-native-facade:
-    cargo test --locked -p tembra --features native --test api_integration native_runner
+    cargo test --locked -p tembra-testing --test tembra-api-integration native_runner
 
 # Compile the public facade without native scheduling dependencies for browsers.
 check-dx-wasm:
@@ -71,6 +91,7 @@ check-dx-wasm:
 # Verify core changes independently while language adapters are being integrated.
 test-core *args:
     cargo test --locked -p tembra-core "$@"
+    cargo test --locked -p tembra-testing --test 'core-*' "$@"
 
 test-core-doc:
     cargo test --locked -p tembra-core --doc
@@ -91,6 +112,7 @@ check-wasm:
 # Verify the pure hook manager without either JavaScript engine adapter.
 test-hooks *args:
     cargo test --locked -p tembra-hooks "$@"
+    cargo test --locked -p tembra-testing --test 'hooks-*' "$@"
 
 lint-hooks:
     cargo clippy --locked -p tembra-hooks --all-targets -- -D warnings
@@ -108,6 +130,7 @@ check-executor:
 # Run native JavaScript executor tests; optional Cargo arguments remain positional data.
 test-executor *args:
     cargo test --locked -p tembra-executor-js "$@"
+    cargo test --locked -p tembra-testing --features embedded-executor --test 'executor-js-*' "$@"
 
 # Check every native JavaScript target with the inherited strict lints.
 lint-executor:
@@ -116,14 +139,6 @@ lint-executor:
 # Format only the native JavaScript adapter while other modules are being edited.
 fmt-executor:
     cargo fmt -p tembra-executor-js
-
-# Run a same-Host native JavaScript example.
-run-executor-example name='interop':
-    cargo run --locked -p tembra-executor-js --example "$1"
-
-# Run an explicit hook pipeline through ordinary managed object methods.
-run-hooks-example name='middleware':
-    cargo run --locked -p tembra-hooks --example "$1"
 
 # Resolve an intentional workspace dependency change while preserving external lock choices.
 lock:
@@ -152,17 +167,17 @@ build-browser-wasm:
 
 # Run the reusable native WebSocket acceptance server on a configurable address.
 run-rpc-server address='127.0.0.1:0':
-    cargo run --locked -p tembra-native --example rpc_server -- "$1"
+    cargo run --locked -p tembra-testing --bin rpc-server -- "$1"
 
 # Emit the native-authored browser acceptance contract without opening a listener.
 emit-rpc-contract:
-    cargo run --locked --quiet -p tembra-native --example rpc_server -- --descriptor
+    cargo run --locked --quiet -p tembra-testing --bin rpc-server -- --descriptor
 
 # Run all Rust gates.
 check: fmt-check lint deps test check-wasm
 
 # Typecheck and execute the TypeScript SDK, integrated tooling and example checks.
-check-ts: build-browser-wasm build-tooling-generators build-ts
+check-ts: build-browser-wasm build-tooling-generators build-ts build-node-binding
     bun run typecheck
     bun run test
 
@@ -204,24 +219,24 @@ build:
 
 # Compile the SDK and integrated development tools.
 build-ts:
-    bun run --bun --sequential --filter @tembra/sdk --filter @tembra/tooling build
+    bun run --bun --filter @tembra/sdk build
 
 # Build Rust exporters and the external Rust generator used by tooling tests.
 build-tooling-generators:
-    cargo build --locked -p tembra-codegen -p tembra-contracts --example emit_typed_contract
+    cargo build --locked -p tembra-testing --bin tembra-testing-emit-contract
     cargo build --locked -p tembra-codegen
 
 check-tooling *args: build-tooling-generators
-    bun run --bun --filter @tembra/tooling typecheck
-    bun run --bun --filter @tembra/tooling test "$@"
+    bun run --bun --filter @tembra/sdk typecheck
+    bun run --bun --filter @tembra/testing test:tooling "$@"
 
 # Install exactly the committed JavaScript dependency graph.
 install-ts:
     bun install --frozen-lockfile
 
-# Run a core example, defaulting to the local object example.
+# Run a typed application example, defaulting to native local values.
 run-example name='local':
-    cargo run --locked -p tembra-core --example "$1"
+    cargo run --locked -p tembra-example-rust --example "$1"
 
 # Generate Rust DTOs and typed contract wrappers; stdout is the default output.
 codegen-rust input='-' output='-' bindings='':
@@ -229,12 +244,12 @@ codegen-rust input='-' output='-' bindings='':
 
 # Emit the independently authored Serde/Schemars contract to stdout.
 emit-contract-rust:
-    cargo run --locked --quiet -p tembra-contracts --example emit_typed_contract
+    cargo run --locked --quiet -p tembra-testing --bin tembra-testing-emit-contract
 
 # Emit the independently authored TypeBox contract to stdout.
 emit-contract-ts:
     bun run --bun --filter @tembra/sdk build >&2
-    bun run packages/sdk/examples/emit-counter.ts
+    bun run testing/typescript/scripts/emit-counter.ts
 
 # Enable the versioned hooks in this checkout; no source files are staged or edited.
 install-hooks:
@@ -249,6 +264,11 @@ changelog *args:
 run-ts *args:
     bun run "$@"
 
-# Compile the TypeScript CLI with its Bun runtime and compiler assets embedded.
-compile-tooling: build-ts
-    bun run --filter @tembra/tooling build:binary
+# Build and stage the SDK's Node-API addon without publishing a second package.
+build-node-binding:
+    node packages/sdk/scripts/build-bindings.ts native --debug
+
+# Build both platform assets for an SDK distribution on the current supported platform.
+package-sdk-bindings:
+    node packages/sdk/scripts/build-bindings.ts native
+    node packages/sdk/scripts/build-bindings.ts wasm

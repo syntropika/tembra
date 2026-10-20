@@ -143,6 +143,50 @@ impl RegisteredOperation {
         Ok(())
     }
 
+    /// Checks the actual portable channel without entering user code.
+    /// # Errors
+    /// Refuses ordinary managed operation admission, nominal profiles and missing JSON channels.
+    pub fn check_portable(&self, context: &Context) -> Result<()> {
+        let owner = self.owner_for(context)?;
+        let host = self
+            .host
+            .upgrade()
+            .ok_or_else(|| RuntimeError::unavailable("closed", "Host ended"))?;
+        if host.in_factory.get() > 0 {
+            return Err(RuntimeError::invalid(
+                "factory",
+                "portable preflight is refused inside factories",
+            ));
+        }
+        let installed = owner.installed.borrow();
+        let implementation = &installed
+            .get(&context.code_version())
+            .ok_or_else(superseded)?
+            .implementation;
+        let member = self
+            .contract
+            .members("")
+            .and_then(|members| members.get(&self.method));
+        let Some(tembra_contracts::Member::Method { args, result }) = member else {
+            return Err(RuntimeError::invalid(
+                "hook_signature",
+                "registered member is not a method",
+            ));
+        };
+        if [args, result]
+            .into_iter()
+            .flatten()
+            .any(|s| matches!(s, tembra_contracts::ValueSchema::Native(_)))
+            || !implementation.json_methods.contains_key(&self.method)
+        {
+            return Err(RuntimeError::invalid(
+                "hook_signature",
+                "registered method has no portable channel",
+            ));
+        }
+        Ok(())
+    }
+
     /// Creates an opt-in tracked native call; construction invokes no handler.
     ///
     /// # Errors
@@ -163,6 +207,36 @@ impl RegisteredOperation {
                 let reference = operation.reference(&context)?;
                 reference
                     .call_with_receipt(&operation.method, args, Some(&context), Some(&observed))
+                    .await
+            }
+            .boxed_local(),
+        )
+    }
+
+    /// Creates a tracked portable call, preserving validation and physical invocation receipts.
+    /// # Errors
+    /// On polling has ordinary `call_json` admission and payload failures. Detached nested
+    /// work remains visible in the receipt after the result observer completes.
+    pub fn call_json_tracked(
+        &self,
+        context: &Context,
+        args: Option<Value>,
+    ) -> crate::ManagedCall<Option<Value>> {
+        let receipt = crate::InvocationReceipt::new();
+        let observed = receipt.clone();
+        let operation = self.clone();
+        let context = context.clone();
+        crate::ManagedCall::new(
+            receipt,
+            async move {
+                let reference = operation.reference(&context)?;
+                reference
+                    .call_json_with_receipt(
+                        &operation.method,
+                        args,
+                        Some(&context),
+                        Some(&observed),
+                    )
                     .await
             }
             .boxed_local(),

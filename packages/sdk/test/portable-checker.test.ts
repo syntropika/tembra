@@ -190,7 +190,10 @@ test("portable checker preserves the adapted TypeBox result across supported key
 
 test("portable checker preserves every shared validation corpus result", async () => {
   const corpus: unknown = JSON.parse(
-    await readFile(new URL("../../../fixtures/contracts/v1.json", import.meta.url), "utf-8"),
+    await readFile(
+      new URL("../../../testing/fixtures/contracts/v1.json", import.meta.url),
+      "utf-8",
+    ),
   );
   const validation: unknown = object(corpus).validation;
   assert.ok(Array.isArray(validation));

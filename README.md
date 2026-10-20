@@ -3,8 +3,8 @@
 A Rust runtime for typed services, managed objects, reactive state and reloadable JavaScript,
 native and in browser WebAssembly.
 
-Tembra keeps object identity, lifetimes and state in one Rust core. The native V8 executor and
-browser JavaScript bindings build on the same runtime model.
+Tembra keeps object identity, lifetimes and state in one Rust core. Node-API and browser JavaScript
+bindings, and the optional embedded V8 executor, build on the same runtime model.
 
 ## How it works
 
@@ -39,9 +39,9 @@ just run-rust-example
 ```
 
 The counter prints `Count: 1` and completes managed shutdown. Its
-[entrypoint](examples/rust/src/main.rs) registers a provider, acquires a reference and checks the
-initial count, increment result and reactive state. The
-[contract and provider](examples/rust/src/counter.rs) include the overflow regression test.
+[entrypoint](examples/rust/src/main.rs) registers a provider, acquires a reference and increments
+managed state. The [contract and provider](examples/rust/src/counter.rs) are exercised by the
+[counter integration tests](testing/rust/tests/examples/counter.rs), including overflow refusal.
 
 ## Rust
 
@@ -54,7 +54,6 @@ use tembra::prelude::*;
 trait Counter {
     #[state]
     fn count(&self) -> u32;
-    async fn read(&self) -> Result<u32>;
     async fn increment(&self) -> Result<u32>;
 }
 
@@ -65,10 +64,6 @@ struct CounterService {
 impl CounterProvider for CounterService {
     fn count(&self) -> Readable<u32> {
         self.count.readable()
-    }
-
-    async fn read(&self, _ctx: Context) -> Result<u32> {
-        self.count.value()
     }
 
     async fn increment(&self, ctx: Context) -> Result<u32> {
@@ -90,10 +85,9 @@ fn main() -> Result<()> {
             })
         })?;
         let counter = host.get(Counter, CounterInput {}).await?;
-        assert_eq!(counter.read().await?, 0);
-        assert_eq!(counter.increment().await?, 1);
-        assert_eq!(counter.count().value()?, 1);
-        counter.core().release();
+        counter.increment().await?;
+        println!("Count: {}", counter.count().value()?);
+        drop(counter);
         Ok(())
     })
 }
@@ -108,13 +102,14 @@ validation. At `u32::MAX`, this provider refuses the increment without changing 
 | Environment | Entry point | Source |
 | --- | --- | --- |
 | Rust | `tembra::prelude`, `tembra::native::run` | [Typed facade](crates/tembra) |
-| Native JavaScript | Rust host with an embedded V8 executor | [Executor and examples](crates/executor-js) |
+| Node.js | `@tembra/sdk/node` over the Rust Host through Node-API | [Node bindings](crates/node-binding) |
+| Embedded JavaScript | Optional V8 executor for Rust applications | [Executor](crates/executor-js) |
 | Browser | `@tembra/sdk/browser` over the Rust WASM core | [WASM bindings](crates/browser-wasm) |
 | TypeScript contracts | `@tembra/sdk` | [SDK](packages/sdk) |
-| Builds and development | `@tembra/tooling`, `tembra build`, `tembra dev` | [Tooling](packages/tooling) |
+| Builds and development | `@tembra/sdk/tooling` programmatic API | [SDK tooling](packages/sdk/src/tooling) |
 
-The TypeScript SDK provides declarations and bindings over the Rust core. Each embedding supplies
-the host and capabilities needed to execute facets.
+The TypeScript SDK provides declarations and bindings over the Rust core. Platform Host usage is
+documented in the [guide](docs/guide.md#typescript-hosts).
 
 ## Development
 
@@ -123,15 +118,14 @@ Use the [justfile](justfile) for project commands:
 ```sh
 just check-all
 just test-doc
-just compile-tooling
 ```
 
 `check-all` runs Rust and TypeScript tests, formatting, strict lint, dependency checks, WebAssembly
 compilation and the native counter. It does not launch a browser. `test-doc` executes Rust
-documentation examples. `compile-tooling` produces `packages/tooling/dist/bin/tembra` with Bun
-embedded; the resulting executable needs no external JavaScript runtime.
+documentation examples. TypeScript build and development tools are functions exported by
+`@tembra/sdk/tooling`; applications own their configuration, cancellation and delivery adapters.
 
-Native facets remain fixed for the process lifetime. Hot reload targets JavaScript implementations.
+Native facets remain fixed for their Host lifetime. Hot reload targets JavaScript implementations.
 State retained through a compatible reload is in-memory state; applications supply durable storage.
 A disconnected remote call can have an unknown execution outcome and is not automatically retried.
 
@@ -140,6 +134,7 @@ A disconnected remote call can have an unknown execution outcome and is not auto
 - [Guide](docs/guide.md): contracts, objects, state and language integrations.
 - [Tutorial](docs/tutorial.md): run and understand the Rust counter.
 - [Runtime behavior](docs/spec.md): lifecycle, state, reload and remote-call guarantees.
+- [Architecture](docs/architecture.md): platform loaders, bindings and the authoritative Rust core.
 
 ## Acknowledgements
 

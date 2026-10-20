@@ -74,6 +74,70 @@ pub(super) fn dispatch<'s>(
     let owner = cap.owner.upgrade();
     let mut lease = None;
     let work: LocalBoxFuture<'static, Result<NativeOutput>> = match (operation, &cap.kind) {
+        ("run_hook", Kind::Scope(facet)) => {
+            let descriptor = tembra_hooks::HookDescriptor::from_json(
+                &json_value(arg(scope, args, 0)?, scope)?.to_string(),
+            )?;
+            let hook = engine
+                .hooks
+                .borrow()
+                .get(descriptor.fingerprint())
+                .cloned()
+                .ok_or_else(|| invalid("hook_signature", "portable hook is not registered"))?;
+            let context_cap = capability(engine, arg(scope, args, 1)?, scope)?;
+            let context = context_cap.context()?;
+            context.check(module.host)?;
+            let context_owner = context_cap.owner()?;
+            if let Some(invocation) = &context_owner.invocation {
+                lease = Some(invocation.retain(&context)?);
+            }
+            let input = json_value(arg(scope, args, 2)?, scope)?;
+            let input = match input.get("present").and_then(Value::as_bool) {
+                Some(false) => None,
+                Some(true) => Some(
+                    input
+                        .get("value")
+                        .cloned()
+                        .ok_or_else(|| invalid("payload", "missing input"))?,
+                ),
+                _ => return Err(invalid("payload", "expected presence envelope")),
+            };
+            let raw = arg(scope, args, 3)?;
+            let terminal = if raw.is_undefined() {
+                None
+            } else {
+                let operation = capability(engine, raw, scope)?;
+                match &operation.kind {
+                    Kind::Operation(operation) => Some(operation.clone()),
+                    _ => {
+                        return Err(invalid(
+                            "hook_signature",
+                            "terminal must be managed operation",
+                        ));
+                    }
+                }
+            };
+            let manager = cap.hook_manager.borrow().clone();
+            let manager = match manager {
+                Some(manager) => manager,
+                None => {
+                    let manager = tembra_hooks::HookManager::new(
+                        facet.clone(),
+                        engine.driver.clone(),
+                        tembra_hooks::HookManagerOptions::default(),
+                    )?;
+                    *cap.hook_manager.borrow_mut() = Some(manager.clone());
+                    manager
+                }
+            };
+            async move {
+                Ok(match hook.run(manager, input, context, terminal).await? {
+                    Some(value) => NativeOutput::Json(value),
+                    None => NativeOutput::Unit,
+                })
+            }
+            .boxed_local()
+        }
         ("root", Kind::Scope(_) | Kind::TaskScope(_)) => {
             let facet = match &cap.kind {
                 Kind::Scope(scope) => RootAuthority::Facet(scope.clone()),

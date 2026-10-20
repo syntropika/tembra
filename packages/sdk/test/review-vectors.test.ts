@@ -32,7 +32,10 @@ type ReviewCorpus = {
 // SAFETY: This checked-in versioned fixture has a shared Rust/SDK schema; cases below validate each descriptor and value.
 // oxlint-disable typescript/no-unsafe-type-assertion -- Read this one authored fixture initializer using its documented shared schema.
 const corpus = JSON.parse(
-  await readFile(new URL("../../../fixtures/contracts/review-v1.json", import.meta.url), "utf-8"),
+  await readFile(
+    new URL("../../../testing/fixtures/contracts/review-v1.json", import.meta.url),
+    "utf-8",
+  ),
 ) as ReviewCorpus;
 // oxlint-enable typescript/no-unsafe-type-assertion
 

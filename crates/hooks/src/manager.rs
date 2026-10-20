@@ -23,13 +23,13 @@ use tembra_core::{
 };
 
 /// Explicit bail control; false/null payloads are ordinary Stop values.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "lowercase")]
 pub enum BailDecision<R> {
     Continue,
     Stop(R),
 }
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "lowercase")]
 pub enum BailOutcome<R> {
     Unresolved,
@@ -200,7 +200,7 @@ impl HookManager {
                 if same(&expected.input, &terminal.profile().input)
                     && same(&expected.result, &terminal.profile().result) =>
             {
-                terminal.operation.check_native::<A, R>(context)
+                terminal.check(context)
             }
             _ => Err(invalid(
                 "hook_signature",

@@ -213,6 +213,7 @@ pub(crate) struct Capability {
     pub(crate) kind: Kind,
     pub(crate) module: Weak<Module>,
     pub(crate) owner: Weak<Owner>,
+    pub(crate) hook_manager: RefCell<Option<tembra_hooks::HookManager>>,
     context: bool,
 }
 impl Drop for Capability {
@@ -276,6 +277,7 @@ impl Capability {
             module: Rc::downgrade(module),
             owner: owner.map_or_else(Weak::new, Rc::downgrade),
             context,
+            hook_manager: RefCell::default(),
         });
         engine
             .capabilities

@@ -467,6 +467,14 @@ impl RemoteBinding {
             self.fail(error);
             return;
         }
+        if self
+            .host
+            .upgrade()
+            .is_some_and(|host| host.rpc_is_closing())
+        {
+            self.close_disconnected_dependency();
+            return;
+        }
         for claim in self.claims() {
             claim.remote_loading();
         }
@@ -476,6 +484,30 @@ impl RemoteBinding {
             .is_some_and(|host| host.rpc_has_resolver())
         {
             self.start_route();
+        }
+    }
+    /// Closing cannot install a replacement route or admit a new attachment. Preserve existing
+    /// attachments, including pending handshake/shape work, and refuse only impossible rebinds.
+    pub(crate) fn close_disconnected_dependency(&self) {
+        let delegate = self.delegate.borrow().clone();
+        if let Some(delegate) = delegate {
+            delegate.close_disconnected_dependency();
+            return;
+        }
+        let disconnected = self
+            .attachment
+            .borrow()
+            .as_ref()
+            .and_then(|attachment| self.connection(attachment.connection))
+            .is_none_or(|connection| connection.status() == ConnectionStatus::Closed);
+        if disconnected {
+            self.fail(
+                RuntimeError::unavailable(
+                    "cleanup_dependency_disconnected",
+                    "the closing Host cannot reconnect this remote cleanup dependency",
+                )
+                .with_details(serde_json::json!({ "target": self.target })),
+            );
         }
     }
     pub(crate) fn fail(&self, error: RuntimeError) {

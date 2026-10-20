@@ -14,9 +14,5 @@ schemars08 = { package = "schemars", version = "0.8" }
 syn = { version = "2", features = ["full", "visit-mut"] }
 prettyplease = "0.2"
 
-[dev-dependencies]
-futures.workspace = true
-tembra-core.workspace = true
-
 [lints]
 workspace = true

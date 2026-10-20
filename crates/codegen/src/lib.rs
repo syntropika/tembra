@@ -268,7 +268,6 @@ pub fn generate_rust_with_options(
         let mut state_types = String::new();
         let mut member_names = BTreeSet::from([
             "new".to_owned(),
-            "reference".to_owned(),
             "core".to_owned(),
             "clone".to_owned(),
             "with_context".to_owned(),
@@ -285,15 +284,6 @@ pub fn generate_rust_with_options(
                     "name_collision",
                     &path,
                     "member names normalize to the same Rust identifier",
-                ));
-            }
-            if matches!(member, Member::Method { .. })
-                && !member_names.insert(format!("call_{member_name}"))
-            {
-                return Err(error(
-                    "name_collision",
-                    &path,
-                    "legacy method alias collides with a member",
                 ));
             }
             let method_ident = rust_method_ident(&member_name, &path)?;
@@ -367,7 +357,6 @@ pub fn generate_rust_with_options(
                             }
                         )
                     };
-                    let forward_args = if args_type.is_some() { "args, " } else { "" };
                     let channel = if native {
                         "checked native"
                     } else {
@@ -383,28 +372,16 @@ pub fn generate_rust_with_options(
                         /// Invokes the declared method through the core {channel} boundary.
                         ///
                         /// Argument conversion completes before dispatch. Cancellation follows the
-                        /// supplied context; it does not roll back effects already performed.
+                        /// context selected by `with_context`; it does not roll back effects already performed.
                         ///
                         /// # Errors
                         /// Returns core admission, validation, cancellation or callback errors,
                         /// or DTO conversion errors. Result validation and conversion may fail
                         /// after the callback has performed application effects.
-                        pub async fn call_{member_name}(
-                            &self{parameter},
-                            ctx: Option<&::tembra_core::Context>,
-                        ) -> ::tembra_core::Result<{result_signature}> {{
-                            {admission}
-                            let ctx = ctx.or(self.context.as_ref());
-                            {invoke}
-                        }}
-
-                        /// Invokes the declared method under this view's context, if supplied.
-                        ///
-                        /// # Errors
-                        /// Returns checked admission, validation, conversion, callback or
-                        /// cancellation errors. Application effects are not rolled back.
                         pub async fn {method_ident}(&self{parameter}) -> ::tembra_core::Result<{result_signature}> {{
-                            self.call_{member_name}({forward_args}self.context.as_ref()).await
+                            {admission}
+                            let ctx = self.context.as_ref();
+                            {invoke}
                         }}
                         "#
                     ));
@@ -545,11 +522,6 @@ pub fn generate_rust_with_options(
                             consumer.ensure_variant()?;
                         }}
                         Ok(consumer)
-                    }}
-
-                    /// Borrows the underlying reference without acquiring a new claim.
-                    pub fn reference(&self) -> &::tembra_core::Reference {{
-                        &self.reference
                     }}
 
                     /// Borrows the managed reference without acquiring a new claim.

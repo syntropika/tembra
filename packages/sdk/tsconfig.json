@@ -10,11 +10,14 @@
     "exactOptionalPropertyTypes": true,
     "declaration": true,
     "outDir": "dist",
-    "rootDir": ".",
+    "rootDir": "../..",
     "skipLibCheck": false,
     "verbatimModuleSyntax": true,
+    "rewriteRelativeImportExtensions": true,
     "noImplicitAny": true,
-    "types": ["bun"]
+    "types": ["bun"],
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "examples/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"]
 }

@@ -166,3 +166,70 @@ fn decode<T: 'static>(
         .map(|value| *value)
         .map_err(|_| invalid("hook_signature", "absent hook position requires unit"))
 }
+
+struct PortableCodec<T>(std::marker::PhantomData<fn() -> T>);
+impl<T: tembra_hooks::portable::PortableValue> ScopedCodec<T> for PortableCodec<T> {
+    fn encode(&self, value: T) -> Result<NativeValue> {
+        Ok(match value.encode()? {
+            Some(value) => NativeValue::portable(value),
+            None => NativeValue::absent(),
+        })
+    }
+    fn decode(&self, value: NativeValue) -> Result<T> {
+        T::decode(if value.is_absent() {
+            None
+        } else {
+            Some(portable_value(value)?)
+        })
+    }
+}
+fn portable_value(value: NativeValue) -> Result<serde_json::Value> {
+    if let Ok(value) = value.clone().into_portable() {
+        return Ok(value);
+    }
+    let record = value.into_record()?;
+    let mut object = serde_json::Map::new();
+    for (key, value) in record.entries() {
+        if !value.is_absent() {
+            object.insert(key.to_owned(), portable_value(value.clone())?);
+        }
+    }
+    Ok(serde_json::Value::Object(object))
+}
+struct PortableAdapter<'a>(&'a Executor);
+impl tembra_hooks::portable::PortableHookAdapter for PortableAdapter<'_> {
+    fn register<
+        A: tembra_hooks::portable::PortableValue,
+        H: tembra_hooks::portable::PortableValue,
+    >(
+        &self,
+        d: &HookDescriptor,
+    ) -> Result<()> {
+        self.0.register_hook::<A, H>(
+            d,
+            Rc::new(PortableCodec(std::marker::PhantomData)),
+            Rc::new(PortableCodec(std::marker::PhantomData)),
+        )
+    }
+}
+impl Executor {
+    /// Registers generic portable hook channels and the existing manager run adapter.
+    /// Repeated registration of the same verified descriptor is idempotent.
+    /// # Errors
+    /// Refuses native application profiles and existing adapter capacity or signature conflicts.
+    pub fn register_portable_hook(&self, descriptor: HookDescriptor) -> Result<()> {
+        if self
+            .inner
+            .hooks
+            .borrow()
+            .contains_key(descriptor.fingerprint())
+        {
+            return Ok(());
+        }
+        let key = descriptor.fingerprint().to_owned();
+        let hook =
+            tembra_hooks::portable::PortableHook::register(descriptor, &PortableAdapter(self))?;
+        self.inner.hooks.borrow_mut().insert(key, hook);
+        Ok(())
+    }
+}

@@ -20,6 +20,7 @@ import type {
   Descriptor,
 } from "./contracts.js";
 import { ContractError } from "./error.js";
+import type { AnyHookDefinition, HookInput, HookResult, HookRunOptions } from "./hooks.js";
 import { canonicalJson, parsePortableJson } from "./portable.js";
 import type { JsonValue } from "./portable.js";
 
@@ -154,10 +155,13 @@ export type TaskScope = {
 };
 /* oxlint-enable typescript/method-signature-style */
 
-/** Host-independent metadata; the backend validates and attaches the definition. */
-export type Registry = {
+declare const registryMetadata: unique symbol;
+/** Host-independent typed metadata; the backend validates and attaches the definition. */
+export type Registry<T = JsonValue> = {
   readonly name: string;
   readonly conflict: "error" | "last";
+  /** Type-only invariant metadata marker; no property is serialized or used as authority. */
+  readonly [registryMetadata]?: (value: T) => T;
 };
 /* oxlint-disable typescript/method-signature-style -- public methods preserve their existing parameter variance */
 /** Callable entry owned by a registry contribution; an issued Context selects its retained version. */
@@ -166,25 +170,25 @@ export type RegisteredOperation = {
 };
 /* oxlint-enable typescript/method-signature-style */
 /** Immutable contribution data and optional managed operation from the same version table. */
-export type RegistryEntry = {
-  readonly data: JsonValue;
+export type RegistryEntry<T = JsonValue> = {
+  readonly data: T;
   readonly operation: RegisteredOperation | undefined;
 };
 /* oxlint-disable typescript/method-signature-style -- public methods preserve their existing parameter variance */
 /** Retained immutable version table; later registry updates do not replace this snapshot. */
-export type RegistrySnapshot = {
+export type RegistrySnapshot<T = JsonValue> = {
   readonly codeVersion: number;
-  readonly entries: readonly (readonly [string, RegistryEntry])[];
-  get(key: string): RegistryEntry | undefined;
+  readonly entries: readonly (readonly [string, RegistryEntry<T>])[];
+  get(key: string): RegistryEntry<T> | undefined;
 };
 /* oxlint-enable typescript/method-signature-style */
 /* oxlint-disable typescript/method-signature-style -- public methods preserve their existing parameter variance */
 /** Live registry access; subscriptions must be removed by their caller. */
-export type RegistryView = {
+export type RegistryView<T = JsonValue> = {
   /** Uses the issued Context's version, or the current table when no Context is supplied. */
-  table(context?: ContextHandle): RegistrySnapshot;
+  table(context?: ContextHandle): RegistrySnapshot<T>;
   /** Ordinary synchronous return values are discarded; PromiseLike returns are refused. */
-  subscribe(listener: (snapshot: RegistrySnapshot) => void): () => void;
+  subscribe(listener: (snapshot: RegistrySnapshot<T>) => void): () => void;
 };
 /* oxlint-enable typescript/method-signature-style */
 
@@ -194,7 +198,15 @@ export type FacetScope = {
   readonly hostName: string;
   readonly signal: CancellationSignal;
   root<T>(callback: (context: ManagedContext) => Completion<T>): Promise<T>;
-  registry(definition: Registry): RegistryView;
+  registry<T>(definition: Registry<T>): RegistryView<T>;
+  runHook<H extends AnyHookDefinition>(
+    definition: H,
+    context: ContextHandle,
+    input: HookInput<H>,
+    ...options: undefined extends H["terminal"]
+      ? [options?: HookRunOptions<H>]
+      : [options: HookRunOptions<H>]
+  ): Promise<HookResult<H>>;
 };
 /* oxlint-enable typescript/method-signature-style */
 
@@ -204,7 +216,7 @@ export type ServeOptions<P extends AnyContract = AnyContract> = {
   readonly lifetime?: "host" | "ref";
   /** Idle retention in nonnegative milliseconds; defaults to 0. Checked by the backend. */
   readonly linger?: number;
-  /** Synchronous legacy views; the core validates each actual consumer binding. */
+  /** Synchronous consumer views; the core validates each declared contract binding. */
   readonly accepts?: readonly ContractAdapter<P>[];
 };
 
@@ -260,8 +272,8 @@ export type ObjectDeclaration = {
   ): void;
   /** Declares owned background work; its callback must cooperate with task cancellation. */
   task(start: (scope: TaskScope) => Completion<void>): void;
-  register(registry: Registry, key: string, data: JsonValue): void;
-  registerMethod(registry: Registry, key: string, data: JsonValue, member: string): void;
+  register<T>(registry: Registry<T>, key: string, data: NoInfer<T>): void;
+  registerMethod<T>(registry: Registry<T>, key: string, data: NoInfer<T>, member: string): void;
 };
 /* oxlint-enable typescript/method-signature-style */
 

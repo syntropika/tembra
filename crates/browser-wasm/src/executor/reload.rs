@@ -146,7 +146,9 @@ impl WasmExecutor {
         uses: JsValue,
         setup: Function,
     ) -> std::result::Result<WasmFacetCandidate, JsValue> {
-        self.reserve_generation(0.0)?.prepare(name, uses, setup)
+        self.callback_generation()
+            .map_err(failure)?
+            .prepare(name, uses, setup)
     }
 
     /// Creates an administration builder; no transaction is admitted until start().

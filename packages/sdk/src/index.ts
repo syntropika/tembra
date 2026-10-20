@@ -7,6 +7,7 @@ export * from "./error.js";
 export * from "./executor.js";
 export * from "./hooks.js";
 export * from "./portable.js";
+export { defineRegistry } from "./registries.js";
 export {
   assertValid,
   canonicalIdentity,
@@ -16,3 +17,10 @@ export {
   validateValue,
 } from "./schema.js";
 export type { CompileLimits, Schema } from "./schema.js";
+export type {
+  TembraHost,
+  DynamicFacet,
+  ModuleFacet,
+  ArtifactFacet,
+  LoadableFacet,
+} from "./host/index.js";

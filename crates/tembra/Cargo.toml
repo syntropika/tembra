@@ -22,10 +22,5 @@ tembra-macros.workspace = true
 tembra-native = { path = "../native", optional = true }
 tokio = { version = "1.53.3", features = ["rt", "time", "net"], optional = true }
 
-[dev-dependencies]
-tembra-native = { path = "../native" }
-tokio = { version = "1.53.3", features = ["rt", "time", "net"] }
-tembra-executor-js = { path = "../executor-js" }
-
 [lints]
 workspace = true
