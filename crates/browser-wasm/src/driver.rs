@@ -3,6 +3,7 @@ use std::{rc::Rc, time::Duration};
 use futures::{FutureExt, future::LocalBoxFuture};
 use gloo_timers::future::TimeoutFuture;
 use tembra_core::{Driver, RuntimeError};
+use wasm_bindgen::{JsCast, JsValue};
 use web_sys::Performance;
 
 /// Local browser scheduling with monotonic, drop-cancelled timers.
@@ -12,13 +13,14 @@ pub struct BrowserDriver {
 }
 
 impl BrowserDriver {
-    /// Uses the current window's monotonic performance clock.
+    /// Uses the current Window or Worker environment's monotonic performance clock.
     ///
     /// # Errors
-    /// Refuses environments without a browser Window or Performance clock.
+    /// Refuses environments without a native Performance clock.
     pub fn new() -> Result<Rc<Self>, RuntimeError> {
-        let clock = web_sys::window()
-            .and_then(|window| window.performance())
+        let clock = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("performance"))
+            .ok()
+            .and_then(|value| value.dyn_into::<Performance>().ok())
             .ok_or_else(|| RuntimeError::unavailable("browser_clock", "no performance clock"))?;
         Ok(Rc::new(Self {
             origin: clock.now(),

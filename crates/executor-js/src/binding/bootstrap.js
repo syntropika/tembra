@@ -372,6 +372,23 @@
         },
         // oxlint-disable-next-line promise/prefer-await-to-callbacks -- callbacks preserve the synchronous event boundary and explicitly join rejection or physical completion
         root: (callback) => sync("root", callback),
+        runHook: async (definition, context, input, options = {}) => {
+          const result = await sync(
+            "run_hook",
+            portable(definition.descriptor),
+            capability(context),
+            portable(input === undefined ? { present: false } : { present: true, value: input }),
+            options.terminal === undefined ? undefined : capability(options.terminal),
+          );
+          if (
+            definition.descriptor.strategy === "parallel" &&
+            definition.terminal === undefined &&
+            definition.result === undefined
+          ) {
+            return result.map(() => undefined);
+          }
+          return result;
+        },
         registry: (registry) => {
           const definition = portable(registry);
           return once(`registry:${JSON.stringify(definition)}`, () => sync("registry", definition));

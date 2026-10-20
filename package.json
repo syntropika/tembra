@@ -3,7 +3,8 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "examples/*"
+    "examples/*",
+    "testing/typescript"
   ],
   "type": "module",
   "scripts": {

@@ -42,22 +42,116 @@ pub(crate) fn registry(value: &JsValue) -> Result<Registry> {
     Registry::new(name, conflict)
 }
 
+pub(crate) fn registry_view(
+    generation: &Rc<Generation>,
+    definition: &JsValue,
+) -> Result<WasmRegistryView> {
+    Ok(WasmRegistryView {
+        view: generation.host()?.host.registry(&registry(definition)?)?,
+        generation: Rc::downgrade(generation),
+        host: generation.session.host.clone(),
+    })
+}
+
 /// Weak, retainable run API. Setup recorder authority is a separate object.
 #[wasm_bindgen]
 pub struct WasmFacetScope {
     scope: FacetScope,
+    manager: std::cell::RefCell<Option<tembra_hooks::HookManager>>,
     generation: Weak<Generation>,
 }
 impl WasmFacetScope {
     pub(crate) fn new(scope: FacetScope, generation: &Rc<Generation>) -> Self {
         Self {
             scope,
+            manager: std::cell::RefCell::default(),
             generation: Rc::downgrade(generation),
         }
     }
 }
+impl WasmFacetScope {
+    /// Runs the registered portable hook through this facet's shared managed run budget.
+    /// # Errors
+    /// Refuses expired/foreign contexts, unregistered hooks and non-managed terminal targets.
+    fn run_portable_hook(
+        &self,
+        descriptor: JsValue,
+        token: JsValue,
+        input: JsValue,
+        terminal: Option<RegisteredOperation>,
+    ) -> std::result::Result<Promise, JsValue> {
+        let generation = generation(&self.generation).map_err(failure)?;
+        let descriptor =
+            tembra_hooks::HookDescriptor::from_json(&string(&descriptor).map_err(failure)?)
+                .map_err(failure)?;
+        let hook = generation
+            .session
+            .hooks
+            .borrow()
+            .get(descriptor.fingerprint())
+            .cloned()
+            .ok_or_else(|| failure(error("hook_signature", "hook is not registered")))?;
+        let (context, physical) =
+            call_context(&generation.session.host, &self.generation, &token).map_err(failure)?;
+        let input = payload(strict_json(&input).map_err(failure)?).map_err(failure)?;
+        let manager = self.manager.borrow().clone();
+        let manager = match manager {
+            Some(manager) => manager,
+            None => {
+                let manager = tembra_hooks::HookManager::new(
+                    self.scope.clone(),
+                    generation.host().map_err(failure)?.driver.clone(),
+                    tembra_hooks::HookManagerOptions::default(),
+                )
+                .map_err(failure)?;
+                *self.manager.borrow_mut() = Some(manager.clone());
+                manager
+            }
+        };
+        Ok(future_to_promise(async move {
+            // Promise abandonment does not settle physical work; retain the originating
+            // receiver through hook callbacks and the final portable result conversion.
+            let _physical = physical;
+            let result = hook
+                .run(manager, input, context, terminal)
+                .await
+                .map_err(failure)?;
+            Ok(JsValue::from_str(
+                &super::support::envelope(result).to_string(),
+            ))
+        }))
+    }
+}
 #[wasm_bindgen]
 impl WasmFacetScope {
+    /// Runs a portable hook without a terminal. Retains an entered caller through physical
+    /// hook settlement and result conversion, even if JavaScript abandons the promise.
+    /// # Errors
+    /// Refuses invalid contexts, unregistered hooks and manager admission failures.
+    #[wasm_bindgen(js_name = runHook)]
+    pub fn run_hook(
+        &self,
+        descriptor: JsValue,
+        token: JsValue,
+        input: JsValue,
+    ) -> std::result::Result<Promise, JsValue> {
+        self.run_portable_hook(descriptor, token, input, None)
+    }
+    /// Runs a portable hook with the exact issued managed terminal, without consuming its wrapper.
+    /// Retains an entered caller through physical settlement and result conversion; abandoning
+    /// the promise does not prove that resource-using work stopped.
+    /// # Errors
+    /// Refuses incompatible terminal/owner/version admission before contribution effects.
+    #[wasm_bindgen(js_name = runHookThen)]
+    pub fn run_hook_then(
+        &self,
+        descriptor: JsValue,
+        token: JsValue,
+        input: JsValue,
+        terminal: &WasmRegisteredOperation,
+    ) -> std::result::Result<Promise, JsValue> {
+        self.run_portable_hook(descriptor, token, input, Some(terminal.operation.clone()))
+    }
     #[wasm_bindgen(js_name = hostName)]
     pub fn host_name(&self) -> String {
         self.scope.host_name().into()
@@ -116,12 +210,6 @@ impl WasmFacetRecorder {
 }
 #[wasm_bindgen]
 impl WasmFacetRecorder {
-    /// Reports the separate executable-adapter channel supported by this binding.
-    #[wasm_bindgen(js_name = adapterVersion)]
-    pub fn adapter_version(&self) -> u32 {
-        1
-    }
-
     /// # Errors
     /// Refuses invalid descriptor/options, expired setup pass or core service admission. Earlier
     /// setup effects follow the core withdrawal policy.

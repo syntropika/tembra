@@ -195,3 +195,70 @@ fn decode<T: 'static>(
         unit()
     }
 }
+
+struct PortableAdapter<'a>(&'a BrowserNativeSignatures);
+impl tembra_hooks::portable::PortableHookAdapter for PortableAdapter<'_> {
+    fn register<
+        A: tembra_hooks::portable::PortableValue,
+        H: tembra_hooks::portable::PortableValue,
+    >(
+        &self,
+        descriptor: &HookDescriptor,
+    ) -> Result<()> {
+        let unit_bail =
+            descriptor.strategy() == tembra_hooks::Strategy::Bail && descriptor.result().is_none();
+        self.0.register_hook::<A, H>(
+            descriptor,
+            portable_encode::<A>,
+            portable_decode::<A>,
+            portable_encode::<H>,
+            move |value| {
+                if unit_bail {
+                    let json =
+                        crate::intrinsics::portable_bail_json_owned(&value).map_err(js_error)?;
+                    H::decode(Some(
+                        tembra_contracts::parse_json(&json)
+                            .map_err(|e| error(&e.reason, &e.message))?,
+                    ))
+                } else {
+                    portable_decode::<H>(value)
+                }
+            },
+        )
+    }
+}
+fn portable_encode<T: tembra_hooks::portable::PortableValue>(value: T) -> Result<JsValue> {
+    match value.encode()? {
+        Some(value) => {
+            crate::intrinsics::parse_portable_owned(&value.to_string()).map_err(js_error)
+        }
+        None => Ok(JsValue::UNDEFINED),
+    }
+}
+fn portable_decode<T: tembra_hooks::portable::PortableValue>(value: JsValue) -> Result<T> {
+    T::decode(if value.is_undefined() {
+        None
+    } else {
+        let json = crate::intrinsics::portable_json_owned(&value).map_err(js_error)?;
+        Some(tembra_contracts::parse_json(&json).map_err(|e| error(&e.reason, &e.message))?)
+    })
+}
+impl super::WasmExecutor {
+    pub(crate) fn register_portable_hook(&self, descriptor: HookDescriptor) -> Result<()> {
+        if self
+            .session
+            .hooks
+            .borrow()
+            .contains_key(descriptor.fingerprint())
+        {
+            return Ok(());
+        }
+        let key = descriptor.fingerprint().to_owned();
+        let hook = tembra_hooks::portable::PortableHook::register(
+            descriptor,
+            &PortableAdapter(&self.session.native),
+        )?;
+        self.session.hooks.borrow_mut().insert(key, hook);
+        Ok(())
+    }
+}

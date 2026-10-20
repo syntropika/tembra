@@ -9,7 +9,7 @@ description = "Thread-affine Tokio and bounded WebSocket adapters for Tembra"
 futures.workspace = true
 serde_json.workspace = true
 tembra-core.workspace = true
-tokio = { version = "1.53.3", features = ["rt", "time", "net", "sync", "io-util", "signal"] }
+tokio = { version = "1.53.3", features = ["rt", "time", "net", "sync", "io-util"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake", "connect"] }
 getrandom = "0.4.3"
 

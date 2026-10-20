@@ -19,7 +19,7 @@ function assertInputRefusal(operation: () => unknown): void {
 
 const fixture: unknown = JSON.parse(
   await readFile(
-    new URL("../../../fixtures/contracts/normalization-v1.json", import.meta.url),
+    new URL("../../../testing/fixtures/contracts/normalization-v1.json", import.meta.url),
     "utf-8",
   ),
 );

@@ -47,7 +47,7 @@ export default defineConfig({
     "**/yarn.lock",
     "**/worker-configuration.d.ts",
     "**/target/**",
-    "fixtures/**",
+    "testing/fixtures/**",
     "**/dist/**",
     "crates/executor-js/vendor/**",
   ],

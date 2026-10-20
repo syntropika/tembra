@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/contracts", "crates/core", "crates/tembra", "crates/macros", "crates/codegen", "crates/browser-wasm", "crates/native", "crates/executor-js", "crates/hooks", "examples/rust"]
+members = ["crates/contracts", "crates/core", "crates/tembra", "crates/macros", "crates/codegen", "crates/browser-wasm", "crates/native", "testing/rust", "crates/executor-js", "crates/hooks", "crates/node-binding", "examples/rust"]
 resolver = "2"
 
 [workspace.package]

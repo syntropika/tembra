@@ -50,7 +50,7 @@ type Corpus = {
 // SAFETY: This checked-in versioned fixture has a shared Rust/SDK schema; cases below validate each descriptor and value.
 // oxlint-disable typescript/no-unsafe-type-assertion -- Read this one authored fixture initializer using its documented shared schema.
 const corpus = JSON.parse(
-  await readFile(new URL("../../../fixtures/contracts/v1.json", import.meta.url), "utf-8"),
+  await readFile(new URL("../../../testing/fixtures/contracts/v1.json", import.meta.url), "utf-8"),
 ) as Corpus;
 // oxlint-enable typescript/no-unsafe-type-assertion
 
@@ -152,7 +152,7 @@ test("TypeBox authoring emits the shared normalized descriptor without library m
 test("independently authored TypeBox matches the Serde/Schemars-origin descriptor", async () => {
   const rust: unknown = JSON.parse(
     await readFile(
-      new URL("../../../fixtures/contracts/typed-rust.json", import.meta.url),
+      new URL("../../../testing/fixtures/contracts/typed-rust.json", import.meta.url),
       "utf-8",
     ),
   );

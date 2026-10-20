@@ -46,6 +46,7 @@ pub(crate) struct Engine {
     pub(crate) natives: RefCell<
         BTreeMap<crate::native::NativeMethodSignature, Rc<dyn crate::native::ErasedNative>>,
     >,
+    pub(crate) hooks: RefCell<BTreeMap<String, tembra_hooks::portable::PortableHook>>,
     pub(crate) activities: binding::activity::Cache,
     pub(crate) opaques: RefCell<BTreeMap<String, Rc<dyn crate::native::ErasedOpaque>>>,
     // All isolate-owned Globals above are dropped before the runtime.
@@ -236,6 +237,7 @@ impl Executor {
             natives: RefCell::default(),
             opaques: RefCell::default(),
             activities: binding::activity::Cache::default(),
+            hooks: RefCell::default(),
         });
         THREAD_ENGINE.with(|slot| *slot.borrow_mut() = Rc::downgrade(&inner));
         inner

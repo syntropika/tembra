@@ -1499,6 +1499,15 @@ impl Reference {
         args: Option<serde_json::Value>,
         ctx: Option<&Context>,
     ) -> Result<Option<serde_json::Value>> {
+        self.call_json_with_receipt(name, args, ctx, None).await
+    }
+    pub(crate) async fn call_json_with_receipt(
+        &self,
+        name: &str,
+        args: Option<serde_json::Value>,
+        ctx: Option<&Context>,
+        receipt: Option<&crate::InvocationReceipt>,
+    ) -> Result<Option<serde_json::Value>> {
         use tembra_contracts::{Member, ValueSchema};
         let host = self
             .claim
@@ -1646,8 +1655,13 @@ impl Reference {
                     "method has no portable binding; use the native typed route",
                 )
             })?;
-        let (child, _invocation) =
-            crate::invocation::enter(&host, object.clone(), implementation.clone(), &context)?;
+        let (child, _invocation) = crate::invocation::enter_with_receipt(
+            &host,
+            object.clone(),
+            implementation.clone(),
+            &context,
+            receipt,
+        )?;
         let result = invoke(args, child).await?;
         if let Some(schema) = provider_result {
             let ValueSchema::Portable(schema) = schema else {

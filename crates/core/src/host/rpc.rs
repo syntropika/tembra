@@ -866,6 +866,12 @@ impl HostInner {
             connection.cancel_ingress(reason.clone());
         }
     }
+    pub(super) fn rpc_fail_disconnected_cleanup(&self) {
+        let remotes: Vec<_> = self.rpc.remotes.borrow().values().cloned().collect();
+        for remote in remotes {
+            remote.close_disconnected_dependency();
+        }
+    }
     pub(super) fn rpc_close_links(&self) {
         // Held dependencies and cleanup-created roots remain usable until resource cleanup
         // finishes. The closing admission gate already refuses new holds and incoming calls.

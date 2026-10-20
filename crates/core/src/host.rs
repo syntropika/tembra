@@ -193,6 +193,11 @@ impl Host {
     pub fn id(&self) -> u64 {
         self.inner.id
     }
+    /// Observes the committed execution version without reserving a root or changing the Host.
+    /// A later reload can advance this value; it is not an ownership lease.
+    pub fn code_version(&self) -> u64 {
+        self.inner.epochs.current().version.get()
+    }
     pub fn name(&self) -> &str {
         &self.inner.name
     }
@@ -343,7 +348,11 @@ impl Host {
     ///
     /// Once first polled, the driver owns cleanup even if this waiter is dropped. Repeated
     /// calls await the same operation and return the same result. New acquisitions are
-    /// refused immediately; cleanup may still call already-held dependencies.
+    /// refused immediately; cleanup may still call already-held dependencies with existing
+    /// remote attachments. Pending disconnected remote dependencies fail with
+    /// `unavailable/cleanup_dependency_disconnected` and the target name in their details;
+    /// closing cannot admit the replacement attachment their readiness would require.
+    /// Already terminal dependencies preserve their original failure reason.
     /// Cancellation signals do not prove that an invocation has terminated. A method or
     /// resource callback that never settles can therefore keep closure pending.
     ///
@@ -369,6 +378,9 @@ impl Host {
             }
             let host = self.inner.clone();
             let operation = async move {
+                // Notify dependency observers only after close_operation has been published,
+                // so reentrant close calls still observe this same driver-owned operation.
+                host.rpc_fail_disconnected_cleanup();
                 host.rpc_reload_stopped().await;
                 if let Some(reload) = reload {
                     reload.settled.cancelled().await;

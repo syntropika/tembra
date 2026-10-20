@@ -28,7 +28,10 @@ test("actual pinned lexer executes the shared native/browser closed-source corpu
   const corpus =
     /* SAFETY: esm-v1.json is the versioned repository lexical corpus; these case fields match the corpus consumed by the native loader tests. */
     /* oxlint-disable typescript/no-unsafe-type-assertion -- The versioned corpus has the fixed case schema consumed below. */ JSON.parse(
-      await readFile(new URL("../../../fixtures/executor/esm-v1.json", import.meta.url), "utf-8"),
+      await readFile(
+        new URL("../../../testing/fixtures/executor/esm-v1.json", import.meta.url),
+        "utf-8",
+      ),
     ) as {
       cases: {
         id: string;
