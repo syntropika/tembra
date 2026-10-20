@@ -234,6 +234,49 @@ fn readiness(records: Vec<Rc<HostActivation>>) -> LocalBoxFuture<'static, Result
 }
 
 impl Host {
+    /// Snapshots the actual installed facet catalog in case-sensitive Rust `str` order.
+    ///
+    /// Failed synchronous setup withdraws its scoped run; an eager activation failure does
+    /// not remove an admitted run; [`FacetStartup`] observes readiness separately. Candidates
+    /// remain absent through setup and activation until [`Host::reload`] commits, which may
+    /// precede resolution of its waiter. During initial synchronous setup, a reentrant query
+    /// can observe that setup's scoped run before its outcome. The catalog is empty after
+    /// [`Host::close`] finishes, including a reported cleanup failure.
+    ///
+    /// Presence establishes catalog admission, not readiness, startup success or provenance.
+    /// Absence does not establish that old calls stopped or resources were physically released.
+    /// Owned values remain unchanged and retain no executable callbacks or resources. Equality
+    /// compares only name and origin; same-name replacement can produce equal snapshots.
+    ///
+    /// ```
+    /// use serde_json::json;
+    /// use tembra_core::{FacetKind, Host, HostOptions, InstalledFacet, LoadOptions, ManualDriver, NativeFacet};
+    /// let driver = ManualDriver::new();
+    /// let host = Host::new(HostOptions::new("catalog", json!(null)), driver.clone());
+    /// assert!(host.installed_facets().is_empty());
+    /// let facet = NativeFacet::new("compiled", vec![], |_, _| Ok(()))?;
+    /// driver.run_until(host.install(facet, LoadOptions::default())?)?;
+    /// let snapshot: Vec<InstalledFacet> = host.installed_facets();
+    /// assert_eq!(snapshot[0].name(), "compiled");
+    /// assert_eq!(snapshot[0].kind(), FacetKind::Native);
+    /// driver.run_until(host.close())?;
+    /// assert!(host.installed_facets().is_empty());
+    /// assert_eq!(snapshot[0].name(), "compiled"); // The prior value is an owned snapshot.
+    /// # Ok::<(), tembra_core::RuntimeError>(())
+    /// ```
+    pub fn installed_facets(&self) -> Vec<crate::InstalledFacet> {
+        let mut facets = self
+            .inner
+            .facets
+            .runs
+            .borrow()
+            .values()
+            .map(|run| crate::InstalledFacet::from_definition(&run.definition))
+            .collect::<Vec<_>>();
+        facets.sort_by(|left, right| left.name().cmp(right.name()));
+        facets
+    }
+
     /// Declares one executable native facet synchronously and returns its startup waiter.
     ///
     /// # Errors
