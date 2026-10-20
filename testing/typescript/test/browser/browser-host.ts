@@ -10,8 +10,9 @@ import {
 } from "@tembra/testing/conformance";
 
 import { detachedHookOwnership } from "../../src/detached-hooks.js";
-import { browserManagerAcceptance } from "./browser-managers.js";
+import { browserManagerAcceptance, browserManagerLiveness } from "./browser-managers.js";
 import { browserModuleAcceptance } from "./browser-modules.js";
+import { browserOptionsAcceptance } from "./browser-options.js";
 
 function check(condition: boolean, message: string): asserts condition {
   if (!condition) {
@@ -261,9 +262,14 @@ export async function browserAcceptance(): Promise<string[]> {
   } finally {
     await hooks.close();
   }
+  await browserOptionsAcceptance();
+  passed.push(
+    "initialized WASM injection, loader injection, Rust consumer linger and state:false readiness",
+  );
   await browserModuleAcceptance();
   passed.push("native modules, URL reload, import maps, CORS and Worker continuity");
   await browserManagerAcceptance();
+  await browserManagerLiveness();
   passed.push("Worker HostManager, real RPC references, state, replacement and failure cleanup");
   return passed;
 }

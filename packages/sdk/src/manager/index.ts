@@ -3,12 +3,14 @@ import { managerBridge, ownManager, checkManagedHostOpen } from "./bridge.js";
 import type { RpcEndpoint } from "./bridge.js";
 import { framePump, deadline, deferred } from "./channel.js";
 import type { HostDriver, ManagedChannel } from "./channel.js";
+import { connectionFailure, lifecycleFailure } from "./failure.js";
 
 export type { HostDriver, ManagedChannel, ManagedMessage } from "./channel.js";
 
 export type HostManagerOptions = {
   /** Parent shutdown stops owned children first, preserving parent services for child closers.
-   * Run cleanup that needs child services before closing the parent. */
+   * Run cleanup that needs child services before closing the parent. Started environments stay
+   * retained until stop/replace/parent close, even with no application references. */
   host: TembraHost;
   name: string;
   driver: HostDriver;
@@ -19,7 +21,11 @@ export type HostManagerOptions = {
 export type HostInstance = {
   readonly name: string;
   readonly generation: number;
+  /** Readiness followed by observed platform/core liveness; no independent heartbeat runs here. */
   readonly status: () => "starting" | "ready" | "stopping" | "stopped" | "failed";
+  /** First causal terminal failure, preserving core code/reason/cause. Normal stop leaves it undefined. */
+  readonly failure: () => Error | undefined;
+  /** Transport traffic, including core pings and control frames; not object demand or a health guarantee. */
   readonly activity: () => Readonly<{
     sentFrames: number;
     receivedFrames: number;
@@ -94,6 +100,7 @@ export function createManagedHostManager(options: HostManagerOptions): HostManag
         const stopped = deferred<undefined>();
         let cleaned = false;
         let status: ReturnType<HostInstance["status"]> = "starting";
+        let failure: Error | undefined;
         let endpoint: RpcEndpoint;
         try {
           endpoint = parent.attach(options.name, true);
@@ -126,6 +133,7 @@ export function createManagedHostManager(options: HostManagerOptions): HostManag
           if (status === "stopped") {
             return;
           }
+          failure ??= error;
           if (status === "stopping") {
             stopped.reject(error);
             return;
@@ -151,13 +159,13 @@ export function createManagedHostManager(options: HostManagerOptions): HostManag
               stopped.resolve(undefined);
             }
             if (message.type === "failure") {
-              failed(new Error(String(message.message)));
+              failed(connectionFailure(message));
             }
           }),
         );
-        void endpoint.closed().then(() => {
+        void endpoint.closed().then((reason) => {
           if (status !== "stopping") {
-            failed(new Error("managed RPC connection closed"));
+            failed(connectionFailure(reason));
           }
         }, failed);
         generation += 1;
@@ -165,6 +173,7 @@ export function createManagedHostManager(options: HostManagerOptions): HostManag
           name: options.name,
           generation,
           status: () => status,
+          failure: () => failure,
           activity: pump.activity,
           closed: closed.promise,
         };
@@ -174,12 +183,23 @@ export function createManagedHostManager(options: HostManagerOptions): HostManag
             return;
           }
           status = "stopping";
+          let refusal: Error | undefined;
           try {
             channel.send({ type: "stop" });
             await deadline(stopped.promise, stopTimeout, "host_stop_timeout");
-          } finally {
-            status = "stopped";
+          } catch (error) {
+            refusal = lifecycleFailure(error);
+            failure ??= refusal;
+          }
+          status = "stopped";
+          try {
             await cleanup();
+          } catch (error) {
+            refusal ??= lifecycleFailure(error);
+            failure ??= refusal;
+          }
+          if (refusal) {
+            throw refusal;
           }
         };
         try {

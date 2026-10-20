@@ -35,7 +35,8 @@ try {
     throw new TypeError("browser test server did not return a URL");
   }
   await browser("open", url);
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const deadline = Date.now() + 90_000;
+  for (;;) {
     // Each observation follows the previous browser operation and pending WASM work.
     // oxlint-disable-next-line no-await-in-loop -- Each observation must wait for the preceding browser operation.
     const text = await browser("get", "text", "output");
@@ -48,7 +49,7 @@ try {
       console.log(result);
       break;
     }
-    if (attempt === 99) {
+    if (Date.now() >= deadline) {
       throw new Error("browser acceptance timed out");
     }
     // oxlint-disable-next-line no-await-in-loop -- Poll after allowing WASM and the previous observation to progress.

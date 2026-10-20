@@ -9,6 +9,7 @@ import { Type, defineFacet, hostNamed, local, method, remote } from "@tembra/sdk
 import { createHost, createHostManager, forkDriver } from "@tembra/sdk/node";
 import type { HostDriver } from "@tembra/sdk/node";
 
+import { managedLiveness, silentPeer } from "../shared/managed-liveness.ts";
 import { refuseFirstStop } from "../shared/managed-stop.ts";
 
 type ManagedChannel = Awaited<ReturnType<HostDriver["spawn"]>>;
@@ -62,6 +63,13 @@ for (const outcome of ["timeout", "failure"] as const) {
       assert.equal(manager.current, undefined);
       await first.closed;
       assert.equal(first.status(), "stopped");
+      const failure = first.failure();
+      assert.ok(failure instanceof Error);
+      if (outcome === "timeout") {
+        assert.ok("reason" in failure && failure.reason === "host_stop_timeout");
+      } else {
+        assert.match(failure.message, /stop acknowledgment rejected/u);
+      }
       assert.equal(controlled.activity.terminations, 1);
       assert.ok(controlled.activity.acknowledgments > 0);
       const firstCleanup = await readFile(files.cleanup, "utf-8");
@@ -380,3 +388,24 @@ for (const disconnected of [false, true]) {
     },
   );
 }
+
+await test(
+  "core liveness reclaims a silently isolated child while idle retention remains explicit",
+  { timeout: 70_000 },
+  async () => {
+    const files = await fixture();
+    const host = await createHost({ name: "liveness-parent" });
+    const controlled = silentPeer(forkDriver({ module: files.module }));
+    const manager = createHostManager({ host, name: "managed-child", driver: controlled.driver });
+    try {
+      await managedLiveness(manager, controlled);
+      await host.close();
+      assert.equal(host.diagnostics().bridge.jobs, 0);
+      assert.equal(host.diagnostics().bridge.callbacks, 0);
+    } finally {
+      await manager.stop();
+      await host.close();
+      await rm(files.root, { recursive: true, force: true });
+    }
+  },
+);
