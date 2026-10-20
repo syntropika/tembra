@@ -359,6 +359,14 @@ fn main() {
         let args = serde_json::from_value(json!({"by":4})).unwrap();
         assert_eq!(portable.increment(args).await.unwrap(), 4);
         assert_eq!(portable.count().value().unwrap(), 4);
+        let float_arguments = portable
+            .core()
+            .call_json("increment", Some(json!({"by":2.0})), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(float_arguments, json!(6));
+        assert_eq!(portable.count().value().unwrap(), 6);
         assert!(
             portable
                 .core()

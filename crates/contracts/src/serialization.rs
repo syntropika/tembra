@@ -1,4 +1,4 @@
-use serde::{Serialize, Serializer, ser};
+use serde::{Serialize, Serializer, de::DeserializeOwned, ser};
 use serde_json::Value;
 
 use crate::{ContractError, Result, validate};
@@ -33,6 +33,34 @@ pub fn to_portable_value<T: Serialize + ?Sized>(value: &T) -> Result<Value> {
         .map_err(|error| ContractError::new("serialization", error.to_string()))?;
     validate(&Value::Bool(true), &value)?;
     Ok(value)
+}
+
+/// Decodes portable JSON after normalizing safe mathematical integers for Serde.
+///
+/// Integral binary64 values from JavaScript, including values beyond the i32 range, decode
+/// into Rust integer fields as their mathematical value. The borrowed input is unchanged.
+///
+/// # Errors
+/// Returns a portable-profile error for unsafe numbers or excessive nesting, or
+/// `deserialization` when the normalized value does not fit `T`. Fractional values are never
+/// truncated into integer fields. Effects of a custom deserializer cannot be rolled back.
+///
+/// ```
+/// use serde_json::json;
+/// use tembra_contracts::from_portable_value;
+///
+/// let value = json!({"wake_at_ms": 1_792_536_326_221.0});
+/// let decoded: std::collections::BTreeMap<String, u64> = from_portable_value(&value)?;
+/// assert_eq!(decoded["wake_at_ms"], 1_792_536_326_221);
+/// assert_eq!(value["wake_at_ms"], json!(1_792_536_326_221.0));
+/// assert_eq!(from_portable_value::<u64>(&json!(1.5)).unwrap_err().reason, "deserialization");
+/// # Ok::<(), tembra_contracts::ContractError>(())
+/// ```
+pub fn from_portable_value<T: DeserializeOwned>(value: &Value) -> Result<T> {
+    let encoded = crate::canonical_json(value)?;
+    let normalized = crate::parse_json(&encoded)?;
+    serde_json::from_value(normalized)
+        .map_err(|error| ContractError::new("deserialization", error.to_string()))
 }
 
 struct Checked<'a, T: ?Sized>(&'a T);

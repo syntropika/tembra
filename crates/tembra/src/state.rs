@@ -17,7 +17,7 @@ pub(crate) fn contract_error(error: tembra_contracts::ContractError) -> RuntimeE
 }
 
 pub(crate) fn decode<T: DeserializeOwned>(value: &Value) -> Result<T> {
-    serde_json::from_value(value.clone())
+    tembra_contracts::from_portable_value(value)
         .map_err(|error| RuntimeError::invalid("state_decode", error.to_string()))
 }
 
@@ -326,8 +326,7 @@ impl<T: Serialize + DeserializeOwned> Cell<T> {
     ) -> Result<Prepared<T>> {
         self.inner
             .prepare_change(context.core(), |draft| {
-                let mut value = serde_json::from_value(std::mem::take(draft))
-                    .map_err(|error| RuntimeError::invalid("state_decode", error.to_string()))?;
+                let mut value = decode(draft)?;
                 change(&mut value)?;
                 *draft = encode(&value)?;
                 Ok(())

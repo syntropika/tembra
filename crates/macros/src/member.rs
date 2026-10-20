@@ -200,7 +200,7 @@ pub(super) fn emit(member: &TraitItem, scope: &Scope<'_>, output: &mut Members) 
             quote!(let _ = value; ::std::result::Result::Ok(()))
         } else {
             quote!(
-                ::tembra::serde_json::from_value(value.ok_or_else(|| {
+                ::tembra::contracts::from_portable_value(&value.ok_or_else(|| {
                     ::tembra::RuntimeError::invalid("missing_result", "missing method result")
                 })?)
                 .map_err(|error| ::tembra::RuntimeError::invalid(
@@ -227,7 +227,7 @@ pub(super) fn emit(member: &TraitItem, scope: &Scope<'_>, output: &mut Members) 
             quote!(let args = ();)
         } else {
             quote! {
-                let args: #args_type = ::tembra::serde_json::from_value(args.ok_or_else(|| {
+                let args: #args_type = ::tembra::contracts::from_portable_value(&args.ok_or_else(|| {
                     ::tembra::RuntimeError::invalid("missing_arguments", "missing method arguments")
                 })?).map_err(|error| {
                     ::tembra::RuntimeError::invalid("argument_conversion", error.to_string())
