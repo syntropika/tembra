@@ -114,6 +114,37 @@ pub enum FacetKind {
     Foreign,
 }
 
+/// An owned observation of one run in the Host's installed facet catalog.
+///
+/// Presence establishes catalog admission, not readiness, startup success or package provenance.
+/// Absence does not establish that old calls stopped or resources were physically released.
+/// This value retains no executable callbacks or resources and carries no mutation authority.
+/// Equality compares only name and origin; same-name replacement can produce an equal value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalledFacet {
+    name: String,
+    kind: FacetKind,
+}
+
+impl InstalledFacet {
+    pub(crate) fn from_definition(definition: &ExecutableFacet) -> Self {
+        Self {
+            name: definition.name().to_owned(),
+            kind: definition.kind(),
+        }
+    }
+
+    /// Returns the exact executable name, not a generation or code-version identity.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the definition's native or foreign origin, independent of readiness.
+    pub fn kind(&self) -> FacetKind {
+        self.kind
+    }
+}
+
 /// Engine-neutral executable definition using the Host's existing synchronous installer.
 ///
 /// Native conversions preserve definition identity. Foreign callbacks own their engine

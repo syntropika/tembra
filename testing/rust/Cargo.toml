@@ -94,6 +94,10 @@ name = "core-facet-integration"
 path = "tests/core/facet_integration.rs"
 
 [[test]]
+name = "core-facet-observations"
+path = "tests/core/facet_observations.rs"
+
+[[test]]
 name = "core-facet-run-retention"
 path = "tests/core/facet_run_retention.rs"
 

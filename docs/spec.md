@@ -109,6 +109,17 @@ not have the same rollback guarantee as coordinated replacement. Registries expo
 per execution version. Hooks are explicit pipelines over managed operations and registry entries;
 they do not intercept every method automatically.
 
+Rust's `host.installed_facets()` reads the actual installed run catalog and returns owned name/origin
+observations sorted in case-sensitive Rust `str` order. Initial synchronous setup failure withdraws
+its scoped run; eager activation failure leaves its admitted declaration in the catalog. A reentrant
+query during initial setup can see that setup's scoped run. Reload candidates stay absent through
+candidate setup and activation until commit, which can precede resolution of the reload waiter.
+Completed Host shutdown empties the catalog even when it reports cleanup errors. Presence means
+catalog admission, not readiness, startup success or package provenance. Absence does not establish
+that old calls stopped or resources were physically released. Snapshot values retain no executable
+callbacks or resources; equality compares name and origin only, so same-name replacement can produce
+equal observations without identifying a code version or generation.
+
 Native facets remain fixed for their Host lifetime. Compatible JavaScript replacement retains
 logical objects, surviving references and compatible state. Already admitted roots keep their old
 implementation version while new roots use the committed version. State schema changes require
