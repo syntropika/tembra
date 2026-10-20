@@ -26,9 +26,11 @@ dependency resolution and file watching live in external tooling.
 
 ## Build from source
 
-Install Git, Rustup, just 1.21 or later and Bun 1.4.3. The checked-in toolchain selects Rust 1.99.0,
-rustfmt, Clippy and the WebAssembly target. Native builds need a C/C++ toolchain; the JavaScript
-executor also builds or downloads its pinned V8 dependency.
+Install Git, Rustup, just 1.21 or later, Bun 1.4.3 and the Node.js version in
+[`.node-version`](.node-version). Node acceptance requires the actual Node runtime; workspace
+test orchestration must not force Bun's `--bun` Node alias. The checked-in toolchain selects
+Rust 1.99.0, rustfmt, Clippy and the WebAssembly target. Native builds need a C/C++ toolchain;
+the JavaScript executor also builds or downloads its pinned V8 dependency.
 
 ```sh
 git clone https://github.com/syntropika/tembra.git
