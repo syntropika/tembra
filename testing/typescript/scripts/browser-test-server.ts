@@ -64,6 +64,11 @@ const server = Bun.serve({
     if (url.pathname === "/manager-worker.js") {
       return new Response(managedWorkerCode, { headers: { "content-type": "text/javascript" } });
     }
+    if (url.pathname === "/manager-liveness-facet.js") {
+      return new Response("export default {name:'managed-liveness',uses:[],setup(){}};", {
+        headers: { "content-type": "text/javascript" },
+      });
+    }
     if (url.pathname === "/manager-facet.js") {
       return new Response(managedFacetCode, { headers: { "content-type": "text/javascript" } });
     }

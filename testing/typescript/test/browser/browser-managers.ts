@@ -1,6 +1,7 @@
 import { Type, defineFacet, hostNamed, local, method, remote } from "@tembra/sdk";
 import { createHost, createHostManager, webWorkerDriver } from "@tembra/sdk/browser";
 
+import { managedLiveness, silentPeer } from "../shared/managed-liveness.js";
 import { refuseFirstStop } from "../shared/managed-stop.ts";
 
 const Counter = remote("test.worker.manager.counter", {
@@ -345,6 +346,28 @@ async function stopRefusalAcceptance(outcome: "timeout" | "failure"): Promise<vo
     await host.close();
     check(host.diagnostics().jobs === 0, "parent closes all physical jobs");
     check(host.diagnostics().callbacks === 0, "parent releases callbacks");
+  } finally {
+    await manager.stop();
+    await host.close();
+  }
+}
+
+export async function browserManagerLiveness(): Promise<void> {
+  const host = await createHost({ name: "worker-liveness-parent" });
+  const controlled = silentPeer(
+    webWorkerDriver({
+      module: "/manager-liveness-facet.js",
+      workerURL: "/manager-worker.js",
+      wasmURL: "/wasm/tembra_browser_wasm_bg.wasm",
+    }),
+  );
+  const manager = createHostManager({
+    host,
+    name: "managed-liveness-worker",
+    driver: controlled.driver,
+  });
+  try {
+    await managedLiveness(manager, controlled);
   } finally {
     await manager.stop();
     await host.close();

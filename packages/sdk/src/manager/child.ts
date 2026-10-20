@@ -2,6 +2,7 @@ import type { TembraHost } from "../host/index.js";
 import { managerBridge } from "./bridge.js";
 import { framePump, deadline } from "./channel.js";
 import type { ManagedChannel } from "./channel.js";
+import { connectionFailure, failureMessage } from "./failure.js";
 
 /** Child-side adapter shared by process and Worker bootstraps. */
 export function serveManagedHost(
@@ -30,9 +31,9 @@ export function serveManagedHost(
           return;
         }
         pump = framePump(endpoint, channel, failed, false, host);
-        void endpoint.closed().then(() => {
+        void endpoint.closed().then((reason) => {
           if (!closing) {
-            failed(new Error("parent RPC connection closed"));
+            failed(connectionFailure(reason));
           }
         }, failed);
         channel.send({ type: "transport-ready" });
@@ -58,10 +59,7 @@ export function serveManagedHost(
     remove();
     removeFailure();
     try {
-      channel.send({
-        type: "failure",
-        message: error instanceof Error ? error.message : String(error),
-      });
+      channel.send(failureMessage(error));
     } catch {
       try {
         await channel.terminate();
@@ -76,10 +74,7 @@ export function serveManagedHost(
     }
     closing = true;
     try {
-      channel.send({
-        type: "failure",
-        message: error instanceof Error ? error.message : String(error),
-      });
+      channel.send(failureMessage(error));
     } catch {
       /* Parent may already be gone. */
     }

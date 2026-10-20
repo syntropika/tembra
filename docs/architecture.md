@@ -73,6 +73,54 @@ published. Closed artifacts follow their explicit validation and native ESM eval
 executor adapts foreign facet code to the same Rust Host semantics. Keeping it independent allows
 Rust embeddings to choose their engine without imposing that engine on Node or browser consumers.
 
+## Browser public interface
+
+The Browser entry point exposes one `createHost` facade over its matching Rust/WASM binding.
+Separate client/executor/port construction is no longer a public integration path. Executor assembly
+and binding ports are implementation details. The application operations remain available:
+callback installation, module/artifact loading, compatible reload, reference acquisition, contexts,
+cancellation, WebSocket connections and diagnostics. Resources, registries, portable hooks and
+registered JavaScript opaque capabilities use the same underlying Host.
+
+Embeddings retain control over WASM initialization through `CreateBrowserHostOptions.wasm` or the
+packaged initializer's `wasmInput`. An initialized module or async module loader must provide the
+matching SDK binding. `name`, `baseURL` and `consumerLinger` remain public options. `host.root` issues
+managed contexts, `host.cancel` requests cancellation, and `host.connect` exposes connection readiness,
+closure and status. Applications release references and unsubscribe their listeners; `host.close`
+joins managed work and disposes tracked WASM wrappers. Exposing raw handles with a separate `free()`
+would introduce another ownership boundary alongside that managed shutdown.
+
+This consolidation also narrows the former raw consumer surface. It does not preserve every
+previously exported ABI operation:
+
+- Raw consumer revision snapshots through `WasmReadable.snapshotJson()` no longer have a public
+  consumer equivalent. Producer `ManagedReadable.snapshot()` and internal Rust snapshots remain.
+- Per-readable `awaitHydrated()` was removed from the WASM wrapper. Reference readiness and
+  `get(..., { state: true })` remain, but are not identical to weakly waiting on one existing source.
+- Raw `subscribeEvents()` was removed from the WASM wrapper. Consumers observe values rather than
+  operation deltas or snapshot/reset lineage. The Rust core retains these event semantics internally.
+
+The high-level TypeScript consumer `Readable<T>` already exposed `value` and `subscribe`; it still
+does. The removed operations belonged to the separately exported raw WASM ABI. Likewise, the old
+consumer-only module constructor and manual executor/candidate assembly are not a supported public
+binary extension contract. Current module injection requires the matching full binding.
+
+Module injection controls initialization, not Host adoption: `createHost` always creates and owns
+a new full Rust Host. Attaching the facade to an externally owned `WasmHost`, or providing only the
+old consumer ABI, is not supported. A future need for external Host adoption would require an
+explicit ownership and shutdown contract, not a raw-handle getter.
+
+Applications can already implement custom acquisition or evaluation and pass the resulting
+`FacetDefinition` to `install()` or `reload([...])`. No raw prepared-candidate builder is needed.
+The embedding owns those external evaluations and their retention policy; SDK loader budgets apply
+to evaluations managed by `load`/`reload` loaders, not code already evaluated before registration.
+
+There is no general `@tembra/sdk/browser/advanced` entry point. If a concrete embedding needs state
+revision, hydration or event observations, evaluate a typed capability shared by Node and browser
+over the same issued sources and owners. It must preserve Rust termination, event ordering and
+weak ownership, without exposing pointers, raw JSON handles or executor disposal. Such an addition
+requires a demonstrated use case and acceptance tests; it is not an implemented or promised API.
+
 ## Modules and responsibilities
 
 | Module | Owns |
@@ -124,6 +172,22 @@ HostManagers separate environment supervision from object reload. Node uses `for
 processes; browser uses `webWorkerDriver` for Workers. Each environment has its own Rust Host.
 Portable core RPC frames connect it to the supervising Host through a bounded transport pump;
 opaque local values do not cross that connection.
+
+An instance's `status()` and `closed` reflect observed platform/core lifecycle. `failure()` retains
+the first causal terminal error; a normal stop leaves it undefined, while a failed stop can record
+an error. `closed` marks completion of the tracked teardown attempt, not proof that every resource
+closer succeeded. Inspect the failure and any rejected stop operation when assessing cleanup.
+
+Connection liveness belongs to Rust RPC, with default ping interval 10 seconds and liveness deadline
+30 seconds without peer traffic. Detection depends on scheduler progress; the manager does not run
+an independent heartbeat. `activity()` includes transport pings and control frames, so increasing
+traffic counters do not establish application demand or business health. Runtime suspension or a
+blocked event loop can cause a connection timeout after scheduling resumes.
+
+Started environments remain retained even with no application references. There is no automatic
+idle disposal or Node `unref()` policy. Ownership ends through `stop()`, `replace()`, parent close
+or failure-triggered teardown. Applications choose when their environment is no longer needed;
+consumer linger policy does not control the process or Worker lifetime.
 
 `start()` creates the child environment, `stop()` joins its managed cleanup before termination,
 and `replace()` creates a fresh environment after stopping the previous one. Parent shutdown stops

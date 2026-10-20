@@ -158,6 +158,20 @@ These profiles are trusted execution environments. A source profile does not sil
 closed artifact's validation or redefine its semantics. TypeScript transformation does not establish
 type safety; use the tooling typechecker separately.
 
+### Browser public interface
+
+The browser Host owns its binding wrappers and executor together. Public integration uses
+`createHost`, including explicit initialized WASM modules or asset initialization, and the Host's
+acquisition, context, connection, facet and diagnostic operations. Callers do not separately free
+internal WASM handles or create another executor over the same Host.
+
+The public TypeScript consumer `Readable<T>` exposes a current value and value subscriptions.
+Raw consumer revision snapshots, delta/reset subscriptions and per-member hydration waits are not
+supported public operations. These former raw WASM capabilities were removed; they are not implied
+by the unified facade. Reference readiness remains supported. Producer cells still expose their
+declared snapshot operations. The [Browser interface decision](architecture.md#browser-public-interface)
+records the rationale and the conditions for adding a narrower advanced interface.
+
 ## Module admission and memory
 
 Retiring a Tembra code generation means releasing its managed registrations, callbacks, values and
@@ -194,6 +208,31 @@ When admission is exhausted, the application must explicitly rotate the relevant
 to admit fresh evaluations. The SDK never resets a Host silently. HostManagers supervise independent
 child Hosts through Node child processes or browser Workers; `replace()` shuts down an environment
 and creates another. It is not `reload()`, reference preservation, state migration or durable recovery.
+
+## HostManager liveness and retention
+
+`start()` waits for both the child bootstrap and the Rust RPC connection to become ready.
+Afterward, `instance.status()` reports the observed lifecycle state. Core connection closure or a
+platform process/Worker failure changes that state to `failed` and starts teardown. `instance.closed`
+observes completion of the manager's teardown attempt; it does not prove that every resource closer
+succeeded. `instance.failure()` preserves the first causal terminal failure, including a structured
+core reason when available. A normal stop leaves this diagnostic undefined; a failed stop can leave
+the instance stopped with a recorded error and reject the stop operation.
+
+Rust RPC owns ping/pong and silence detection. Managed links use its current default 10-second ping
+interval and 30-second liveness deadline; there is no separate JavaScript heartbeat. Timers require
+the supervising scheduler to progress, so `ready` is not an instantaneous health guarantee during
+event-loop blockage or browser suspension. Activity counts include protocol/control traffic; neither
+those counts nor `lastMessageAt` measures application demand or proves peer health.
+
+A healthy started environment remains retained even with zero application references. Explicit
+`stop()`, `replace()`, parent shutdown or detected failure ends that retention. There is no idle-stop,
+automatic restart or configurable `keepAlive` switch. Node's managed IPC and frame pump keep its
+parent event loop referenced; this interface does not provide an `unref` policy. Object lifetime and
+consumer linger remain separate core policies. Applications that need an idle policy decide when
+to call `stop()` using their own demand information, rather than inferring demand from RPC traffic.
+Stopping a child does not close its parent Host or release that Host's own scheduler work. Full
+application shutdown still requires awaiting the parent Host's `close()`.
 
 ## Portable hooks and local capabilities
 

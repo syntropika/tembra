@@ -86,6 +86,10 @@ Node and browser expose the same high-level operations:
 | `reference.release()` | Release the acquisition's claim. |
 | `await host.close()` | Await managed shutdown and cleanup. |
 
+Acquisition defaults to `state: true`. Passing `{ state: false }` requests shape-only readiness;
+it neither bypasses provider activation nor guarantees hydrated state reads. Use a state-demanding
+acquisition when its initial readable values must be ready.
+
 The maintained [contract](../examples/typescript/counter/contract.ts) and
 [callback facet](../examples/typescript/counter/facet.ts) are shared by both platforms. The following
 flow uses the same imports as their [Node entrypoint](../examples/typescript/counter/node.ts):
@@ -154,6 +158,25 @@ Closed artifacts retain format, hash, export and ESM validation. They have no ex
 dynamic dependency resolution. Produce them with `@tembra/sdk/tooling`; they are an explicit delivery
 option, not a required envelope around every platform module.
 
+### Browser embedding controls
+
+Use `CreateBrowserHostOptions.wasm` for a matching preinitialized WASM module or an async loader,
+and `wasmInput` to configure the packaged initializer. `baseURL` controls module resolution;
+`consumerLinger` configures the Rust consumer cache. Advanced application operations remain on the
+Host: `root` and `cancel` for issued contexts, `connect` for WebSocket readiness/status/closure,
+and `diagnostics` for retained failures and ownership observations. Release references and remove
+subscriptions explicitly; await `close` for managed shutdown and wrapper disposal.
+
+Supplying a module still creates a new Host; it does not adopt an externally owned raw Host. A custom
+application loader can pass an already evaluated `FacetDefinition` to `install` or `reload`.
+The application then owns evaluation, caching and retention; registration does not charge those
+external evaluations to the SDK's module-loader budget.
+
+The old client/executor classes and raw `free()` handles are not an additional public API. Consumer
+state still exposes `value` and `subscribe`; raw revision snapshots, per-readable hydration waits
+and operation/reset event streams are not exposed. The [Browser interface decision](architecture.md#browser-public-interface)
+explains this scope and the criteria for any future typed observation capability.
+
 ### Hooks, registries and opaque capabilities
 
 Portable hooks use `defineHook`, `host.registerHook`, `registerHook` and `hookHandler`. Generic binding
@@ -195,6 +218,21 @@ guarantee physical JavaScript module unloading. Finite admission limits evaluati
 heap cap on trusted application code. See [loader policy](spec.md#module-admission-and-memory)
 for limits and [environment supervision](architecture.md#environment-supervision) for replacement.
 Replacing an environment creates a new Host; it does not preserve its in-memory references or state.
+
+### Supervise a child Host
+
+`createHostManager` uses `forkDriver` in Node or `webWorkerDriver` in a browser. After `start`, retain
+the returned instance to inspect `status()`, `failure()` and `activity()`, and await its `closed`
+Promise to observe the tracked teardown attempt. The first terminal failure remains available;
+normal shutdown leaves it undefined. A completed teardown attempt does not prove that every closer
+succeeded, so also handle errors from `stop()`.
+
+Rust RPC supplies liveness detection, with default pings every 10 seconds and a 30-second deadline
+without peer traffic, subject to scheduler progress. Transport activity includes those pings; it
+does not measure business activity. A suspended or blocked runtime can time out after scheduling
+resumes. The manager keeps the environment alive even without application references until stop,
+replacement, parent shutdown or failure teardown. It does not apply idle disposal or an `unref`
+policy. See [environment supervision](architecture.md#environment-supervision) for ownership details.
 
 ## Cleanup and replacement guarantees
 
