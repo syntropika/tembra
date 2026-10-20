@@ -290,7 +290,7 @@ impl Implementation {
             async move {
                 let args = args
                     .ok_or_else(|| RuntimeError::invalid("args", "method requires an argument"))?;
-                let args = serde_json::from_value(args)
+                let args = tembra_contracts::from_portable_value(&args)
                     .map_err(|error| RuntimeError::invalid("args", error.to_string()))?;
                 let result = method(args, ctx).await?;
                 tembra_contracts::to_portable_value(&result)

@@ -349,7 +349,7 @@ pub fn generate_rust_with_options(
                                 r#"let value = result.ok_or_else(|| {
                                 ::tembra_core::RuntimeError::invalid("missing_result", "value-returning method returned no result")
                             })?;
-                            ::serde_json::from_value(value).map_err(|error| {
+                            ::tembra_contracts::from_portable_value(&value).map_err(|error| {
                                 ::tembra_core::RuntimeError::invalid("result_conversion", error.to_string())
                             })"#
                             } else {

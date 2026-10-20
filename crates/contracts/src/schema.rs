@@ -538,12 +538,28 @@ fn transform(
         return Err(error("depth", "/", "normalization nesting limit exceeded"));
     }
     let mut result = value.clone();
-    if let Some(branch) = schema
-        .get("anyOf")
-        .and_then(Value::as_array)
-        .and_then(|branches| branches.get(nullable_branch(branches).unwrap_or(0)))
-    {
-        result = transform(branch, &result, defaults, identity, depth + 1)?;
+    if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
+        let branch = if let Some((property, tags)) = discriminated_branches(branches) {
+            // A nullable outer union can apply this branch to null. Nonobjects have no
+            // object cleaning to perform and remain available for final validation.
+            if !result.is_object() {
+                None
+            } else {
+                let tag = result.get(property).and_then(Value::as_str);
+                let index = tags
+                    .iter()
+                    .position(|candidate| Some(*candidate) == tag)
+                    .ok_or_else(|| {
+                        error("validation", "/", "missing or unknown union discriminant")
+                    })?;
+                branches.get(index)
+            }
+        } else {
+            branches.get(nullable_branch(branches).unwrap_or(0))
+        };
+        if let Some(branch) = branch {
+            result = transform(branch, &result, defaults, identity, depth + 1)?;
+        }
     }
     if let Some(values) = result.as_array_mut()
         && let Some(items) = schema.get("items")
@@ -593,7 +609,7 @@ fn transform(
     Ok(result)
 }
 
-/// Accept only unions whose normalization is independent of branch selection.
+/// Accept branch-independent policies or object unions selected by a unique required literal tag.
 pub(crate) fn check_normalization(schema: &Value) -> Result<()> {
     normalization_signature(schema).map(|_| ())
 }
@@ -616,6 +632,44 @@ fn nullable_branch(branches: &[Value]) -> Option<usize> {
             })
         })
         .map(|index| 1 - index)
+}
+
+// Required, distinct string constants prove branch selection before cleaning/defaults.
+// The discriminant cannot have a default: identity normalization must retain its value.
+fn discriminated_branches(branches: &[Value]) -> Option<(&str, Vec<&str>)> {
+    let first = branches.first()?.get("properties")?.as_object()?;
+    for property in first.keys() {
+        let mut tags = Vec::with_capacity(branches.len());
+        for branch in branches {
+            if branch.get("type").and_then(Value::as_str) != Some("object")
+                || !branch
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_some_and(|required| {
+                        required.iter().any(|name| name.as_str() == Some(property))
+                    })
+            {
+                break;
+            }
+            let Some(schema) = branch
+                .get("properties")
+                .and_then(|properties| properties.get(property))
+            else {
+                break;
+            };
+            let Some(tag) = schema.get("const").and_then(Value::as_str) else {
+                break;
+            };
+            if schema.get("default").is_some() || tags.contains(&tag) {
+                break;
+            }
+            tags.push(tag);
+        }
+        if tags.len() == branches.len() {
+            return Some((property, tags));
+        }
+    }
+    None
 }
 
 fn normalization_signature_at(schema: &Value, path: &str) -> Result<Value> {
@@ -654,29 +708,34 @@ fn normalization_signature_at(schema: &Value, path: &str) -> Result<Value> {
     }
     if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
         let selected = nullable_branch(branches);
-        let mut expected = None;
+        let mut policies = Vec::new();
         for (index, branch) in branches.iter().enumerate() {
             if selected.is_some_and(|selected| index != selected) {
                 continue;
             }
-            let branch = normalization_signature_at(branch, &format!("{path}anyOf/{index}/"))?;
-            if expected
-                .as_ref()
-                .is_some_and(|expected| expected != &branch)
-            {
-                return Err(error(
-                    "ambiguous_normalization",
-                    &format!("{path}anyOf"),
-                    "union branches have different cleaning/default policies",
-                ));
-            }
-            expected = Some(branch);
+            policies.push(normalization_signature_at(
+                branch,
+                &format!("{path}anyOf/{index}/"),
+            )?);
         }
-        if let Some(expected) = expected.filter(|expected| {
-            expected
-                .as_object()
-                .is_some_and(|object| !object.is_empty())
-        }) {
+        let same_policy = policies.windows(2).all(|pair| pair[0] == pair[1]);
+        let policy = if same_policy {
+            policies.into_iter().next().unwrap_or_else(|| json!({}))
+        } else if let Some((property, tags)) = discriminated_branches(branches) {
+            let alternatives = tags
+                .into_iter()
+                .zip(policies)
+                .map(|(tag, policy)| (tag.to_owned(), policy))
+                .collect::<Map<_, _>>();
+            json!({"tagged": {"property": property, "alternatives": alternatives}})
+        } else {
+            return Err(error(
+                "ambiguous_normalization",
+                &format!("{path}anyOf"),
+                "union branches need identical cleaning/default policies or distinct required string tags",
+            ));
+        };
+        if policy.as_object().is_some_and(|object| !object.is_empty()) {
             if signature.contains_key("object") || signature.contains_key("items") {
                 return Err(error(
                     "ambiguous_normalization",
@@ -684,7 +743,7 @@ fn normalization_signature_at(schema: &Value, path: &str) -> Result<Value> {
                     "sibling and union cleaning/default policies cannot be combined",
                 ));
             }
-            signature.insert("union".into(), expected);
+            signature.insert("union".into(), policy);
         }
     }
     Ok(Value::Object(signature))

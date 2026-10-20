@@ -42,6 +42,17 @@ finite, and integral values must fit the shared safe integer range
 `-9_007_199_254_740_991..=9_007_199_254_740_991`. Rust state uses this profile even when its contract
 is local. An absent method argument or result is distinct from a present JSON `null`.
 
+Portable unions can use different object cleaning and defaults when every branch requires a
+shared property with a distinct string `const` and no default on that property. The literal tag
+selects the branch before cleaning; its value remains part of object identity. Unknown or missing
+tags are refused for object values. Branches without that proof still require identical
+normalization policies. Nullable wrappers preserve explicit nested null values.
+
+Typed Rust portable decoding normalizes safe integral JavaScript numbers before deserializing
+integer fields, including values beyond the JavaScript engine's small-integer representation.
+Fractional and unsafe integer values are refused rather than truncated. Generated portable
+providers and consumers use the same decoder; native-only Rust method values remain native.
+
 ## Declaration and readiness
 
 Factories run synchronously. They declare behavior, state, dependencies and resources before

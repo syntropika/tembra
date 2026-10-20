@@ -16,7 +16,7 @@ pub use schema::{
     canonical_json, clean_arguments, normalize_input, normalize_schema,
     normalize_schema_with_limits, validate,
 };
-pub use serialization::to_portable_value;
+pub use serialization::{from_portable_value, to_portable_value};
 pub use source::CompileLimits;
 
 /// A contract error with a stable machine-readable reason.

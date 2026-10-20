@@ -504,3 +504,15 @@ required-features = ["embedded-executor"]
 name = "executor-js-stabilization-reload"
 path = "tests/executor-js/stabilization_reload.rs"
 required-features = ["embedded-executor"]
+
+[[test]]
+name = "contracts-discriminated"
+path = "tests/contracts/discriminated.rs"
+
+[[test]]
+name = "contracts-portable-decode"
+path = "tests/contracts/portable_decode.rs"
+
+[[test]]
+name = "tembra-portable-decode"
+path = "tests/tembra/portable_decode.rs"
