@@ -1,13 +1,10 @@
 # Tembra
 
-Managed objects for Rust and JavaScript.
+A Rust runtime for typed services, managed objects, reactive state and reloadable JavaScript,
+native and in browser WebAssembly.
 
-Build typed services with shared lifetimes, reactive state and reloadable JavaScript implementations.
-Tembra keeps the object runtime in Rust: run it natively or compile the same core to browser
-WebAssembly. Rust, embedded V8 and browser JavaScript use the same model for objects, references,
-contexts and state.
-
-Tembra is under active development. Build and use it from this repository.
+Tembra keeps object identity, lifetimes and state in one Rust core. The native V8 executor and
+browser JavaScript bindings build on the same runtime model.
 
 ## How it works
 
@@ -137,6 +134,12 @@ embedded; the resulting executable needs no external JavaScript runtime.
 Native facets remain fixed for the process lifetime. Hot reload targets JavaScript implementations.
 State retained through a compatible reload is in-memory state; applications supply durable storage.
 A disconnected remote call can have an unknown execution outcome and is not automatically retried.
+
+## Documentation
+
+- [Guide](docs/guide.md): contracts, objects, state and language integrations.
+- [Tutorial](docs/tutorial.md): run and understand the Rust counter.
+- [Runtime behavior](docs/spec.md): lifecycle, state, reload and remote-call guarantees.
 
 ## Acknowledgements
 
