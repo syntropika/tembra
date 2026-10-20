@@ -63,7 +63,7 @@ where
     P: 'static,
 {
     Rc::new(move |input, principal, declaration| {
-        let input = serde_json::from_value(input)
+        let input = crate::contracts::from_portable_value(&input)
             .map_err(|error| crate::RuntimeError::invalid("input", error.to_string()))?;
         let provider = factory(
             input,

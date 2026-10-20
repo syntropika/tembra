@@ -501,3 +501,61 @@ test("strict depth permits exactly 128 containers and safe descriptor integers a
   const contract = fromDescriptor(parsePortableJson(floatSpelled));
   assert.equal(contract.descriptor.fingerprint, firstFixture.fingerprint);
 });
+
+test("literal tagged object unions refuse invalid and ambiguous branch selection", () => {
+  const branches = [
+    {
+      type: "object",
+      required: ["type"],
+      additionalProperties: false,
+      properties: {
+        type: { type: "string", const: "create" },
+        name: { type: "string", default: "untitled" },
+      },
+    },
+    {
+      type: "object",
+      required: ["type", "id"],
+      additionalProperties: false,
+      properties: {
+        type: { type: "string", const: "remove" },
+        id: { type: "integer" },
+      },
+    },
+  ];
+  const schema = { anyOf: branches };
+  for (const input of [
+    {},
+    { type: "unknown" },
+    { type: 3 },
+    { type: "remove" },
+    { type: "remove", id: "wrong" },
+  ]) {
+    const before = structuredClone(input);
+    assert.throws(() => normalizeInput(schema, input), /validation|input/u);
+    assert.deepEqual(input, before);
+  }
+  for (const anyOf of [
+    branches.map((branch) => ({ ...branch, required: [] })),
+    branches.map((branch) => ({
+      ...branch,
+      properties: { ...branch.properties, type: { type: "string", const: "same" } },
+    })),
+    branches.map((branch) => ({
+      ...branch,
+      properties: {
+        ...branch.properties,
+        type: { ...branch.properties.type, default: branch.properties.type.const },
+      },
+    })),
+  ]) {
+    assert.throws(() => normalizeInput({ anyOf }, { type: "create" }), /ambiguous_normalization/u);
+  }
+  assert.deepEqual(
+    normalizeInput(
+      { type: "object", properties: { next: { anyOf: [schema, { type: "null" }] } } },
+      { next: null },
+    ),
+    { next: null },
+  );
+});

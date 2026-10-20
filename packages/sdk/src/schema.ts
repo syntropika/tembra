@@ -588,6 +588,48 @@ function normalizationBranch(branches: readonly JsonValue[]): number {
   return 0;
 }
 
+/** Required distinct literal tags select a branch before cleaning or defaults. */
+function discriminatedBranches(
+  branches: readonly JsonValue[],
+): { property: string; tags: string[] } | undefined {
+  const [first] = branches;
+  if (first === null || typeof first !== "object" || Array.isArray(first)) {
+    return undefined;
+  }
+  for (const property of Object.keys(jsonObject(first.properties ?? {})).toSorted()) {
+    const tags: string[] = [];
+    for (const source of branches) {
+      const branch = schemaChild(source);
+      if (
+        typeof branch === "boolean" ||
+        branch.type !== "object" ||
+        !Array.isArray(branch.required) ||
+        !branch.required.includes(property)
+      ) {
+        break;
+      }
+      const sourceTag = jsonObject(branch.properties ?? {})[property];
+      if (sourceTag === undefined) {
+        break;
+      }
+      const tagSchema = schemaChild(sourceTag);
+      if (
+        typeof tagSchema === "boolean" ||
+        typeof tagSchema.const !== "string" ||
+        Object.hasOwn(tagSchema, "default") ||
+        tags.includes(tagSchema.const)
+      ) {
+        break;
+      }
+      tags.push(tagSchema.const);
+    }
+    if (tags.length === branches.length) {
+      return { property, tags };
+    }
+  }
+  return undefined;
+}
+
 function signature(schema: Schema, path = "/"): JsonValue {
   if (typeof schema === "boolean") {
     return {};
@@ -630,18 +672,26 @@ function signature(schema: Schema, path = "/"): JsonValue {
           Object.keys(branch).length === 1 &&
           branch.type === "null",
       );
-    if (
-      !nullable &&
-      branches.some((branch) => canonicalJson(branch) !== canonicalJson(branches[selected]))
-    ) {
-      throw new ContractError(
-        "ambiguous_normalization",
-        "union branches have different cleaning/default policies",
-        `${path}anyOf`,
-      );
+    let policy = schemaChildProperty(branches, selected);
+    if (!nullable && branches.some((branch) => canonicalJson(branch) !== canonicalJson(policy))) {
+      const tagged = discriminatedBranches(schema.anyOf);
+      if (!tagged) {
+        throw new ContractError(
+          "ambiguous_normalization",
+          "union branches need identical cleaning/default policies or distinct required string tags",
+          `${path}anyOf`,
+        );
+      }
+      policy = {
+        tagged: {
+          property: tagged.property,
+          alternatives: Object.fromEntries(
+            tagged.tags.map((tag, index) => [tag, schemaChildProperty(branches, index)]),
+          ),
+        },
+      };
     }
-    const union = object(branches[selected]);
-    if (Object.keys(union).length) {
+    if (Object.keys(object(policy)).length) {
       if (Object.hasOwn(output, "object") || Object.hasOwn(output, "items")) {
         throw new ContractError(
           "ambiguous_normalization",
@@ -649,7 +699,7 @@ function signature(schema: Schema, path = "/"): JsonValue {
           `${path}anyOf`,
         );
       }
-      output.union = schemaChildProperty(branches, selected);
+      output.union = policy;
     }
   }
   return output;
@@ -670,12 +720,22 @@ function transform(
   }
   let value = clonePortable(input);
   if (Array.isArray(schema.anyOf) && schema.anyOf.length) {
-    value = transform(
-      schemaChild(schema.anyOf[normalizationBranch(schema.anyOf)]),
-      value,
-      defaults,
-      identity,
-    );
+    const tagged = discriminatedBranches(schema.anyOf);
+    let selected = normalizationBranch(schema.anyOf);
+    if (tagged) {
+      if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+        const actualTag = value[tagged.property];
+        selected = typeof actualTag === "string" ? tagged.tags.indexOf(actualTag) : -1;
+        if (selected === -1) {
+          throw new ContractError("validation", "missing or unknown union discriminant");
+        }
+      } else {
+        selected = -1;
+      }
+    }
+    if (selected !== -1) {
+      value = transform(schemaChild(schema.anyOf[selected]), value, defaults, identity);
+    }
   }
   if (Array.isArray(value) && schema.items !== undefined) {
     value = value.map((item) => transform(schemaChild(schema.items), item, defaults, identity));

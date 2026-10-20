@@ -478,6 +478,106 @@
         "nullable": null
       },
       "identity": "{\"child\":{},\"nullable\":null}"
+    },
+    {
+      "name": "tagged create defaults and identity",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "create"
+              },
+              "name": {
+                "type": "string",
+                "default": "untitled"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "remove"
+              },
+              "id": {
+                "type": "integer"
+              }
+            }
+          }
+        ]
+      },
+      "input": {
+        "type": "create"
+      },
+      "normalized": {
+        "type": "create",
+        "name": "untitled"
+      },
+      "identity": "{\"type\":\"create\"}"
+    },
+    {
+      "name": "tagged remove cleans selected branch",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "create"
+              },
+              "name": {
+                "type": "string",
+                "default": "untitled"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "remove"
+              },
+              "id": {
+                "type": "integer"
+              }
+            }
+          }
+        ]
+      },
+      "input": {
+        "type": "remove",
+        "id": 3,
+        "name": "remove this extra"
+      },
+      "normalized": {
+        "type": "remove",
+        "id": 3
+      },
+      "identity": "{\"id\":3,\"type\":\"remove\"}"
     }
   ],
   "canonical": [
