@@ -98,6 +98,13 @@ Object execution uses the object's principal; trusted transport and acquisition 
 which principals may be admitted. Cancellation ends logical permission to continue and signals
 cooperative work. It does not undo external effects or prove that a callback has physically stopped.
 
+Facet and managed-task roots also retain protected local execution origin. A receiver's
+`Context::caller_facet()` reports the immediate managed caller's installed Facet name; nested calls
+report the immediate receiver Facet, not an earlier caller. Direct Host roots and RPC ingress are
+unattributed, regardless of principal overrides. This observation does not replace scope admission,
+remote authentication, or the embedding's trust in native code. Compatible replacement preserves
+the stable name. Calls that omit an explicit Context start an unattributed Host root.
+
 ## Atomic state
 
 A cell mutation prepares a private candidate and recomputes its affected internal derivations.

@@ -89,6 +89,7 @@ pub(crate) struct Service {
     pub(crate) options: ServeOptions,
     pub(crate) ordinal: facets::InstalledServiceId,
     pub(crate) owner: Option<facets::FacetRunId>,
+    pub(crate) owner_name: Option<Rc<str>>,
 }
 
 #[derive(Clone)]
@@ -231,7 +232,7 @@ impl Host {
         let batch = self.inner.begin_declarations()?;
         let result = self
             .inner
-            .insert_service(contract, factory, options, None)
+            .insert_service(contract, factory, options, None, None)
             .and_then(|id| self.inner.start_host_service(id).map(|_| ()));
         batch.finish();
         result
@@ -586,6 +587,16 @@ impl HostInner {
             ));
         }
         let (context, guard) = self.new_root(object.principal.clone());
+        let facet = object
+            .installed
+            .borrow()
+            .get(&context.code_version())
+            .and_then(|installed| installed.service.owner_name.clone());
+        let context = if let Some(facet) = facet {
+            context.with_facet_root(facet)
+        } else {
+            context
+        };
         admission.signal().link_child(context.cancellation());
         context.check(self.id)?;
         Ok((context, guard))

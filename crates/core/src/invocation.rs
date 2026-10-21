@@ -308,18 +308,23 @@ pub(crate) fn enter_with_receipt(
         .checked_add(1)
         .ok_or_else(limit)?;
     let count = object.invocations.get().checked_add(1).ok_or_else(limit)?;
-    let (mut child, scope) = parent.child_call(host.principal.clone())?;
+    let installed = object
+        .installed
+        .borrow()
+        .get(&parent.code_version())
+        .cloned();
+    let facet = installed
+        .as_ref()
+        .and_then(|installed| installed.service.owner_name.clone());
+    let (child, scope) = parent.child_call(host.principal.clone())?;
+    let mut child = child.enter_facet(facet);
     let entry = Rc::new(InvocationEntry {
         host: Rc::downgrade(host),
         object: object.clone(),
         implementation: Some(implementation),
         receipt: receipt.map(|receipt| receipt.state.clone()),
         context: Some(child.clone()),
-        installed: object
-            .installed
-            .borrow()
-            .get(&child.code_version())
-            .cloned(),
+        installed,
         version: child.code_version(),
         id,
     });
