@@ -457,3 +457,150 @@ fn acquisition_defaults_and_placement_cannot_be_bridged_by_version_adapters() {
         host.close().await.unwrap();
     });
 }
+
+fn ambiguous_binding(name: &str) -> Rc<Contract> {
+    local(
+        name,
+        1,
+        BTreeMap::from([(
+            "call".into(),
+            method(
+                Some(json!({"anyOf": [
+                    {"type": "object", "properties": {"a": {"type": "string"}}},
+                    {"type": "object", "properties": {"b": {"type": "integer"}}, "additionalProperties": true}
+                ]})),
+                None,
+            ),
+        )]),
+    )
+}
+
+#[test]
+fn ambiguous_self_binding_is_refused_before_service_admission() {
+    let host = Host::new(
+        HostOptions::new("binding", json!(null)),
+        ManualDriver::new(),
+    );
+    let contract = ambiguous_binding("binding.ambiguous");
+    let error = host
+        .serve(
+            contract,
+            Rc::new(|_, _, _| Ok(Implementation::new())),
+            ServeOptions::default(),
+        )
+        .unwrap_err();
+    assert_eq!(error.reason, "ambiguous_normalization");
+}
+
+#[test]
+fn duplicate_error_precedes_binding_validation_and_capture_drop_can_reenter() {
+    struct Reenter {
+        host: Host,
+        dropped: Rc<Cell<bool>>,
+    }
+    impl Drop for Reenter {
+        fn drop(&mut self) {
+            self.host
+                .serve(
+                    local("binding.from-drop", 1, BTreeMap::new()),
+                    Rc::new(|_, _, _| Ok(Implementation::new())),
+                    ServeOptions::default(),
+                )
+                .unwrap();
+            self.dropped.set(true);
+        }
+    }
+    let host = Host::new(
+        HostOptions::new("binding", json!(null)),
+        ManualDriver::new(),
+    );
+    host.serve(
+        local("binding.order", 1, BTreeMap::new()),
+        Rc::new(|_, _, _| Ok(Implementation::new())),
+        ServeOptions::default(),
+    )
+    .unwrap();
+    let dropped = Rc::new(Cell::new(false));
+    let capture = Reenter {
+        host: host.clone(),
+        dropped: dropped.clone(),
+    };
+    let error = host
+        .serve(
+            ambiguous_binding("binding.order"),
+            Rc::new(move |_, _, _| {
+                let _capture = &capture;
+                Ok(Implementation::new())
+            }),
+            ServeOptions::default(),
+        )
+        .unwrap_err();
+    assert_eq!(error.reason, "duplicate");
+    assert!(dropped.get());
+}
+
+#[test]
+fn repeated_binding_success_does_not_skip_input_validation() {
+    let driver = ManualDriver::new();
+    driver.run_until(async {
+        let make = || Rc::new(Contract::local(
+            "binding.input-on-hit", 1,
+            json!({"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}),
+            BTreeMap::new(),
+        ).unwrap());
+        let provider = make();
+        let consumer = make();
+        let host = Host::new(HostOptions::new("binding", json!(null)), driver.clone());
+        host.serve(provider.clone(), Rc::new(|_, _, _| Ok(Implementation::new())), ServeOptions::default()).unwrap();
+        for contract in [provider, consumer] {
+            host.get(contract.clone(), json!({"id": 1}), GetOptions::default()).await.unwrap().release();
+            let error = host.get(contract.clone(), json!({"id": "invalid"}), GetOptions::default()).await.err().unwrap();
+            assert_eq!(error.reason, "validation");
+        }
+        host.close().await.unwrap();
+    });
+}
+
+#[test]
+fn service_drops_factory_captures_before_adapter_captures() {
+    use std::cell::RefCell;
+    struct Observe {
+        name: &'static str,
+        events: Rc<RefCell<Vec<&'static str>>>,
+    }
+    impl Drop for Observe {
+        fn drop(&mut self) {
+            self.events.borrow_mut().push(self.name);
+        }
+    }
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let host = Host::new(
+        HostOptions::new("binding", json!(null)),
+        ManualDriver::new(),
+    );
+    let factory_capture = Observe {
+        name: "factory",
+        events: events.clone(),
+    };
+    let adapter_capture = Observe {
+        name: "adapter",
+        events: events.clone(),
+    };
+    host.serve(
+        local("binding.drop-order", 1, BTreeMap::new()),
+        Rc::new(move |_, _, _| {
+            let _capture = &factory_capture;
+            Ok(Implementation::new())
+        }),
+        ServeOptions::default().with_adapter(
+            2,
+            Rc::new(move |implementation| {
+                let _capture = &adapter_capture;
+                Ok((*implementation).clone())
+            }),
+        ),
+    )
+    .unwrap();
+    drop(host);
+    assert_eq!(*events.borrow(), ["factory", "adapter"]);
+}

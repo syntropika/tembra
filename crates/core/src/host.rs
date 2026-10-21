@@ -2,6 +2,8 @@ pub(crate) mod facets;
 pub(crate) mod reload;
 pub use reload::{ReloadOptions, ReloadReport};
 mod limits;
+mod service;
+pub(crate) use service::Service;
 mod rpc;
 pub use limits::HostRpcLimits;
 
@@ -80,16 +82,6 @@ impl Default for GetOptions {
             state: true,
         }
     }
-}
-
-#[derive(Clone)]
-pub(crate) struct Service {
-    pub(crate) contract: Rc<Contract>,
-    pub(crate) factory: Factory,
-    pub(crate) options: ServeOptions,
-    pub(crate) ordinal: facets::InstalledServiceId,
-    pub(crate) owner: Option<facets::FacetRunId>,
-    pub(crate) owner_name: Option<Rc<str>>,
 }
 
 #[derive(Clone)]
@@ -648,7 +640,7 @@ impl HostInner {
             .get(contract.name())
             .cloned()
             .ok_or_else(|| RuntimeError::unavailable("unknown_type", "type is not served"))?;
-        check_binding(&service.contract, &contract, &service.options)?;
+        service.bind(&contract)?;
         let input = contract.normalize_input(&input).map_err(contract_error)?;
         if contract
             .resolve_host(&input)
@@ -661,12 +653,12 @@ impl HostInner {
             ));
         }
         let provider_input = service
-            .contract
+            .contract()
             .normalize_input(&input)
             .map_err(contract_error)?;
         if contract.identity(&input).map_err(contract_error)?
             != service
-                .contract
+                .contract()
                 .identity(&provider_input)
                 .map_err(contract_error)?
         {
@@ -676,7 +668,7 @@ impl HostInner {
                 "consumer and provider normalize to different object identities",
             ));
         }
-        let principal = if service.options.lifetime == Lifetime::Host {
+        let principal = if service.options().lifetime == Lifetime::Host {
             if contract.identity(&input).map_err(contract_error)?
                 != contract
                     .identity(&serde_json::json!({}))
@@ -733,7 +725,7 @@ impl HostInner {
     ) -> Rc<ObjectRecord> {
         let id = self.next_object.get() + 1;
         self.next_object.set(id);
-        let host_lifetime = service.options.lifetime == Lifetime::Host;
+        let host_lifetime = service.options().lifetime == Lifetime::Host;
         let activation_service = Rc::new(service.clone());
         Rc::new_cyclic(|weak| ObjectRecord {
             id,
@@ -749,9 +741,9 @@ impl HostInner {
             key: key.clone(),
             input: provider_input,
             principal,
-            contract: service.contract,
-            lifetime: service.options.lifetime,
-            linger: service.options.linger,
+            contract: service.contract().clone(),
+            lifetime: service.options().lifetime,
+            linger: service.options().linger,
             factory: RefCell::new(Some(service.factory)),
             state: self.state_graph(weak.clone()),
             state_exposures: RefCell::new(Vec::new()),

@@ -1035,7 +1035,7 @@ impl Reference {
                     .borrow()
                     .get(&self.claim.binding_version().ok()?)?
                     .service
-                    .contract
+                    .contract()
                     .fingerprint()
                     .into()
             },
@@ -1140,7 +1140,7 @@ impl Reference {
             .installed
             .borrow()
             .get(&self.claim.binding_version()?)
-            .map(|installed| installed.service.contract.clone())
+            .map(|installed| installed.service.contract().clone())
             .ok_or_else(crate::epoch::superseded)?;
         let mode = if provider.version() == self.contract().version() {
             crate::rpc::protocol::BindingMode::Direct
@@ -1440,7 +1440,7 @@ impl Reference {
             .cloned()
             .ok_or_else(crate::epoch::superseded)?;
         let current = installed.implementation.clone();
-        if installed.service.contract.version() == self.contract().version() {
+        if installed.service.contract().version() == self.contract().version() {
             HostInner::validate_view(self.contract(), &current, false)?;
             return Ok(current);
         }
@@ -1454,7 +1454,7 @@ impl Reference {
         }
         let adapter = installed
             .service
-            .options
+            .options()
             .accepts
             .get(&self.contract().version())
             .cloned()
@@ -1581,7 +1581,7 @@ impl Reference {
             .installed
             .borrow()
             .get(&context.code_version())
-            .map(|installed| installed.service.contract.clone())
+            .map(|installed| installed.service.contract().clone())
             .ok_or_else(crate::epoch::superseded)?;
         let validation_contract = if provider.version() == self.contract().version() {
             &provider
