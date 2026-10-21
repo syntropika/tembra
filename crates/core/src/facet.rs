@@ -207,15 +207,17 @@ pub struct FacetScope {
     host: Weak<HostInner>,
     host_id: u64,
     host_name: Rc<str>,
+    facet_name: Rc<str>,
     signal: FacetSignal,
 }
 
 impl FacetScope {
-    pub(crate) fn new(host: &Rc<HostInner>, signal: FacetSignal) -> Self {
+    pub(crate) fn new(host: &Rc<HostInner>, facet_name: Rc<str>, signal: FacetSignal) -> Self {
         Self {
             host: Rc::downgrade(host),
             host_id: host.id,
             host_name: Rc::from(host.name.as_str()),
+            facet_name,
             signal,
         }
     }
@@ -238,6 +240,7 @@ impl FacetScope {
     }
 
     /// Runs a root through the Host's existing current-version admission path.
+    /// Calls made with this root Context attribute this scope's installed Facet as their caller.
     ///
     /// The root scope expires when its future settles or is dropped. The run signal does not
     /// gate this operation: a resource closer may still use a retained scope and held dependency
@@ -255,11 +258,14 @@ impl FacetScope {
         callback: impl FnOnce(Context) -> LocalBoxFuture<'static, Result<T>> + 'static,
     ) -> LocalBoxFuture<'static, Result<T>> {
         let host = self.host.clone();
+        let facet_name = self.facet_name.clone();
         async move {
             let host = host
                 .upgrade()
                 .ok_or_else(|| RuntimeError::unavailable("closed", "host is closed"))?;
-            Host { inner: host }.root(callback).await
+            Host { inner: host }
+                .root(move |context| callback(context.with_facet_root(facet_name)))
+                .await
         }
         .boxed_local()
     }
