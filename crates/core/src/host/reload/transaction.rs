@@ -560,7 +560,7 @@ impl HostInner {
                         let contract = replays
                             .iter()
                             .find(|replay| Rc::ptr_eq(&replay.object, object))
-                            .map(|replay| replay.candidate.service.contract.clone())
+                            .map(|replay| replay.candidate.service.contract().clone())
                             .unwrap_or_else(|| {
                                 object
                                     .installed
@@ -568,7 +568,7 @@ impl HostInner {
                                     .get(&object.current_epoch.get())
                                     .expect("live version")
                                     .service
-                                    .contract
+                                    .contract()
                                     .clone()
                             });
                         crate::Reference::pending(

@@ -283,11 +283,11 @@ impl Declaration {
         let candidate = self.reload_candidate()?;
         let contract = candidate
             .as_ref()
-            .map(|candidate| &candidate.service.contract)
+            .map(|candidate| candidate.service.contract())
             .unwrap_or(&self.object.contract);
         let lifetime = candidate
             .as_ref()
-            .map(|candidate| candidate.service.options.lifetime)
+            .map(|candidate| candidate.service.options().lifetime)
             .unwrap_or(self.object.lifetime);
         let registrations = candidate
             .as_ref()

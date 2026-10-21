@@ -1,6 +1,6 @@
 //! Prospective declarations and private object discovery; no services are installed here.
 use super::*;
-use crate::host::{Address, HostInner, Service, check_binding, contract_error};
+use crate::host::{Address, HostInner, Service, contract_error};
 use crate::object::{ObjectRecord, Phase};
 use crate::{GetOptions, Lifetime, Reference, Result, RuntimeError};
 use futures::{
@@ -94,18 +94,14 @@ impl CandidateCatalog {
                 .ok_or_else(|| {
                     RuntimeError::invalid("reload_state", "candidate was not recorded")
                 })?;
-            check_binding(
-                &candidate.service.contract,
-                reference.contract(),
-                &candidate.service.options,
-            )?;
+            candidate.service.bind(reference.contract())?;
             let cached = self
                 .views
                 .borrow()
                 .get(&object.id)
                 .and_then(|views| views.get(reference.contract().fingerprint()))
                 .cloned();
-            let view = if reference.contract().version() == candidate.service.contract.version() {
+            let view = if reference.contract().version() == candidate.service.contract().version() {
                 HostInner::validate_view(reference.contract(), &current, false)?;
                 current
             } else if let Some(view) = cached {
@@ -113,7 +109,7 @@ impl CandidateCatalog {
             } else {
                 let adapter = candidate
                     .service
-                    .options
+                    .options()
                     .accepts
                     .get(&reference.contract().version())
                     .expect("checked candidate adapter")
@@ -170,7 +166,7 @@ impl CandidateCatalog {
         let service = self.services.get(contract.name()).cloned().ok_or_else(|| {
             RuntimeError::unavailable("unknown_type", "candidate type is not served")
         })?;
-        check_binding(&service.contract, &contract, &service.options)?;
+        service.bind(&contract)?;
         if contract
             .resolve_host(&input)
             .map_err(contract_error)?
@@ -182,13 +178,13 @@ impl CandidateCatalog {
             ));
         }
         let provider_input = service
-            .contract
+            .contract()
             .normalize_input(&input)
             .map_err(contract_error)?;
         let identity = contract.identity(&input).map_err(contract_error)?;
         if identity
             != service
-                .contract
+                .contract()
                 .identity(&provider_input)
                 .map_err(contract_error)?
         {
@@ -198,7 +194,7 @@ impl CandidateCatalog {
                 "candidate input identity differs",
             ));
         }
-        let principal = if service.options.lifetime == Lifetime::Host {
+        let principal = if service.options().lifetime == Lifetime::Host {
             if identity
                 != contract
                     .identity(&serde_json::json!({}))

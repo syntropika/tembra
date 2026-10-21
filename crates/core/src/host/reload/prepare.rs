@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     Declaration, ErrorCode, Implementation, Result, RuntimeError,
     epoch::EpochRecord,
-    host::{FactoryPass, HostInner, check_binding, facets::PreparedFacetBatch},
+    host::{FactoryPass, HostInner, facets::PreparedFacetBatch},
     object::{FactoryScope, Phase},
     resource::ResourceReload,
     state::CandidateSources,
@@ -46,7 +46,7 @@ impl HostInner {
             views.insert(
                 (
                     object.id,
-                    installed.service.contract.fingerprint().to_owned(),
+                    installed.service.contract().fingerprint().to_owned(),
                 ),
                 installed.implementation.clone(),
             );
@@ -64,7 +64,7 @@ impl HostInner {
                 .filter_map(std::rc::Weak::upgrade)
             {
                 if !claim_retires(replays, &claim)
-                    && claim.contract.version() == installed.service.contract.version()
+                    && claim.contract.version() == installed.service.contract().version()
                 {
                     views.insert(
                         (object.id, claim.contract.fingerprint().to_owned()),
@@ -95,10 +95,10 @@ impl HostInner {
         for service in batch
             .services
             .values()
-            .filter(|service| service.options.lifetime == crate::Lifetime::Host)
+            .filter(|service| service.options().lifetime == crate::Lifetime::Host)
         {
             let reference = catalog.hold(
-                service.contract.clone(),
+                service.contract().clone(),
                 serde_json::json!({}),
                 crate::GetOptions {
                     state: false,
@@ -183,11 +183,11 @@ impl HostInner {
                     None => return Err(crate::epoch::superseded()),
                 };
                 let expected = service
-                    .contract
+                    .contract()
                     .normalize_input(&object.input)
                     .map_err(crate::host::contract_error)?;
                 if service
-                    .contract
+                    .contract()
                     .identity(&expected)
                     .map_err(crate::host::contract_error)?
                     != object.key.1
@@ -276,10 +276,10 @@ impl HostInner {
                     };
                     (service.factory)(expected, object.principal.clone(), &mut declaration)
                 }?;
-                Self::validate_implementation(&service.contract, &implementation)?;
+                Self::validate_implementation(service.contract(), &implementation)?;
                 let mut implementation = implementation;
                 let members = service
-                    .contract
+                    .contract()
                     .members(implementation.variant.as_deref().unwrap_or(""))
                     .expect("validated variant");
                 for (name, source) in &mut implementation.states {
@@ -311,7 +311,7 @@ impl HostInner {
                 let reference = crate::Reference::new(
                     self,
                     replay.object.clone(),
-                    replay.candidate.service.contract.clone(),
+                    replay.candidate.service.contract().clone(),
                     false,
                 );
                 reference.claim.object_owned.set(true);
@@ -450,12 +450,8 @@ impl HostInner {
                 .map(|claim| claim.contract.clone())
                 .collect::<Vec<_>>();
             for consumer in consumers {
-                check_binding(
-                    &installed.service.contract,
-                    &consumer,
-                    &installed.service.options,
-                )?;
-                if consumer.version() == installed.service.contract.version() {
+                installed.service.bind(&consumer)?;
+                if consumer.version() == installed.service.contract().version() {
                     continue;
                 }
                 if installed
@@ -467,7 +463,7 @@ impl HostInner {
                 }
                 let adapter = installed
                     .service
-                    .options
+                    .options()
                     .accepts
                     .get(&consumer.version())
                     .expect("binding checked adapter");
@@ -505,7 +501,7 @@ impl HostInner {
             )?;
             replacements.push((
                 replay.object.clone(),
-                replay.candidate.service.contract.clone(),
+                replay.candidate.service.contract().clone(),
                 replay.candidate.registrations.borrow().clone(),
             ));
             prepared.push((installed, PendingActivities(Some(activities))));

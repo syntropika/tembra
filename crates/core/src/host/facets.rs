@@ -494,7 +494,7 @@ impl HostInner {
                     "candidate type is already served",
                 ));
             }
-            self.validate_service(&contract, &options)?;
+            let definition = self.validate_service(&contract, &options)?;
             let replaced = journal
                 .borrow()
                 .candidate_replaced
@@ -521,14 +521,13 @@ impl HostInner {
                 .unwrap_or(InstalledServiceId(checked_next(&self.facets.next_service)?));
             candidate.borrow_mut().insert(
                 contract.name().into(),
-                Service {
-                    contract,
+                Service::new(
+                    definition,
                     factory,
-                    options,
                     ordinal,
-                    owner: Some(run),
-                    owner_name: Some(owner_name.clone()),
-                },
+                    Some(run),
+                    Some(owner_name.clone()),
+                ),
             );
             ordinal
         } else {
@@ -684,7 +683,7 @@ impl HostInner {
             .ok_or_else(|| {
                 RuntimeError::unavailable("unknown_type", "service disappeared during setup")
             })?;
-        if service.options.lifetime != Lifetime::Host {
+        if service.options().lifetime != Lifetime::Host {
             return Ok(None);
         }
         let startup = self
@@ -695,7 +694,7 @@ impl HostInner {
             .cloned()
             .expect("host service admission installs its startup ledger before acquisition");
         let reference = self.hold(
-            service.contract,
+            service.contract().clone(),
             serde_json::json!({}),
             GetOptions::default(),
         )?;
@@ -827,7 +826,11 @@ impl HostInner {
         activity_actions.start();
         Ok(())
     }
-    fn validate_service(&self, contract: &Contract, options: &ServeOptions) -> Result<()> {
+    fn validate_service(
+        &self,
+        contract: &Rc<Contract>,
+        options: &ServeOptions,
+    ) -> Result<service::ServiceDefinition> {
         if let Some(placement) = contract.placement() {
             let allowed = match placement {
                 tembra_contracts::Placement::Named { name } => name == self.name.as_str(),
@@ -860,8 +863,7 @@ impl HostInner {
                 ));
             }
         }
-        check_binding(contract, contract, options)?;
-        Ok(())
+        service::ServiceDefinition::checked(contract, options)
     }
 
     pub(super) fn insert_service(
@@ -878,7 +880,7 @@ impl HostInner {
         if self.services.borrow().contains_key(contract.name()) {
             return Err(RuntimeError::invalid("duplicate", "type is already served"));
         }
-        self.validate_service(&contract, &options)?;
+        let definition = self.validate_service(&contract, &options)?;
         let ordinal = InstalledServiceId(checked_next(&self.facets.next_service)?);
         if options.lifetime == Lifetime::Host {
             self.facets
@@ -888,14 +890,7 @@ impl HostInner {
         }
         self.services.borrow_mut().insert(
             contract.name().into(),
-            Service {
-                contract,
-                factory,
-                options,
-                ordinal,
-                owner,
-                owner_name,
-            },
+            Service::new(definition, factory, ordinal, owner, owner_name),
         );
         Ok(ordinal)
     }
@@ -1137,8 +1132,8 @@ impl HostInner {
             let Some(previous) = current.get(name) else {
                 continue;
             };
-            if next.contract.kind() != previous.contract.kind()
-                || next.contract.placement() != previous.contract.placement()
+            if next.contract().kind() != previous.contract().kind()
+                || next.contract().placement() != previous.contract().placement()
             {
                 return Err(RuntimeError::new(
                     ErrorCode::ContractMismatch,
@@ -1146,12 +1141,15 @@ impl HostInner {
                     "reload cannot change contract kind or placement",
                 ));
             }
-            tembra_contracts::identity_compatible(previous.contract.input(), next.contract.input())
-                .map_err(|error| {
-                    RuntimeError::new(ErrorCode::ContractMismatch, error.reason, error.message)
-                })?;
-            if next.contract.version() == previous.contract.version() {
-                check_binding(&next.contract, &previous.contract, &next.options)?;
+            tembra_contracts::identity_compatible(
+                previous.contract().input(),
+                next.contract().input(),
+            )
+            .map_err(|error| {
+                RuntimeError::new(ErrorCode::ContractMismatch, error.reason, error.message)
+            })?;
+            if next.contract().version() == previous.contract().version() {
+                check_binding(next.contract(), previous.contract(), next.options())?;
             }
         }
         let mut uses = self
@@ -1172,7 +1170,7 @@ impl HostInner {
             if batch.services.contains_key(token.name())
                 && let Some(service) = prospective.get(token.name())
             {
-                check_binding(&service.contract, &token, &service.options)?;
+                service.bind(&token)?;
             }
         }
         Ok(())
