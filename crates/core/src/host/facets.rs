@@ -338,7 +338,11 @@ impl Host {
                     let run = &runs[&name];
                     (run.definition.clone(), run.cancellation.clone())
                 };
-                let scope = FacetScope::new(&self.inner, FacetSignal::new(token));
+                let scope = FacetScope::new(
+                    &self.inner,
+                    Rc::from(name.as_str()),
+                    FacetSignal::new(token),
+                );
                 let setup = {
                     let (_pass, weak) = SetupPass::enter(&self.inner);
                     definition.setup(
@@ -479,6 +483,7 @@ impl HostInner {
             }
             journal.run
         };
+        let owner_name: Rc<str> = Rc::from(journal.borrow().name.as_str());
         // Successful insertion moves captures into storage and invokes no user code. Error
         // drops happen here, outside the journal borrow; there is no queued service on error.
         let candidate = journal.borrow().candidate.clone();
@@ -522,11 +527,12 @@ impl HostInner {
                     options,
                     ordinal,
                     owner: Some(run),
+                    owner_name: Some(owner_name.clone()),
                 },
             );
             ordinal
         } else {
-            self.insert_service(contract, factory, options, Some(run))?
+            self.insert_service(contract, factory, options, Some(run), Some(owner_name))?
         };
         journal.borrow_mut().services.push(id);
         Ok(id)
@@ -864,6 +870,7 @@ impl HostInner {
         factory: Factory,
         options: ServeOptions,
         owner: Option<FacetRunId>,
+        owner_name: Option<Rc<str>>,
     ) -> Result<InstalledServiceId> {
         if self.closing.get() {
             return Err(RuntimeError::unavailable("closed", "host is closing"));
@@ -887,6 +894,7 @@ impl HostInner {
                 options,
                 ordinal,
                 owner,
+                owner_name,
             },
         );
         Ok(ordinal)
@@ -1000,7 +1008,11 @@ impl HostInner {
                 candidate_run: Some(run.clone()),
                 candidate_replaced: Some(prepared.replaced_owners.clone()),
             }));
-            let scope = FacetScope::new(self, FacetSignal::new(run.cancellation.clone()));
+            let scope = FacetScope::new(
+                self,
+                Rc::from(run.definition.name()),
+                FacetSignal::new(run.cancellation.clone()),
+            );
             let setup = {
                 let (_pass, weak) = SetupPass::enter(self);
                 run.definition

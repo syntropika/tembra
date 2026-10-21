@@ -516,3 +516,12 @@ path = "tests/contracts/portable_decode.rs"
 [[test]]
 name = "tembra-portable-decode"
 path = "tests/tembra/portable_decode.rs"
+
+[[test]]
+name = "core-caller-facet"
+path = "tests/core/caller_facet.rs"
+
+[[test]]
+name = "executor-js-caller-facet"
+path = "tests/executor-js/caller_facet.rs"
+required-features = ["embedded-executor"]
