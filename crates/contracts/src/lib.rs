@@ -13,7 +13,7 @@ pub use coverage::{identity_compatible, input_compatible, output_fits};
 pub use descriptor::{Contract, ContractKind, Descriptor, Member, Placement, ValueSchema};
 pub use json::parse_json;
 pub use schema::{
-    canonical_json, clean_arguments, normalize_input, normalize_schema,
+    PreparedSchema, canonical_json, clean_arguments, normalize_input, normalize_schema,
     normalize_schema_with_limits, validate,
 };
 pub use serialization::{from_portable_value, to_portable_value};

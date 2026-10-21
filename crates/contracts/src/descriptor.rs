@@ -1,11 +1,15 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::schema::{canonical_json, identity_value, normalize_input, normalize_schema};
+use crate::schema::{canonical_json, identity_value, normalize_schema};
 use crate::{ContractError, Result};
+
+mod prepared;
+
+use prepared::PreparedContract;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -102,10 +106,27 @@ pub struct Descriptor {
 /// Serde deserialization requires a valid supplied fingerprint and checks the semantic
 /// portable value. [`Contract::from_json`] additionally checks lexical JSON details such
 /// as duplicate keys and numeric spelling. Trusted authoring uses [`Contract::from_descriptor`].
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(transparent)]
 pub struct Contract {
     descriptor: Descriptor,
+    #[serde(skip)]
+    prepared: Arc<PreparedContract>,
+}
+
+impl std::fmt::Debug for Contract {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Contract")
+            .field("descriptor", &self.descriptor)
+            .finish()
+    }
+}
+
+impl PartialEq for Contract {
+    fn eq(&self, other: &Self) -> bool {
+        self.descriptor == other.descriptor
+    }
 }
 
 impl<'de> Deserialize<'de> for Contract {
@@ -341,7 +362,11 @@ impl Contract {
             ));
         }
         descriptor.fingerprint = computed;
-        Ok(Self { descriptor })
+        let prepared = Arc::new(PreparedContract::new(&descriptor));
+        Ok(Self {
+            descriptor,
+            prepared,
+        })
     }
 
     pub fn name(&self) -> &str {
@@ -371,12 +396,63 @@ impl Contract {
     pub fn descriptor(&self) -> &Descriptor {
         &self.descriptor
     }
+
+    /// Clean portable method arguments using this descriptor's retained preparation.
+    /// No default insertion, value validation or runtime admission is performed.
+    ///
+    /// # Errors
+    /// Refuses an absent/native/non-method slot, or the same value/schema errors as
+    /// [`crate::clean_arguments`], checking value portability before preparation refusals.
+    pub fn clean_method_args(&self, variant: &str, member: &str, value: &Value) -> Result<Value> {
+        self.prepared
+            .member(variant, member)
+            .and_then(|m| m.args.as_ref())
+            .ok_or_else(|| ContractError::new("member", "portable argument schema is absent"))?
+            .clean_arguments(value)
+    }
+
+    /// Validate portable arguments with retained schema preparation and no value caching.
+    ///
+    /// # Errors
+    /// Refuses an absent/native/non-method slot or the same ordered errors as [`crate::validate`].
+    pub fn validate_method_args(&self, variant: &str, member: &str, value: &Value) -> Result<()> {
+        self.prepared
+            .member(variant, member)
+            .and_then(|m| m.args.as_ref())
+            .ok_or_else(|| ContractError::new("member", "portable argument schema is absent"))?
+            .validate(value)
+    }
+
+    /// Validate a portable result without cleaning, coercion or runtime admission.
+    ///
+    /// # Errors
+    /// Refuses an absent/native/non-method slot or the same ordered errors as [`crate::validate`].
+    pub fn validate_method_result(&self, variant: &str, member: &str, value: &Value) -> Result<()> {
+        self.prepared
+            .member(variant, member)
+            .and_then(|m| m.result.as_ref())
+            .ok_or_else(|| ContractError::new("member", "portable result schema is absent"))?
+            .validate(value)
+    }
+
+    /// Validate a state value against this exact descriptor variant/member.
+    ///
+    /// # Errors
+    /// Refuses a missing/non-state slot or the same ordered errors as [`crate::validate`].
+    pub fn validate_state(&self, variant: &str, member: &str, value: &Value) -> Result<()> {
+        self.prepared
+            .member(variant, member)
+            .and_then(|m| m.state.as_ref())
+            .ok_or_else(|| ContractError::new("member", "state schema is absent"))?
+            .validate(value)
+    }
+
     /// Normalize acquisition input without changing this contract or the caller's value.
     ///
     /// # Errors
     /// See [`crate::normalize_input`]; no input candidate is adopted by this operation.
     pub fn normalize_input(&self, value: &Value) -> Result<Value> {
-        normalize_input(self.input(), value)
+        self.prepared.input.normalize_input(value)
     }
     /// Normalize input, omit default-valued properties, and return its JCS identity.
     ///

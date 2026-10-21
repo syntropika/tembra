@@ -165,6 +165,7 @@ impl StateGraph {
         RetiredGraphDeclarations {
             nodes: removed,
             schemas,
+            metadata_schemas: Vec::new(),
         }
     }
     pub(super) fn flush_retirements(self: &Rc<Self>, retained: &[GraphDeclarationSet]) {

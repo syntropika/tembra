@@ -405,7 +405,9 @@ impl CandidateSources {
                     }
                     None => old,
                 };
-                tembra_contracts::validate(&change.schema, &value)
+                change
+                    .schema
+                    .validate(&value)
                     .map_err(|error| RuntimeError::invalid("state", error.message))?;
                 self.migrations.borrow_mut().insert(key, value);
             }

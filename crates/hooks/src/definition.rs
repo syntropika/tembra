@@ -7,7 +7,7 @@ use futures::FutureExt;
 use serde::Serialize;
 use serde_json::Value;
 use std::{any::TypeId, marker::PhantomData, rc::Rc};
-use tembra_contracts::{ValueSchema, to_portable_value, validate};
+use tembra_contracts::{PreparedSchema, ValueSchema, to_portable_value};
 use tembra_core::{Declaration, DeclarationRecorder, RegisteredOperation, Result};
 
 pub(crate) type Validator<T> = Rc<dyn Fn(&T) -> Result<()>>;
@@ -45,12 +45,17 @@ impl<T: 'static> HookType<T> {
         let Some(ValueSchema::Portable(schema)) = &profile else {
             unreachable!()
         };
-        let schema = schema.clone();
+        let prepared = PreparedSchema::new(schema);
         Ok(Self {
             profile,
             validate: Rc::new(move |value| {
                 let value = encode(value)?;
-                validate(&schema, &value).map_err(|e| invalid("hook_value", e.message))
+                match &prepared {
+                    Ok(schema) => schema.validate(&value),
+                    Err(error) => tembra_contracts::validate(&Value::Bool(true), &value)
+                        .and_then(|()| Err(error.clone())),
+                }
+                .map_err(|e| invalid("hook_value", e.message))
             }),
         })
     }
@@ -312,5 +317,46 @@ impl<A: 'static, R: 'static> HookTerminal<A, R> {
         let value = result?;
         self.result.check(&value)?;
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn deferred_schema_budget_refusal_follows_each_encoder_and_portable_value_check() {
+        let properties = (0..9_000)
+            .map(|index| (format!("a{index}"), json!({"type":"array"})))
+            .collect::<serde_json::Map<_, _>>();
+        let source = json!({"type":"object", "properties":properties});
+        let normalized = tembra_contracts::normalize_schema(&source).unwrap();
+        let expected = tembra_contracts::validate(&normalized, &json!({})).unwrap_err();
+        assert_eq!(expected.reason, "schema_budget");
+        let calls = Rc::new(Cell::new(0));
+        let encoded = calls.clone();
+        let profile = HookType::portable(source, move |value: &Value| {
+            encoded.set(encoded.get() + 1);
+            if value == &json!("encoder-error") {
+                return Err(invalid("encoder", "conversion refused"));
+            }
+            Ok(value.clone())
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+        for value in [json!({}), json!(9_007_199_254_740_992_u64)] {
+            let expected = tembra_contracts::validate(&normalized, &value).unwrap_err();
+            let error = profile.check(&value).unwrap_err();
+            assert_eq!(error.reason, "hook_value");
+            assert_eq!(error.message, expected.message);
+        }
+        assert_eq!(
+            profile.check(&json!("encoder-error")).unwrap_err().reason,
+            "encoder"
+        );
+        assert_eq!(calls.get(), 3);
     }
 }

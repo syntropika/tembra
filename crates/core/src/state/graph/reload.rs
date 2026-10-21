@@ -12,7 +12,7 @@ pub(crate) use sources::{CandidateSources, ReadyBarrier};
 
 struct CellChange {
     cell: Cell,
-    schema: Rc<Value>,
+    schema: StateSchema,
     version: u64,
     migrate: Option<StateMigration>,
     changed: bool,
@@ -25,7 +25,7 @@ pub(crate) struct GraphReload {
     cells: RefCell<BTreeMap<String, Rc<CellChange>>>,
     reserved: RefCell<Vec<NodeId>>,
     owned: RefCell<Vec<NodeId>>,
-    exposures: RefCell<Vec<(NodeId, u64, Rc<Value>)>>,
+    exposures: RefCell<Vec<(NodeId, u64, StateSchema)>>,
     initializers: RefCell<Vec<InitializerPlan>>,
     sealed: Flag<bool>,
     adopted: Flag<bool>,
@@ -57,7 +57,7 @@ impl GraphReload {
         }
         self.graph.check()
     }
-    fn reserve(&self, kind: Kind, schema: Rc<Value>) -> Result<(NodeId, Rc<Node>)> {
+    fn reserve(&self, kind: Kind, schema: StateSchema) -> Result<(NodeId, Rc<Node>)> {
         let installed = Rc::new(Flag::new(false));
         let flag = installed.clone();
         let read = self.read.clone();
@@ -133,7 +133,7 @@ impl GraphReload {
                 node: id,
                 metadata: Rc::new(Metadata {
                     name: name.clone(),
-                    schema: RefCell::new(schema.clone()),
+                    schema: RefCell::new(schema.source.clone()),
                     version: Flag::new(declaration.version),
                 }),
                 readable: node.port.node_readable(&self.graph, id),
@@ -184,7 +184,7 @@ impl GraphReload {
                 source,
                 subscription: RefCell::default(),
             },
-            Rc::new(Value::Bool(true)),
+            StateGraph::schema(Value::Bool(true))?,
         )?;
         Ok(id)
     }
@@ -305,7 +305,8 @@ impl GraphReload {
         }
         for (id, _, schema) in self.exposures.borrow().iter() {
             let value = candidates.get(id).ok_or_else(gone)?;
-            tembra_contracts::validate(schema, value)
+            schema
+                .validate(value)
                 .map_err(|error| RuntimeError::invalid("state", error.message))?;
         }
         let next = self
@@ -325,7 +326,8 @@ impl GraphReload {
                 .find(|change| change.cell.node == id)
                 .map(|change| change.schema.clone())
                 .unwrap_or_else(|| node.schema.borrow().clone());
-            tembra_contracts::validate(&schema, &value)
+            schema
+                .validate(&value)
                 .map_err(|error| RuntimeError::invalid("state", error.message))?;
             {
                 for (key, schema) in node.constraints.borrow().iter() {
@@ -335,7 +337,8 @@ impl GraphReload {
                     if self.requires_gate() && self.baseline.exposures.contains(&(id, *key)) {
                         continue;
                     }
-                    tembra_contracts::validate(schema, &value)
+                    schema
+                        .validate(&value)
                         .map_err(|error| RuntimeError::invalid("state", error.message))?;
                 }
             }
@@ -381,6 +384,7 @@ impl GraphReload {
         RetiredGraphDeclarations {
             nodes,
             schemas: Vec::new(),
+            metadata_schemas: Vec::new(),
         }
     }
 }
@@ -447,6 +451,7 @@ impl PreparedGraphReload {
     pub(crate) fn adopt(&mut self) -> Vec<PendingPublication> {
         let graph = &self.plan.graph;
         let mut schemas = Vec::new();
+        let mut metadata_schemas = Vec::new();
         let mut removed = Vec::new();
         if self.plan.requires_gate() {
             for id in self.plan.baseline.nodes.iter() {
@@ -470,7 +475,13 @@ impl PreparedGraphReload {
                 .node(change.cell.node)
                 .expect("preflighted candidate node");
             schemas.push(node.schema.replace(change.schema.clone()));
-            schemas.push(change.cell.metadata.schema.replace(change.schema.clone()));
+            metadata_schemas.push(
+                change
+                    .cell
+                    .metadata
+                    .schema
+                    .replace(change.schema.source.clone()),
+            );
             change.cell.metadata.version.set(change.version);
             graph
                 .named
@@ -504,6 +515,7 @@ impl PreparedGraphReload {
         self.retired = Some(RetiredGraphDeclarations {
             nodes: removed,
             schemas,
+            metadata_schemas,
         });
         events
             .into_iter()
@@ -551,7 +563,8 @@ impl PreparedGraphReload {
 #[derive(Default)]
 pub(crate) struct RetiredGraphDeclarations {
     nodes: Vec<Rc<Node>>,
-    schemas: Vec<Rc<Value>>,
+    schemas: Vec<StateSchema>,
+    metadata_schemas: Vec<Rc<Value>>,
 }
 impl RetiredGraphDeclarations {
     pub(crate) fn finish(self) {
@@ -559,6 +572,7 @@ impl RetiredGraphDeclarations {
             node.port.terminate(gone());
         }
         drop(self.schemas);
+        drop(self.metadata_schemas);
         drop(self.nodes);
     }
 }

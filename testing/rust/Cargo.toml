@@ -314,6 +314,10 @@ name = "contracts-normalization"
 path = "tests/contracts/normalization.rs"
 
 [[test]]
+name = "contracts-prepared-schema"
+path = "tests/contracts/prepared_schema.rs"
+
+[[test]]
 name = "contracts-review-regressions"
 path = "tests/contracts/review_regressions.rs"
 
