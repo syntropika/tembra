@@ -2,6 +2,10 @@ use serde_json::{Map, Value, json};
 
 use crate::{ContractError, Result};
 
+mod prepared;
+
+pub use prepared::PreparedSchema;
+
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const MAX_DEPTH: usize = 128;
 const ANNOTATIONS: &[&str] = &[
@@ -45,7 +49,7 @@ fn error(reason: &str, path: &str, message: impl std::fmt::Display) -> ContractE
     })
 }
 
-fn portable(value: &Value, depth: usize) -> Result<()> {
+pub(crate) fn portable(value: &Value, depth: usize) -> Result<()> {
     if depth >= MAX_DEPTH && (value.is_array() || value.is_object()) {
         return Err(error("depth", "/", "JSON nesting limit exceeded"));
     }
@@ -477,7 +481,7 @@ fn check_length(
 /// Clone and clean arguments, without acquisition null fallback or default insertion.
 ///
 /// This operation does not validate the returned argument. Dispatch cleans through
-/// both contracts and then validates the selected provider/adapter schema.
+/// each contract and validates that contract's cleaned candidate before proceeding.
 ///
 /// # Errors
 /// Rejects invalid/unsupported schemas, nonportable data and ambiguous union cleaning.

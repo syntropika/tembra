@@ -44,12 +44,39 @@ enum Kind {
 
 struct Node {
     port: Rc<ReadPort>,
-    schema: RefCell<Rc<Value>>,
+    schema: RefCell<StateSchema>,
     installed: Rc<Flag<bool>>,
-    constraints: RefCell<BTreeMap<u64, Rc<Value>>>,
+    constraints: RefCell<BTreeMap<u64, StateSchema>>,
     generation: Flag<u64>,
     unpublished: Flag<bool>,
     kind: Kind,
+}
+
+/// Keeps normalized public metadata and its immutable validation proof together.
+#[derive(Clone)]
+struct StateSchema {
+    source: Rc<Value>,
+    prepared: tembra_contracts::Result<tembra_contracts::PreparedSchema>,
+}
+
+impl std::ops::Deref for StateSchema {
+    type Target = Value;
+
+    fn deref(&self) -> &Value {
+        &self.source
+    }
+}
+
+impl StateSchema {
+    fn validate(&self, value: &Value) -> tembra_contracts::Result<()> {
+        match &self.prepared {
+            Ok(prepared) => prepared.validate(value),
+            Err(error) => {
+                tembra_contracts::validate(&Value::Bool(true), value)?;
+                Err(error.clone())
+            }
+        }
+    }
 }
 
 pub(super) struct Candidate {
@@ -184,10 +211,14 @@ impl StateGraph {
         Ok(source.origin.as_ref().expect("owned source has origin").1)
     }
 
-    fn schema(schema: Value) -> Result<Rc<Value>> {
-        tembra_contracts::normalize_schema(&schema)
-            .map(Rc::new)
-            .map_err(|error| RuntimeError::invalid(error.reason, error.message))
+    fn schema(schema: Value) -> Result<StateSchema> {
+        let source = tembra_contracts::normalize_schema(&schema)
+            .map_err(|error| RuntimeError::invalid(error.reason, error.message))?;
+        let prepared = tembra_contracts::PreparedSchema::new(&source);
+        Ok(StateSchema {
+            source: Rc::new(source),
+            prepared,
+        })
     }
 
     fn validate(node: &Node, value: &Value) -> Result<()> {
@@ -195,7 +226,8 @@ impl StateGraph {
             .chain(node.constraints.borrow().values().cloned())
             .collect();
         for schema in schemas {
-            tembra_contracts::validate(&schema, value)
+            schema
+                .validate(value)
                 .map_err(|error| RuntimeError::invalid("state", error.message))?;
         }
         Ok(())
@@ -245,7 +277,7 @@ impl StateGraph {
             node: id,
             metadata: Rc::new(Metadata {
                 name: name.clone(),
-                schema: RefCell::new(schema),
+                schema: RefCell::new(schema.source),
                 version: Flag::new(declaration.version),
             }),
             readable: port.node_readable(self, id),
@@ -304,7 +336,7 @@ impl StateGraph {
         let id = self.nodes.borrow().len();
         self.nodes.borrow_mut().push(Some(Rc::new(Node {
             port: port.clone(),
-            schema: RefCell::new(Rc::new(Value::Bool(true))),
+            schema: RefCell::new(Self::schema(Value::Bool(true))?),
             installed: Rc::new(Flag::new(true)),
             constraints: RefCell::default(),
             generation: Flag::new(0),
@@ -373,7 +405,8 @@ impl StateGraph {
         let node = self.node(id)?;
         let schema = Self::schema(schema)?;
         match node.port.current() {
-            Ok(snapshot) => tembra_contracts::validate(&schema, snapshot.value())
+            Ok(snapshot) => schema
+                .validate(snapshot.value())
                 .map_err(|error| RuntimeError::invalid("state", error.message))?,
             Err(error) if error.code == ErrorCode::NotReady => {}
             Err(error) => return Err(error),
@@ -435,5 +468,35 @@ impl Drop for Preparing<'_> {
         // Native panic propagates. Defer user computation until a later safe entry
         // rather than risking a second panic while already unwinding.
         self.0.flush_refreshes();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn state_schema_keeps_second_pass_refusal_deferred_and_value_error_precedence() {
+        let properties = (0..9_000)
+            .map(|index| (format!("a{index}"), json!({"type":"array"})))
+            .collect::<serde_json::Map<_, _>>();
+        let source = json!({"type":"object", "properties":properties});
+        let schema = StateGraph::schema(source).unwrap();
+        assert_eq!(
+            schema.prepared.as_ref().unwrap_err().reason,
+            "schema_budget"
+        );
+        for value in [json!({}), json!(9_007_199_254_740_992_u64)] {
+            assert_eq!(
+                schema.validate(&value),
+                tembra_contracts::validate(&schema.source, &value)
+            );
+        }
+        let valid = StateGraph::schema(json!({"type":"integer"})).unwrap();
+        assert!(valid.validate(&json!("bad")).is_err());
+        valid.clone().validate(&json!(1)).unwrap();
+        assert!(StateGraph::schema(json!({"type":"unknown"})).is_err());
+        valid.validate(&json!(2)).unwrap();
     }
 }

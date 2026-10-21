@@ -37,6 +37,15 @@ Portable local methods and remote contracts use portable values and runtime sche
 contracts validate arguments and results even when the caller shares the provider's host. Opaque
 native capabilities are not remote contract members.
 
+Rust `PreparedSchema` owns an immutable normalized schema and shares preparation across clones.
+Its value operations still check the portable domain and interpret each actual value; no validated
+value, runtime authority or Context is retained. Cleaning eligibility is checked only when cleaning
+is requested, so validation-only unions retain their existing behavior. Checked Contracts retain
+preparation with their exact descriptor slots; serialization, equality and fingerprints remain
+descriptor-only. State declarations and hook profiles retain preparation with their existing owners.
+Consumer and provider checks, hook encoding, reload admission and per-value errors remain at their
+original boundaries, including deferred refusals when a normalized schema exceeds a later budget.
+
 The portable profile limits canonical JSON to 1 MiB and nesting to 128 containers. Numbers must be
 finite, and integral values must fit the shared safe integer range
 `-9_007_199_254_740_991..=9_007_199_254_740_991`. Rust state uses this profile even when its contract

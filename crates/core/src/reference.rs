@@ -460,8 +460,12 @@ impl Claim {
         let sources: Vec<_> = members
             .iter()
             .filter_map(|(name, member)| {
-                if let tembra_contracts::Member::State { schema } = member {
-                    Some((name.clone(), view.states[name].clone(), schema.clone()))
+                if let tembra_contracts::Member::State { .. } = member {
+                    Some((
+                        name.clone(),
+                        view.states[name].clone(),
+                        (self.contract.clone(), variant.to_owned()),
+                    ))
                 } else {
                     None
                 }
@@ -553,11 +557,13 @@ impl Claim {
     fn receive_state(
         self: &Rc<Self>,
         name: &str,
-        schema: &serde_json::Value,
+        schema: &(Rc<tembra_contracts::Contract>, String),
         event: StateEvent,
     ) -> Result<()> {
         self.check()?;
-        tembra_contracts::validate(schema, event.snapshot().value())
+        schema
+            .0
+            .validate_state(&schema.1, name, event.snapshot().value())
             .map_err(|error| RuntimeError::invalid("state", error.message))?;
         if self.state_ready.get() {
             let host = self
@@ -1610,31 +1616,21 @@ impl Reference {
                 "native method schemas require an explicit portable binding contract",
             ));
         }
-        let clean =
-            |schema: &ValueSchema, value: &serde_json::Value| -> Result<serde_json::Value> {
-                let ValueSchema::Portable(schema) = schema else {
-                    return Err(RuntimeError::invalid(
-                        "native_type",
-                        "native capability requires an explicit language binding",
-                    ));
-                };
-                tembra_contracts::clean_arguments(schema, value)
-                    .map_err(|error| RuntimeError::invalid("args", error.message))
-            };
         let args = match (consumer_args, provider_args, args) {
             (None, None, None) => None,
-            (Some(consumer), Some(provider), Some(value)) => {
-                let value = clean(consumer, &value)?;
-                let ValueSchema::Portable(consumer_schema) = consumer else {
-                    unreachable!()
-                };
-                tembra_contracts::validate(consumer_schema, &value)
+            (Some(_), Some(_), Some(value)) => {
+                let value = self
+                    .contract()
+                    .clean_method_args(variant, name, &value)
                     .map_err(|error| RuntimeError::invalid("args", error.message))?;
-                let value = clean(provider, &value)?;
-                let ValueSchema::Portable(schema) = provider else {
-                    unreachable!()
-                };
-                tembra_contracts::validate(schema, &value)
+                self.contract()
+                    .validate_method_args(variant, name, &value)
+                    .map_err(|error| RuntimeError::invalid("args", error.message))?;
+                let value = validation_contract
+                    .clean_method_args(variant, name, &value)
+                    .map_err(|error| RuntimeError::invalid("args", error.message))?;
+                validation_contract
+                    .validate_method_args(variant, name, &value)
                     .map_err(|error| RuntimeError::invalid("args", error.message))?;
                 Some(value)
             }
@@ -1664,7 +1660,7 @@ impl Reference {
         )?;
         let result = invoke(args, child).await?;
         if let Some(schema) = provider_result {
-            let ValueSchema::Portable(schema) = schema else {
+            let ValueSchema::Portable(_) = schema else {
                 return Err(RuntimeError::invalid(
                     "native_type",
                     "native result cannot cross a portable boundary",
@@ -1673,7 +1669,8 @@ impl Reference {
             let value = result.as_ref().ok_or_else(|| {
                 RuntimeError::invalid("result", "provider omitted its declared result")
             })?;
-            tembra_contracts::validate(schema, value)
+            validation_contract
+                .validate_method_result(variant, name, value)
                 .map_err(|error| RuntimeError::invalid("result", error.message))?;
         }
         if consumer_result.is_none() {
@@ -1682,8 +1679,9 @@ impl Reference {
         let value = result.ok_or_else(|| {
             RuntimeError::invalid("result", "provider omitted the consumer result")
         })?;
-        if let Some(ValueSchema::Portable(schema)) = consumer_result {
-            tembra_contracts::validate(schema, &value)
+        if let Some(ValueSchema::Portable(_)) = consumer_result {
+            self.contract()
+                .validate_method_result(variant, name, &value)
                 .map_err(|error| RuntimeError::invalid("result", error.message))?;
         }
         Ok(Some(value))
