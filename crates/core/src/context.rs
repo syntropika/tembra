@@ -147,6 +147,8 @@ pub struct Context {
     root_id: u64,
     code_version: u64,
     principal: Value,
+    current_facet: Option<Rc<str>>,
+    caller_facet: Option<Rc<str>>,
     cancellation: CancellationToken,
     scope: Rc<RefCell<ScopeState>>,
     attachments: Rc<RefCell<HashMap<TypeId, Rc<dyn Any>>>>,
@@ -170,6 +172,8 @@ impl Context {
                 root_id,
                 code_version,
                 principal,
+                current_facet: None,
+                caller_facet: None,
                 cancellation: CancellationToken::new(),
                 scope,
                 attachments: Rc::default(),
@@ -210,6 +214,33 @@ impl Context {
 
     pub fn principal(&self) -> &Value {
         &self.principal
+    }
+
+    /// Returns the immediate managed caller's installed Facet name, when attributed.
+    ///
+    /// Facet and managed-task roots attribute calls to their owning Facet. A nested call
+    /// attributes its immediate receiver implementation, rather than propagating an earlier
+    /// caller's authority. Direct Host roots, including principal overrides, and RPC ingress
+    /// provide no Facet attribution. This identity is independent of the receiver principal.
+    ///
+    /// Names survive compatible replacement and a fresh Host with the same installed Facet.
+    /// This is a local execution-origin observation, not remote authentication or a sandbox
+    /// against trusted native code that independently owns a Host or another live Context.
+    /// Reading it does not validate scope liveness; calls must still pass ordinary admission.
+    pub fn caller_facet(&self) -> Option<&str> {
+        self.caller_facet.as_deref()
+    }
+
+    pub(crate) fn with_facet_root(mut self, facet: Rc<str>) -> Self {
+        self.current_facet = Some(facet);
+        self.caller_facet = None;
+        self
+    }
+
+    pub(crate) fn enter_facet(mut self, facet: Option<Rc<str>>) -> Self {
+        self.caller_facet = self.current_facet.take();
+        self.current_facet = facet;
+        self
     }
 
     pub fn cancellation(&self) -> &CancellationToken {
@@ -282,6 +313,8 @@ impl Context {
                 root_id: self.root_id,
                 code_version: self.code_version,
                 principal,
+                current_facet: self.current_facet.clone(),
+                caller_facet: self.caller_facet.clone(),
                 cancellation: self.cancellation.child(),
                 scope,
                 attachments: Rc::new(RefCell::new(self.attachments.borrow().clone())),
