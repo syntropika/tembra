@@ -179,6 +179,20 @@ explains this scope and the criteria for any future typed observation capability
 
 ### Hooks, registries and opaque capabilities
 
+Rust managed consumers can prepare hook metadata in their normal factory with
+`hooks.declare_waterfall(declaration.core_mut(), "before-call", build_definition)` and retain the
+returned `PreparedWaterfall<A>`. Its `run(input, context.core())` delegates to the existing runner.
+Series, bail, middleware and parallel have corresponding typed declaration handles, including the
+ordinary optional-terminal and `run_then` forms. Producers run during declaration rather than the
+first call; a replacement implementation prepares its own metadata. Handles do not keep the
+implementation alive and refuse use through an expired Context or an ended owner.
+
+For middleware, select the actual operation from the current Context's registry on each step and
+pass it to `run_native` or `run_portable`. These convenience methods reuse the declared checked types
+while constructing an adapter for that supplied operation. Preserve explicit portable encode/decode
+callbacks; do not retain an operation selected during startup as a substitute for current selection.
+See the [executable Rust declaration example](../crates/hooks/src/prepared.rs).
+
 Portable hooks use `defineHook`, `host.registerHook`, `registerHook` and `hookHandler`. Generic binding
 adapters connect their checked arguments and results to the Rust hook manager. `FacetScope.runHook`
 invokes a pipeline explicitly under an issued context; registering a hook does not intercept

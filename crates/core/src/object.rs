@@ -1,3 +1,6 @@
+mod owner;
+pub use owner::WeakImplementationOwner;
+
 mod recorder;
 pub use recorder::DeclarationRecorder;
 pub(crate) use recorder::FactoryScope;
@@ -78,6 +81,11 @@ impl Implementation {
     pub fn retain_owner<T: 'static>(mut self, owner: Rc<T>) -> Self {
         self.owners.push(owner);
         self
+    }
+
+    fn retains_owner<T: 'static>(&self, value: &Rc<T>) -> bool {
+        let erased: Rc<dyn Any> = value.clone();
+        self.owners.iter().any(|owner| Rc::ptr_eq(owner, &erased))
     }
 
     /// Returns the first retained capture of the requested Rust type, if one was attached.

@@ -1,6 +1,7 @@
 use crate::invalid;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::rc::Rc;
 use tembra_contracts::{Member, ValueSchema, canonical_json, normalize_schema, parse_json};
 use tembra_core::{ConflictPolicy, Registry, Result};
 
@@ -34,12 +35,50 @@ pub struct Descriptor {
     pub terminal: Option<TerminalProfile>,
     pub fingerprint: String,
 }
+/// Exact canonical equality, including the existing failed-canonicalization semantics.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ProfileEquality(Option<tembra_contracts::CanonicalProfileKey>);
+
+impl ProfileEquality {
+    pub(crate) fn key(&self) -> Option<&tembra_contracts::CanonicalProfileKey> {
+        self.0.as_ref()
+    }
+
+    pub(crate) fn new(profile: &Option<ValueSchema>) -> Self {
+        Self(tembra_contracts::CanonicalProfileKey::new(profile).ok())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TerminalEquality {
+    input: ProfileEquality,
+    result: ProfileEquality,
+}
+
+impl TerminalEquality {
+    fn new(profile: &TerminalProfile) -> Self {
+        Self {
+            input: ProfileEquality::new(&profile.input),
+            result: ProfileEquality::new(&profile.result),
+        }
+    }
+
+    pub(crate) fn matches(&self, input: &ProfileEquality, result: &ProfileEquality) -> bool {
+        self.input == *input && self.result == *result
+    }
+}
+
 /// Validated immutable descriptor; authoring and peer decoding are separate boundaries.
 #[derive(Clone)]
 pub struct HookDescriptor {
+    metadata: Rc<DescriptorMetadata>,
+}
+
+struct DescriptorMetadata {
     descriptor: Descriptor,
     canonical: String,
     registry: Registry,
+    terminal_equality: Option<TerminalEquality>,
 }
 
 pub(crate) fn normalize(profile: Option<ValueSchema>) -> Result<Option<ValueSchema>> {
@@ -190,10 +229,14 @@ impl HookDescriptor {
             canonical_json(&value).map_err(|e| invalid("hook_definition", e.message))?;
         let fingerprint = format!("{:x}", Sha256::digest(canonical.as_bytes()));
         descriptor.fingerprint = fingerprint;
+        let terminal_equality = descriptor.terminal.as_ref().map(TerminalEquality::new);
         Ok(Self {
-            descriptor,
-            canonical,
-            registry,
+            metadata: Rc::new(DescriptorMetadata {
+                descriptor,
+                canonical,
+                registry,
+                terminal_equality,
+            }),
         })
     }
     /// Decodes strict portable peer JSON with required fields and a matching fingerprint.
@@ -245,29 +288,33 @@ impl HookDescriptor {
         Ok(checked)
     }
     pub fn descriptor(&self) -> &Descriptor {
-        &self.descriptor
+        &self.metadata.descriptor
     }
     pub fn fingerprint(&self) -> &str {
-        &self.descriptor.fingerprint
+        &self.metadata.descriptor.fingerprint
     }
     pub fn canonical(&self) -> &str {
-        &self.canonical
+        &self.metadata.canonical
     }
     pub fn registry(&self) -> &Registry {
-        &self.registry
+        &self.metadata.registry
     }
     pub fn strategy(&self) -> Strategy {
-        self.descriptor.strategy
+        self.metadata.descriptor.strategy
     }
     pub fn input(&self) -> &Option<ValueSchema> {
-        &self.descriptor.input
+        &self.metadata.descriptor.input
     }
     pub fn result(&self) -> &Option<ValueSchema> {
-        &self.descriptor.result
+        &self.metadata.descriptor.result
     }
     pub fn terminal(&self) -> Option<&TerminalProfile> {
-        self.descriptor.terminal.as_ref()
+        self.metadata.descriptor.terminal.as_ref()
     }
+    pub(crate) fn terminal_equality(&self) -> Option<&TerminalEquality> {
+        self.metadata.terminal_equality.as_ref()
+    }
+
     pub fn contribution_member(&self) -> Member {
         Member::Method {
             args: Some(ValueSchema::Native(format!(
@@ -283,5 +330,87 @@ impl HookDescriptor {
                 _ => self.result().clone(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn retained_profile_equality_matches_existing_canonical_comparison() {
+        let profiles = [
+            None,
+            Some(ValueSchema::Native("integer@1".into())),
+            Some(ValueSchema::Native("different@1".into())),
+            Some(ValueSchema::Portable(json!(true))),
+            Some(ValueSchema::Portable(json!({"type":"integer", "minimum":1}))),
+            Some(ValueSchema::Portable(json!({"minimum":1.0, "type":"integer"}))),
+            Some(ValueSchema::Portable(serde_json::from_str(
+                r#"{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"integer"}}}"#,
+            ).unwrap())),
+            Some(ValueSchema::Portable(serde_json::from_str(
+                r#"{"properties":{"b":{"type":"integer"},"a":{"type":"string"}},"type":"object"}"#,
+            ).unwrap())),
+            Some(ValueSchema::Portable(json!({"minimum":9_007_199_254_740_992_u64}))),
+            Some(ValueSchema::Portable(json!({"maximum":9_007_199_254_740_993_u64}))),
+        ];
+        for left in &profiles {
+            for right in &profiles {
+                assert_eq!(
+                    ProfileEquality::new(left) == ProfileEquality::new(right),
+                    same(left, right)
+                );
+            }
+        }
+        assert!(ProfileEquality::new(&profiles[8]).0.is_none());
+        assert!(ProfileEquality::new(&profiles[9]).0.is_none());
+        assert!(ProfileEquality::new(&profiles[0]).0.is_some());
+    }
+
+    #[test]
+    fn descriptor_terminal_equality_follows_immutable_normalized_owner() {
+        let profile = Some(ValueSchema::Portable(json!({"type":"integer","minimum":0})));
+        let descriptor = HookDescriptor::new(
+            "retained",
+            1,
+            Strategy::Middleware,
+            profile.clone(),
+            profile.clone(),
+            Some(TerminalProfile {
+                input: profile.clone(),
+                result: profile.clone(),
+            }),
+        )
+        .unwrap();
+        let restored =
+            HookDescriptor::from_json(&serde_json::to_string(descriptor.descriptor()).unwrap())
+                .unwrap();
+        let mut external = descriptor.descriptor().clone();
+        external.terminal.as_mut().unwrap().input = None;
+        let copied = descriptor.clone();
+        drop(descriptor);
+        let equality = ProfileEquality::new(&profile);
+        for owner in [&copied, &restored] {
+            let retained = owner.terminal_equality().unwrap();
+            assert!(retained.matches(&equality, &equality));
+            assert!(!retained.matches(&ProfileEquality::new(&None), &equality));
+            assert!(!retained.matches(&equality, &ProfileEquality::new(&None)));
+        }
+        assert!(
+            HookDescriptor::new(
+                "bad",
+                1,
+                Strategy::Middleware,
+                profile.clone(),
+                profile,
+                Some(TerminalProfile {
+                    input: None,
+                    result: None
+                })
+            )
+            .is_err()
+        );
     }
 }

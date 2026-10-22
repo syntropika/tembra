@@ -15,6 +15,76 @@ use crate::{Context, ErrorCode, ManualDriver, Result, RuntimeError};
 
 use super::*;
 
+#[test]
+fn structured_state_normalization_preserves_previous_values_limits_and_errors() {
+    fn previous(value: &Value) -> Result<Rc<Value>> {
+        let encoded = tembra_contracts::canonical_json(value)
+            .map_err(|error| RuntimeError::invalid(error.reason, error.message))?;
+        tembra_contracts::parse_json(&encoded)
+            .map(Rc::new)
+            .map_err(|error| RuntimeError::invalid(error.reason, error.message))
+    }
+    fn compare(value: &Value) {
+        let fingerprint = |error: RuntimeError| (error.code, error.reason, error.message);
+        let before = value.clone();
+        assert_eq!(
+            normalize(value).map_err(fingerprint),
+            previous(value).map_err(fingerprint),
+            "input: {value:?}"
+        );
+        assert_eq!(*value, before);
+    }
+    for value in [
+        json!(null),
+        json!(true),
+        json!(0),
+        json!(-0.0),
+        json!(17.0),
+        json!(-17.0),
+        json!(1.25),
+        json!(0.1),
+        json!(f64::from_bits(1)),
+        json!(9_007_199_254_740_991_u64),
+        json!(9_007_199_254_740_992_u64),
+        json!(u64::MAX),
+        json!(1.0e100),
+        json!({"é":[1.0,-0.0,1.25,null,{"text":"quote\" slash\\ newline\n \u{0} 🦀"}]}),
+        json!({"$serde_json::private::Number":"1.25"}),
+    ] {
+        compare(&value);
+    }
+    for text in [
+        "1.00000000000000001",
+        "9007199254740991.01",
+        "0.100000000000000000000001",
+        "1e-400",
+        "-1e-400",
+        "4.9406564584124654e-324",
+    ] {
+        compare(&Value::Number(text.parse().unwrap()));
+    }
+    for length in [1_048_573, 1_048_574, 1_048_575] {
+        compare(&Value::String("a".repeat(length)));
+    }
+    compare(&Value::String("\u{0}".repeat(174_763)));
+    for depth in [127, 128, 129] {
+        let mut value = json!(null);
+        for _ in 0..depth {
+            value = json!([value]);
+        }
+        compare(&value);
+    }
+    let mut bits = 0x9e3779b97f4a7c15_u64;
+    for _ in 0..4096 {
+        bits ^= bits << 13;
+        bits ^= bits >> 7;
+        bits ^= bits << 17;
+        if let Some(number) = serde_json::Number::from_f64(f64::from_bits(bits)) {
+            compare(&Value::Number(number));
+        }
+    }
+}
+
 fn graph() -> (Rc<StateGraph>, Rc<RefCell<Vec<RuntimeError>>>) {
     let errors = Rc::new(RefCell::new(Vec::new()));
     let reported = errors.clone();

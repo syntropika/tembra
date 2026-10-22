@@ -397,6 +397,23 @@ impl Contract {
         &self.descriptor
     }
 
+    /// Compares this exact checked member's retained canonical profiles.
+    ///
+    /// Returns false for a missing variant/member, non-method or different position.
+    /// Keys are comparison data only; this neither validates values nor admits a call.
+    /// A deferred canonical preparation failure does not become a matching key.
+    pub fn method_profiles_match(
+        &self,
+        variant: &str,
+        member: &str,
+        input: &crate::CanonicalProfileKey,
+        output: &crate::CanonicalProfileKey,
+    ) -> bool {
+        self.prepared.member(variant, member)
+            .and_then(|member| member.profiles.as_ref())
+            .is_some_and(|(args, result)| matches!((args, result), (Ok(args), Ok(result)) if args == input && result == output))
+    }
+
     /// Clean portable method arguments using this descriptor's retained preparation.
     /// No default insertion, value validation or runtime admission is performed.
     ///

@@ -21,12 +21,37 @@ pub(crate) fn decode<T: DeserializeOwned>(value: &Value) -> Result<T> {
         .map_err(|error| RuntimeError::invalid("state_decode", error.to_string()))
 }
 
+// Floating representations and Serde's reserved number map can be observable
+// under arbitrary_precision. Keep the original parser path for those values.
+fn needs_json_roundtrip(value: &Value) -> bool {
+    match value {
+        Value::Number(number) => !number.is_i64() && !number.is_u64(),
+        Value::Array(values) => values.iter().any(needs_json_roundtrip),
+        Value::Object(values) => {
+            values.contains_key("$serde_json::private::Number")
+                || values.values().any(needs_json_roundtrip)
+        }
+        _ => false,
+    }
+}
+
 /// Serializes once, then checks the exact portable representation adopted by the core.
 pub(crate) fn encode<T: Serialize + DeserializeOwned>(value: &T) -> Result<Value> {
     let value = tembra_contracts::to_portable_value(value).map_err(contract_error)?;
-    let encoded = tembra_contracts::canonical_json(&value).map_err(contract_error)?;
-    let normalized = tembra_contracts::parse_json(&encoded).map_err(contract_error)?;
-    let _: T = decode(&normalized)?;
+    if needs_json_roundtrip(&value) {
+        let encoded = tembra_contracts::canonical_json(&value).map_err(contract_error)?;
+        let normalized = tembra_contracts::parse_json(&encoded).map_err(contract_error)?;
+        let _: T = decode(&normalized)?;
+        return Ok(normalized);
+    }
+    let normalized =
+        tembra_contracts::from_portable_value::<Value>(&value).map_err(contract_error)?;
+    let _: T = serde_json::from_value(normalized.clone()).map_err(|error| {
+        RuntimeError::invalid(
+            "state_decode",
+            tembra_contracts::ContractError::new("deserialization", error.to_string()).to_string(),
+        )
+    })?;
     Ok(normalized)
 }
 
@@ -656,3 +681,218 @@ tuple_sources!(A:0, B:1, C:2, D:3, E:4);
 tuple_sources!(A:0, B:1, C:2, D:3, E:4, F:5);
 tuple_sources!(A:0, B:1, C:2, D:3, E:4, F:5, G:6);
 tuple_sources!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7);
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+    use std::cell::RefCell;
+
+    fn previous<T: Serialize + DeserializeOwned>(value: &T) -> Result<Value> {
+        let value = tembra_contracts::to_portable_value(value).map_err(contract_error)?;
+        let encoded = tembra_contracts::canonical_json(&value).map_err(contract_error)?;
+        let normalized = tembra_contracts::parse_json(&encoded).map_err(contract_error)?;
+        let _: T = decode(&normalized)?;
+        Ok(normalized)
+    }
+
+    fn outcome(
+        result: Result<Value>,
+    ) -> std::result::Result<Value, (core::ErrorCode, String, String)> {
+        result.map_err(|error| (error.code, error.reason, error.message))
+    }
+
+    #[test]
+    fn typed_encode_preserves_canonical_map_order_at_custom_deserializer() {
+        use serde::ser::SerializeMap;
+        thread_local! { static KEYS: RefCell<Vec<Vec<String>>> = const { RefCell::new(Vec::new()) }; }
+        struct Observed;
+        impl Serialize for Observed {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                let mut map = serializer.serialize_map(Some(4))?;
+                for key in ["z", "\u{e000}", "😀", "a"] {
+                    map.serialize_entry(key, &1)?;
+                }
+                map.end()
+            }
+        }
+        impl<'de> Deserialize<'de> for Observed {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> std::result::Result<Self, D::Error> {
+                let value = Value::deserialize(deserializer)?;
+                KEYS.with(|keys| {
+                    keys.borrow_mut()
+                        .push(value.as_object().unwrap().keys().cloned().collect())
+                });
+                Ok(Self)
+            }
+        }
+        KEYS.with(|keys| keys.borrow_mut().clear());
+        let before = outcome(previous(&Observed));
+        let old = KEYS.with(|keys| std::mem::take(&mut *keys.borrow_mut()));
+        let after = outcome(encode(&Observed));
+        let new = KEYS.with(|keys| std::mem::take(&mut *keys.borrow_mut()));
+        assert_eq!(before, after);
+        assert_eq!(old, new);
+        assert_eq!(new.len(), 1);
+    }
+
+    #[test]
+    fn typed_encode_matches_previous_numeric_shapes_and_boundaries() {
+        let mut values = vec![
+            json!({"$serde_json::private::Number":"1.25"}),
+            json!(null),
+            json!(true),
+            json!(-0.0),
+            json!(17.0),
+            json!(-17.0),
+            json!(1.25),
+            json!(0.1),
+            json!(f64::from_bits(1)),
+            json!(9_007_199_254_740_991_u64),
+            json!(9_007_199_254_740_992_u64),
+            json!(u64::MAX),
+            json!(1.0e100),
+            json!({"é":[1.0,-0.0,1.25,null,{"text":"quote\" slash\\ newline\n \u{0} 🦀"}]}),
+        ];
+        for length in [1_048_573, 1_048_574, 1_048_575] {
+            values.push(Value::String("a".repeat(length)));
+        }
+        values.push(Value::String("\u{0}".repeat(174_763)));
+        for depth in [127, 128, 129] {
+            let mut value = json!(null);
+            for _ in 0..depth {
+                value = json!([value]);
+            }
+            values.push(value);
+        }
+        let mut bits = 0x9e3779b97f4a7c15_u64;
+        for _ in 0..4096 {
+            bits ^= bits << 13;
+            bits ^= bits >> 7;
+            bits ^= bits << 17;
+            if let Some(number) = serde_json::Number::from_f64(f64::from_bits(bits)) {
+                values.push(Value::Number(number));
+            }
+        }
+        for value in values {
+            let before = value.clone();
+            assert_eq!(
+                outcome(encode(&value)),
+                outcome(previous(&value)),
+                "input: {value:?}"
+            );
+            assert_eq!(value, before);
+        }
+    }
+
+    #[test]
+    fn typed_encode_preserves_current_custom_effects_and_refusals() {
+        thread_local! { static EVENTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) }; }
+        struct Watched(Value);
+        impl Serialize for Watched {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                encoder: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                EVENTS.with(|events| events.borrow_mut().push("serialize"));
+                assert!(encoder.is_human_readable());
+                if self.0 == json!("serialize-refuse") {
+                    return Err(serde::ser::Error::custom("serializer refusal"));
+                }
+                self.0.serialize(encoder)
+            }
+        }
+        impl<'de> Deserialize<'de> for Watched {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                decoder: D,
+            ) -> std::result::Result<Self, D::Error> {
+                EVENTS.with(|events| events.borrow_mut().push("deserialize"));
+                assert!(decoder.is_human_readable());
+                let value = Value::deserialize(decoder)?;
+                if value == json!("deserialize-refuse") {
+                    return Err(serde::de::Error::custom("deserializer refusal"));
+                }
+                Ok(Self(value))
+            }
+        }
+        impl Drop for Watched {
+            fn drop(&mut self) {
+                EVENTS.with(|events| events.borrow_mut().push("drop"));
+            }
+        }
+        for value in [
+            json!(1.0),
+            json!("deserialize-refuse"),
+            json!(2.5),
+            json!("serialize-refuse"),
+            json!(9_007_199_254_740_992_u64),
+            Value::String("a".repeat(1_048_575)),
+        ] {
+            let input = Watched(value);
+            EVENTS.with(|events| events.borrow_mut().clear());
+            let old = outcome(previous(&input));
+            let old_events = EVENTS.with(|events| events.borrow().clone());
+            EVENTS.with(|events| events.borrow_mut().clear());
+            let current = outcome(encode(&input));
+            let current_events = EVENTS.with(|events| events.borrow().clone());
+            assert_eq!(current, old);
+            assert_eq!(current_events, old_events);
+            assert_eq!(
+                current_events
+                    .iter()
+                    .filter(|event| **event == "serialize")
+                    .count(),
+                1
+            );
+            let decoded = old
+                .as_ref()
+                .err()
+                .is_none_or(|(_, reason, _)| reason == "state_decode");
+            assert_eq!(
+                current_events
+                    .iter()
+                    .filter(|event| **event == "deserialize")
+                    .count(),
+                usize::from(decoded)
+            );
+        }
+    }
+
+    #[test]
+    fn typed_encode_rejects_nonfinite_before_deserialization() {
+        thread_local! { static EVENTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) }; }
+        struct NonFinite(f64);
+        impl Serialize for NonFinite {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                encoder: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                EVENTS.with(|events| events.borrow_mut().push("serialize"));
+                encoder.serialize_f64(self.0)
+            }
+        }
+        impl<'de> Deserialize<'de> for NonFinite {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                decoder: D,
+            ) -> std::result::Result<Self, D::Error> {
+                EVENTS.with(|events| events.borrow_mut().push("deserialize"));
+                f64::deserialize(decoder).map(Self)
+            }
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let input = NonFinite(value);
+            EVENTS.with(|events| events.borrow_mut().clear());
+            let old = outcome(previous(&input));
+            assert_eq!(EVENTS.with(|events| events.borrow().clone()), ["serialize"]);
+            EVENTS.with(|events| events.borrow_mut().clear());
+            assert_eq!(outcome(encode(&input)), old);
+            assert_eq!(EVENTS.with(|events| events.borrow().clone()), ["serialize"]);
+        }
+    }
+}

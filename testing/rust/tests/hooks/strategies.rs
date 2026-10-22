@@ -5,6 +5,123 @@ use std::{cell::RefCell, rc::Rc};
 use support::*;
 use tembra_core::*;
 use tembra_hooks::*;
+
+#[test]
+fn cloned_metadata_survives_authoring_drop_without_retaining_execution_admission() {
+    let h = Harness::new();
+    let definition = {
+        let authored = middleware("shared-owner");
+        authored.clone()
+    };
+    let entries = Rc::new(std::cell::Cell::new(0));
+    let counter = entries.clone();
+    let terminal = {
+        let authored = h.terminal(
+            "shared-owner",
+            integer(),
+            integer(),
+            method(move |value, _| {
+                counter.set(counter.get() + 1);
+                async move { Ok(value) }.boxed_local()
+            }),
+        );
+        authored.clone()
+    };
+    let (manager, copied_definition, copied_terminal) =
+        (h.manager.clone(), definition.clone(), terminal.clone());
+    let expired = h
+        .driver
+        .run_until(h.host.root(move |context| {
+            async move {
+                assert_eq!(
+                    manager
+                        .run_middleware(&copied_definition, 3, &context, copied_terminal)
+                        .await?,
+                    3
+                );
+                Ok(context)
+            }
+            .boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(entries.get(), 1);
+    assert_eq!(
+        h.driver
+            .run_until(
+                h.manager
+                    .run_middleware(&definition, 4, &expired, terminal.clone())
+            )
+            .unwrap_err()
+            .reason,
+        "expired"
+    );
+    h.close();
+    assert!(
+        h.driver
+            .run_until(h.manager.run_middleware(&definition, 5, &expired, terminal))
+            .is_err()
+    );
+    assert_eq!(entries.get(), 1);
+}
+
+#[test]
+fn retained_terminal_profiles_reject_disagreement_and_check_each_current_value() {
+    let h = Harness::new();
+    let bounded = || HookType::<i32>::serde(json!({"type":"integer", "minimum":0})).unwrap();
+    let input = bounded();
+    let d = definition(
+        "retained-agreement",
+        Strategy::Middleware,
+        input.clone(),
+        input.clone(),
+        Some(TerminalProfile {
+            input: input.profile().clone(),
+            result: input.profile().clone(),
+        }),
+    );
+    let entries = Rc::new(std::cell::Cell::new(0));
+    let counter = entries.clone();
+    let terminal = h.terminal(
+        "retained-matching",
+        bounded(),
+        bounded(),
+        method(move |value, _| {
+            counter.set(counter.get() + 1);
+            async move { Ok(value) }.boxed_local()
+        }),
+    );
+    let stricter = HookType::<i32>::serde(json!({"type":"integer", "minimum":10})).unwrap();
+    let counter = entries.clone();
+    let disagreeing = h.terminal(
+        "retained-disagreeing",
+        stricter.clone(),
+        stricter,
+        method(move |value, _| {
+            counter.set(counter.get() + 1);
+            async move { Ok(value) }.boxed_local()
+        }),
+    );
+    let (manager, definition) = (h.manager.clone(), d.clone());
+    assert_eq!(
+        h.run(move |ctx| manager.run_middleware(&definition, 20, &ctx, disagreeing))
+            .unwrap_err()
+            .reason,
+        "hook_signature"
+    );
+    assert_eq!(entries.get(), 0);
+    for value in [3, -1, 4] {
+        let (manager, definition, terminal) = (h.manager.clone(), d.clone(), terminal.clone());
+        let result = h.run(move |ctx| manager.run_middleware(&definition, value, &ctx, terminal));
+        if value >= 0 {
+            assert_eq!(result.unwrap(), value);
+        } else {
+            assert_eq!(result.unwrap_err().reason, "hook_value");
+        }
+    }
+    assert_eq!(entries.get(), 2);
+    h.close();
+}
+
 #[test]
 fn five_empty_outcomes_and_terminal_presence_are_explicit() {
     let h = Harness::new();

@@ -1,7 +1,5 @@
 use crate::{
-    HookArgs, HookDescriptor, HookTerminal, HookType, RustHookDefinition, Strategy,
-    descriptor::same,
-    invalid,
+    HookArgs, HookDescriptor, HookTerminal, HookType, RustHookDefinition, Strategy, invalid,
     next::{Continuation, Frame},
 };
 use futures::{
@@ -67,7 +65,7 @@ impl Drop for Permit {
 /// that creates an owned-work cycle. Cancellation signals never prove physical completion.
 #[derive(Clone)]
 pub struct HookManager {
-    scope: FacetScope,
+    pub(crate) scope: FacetScope,
     driver: Rc<dyn Driver>,
     options: HookManagerOptions,
     budget: Rc<Budget>,
@@ -194,12 +192,9 @@ impl HookManager {
         terminal: Option<&HookTerminal<A, R>>,
         context: &Context,
     ) -> Result<()> {
-        match (definition.terminal(), terminal) {
+        match (definition.terminal_equality(), terminal) {
             (None, None) => Ok(()),
-            (Some(expected), Some(terminal))
-                if same(&expected.input, &terminal.profile().input)
-                    && same(&expected.result, &terminal.profile().result) =>
-            {
+            (Some(expected), Some(terminal)) if terminal.matches_profile(expected) => {
                 terminal.check(context)
             }
             _ => Err(invalid(
@@ -692,6 +687,14 @@ fn parallel<A: Clone + 'static, R: 'static>(
 pub struct HookRun<T> {
     future: Option<LocalBoxFuture<'static, Result<T>>>,
     cancellation: Rc<RefCell<Option<Rc<CancellationToken>>>>,
+}
+impl<T> HookRun<T> {
+    pub(crate) fn deferred(future: LocalBoxFuture<'static, Result<T>>) -> Self {
+        Self {
+            future: Some(future),
+            cancellation: Rc::new(RefCell::new(None)),
+        }
+    }
 }
 impl<T> Future for HookRun<T> {
     type Output = Result<T>;

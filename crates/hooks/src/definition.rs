@@ -1,6 +1,6 @@
 use crate::{
-    HookDescriptor, TerminalProfile,
-    descriptor::{normalize, same},
+    HookDescriptor,
+    descriptor::{ProfileEquality, TerminalEquality, normalize, same},
     invalid,
 };
 use futures::FutureExt;
@@ -17,22 +17,29 @@ pub(crate) type Validator<T> = Rc<dyn Fn(&T) -> Result<()>>;
 /// may cross several trust boundaries (handler, continuation, terminal or foreign codec),
 /// each of which can validate again; no exact invocation count is promised.
 pub struct HookType<T> {
-    pub(crate) profile: Option<ValueSchema>,
-    pub(crate) validate: Validator<T>,
+    metadata: Rc<TypeMetadata<T>>,
+}
+
+struct TypeMetadata<T> {
+    profile: Option<ValueSchema>,
+    equality: ProfileEquality,
+    validate: Validator<T>,
 }
 impl<T> Clone for HookType<T> {
     fn clone(&self) -> Self {
         Self {
-            profile: self.profile.clone(),
-            validate: self.validate.clone(),
+            metadata: self.metadata.clone(),
         }
     }
 }
 impl HookType<()> {
     pub fn absent() -> Self {
         Self {
-            profile: None,
-            validate: Rc::new(|_| Ok(())),
+            metadata: Rc::new(TypeMetadata {
+                profile: None,
+                equality: ProfileEquality::new(&None),
+                validate: Rc::new(|_| Ok(())),
+            }),
         }
     }
 }
@@ -46,16 +53,20 @@ impl<T: 'static> HookType<T> {
             unreachable!()
         };
         let prepared = PreparedSchema::new(schema);
+        let equality = ProfileEquality::new(&profile);
         Ok(Self {
-            profile,
-            validate: Rc::new(move |value| {
-                let value = encode(value)?;
-                match &prepared {
-                    Ok(schema) => schema.validate(&value),
-                    Err(error) => tembra_contracts::validate(&Value::Bool(true), &value)
-                        .and_then(|()| Err(error.clone())),
-                }
-                .map_err(|e| invalid("hook_value", e.message))
+            metadata: Rc::new(TypeMetadata {
+                profile,
+                equality,
+                validate: Rc::new(move |value| {
+                    let value = encode(value)?;
+                    match &prepared {
+                        Ok(schema) => schema.validate(&value),
+                        Err(error) => tembra_contracts::validate(&Value::Bool(true), &value)
+                            .and_then(|()| Err(error.clone())),
+                    }
+                    .map_err(|e| invalid("hook_value", e.message))
+                }),
             }),
         })
     }
@@ -77,17 +88,24 @@ impl<T: 'static> HookType<T> {
         id: impl Into<String>,
         validate: impl Fn(&T) -> Result<()> + 'static,
     ) -> Result<Self> {
+        let profile = normalize(Some(ValueSchema::Native(id.into())))?;
+        let equality = ProfileEquality::new(&profile);
         Ok(Self {
-            profile: normalize(Some(ValueSchema::Native(id.into())))?,
-            validate: Rc::new(validate),
+            metadata: Rc::new(TypeMetadata {
+                profile,
+                equality,
+                validate: Rc::new(validate),
+            }),
         })
     }
     pub fn profile(&self) -> &Option<ValueSchema> {
-        &self.profile
+        &self.metadata.profile
     }
     pub(crate) fn check(&self, value: &T) -> Result<()> {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.validate)(value)))
-            .unwrap_or_else(|_| Err(invalid("hook_panic", "hook value validator panicked")))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.metadata.validate)(value)
+        }))
+        .unwrap_or_else(|_| Err(invalid("hook_panic", "hook value validator panicked")))
     }
 }
 /// One validated hook descriptor associated with real Rust input/payload types.
@@ -114,10 +132,10 @@ impl<A: 'static, R: 'static> RustHookDefinition<A, R> {
         input: HookType<A>,
         result: HookType<R>,
     ) -> Result<Self> {
-        if !same(descriptor.input(), &input.profile)
-            || !same(descriptor.result(), &result.profile)
-            || (input.profile.is_none() && TypeId::of::<A>() != TypeId::of::<()>())
-            || (result.profile.is_none() && TypeId::of::<R>() != TypeId::of::<()>())
+        if !same(descriptor.input(), &input.metadata.profile)
+            || !same(descriptor.result(), &result.metadata.profile)
+            || (input.metadata.profile.is_none() && TypeId::of::<A>() != TypeId::of::<()>())
+            || (result.metadata.profile.is_none() && TypeId::of::<R>() != TypeId::of::<()>())
         {
             return Err(invalid("hook_definition", "typed hook profiles differ"));
         }
@@ -206,20 +224,31 @@ impl<A: 'static, R: 'static> HookTerminal<A, R> {
         input: HookType<A>,
         result: HookType<R>,
     ) -> Result<Self> {
-        let member = operation
-            .contract()
-            .members("")
-            .and_then(|m| m.get(operation.method()));
-        let matches_profile = match member {
-            Some(tembra_contracts::Member::Method {
-                args,
-                result: output,
-            }) => same(args, &input.profile) && same(output, &result.profile),
-            _ => false,
+        let matches_profile = match (
+            input.metadata.equality.key(),
+            result.metadata.equality.key(),
+        ) {
+            (Some(args), Some(output)) => {
+                operation
+                    .contract()
+                    .method_profiles_match("", operation.method(), args, output)
+            }
+            // Preserve the previous `.ok()` equality on deferred canonical-error paths.
+            _ => match operation
+                .contract()
+                .members("")
+                .and_then(|m| m.get(operation.method()))
+            {
+                Some(tembra_contracts::Member::Method {
+                    args,
+                    result: output,
+                }) => same(args, input.profile()) && same(output, result.profile()),
+                _ => false,
+            },
         };
         if !matches_profile
-            || (input.profile.is_none() && TypeId::of::<A>() != TypeId::of::<()>())
-            || (result.profile.is_none() && TypeId::of::<R>() != TypeId::of::<()>())
+            || (input.metadata.profile.is_none() && TypeId::of::<A>() != TypeId::of::<()>())
+            || (result.metadata.profile.is_none() && TypeId::of::<R>() != TypeId::of::<()>())
         {
             return Err(invalid("hook_signature", "terminal profile differs"));
         }
@@ -242,7 +271,7 @@ impl<A: 'static, R: 'static> HookTerminal<A, R> {
         encode: impl Fn(A) -> Result<Option<Value>> + 'static,
         decode: impl Fn(Option<Value>) -> Result<R> + 'static,
     ) -> Result<Self> {
-        if [&input.profile, &result.profile]
+        if [&input.metadata.profile, &result.metadata.profile]
             .into_iter()
             .flatten()
             .any(|p| matches!(p, ValueSchema::Native(_)))
@@ -294,11 +323,11 @@ impl<A: 'static, R: 'static> HookTerminal<A, R> {
             self.operation.check_native::<A, R>(context)
         }
     }
-    pub(crate) fn profile(&self) -> TerminalProfile {
-        TerminalProfile {
-            input: self.input.profile.clone(),
-            result: self.result.profile.clone(),
-        }
+    pub(crate) fn matches_profile(&self, expected: &TerminalEquality) -> bool {
+        expected.matches(
+            &self.input.metadata.equality,
+            &self.result.metadata.equality,
+        )
     }
     pub(crate) async fn invoke(&self, input: A, context: &tembra_core::Context) -> Result<R> {
         self.input.check(&input)?;
@@ -326,6 +355,34 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn retained_type_equality_does_not_cache_value_acceptance_or_mutable_source() {
+        let mut source = json!({"type":"integer", "minimum":0});
+        let owner = HookType::<i32>::serde(source.clone()).unwrap();
+        let retained = owner.clone();
+        source["minimum"] = json!(10);
+        let replacement = HookType::<i32>::serde(source).unwrap();
+        assert!(owner.metadata.equality == retained.metadata.equality);
+        assert!(owner.metadata.equality != replacement.metadata.equality);
+        drop(owner);
+        retained.check(&3).unwrap();
+        assert_eq!(retained.check(&-1).unwrap_err().reason, "hook_value");
+        retained.check(&4).unwrap();
+        assert_eq!(replacement.check(&3).unwrap_err().reason, "hook_value");
+        let native = HookType::<i32>::native("bounded@1", |value| {
+            if *value >= 0 {
+                Ok(())
+            } else {
+                Err(invalid("refused", "negative value"))
+            }
+        })
+        .unwrap();
+        let copied = native.clone();
+        copied.check(&1).unwrap();
+        assert_eq!(copied.check(&-1).unwrap_err().reason, "refused");
+        assert!(HookType::<i32>::native("", |_| Ok(())).is_err());
+    }
 
     #[test]
     fn deferred_schema_budget_refusal_follows_each_encoder_and_portable_value_check() {

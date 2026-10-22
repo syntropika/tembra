@@ -246,6 +246,7 @@ impl HostInner {
                 catalog.register(&object, &candidate);
                 let pass = Rc::new(FactoryScope {
                     target: DeclarationTarget::Reload(Rc::downgrade(&candidate)),
+                    implementation_owners: RefCell::new(Vec::new()),
                 });
                 *pass_slot.borrow_mut() = Rc::downgrade(&pass);
                 replays.push(Replay {
@@ -275,6 +276,7 @@ impl HostInner {
                         pass: Rc::downgrade(&pass),
                     };
                     (service.factory)(expected, object.principal.clone(), &mut declaration)
+                        .map(|implementation| pass.attach_implementation_owners(implementation))
                 }?;
                 Self::validate_implementation(service.contract(), &implementation)?;
                 let mut implementation = implementation;
