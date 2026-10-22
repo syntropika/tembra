@@ -1079,6 +1079,7 @@ impl HostInner {
         let implementation = {
             let pass = Rc::new(crate::object::FactoryScope {
                 target: crate::host::reload::DeclarationTarget::Activation,
+                implementation_owners: RefCell::new(Vec::new()),
             });
             let previous = self.factory_pass.replace(Rc::downgrade(&pass));
             self.in_factory.set(self.in_factory.get() + 1);
@@ -1097,6 +1098,7 @@ impl HostInner {
                 object.principal.clone(),
                 &mut declaration,
             )
+            .map(|implementation| pass.attach_implementation_owners(implementation))
         };
         drop(factory);
         let mut implementation = implementation?;

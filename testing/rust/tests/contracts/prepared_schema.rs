@@ -307,3 +307,89 @@ fn descriptor_retains_second_pass_budget_errors_until_actual_value_use() {
         expected
     );
 }
+
+#[test]
+fn method_profile_keys_follow_actual_contract_members_and_cloned_owners() {
+    use tembra_contracts::CanonicalProfileKey;
+    let input = Some(ValueSchema::Portable(json!({"type":"integer","minimum":1})));
+    let equivalent = Some(ValueSchema::Portable(
+        json!({"minimum":1.0,"type":"integer"}),
+    ));
+    let output = Some(ValueSchema::Native("answer@1".into()));
+    let token = Contract::local(
+        "profiles",
+        1,
+        json!({}),
+        BTreeMap::from([
+            (
+                "run".into(),
+                Member::Method {
+                    args: input.clone(),
+                    result: output.clone(),
+                },
+            ),
+            (
+                "empty".into(),
+                Member::Method {
+                    args: None,
+                    result: None,
+                },
+            ),
+            (
+                "state".into(),
+                Member::State {
+                    schema: json!({"type":"integer"}),
+                },
+            ),
+        ]),
+    )
+    .unwrap();
+    let mut detached = token.descriptor().clone();
+    detached.variants.get_mut("").unwrap().insert(
+        "run".into(),
+        Member::Method {
+            args: None,
+            result: None,
+        },
+    );
+    let changed = Contract::from_descriptor({
+        detached.fingerprint.clear();
+        detached
+    })
+    .unwrap();
+    let copy = token.clone();
+    drop(token);
+    let a = CanonicalProfileKey::new(&equivalent).unwrap();
+    let b = CanonicalProfileKey::new(&output).unwrap();
+    let absent = CanonicalProfileKey::new(&None).unwrap();
+    assert!(copy.method_profiles_match("", "run", &a, &b));
+    assert!(!changed.method_profiles_match("", "run", &a, &b));
+    assert!(!copy.method_profiles_match("missing", "run", &a, &b));
+    assert!(!copy.method_profiles_match("", "missing", &a, &b));
+    assert!(!copy.method_profiles_match("", "state", &a, &b));
+    assert!(!copy.method_profiles_match("", "run", &b, &a));
+    assert!(copy.method_profiles_match("", "empty", &absent, &absent));
+    assert!(!copy.method_profiles_match("", "empty", &a, &absent));
+    assert_ne!(
+        absent,
+        CanonicalProfileKey::new(&Some(ValueSchema::Portable(json!(null)))).unwrap()
+    );
+    assert_ne!(
+        b,
+        CanonicalProfileKey::new(&Some(ValueSchema::Portable(json!({"type":"string"})))).unwrap()
+    );
+    assert_ne!(
+        CanonicalProfileKey::new(&Some(ValueSchema::Native("x".into()))).unwrap(),
+        CanonicalProfileKey::new(&Some(ValueSchema::Portable(json!({"native":"x"})))).unwrap()
+    );
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Contract>();
+    assert_send_sync::<CanonicalProfileKey>();
+    let invalid = Some(ValueSchema::Portable(
+        json!({"minimum":9_007_199_254_740_992_u64}),
+    ));
+    assert_eq!(
+        CanonicalProfileKey::new(&invalid).unwrap_err().reason,
+        "number"
+    );
+}

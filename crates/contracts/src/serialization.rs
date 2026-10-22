@@ -58,9 +58,62 @@ pub fn to_portable_value<T: Serialize + ?Sized>(value: &T) -> Result<Value> {
 /// ```
 pub fn from_portable_value<T: DeserializeOwned>(value: &Value) -> Result<T> {
     let encoded = crate::canonical_json(value)?;
-    let normalized = crate::parse_json(&encoded)?;
+    if encoded.len() > 1_048_576 {
+        return Err(ContractError::new(
+            "json_size",
+            "JSON input exceeds the one MiB ingestion limit",
+        ));
+    }
+    // Optional arbitrary_precision changes how the strict parser presents number
+    // tokens. Preserve that existing boundary for floating representations rather
+    // than silently accepting different values or custom-deserializer errors.
+    if needs_numeric_roundtrip(value) {
+        let normalized = crate::parse_json(&encoded)?;
+        return serde_json::from_value(normalized)
+            .map_err(|error| ContractError::new("deserialization", error.to_string()));
+    }
+    let mut normalized = value.clone();
+    crate::json::normalize_numbers(&mut normalized);
+    normalize_object_order(&mut normalized);
     serde_json::from_value(normalized)
         .map_err(|error| ContractError::new("deserialization", error.to_string()))
+}
+
+fn needs_numeric_roundtrip(value: &Value) -> bool {
+    match value {
+        Value::Number(number) => !number.is_i64() && !number.is_u64(),
+        Value::Array(values) => values.iter().any(needs_numeric_roundtrip),
+        Value::Object(values) => values.values().any(needs_numeric_roundtrip),
+        _ => false,
+    }
+}
+
+// Parsing canonical JSON visits object keys in UTF-16 order when preserve_order is
+// unified by a consumer. Rebuild only unordered maps; default BTreeMap parsing still
+// observes its normal key order. No custom deserializer executes during preparation.
+fn normalize_object_order(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if !map
+                .keys()
+                .zip(map.keys().skip(1))
+                .all(|(a, b)| a.encode_utf16().cmp(b.encode_utf16()).is_le())
+            {
+                let mut entries: Vec<_> = std::mem::take(map).into_iter().collect();
+                entries.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+                map.extend(entries);
+            }
+            for value in map.values_mut() {
+                normalize_object_order(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                normalize_object_order(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 struct Checked<'a, T: ?Sized>(&'a T);
@@ -344,6 +397,213 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn legacy_decode<T: DeserializeOwned>(value: &Value) -> Result<T> {
+        let encoded = crate::canonical_json(value)?;
+        let normalized = crate::parse_json(&encoded)?;
+        serde_json::from_value(normalized)
+            .map_err(|e| ContractError::new("deserialization", e.to_string()))
+    }
+
+    fn compare_decode<T: DeserializeOwned + std::fmt::Debug + PartialEq>(value: &Value) {
+        let fingerprint = |error: ContractError| (error.reason, error.path, error.message);
+        assert_eq!(
+            from_portable_value::<T>(value).map_err(fingerprint),
+            legacy_decode::<T>(value).map_err(fingerprint),
+            "input: {value:?}"
+        );
+    }
+
+    #[test]
+    fn structured_decode_matches_legacy_for_precision_sensitive_number_tokens() {
+        for text in [
+            "1.00000000000000001",
+            "9007199254740991.01",
+            "0.100000000000000000000001",
+            "1e-400",
+            "-1e-400",
+            "4.9406564584124654e-324",
+            "1.0",
+            "-0.0",
+        ] {
+            let number: serde_json::Number = text.parse().unwrap();
+            let value = Value::Number(number);
+            compare_decode::<Value>(&value);
+            compare_decode::<u64>(&value);
+            compare_decode::<f64>(&value);
+        }
+    }
+
+    #[test]
+    fn structured_decode_preserves_canonical_map_visitation_and_first_error() {
+        #[derive(Debug, PartialEq)]
+        struct Order(Vec<(String, Vec<String>)>);
+        impl<'de> serde::Deserialize<'de> for Order {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> std::result::Result<Self, D::Error> {
+                struct Visitor;
+                impl<'de> serde::de::Visitor<'de> for Visitor {
+                    type Value = Order;
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("object")
+                    }
+                    fn visit_map<M: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: M,
+                    ) -> std::result::Result<Order, M::Error> {
+                        let mut keys = Vec::new();
+                        while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                            let nested = value
+                                .as_object()
+                                .map(|map| map.keys().cloned().collect())
+                                .unwrap_or_default();
+                            keys.push((key, nested));
+                        }
+                        Ok(Order(keys))
+                    }
+                }
+                deserializer.deserialize_map(Visitor)
+            }
+        }
+        #[derive(Debug, PartialEq)]
+        struct Reject;
+        impl<'de> serde::Deserialize<'de> for Reject {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> std::result::Result<Self, D::Error> {
+                struct Visitor;
+                impl<'de> serde::de::Visitor<'de> for Visitor {
+                    type Value = Reject;
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("object")
+                    }
+                    fn visit_map<M: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: M,
+                    ) -> std::result::Result<Reject, M::Error> {
+                        let first = map.next_key::<String>()?.unwrap();
+                        Err(serde::de::Error::custom(format!("first field: {first}")))
+                    }
+                }
+                deserializer.deserialize_map(Visitor)
+            }
+        }
+        let value: Value = serde_json::from_str(
+            r#"{"z":{},"\ue000":{"z":0,"a":1},"😀":{"\ue000":0,"😀":1,"a":2},"a":{}}"#,
+        )
+        .unwrap();
+        let untouched = value.clone();
+        compare_decode::<Order>(&value);
+        compare_decode::<Reject>(&value);
+        let expected = crate::parse_json(&crate::canonical_json(&value).unwrap()).unwrap();
+        assert_eq!(
+            from_portable_value::<Order>(&value)
+                .unwrap()
+                .0
+                .iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            expected.as_object().unwrap().keys().collect::<Vec<_>>()
+        );
+        assert_eq!(value, untouched);
+    }
+
+    #[test]
+    fn structured_decode_matches_legacy_numeric_and_structured_values() {
+        let fixtures = [
+            json!(null),
+            json!(true),
+            json!(false),
+            json!(0),
+            json!(-0.0),
+            json!(1.0),
+            json!(-17.0),
+            json!(1.25),
+            json!(0.1),
+            json!(1.2345678901234567),
+            json!(1.0e-308),
+            json!(f64::from_bits(1)),
+            json!(9_007_199_254_740_991_u64),
+            json!(-9_007_199_254_740_991_i64),
+            json!(9_007_199_254_740_992_u64),
+            json!(u64::MAX),
+            json!(1.0e100),
+            json!("quote\" slash\\ newline\n \u{0} é 🦀"),
+            json!({"nested":[1.0,-0.0,1.25,null,{"x":"\\uD800","é":true}]}),
+        ];
+        for value in &fixtures {
+            let before = value.clone();
+            compare_decode::<Value>(value);
+            compare_decode::<u64>(value);
+            compare_decode::<i64>(value);
+            compare_decode::<f64>(value);
+            assert_eq!(*value, before);
+        }
+        let mut bits = 0x9e3779b97f4a7c15_u64;
+        for _ in 0..4096 {
+            bits ^= bits << 13;
+            bits ^= bits >> 7;
+            bits ^= bits << 17;
+            if let Some(number) = serde_json::Number::from_f64(f64::from_bits(bits)) {
+                compare_decode::<Value>(&Value::Number(number));
+            }
+        }
+    }
+
+    #[test]
+    fn structured_decode_preserves_encoded_size_and_depth_refusals() {
+        for length in [1_048_573, 1_048_574, 1_048_575] {
+            compare_decode::<Value>(&Value::String("a".repeat(length)));
+        }
+        compare_decode::<Value>(&Value::String("\u{0}".repeat(174_763)));
+        for depth in [127, 128, 129] {
+            let mut value = json!(null);
+            for _ in 0..depth {
+                value = json!([value]);
+            }
+            compare_decode::<Value>(&value);
+        }
+    }
+
+    #[test]
+    fn structured_decode_calls_the_current_custom_deserializer_exactly_once() {
+        thread_local! { static CALLS: Cell<usize> = const { Cell::new(0) }; }
+        #[derive(Debug, PartialEq)]
+        struct Current(Value);
+        impl<'de> serde::Deserialize<'de> for Current {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                decoder: D,
+            ) -> std::result::Result<Self, D::Error> {
+                CALLS.with(|calls| calls.set(calls.get() + 1));
+                assert!(decoder.is_human_readable());
+                let value = Value::deserialize(decoder)?;
+                if value == json!("reject") {
+                    return Err(serde::de::Error::custom("custom refusal"));
+                }
+                Ok(Self(value))
+            }
+        }
+        for value in [
+            json!(1.0),
+            json!(2.5),
+            json!("reject"),
+            json!(9_007_199_254_740_992_u64),
+        ] {
+            CALLS.with(|calls| calls.set(0));
+            let old = legacy_decode::<Current>(&value).map_err(|e| (e.reason, e.path, e.message));
+            let previous = CALLS.with(Cell::get);
+            CALLS.with(|calls| calls.set(0));
+            let current =
+                from_portable_value::<Current>(&value).map_err(|e| (e.reason, e.path, e.message));
+            assert_eq!(current, old);
+            assert_eq!(CALLS.with(Cell::get), previous);
+            assert_eq!(
+                previous,
+                usize::from(value != json!(9_007_199_254_740_992_u64))
+            );
+        }
+    }
 
     #[test]
     fn non_finite_values_are_refused_at_nested_serde_boundaries() {

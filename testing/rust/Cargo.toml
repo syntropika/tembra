@@ -529,3 +529,11 @@ path = "tests/core/caller_facet.rs"
 name = "executor-js-caller-facet"
 path = "tests/executor-js/caller_facet.rs"
 required-features = ["embedded-executor"]
+
+[[test]]
+name = "hooks-prepared"
+path = "tests/hooks/prepared.rs"
+
+[[test]]
+name = "hooks-prepared-lifecycle"
+path = "tests/hooks/prepared_lifecycle.rs"

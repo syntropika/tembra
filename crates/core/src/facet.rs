@@ -212,6 +212,10 @@ pub struct FacetScope {
 }
 
 impl FacetScope {
+    pub(crate) fn same_host(&self, host: &Rc<HostInner>) -> bool {
+        Weak::ptr_eq(&self.host, &Rc::downgrade(host))
+    }
+
     pub(crate) fn new(host: &Rc<HostInner>, facet_name: Rc<str>, signal: FacetSignal) -> Self {
         Self {
             host: Rc::downgrade(host),

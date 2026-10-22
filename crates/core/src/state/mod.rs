@@ -58,10 +58,29 @@ fn pending() -> RuntimeError {
     )
 }
 
+// Floating representations and Serde's reserved number map can be observable
+// under arbitrary_precision. Keep the original parser path for those values.
+fn needs_json_roundtrip(value: &Value) -> bool {
+    match value {
+        Value::Number(number) => !number.is_i64() && !number.is_u64(),
+        Value::Array(values) => values.iter().any(needs_json_roundtrip),
+        Value::Object(values) => {
+            values.contains_key("$serde_json::private::Number")
+                || values.values().any(needs_json_roundtrip)
+        }
+        _ => false,
+    }
+}
+
 fn normalize(value: &Value) -> Result<Rc<Value>> {
-    let encoded = tembra_contracts::canonical_json(value)
-        .map_err(|error| RuntimeError::invalid(error.reason, error.message))?;
-    tembra_contracts::parse_json(&encoded)
+    if needs_json_roundtrip(value) {
+        let encoded = tembra_contracts::canonical_json(value)
+            .map_err(|error| RuntimeError::invalid(error.reason, error.message))?;
+        return tembra_contracts::parse_json(&encoded)
+            .map(Rc::new)
+            .map_err(|error| RuntimeError::invalid(error.reason, error.message));
+    }
+    tembra_contracts::from_portable_value::<Value>(value)
         .map(Rc::new)
         .map_err(|error| RuntimeError::invalid(error.reason, error.message))
 }

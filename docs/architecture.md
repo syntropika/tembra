@@ -218,3 +218,26 @@ exercise the bindings, compatible reload, retained references, hooks, opaque ide
 The browser runner launches real Chromium; a TypeScript compile alone does not establish browser
 runtime compatibility. Examples remain applications rather than test fixture emitters or low-level
 adapter demonstrations.
+
+## Implementation-owned Rust hook preparation
+
+Rust consumers declare hook definitions eagerly through `HookManager::declare_series`,
+`declare_bail`, `declare_waterfall`, `declare_middleware` and `declare_parallel` in their managed
+implementation factory. The core validates the source Host and exact declaration pass before
+running the producer without runtime borrows, then rechecks admission before attaching its value
+to the returned implementation's existing owners. Failure does not adopt that producer's returned metadata; successful nested declarations and external producer/destructor effects
+are not rolled back.
+
+Strategy-typed handles contain only weak access to that exact owner. Each polled run validates
+its current Context, execution version, receiver lifecycle and exact installed implementation.
+Unchanged admitted implementation aliases may share metadata; replacement prepares new metadata.
+Labels identify diagnostics only. No reactive State, global type map, registry plan, permission,
+validated value or operation is cached. Runs delegate to the existing strategy pipelines and retain
+their cancellation and physical-settlement ownership rules.
+
+Checked Contracts retain exact canonical method-position keys beside their existing prepared
+schemas. Hook types and descriptors share immutable metadata. The current selected operation's
+Contract supplies profile comparison; equality data grants no execution authority. Canonical
+preparation failures retain the previous deferred fallback behavior. Dynamic callers still select
+their actual operation from the current Context's registry on every call. This Rust declaration
+facility does not introduce a separate runtime or change foreign hook registration protocols.

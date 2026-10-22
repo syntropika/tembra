@@ -136,6 +136,16 @@ not have the same rollback guarantee as coordinated replacement. Registries expo
 per execution version. Hooks are explicit pipelines over managed operations and registry entries;
 they do not intercept every method automatically.
 
+Rust hook declaration producers run eagerly once per new implementation during its synchronous
+factory pass. A wrong strategy or failed/panicking producer does not adopt its returned metadata;
+successful nested declarations and external effects are not rolled back. Successful metadata
+is retained by that exact implementation, while the consumer's typed handle is weak. Each use checks
+the current Context and exact installed owner before executing the existing pipeline, including its
+current contribution table and current value validation. Unchanged implementation aliases may share
+metadata; replaced, retired or disposed owners cannot be revived by an escaped handle. Dropping an
+observer signals cancellation and does not establish physical termination. Native/portable/absent
+profiles remain distinct; method-profile keys compare exact canonical bytes and are not authority.
+
 Rust's `host.installed_facets()` reads the actual installed run catalog and returns owned name/origin
 observations sorted in case-sensitive Rust `str` order. Initial synchronous setup failure withdraws
 its scoped run; eager activation failure leaves its admitted declaration in the catalog. A reentrant

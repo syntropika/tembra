@@ -46,11 +46,15 @@ mod descriptor;
 mod manager;
 mod next;
 pub mod portable;
+mod prepared;
 mod wrapper;
 pub use definition::{HookTerminal, HookType, RustHookDefinition};
 pub use descriptor::{Descriptor, HookDescriptor, Strategy, TerminalProfile};
 pub use manager::{BailDecision, BailOutcome, HookManager, HookManagerOptions, HookRun};
 pub use next::{HookArgs, Next, OutputCompletion, ProjectedCall};
+pub use prepared::{
+    PreparedBail, PreparedMiddleware, PreparedParallel, PreparedSeries, PreparedWaterfall,
+};
 pub use wrapper::{MethodHandler, MethodWrapper, hook_handler, hook_wrapper};
 pub(crate) fn invalid(reason: &str, message: impl Into<String>) -> tembra_core::RuntimeError {
     tembra_core::RuntimeError::invalid(reason, message)

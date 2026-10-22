@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{Descriptor, Member, PreparedSchema, Result, ValueSchema};
+use crate::{CanonicalProfileKey, Descriptor, Member, PreparedSchema, Result, ValueSchema};
 
 /// Derived metadata follows its checked descriptor owner, never a process-global key.
 #[derive(Debug)]
@@ -14,6 +14,7 @@ pub(super) struct PreparedMember {
     pub args: Option<RetainedSchema>,
     pub result: Option<RetainedSchema>,
     pub state: Option<RetainedSchema>,
+    pub profiles: Option<(Result<CanonicalProfileKey>, Result<CanonicalProfileKey>)>,
 }
 
 impl PreparedContract {
@@ -37,6 +38,10 @@ impl PreparedContract {
                                     args: portable(args),
                                     result: portable(result),
                                     state: None,
+                                    profiles: Some((
+                                        CanonicalProfileKey::new(args),
+                                        CanonicalProfileKey::new(result),
+                                    )),
                                 },
                                 Member::State { schema } => PreparedMember {
                                     state: Some(RetainedSchema::new(schema)),
