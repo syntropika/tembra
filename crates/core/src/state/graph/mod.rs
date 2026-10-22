@@ -54,8 +54,8 @@ struct Node {
 
 /// Keeps normalized public metadata and its immutable validation proof together.
 #[derive(Clone)]
-struct StateSchema {
-    source: Rc<Value>,
+pub(crate) struct StateSchema {
+    pub(crate) source: Rc<Value>,
     prepared: tembra_contracts::Result<tembra_contracts::PreparedSchema>,
 }
 
@@ -68,7 +68,7 @@ impl std::ops::Deref for StateSchema {
 }
 
 impl StateSchema {
-    fn validate(&self, value: &Value) -> tembra_contracts::Result<()> {
+    pub(crate) fn validate(&self, value: &Value) -> tembra_contracts::Result<()> {
         match &self.prepared {
             Ok(prepared) => prepared.validate(value),
             Err(error) => {
@@ -211,7 +211,7 @@ impl StateGraph {
         Ok(source.origin.as_ref().expect("owned source has origin").1)
     }
 
-    fn schema(schema: Value) -> Result<StateSchema> {
+    pub(crate) fn schema(schema: Value) -> Result<StateSchema> {
         let source = tembra_contracts::normalize_schema(&schema)
             .map_err(|error| RuntimeError::invalid(error.reason, error.message))?;
         let prepared = tembra_contracts::PreparedSchema::new(&source);
@@ -219,6 +219,15 @@ impl StateGraph {
             source: Rc::new(source),
             prepared,
         })
+    }
+
+    fn declaration_schema(schema: super::cell::DeclarationSchema) -> Result<StateSchema> {
+        match schema {
+            super::cell::DeclarationSchema::Dynamic(value) => Self::schema(value),
+            super::cell::DeclarationSchema::Prepared(definition) => {
+                Ok(definition.inner.as_ref().clone())
+            }
+        }
     }
 
     fn validate(node: &Node, value: &Value) -> Result<()> {
@@ -251,7 +260,7 @@ impl StateGraph {
                 "state version must be a positive safe integer",
             ));
         }
-        let schema = Self::schema(declaration.schema)?;
+        let schema = Self::declaration_schema(declaration.schema)?;
         let port = self.port();
         let node = Rc::new(Node {
             port: port.clone(),
@@ -356,8 +365,26 @@ impl StateGraph {
         schema: Value,
         compute: Derive,
     ) -> Result<Readable> {
+        self.derive_with(sources, || Self::schema(schema), compute)
+    }
+
+    pub(crate) fn derive_definition(
+        self: &Rc<Self>,
+        sources: Vec<Readable>,
+        definition: super::StateDefinition,
+        compute: Derive,
+    ) -> Result<Readable> {
+        self.derive_with(sources, || Ok(definition.inner.as_ref().clone()), compute)
+    }
+
+    fn derive_with(
+        self: &Rc<Self>,
+        sources: Vec<Readable>,
+        prepare: impl FnOnce() -> Result<StateSchema>,
+        compute: Derive,
+    ) -> Result<Readable> {
         self.check()?;
-        let schema = Self::schema(schema)?;
+        let schema = prepare()?;
         let mut ids = Vec::new();
         for source in sources {
             ids.push(self.source_id(&self.forward(source)?)?);
@@ -399,11 +426,25 @@ impl StateGraph {
         Ok(port.node_readable(self, id))
     }
 
-    pub fn expose(self: &Rc<Self>, source: &Readable, schema: Value) -> Result<Exposure> {
+    pub(crate) fn expose_definition(
+        self: &Rc<Self>,
+        source: &Readable,
+        definition: Result<super::StateDefinition>,
+    ) -> Result<Exposure> {
+        self.expose_with(source, || {
+            definition.map(|value| value.inner.as_ref().clone())
+        })
+    }
+
+    fn expose_with(
+        self: &Rc<Self>,
+        source: &Readable,
+        prepare: impl FnOnce() -> Result<StateSchema>,
+    ) -> Result<Exposure> {
         self.check()?;
         let id = self.source_id(source)?;
         let node = self.node(id)?;
-        let schema = Self::schema(schema)?;
+        let schema = prepare()?;
         match node.port.current() {
             Ok(snapshot) => schema
                 .validate(snapshot.value())

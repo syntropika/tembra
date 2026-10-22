@@ -9,9 +9,16 @@ use tembra::prelude::*;
 #[test]
 fn example_counter_exposes_its_committed_increment() -> Result<()> {
     tembra::native::run("example-counter-behavior", (), |host| async move {
-        host.serve(Counter, |_, _, declaration| {
-            CounterService::new(declaration, 0)
-        })?;
+        host.install(
+            NativeFacet::new("counter", vec![], |_, setup| {
+                let count = setup.state::<u32>("count")?;
+                setup.serve(Counter, move |_, _, declaration| {
+                    CounterService::new(declaration, count.value(0)?)
+                })
+            })?,
+            Default::default(),
+        )?
+        .await?;
         let counter = host.get(Counter, CounterInput {}).await?;
         assert_eq!(counter.count().value()?, 0);
         assert_eq!(counter.increment().await?, 1);
@@ -24,9 +31,16 @@ fn example_counter_exposes_its_committed_increment() -> Result<()> {
 #[test]
 fn example_counter_refuses_overflow_without_mutating_state() -> Result<()> {
     tembra::native::run("example-counter-limit", (), |host| async move {
-        host.serve(Counter, |_, _, declaration| {
-            CounterService::new(declaration, u32::MAX)
-        })?;
+        host.install(
+            NativeFacet::new("counter", vec![], |_, setup| {
+                let count = setup.state::<u32>("count")?;
+                setup.serve(Counter, move |_, _, declaration| {
+                    CounterService::new(declaration, count.value(u32::MAX)?)
+                })
+            })?,
+            Default::default(),
+        )?
+        .await?;
         let counter = host.get(Counter, CounterInput {}).await?;
         let error = counter.increment().await.expect_err("overflow must fail");
         assert_eq!(error.code, tembra::ErrorCode::Invalid);

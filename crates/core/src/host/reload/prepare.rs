@@ -291,7 +291,14 @@ impl HostInner {
                     let tembra_contracts::Member::State { schema } = &members[name] else {
                         unreachable!()
                     };
-                    candidate.graph.expose(source, schema.clone())?;
+                    let _ = schema;
+                    candidate.graph.expose_definition(
+                        source,
+                        service.state_definition(
+                            implementation.variant.as_deref().unwrap_or(""),
+                            name,
+                        ),
+                    )?;
                 }
                 candidate.resources.preflight_adoption()?;
                 replays.last_mut().expect("recorded replay").implementation =

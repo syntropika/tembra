@@ -81,11 +81,15 @@ impl CounterProvider for CounterService {
 
 fn main() -> Result<()> {
     tembra::native::run("example", (), |host| async move {
-        host.serve(Counter, |_, _, declaration| {
-            Ok(CounterService {
-                count: declaration.state("count", 0_u32)?,
+        let facet = tembra::NativeFacet::new("counter", vec![], |_, setup| {
+            let count = setup.state::<u32>("count")?;
+            setup.serve(Counter, move |_, _, declaration| {
+                Ok(CounterService {
+                    count: declaration.state(count.value(0)?)?,
+                })
             })
         })?;
+        host.install(facet, Default::default())?.await?;
         let counter = host.get(Counter, CounterInput {}).await?;
         counter.increment().await?;
         println!("Count: {}", counter.count().value()?);

@@ -40,7 +40,50 @@ pub struct FacetDeclaration<'a, 'b> {
     inner: &'a mut core::FacetDeclaration<'b>,
 }
 
-impl<'b> FacetDeclaration<'_, 'b> {
+impl<'a, 'b> FacetDeclaration<'a, 'b> {
+    /// Borrows actual Core setup authority; no factory or Context can construct setup authority.
+    pub fn from_core(inner: &'a mut core::FacetDeclaration<'b>) -> Self {
+        Self { inner }
+    }
+
+    /// Prepares a typed State definition once in this actual setup run.
+    /// # Errors
+    /// Rejects invalid setup and static schema/profile failures before any instance exists.
+    /// Names remain local to the cells that instantiate this definition.
+    pub fn state<
+        T: crate::serde::Serialize
+            + crate::serde::de::DeserializeOwned
+            + crate::schemars::JsonSchema
+            + 'static,
+    >(
+        &mut self,
+        name: impl Into<String>,
+    ) -> Result<crate::StateDefinition<T>> {
+        let name = name.into();
+        let metadata = self.inner.prepare_metadata(|| {
+            let schema =
+                crate::contracts::schema_for::<T>().map_err(crate::state::contract_error)?;
+            crate::state_definition::Metadata::prepare(name, schema)
+        })?;
+        Ok(crate::StateDefinition::from_metadata(metadata))
+    }
+
+    /// Prepares a descriptor-defined State schema for DTOs without JsonSchema.
+    /// # Errors
+    /// Rejects invalid setup and schema/profile failures during registration.
+    pub fn state_schema<
+        T: crate::serde::Serialize + crate::serde::de::DeserializeOwned + 'static,
+    >(
+        &mut self,
+        name: impl Into<String>,
+        schema: crate::serde_json::Value,
+    ) -> Result<crate::StateDefinition<T>> {
+        let metadata = self
+            .inner
+            .prepare_metadata(|| crate::state_definition::Metadata::prepare(name.into(), schema))?;
+        Ok(crate::StateDefinition::from_metadata(metadata))
+    }
+
     /// Registers a typed provider using default referenced-object lifecycle.
     ///
     /// # Errors

@@ -150,57 +150,102 @@ fn main() {
         driver.clone(),
     );
     let facade = tembra::Host::from_core(host.clone());
-    facade
-        .serve(generated::Counter, |_, _, declaration| {
-            let capability = declaration.core_mut().resource(
-                "capability",
-                ResourceDeclaration::new(|_| async { Ok(Cell::new(13_u32)) }.boxed_local()),
-            )?;
-            let count = declaration.state("count", 3_i64)?.readable();
-            Ok(NativeCounter { count, capability })
-        })
-        .unwrap();
-    let service = tembra::Host::with_driver("service", "host", driver.clone()).unwrap();
-    service
-        .serve(portable::GeneratedContract, |input, _, declaration| {
-            let initial = if input.name == "forwarded" {
-                7_i32
-            } else {
-                0_i32
-            };
-            let initialized =
-                portable::GeneratedContract::count_state_with_initializer(move |_| async move {
-                    let mut first_poll = true;
-                    tembra::futures::future::poll_fn(move |context| {
-                        if first_poll {
-                            first_poll = false;
-                            context.waker().wake_by_ref();
-                            std::task::Poll::Pending
-                        } else {
-                            std::task::Poll::Ready(())
-                        }
+    (|| -> tembra::Result<()> {
+        let provider_contract = generated::Counter;
+        facade
+            .install(
+                tembra::NativeFacet::new("generated-counter-provider", vec![], move |_, setup| {
+                    let count_definition = setup.state("count")?;
+                    setup.serve(provider_contract, move |_, _, declaration| {
+                        let capability = declaration.core_mut().resource(
+                            "capability",
+                            ResourceDeclaration::new(|_| {
+                                async { Ok(Cell::new(13_u32)) }.boxed_local()
+                            }),
+                        )?;
+                        let count = declaration
+                            .state(count_definition.value(3_i64)?)?
+                            .readable();
+                        Ok(NativeCounter { count, capability })
                     })
-                    .await;
-                    Ok(initial)
-                })?;
-            Ok(PortableCounter {
-                count: declaration.state_with("count", initialized)?,
-            })
-        })
-        .unwrap();
-    service
-        .serve(forwarded::GeneratedContract, |_, _, declaration| {
-            let source = declaration.get(
-                portable::GeneratedContract,
-                serde_json::from_value(json!({"name":"forwarded"})).unwrap(),
-            )?;
-            assert_eq!(source.core().status(), RefStatus::Loading);
-            // Capture and derive from the weak pending source before core hydration.
-            let count = source.count();
-            let derived = declaration.derive((count,), |(value,)| Ok(value))?;
-            Ok(ForwardedCounter { count: derived })
-        })
-        .unwrap();
+                })?,
+                Default::default(),
+            )
+            .map(drop)
+    })()
+    .unwrap();
+    let service = tembra::Host::with_driver("service", "host", driver.clone()).unwrap();
+    (|| -> tembra::Result<()> {
+        let provider_contract = portable::GeneratedContract;
+        service
+            .install(
+                tembra::NativeFacet::new(
+                    "portable-generatedcontract-provider",
+                    vec![],
+                    move |_, setup| {
+                        let count_definition =
+                            portable::GeneratedContract::count_state(setup, "count")?;
+                        setup.serve(provider_contract, move |input, _, declaration| {
+                            let initial = if input.name == "forwarded" {
+                                7_i32
+                            } else {
+                                0_i32
+                            };
+                            let initialized =
+                                count_definition.with_initializer(move |_| async move {
+                                    let mut first_poll = true;
+                                    tembra::futures::future::poll_fn(move |context| {
+                                        if first_poll {
+                                            first_poll = false;
+                                            context.waker().wake_by_ref();
+                                            std::task::Poll::Pending
+                                        } else {
+                                            std::task::Poll::Ready(())
+                                        }
+                                    })
+                                    .await;
+                                    Ok(initial)
+                                });
+                            Ok(PortableCounter {
+                                count: declaration.state(initialized)?,
+                            })
+                        })
+                    },
+                )?,
+                Default::default(),
+            )
+            .map(drop)
+    })()
+    .unwrap();
+    (|| -> tembra::Result<()> {
+        let provider_contract = forwarded::GeneratedContract;
+        service
+            .install(
+                tembra::NativeFacet::new(
+                    "forwarded-generatedcontract-provider",
+                    vec![],
+                    move |_, setup| {
+                        let derived_definition = setup.state("derived")?;
+                        setup.serve(provider_contract, move |_, _, declaration| {
+                            let source = declaration.get(
+                                portable::GeneratedContract,
+                                serde_json::from_value(json!({"name":"forwarded"})).unwrap(),
+                            )?;
+                            assert_eq!(source.core().status(), RefStatus::Loading);
+                            // Capture and derive from the weak pending source before core hydration.
+                            let count = source.count();
+                            let derived =
+                                declaration
+                                    .derive(&derived_definition, (count,), |(value,)| Ok(value))?;
+                            Ok(ForwardedCounter { count: derived })
+                        })
+                    },
+                )?,
+                Default::default(),
+            )
+            .map(drop)
+    })()
+    .unwrap();
     let weak_forwarded = driver.run_until(async {
         let reference = service
             .get(
@@ -216,46 +261,77 @@ fn main() {
     });
     driver.run_until_stalled();
     assert!(weak_forwarded.value().is_err());
+    let validation_definition = Rc::new(RefCell::new(None));
+    let capture_definition = validation_definition.clone();
     let projection_handles = Rc::new(RefCell::new(None));
     let record_projection = projection_handles.clone();
-    service
-        .serve(custom::GeneratedContract, move |_, _, declaration| {
-            let age = declaration.state("projection-source", 99_i64)?;
-            let projection =
-                custom::GeneratedContract::user_derive(declaration, (age.readable(),), |(age,)| {
-                    Ok(custom::variant_main::StateUser {
-                        name: "Projected".into(),
-                        age,
-                        note: if age == 100 {
-                            custom::Presence::Present(None)
-                        } else {
-                            custom::Presence::Missing
-                        },
-                    })
-                })?;
-            *record_projection.borrow_mut() = Some((age, projection));
-            let initial = custom::variant_main::StateUser {
-                name: "Alice".into(),
-                age: 99,
-                note: custom::Presence::Missing,
-            };
-            let _previous = declaration.state_with(
-                "previous-user",
-                custom::GeneratedContract::user_state(initial.clone())?
-                    .version(1)
-                    .with_migrate::<custom::variant_main::StateUser>(|old, _| Ok(old)),
-            )?;
-            let initialized = custom::GeneratedContract::user_state_with_initializer(move |_| {
-                let initial = initial.clone();
-                async move { Ok(initial) }
-            })?
-            .version(1)
-            .with_migrate::<custom::variant_main::StateUser>(|old, _| Ok(old));
-            Ok(UserProvider {
-                user: declaration.state_with("user", initialized)?,
-            })
-        })
-        .unwrap();
+    (|| -> tembra::Result<()> {
+        let provider_contract = custom::GeneratedContract;
+        service
+            .install(
+                tembra::NativeFacet::new(
+                    "custom-generatedcontract-provider",
+                    vec![],
+                    move |_, setup| {
+                        let record_projection = record_projection.clone();
+                        let state_projection_definition = setup.state("state-projection")?;
+                        let projected_user_definition =
+                            custom::GeneratedContract::user_state(setup, "projected-user")?;
+                        let previous_user_definition =
+                            custom::GeneratedContract::user_state(setup, "previous-user")?;
+                        let user_definition = custom::GeneratedContract::user_state(setup, "user")?;
+                        *capture_definition.borrow_mut() = Some(user_definition.clone());
+                        setup.serve(provider_contract, move |_, _, declaration| {
+                            let age =
+                                declaration.state(state_projection_definition.value(99_i64)?)?;
+                            let projection = declaration.derive(
+                                &projected_user_definition,
+                                (age.readable(),),
+                                |(age,)| {
+                                    Ok(custom::variant_main::StateUser {
+                                        name: "Projected".into(),
+                                        age,
+                                        note: if age == 100 {
+                                            custom::Presence::Present(None)
+                                        } else {
+                                            custom::Presence::Missing
+                                        },
+                                    })
+                                },
+                            )?;
+                            *record_projection.borrow_mut() = Some((age, projection));
+                            let initial = custom::variant_main::StateUser {
+                                name: "Alice".into(),
+                                age: 99,
+                                note: custom::Presence::Missing,
+                            };
+                            let _previous =
+                                declaration.state(
+                                    previous_user_definition
+                                        .value(initial.clone())?
+                                        .version(1)
+                                        .with_migrate::<custom::variant_main::StateUser>(|old, _| {
+                                        Ok(old)
+                                    }),
+                                )?;
+                            let initialized = user_definition
+                                .with_initializer(move |_| {
+                                    let initial = initial.clone();
+                                    async move { Ok(initial) }
+                                })
+                                .version(1)
+                                .with_migrate::<custom::variant_main::StateUser>(|old, _| Ok(old));
+                            Ok(UserProvider {
+                                user: declaration.state(initialized)?,
+                            })
+                        })
+                    },
+                )?,
+                Default::default(),
+            )
+            .map(drop)
+    })()
+    .unwrap();
     driver.run_until(async move {
         let raw = facade
             .core()
@@ -290,12 +366,16 @@ fn main() {
         let counter = facade.get(generated::Counter, input).await.unwrap();
         held.core().release();
         assert!(
-            custom::GeneratedContract::user_state(custom::variant_main::StateUser {
-                name: "Invalid".into(),
-                age: 101,
-                note: custom::Presence::Missing,
-            })
-            .is_err()
+            validation_definition
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .value(custom::variant_main::StateUser {
+                    name: "Invalid".into(),
+                    age: 101,
+                    note: custom::Presence::Missing,
+                })
+                .is_err()
         );
         let user = service
             .get(custom::GeneratedContract, custom::GeneratedContractInput {})

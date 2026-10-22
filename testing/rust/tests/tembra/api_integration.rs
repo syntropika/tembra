@@ -55,6 +55,7 @@ fn typed_facet_records_sync_dependencies_and_awaits_resource_and_state_readiness
         setup_events.borrow_mut().push("setup");
         let factory_events = setup_events.clone();
         // Record the eager consumer first; dependencies activate after setup finishes.
+        let seed_definition = setup.state("seed")?;
         setup.serve_with_options(
             Consumer,
             move |_, _, declaration| {
@@ -89,17 +90,14 @@ fn typed_facet_records_sync_dependencies_and_awaits_resource_and_state_readiness
                 assert_eq!(value.value().unwrap_err().code, ErrorCode::NotReady);
                 let initialized_value = value.clone();
                 let initialize_events = factory_events.clone();
-                let seed = declaration.state_with(
-                    "seed",
-                    StateDeclaration::with_initializer(move |_| {
-                        let value = initialized_value.clone();
-                        let events = initialize_events.clone();
-                        async move {
-                            events.borrow_mut().push("consumer initialize");
-                            Ok(*value.value()?)
-                        }
-                    })?,
-                )?;
+                let seed = declaration.state(seed_definition.with_initializer(move |_| {
+                    let value = initialized_value.clone();
+                    let events = initialize_events.clone();
+                    async move {
+                        events.borrow_mut().push("consumer initialize");
+                        Ok(*value.value()?)
+                    }
+                }))?;
                 Ok(ConsumerService {
                     dependency,
                     value,

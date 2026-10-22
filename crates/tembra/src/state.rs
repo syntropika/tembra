@@ -3,7 +3,7 @@
 //! State remains within the existing portable profile even for native local contracts.
 //! Rust values are decoded copies; mutating one never mutates a snapshot or authority.
 
-use std::{fmt, future::Future, marker::PhantomData};
+use std::{fmt, marker::PhantomData};
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -411,9 +411,13 @@ impl<T: Serialize + DeserializeOwned> Cell<T> {
     ///
     /// let driver = tembra::ManualDriver::new();
     /// let host = Host::with_driver("checked-counter", (), driver.clone())?;
-    /// host.serve(Counter, |_, _, declaration| {
-    ///     Ok(Service { count: declaration.state("count", 0_u64)? })
+    /// let facet = tembra::NativeFacet::new("counter", vec![], |_, setup| {
+    ///     let count = setup.state::<u64>("count")?;
+    ///     setup.serve(Counter, move |_, _, declaration| {
+    ///         Ok(Service { count: declaration.state(count.value(0)?)? })
+    ///     })
     /// })?;
+    /// driver.run_until(host.install(facet, Default::default())?)?;
     /// driver.run_until(async {
     ///     let counter = host.get(Counter, CounterInput {}).await?;
     ///     host.root(move |context| async move {
@@ -505,6 +509,7 @@ impl<T> Prepared<T> {
 
 /// A typed declaration retaining core initialization, migration and version semantics.
 pub struct StateDeclaration<T> {
+    name: std::rc::Rc<str>,
     inner: core::StateDeclaration,
     marker: PhantomData<fn() -> T>,
 }
@@ -517,85 +522,10 @@ impl<T> fmt::Debug for StateDeclaration<T> {
     }
 }
 
-impl<T: Serialize + DeserializeOwned + schemars::JsonSchema + 'static> StateDeclaration<T> {
-    /// Builds a checked portable initial value without installing it in an object.
-    ///
-    /// # Errors
-    /// Refuses unsupported schemas, nonportable values and failed Rust conversions.
-    ///
-    /// ```
-    /// use tembra::StateDeclaration;
-    ///
-    /// let empty = Vec::<u64>::new();
-    /// assert!(StateDeclaration::new(empty).is_ok());
-    /// assert!(StateDeclaration::new(f64::NAN).is_err());
-    /// assert!(StateDeclaration::new(u64::MAX).is_err());
-    /// ```
-    pub fn new(initial: T) -> Result<Self> {
-        let schema = tembra_contracts::schema_for::<T>().map_err(contract_error)?;
-        Self::with_schema(schema, initial)
-    }
-
-    /// Records an initializer that starts under the core's activation lifecycle.
-    ///
-    /// # Errors
-    /// Refuses an unsupported generated schema now. Initialization and conversion failures
-    /// later fail activation; cancellation still waits for started initializers to settle.
-    pub fn with_initializer<F, Fut>(initialize: F) -> Result<Self>
-    where
-        F: Fn(Context) -> Fut + 'static,
-        Fut: Future<Output = Result<T>> + 'static,
-    {
-        let schema = tembra_contracts::schema_for::<T>().map_err(contract_error)?;
-        Self::with_schema_initializer(schema, initialize)
-    }
-}
-
 impl<T: Serialize + DeserializeOwned + 'static> StateDeclaration<T> {
-    /// Builds a typed declaration against an existing canonical contract state schema.
-    ///
-    /// This advanced binding boundary supports generated DTOs without `JsonSchema`.
-    /// The supplied schema is normalized and the normalized initial value is validated
-    /// before constructing the core declaration. Installing it remains core-owned.
-    ///
+    /// Records a checked migration; Core validates every candidate before adoption.
     /// # Errors
-    /// Refuses invalid or unsupported schemas, failed Rust conversions and initial values
-    /// outside the supplied schema without recording state or running an initializer.
-    #[doc(hidden)]
-    pub fn with_schema(schema: Value, initial: T) -> Result<Self> {
-        let schema = tembra_contracts::normalize_schema(&schema).map_err(contract_error)?;
-        let value = encode(&initial)?;
-        tembra_contracts::validate(&schema, &value).map_err(contract_error)?;
-        Ok(Self {
-            inner: core::StateDeclaration::new(schema, value),
-            marker: PhantomData,
-        })
-    }
-
-    /// Records a typed initializer against an existing canonical contract state schema.
-    ///
-    /// # Errors
-    /// Refuses invalid or unsupported schemas immediately. Conversion and schema failures
-    /// from the eventual value fail core activation before state becomes authoritative.
-    /// Started initialization still follows core cancellation and physical cleanup rules.
-    #[doc(hidden)]
-    pub fn with_schema_initializer<F, Fut>(schema: Value, initialize: F) -> Result<Self>
-    where
-        F: Fn(Context) -> Fut + 'static,
-        Fut: Future<Output = Result<T>> + 'static,
-    {
-        let schema = tembra_contracts::normalize_schema(&schema).map_err(contract_error)?;
-        Ok(Self {
-            inner: core::StateDeclaration::with_initializer(schema, move |context| {
-                let future = initialize(context.into());
-                Box::pin(async move { encode(&future.await?) })
-            }),
-            marker: PhantomData,
-        })
-    }
-
-    /// Migrates a decoded old-version value into the new Rust representation.
-    /// Decode and encode occur inside the core's synchronous reload preparation.
+    /// Migration/conversion failures refuse the candidate without changing installed values.
     pub fn with_migrate<Old: DeserializeOwned + 'static>(
         mut self,
         migrate: impl Fn(Old, u64) -> Result<T> + 'static,
@@ -606,15 +536,24 @@ impl<T: Serialize + DeserializeOwned + 'static> StateDeclaration<T> {
         self
     }
 }
-
 impl<T> StateDeclaration<T> {
+    pub(crate) fn from_prepared_core(
+        name: std::rc::Rc<str>,
+        inner: core::StateDeclaration,
+    ) -> Self {
+        Self {
+            name,
+            inner,
+            marker: PhantomData,
+        }
+    }
+    /// Sets the declaration version checked by Core replacement/migration admission.
     pub fn version(mut self, version: u64) -> Self {
         self.inner = self.inner.version(version);
         self
     }
-
-    pub fn into_core(self) -> core::StateDeclaration {
-        self.inner
+    pub(crate) fn into_parts(self) -> (std::rc::Rc<str>, core::StateDeclaration) {
+        (self.name, self.inner)
     }
 }
 

@@ -264,7 +264,7 @@ impl HookManager {
     /// Runs ordered unit handlers without a terminal.
     /// # Errors
     /// Refuses full-plan admission before handler entry; later errors may follow effects.
-    pub fn run_series<A: Clone + 'static>(
+    pub fn run_dynamic_series<A: Clone + 'static>(
         &self,
         definition: &RustHookDefinition<A, ()>,
         input: A,
@@ -297,7 +297,7 @@ impl HookManager {
     /// Runs ordered unit handlers and the exact declared managed terminal.
     /// # Errors
     /// Refuses terminal/profile/full-plan admission before any contribution effect.
-    pub fn run_series_then<A: Clone + 'static, T: 'static>(
+    pub fn run_dynamic_series_then<A: Clone + 'static, T: 'static>(
         &self,
         definition: &RustHookDefinition<A, ()>,
         input: A,
@@ -331,7 +331,7 @@ impl HookManager {
     /// Returns the first explicit Stop, an exact terminal result, or Unresolved.
     /// # Errors
     /// Handler errors do not mean Continue; no later contribution starts after failure.
-    pub fn run_bail<A: Clone + 'static, R: 'static>(
+    pub fn run_dynamic_bail<A: Clone + 'static, R: 'static>(
         &self,
         definition: &RustHookDefinition<A, R>,
         input: A,
@@ -387,7 +387,7 @@ impl HookManager {
     /// Moves each validated accumulator into the next handler.
     /// # Errors
     /// Invalid intermediate results stop before another handler starts.
-    pub fn run_waterfall<A: 'static>(
+    pub fn run_dynamic_waterfall<A: 'static>(
         &self,
         definition: &RustHookDefinition<A, A>,
         input: A,
@@ -422,7 +422,7 @@ impl HookManager {
     /// Runs a waterfall followed by its declared ordinary terminal.
     /// # Errors
     /// Refuses plan/terminal mismatch or any invalid intermediate/output value.
-    pub fn run_waterfall_then<A: 'static, T: 'static>(
+    pub fn run_dynamic_waterfall_then<A: 'static, T: 'static>(
         &self,
         definition: &RustHookDefinition<A, A>,
         input: A,
@@ -459,7 +459,7 @@ impl HookManager {
     /// # Errors
     /// Refuses admission, missing wrappers, expired/repeated Next and unacknowledged failure.
     /// Started downstream and physical work are joined before result completion.
-    pub fn run_middleware<A: 'static, R: 'static>(
+    pub fn run_dynamic_middleware<A: 'static, R: 'static>(
         &self,
         definition: &RustHookDefinition<A, R>,
         input: A,
@@ -479,7 +479,7 @@ impl HookManager {
     /// Starts independent handlers in order and returns registration-ordered results.
     /// # Errors
     /// First observed failure cancels only sibling child scopes and joins all started work.
-    pub fn run_parallel<A: Clone + 'static, R: 'static>(
+    pub fn run_dynamic_parallel<A: Clone + 'static, R: 'static>(
         &self,
         definition: &RustHookDefinition<A, R>,
         input: A,
@@ -497,7 +497,7 @@ impl HookManager {
     /// Transforms an ordered successful parallel vector through its declared terminal.
     /// # Errors
     /// Refuses terminal/plan mismatch and skips terminal after any contribution failure.
-    pub fn run_parallel_then<A: Clone + 'static, R: 'static, T: 'static>(
+    pub fn run_dynamic_parallel_then<A: Clone + 'static, R: 'static, T: 'static>(
         &self,
         definition: &RustHookDefinition<A, R>,
         input: A,

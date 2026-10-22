@@ -13,6 +13,9 @@
 //! Their projections refresh after preparation; following a native panic, queued
 //! refreshes resume on the next non-unwinding graph operation.
 
+mod definition;
+pub use definition::StateDefinition;
+
 mod cell;
 mod graph;
 mod port;

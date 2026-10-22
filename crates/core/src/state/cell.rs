@@ -21,9 +21,15 @@ pub(super) enum Initial {
     Async(StateInitializer),
 }
 
+#[derive(Clone)]
+pub(super) enum DeclarationSchema {
+    Dynamic(Value),
+    Prepared(super::StateDefinition),
+}
+
 /// A candidate named cell declaration. Validation occurs when the declaration is installed.
 pub struct StateDeclaration {
-    pub(super) schema: Value,
+    pub(super) schema: DeclarationSchema,
     pub(super) version: u64,
     pub(super) initial: Initial,
     pub(super) migrate: Option<StateMigration>,
@@ -32,7 +38,7 @@ pub struct StateDeclaration {
 impl StateDeclaration {
     pub fn new(schema: Value, initial: Value) -> Self {
         Self {
-            schema,
+            schema: DeclarationSchema::Dynamic(schema),
             version: 1,
             initial: Initial::Value(initial),
             migrate: None,
@@ -44,7 +50,30 @@ impl StateDeclaration {
         initialize: impl Fn(Context) -> LocalBoxFuture<'static, Result<Value>> + 'static,
     ) -> Self {
         Self {
-            schema,
+            schema: DeclarationSchema::Dynamic(schema),
+            version: 1,
+            initial: Initial::Async(Rc::new(initialize)),
+            migrate: None,
+        }
+    }
+
+    /// Instantiates shared immutable metadata with a fresh independently validated value.
+    pub fn from_definition(definition: super::StateDefinition, initial: Value) -> Self {
+        Self {
+            schema: DeclarationSchema::Prepared(definition),
+            version: 1,
+            initial: Initial::Value(initial),
+            migrate: None,
+        }
+    }
+
+    /// Records a fresh initializer; the current Core graph validates its eventual result.
+    pub fn from_definition_initializer(
+        definition: super::StateDefinition,
+        initialize: impl Fn(Context) -> LocalBoxFuture<'static, Result<Value>> + 'static,
+    ) -> Self {
+        Self {
+            schema: DeclarationSchema::Prepared(definition),
             version: 1,
             initial: Initial::Async(Rc::new(initialize)),
             migrate: None,

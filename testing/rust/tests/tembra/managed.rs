@@ -186,12 +186,24 @@ fn typed_remote_acquisition_calls_state_and_validation_use_the_shared_rpc_core()
     client.core().set_route("dx-server", outbound)?;
     let calls = Rc::new(Flag::new(0));
     let invoked = calls.clone();
-    server.serve(RemoteCounter, move |_, _, declaration| {
-        Ok(CounterService {
-            count: declaration.state("count", 0_u64)?,
-            calls: invoked.clone(),
-        })
-    })?;
+    (|| -> tembra::Result<()> {
+        let provider_contract = RemoteCounter;
+        server
+            .install(
+                tembra::NativeFacet::new("remotecounter-provider", vec![], move |_, setup| {
+                    let invoked = invoked.clone();
+                    let count_definition = setup.state("count")?;
+                    setup.serve(provider_contract, move |_, _, declaration| {
+                        Ok(CounterService {
+                            count: declaration.state(count_definition.value(0_u64)?)?,
+                            calls: invoked.clone(),
+                        })
+                    })
+                })?,
+                Default::default(),
+            )
+            .map(drop)
+    })()?;
     driver.run_until(async {
         let reference = client.get(RemoteCounter, RemoteCounterInput {}).await?;
         assert_eq!(reference.count().value()?, 0);

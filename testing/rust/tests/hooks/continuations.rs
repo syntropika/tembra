@@ -64,7 +64,7 @@ fn first_invalid_decode_consumes_next_and_explicit_recovery_prepares_before_ack(
     );
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_middleware(&d, 1, &ctx, terminal))
+        h.run(move |ctx| m.run_dynamic_middleware(&d, 1, &ctx, terminal))
             .unwrap(),
         9
     );
@@ -106,7 +106,7 @@ fn projection_errors_are_sticky_but_prepared_rejections_are_recoverable() {
             }),
         );
         let m = h.manager.clone();
-        let result = h.run(move |ctx| m.run_middleware(&d, 1, &ctx, terminal));
+        let result = h.run(move |ctx| m.run_dynamic_middleware(&d, 1, &ctx, terminal));
         if sticky {
             assert_eq!(result.unwrap_err().reason, "projection");
         } else {
@@ -143,7 +143,7 @@ fn encoded_next_error_can_be_recovered_without_joining_its_own_projection_guard(
     let terminal = h.terminal("encoding", integer(), integer(), identity());
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_middleware(&d, 1, &ctx, terminal))
+        h.run(move |ctx| m.run_dynamic_middleware(&d, 1, &ctx, terminal))
             .unwrap(),
         5
     );
@@ -181,7 +181,7 @@ fn retained_unpolled_attempt_seals_without_downstream_and_late_next_expires() {
     );
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_middleware(&d, 1, &ctx, terminal))
+        h.run(move |ctx| m.run_dynamic_middleware(&d, 1, &ctx, terminal))
             .unwrap_err()
             .reason,
         "hook_next_abandoned"
@@ -226,7 +226,7 @@ fn unwrapped_contribution_cannot_receive_an_active_next() {
     let terminal = h.terminal("unwrapped", integer(), integer(), identity());
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_middleware(&d, 1, &ctx, terminal))
+        h.run(move |ctx| m.run_dynamic_middleware(&d, 1, &ctx, terminal))
             .unwrap_err()
             .reason,
         "hook_signature"
@@ -298,7 +298,7 @@ fn fallback_validation_reentry_is_refused_and_invalid_fallback_does_not_consume_
     );
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_middleware(&d, 1, &ctx, terminal))
+        h.run(move |ctx| m.run_dynamic_middleware(&d, 1, &ctx, terminal))
             .unwrap(),
         8
     );
@@ -332,7 +332,7 @@ fn duplicate_refusal_is_ordinary_but_its_actual_output_projection_failure_is_sti
         );
         let terminal = h.terminal("duplicate", integer(), integer(), identity());
         let m = h.manager.clone();
-        let result = h.run(move |ctx| m.run_middleware(&d, 1, &ctx, terminal));
+        let result = h.run(move |ctx| m.run_dynamic_middleware(&d, 1, &ctx, terminal));
         if sticky {
             assert_eq!(result.unwrap_err().reason, "projection");
         } else {

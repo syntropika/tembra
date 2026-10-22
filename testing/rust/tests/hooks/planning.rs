@@ -47,7 +47,7 @@ fn one_immutable_registry_plan_excludes_contributions_published_mid_run() {
     h.driver.spawn(
         async move {
             *sink.borrow_mut() = Some(
-                host.root(move |ctx| m.run_series(&old, 1, &ctx).boxed_local())
+                host.root(move |ctx| m.run_dynamic_series(&old, 1, &ctx).boxed_local())
                     .await,
             );
         }
@@ -71,7 +71,7 @@ fn one_immutable_registry_plan_excludes_contributions_published_mid_run() {
     output.borrow_mut().take().unwrap().unwrap();
     assert_eq!(&*seen.borrow(), &["first"]);
     let m = h.manager.clone();
-    h.run(move |ctx| m.run_series(&d, 1, &ctx)).unwrap();
+    h.run(move |ctx| m.run_dynamic_series(&d, 1, &ctx)).unwrap();
     assert_eq!(&*seen.borrow(), &["first", "first", "later"]);
     h.close();
 }
@@ -130,7 +130,7 @@ fn native_middleware_keeps_actual_rc_identity_without_clone_bounds_on_payload() 
     let expected = Rc::new(Marker);
     let input = expected.clone();
     let result = h
-        .run(move |ctx| m.run_middleware(&d, input, &ctx, terminal))
+        .run(move |ctx| m.run_dynamic_middleware(&d, input, &ctx, terminal))
         .unwrap();
     assert!(Rc::ptr_eq(&expected, &result));
     h.close();
@@ -187,7 +187,7 @@ fn maximum_middleware_plan_uses_driver_trampoline_instead_of_recursive_poll_stac
     let terminal = h.terminal("wide", integer(), integer(), identity());
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_middleware(&d, 0, &ctx, terminal))
+        h.run(move |ctx| m.run_dynamic_middleware(&d, 0, &ctx, terminal))
             .unwrap(),
         COUNT as i32
     );

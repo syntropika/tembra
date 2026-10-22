@@ -35,7 +35,7 @@ fn cloned_metadata_survives_authoring_drop_without_retaining_execution_admission
             async move {
                 assert_eq!(
                     manager
-                        .run_middleware(&copied_definition, 3, &context, copied_terminal)
+                        .run_dynamic_middleware(&copied_definition, 3, &context, copied_terminal)
                         .await?,
                     3
                 );
@@ -49,7 +49,7 @@ fn cloned_metadata_survives_authoring_drop_without_retaining_execution_admission
         h.driver
             .run_until(
                 h.manager
-                    .run_middleware(&definition, 4, &expired, terminal.clone())
+                    .run_dynamic_middleware(&definition, 4, &expired, terminal.clone())
             )
             .unwrap_err()
             .reason,
@@ -58,7 +58,10 @@ fn cloned_metadata_survives_authoring_drop_without_retaining_execution_admission
     h.close();
     assert!(
         h.driver
-            .run_until(h.manager.run_middleware(&definition, 5, &expired, terminal))
+            .run_until(
+                h.manager
+                    .run_dynamic_middleware(&definition, 5, &expired, terminal)
+            )
             .is_err()
     );
     assert_eq!(entries.get(), 1);
@@ -103,7 +106,7 @@ fn retained_terminal_profiles_reject_disagreement_and_check_each_current_value()
     );
     let (manager, definition) = (h.manager.clone(), d.clone());
     assert_eq!(
-        h.run(move |ctx| manager.run_middleware(&definition, 20, &ctx, disagreeing))
+        h.run(move |ctx| manager.run_dynamic_middleware(&definition, 20, &ctx, disagreeing))
             .unwrap_err()
             .reason,
         "hook_signature"
@@ -111,7 +114,8 @@ fn retained_terminal_profiles_reject_disagreement_and_check_each_current_value()
     assert_eq!(entries.get(), 0);
     for value in [3, -1, 4] {
         let (manager, definition, terminal) = (h.manager.clone(), d.clone(), terminal.clone());
-        let result = h.run(move |ctx| manager.run_middleware(&definition, value, &ctx, terminal));
+        let result =
+            h.run(move |ctx| manager.run_dynamic_middleware(&definition, value, &ctx, terminal));
         if value >= 0 {
             assert_eq!(result.unwrap(), value);
         } else {
@@ -138,27 +142,29 @@ fn five_empty_outcomes_and_terminal_presence_are_explicit() {
     let mw = middleware("middleware");
     let terminal = h.terminal("identity", integer(), integer(), identity());
     let m = h.manager.clone();
-    h.run(move |ctx| m.run_series(&series, 3, &ctx)).unwrap();
+    h.run(move |ctx| m.run_dynamic_series(&series, 3, &ctx))
+        .unwrap();
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_bail(&bail, 3, &ctx, None)).unwrap(),
+        h.run(move |ctx| m.run_dynamic_bail(&bail, 3, &ctx, None))
+            .unwrap(),
         BailOutcome::Unresolved
     );
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_waterfall(&waterfall, 3, &ctx))
+        h.run(move |ctx| m.run_dynamic_waterfall(&waterfall, 3, &ctx))
             .unwrap(),
         3
     );
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_parallel(&parallel, 3, &ctx))
+        h.run(move |ctx| m.run_dynamic_parallel(&parallel, 3, &ctx))
             .unwrap(),
         Vec::<i32>::new()
     );
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_middleware(&mw, 3, &ctx, terminal))
+        h.run(move |ctx| m.run_dynamic_middleware(&mw, 3, &ctx, terminal))
             .unwrap(),
         3
     );
@@ -195,7 +201,7 @@ fn priority_order_waterfall_parallel_and_all_terminal_forms() {
     let terminal = h.terminal("series", integer(), integer(), identity());
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_series_then(&series, 7, &ctx, terminal))
+        h.run(move |ctx| m.run_dynamic_series_then(&series, 7, &ctx, terminal))
             .unwrap(),
         7
     );
@@ -225,7 +231,7 @@ fn priority_order_waterfall_parallel_and_all_terminal_forms() {
     );
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_waterfall_then(&waterfall, 2, &ctx, terminal))
+        h.run(move |ctx| m.run_dynamic_waterfall_then(&waterfall, 2, &ctx, terminal))
             .unwrap(),
         13
     );
@@ -259,7 +265,7 @@ fn priority_order_waterfall_parallel_and_all_terminal_forms() {
     );
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_parallel_then(&parallel, 10, &ctx, terminal))
+        h.run(move |ctx| m.run_dynamic_parallel_then(&parallel, 10, &ctx, terminal))
             .unwrap(),
         28
     );
@@ -286,7 +292,8 @@ fn bail_false_and_null_are_stops_and_terminal_runs_only_after_continue() {
         h.ready();
         let m = h.manager.clone();
         assert_eq!(
-            h.run(move |ctx| m.run_bail(&d, (), &ctx, None)).unwrap(),
+            h.run(move |ctx| m.run_dynamic_bail(&d, (), &ctx, None))
+                .unwrap(),
             BailOutcome::Resolved(expected)
         );
         h.close();
@@ -313,7 +320,7 @@ fn bail_false_and_null_are_stops_and_terminal_runs_only_after_continue() {
     let terminal = h.terminal("bail", integer(), integer(), identity());
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_bail(&d, 9, &ctx, Some(terminal)))
+        h.run(move |ctx| m.run_dynamic_bail(&d, 9, &ctx, Some(terminal)))
             .unwrap(),
         BailOutcome::Resolved(9)
     );
@@ -364,7 +371,7 @@ fn middleware_modifies_short_circuits_and_requires_named_recovery() {
             }),
         );
         let m = h.manager.clone();
-        let result = h.run(move |ctx| m.run_middleware(&d, 3, &ctx, terminal));
+        let result = h.run(move |ctx| m.run_dynamic_middleware(&d, 3, &ctx, terminal));
         match mode {
             0 => assert_eq!(result.unwrap(), 18),
             1 => assert_eq!(result.unwrap(), 55),

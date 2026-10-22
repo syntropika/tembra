@@ -11,6 +11,8 @@ mod declaration;
 mod facet;
 mod host;
 mod state;
+mod state_definition;
+pub use state_definition::StateDefinition;
 mod token;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -39,6 +41,7 @@ pub mod prelude {
     pub use crate::serde::{Deserialize, Serialize};
     pub use crate::{
         Cell, Context, ContractToken, Declaration, Host, NativeFacet, Prepared, Readable, Resource,
-        ResourceDeclaration, Result, RuntimeError, Snapshot, StateDeclaration, contract,
+        ResourceDeclaration, Result, RuntimeError, Snapshot, StateDeclaration, StateDefinition,
+        contract,
     };
 }

@@ -45,11 +45,21 @@ impl CounterProvider for CounterService {
 fn native_provider_and_reference_keep_core_owned_state_and_dispatch() -> Result<()> {
     let driver = ManualDriver::new();
     let host = Host::with_driver("typed-counter", (), driver.clone())?;
-    host.serve(Counter, |_, _, declaration| {
-        Ok(CounterService {
-            count: declaration.state("count", 0_u64)?,
-        })
-    })?;
+    (|| -> tembra::Result<()> {
+        let provider_contract = Counter;
+        host.install(
+            tembra::NativeFacet::new("counter-provider", vec![], move |_, setup| {
+                let count_definition = setup.state("count")?;
+                setup.serve(provider_contract, move |_, _, declaration| {
+                    Ok(CounterService {
+                        count: declaration.state(count_definition.value(0_u64)?)?,
+                    })
+                })
+            })?,
+            Default::default(),
+        )
+        .map(drop)
+    })()?;
     driver.run_until(async {
         let counter = host.get(Counter, CounterInput {}).await?;
         let Err(mismatch) = PortableLocalRef::from_reference(counter.core().clone()) else {

@@ -60,7 +60,7 @@ fn first_parallel_logical_failure_cancels_siblings_before_detached_physical_leas
             *result.borrow_mut() = Some(
                 host.root(move |ctx| {
                     async move {
-                        let outcome = m.run_parallel(&d, 1, &ctx).await;
+                        let outcome = m.run_dynamic_parallel(&d, 1, &ctx).await;
                         ctx.check(ctx.host_id())
                             .expect("sibling failure cannot cancel caller root");
                         outcome
@@ -190,7 +190,7 @@ fn dropped_observer_keeps_run_budget_until_started_work_and_detached_lease_settl
         async move {
             host.root(move |ctx| {
                 *saved.borrow_mut() = Some(ctx.clone());
-                *target.borrow_mut() = Some(m.run_parallel(&definition, 1, &ctx));
+                *target.borrow_mut() = Some(m.run_dynamic_parallel(&definition, 1, &ctx));
                 async move {
                     ended.await.unwrap();
                     Ok(())
@@ -221,7 +221,7 @@ fn dropped_observer_keeps_run_budget_until_started_work_and_detached_lease_settl
         .unwrap();
     let (m, definition) = (h.manager.clone(), d.clone());
     assert_eq!(
-        h.run(move |ctx| m.run_parallel(&definition, 1, &ctx))
+        h.run(move |ctx| m.run_dynamic_parallel(&definition, 1, &ctx))
             .unwrap_err()
             .reason,
         "hook_runs"
@@ -231,7 +231,7 @@ fn dropped_observer_keeps_run_budget_until_started_work_and_detached_lease_settl
     h.driver.run_until_stalled();
     let (m, definition) = (h.manager.clone(), d.clone());
     assert_eq!(
-        h.run(move |ctx| m.run_parallel(&definition, 1, &ctx))
+        h.run(move |ctx| m.run_dynamic_parallel(&definition, 1, &ctx))
             .unwrap_err()
             .reason,
         "hook_runs"
@@ -240,7 +240,8 @@ fn dropped_observer_keeps_run_budget_until_started_work_and_detached_lease_settl
     h.driver.run_until_stalled();
     let m = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| m.run_parallel(&d, 1, &ctx)).unwrap(),
+        h.run(move |ctx| m.run_dynamic_parallel(&d, 1, &ctx))
+            .unwrap(),
         vec![2]
     );
     end.send(()).unwrap();
@@ -290,7 +291,9 @@ fn complete_plan_type_preflight_and_contribution_limit_run_no_handlers() {
         }
         h.ready();
         let m = h.manager.clone();
-        let error = h.run(move |ctx| m.run_series(&d, 1, &ctx)).unwrap_err();
+        let error = h
+            .run(move |ctx| m.run_dynamic_series(&d, 1, &ctx))
+            .unwrap_err();
         assert_eq!(
             error.reason,
             if limit {

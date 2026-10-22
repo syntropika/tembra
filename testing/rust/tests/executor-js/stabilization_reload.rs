@@ -293,7 +293,7 @@ export default {{name:'stabilization.js',uses:[monitor],setup(scope,declare){{
             host.root(move |ctx| {
                 async move {
                     manager
-                        .run_middleware(&definition, marker, &ctx, terminal)
+                        .run_dynamic_middleware(&definition, marker, &ctx, terminal)
                         .await
                 }
                 .boxed_local()

@@ -170,7 +170,7 @@ return function discarded() {
             .unwrap();
 
             host.root(move |ctx| {
-                async move { manager.run_series(&definition, (), &ctx).await }.boxed_local()
+                async move { manager.run_dynamic_series(&definition, (), &ctx).await }.boxed_local()
             })
             .await
             .unwrap();
@@ -333,7 +333,7 @@ fn native_hook_values_keep_real_rc_identity_and_exact_root_through_js_and_termin
 
                     async move {
                         manager
-                            .run_middleware(&definition, input, &ctx, terminal)
+                            .run_dynamic_middleware(&definition, input, &ctx, terminal)
                             .await
                     }
                     .boxed_local()
@@ -410,7 +410,8 @@ fn bail_handler_type_is_distinct_from_semantic_payload_and_false_is_a_stop() {
 
             let result = host
                 .root(move |ctx| {
-                    async move { manager.run_bail(&definition, (), &ctx, None).await }.boxed_local()
+                    async move { manager.run_dynamic_bail(&definition, (), &ctx, None).await }
+                        .boxed_local()
                 })
                 .await
                 .unwrap();

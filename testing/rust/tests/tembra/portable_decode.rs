@@ -51,12 +51,22 @@ impl NumbersProvider for Service {
 fn macro_provider_accepts_large_integral_float_arguments_and_factory_inputs() -> Result<()> {
     let driver = core::ManualDriver::new();
     let host = Host::with_driver("typed-portable-decode-provider", (), driver.clone())?;
-    host.serve(Numbers, |input, _, declaration| {
-        assert_eq!(input, clock());
-        Ok(Service {
-            clock: declaration.state("clock", input.wake_at_ms)?,
-        })
-    })?;
+    (|| -> tembra::Result<()> {
+        let provider_contract = Numbers;
+        host.install(
+            tembra::NativeFacet::new("numbers-provider", vec![], move |_, setup| {
+                let clock_definition = setup.state("clock")?;
+                setup.serve(provider_contract, move |input, _, declaration| {
+                    assert_eq!(input, clock());
+                    Ok(Service {
+                        clock: declaration.state(clock_definition.value(input.wake_at_ms)?)?,
+                    })
+                })
+            })?,
+            Default::default(),
+        )
+        .map(drop)
+    })()?;
     driver.run_until(async {
         let reference = host
             .core()

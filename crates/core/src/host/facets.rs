@@ -420,12 +420,18 @@ impl HostInner {
     pub(crate) fn replace_setup_pass(&self, pass: Weak<SetupScope>) -> Weak<SetupScope> {
         self.facets.setup_pass.replace(pass)
     }
-    pub(crate) fn retain_run_owner(
+    pub(crate) fn check_setup(
         self: &Rc<Self>,
         journal: &Rc<RefCell<SetupJournal>>,
         pass: &Weak<SetupScope>,
-        owner: Rc<dyn Any>,
     ) -> Result<()> {
+        self.setup_run(journal, pass).map(|_| ())
+    }
+    fn setup_run(
+        self: &Rc<Self>,
+        journal: &Rc<RefCell<SetupJournal>>,
+        pass: &Weak<SetupScope>,
+    ) -> Result<Rc<InstalledRun>> {
         let (id, name, candidate) = {
             let journal = journal.borrow();
             if pass.upgrade().is_none()
@@ -451,6 +457,15 @@ impl HostInner {
         let run = run
             .filter(|run| run.id == id)
             .ok_or_else(|| RuntimeError::invalid("setup_scope", "run is no longer installed"))?;
+        Ok(run)
+    }
+    pub(crate) fn retain_run_owner(
+        self: &Rc<Self>,
+        journal: &Rc<RefCell<SetupJournal>>,
+        pass: &Weak<SetupScope>,
+        owner: Rc<dyn Any>,
+    ) -> Result<()> {
+        let run = self.setup_run(journal, pass)?;
         let mut retained = run.retained.borrow_mut();
         if let Some(retained) = retained.as_mut() {
             retained.push(owner);
