@@ -113,7 +113,7 @@ impl GraphReload {
                 "state names must be nonempty and unique",
             ));
         }
-        let schema = StateGraph::schema(declaration.schema.clone())?;
+        let schema = StateGraph::declaration_schema(declaration.schema.clone())?;
         let existing = self.graph.named.borrow().get(&name).cloned();
         let (cell, changed) = if let Some(cell) = existing {
             let changed = cell.compare_declaration(&schema, declaration.version)?
@@ -199,8 +199,26 @@ impl GraphReload {
         schema: Value,
         compute: Derive,
     ) -> Result<Readable> {
+        self.derive_with(sources, || StateGraph::schema(schema), compute)
+    }
+
+    pub(crate) fn derive_definition(
+        &self,
+        sources: Vec<Readable>,
+        definition: super::super::StateDefinition,
+        compute: Derive,
+    ) -> Result<Readable> {
+        self.derive_with(sources, || Ok(definition.inner.as_ref().clone()), compute)
+    }
+
+    fn derive_with(
+        &self,
+        sources: Vec<Readable>,
+        prepare: impl FnOnce() -> Result<StateSchema>,
+        compute: Derive,
+    ) -> Result<Readable> {
         self.check()?;
-        let schema = StateGraph::schema(schema)?;
+        let schema = prepare()?;
         let ids = sources
             .into_iter()
             .map(|source| self.source(source))
@@ -240,6 +258,20 @@ impl GraphReload {
         self.exposures.borrow_mut().push((id, key, schema));
         Ok(())
     }
+    pub(crate) fn expose_definition(
+        &self,
+        source: &Readable,
+        definition: Result<super::super::StateDefinition>,
+    ) -> Result<()> {
+        self.check()?;
+        let id = self.graph.source_id(source)?;
+        let schema = definition?.inner.as_ref().clone();
+        let key = self.graph.exposure.get() + 1;
+        self.graph.exposure.set(key);
+        self.exposures.borrow_mut().push((id, key, schema));
+        Ok(())
+    }
+
     pub(crate) fn take_initializers(&self) -> Vec<InitializerPlan> {
         std::mem::take(&mut *self.initializers.borrow_mut())
     }

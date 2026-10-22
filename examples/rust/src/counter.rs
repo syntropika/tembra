@@ -18,9 +18,12 @@ pub(crate) struct CounterService {
 }
 
 impl CounterService {
-    pub(crate) fn new(declaration: &mut Declaration<'_>, initial: u32) -> Result<Self> {
+    pub(crate) fn new(
+        declaration: &mut Declaration<'_>,
+        initial: tembra::StateDeclaration<u32>,
+    ) -> Result<Self> {
         Ok(Self {
-            count: declaration.state("count", initial)?,
+            count: declaration.state(initial)?,
         })
     }
 }

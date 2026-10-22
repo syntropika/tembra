@@ -1116,7 +1116,17 @@ impl HostInner {
             if !object.state.owns(source) {
                 *source = object.state.forward(source.clone())?;
             }
-            exposures.push(object.state.expose(source, schema.clone())?);
+            let _ = schema;
+            let service = object
+                .activation_service
+                .borrow()
+                .clone()
+                .expect("activation service retained");
+            exposures.push(
+                object
+                    .state
+                    .expose_definition(source, service.state_definition(variant, name))?,
+            );
         }
         *object.state_exposures.borrow_mut() = exposures;
         *object.implementation.borrow_mut() = Some(Rc::new(implementation));

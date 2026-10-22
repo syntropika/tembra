@@ -362,7 +362,7 @@ export default {{
             .root(move |context| {
                 async move {
                     manager
-                        .run_middleware(&definition, input, &context, terminal)
+                        .run_dynamic_middleware(&definition, input, &context, terminal)
                         .await
                 }
                 .boxed_local()
@@ -892,8 +892,12 @@ return value;
                 .host
                 .root(move |ctx| {
                     *captured.borrow_mut() = Some(ctx.clone());
-                    async move { manager.run_middleware(&definition, 5, &ctx, terminal).await }
-                        .boxed_local()
+                    async move {
+                        manager
+                            .run_dynamic_middleware(&definition, 5, &ctx, terminal)
+                            .await
+                    }
+                    .boxed_local()
                 })
                 .boxed_local();
 

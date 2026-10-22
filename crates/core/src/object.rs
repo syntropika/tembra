@@ -537,6 +537,28 @@ impl Declaration {
         }
     }
 
+    /// Declares a projection using immutable definition metadata through the existing graph.
+    /// # Errors
+    /// Preserves source/lifecycle, conversion and candidate-validation failures.
+    pub fn derive_definition(
+        &mut self,
+        sources: Vec<Readable>,
+        definition: crate::StateDefinition,
+        compute: impl Fn(&[Snapshot]) -> Result<Value> + 'static,
+    ) -> Result<Readable> {
+        match self.reload_candidate()? {
+            Some(candidate) => {
+                candidate
+                    .graph
+                    .derive_definition(sources, definition, Rc::new(compute))
+            }
+            None => self
+                .object
+                .state
+                .derive_definition(sources, definition, Rc::new(compute)),
+        }
+    }
+
     /// Declares an object-owned reference, deduplicated by object address.
     ///
     /// # Errors

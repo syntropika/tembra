@@ -3,12 +3,13 @@ use super::{check_binding, facets};
 use crate::{Factory, Result, ServeOptions};
 use std::{
     cell::RefCell,
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     rc::{Rc, Weak},
 };
 use tembra_contracts::Contract;
 
 const MAX_CONSUMER_PROOFS: usize = 16;
+type StateDefinitions = Rc<RefCell<BTreeMap<(String, String), Result<crate::StateDefinition>>>>;
 
 // Only this module can construct or replace the inputs certified by these proofs.
 // Every replacement starts with fresh proofs; Service clones share the same proof owner.
@@ -16,6 +17,7 @@ pub(super) struct ServiceDefinition {
     contract: Rc<Contract>,
     options: ServeOptions,
     proofs: Rc<BindingProofs>,
+    state_definitions: StateDefinitions,
 }
 
 impl ServiceDefinition {
@@ -25,6 +27,7 @@ impl ServiceDefinition {
             contract: contract.clone(),
             options: options.clone(),
             proofs: Rc::new(BindingProofs::default()),
+            state_definitions: Rc::default(),
         })
     }
 }
@@ -77,6 +80,7 @@ pub(crate) struct Service {
     pub(crate) owner: Option<facets::FacetRunId>,
     pub(crate) owner_name: Option<Rc<str>>,
     proofs: Rc<BindingProofs>,
+    state_definitions: StateDefinitions,
 }
 
 impl Service {
@@ -91,6 +95,7 @@ impl Service {
             contract,
             options,
             proofs,
+            state_definitions,
         } = definition;
         Self {
             contract,
@@ -100,7 +105,37 @@ impl Service {
             owner,
             owner_name,
             proofs,
+            state_definitions,
         }
+    }
+
+    pub(crate) fn state_definition(
+        &self,
+        variant: &str,
+        name: &str,
+    ) -> Result<crate::StateDefinition> {
+        let key = (variant.to_owned(), name.to_owned());
+        if let Some(value) = self.state_definitions.borrow().get(&key) {
+            return value.clone();
+        }
+        let schema = match self
+            .contract
+            .members(variant)
+            .and_then(|members| members.get(name))
+        {
+            Some(tembra_contracts::Member::State { schema }) => schema.clone(),
+            _ => {
+                return Err(crate::RuntimeError::invalid(
+                    "state_definition",
+                    "provider has no selected state member",
+                ));
+            }
+        };
+        let prepared = crate::StateDefinition::new(schema);
+        self.state_definitions
+            .borrow_mut()
+            .insert(key, prepared.clone());
+        prepared
     }
 
     pub(crate) fn contract(&self) -> &Rc<Contract> {
@@ -274,5 +309,34 @@ mod tests {
         assert!(!Rc::ptr_eq(&old.proofs, &replacement.proofs));
         assert_eq!(replacement.bind(&consumer).unwrap_err().reason, "version");
         old.bind(&consumer).unwrap();
+    }
+    #[test]
+    fn state_metadata_is_registration_owned_and_replacement_cannot_reuse_old_schema() {
+        let make = |version, maximum| {
+            Rc::new(
+                Contract::local(
+                    "state-proof",
+                    version,
+                    json!({}),
+                    BTreeMap::from([(
+                        "value".into(),
+                        Member::State {
+                            schema: json!({"type":"integer","maximum":maximum}),
+                        },
+                    )]),
+                )
+                .unwrap(),
+            )
+        };
+        let old = service(&make(1, 10), &ServeOptions::default());
+        let original = old.state_definition("", "value").unwrap();
+        let cloned = old.clone().state_definition("", "value").unwrap();
+        assert!(Rc::ptr_eq(&original.schema(), &cloned.schema()));
+        original.validate(&json!(5)).unwrap();
+        let replacement = service(&make(2, 1), &ServeOptions::default());
+        let next = replacement.state_definition("", "value").unwrap();
+        assert!(!Rc::ptr_eq(&original.schema(), &next.schema()));
+        assert!(next.validate(&json!(5)).is_err());
+        original.validate(&json!(5)).unwrap();
     }
 }

@@ -33,10 +33,10 @@
 //! let definition = RustHookDefinition::from_descriptor(descriptor, input, HookType::absent())?;
 //! let (run_manager, run_definition) = (manager.clone(), definition.clone());
 //! let expired = driver.run_until(host.root(move |context| async move {
-//!     run_manager.run_series(&run_definition, 3, &context).await?;
+//!     run_manager.run_dynamic_series(&run_definition, 3, &context).await?;
 //!     Ok(context)
 //! }.boxed_local()))?;
-//! let refusal = driver.run_until(manager.run_series(&definition, 3, &expired));
+//! let refusal = driver.run_until(manager.run_dynamic_series(&definition, 3, &expired));
 //! assert_eq!(refusal.unwrap_err().reason, "expired");
 //! driver.run_until(host.close())?;
 //! # Ok::<(), tembra_core::RuntimeError>(())

@@ -92,54 +92,16 @@ impl Provider {
             "let implementation = implementation.state({wire:?}, provider.{ident}().core()?);"
         ));
         let ident = ident.trim_start_matches("r#");
-        self.state_helpers.push_str(&format!(
-            r#"
-            /// Builds typed state using this member's exact canonical contract schema.
-            /// The declaration's internal cell name is chosen separately by the factory.
-            ///
+        self.state_helpers.push_str(&format!(r#"
+            /// Prepares this member's exact current contract schema in real provider setup.
             /// # Errors
-            /// Refuses incompatible linked descriptors, nonportable or invalid initial values,
-            /// and failed Rust conversions before creating a core state declaration.
-            pub fn {ident}_state(initial: {kind})
-                -> ::tembra::Result<::tembra::StateDeclaration<{kind}>>
+            /// Refuses invalid setup, incompatible linked descriptors or unsupported schemas.
+            pub fn {ident}_state(setup: &mut ::tembra::FacetDeclaration<'_, '_>, name: impl Into<String>)
+                -> ::tembra::Result<::tembra::StateDefinition<{kind}>>
             {{
-                ::tembra::StateDeclaration::with_schema(Self::state_schema({wire:?})?, initial)
+                setup.state_schema(name, Self::state_schema({wire:?})?)
             }}
-
-            /// Builds typed state initialized asynchronously under managed core activation.
-            /// This is a state initializer; factories remain synchronous.
-            ///
-            /// # Errors
-            /// Refuses incompatible linked descriptors and unsupported schemas now.
-            /// Callback, conversion and validation errors later fail activation.
-            pub fn {ident}_state_with_initializer<F, Fut>(initialize: F)
-                -> ::tembra::Result<::tembra::StateDeclaration<{kind}>>
-            where
-                F: Fn(::tembra::Context) -> Fut + 'static,
-                Fut: ::std::future::Future<Output = ::tembra::Result<{kind}>> + 'static,
-            {{
-                ::tembra::StateDeclaration::with_schema_initializer(
-                    Self::state_schema({wire:?})?, initialize
-                )
-            }}
-
-            /// Declares a typed synchronous projection using the exact canonical state schema.
-            /// Internal projection failure refuses the complete source candidate before adoption.
-            ///
-            /// # Errors
-            /// Refuses unsupported schemas, invalid source bindings, failed conversions and
-            /// computation errors. External source changes remain independently authoritative.
-            pub fn {ident}_derive<D, F>(
-                declaration: &mut ::tembra::Declaration<'_>, sources: D, compute: F
-            ) -> ::tembra::Result<::tembra::Readable<{kind}>>
-            where
-                D: ::tembra::Sources,
-                F: Fn(D::Values) -> ::tembra::Result<{kind}> + 'static,
-            {{
-                declaration.derive_with_schema(sources, Self::state_schema({wire:?})?, compute)
-            }}
-        "#
-        ));
+        "#));
     }
 
     pub fn opaque(&mut self, wire: &str, ident: &str, kind: &str) {

@@ -324,6 +324,21 @@ impl<'setup> FacetDeclaration<'setup> {
         }
     }
 
+    /// Prepares immutable definition metadata in this exact setup and retains it in its run.
+    /// # Errors
+    /// Rejects expired or foreign setup before the producer and rechecks after it returns.
+    /// Producer errors retain nothing; independent callback effects are not rolled back.
+    pub fn prepare_metadata<T: 'static>(
+        &self,
+        prepare: impl FnOnce() -> Result<T>,
+    ) -> Result<Rc<T>> {
+        self.host.check_setup(self.journal, &self.pass)?;
+        let value = Rc::new(prepare()?);
+        self.host
+            .retain_run_owner(self.journal, &self.pass, value.clone())?;
+        Ok(value)
+    }
+
     /// Declares a service through the Host's scoped installation journal.
     ///
     /// Host-lifetime activation is scheduled after the outer declaration batch finishes;

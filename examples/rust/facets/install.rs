@@ -10,8 +10,9 @@ fn main() -> Result<()> {
     tembra::native::run("facet-example", (), |host| async move {
         // 1. Prepare registrations. Setup runs when this native facet is installed.
         let facet = NativeFacet::new("counter", vec![], |_scope, declarations| {
-            declarations.serve(Counter, |_, _, declaration| {
-                CounterService::new(declaration, 0)
+            let count = declarations.state::<u32>("count")?;
+            declarations.serve(Counter, move |_, _, declaration| {
+                CounterService::new(declaration, count.value(0)?)
             })
         })?;
 

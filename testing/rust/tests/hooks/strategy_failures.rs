@@ -81,7 +81,7 @@ fn sequential_case(strategy: Strategy, cancel: bool, ignore_cancel: bool) {
             let manager = h.manager.clone();
             Box::new(move |ctx| {
                 manager
-                    .run_series_then(&d, 1, &ctx, terminal)
+                    .run_dynamic_series_then(&d, 1, &ctx, terminal)
                     .map(|result| result.map(|_| ()))
                     .boxed_local()
             })
@@ -114,7 +114,7 @@ fn sequential_case(strategy: Strategy, cancel: bool, ignore_cancel: bool) {
             let manager = h.manager.clone();
             Box::new(move |ctx| {
                 manager
-                    .run_bail(&d, 1, &ctx, Some(terminal))
+                    .run_dynamic_bail(&d, 1, &ctx, Some(terminal))
                     .map(|result| result.map(|_| ()))
                     .boxed_local()
             })
@@ -142,7 +142,7 @@ fn sequential_case(strategy: Strategy, cancel: bool, ignore_cancel: bool) {
             let manager = h.manager.clone();
             Box::new(move |ctx| {
                 manager
-                    .run_waterfall_then(&d, 1, &ctx, terminal)
+                    .run_dynamic_waterfall_then(&d, 1, &ctx, terminal)
                     .map(|result| result.map(|_| ()))
                     .boxed_local()
             })
@@ -233,7 +233,7 @@ fn invalid_bail_waterfall_and_parallel_handler_results_are_refused() {
                 );
                 h.ready();
                 let manager = h.manager.clone();
-                h.run(move |ctx| manager.run_bail(&definition, 1, &ctx, None))
+                h.run(move |ctx| manager.run_dynamic_bail(&definition, 1, &ctx, None))
                     .unwrap_err()
             }
             Strategy::Waterfall => {
@@ -255,7 +255,7 @@ fn invalid_bail_waterfall_and_parallel_handler_results_are_refused() {
                 );
                 h.ready();
                 let manager = h.manager.clone();
-                h.run(move |ctx| manager.run_waterfall(&definition, 1, &ctx))
+                h.run(move |ctx| manager.run_dynamic_waterfall(&definition, 1, &ctx))
                     .unwrap_err()
             }
             Strategy::Parallel => {
@@ -267,7 +267,7 @@ fn invalid_bail_waterfall_and_parallel_handler_results_are_refused() {
                 );
                 h.ready();
                 let manager = h.manager.clone();
-                h.run(move |ctx| manager.run_parallel(&definition, 1, &ctx))
+                h.run(move |ctx| manager.run_dynamic_parallel(&definition, 1, &ctx))
                     .unwrap_err()
             }
             _ => unreachable!(),
@@ -306,7 +306,7 @@ fn invalid_terminal_result_is_reported_after_its_actual_effect() {
     );
     let manager = h.manager.clone();
     let error = h
-        .run(move |context| manager.run_series_then(&d, 1, &context, terminal))
+        .run(move |context| manager.run_dynamic_series_then(&d, 1, &context, terminal))
         .unwrap_err();
     assert_eq!(error.reason, "hook_value");
     assert_eq!(
@@ -343,7 +343,7 @@ fn manager_revalidates_result_changed_after_the_checked_wrapper_returns() {
     h.ready();
     let manager = h.manager.clone();
     let error = h
-        .run(move |context| manager.run_bail(&d, 1, &context, None))
+        .run(move |context| manager.run_dynamic_bail(&d, 1, &context, None))
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::Invalid);
     assert_eq!(error.reason, "hook_value");

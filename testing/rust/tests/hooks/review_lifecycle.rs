@@ -70,7 +70,7 @@ fn dropped_started_driver_task_settles_attempt_and_releases_run_capacity() {
     for _ in 0..3 {
         let (manager, definition, terminal) = (h.manager.clone(), d.clone(), terminal.clone());
         assert_eq!(
-            h.run(move |ctx| manager.run_middleware(&definition, 1, &ctx, terminal))
+            h.run(move |ctx| manager.run_dynamic_middleware(&definition, 1, &ctx, terminal))
                 .unwrap(),
             7
         );
@@ -126,7 +126,7 @@ fn panicking_terminal_and_deeper_handler_return_typed_errors_without_stuck_start
         );
         let (manager, definition, target) = (h.manager.clone(), d.clone(), terminal.clone());
         assert_eq!(
-            h.run(move |ctx| manager.run_middleware(&definition, 1, &ctx, target))
+            h.run(move |ctx| manager.run_dynamic_middleware(&definition, 1, &ctx, target))
                 .unwrap_err()
                 .reason,
             "hook_panic"
@@ -134,7 +134,7 @@ fn panicking_terminal_and_deeper_handler_return_typed_errors_without_stuck_start
         panic_now.set(false);
         let manager = h.manager.clone();
         assert_eq!(
-            h.run(move |ctx| manager.run_middleware(&d, 1, &ctx, terminal))
+            h.run(move |ctx| manager.run_dynamic_middleware(&d, 1, &ctx, terminal))
                 .unwrap(),
             1
         );
@@ -175,7 +175,7 @@ fn panicking_deferred_decode_and_encode_are_recoverable_primary_failures() {
         let terminal = h.terminal("codec", integer(), integer(), identity());
         let manager = h.manager.clone();
         assert_eq!(
-            h.run(move |ctx| manager.run_middleware(&d, 1, &ctx, terminal))
+            h.run(move |ctx| manager.run_dynamic_middleware(&d, 1, &ctx, terminal))
                 .unwrap(),
             5
         );
@@ -214,14 +214,15 @@ fn validator_panic_is_typed_before_handler_and_budget_admission() {
     h.ready();
     let (manager, definition) = (h.manager.clone(), d.clone());
     assert_eq!(
-        h.run(move |ctx| manager.run_series(&definition, 1, &ctx))
+        h.run(move |ctx| manager.run_dynamic_series(&definition, 1, &ctx))
             .unwrap_err()
             .reason,
         "hook_panic"
     );
     assert_eq!(calls.get(), 0);
     let manager = h.manager.clone();
-    h.run(move |ctx| manager.run_series(&d, 2, &ctx)).unwrap();
+    h.run(move |ctx| manager.run_dynamic_series(&d, 2, &ctx))
+        .unwrap();
     assert_eq!(calls.get(), 1);
     h.close();
 }
@@ -269,7 +270,7 @@ fn sequential_steps_wait_for_actual_detached_physical_entry() {
     let manager = h.manager.clone();
     let run = h
         .host
-        .root(move |ctx| manager.run_series(&d, 1, &ctx).boxed_local())
+        .root(move |ctx| manager.run_dynamic_series(&d, 1, &ctx).boxed_local())
         .boxed_local();
     let Either::Right((_, run)) = h.driver.run_until(select(run, receive)) else {
         panic!("physical lease must keep series pending")
@@ -311,7 +312,7 @@ fn backend_admitted_attempt_cancelled_before_first_poll_still_settles() {
     let terminal = h.terminal("before-poll", integer(), integer(), identity());
     let manager = h.manager.clone();
     assert_eq!(
-        h.run(move |ctx| manager.run_middleware(&d, 1, &ctx, terminal))
+        h.run(move |ctx| manager.run_dynamic_middleware(&d, 1, &ctx, terminal))
             .unwrap_err()
             .reason,
         "before_poll"
@@ -354,7 +355,7 @@ fn contained_handler_panic_still_joins_its_detached_physical_receipt() {
         .host
         .root(move |context| {
             manager
-                .run_middleware(&d, 1, &context, terminal)
+                .run_dynamic_middleware(&d, 1, &context, terminal)
                 .boxed_local()
         })
         .boxed_local();
@@ -406,7 +407,7 @@ fn receiver_self_cancel_refuses_native_next_without_cancelling_ancestor_root() {
         .run_until(h.host.root(move |root| {
             async move {
                 let error = manager
-                    .run_middleware(&definition, 1, &root, terminal)
+                    .run_dynamic_middleware(&definition, 1, &root, terminal)
                     .await
                     .unwrap_err();
                 assert_eq!(error.code, ErrorCode::Aborted);
@@ -414,7 +415,7 @@ fn receiver_self_cancel_refuses_native_next_without_cancelling_ancestor_root() {
                 root.check(root.host_id())?;
                 assert_eq!(
                     manager
-                        .run_middleware(&after, 7, &root, after_terminal)
+                        .run_dynamic_middleware(&after, 7, &root, after_terminal)
                         .await?,
                     7
                 );
@@ -454,7 +455,7 @@ fn swallowed_admitted_pre_poll_cancellation_preserves_the_actual_primary_reason(
     let terminal = h.terminal("swallowed-pre-poll", integer(), integer(), identity());
     let manager = h.manager.clone();
     let error = h
-        .run(move |context| manager.run_middleware(&d, 1, &context, terminal))
+        .run(move |context| manager.run_dynamic_middleware(&d, 1, &context, terminal))
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::Aborted);
     assert_eq!(error.reason, "pre_poll_cause");
@@ -535,7 +536,7 @@ fn portable_terminal_panic_joins_detached_physical_work() {
         .host
         .root(move |context| {
             manager
-                .run_middleware(&definition, 1, &context, terminal)
+                .run_dynamic_middleware(&definition, 1, &context, terminal)
                 .boxed_local()
         })
         .boxed_local();

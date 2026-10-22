@@ -191,7 +191,7 @@ fn build<A: PortableValue, R: PortableValue>(
                         if let Some(op) = operation {
                             if output.is_some() {
                                 manager
-                                    .run_series_then(
+                                    .run_dynamic_series_then(
                                         &definition,
                                         input,
                                         &context,
@@ -201,7 +201,7 @@ fn build<A: PortableValue, R: PortableValue>(
                                     .encode()
                             } else {
                                 manager
-                                    .run_series_then(
+                                    .run_dynamic_series_then(
                                         &definition,
                                         input,
                                         &context,
@@ -212,7 +212,7 @@ fn build<A: PortableValue, R: PortableValue>(
                             }
                         } else {
                             manager
-                                .run_series(&definition, input, &context)
+                                .run_dynamic_series(&definition, input, &context)
                                 .await?
                                 .encode()
                         }
@@ -224,7 +224,7 @@ fn build<A: PortableValue, R: PortableValue>(
                             .transpose()?;
                         Ok(Some(
                             match manager
-                                .run_bail(&definition, input, &context, terminal)
+                                .run_dynamic_bail(&definition, input, &context, terminal)
                                 .await?
                             {
                                 BailOutcome::Unresolved => json!({"kind":"unresolved"}),
@@ -241,7 +241,7 @@ fn build<A: PortableValue, R: PortableValue>(
                         if let Some(op) = operation {
                             if output.is_some() {
                                 manager
-                                    .run_waterfall_then(
+                                    .run_dynamic_waterfall_then(
                                         &definition,
                                         input,
                                         &context,
@@ -251,7 +251,7 @@ fn build<A: PortableValue, R: PortableValue>(
                                     .encode()
                             } else {
                                 manager
-                                    .run_waterfall_then(
+                                    .run_dynamic_waterfall_then(
                                         &definition,
                                         input,
                                         &context,
@@ -262,7 +262,7 @@ fn build<A: PortableValue, R: PortableValue>(
                             }
                         } else {
                             manager
-                                .run_waterfall(&definition, input, &context)
+                                .run_dynamic_waterfall(&definition, input, &context)
                                 .await?
                                 .encode()
                         }
@@ -273,7 +273,7 @@ fn build<A: PortableValue, R: PortableValue>(
                             invalid("hook_signature", "middleware requires terminal")
                         })?;
                         manager
-                            .run_middleware(
+                            .run_dynamic_middleware(
                                 &definition,
                                 input,
                                 &context,
@@ -306,7 +306,7 @@ fn build<A: PortableValue, R: PortableValue>(
                             })?;
                             if output.is_some() {
                                 manager
-                                    .run_parallel_then(
+                                    .run_dynamic_parallel_then(
                                         &definition,
                                         input,
                                         &context,
@@ -316,7 +316,7 @@ fn build<A: PortableValue, R: PortableValue>(
                                     .encode()
                             } else {
                                 manager
-                                    .run_parallel_then(
+                                    .run_dynamic_parallel_then(
                                         &definition,
                                         input,
                                         &context,
@@ -326,7 +326,11 @@ fn build<A: PortableValue, R: PortableValue>(
                                     .encode()
                             }
                         } else {
-                            encode(manager.run_parallel(&definition, input, &context).await?)
+                            encode(
+                                manager
+                                    .run_dynamic_parallel(&definition, input, &context)
+                                    .await?,
+                            )
                         }
                     }
                 }

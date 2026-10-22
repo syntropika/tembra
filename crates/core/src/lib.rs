@@ -90,7 +90,7 @@ pub use reference::*;
 pub use registry::*;
 pub use resource::*;
 pub use state::{
-    Cell, Prepared, Readable, ReplaceOptions, Snapshot, StateDeclaration, StateEvent,
-    StateMetadataChange, Subscription,
+    Cell, Prepared, Readable, ReplaceOptions, Snapshot, StateDeclaration, StateDefinition,
+    StateEvent, StateMetadataChange, Subscription,
 };
 pub use tembra_contracts as contracts;

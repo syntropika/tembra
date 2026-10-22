@@ -372,7 +372,7 @@ impl<A: Clone + 'static> PreparedSeries<A> {
         self.inner.run(context, move |metadata, context| {
             metadata
                 .manager
-                .run_series(&metadata.definition, input, context)
+                .run_dynamic_series(&metadata.definition, input, context)
         })
     }
     /// Runs the ordinary series pipeline followed by the supplied current terminal.
@@ -388,7 +388,7 @@ impl<A: Clone + 'static> PreparedSeries<A> {
         self.inner.run(context, move |metadata, context| {
             metadata
                 .manager
-                .run_series_then(&metadata.definition, input, context, terminal)
+                .run_dynamic_series_then(&metadata.definition, input, context, terminal)
         })
     }
 }
@@ -407,7 +407,7 @@ impl<A: Clone + 'static, R: 'static> PreparedBail<A, R> {
         self.inner.run(context, move |metadata, context| {
             metadata
                 .manager
-                .run_bail(&metadata.definition, input, context, terminal)
+                .run_dynamic_bail(&metadata.definition, input, context, terminal)
         })
     }
 }
@@ -421,7 +421,7 @@ impl<A: 'static> PreparedWaterfall<A> {
         self.inner.run(context, move |metadata, context| {
             metadata
                 .manager
-                .run_waterfall(&metadata.definition, input, context)
+                .run_dynamic_waterfall(&metadata.definition, input, context)
         })
     }
     /// Runs the ordinary waterfall pipeline followed by the supplied current terminal.
@@ -435,9 +435,12 @@ impl<A: 'static> PreparedWaterfall<A> {
         terminal: HookTerminal<A, T>,
     ) -> HookRun<T> {
         self.inner.run(context, move |metadata, context| {
-            metadata
-                .manager
-                .run_waterfall_then(&metadata.definition, input, context, terminal)
+            metadata.manager.run_dynamic_waterfall_then(
+                &metadata.definition,
+                input,
+                context,
+                terminal,
+            )
         })
     }
 }
@@ -451,7 +454,7 @@ impl<A: 'static, R: 'static> PreparedMiddleware<A, R> {
         self.inner.run(context, move |metadata, context| {
             metadata
                 .manager
-                .run_middleware(&metadata.definition, input, context, terminal)
+                .run_dynamic_middleware(&metadata.definition, input, context, terminal)
         })
     }
     /// Adapts the supplied actual native operation using retained checked types.
@@ -471,11 +474,12 @@ impl<A: 'static, R: 'static> PreparedMiddleware<A, R> {
                 metadata.definition.result.clone(),
             );
             match terminal {
-                Ok(terminal) => {
-                    metadata
-                        .manager
-                        .run_middleware(&metadata.definition, input, context, terminal)
-                }
+                Ok(terminal) => metadata.manager.run_dynamic_middleware(
+                    &metadata.definition,
+                    input,
+                    context,
+                    terminal,
+                ),
                 Err(error) => HookRun::deferred(async move { Err(error) }.boxed_local()),
             }
         })
@@ -506,11 +510,12 @@ impl<A: 'static, R: 'static> PreparedMiddleware<A, R> {
                 decode,
             );
             match terminal {
-                Ok(terminal) => {
-                    metadata
-                        .manager
-                        .run_middleware(&metadata.definition, input, context, terminal)
-                }
+                Ok(terminal) => metadata.manager.run_dynamic_middleware(
+                    &metadata.definition,
+                    input,
+                    context,
+                    terminal,
+                ),
                 Err(error) => HookRun::deferred(async move { Err(error) }.boxed_local()),
             }
         })
@@ -526,7 +531,7 @@ impl<A: Clone + 'static, R: 'static> PreparedParallel<A, R> {
         self.inner.run(context, move |metadata, context| {
             metadata
                 .manager
-                .run_parallel(&metadata.definition, input, context)
+                .run_dynamic_parallel(&metadata.definition, input, context)
         })
     }
     /// Runs the ordinary parallel pipeline followed by the supplied current terminal.
@@ -540,9 +545,12 @@ impl<A: Clone + 'static, R: 'static> PreparedParallel<A, R> {
         terminal: HookTerminal<Vec<R>, T>,
     ) -> HookRun<T> {
         self.inner.run(context, move |metadata, context| {
-            metadata
-                .manager
-                .run_parallel_then(&metadata.definition, input, context, terminal)
+            metadata.manager.run_dynamic_parallel_then(
+                &metadata.definition,
+                input,
+                context,
+                terminal,
+            )
         })
     }
 }

@@ -125,7 +125,10 @@ fn failed_drafts_derivations_exposures_and_panics_leave_authority_intact() {
         )
         .unwrap();
     let exposure = graph
-        .expose(&derived, json!({"type": "integer", "maximum": 8}))
+        .expose_definition(
+            &derived,
+            StateDefinition::new(json!({"type": "integer", "maximum": 8})),
+        )
         .unwrap();
     graph.activate().unwrap();
     let (ctx, _scope) = Context::new_root(1, 1, 1, Value::Null);
@@ -185,7 +188,10 @@ fn staged_dependency_set_and_topology_invalidate_competing_preparations() {
         .prepare_replace(&ctx, json!(2), ReplaceOptions::default())
         .unwrap();
     let _exposure = graph
-        .expose(&a.readable(), json!({"type": "integer", "maximum": 1}))
+        .expose_definition(
+            &a.readable(),
+            StateDefinition::new(json!({"type": "integer", "maximum": 1})),
+        )
         .unwrap();
     assert_eq!(
         a.adopt(&ctx, &prepared).unwrap_err().reason,

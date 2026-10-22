@@ -37,12 +37,24 @@ impl CounterProvider for CounterService {
 fn main() -> Result<()> {
     tembra::native::run("state-example", (), |host| async move {
         // 2. Declare the cell and its derived value together in the provider factory.
-        host.serve(Counter, |_, _, declaration| {
-            let count = declaration.state("count", 0_u32)?;
-            let double =
-                declaration.derive((count.readable(),), |(count,)| Ok(u64::from(count) * 2))?;
-            Ok(CounterService { count, double })
-        })?;
+        host.install(
+            NativeFacet::new("counter-state", vec![], |_, setup| {
+                let count_definition = setup.state::<u32>("count")?;
+                let double_definition = setup.state::<u64>("double")?;
+                setup.serve(Counter, move |_, _, declaration| {
+                    let count = declaration.state(count_definition.value(0_u32)?)?;
+                    let double = declaration.derive(
+                        &double_definition,
+                        (count.readable(),),
+                        |(count,)| Ok(u64::from(count) * 2),
+                    )?;
+                    Ok(CounterService { count, double })
+                })?;
+                Ok(())
+            })?,
+            Default::default(),
+        )?
+        .await?;
         let counter = host.get(Counter, CounterInput {}).await?;
 
         // 3. Keep the reference alive while observing its weak readable views.
