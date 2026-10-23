@@ -1847,6 +1847,7 @@ name = "tembra-example-rust"
 version = "0.1.0"
 dependencies = [
  "tembra",
+ "tembra-hooks",
 ]
 
 [[package]]

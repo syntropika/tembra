@@ -60,8 +60,8 @@ Retaining a context clone does not extend that scope after the owning operation 
 
 A `Readable` and its subscriptions are weak views. Keep the reference alive while observing state,
 then unsubscribe and drop it. A snapshot retains its immutable historical value and revision.
-The [state example](../examples/rust/basics/state.rs) demonstrates derivation and observation;
-the [facet example](../examples/rust/facets/install.rs) groups typed registrations with `NativeFacet`.
+The [state example](../examples/rust/examples/state.rs) demonstrates derivation and observation;
+the [facet example](../examples/rust/examples/facets.rs) groups typed registrations with `NativeFacet`.
 
 `tembra::native::run` creates a current-thread runtime and awaits `host.close()` after its callback
 returns, including on callback failure. Call it outside an already running Tokio runtime. Applications
@@ -263,7 +263,9 @@ state is in memory; use application storage when it must survive environment shu
 ## Run the maintained examples
 
 The [Rust tutorial](tutorial.md) starts with `just run-rust-example`. Add one concept at a time with
-`just run-example local`, `just run-example state` and `just run-example facets`.
+`just run-example local`, `just run-example state` and `just run-example facets`. The
+[tutorial's table](tutorial.md#7-try-one-additional-concept) lists further examples covering the
+driver, object dependencies, addresses, lifetimes and hooks.
 
 For TypeScript examples in the checkout, install dependencies and build the SDK and Node binding:
 

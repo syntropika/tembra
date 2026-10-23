@@ -4,21 +4,47 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
+autoexamples = false
 
 [dependencies]
 tembra = { workspace = true, features = ["native"] }
+tembra-hooks = { workspace = true }
 
 [lints]
 workspace = true
 
 [[example]]
 name = "local"
-path = "basics/native-values.rs"
+path = "examples/native-values.rs"
 
 [[example]]
 name = "state"
-path = "basics/state.rs"
+path = "examples/state.rs"
 
 [[example]]
 name = "facets"
-path = "facets/install.rs"
+path = "examples/facets.rs"
+
+[[example]]
+name = "driver"
+path = "examples/driver.rs"
+
+[[example]]
+name = "dependencies"
+path = "examples/dependencies.rs"
+
+[[example]]
+name = "addresses"
+path = "examples/addresses.rs"
+
+[[example]]
+name = "lifetime"
+path = "examples/lifetime.rs"
+
+[[example]]
+name = "hooks"
+path = "examples/hooks.rs"
+
+[[example]]
+name = "hook-strategies"
+path = "examples/hook-strategies.rs"
