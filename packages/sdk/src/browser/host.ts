@@ -12,6 +12,12 @@ import type { ExecutorWasmModule } from "../host/executor.js";
 import { facetInputs, readyReference } from "../host/index.js";
 import type { DynamicFacet, LoadableFacet, TembraHost } from "../host/index.js";
 import {
+  checkObservationLimit,
+  drainFinalObservations,
+  parseObservationBatch,
+} from "../host/observability.js";
+import type { ObservationBatch, ObservationOptions } from "../host/observability.js";
+import {
   registerManagerBridge,
   closeManagedHosts,
   disposeManagerLinks,
@@ -25,6 +31,7 @@ import { browserModuleBase, moduleDiagnostics } from "./module.js";
 
 /** Core-owned idle consumer cache policy. */
 export type BrowserHostOptions = {
+  readonly observability?: ObservationOptions;
   readonly consumerLinger?: {
     readonly types: Readonly<Record<string, number>>;
     readonly capacity?: number;
@@ -139,8 +146,10 @@ export async function createHost(options: CreateBrowserHostOptions = {}): Promis
     module = typeof options.wasm === "function" ? await options.wasm() : options.wasm;
   }
   const owned = wrappers();
-  const policy =
-    options.consumerLinger === undefined ? {} : { consumerLinger: options.consumerLinger };
+  const policy = {
+    ...(options.consumerLinger === undefined ? {} : { consumerLinger: options.consumerLinger }),
+    ...(options.observability === undefined ? {} : { observability: options.observability }),
+  };
   const rawHost = owned.track(
     module.WasmHost.withOptions(options.name ?? "browser", canonicalJson(policy)),
   );
@@ -154,6 +163,7 @@ export async function createHost(options: CreateBrowserHostOptions = {}): Promis
     let closing: Promise<void> | undefined;
     let closed = false;
     let finalDiagnostics: BrowserHostDiagnostics | undefined;
+    let finalObservations: ObservationBatch | null | undefined;
     const snapshotDiagnostics = (): BrowserHostDiagnostics =>
       Object.freeze({
         ...executor.diagnostics(),
@@ -249,6 +259,15 @@ export async function createHost(options: CreateBrowserHostOptions = {}): Promis
         check();
         rawHost.cancelContext(context.handle);
       },
+      observations(limit: number): ObservationBatch | null {
+        checkObservationLimit(limit);
+        if (finalObservations !== undefined) {
+          const { result, remaining } = drainFinalObservations(finalObservations, limit);
+          finalObservations = remaining;
+          return result;
+        }
+        return parseObservationBatch(rawHost.observationsJson(limit));
+      },
       diagnostics() {
         return finalDiagnostics ?? snapshotDiagnostics();
       },
@@ -280,6 +299,7 @@ export async function createHost(options: CreateBrowserHostOptions = {}): Promis
           } finally {
             disposeManagerLinks(host);
             try {
+              finalObservations = parseObservationBatch(rawHost.observationsJson(1_048_576));
               finalDiagnostics = snapshotDiagnostics();
             } finally {
               closed = true;

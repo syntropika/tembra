@@ -1,9 +1,21 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
+
+import { benchmarkMetadata } from "../../performance/metadata.ts";
 
 const testing = path.resolve(import.meta.dirname, "..");
 const sdk = path.resolve(testing, "../../packages/sdk");
+const workload = process.env.TEMBRA_BROWSER_WORKLOAD ?? "acceptance";
+if (workload !== "acceptance" && workload !== "benchmark") {
+  throw new Error("TEMBRA_BROWSER_WORKLOAD must be acceptance or benchmark");
+}
+const buildInput = workload === "benchmark" ? benchmarkMetadata(["packages/sdk/dist/wasm"]) : null;
 const result = await Bun.build({
-  entrypoints: [path.join(testing, "test/browser/browser-host.ts")],
+  entrypoints: [
+    workload === "benchmark"
+      ? path.join(testing, "src/benchmarks/browser.ts")
+      : path.join(testing, "test/browser/browser-host.ts"),
+  ],
   target: "browser",
   format: "esm",
 });
@@ -61,6 +73,19 @@ const server = Bun.serve({
   port: Number(process.env.PORT ?? 0),
   fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === "/benchmark-metadata.json" && workload === "benchmark") {
+      const current = benchmarkMetadata(["packages/sdk/dist/wasm"]);
+      if (JSON.stringify(buildInput) !== JSON.stringify(current)) {
+        throw new Error("browser benchmark source or WASM changed after bundling");
+      }
+      return Response.json({
+        ...current,
+        browser_bundle: {
+          bytes: Buffer.byteLength(code),
+          sha256: createHash("sha256").update(code).digest("hex"),
+        },
+      });
+    }
     if (url.pathname === "/manager-worker.js") {
       return new Response(managedWorkerCode, { headers: { "content-type": "text/javascript" } });
     }

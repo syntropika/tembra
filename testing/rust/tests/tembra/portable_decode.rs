@@ -204,7 +204,7 @@ export default {{name:'portable-decode', uses:[], setup(scope,declare) {{
 }}}};
 "#);
         let executor = Executor::new(driver.clone(), ExecutorOptions::default())?;
-        let facet = executor.prepare(host.core().id(), BundledJsArtifact::new("portable-decode", source, vec!["default".into()])?, "default".into()).await?;
+        let facet = executor.prepare_for_host(host.core(), BundledJsArtifact::new("portable-decode", source, vec!["default".into()])?, "default".into()).await?;
         host.core().install_executable(facet, core::LoadOptions::default())?.await?;
         let reference = host.get(Numbers, clock()).await?;
         assert_eq!(reference.echo(clock()).await?, clock());

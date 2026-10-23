@@ -53,8 +53,8 @@ fn token(name: &str, members: BTreeMap<String, Member>) -> Rc<Contract> {
 
 async fn install(host: &Host, executor: &Executor, source: String) {
     let facet = executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            host,
             BundledJsArtifact::new("capabilities", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )
@@ -403,8 +403,8 @@ async fn check_kept_opaque(driver: Rc<TokioDriver>) {
     )
     .unwrap();
     let prepare = || {
-        executor.prepare(
-            host.id(),
+        executor.prepare_for_host(
+            &host,
             BundledJsArtifact::new(
                 "kept-opaque",
                 format!(

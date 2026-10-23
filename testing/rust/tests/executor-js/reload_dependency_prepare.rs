@@ -80,8 +80,8 @@ fn prepare(
     source: String,
 ) -> ExecutableFacet {
     driver
-        .run_until(executor.prepare(
-            host.id(),
+        .run_until(executor.prepare_for_host(
+            host,
             BundledJsArtifact::new("consumer", source, vec!["default".into()]).unwrap(),
             "default".into(),
         ))

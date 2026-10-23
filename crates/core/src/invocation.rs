@@ -261,6 +261,7 @@ pub(crate) struct ActiveInvocation {
 }
 
 pub(crate) struct InvocationEntry {
+    observation: Option<crate::observability::Span>,
     host: Weak<HostInner>,
     object: Rc<ObjectRecord>,
     implementation: Option<Rc<Implementation>>,
@@ -318,7 +319,22 @@ pub(crate) fn enter_with_receipt(
         .and_then(|installed| installed.service.owner_name.clone());
     let (child, scope) = parent.child_call(host.principal.clone())?;
     let mut child = child.enter_facet(facet);
+    let observation = crate::observability::start(
+        &host.observations,
+        crate::observability::Operation::PhysicalInvocation,
+        "method",
+        Some(&child),
+        Some(object.id),
+        None,
+    );
+    let observation_id = observation
+        .as_ref()
+        .map(crate::observability::Span::id)
+        .or(child.observation_id());
+    child = child.with_observation_id(observation_id);
+    child.observe_cancellation();
     let entry = Rc::new(InvocationEntry {
+        observation,
         host: Rc::downgrade(host),
         object: object.clone(),
         implementation: Some(implementation),
@@ -375,7 +391,16 @@ pub(crate) fn retain_activity(
         .ok_or_else(limit)?;
     let count = object.invocations.get().checked_add(1).ok_or_else(limit)?;
     let receipt = InvocationReceipt::new();
+    let observation = crate::observability::start(
+        &host.observations,
+        crate::observability::Operation::PhysicalInvocation,
+        "activity",
+        None,
+        Some(object.id),
+        None,
+    );
     let entry = Rc::new(InvocationEntry {
+        observation,
         host: Rc::downgrade(host),
         object: object.clone(),
         implementation: Some(installed.implementation.clone()),
@@ -417,6 +442,9 @@ impl Drop for InvocationEntry {
         if let Some(host) = self.host.upgrade() {
             host.roots.notify_change();
             host.idle(self.object.clone());
+        }
+        if let Some(mut observation) = self.observation.take() {
+            observation.finish(crate::observability::Outcome::Settled);
         }
         if let Some(receipt) = self.receipt.take() {
             receipt.finish();

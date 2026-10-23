@@ -140,6 +140,7 @@ A disconnected remote call can have an unknown execution outcome and is not auto
 - [Guide](docs/guide.md): contracts, objects, state and language integrations.
 - [Tutorial](docs/tutorial.md): run and understand the Rust counter.
 - [Runtime behavior](docs/spec.md): lifecycle, state, reload and remote-call guarantees.
+- [Observability](docs/observability.md): bounded metadata, timing guarantees and benchmarks.
 - [Architecture](docs/architecture.md): platform loaders, bindings and the authoritative Rust core.
 
 ## Acknowledgements

@@ -143,8 +143,8 @@ export default {{name: 'closed-send', uses: [], setup(scope, declare) {{
         serde_json::to_string(token.descriptor()).unwrap()
     );
     let facet = executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            &host,
             crate::BundledJsArtifact::new("closed-send", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

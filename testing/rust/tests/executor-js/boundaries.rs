@@ -52,7 +52,7 @@ export default {{
     );
     let artifact = BundledJsArtifact::new("boundary", source, vec!["default".into()]).unwrap();
     let facet = executor
-        .prepare(host.id(), artifact, "default".into())
+        .prepare_for_host(host, artifact, "default".into())
         .await
         .unwrap();
     host.install_executable(facet, LoadOptions::default())
@@ -301,8 +301,8 @@ export default {{
         serde_json::to_string(token.descriptor()).unwrap()
     );
     let facet = executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            &host,
             BundledJsArtifact::new("quota", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

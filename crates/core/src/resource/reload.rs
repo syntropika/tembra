@@ -146,6 +146,7 @@ impl ResourceReload {
             Some(record) => (record, true),
             None => (
                 Rc::new(ResourceRecord {
+                    host: self.installed.host.clone(),
                     name,
                     type_id: TypeId::of::<T>(),
                     spec: RefCell::new(spec.clone()),
@@ -254,74 +255,94 @@ impl ResourceReload {
         let this = self.clone();
         let selected = entry.clone();
         let future = async move {
-            external.check()?;
-            this.signal.check()?;
-            let entries = this.entries.borrow().clone();
-            let deps = selected
-                .spec
-                .deps
-                .iter()
-                .map(|dep| match dep {
-                    ResourceDependency::Reference(reference) => {
-                        let reference = reference.clone();
-                        let ready = (this.ready)(reference);
-                        let cancelled = this.signal.cancelled();
-                        let external = external.cancelled();
-                        async move {
-                            match futures::future::select(
-                                ready,
-                                futures::future::select(cancelled, external),
-                            )
-                            .await
-                            {
-                                futures::future::Either::Left((result, _)) => result,
-                                futures::future::Either::Right((cancelled, _)) => {
-                                    let cause = match cancelled {
-                                        futures::future::Either::Left((cause, _))
-                                        | futures::future::Either::Right((cause, _)) => cause,
-                                    };
-                                    Err(cause)
+            let observations = this
+                .installed
+                .host
+                .upgrade()
+                .and_then(|host| host.observations.clone());
+            let mut observation = crate::observability::start(
+                &observations,
+                crate::observability::Operation::ResourceOpen,
+                &selected.record.name,
+                None,
+                None,
+                None,
+            );
+            let result = async {
+                external.check()?;
+                this.signal.check()?;
+                let entries = this.entries.borrow().clone();
+                let deps = selected
+                    .spec
+                    .deps
+                    .iter()
+                    .map(|dep| match dep {
+                        ResourceDependency::Reference(reference) => {
+                            let reference = reference.clone();
+                            let ready = (this.ready)(reference);
+                            let cancelled = this.signal.cancelled();
+                            let external = external.cancelled();
+                            async move {
+                                match futures::future::select(
+                                    ready,
+                                    futures::future::select(cancelled, external),
+                                )
+                                .await
+                                {
+                                    futures::future::Either::Left((result, _)) => result,
+                                    futures::future::Either::Right((cancelled, _)) => {
+                                        let cause = match cancelled {
+                                            futures::future::Either::Left((cause, _))
+                                            | futures::future::Either::Right((cause, _)) => cause,
+                                        };
+                                        Err(cause)
+                                    }
                                 }
                             }
+                            .boxed_local()
                         }
-                        .boxed_local()
+                        ResourceDependency::Resource(resource) => {
+                            let dependency = entries
+                                .iter()
+                                .find(|other| Rc::ptr_eq(&other.record, &resource.0))
+                                .cloned()
+                                .expect("declared dependency exists");
+                            this.open(dependency, external.clone())
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let results = futures::future::join_all(deps).await;
+                results.into_iter().collect::<Result<Vec<_>>>()?;
+                external.check()?;
+                this.signal.check()?;
+                let token = this.signal.child();
+                let open = (selected.spec.open)(token.clone());
+                // Cancellation notifies the opener but never substitutes for physical settlement.
+                let value = match futures::future::select(open, external.cancelled()).await {
+                    futures::future::Either::Left((result, _)) => result?,
+                    futures::future::Either::Right((cause, pending)) => {
+                        token.cancel(cause.clone());
+                        let result = pending.await;
+                        if let Ok(value) = result {
+                            *selected.record.value.borrow_mut() = Some(value);
+                            selected.record.close().await?;
+                        }
+                        return Err(cause);
                     }
-                    ResourceDependency::Resource(resource) => {
-                        let dependency = entries
-                            .iter()
-                            .find(|other| Rc::ptr_eq(&other.record, &resource.0))
-                            .cloned()
-                            .expect("declared dependency exists");
-                        this.open(dependency, external.clone())
-                    }
-                })
-                .collect::<Vec<_>>();
-            let results = futures::future::join_all(deps).await;
-            results.into_iter().collect::<Result<Vec<_>>>()?;
-            external.check()?;
-            this.signal.check()?;
-            let token = this.signal.child();
-            let open = (selected.spec.open)(token.clone());
-            // Cancellation notifies the opener but never substitutes for physical settlement.
-            let value = match futures::future::select(open, external.cancelled()).await {
-                futures::future::Either::Left((result, _)) => result?,
-                futures::future::Either::Right((cause, pending)) => {
-                    token.cancel(cause.clone());
-                    let result = pending.await;
-                    if let Ok(value) = result {
-                        *selected.record.value.borrow_mut() = Some(value);
-                        selected.record.close().await?;
-                    }
+                };
+                *selected.record.value.borrow_mut() = Some(value);
+                this.opened.borrow_mut().push(selected.record.clone());
+                if let Err(cause) = this.signal.check().and_then(|_| external.check()) {
+                    selected.record.close().await?;
                     return Err(cause);
                 }
-            };
-            *selected.record.value.borrow_mut() = Some(value);
-            this.opened.borrow_mut().push(selected.record.clone());
-            if let Err(cause) = this.signal.check().and_then(|_| external.check()) {
-                selected.record.close().await?;
-                return Err(cause);
+                Ok(())
             }
-            Ok(())
+            .await;
+            if let Some(observation) = &mut observation {
+                observation.result(&result);
+            }
+            result
         }
         .boxed_local()
         .shared();
@@ -464,7 +485,24 @@ impl ResourceReload {
             let attempted = std::mem::take(&mut *this.attempted.borrow_mut());
             for record in attempted.into_iter().rev() {
                 let spec = record.spec();
-                match (spec.open)(CancellationToken::new()).await {
+                let observations = this
+                    .installed
+                    .host
+                    .upgrade()
+                    .and_then(|host| host.observations.clone());
+                let mut observation = crate::observability::start(
+                    &observations,
+                    crate::observability::Operation::ResourceOpen,
+                    &record.name,
+                    None,
+                    None,
+                    None,
+                );
+                let restored = (spec.open)(CancellationToken::new()).await;
+                if let Some(observation) = &mut observation {
+                    observation.result(&restored);
+                }
+                match restored {
                     Ok(value) => {
                         *record.value.borrow_mut() = Some(value);
                     }

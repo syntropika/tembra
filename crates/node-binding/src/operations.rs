@@ -293,6 +293,18 @@ pub(crate) fn request(session: &Rc<Session>, op: &str, id: &str, args: Value) ->
                 context(session, &arg(0))?.context.cancel("requested");
                 Ok(absent())
             }
+            "observations" => {
+                let limit = arg(0)
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(invalid)?;
+                Ok(match session.host.observations() {
+                    Some(observations) => {
+                        json!({"events": observations.drain(limit), "statistics": observations.statistics()})
+                    }
+                    None => Value::Null,
+                })
+            }
             "diagnostics" => {
                 let entries = session.entries.borrow();
                 let mut kinds = std::collections::BTreeMap::<&str, usize>::new();
@@ -445,6 +457,8 @@ pub(crate) fn request(session: &Rc<Session>, op: &str, id: &str, args: Value) ->
         (Entry::Context(ctx), "cancel") => { ctx.context.check(session.host.id())?; ctx.context.cancel(text(&arg(0))?); Ok(absent()) },
         (Entry::Context(ctx), "principalJson") => Ok(json!(ctx.context.principal().to_string())),
         (Entry::Context(ctx), "codeVersion") => Ok(json!(ctx.context.code_version())),
+        (Entry::Context(ctx), "observationHostId") => Ok(json!(ctx.context.host_id().to_string())),
+        (Entry::Context(ctx), "observationId") => Ok(json!(ctx.context.observation_id().map(|id| id.to_string()))),
         (Entry::Context(ctx), "signal") => core_signal(session, Signal::Token(ctx.signal)),
         (Entry::Context(ctx), "get") => {
             ctx.context.check(session.host.id())?;

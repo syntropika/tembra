@@ -131,8 +131,8 @@ fn prepare(
     name: &str,
 ) -> ExecutableFacet {
     driver
-        .run_until(executor.prepare(
-            host.id(),
+        .run_until(executor.prepare_for_host(
+            host,
             BundledJsArtifact::new(name, source, vec!["default".into()]).unwrap(),
             "default".into(),
         ))
@@ -256,8 +256,8 @@ fn explicit_checkpoint_drain_and_restart_reacquires_references_and_private_resou
         let before_refusal = records.borrow().clone();
         let refused = driver
             .run_until(
-                executor.prepare(
-                    host.id(),
+                executor.prepare_for_host(
+                    &host,
                     BundledJsArtifact::new(
                         "session-refused",
                         source(&counter, &gate, &json!(9999), 1, 3),

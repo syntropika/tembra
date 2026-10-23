@@ -8,6 +8,18 @@ impl Connection {
             return;
         }
         self.inner.last_seen.set(self.inner.driver.now());
+        let mut observation = crate::observability::start(
+            &self
+                .inner
+                .host
+                .upgrade()
+                .and_then(|host| host.observations.clone()),
+            crate::observability::Operation::RpcReceive,
+            "decode_dispatch",
+            None,
+            None,
+            None,
+        );
         let result = match decode(bytes, self.inner.options.limits.max_frame_bytes) {
             Ok(frame) => self.dispatch(frame),
             Err(DecodeError::RecoverableDelta {
@@ -23,6 +35,9 @@ impl Connection {
             }
             Err(DecodeError::Fatal(error)) => Err(error),
         };
+        if let Some(observation) = &mut observation {
+            observation.result(&result);
+        }
         if let Err(error) = result {
             self.fail(error);
         }

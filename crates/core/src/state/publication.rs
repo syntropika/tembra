@@ -14,18 +14,29 @@ pub(crate) struct PendingPublication {
 
 /// One host's synchronous FIFO. Only complete, already-adopted batches enter it.
 pub(crate) struct PublicationQueue {
+    observations: Option<crate::Observations>,
     pending: RefCell<VecDeque<Vec<Publication>>>,
     held: Cell<usize>,
     draining: Cell<bool>,
 }
 
 impl PublicationQueue {
+    #[cfg(test)]
     pub fn new() -> Rc<Self> {
+        Self::observed(None)
+    }
+
+    pub(crate) fn observed(observations: Option<crate::Observations>) -> Rc<Self> {
         Rc::new(Self {
+            observations,
             pending: RefCell::default(),
             held: Cell::new(0),
             draining: Cell::new(false),
         })
+    }
+
+    pub(crate) fn observations(&self) -> &Option<crate::Observations> {
+        &self.observations
     }
 
     pub fn append_batch(&self, batch: Vec<PendingPublication>) {
@@ -67,6 +78,20 @@ impl PublicationQueue {
             let batch = self.pending.borrow_mut().pop_front();
             let Some(batch) = batch else { break };
             for publication in batch {
+                let operation = match &publication {
+                    Publication::State(_) => crate::observability::Operation::StatePublication,
+                    Publication::Registry(_) => {
+                        crate::observability::Operation::RegistryPublication
+                    }
+                };
+                let mut observation = crate::observability::start(
+                    &self.observations,
+                    operation,
+                    "publication",
+                    None,
+                    None,
+                    None,
+                );
                 match publication {
                     Publication::State(publication) => {
                         if let Some(port) = publication.port.upgrade() {
@@ -74,6 +99,9 @@ impl PublicationQueue {
                         }
                     }
                     Publication::Registry(publication) => publication.deliver(),
+                }
+                if let Some(observation) = &mut observation {
+                    observation.finish(crate::observability::Outcome::Ok);
                 }
             }
             if self.held.get() != 0 {

@@ -111,6 +111,8 @@ export type RawContext = {
   cancel: WasmMethod<[reason: string], void>;
   principalJson: WasmMethod<[], string>;
   codeVersion: WasmMethod<[], number>;
+  observationHostId: WasmMethod<[], string>;
+  observationId: WasmMethod<[], string | null | undefined>;
   signal: WasmMethod<[], RawSignal>;
   get: WasmMethod<[descriptor: string, input: string, state: boolean], Promise<RawReference>>;
 };
@@ -401,6 +403,12 @@ export function wrapContext(raw: RawContext): ManagedContext {
     },
     get codeVersion() {
       return raw.codeVersion();
+    },
+    get observationHostId() {
+      return raw.observationHostId();
+    },
+    get observationId() {
+      return raw.observationId() ?? null;
     },
     check: () => {
       raw.check();

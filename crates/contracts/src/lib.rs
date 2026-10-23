@@ -11,7 +11,9 @@ mod source;
 
 pub use builder::{ContractBuilder, schema_for};
 pub use coverage::{identity_compatible, input_compatible, output_fits};
-pub use descriptor::{Contract, ContractKind, Descriptor, Member, Placement, ValueSchema};
+pub use descriptor::{
+    AcquisitionInput, Contract, ContractKind, Descriptor, Member, Placement, ValueSchema,
+};
 pub use json::parse_json;
 pub use profile::CanonicalProfileKey;
 pub use schema::{

@@ -257,8 +257,8 @@ export default {{name:'stabilization.js',uses:[monitor],setup(scope,declare){{
     }
     async fn prepare(&self, generation: u64, fail: bool) -> ExecutableFacet {
         self.executor
-            .prepare(
-                self.host.id(),
+            .prepare_for_host(
+                &self.host,
                 BundledJsArtifact::new(
                     format!("stabilization-{generation}"),
                     self.source(generation, fail),

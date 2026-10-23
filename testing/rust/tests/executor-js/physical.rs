@@ -146,7 +146,7 @@ export default {
                 let artifact =
                     BundledJsArtifact::new("physical", js, vec!["default".into()]).unwrap();
                 let facet = executor
-                    .prepare(host.id(), artifact, "default".into())
+                    .prepare_for_host(&host, artifact, "default".into())
                     .await
                     .unwrap();
                 host.install_executable(facet, LoadOptions::default())
@@ -261,8 +261,8 @@ export default {
         &(serde_json::to_string(sink.descriptor()).unwrap()),
     );
     let facet = executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            &host,
             BundledJsArtifact::new("detached", js, vec!["default".into()]).unwrap(),
             "default".into(),
         )

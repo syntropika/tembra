@@ -102,6 +102,10 @@ pub(super) fn parse<'s>(
                     let expects_args = args.is_some();
                     let expects_result = result.is_some();
                     candidate = candidate.json_method(name, move |args, context| {
+                        let mut observation = context.observe(
+                            tembra_core::observability::Operation::Executor,
+                            "portable_callback",
+                        );
                         let admitted: Result<_> = (|| {
                             let owner = weak.upgrade().ok_or_else(crate::slots::expired)?;
                             let lease = owner
@@ -126,6 +130,9 @@ pub(super) fn parse<'s>(
                             }
                             Ok((owner, lease, values))
                         })();
+                        if let (Some(observation), Err(error)) = (&mut observation, &admitted) {
+                            observation.result::<()>(&Err(error.clone()));
+                        }
                         let handler = handler.clone();
                         async move {
                             let (owner, lease, args) = admitted?;
@@ -135,7 +142,7 @@ pub(super) fn parse<'s>(
                                 .clone()
                                 .enqueue(
                                     handler,
-                                    args,
+                                    (args, observation),
                                     Some(owner),
                                     Some(lease),
                                     Conversion::Portable(expects_result),

@@ -23,6 +23,7 @@ type InterestHook = Rc<dyn Fn(bool) -> Result<()>>;
 
 struct Listener {
     callback: Observer,
+    observation: Option<crate::observability::Span>,
     seen: bool,
 }
 
@@ -186,7 +187,19 @@ impl ReadPort {
                 } else {
                     event.clone()
                 };
-                if let Err(error) = callback(event) {
+                let mut observation = crate::observability::start(
+                    self._queue.observations(),
+                    crate::observability::Operation::StateDelivery,
+                    "observer",
+                    None,
+                    None,
+                    None,
+                );
+                let result = callback(event);
+                if let Some(observation) = &mut observation {
+                    observation.result(&result);
+                }
+                if let Err(error) = result {
                     (self.reporter)(error);
                 }
             }
@@ -214,6 +227,14 @@ impl ReadPort {
                 id,
                 Listener {
                     callback: callback.clone(),
+                    observation: crate::observability::start(
+                        self._queue.observations(),
+                        crate::observability::Operation::StateSubscription,
+                        "subscription",
+                        None,
+                        None,
+                        None,
+                    ),
                     seen: false,
                 },
             );
@@ -247,7 +268,12 @@ impl ReadPort {
 
     fn unregister(&self, id: u64) {
         let callback = self.state.borrow_mut().listeners.remove(&id);
-        drop(callback);
+        if let Some(mut callback) = callback {
+            if let Some(mut observation) = callback.observation.take() {
+                observation.finish(crate::observability::Outcome::Ok);
+            }
+            drop(callback);
+        }
         if let Err(error) = self.update_interest() {
             (self.reporter)(error);
         }

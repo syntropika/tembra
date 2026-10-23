@@ -98,15 +98,21 @@ impl Session {
         let scheduler = Scheduler::get()?;
         let options: Value =
             serde_json::from_str(options).map_err(|e| napi::Error::from_reason(e.to_string()))?;
-        if options.as_object().is_none_or(|o| !o.is_empty()) {
+        if options
+            .as_object()
+            .is_none_or(|o| o.keys().any(|key| key != "observability"))
+        {
             return Err(napi::Error::from_reason("unsupported native Host options"));
+        }
+        let mut host_options = HostOptions::new(name, json!(null));
+        if let Some(options) = options.get("observability") {
+            let options = serde_json::from_value(options.clone())
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            host_options = host_options.with_observability(options);
         }
         Ok(Rc::new(Self {
             handoffs: RefCell::default(),
-            host: Host::new(
-                HostOptions::new(name, json!(null)),
-                scheduler.driver.clone(),
-            ),
+            host: Host::new(host_options, scheduler.driver.clone()),
             scheduler,
             loader: crate::loader::Environment::get(env)?,
             generation: RefCell::default(),

@@ -174,8 +174,8 @@ export default {{name: 'entry-probe', uses: [native], setup(scope, declare) {{
         serde_json::to_string(observer.descriptor()).unwrap()
     );
     let facet = executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            &host,
             BundledJsArtifact::new("entry-probe", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

@@ -76,6 +76,7 @@ pub(crate) enum Request {
     },
     Prepare {
         host: u64,
+        observation: Option<tembra_core::observability::ObservationSpan>,
         artifact: BundledJsArtifact,
         export: String,
         reply: oneshot::Sender<Result<ExecutableFacet>>,
@@ -103,15 +104,57 @@ pub(crate) struct Invocation {
 }
 // Only the registered typed core closer can construct ResourceClose. Ordinary
 // invocation arguments retain exact executable-generation checks.
-enum InvocationArguments {
-    Ordinary(Vec<JsValue>),
+pub(crate) enum InvocationArguments {
+    Ordinary {
+        values: Vec<JsValue>,
+        observation: Option<Box<tembra_core::observability::ObservationSpan>>,
+    },
     ResourceClose(Rc<JsValue>),
-    Event { context: JsValue, value: JsValue },
+    Event {
+        context: JsValue,
+        value: JsValue,
+    },
+}
+impl From<Vec<JsValue>> for InvocationArguments {
+    fn from(values: Vec<JsValue>) -> Self {
+        Self::Ordinary {
+            values,
+            observation: None,
+        }
+    }
+}
+impl
+    From<(
+        Vec<JsValue>,
+        Option<tembra_core::observability::ObservationSpan>,
+    )> for InvocationArguments
+{
+    fn from(
+        (values, observation): (
+            Vec<JsValue>,
+            Option<tembra_core::observability::ObservationSpan>,
+        ),
+    ) -> Self {
+        Self::Ordinary {
+            values,
+            observation: observation.map(Box::new),
+        }
+    }
 }
 impl InvocationArguments {
+    fn observe_result<T>(&mut self, result: &Result<T>) {
+        if let Self::Ordinary {
+            observation: Some(observation),
+            ..
+        } = self
+        {
+            observation.result(result);
+        }
+    }
+
     fn values(&self) -> &[JsValue] {
         match self {
-            Self::Ordinary(values) => values,
+            Self::Ordinary { values, .. } => values,
             Self::ResourceClose(value) => std::slice::from_ref(value.as_ref()),
             Self::Event { .. } => &[],
         }
@@ -258,11 +301,41 @@ impl Executor {
     /// # Errors
     /// Refuses artifact/export/profile/queue budgets, JavaScript syntax/evaluation failures,
     /// and invalid facet definitions. No Host is acquired or mutated by preparation.
+    /// Prepares without Host observation correlation because a numeric ID identifies no collector.
     pub fn prepare(
         &self,
         host_id: u64,
         artifact: BundledJsArtifact,
         export_name: String,
+    ) -> LocalBoxFuture<'static, Result<ExecutableFacet>> {
+        self.prepare_observed(host_id, artifact, export_name, None)
+    }
+
+    /// Uses the same preparer with the given Host's optional bounded metadata collection.
+    /// The request retains only a diagnostic span, never the Host. Evaluation outlives a dropped waiter.
+    ///
+    /// # Errors
+    /// Returns the same admission, validation and evaluation failures as [`Self::prepare`].
+    pub fn prepare_for_host(
+        &self,
+        host: &tembra_core::Host,
+        artifact: BundledJsArtifact,
+        export_name: String,
+    ) -> LocalBoxFuture<'static, Result<ExecutableFacet>> {
+        let observation = host.observations().and_then(|observations| {
+            observations.observe(
+                tembra_core::observability::Operation::Executor,
+                "module_prepare",
+            )
+        });
+        self.prepare_observed(host.id(), artifact, export_name, observation)
+    }
+    fn prepare_observed(
+        &self,
+        host_id: u64,
+        artifact: BundledJsArtifact,
+        export_name: String,
+        mut observation: Option<tembra_core::observability::ObservationSpan>,
     ) -> LocalBoxFuture<'static, Result<ExecutableFacet>> {
         let result = (|| {
             if artifact.source.len() > self.inner.options.max_source_bytes {
@@ -270,22 +343,28 @@ impl Executor {
             }
             self.inner.admit_queue()?;
             let (reply, receive) = oneshot::channel();
-            if self
-                .inner
-                .sender
-                .unbounded_send(Request::Prepare {
-                    host: host_id,
-                    artifact,
-                    export: export_name,
-                    reply,
-                })
-                .is_err()
-            {
+            if let Err(error) = self.inner.sender.unbounded_send(Request::Prepare {
+                host: host_id,
+                observation: observation.take(),
+                artifact,
+                export: export_name,
+                reply,
+            }) {
                 self.inner.dequeued();
+                if let Request::Prepare {
+                    observation: Some(mut observation),
+                    ..
+                } = error.into_inner()
+                {
+                    observation.result::<()>(&Err(closed()));
+                }
                 return Err(closed());
             }
             Ok(receive)
         })();
+        if let (Some(observation), Err(error)) = (&mut observation, &result) {
+            observation.result::<()>(&Err(error.clone()));
+        }
         async move { result?.await.map_err(|_| closed())? }.boxed_local()
     }
     /// Drains up to the latest 128 asynchronous event-loop or observer diagnostics.
@@ -343,18 +422,12 @@ impl Engine {
     pub(crate) fn enqueue(
         self: &Rc<Self>,
         callback: Rc<Callback>,
-        args: Vec<JsValue>,
+        args: impl Into<InvocationArguments>,
         owner: Option<Rc<Owner>>,
         lease: Option<InvocationLease>,
         conversion: Conversion,
     ) -> LocalBoxFuture<'static, Result<Output>> {
-        self.enqueue_arguments(
-            callback,
-            InvocationArguments::Ordinary(args),
-            owner,
-            lease,
-            conversion,
-        )
+        self.enqueue_arguments(callback, args.into(), owner, lease, conversion)
     }
     /// Only used by the actual typed ResourceDeclaration closer. The value keeps its
     /// original module; the new callback separately owns its own module until settlement.
@@ -406,7 +479,10 @@ impl Engine {
                 conversion,
                 reply,
             };
-            if self.sender.unbounded_send(Request::Invoke(job)).is_err() {
+            if let Err(error) = self.sender.unbounded_send(Request::Invoke(job)) {
+                if let Request::Invoke(mut job) = error.into_inner() {
+                    job.args.observe_result::<()>(&Err(closed()));
+                }
                 self.dequeued();
                 return Err(closed());
             }

@@ -85,8 +85,8 @@ export default {{name: 'reload.middleware', uses: [monitor], setup(scope, declar
 
 async fn prepare(host: &Host, executor: &Executor, source: String) -> ExecutableFacet {
     executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            host,
             BundledJsArtifact::new("reload.middleware", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

@@ -182,8 +182,8 @@ fn real_reload_reuses_event_sources_switches_handlers_and_stops_old_task_root_ad
             )
             .unwrap();
             let prepare = |version| {
-                executor.prepare(
-                    host.id(),
+                executor.prepare_for_host(
+                    &host,
                     BundledJsArtifact::new(
                         "activities",
                         source(&service, &monitor, version),
@@ -364,8 +364,8 @@ export default {{name: 'restarted-events', uses: [], setup(scope, declare) {{
                 serde_json::to_string(token.descriptor()).unwrap()
             );
             let facet = executor
-                .prepare(
-                    host.id(),
+                .prepare_for_host(
+                    &host,
                     BundledJsArtifact::new("restarted-events", source, vec!["default".into()])
                         .unwrap(),
                     "default".into(),

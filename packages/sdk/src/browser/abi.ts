@@ -25,6 +25,7 @@ export type WasmHost = {
   cancelContext: WasmMethod<[token: unknown], void>;
   close: WasmMethod<[], Promise<void>>;
   errorsJson: WasmMethod<[], string>;
+  observationsJson: WasmMethod<[limit: number], string>;
   free: WasmMethod<[], void>;
 };
 export type WasmModule = {

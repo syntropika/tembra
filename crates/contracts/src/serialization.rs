@@ -57,35 +57,38 @@ pub fn to_portable_value<T: Serialize + ?Sized>(value: &T) -> Result<Value> {
 /// # Ok::<(), tembra_contracts::ContractError>(())
 /// ```
 pub fn from_portable_value<T: DeserializeOwned>(value: &Value) -> Result<T> {
-    let encoded = crate::canonical_json(value)?;
-    if encoded.len() > 1_048_576 {
-        return Err(ContractError::new(
-            "json_size",
-            "JSON input exceeds the one MiB ingestion limit",
-        ));
+    match crate::schema::decode_preflight(value)? {
+        crate::schema::DecodePreflight::Bytes(encoded) => {
+            if encoded.len() > 1_048_576 {
+                return Err(ContractError::new(
+                    "json_size",
+                    "JSON input exceeds the one MiB ingestion limit",
+                ));
+            }
+
+            let normalized = crate::parse_json(&encoded)?;
+            serde_json::from_value(normalized)
+                .map_err(|error| ContractError::new("deserialization", error.to_string()))
+        }
+        crate::schema::DecodePreflight::Length(length) => {
+            if length > 1_048_576 {
+                return Err(ContractError::new(
+                    "json_size",
+                    "JSON input exceeds the one MiB ingestion limit",
+                ));
+            }
+
+            decode_structured(value)
+        }
     }
-    // Optional arbitrary_precision changes how the strict parser presents number
-    // tokens. Preserve that existing boundary for floating representations rather
-    // than silently accepting different values or custom-deserializer errors.
-    if needs_numeric_roundtrip(value) {
-        let normalized = crate::parse_json(&encoded)?;
-        return serde_json::from_value(normalized)
-            .map_err(|error| ContractError::new("deserialization", error.to_string()));
-    }
+}
+
+fn decode_structured<T: DeserializeOwned>(value: &Value) -> Result<T> {
     let mut normalized = value.clone();
     crate::json::normalize_numbers(&mut normalized);
     normalize_object_order(&mut normalized);
     serde_json::from_value(normalized)
         .map_err(|error| ContractError::new("deserialization", error.to_string()))
-}
-
-fn needs_numeric_roundtrip(value: &Value) -> bool {
-    match value {
-        Value::Number(number) => !number.is_i64() && !number.is_u64(),
-        Value::Array(values) => values.iter().any(needs_numeric_roundtrip),
-        Value::Object(values) => values.values().any(needs_numeric_roundtrip),
-        _ => false,
-    }
 }
 
 // Parsing canonical JSON visits object keys in UTF-16 order when preserve_order is
@@ -692,5 +695,206 @@ mod tests {
         assert!(to_portable_value(&Sequence).is_err());
         assert!(to_portable_value(&Map).is_err());
         assert!(to_portable_value(&Variant).is_err());
+    }
+}
+
+#[cfg(test)]
+mod size_preflight_oracle_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn needs_numeric_roundtrip(value: &Value) -> bool {
+        match value {
+            Value::Number(number) => !number.is_i64() && !number.is_u64(),
+            Value::Array(values) => values.iter().any(needs_numeric_roundtrip),
+            Value::Object(values) => values.values().any(needs_numeric_roundtrip),
+            _ => false,
+        }
+    }
+
+    fn frozen_allocating_decode<T: DeserializeOwned>(value: &Value) -> Result<T> {
+        crate::schema::frozen_portable(value, 0)?;
+        let encoded = serde_jcs::to_string(value)
+            .map_err(|error| ContractError::new("canonical", error.to_string()))?;
+        if encoded.len() > 1_048_576 {
+            return Err(ContractError::new(
+                "json_size",
+                "JSON input exceeds the one MiB ingestion limit",
+            ));
+        }
+        // Optional arbitrary_precision changes how the strict parser presents number
+        // tokens. Preserve that existing boundary for floating representations rather
+        // than silently accepting different values or custom-deserializer errors.
+        if needs_numeric_roundtrip(value) {
+            let normalized = crate::parse_json(&encoded)?;
+            return serde_json::from_value(normalized)
+                .map_err(|error| ContractError::new("deserialization", error.to_string()));
+        }
+        let mut normalized = value.clone();
+        crate::json::normalize_numbers(&mut normalized);
+        normalize_object_order(&mut normalized);
+        serde_json::from_value(normalized)
+            .map_err(|error| ContractError::new("deserialization", error.to_string()))
+    }
+
+    std::thread_local! { static EFFECTS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) }; }
+    fn effects() -> Vec<String> {
+        EFFECTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+    }
+    fn record(value: impl Into<String>) {
+        EFFECTS.with(|events| events.borrow_mut().push(value.into()));
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Observed(Vec<String>);
+    impl<'de> serde::Deserialize<'de> for Observed {
+        fn deserialize<D: serde::Deserializer<'de>>(
+            deserializer: D,
+        ) -> std::result::Result<Self, D::Error> {
+            record(format!("deserialize:{}", deserializer.is_human_readable()));
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Observed;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("object")
+                }
+                fn visit_map<M: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: M,
+                ) -> std::result::Result<Observed, M::Error> {
+                    let mut keys = Vec::new();
+                    while let Some((key, _value)) = map.next_entry::<String, Value>()? {
+                        record(format!("key:{key}"));
+                        keys.push(key);
+                    }
+                    Ok(Observed(keys))
+                }
+            }
+            deserializer.deserialize_map(Visitor)
+        }
+    }
+    #[derive(Debug, PartialEq)]
+    struct Reject;
+    impl<'de> serde::Deserialize<'de> for Reject {
+        fn deserialize<D: serde::Deserializer<'de>>(_: D) -> std::result::Result<Self, D::Error> {
+            record("custom refusal");
+            Err(serde::de::Error::custom("first custom refusal"))
+        }
+    }
+    fn compare<T: serde::de::DeserializeOwned + std::fmt::Debug + PartialEq>(value: &Value) {
+        let original = value.clone();
+        effects();
+        let expected = frozen_allocating_decode::<T>(value);
+        let expected_effects = effects();
+        let count = from_portable_value::<T>(value);
+        let actual_effects = effects();
+        assert_eq!(count, expected, "value/error mismatch for {value:?}");
+        assert_eq!(actual_effects, expected_effects, "custom effects changed");
+        assert_eq!(*value, original, "borrowed value changed");
+        assert_eq!(
+            serde_json::to_vec(value).unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
+    }
+    fn corpus() -> Vec<Value> {
+        let mut values = vec![
+            json!(null),
+            json!(true),
+            json!(false),
+            json!(0),
+            json!(-1),
+            json!(9_007_199_254_740_991_u64),
+            json!(9_007_199_254_740_992_u64),
+            json!(u64::MAX),
+            json!(i64::MIN),
+            json!(0.0),
+            json!(-0.0),
+            json!(1.0),
+            json!(-1.0),
+            json!(0.1),
+            json!(-0.1),
+            json!(1e-7),
+            json!(1e-6),
+            json!(f64::from_bits(1)),
+            json!(1e100),
+            json!({"\u{e000}":1,"😀":0.1,"é":"中","e\u{0301}":[null,true]}),
+            json!({"z":1,"a":2}),
+            json!([1, 2, 3]),
+        ];
+        for depth in [127, 128, 129] {
+            let mut deep = json!(0);
+            for _ in 0..depth {
+                deep = json!([deep]);
+            }
+            values.push(deep);
+        }
+        for size in [1_048_575, 1_048_576, 1_048_577] {
+            values.push(json!("x".repeat(size - 2)));
+        }
+        let mut deep = json!(0);
+        for _ in 0..129 {
+            deep = json!([deep]);
+        }
+        values.push(json!([0.1, deep.clone()]));
+        values.push(json!([0.1, 9_007_199_254_740_992_u64]));
+        values.push(json!([deep.clone(), 9_007_199_254_740_992_u64]));
+        values.push(json!([9_007_199_254_740_992_u64, deep]));
+        // Oversized numeric values must still fail size before custom Deserialize.
+        values.push(json!({"padding":"x".repeat(1_048_576),"number":0.1}));
+        values
+    }
+    #[test]
+    fn dual_preflight_matches_baseline_decoder_and_custom_effects() {
+        for value in corpus() {
+            compare::<Value>(&value);
+            compare::<u64>(&value);
+            compare::<Observed>(&value);
+            compare::<Reject>(&value);
+        }
+    }
+    #[test]
+    fn numeric_roundtrip_keeps_strict_parser_and_canonical_key_visitation() {
+        for value in [
+            json!({"z":-0.0,"a":0.1,"\u{e000}":1,"😀":2}),
+            json!({"n":1.0}),
+            json!({"n":0.10000000000000002}),
+            json!({"n":5e-324}),
+        ] {
+            assert!(needs_numeric_roundtrip(&value));
+            compare::<Value>(&value);
+            compare::<Observed>(&value);
+        }
+        for source in [
+            "1.00000000000000001",
+            "9007199254740991.01",
+            "0.100000000000000000000001",
+            "1e-400",
+            "-0",
+            "4.9406564584124654e-324",
+        ] {
+            let value: Value = serde_json::from_str(source).unwrap();
+            compare::<Value>(&value);
+            compare::<u64>(&value);
+        }
+    }
+    #[test]
+    fn malformed_depth_number_and_oversize_refuse_before_custom_deserializer() {
+        let mut deep = json!(0);
+        for _ in 0..129 {
+            deep = json!([deep]);
+        }
+        for value in [
+            deep,
+            json!(9_007_199_254_740_992_u64),
+            json!("x".repeat(1_048_575)),
+        ] {
+            effects();
+            let old = frozen_allocating_decode::<Reject>(&value);
+            assert!(old.is_err());
+            assert!(effects().is_empty());
+            let new = from_portable_value::<Reject>(&value);
+            assert_eq!(new, old);
+            assert!(effects().is_empty());
+        }
     }
 }

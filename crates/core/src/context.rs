@@ -23,6 +23,15 @@ struct CancellationState {
     children: Vec<Weak<RefCell<CancellationState>>>,
     waiters: BTreeMap<u64, Waker>,
     next_waiter: u64,
+    observation: Option<CancellationObservation>,
+}
+
+#[derive(Clone)]
+struct CancellationObservation {
+    observations: crate::Observations,
+    root: u64,
+    parent: Option<u64>,
+    version: u64,
 }
 
 impl CancellationToken {
@@ -33,6 +42,7 @@ impl CancellationToken {
     pub fn child(&self) -> Self {
         let child = Self::new();
         self.link_child(&child);
+        child.inner.borrow_mut().observation = self.inner.borrow().observation.clone();
         child
     }
 
@@ -54,14 +64,30 @@ impl CancellationToken {
         let reason = reason.into();
         let mut pending = vec![self.inner.clone()];
         let mut wake = Vec::new();
+        let mut diagnostics = Vec::new();
         while let Some(inner) = pending.pop() {
             let mut state = inner.borrow_mut();
             if state.reason.is_some() {
                 continue;
             }
             state.reason = Some(reason.clone());
+            if let Some(observation) = &state.observation {
+                diagnostics.push(observation.clone());
+            }
             pending.extend(state.children.drain(..).filter_map(|child| child.upgrade()));
             wake.extend(std::mem::take(&mut state.waiters).into_values());
+        }
+        for diagnostic in diagnostics {
+            if let Some(mut observation) = diagnostic.observations.start(
+                crate::observability::Operation::Cancellation,
+                "signal",
+                None,
+                None,
+                None,
+            ) {
+                observation.link(diagnostic.root, diagnostic.parent, diagnostic.version);
+                observation.result::<()>(&Err(reason.clone()));
+            }
         }
         for waiter in wake {
             waiter.wake();
@@ -137,12 +163,15 @@ struct ScopeState {
     expiry: CancellationToken,
     hooks: BTreeMap<u64, Box<dyn FnOnce()>>,
     next_hook: u64,
+    observation: Option<crate::observability::Span>,
     children: Vec<Weak<RefCell<ScopeState>>>,
 }
 
 /// A host-created invocation capability; retaining a clone does not extend its scope.
 #[derive(Clone)]
 pub struct Context {
+    observation_id: Option<u64>,
+    observations: Option<crate::Observations>,
     host_id: u64,
     root_id: u64,
     code_version: u64,
@@ -168,6 +197,8 @@ impl Context {
         };
         (
             Self {
+                observation_id: None,
+                observations: None,
                 host_id,
                 root_id,
                 code_version,
@@ -198,6 +229,54 @@ impl Context {
     pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
+    }
+
+    /// Starts a bounded adapter observation linked to this issued context, if enabled.
+    /// This observes metadata only and does not check or extend context authority.
+    pub fn observe(
+        &self,
+        operation: crate::observability::Operation,
+        label: &str,
+    ) -> Option<crate::observability::ObservationSpan> {
+        crate::observability::start(&self.observations, operation, label, Some(self), None, None)
+    }
+
+    /// Diagnostic operation identity only; it grants no authority and can be absent.
+    pub fn observation_id(&self) -> Option<u64> {
+        self.observation_id
+    }
+
+    pub(crate) fn with_observation_id(mut self, id: Option<u64>) -> Self {
+        self.observation_id = id;
+        self
+    }
+
+    pub(crate) fn observe_root(mut self, observations: Option<crate::Observations>) -> Self {
+        let span = crate::observability::start(
+            &observations,
+            crate::observability::Operation::Root,
+            "root",
+            Some(&self),
+            None,
+            None,
+        );
+        self.observation_id = span.as_ref().map(crate::observability::Span::id);
+        self.scope.borrow_mut().observation = span;
+        self.observations = observations;
+        self.observe_cancellation();
+        self
+    }
+
+    pub(crate) fn observe_cancellation(&self) {
+        self.cancellation.inner.borrow_mut().observation =
+            self.observations
+                .as_ref()
+                .map(|observations| CancellationObservation {
+                    observations: observations.clone(),
+                    root: self.root_id,
+                    parent: self.observation_id,
+                    version: self.code_version,
+                });
     }
 
     pub fn host_id(&self) -> u64 {
@@ -298,7 +377,15 @@ impl Context {
     /// Returns [`Self::check`] failures without creating a child.
     pub fn child_call(&self, principal: Value) -> Result<(Self, ScopeGuard)> {
         self.check(self.host_id)?;
-        let scope = Rc::new(RefCell::new(ScopeState::default()));
+        let observation = self.observe(crate::observability::Operation::Scope, "child_scope");
+        let observation_id = observation
+            .as_ref()
+            .map(crate::observability::Span::id)
+            .or(self.observation_id);
+        let scope = Rc::new(RefCell::new(ScopeState {
+            observation,
+            ..Default::default()
+        }));
         {
             let mut parent = self.scope.borrow_mut();
             parent.children.retain(|child| child.strong_count() > 0);
@@ -309,6 +396,8 @@ impl Context {
         };
         Ok((
             Self {
+                observation_id,
+                observations: self.observations.clone(),
                 host_id: self.host_id,
                 root_id: self.root_id,
                 code_version: self.code_version,
@@ -442,6 +531,9 @@ impl ScopeGuard {
                 continue;
             }
             state.settled = true;
+            if let Some(mut observation) = state.observation.take() {
+                observation.finish(crate::observability::Outcome::Ok);
+            }
             pending.extend(state.children.drain(..).filter_map(|child| child.upgrade()));
             settled.push((state.expiry.clone(), std::mem::take(&mut state.hooks)));
         }

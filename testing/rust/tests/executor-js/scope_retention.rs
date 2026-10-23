@@ -44,8 +44,8 @@ fn service() -> Rc<Contract> {
 
 async fn prepare(host: &Host, executor: &Executor, source: String) -> ExecutableFacet {
     executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            host,
             BundledJsArtifact::new("scope-retention", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

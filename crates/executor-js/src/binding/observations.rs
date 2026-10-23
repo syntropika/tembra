@@ -57,6 +57,8 @@ pub(super) fn dispatch<'s>(
             | "task_signal"
             | "scope_signal"
             | "context_signal"
+            | "observation_host_id"
+            | "observation_id"
             | "registry"
             | "table"
             | "registry_subscribe"
@@ -305,6 +307,10 @@ pub(super) fn dispatch<'s>(
                     Kind::Signal(Signal::Core(token)),
                 )?;
                 wrap(engine, scope, &signal)
+            }
+            ("observation_host_id", Kind::Context(ctx)) => to_js(scope, ctx.host_id().to_string()),
+            ("observation_id", Kind::Context(ctx)) => {
+                to_js(scope, ctx.observation_id().map(|id| id.to_string()))
             }
             ("check", Kind::Context(ctx)) => {
                 ctx.check(module.host)?;

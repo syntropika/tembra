@@ -10,6 +10,7 @@ import {
 } from "@tembra/testing/conformance";
 
 import { detachedHookOwnership } from "../../src/detached-hooks.js";
+import { observationAcceptance } from "../../src/observability.ts";
 import { browserManagerAcceptance, browserManagerLiveness } from "./browser-managers.js";
 import { browserModuleAcceptance } from "./browser-modules.js";
 import { browserOptionsAcceptance } from "./browser-options.js";
@@ -262,6 +263,8 @@ export async function browserAcceptance(): Promise<string[]> {
   } finally {
     await hooks.close();
   }
+  await observationAcceptance(createHost);
+  passed.push("bounded core observations, sampling, State and final managed cleanup");
   await browserOptionsAcceptance();
   passed.push(
     "initialized WASM injection, loader injection, Rust consumer linger and state:false readiness",

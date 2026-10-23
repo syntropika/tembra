@@ -535,11 +535,29 @@ impl Connection {
         Ok(value)
     }
     fn send(&self, frame: Frame) -> Result<()> {
-        if self.status() == ConnectionStatus::Closed {
-            return Err(RuntimeError::unavailable("closed", "connection closed"));
+        let mut observation = crate::observability::start(
+            &self
+                .inner
+                .host
+                .upgrade()
+                .and_then(|host| host.observations.clone()),
+            crate::observability::Operation::RpcSend,
+            "enqueue",
+            None,
+            None,
+            None,
+        );
+        let result = (|| {
+            if self.status() == ConnectionStatus::Closed {
+                return Err(RuntimeError::unavailable("closed", "connection closed"));
+            }
+            let bytes = encode(&frame, self.inner.peer_frame.get())?;
+            self.enqueue(bytes)
+        })();
+        if let Some(observation) = &mut observation {
+            observation.result(&result);
         }
-        let bytes = encode(&frame, self.inner.peer_frame.get())?;
-        self.enqueue(bytes)
+        result
     }
     fn output_fits(&self, bytes: usize, frames: usize, state: bool) -> bool {
         let limits = &self.inner.options.limits;

@@ -208,6 +208,10 @@ impl<A: 'static, R: 'static> ErasedNative for Adapter<A, R> {
         let signature = self.signature.clone();
         let weak = Rc::downgrade(&owner);
         let invoke: tembra_hooks::MethodHandler<A, R> = Rc::new(move |args: A, context| {
+            let mut observation = context.observe(
+                tembra_core::observability::Operation::Executor,
+                "native_callback",
+            );
             let admitted: Result<_> = (|| {
                 let owner = weak.upgrade().ok_or_else(crate::slots::expired)?;
                 let lease = owner
@@ -229,6 +233,9 @@ impl<A: 'static, R: 'static> ErasedNative for Adapter<A, R> {
                 }
                 Ok((owner, lease, values))
             })();
+            if let (Some(observation), Err(error)) = (&mut observation, &admitted) {
+                observation.result::<()>(&Err(error.clone()));
+            }
             let handler = handler.clone();
             let decode = decode.clone();
             let result_schema = signature.result.clone();
@@ -247,7 +254,13 @@ impl<A: 'static, R: 'static> ErasedNative for Adapter<A, R> {
                     .module
                     .engine
                     .clone()
-                    .enqueue(handler, args, Some(owner), Some(lease), conversion)
+                    .enqueue(
+                        handler,
+                        (args, observation),
+                        Some(owner),
+                        Some(lease),
+                        conversion,
+                    )
                     .await?
                 {
                     Output::Native(value) => value

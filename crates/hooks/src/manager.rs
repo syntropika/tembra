@@ -136,7 +136,9 @@ impl HookManager {
                 "too many hook contributions",
             ));
         }
-        let expected = definition.contribution_member();
+        // Empty snapshots have no contribution signature to compare. Nonempty plans
+        // construct the expected profile before validating contribution metadata.
+        let expected = (!snapshot.is_empty()).then(|| definition.contribution_member());
         let mut ordered = Vec::with_capacity(snapshot.len());
         for (ordinal, (key, entry)) in snapshot.entries().enumerate() {
             let data = entry
@@ -166,7 +168,7 @@ impl HookManager {
                 .contract()
                 .members("")
                 .and_then(|members| members.get(operation.method()));
-            if actual != Some(&expected) {
+            if actual != expected.as_ref() {
                 return Err(invalid(
                     "hook_signature",
                     "contribution member profile differs",
@@ -238,9 +240,15 @@ impl HookManager {
                     })?;
                     *selected.borrow_mut() = Some(token.clone());
                     let (send, receive) = oneshot::channel();
+                    let observation =
+                        group.observe(tembra_core::observability::Operation::Hook, "pipeline");
                     manager.driver.spawn(
                         async move {
+                            let mut observation = observation;
                             let result = body.await;
+                            if let Some(observation) = &mut observation {
+                                observation.result(&result);
+                            }
                             drop(settlement);
                             drop(scope);
                             drop(permit);

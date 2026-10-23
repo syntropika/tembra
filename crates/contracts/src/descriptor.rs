@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{cell::OnceCell, collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -471,6 +471,23 @@ impl Contract {
     pub fn normalize_input(&self, value: &Value) -> Result<Value> {
         self.prepared.input.normalize_input(value)
     }
+
+    /// Prepares one acquisition's owned input under this exact immutable contract.
+    ///
+    /// No caller-supplied validation proof is accepted. The result exposes no mutation,
+    /// dispatch authority, Context or authorization result. Identity is evaluated lazily.
+    /// # Errors
+    /// Returns the ordinary normalization error before creating a prepared input.
+    #[doc(hidden)]
+    pub fn prepare_acquisition_input(&self, value: &Value) -> Result<AcquisitionInput<'_>> {
+        let normalized = self.normalize_input(value)?;
+
+        Ok(AcquisitionInput {
+            contract: self,
+            normalized,
+            identity: OnceCell::new(),
+        })
+    }
     /// Normalize input, omit default-valued properties, and return its JCS identity.
     ///
     /// # Errors
@@ -508,6 +525,65 @@ impl Contract {
     }
 }
 
+/// Owned per-acquisition input bound to its originating contract by an immutable borrow.
+/// Its fields are private, so another contract cannot adopt it as prevalidated input.
+#[doc(hidden)]
+pub struct AcquisitionInput<'a> {
+    contract: &'a Contract,
+    normalized: Value,
+    identity: OnceCell<Result<String>>,
+}
+
+impl AcquisitionInput<'_> {
+    /// Borrows the normalized value; callers cannot change the prepared candidate.
+    pub fn value(&self) -> &Value {
+        &self.normalized
+    }
+
+    /// Consumes this preparation without granting authority over the returned value.
+    pub fn into_value(self) -> Value {
+        self.normalized
+    }
+
+    /// Returns exactly this contract's canonical identity for the prepared candidate.
+    /// # Errors
+    /// Preserves identity transformation and canonical JSON errors. A refusal is retained
+    /// only by this individual preparation, never by the contract or across acquisitions.
+    pub fn identity(&self) -> Result<&str> {
+        self.identity
+            .get_or_init(|| {
+                canonical_json(&identity_value(self.contract.input(), &self.normalized)?)
+            })
+            .as_ref()
+            .map(String::as_str)
+            .map_err(Clone::clone)
+    }
+
+    /// Resolves placement from this preparation's immutable normalized input.
+    /// # Errors
+    /// Preserves the ordinary nonempty-string family-key refusal.
+    pub fn resolve_host(&self) -> Result<Option<String>> {
+        match self.contract.placement() {
+            None => Ok(None),
+            Some(Placement::Named { name }) => Ok(Some(name.clone())),
+            Some(Placement::Family { prefix, key }) => {
+                let suffix = self
+                    .normalized
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        ContractError::new(
+                            "placement",
+                            "family key must resolve to a nonempty string",
+                        )
+                    })?;
+                Ok(Some(format!("{prefix}{suffix}")))
+            }
+        }
+    }
+}
+
 fn present_schema<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<ValueSchema>, D::Error> {
@@ -529,5 +605,118 @@ fn check_nominal(id: &str) -> Result<()> {
             "native_id",
             "nominal id must be name@version",
         ))
+    }
+}
+
+#[cfg(test)]
+mod acquisition_preparation_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn local(schema: Value) -> Contract {
+        Contract::local("prepared-acquisition", 1, schema, BTreeMap::new()).unwrap()
+    }
+
+    #[test]
+    fn prepared_input_matches_repeated_normalization_identity_and_refusals() {
+        let schemas = vec![
+            json!(true),
+            json!({"type":"object","properties":{"value":{"type":"integer","default":0}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"value":{"type":["integer","null"],"default":null}},"additionalProperties":true}),
+            json!({"type":"object","properties":{"nested":{"type":"object","default":{},"properties":{"name":{"type":"string","default":"x"}}}},"additionalProperties":false}),
+            json!({"type":"array","items":{"type":"object","properties":{"value":{"type":"integer","default":7}}}}),
+            json!({"anyOf":[{"type":"null"},{"type":"object","properties":{"value":{"type":"integer","default":3}}}]}),
+            json!({"anyOf":[{"type":"object","properties":{"tag":{"const":"a"},"value":{"type":"integer","default":1}},"required":["tag"]},{"type":"object","properties":{"tag":{"const":"b"},"value":{"type":"string","default":"s"}},"required":["tag"]}]}),
+            json!({"anyOf":[{"type":"integer"},{"type":"string"}]}),
+        ];
+        let mut values = vec![
+            json!(null),
+            json!({}),
+            json!({"value":0}),
+            json!({"value":null}),
+            json!({"value":"bad","extra":5}),
+            json!({"nested":{"name":"z","unknown":1}}),
+            json!([{}, {"value":4}]),
+            json!({"tag":"a"}),
+            json!({"tag":"b","value":"t"}),
+            json!({"tag":"bad"}),
+            json!(9007199254740992_u64),
+            json!({"value":1.5}),
+        ];
+        let mut deep = json!(0);
+        for _ in 0..300 {
+            deep = json!([deep]);
+        }
+        values.push(deep);
+        for schema in schemas {
+            let contract = local(schema);
+            for value in &values {
+                let original = value.clone();
+                let legacy = contract.normalize_input(value);
+                let candidate = contract.prepare_acquisition_input(value);
+                match (legacy, candidate) {
+                    (Ok(normalized), Ok(prepared)) => {
+                        assert_eq!(prepared.value(), &normalized);
+                        let second = contract.normalize_input(&normalized).unwrap();
+                        assert_eq!(second, normalized, "normalization must be idempotent");
+                        assert_eq!(
+                            prepared.identity().map(str::to_owned),
+                            contract.identity(&second)
+                        );
+                        assert_eq!(
+                            prepared.identity().map(str::to_owned),
+                            contract.identity(value)
+                        );
+                        assert_eq!(prepared.resolve_host(), contract.resolve_host(&normalized));
+                        assert_eq!(prepared.into_value(), normalized);
+                    }
+                    (Err(old), Err(new)) => assert_eq!(old, new),
+                    _ => panic!("normalization result differs"),
+                }
+                assert_eq!(*value, original, "input changed");
+            }
+        }
+    }
+
+    #[test]
+    fn consumer_provider_preparations_keep_their_own_defaults_and_placement() {
+        let consumer = local(
+            json!({"type":"object","properties":{"mode":{"type":"string","default":"consumer"}}}),
+        );
+        let provider = local(
+            json!({"type":"object","properties":{"mode":{"type":"string","default":"provider"}}}),
+        );
+        let prepared = consumer.prepare_acquisition_input(&json!({})).unwrap();
+        let actual = provider
+            .prepare_acquisition_input(prepared.value())
+            .unwrap();
+        assert_eq!(prepared.value(), &json!({"mode":"consumer"}));
+        assert_eq!(prepared.identity().unwrap(), "{}");
+        assert_eq!(actual.identity().unwrap(), "{\"mode\":\"consumer\"}");
+        assert_ne!(prepared.identity().unwrap(), actual.identity().unwrap());
+        let variants = BTreeMap::from([("v".to_owned(), BTreeMap::new())]);
+        for placement in [
+            Placement::Named {
+                name: "fixed".into(),
+            },
+            Placement::Family {
+                prefix: "node-".into(),
+                key: "region".into(),
+            },
+        ] {
+            let contract=Contract::remote("remote-input",1,json!({"type":"object","properties":{"region":{"type":"string"}},"required":["region"]}),placement,variants.clone()).unwrap();
+            for value in [
+                json!({"region":"west"}),
+                json!({"region":""}),
+                json!({}),
+                json!({"region":2}),
+            ] {
+                let old = contract.resolve_host(&value);
+                let new = contract
+                    .prepare_acquisition_input(&value)
+                    .and_then(|input| input.resolve_host());
+                assert_eq!(old, new);
+            }
+        }
     }
 }

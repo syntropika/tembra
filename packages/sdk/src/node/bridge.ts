@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { arch, platform } from "node:process";
 import { fileURLToPath } from "node:url";
 
+import type { ObservationOptions } from "../host/observability.js";
 import { canonicalJson } from "../portable.js";
 
 /** Private same-thread Node-API transport; it carries capabilities, never runtime state. */
@@ -78,7 +79,11 @@ function portableRead(input: unknown): () => string {
     canonicalJson(input === undefined ? { present: false } : { present: true, value: input });
 }
 
-export function nativeTransport(name: string, binary?: string | URL) {
+export function nativeTransport(
+  name: string,
+  binary?: string | URL,
+  observability?: ObservationOptions,
+) {
   const require = createRequire(import.meta.url);
   const filename =
     binary ?? new URL(`../../native/tembra.${platform}-${arch}.node`, import.meta.url);
@@ -115,7 +120,11 @@ export function nativeTransport(name: string, binary?: string | URL) {
   let serial = 0;
   let disposed = false;
   let polling = false;
-  const native = new module.NodeBridge(name, canonicalJson({}), dispatch);
+  const native = new module.NodeBridge(
+    name,
+    canonicalJson(observability === undefined ? {} : { observability }),
+    dispatch,
+  );
   const finalized = new FinalizationRegistry<string>((id) => {
     issued.delete(id);
     if (!disposed) {

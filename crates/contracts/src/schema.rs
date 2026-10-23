@@ -1,3 +1,6 @@
+mod length;
+pub(crate) use length::{DecodePreflight, decode_preflight};
+
 use serde_json::{Map, Value, json};
 
 use crate::{ContractError, Result};
@@ -50,35 +53,48 @@ fn error(reason: &str, path: &str, message: impl std::fmt::Display) -> ContractE
 }
 
 pub(crate) fn portable(value: &Value, depth: usize) -> Result<()> {
+    portable_walk::<false>(value, depth).map(|_| ())
+}
+
+// Classification is computed only after each node's ordinary portability checks.
+// Every child is validated even after a numeric representation has been observed.
+// The false specialization preserves the ordinary validator without classification work.
+fn portable_walk<const CLASSIFY_NUMERIC: bool>(value: &Value, depth: usize) -> Result<bool> {
     if depth >= MAX_DEPTH && (value.is_array() || value.is_object()) {
         return Err(error("depth", "/", "JSON nesting limit exceeded"));
     }
+    let mut numeric = false;
     match value {
         Value::Number(number) => {
-            let number = number
+            let mathematical = number
                 .as_f64()
                 .ok_or_else(|| error("number", "/", "number cannot be represented as binary64"))?;
-            if !number.is_finite() || (number.fract() == 0.0 && number.abs() > MAX_SAFE_INTEGER) {
+            if !mathematical.is_finite()
+                || (mathematical.fract() == 0.0 && mathematical.abs() > MAX_SAFE_INTEGER)
+            {
                 return Err(error(
                     "number",
                     "/",
                     "number is non-finite or outside the safe integral range",
                 ));
             }
+            if CLASSIFY_NUMERIC {
+                numeric = !number.is_i64() && !number.is_u64();
+            }
         }
         Value::Array(values) => {
             for value in values {
-                portable(value, depth + 1)?;
+                numeric |= portable_walk::<CLASSIFY_NUMERIC>(value, depth + 1)?;
             }
         }
         Value::Object(values) => {
             for value in values.values() {
-                portable(value, depth + 1)?;
+                numeric |= portable_walk::<CLASSIFY_NUMERIC>(value, depth + 1)?;
             }
         }
         _ => {}
     }
-    Ok(())
+    Ok(numeric)
 }
 
 /// Serialize strict portable JSON using RFC 8785, rejecting unsafe numbers.
@@ -751,4 +767,38 @@ fn normalization_signature_at(schema: &Value, path: &str) -> Result<Value> {
         }
     }
     Ok(Value::Object(signature))
+}
+
+// Frozen baseline portability oracle; independent of the optimized walk.
+#[cfg(test)]
+pub(crate) fn frozen_portable(value: &Value, depth: usize) -> Result<()> {
+    if depth >= MAX_DEPTH && (value.is_array() || value.is_object()) {
+        return Err(error("depth", "/", "JSON nesting limit exceeded"));
+    }
+    match value {
+        Value::Number(number) => {
+            let number = number
+                .as_f64()
+                .ok_or_else(|| error("number", "/", "number cannot be represented as binary64"))?;
+            if !number.is_finite() || (number.fract() == 0.0 && number.abs() > MAX_SAFE_INTEGER) {
+                return Err(error(
+                    "number",
+                    "/",
+                    "number is non-finite or outside the safe integral range",
+                ));
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                frozen_portable(value, depth + 1)?;
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                frozen_portable(value, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }

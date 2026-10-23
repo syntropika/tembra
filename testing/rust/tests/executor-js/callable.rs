@@ -283,8 +283,8 @@ export default {{
                 );
 
                 let facet = executor
-                    .prepare(
-                        host.id(),
+                    .prepare_for_host(
+                        &host,
                         BundledJsArtifact::new("callable", source, vec!["default".into()]).unwrap(),
                         "default".into(),
                     )

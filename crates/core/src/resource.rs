@@ -233,6 +233,7 @@ pub(crate) struct ResourceSpec {
 }
 
 pub(crate) struct ResourceRecord {
+    host: Weak<HostInner>,
     pub name: String,
     pub type_id: TypeId,
     spec: RefCell<Rc<ResourceSpec>>,
@@ -249,6 +250,7 @@ impl ResourceRecord {
     ) -> Resource<T> {
         let spec = ResourceSpec::erase(declaration);
         let record = Rc::new(Self {
+            host: host.clone(),
             name,
             type_id: TypeId::of::<T>(),
             spec: RefCell::new(spec),
@@ -268,12 +270,31 @@ impl ResourceRecord {
     }
 
     pub async fn close(&self) -> Result<()> {
-        let spec = self.spec();
-        let value = self.value.borrow_mut().take();
-        if let (Some(value), Some(close)) = (value, &spec.close) {
-            close(value).await?;
+        let observations = self
+            .host
+            .upgrade()
+            .and_then(|host| host.observations.clone());
+        let mut observation = crate::observability::start(
+            &observations,
+            crate::observability::Operation::ResourceClose,
+            &self.name,
+            None,
+            None,
+            None,
+        );
+        let result = async {
+            let spec = self.spec();
+            let value = self.value.borrow_mut().take();
+            if let (Some(value), Some(close)) = (value, &spec.close) {
+                close(value).await?;
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+        if let Some(observation) = &mut observation {
+            observation.result(&result);
+        }
+        result
     }
 }
 
