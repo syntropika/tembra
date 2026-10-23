@@ -155,10 +155,19 @@ impl Host {
             }
             .boxed_local();
         }
+        let observations = self.inner.observations.clone();
         let prepare = self.inner.prepare_reload_at(definitions, options, None);
         let (send, receive) = oneshot::channel();
         self.inner.driver.spawn(
             async move {
+                let mut observation = crate::observability::start(
+                    &observations,
+                    crate::observability::Operation::Reload,
+                    "reload",
+                    None,
+                    None,
+                    None,
+                );
                 let result = async {
                     let mut prepared = prepare.await?;
                     prepared.decide()?;
@@ -166,6 +175,9 @@ impl Host {
                     prepared.finish(report).await
                 }
                 .await;
+                if let Some(observation) = &mut observation {
+                    observation.result(&result);
+                }
                 let _ = send.send(result);
             }
             .boxed_local(),

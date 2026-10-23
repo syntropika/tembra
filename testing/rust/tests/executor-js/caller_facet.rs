@@ -111,8 +111,8 @@ export default {{
         javascript = serde_json::to_string(javascript.descriptor()).unwrap()
     );
     let facet = executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            &host,
             BundledJsArtifact::new("caller-facet", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

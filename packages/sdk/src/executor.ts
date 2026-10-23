@@ -45,6 +45,10 @@ export type ManagedContext = {
   readonly principal: JsonValue;
   /** Version snapshot of this admitted operation; retained Contexts do not become current roots. */
   readonly codeVersion: number;
+  /** Decimal local Host identity for diagnostics only; namespace captures across threads/processes. */
+  readonly observationHostId: string;
+  /** Diagnostic operation ID, or null when absent. It can identify a root/ancestor, not always a physical invocation. */
+  readonly observationId: string | null;
   readonly signal: CancellationSignal;
   /** Throws when this issued scope no longer admits operations. */
   check(): void;

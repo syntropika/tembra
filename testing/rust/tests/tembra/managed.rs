@@ -331,8 +331,8 @@ fn typed_references_follow_actual_javascript_reload_and_retain_entered_versions(
     runtime.block_on(driver.run_until(async {
         let executor = Executor::new(driver.clone(), ExecutorOptions::default())?;
         let prepare = |version, incompatible| {
-            executor.prepare(
-                host.core().id(),
+            executor.prepare_for_host(
+                host.core(),
                 BundledJsArtifact::new(
                     "dx.extension",
                     source(version, incompatible).unwrap(),

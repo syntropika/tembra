@@ -34,7 +34,9 @@ try {
   if (typeof url !== "string") {
     throw new TypeError("browser test server did not return a URL");
   }
-  await browser("open", url);
+  const target = new URL(url);
+  target.search = process.env.TEMBRA_BROWSER_QUERY ?? "";
+  await browser("open", target.href);
   const deadline = Date.now() + 90_000;
   for (;;) {
     // Each observation follows the previous browser operation and pending WASM work.

@@ -194,3 +194,56 @@ fn maximum_middleware_plan_uses_driver_trampoline_instead_of_recursive_poll_stac
     assert_eq!(calls.get(), COUNT);
     h.close();
 }
+
+#[test]
+fn empty_and_nonempty_series_preserve_validator_effects_and_input_refusal() {
+    let h = Harness::new();
+    let validations = Rc::new(Cell::new(0));
+    let selected = validations.clone();
+    let input = HookType::native("empty-member.input@1", move |value: &i32| {
+        selected.set(selected.get() + 1);
+        if *value < 0 {
+            return Err(RuntimeError::invalid("input", "negative input"));
+        }
+        Ok(())
+    })
+    .unwrap();
+    let d = definition(
+        "empty-member-effects",
+        Strategy::Series,
+        input,
+        HookType::absent(),
+        None,
+    );
+    let effects = Rc::new(Cell::new(0));
+    for count in 0..=2 {
+        if count > 0 {
+            let target = effects.clone();
+            h.add(
+                &d,
+                &format!("item-{count}"),
+                0,
+                method(move |_: HookArgs<i32, ()>, _| {
+                    target.set(target.get() + 1);
+                    async { Ok(()) }.boxed_local()
+                }),
+            );
+            h.ready();
+        }
+        let (before_validations, before_effects) = (validations.get(), effects.get());
+        let (manager, definition) = (h.manager.clone(), d.clone());
+        h.run(move |ctx| manager.run_dynamic_series(&definition, 1, &ctx))
+            .unwrap();
+        assert_eq!(validations.get() - before_validations, count + 1);
+        assert_eq!(effects.get() - before_effects, count);
+        let before_validations = validations.get();
+        let (manager, definition) = (h.manager.clone(), d.clone());
+        let error = h
+            .run(move |ctx| manager.run_dynamic_series(&definition, -1, &ctx))
+            .unwrap_err();
+        assert_eq!(error.reason, "input");
+        assert_eq!(validations.get() - before_validations, 1);
+        assert_eq!(effects.get() - before_effects, count);
+    }
+    h.close();
+}

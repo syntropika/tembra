@@ -8,7 +8,10 @@ use crate::boundary::{failure, json};
 pub(crate) fn consumer_linger(options: &JsValue) -> Result<ConsumerLingerOptions, JsValue> {
     let value = json(options)?;
     let object = value.as_object().ok_or_else(invalid)?;
-    if object.keys().any(|key| key != "consumerLinger") {
+    if object
+        .keys()
+        .any(|key| key != "consumerLinger" && key != "observability")
+    {
         return Err(invalid());
     }
     let Some(policy) = object.get("consumerLinger") else {

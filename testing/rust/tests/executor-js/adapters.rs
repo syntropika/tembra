@@ -92,8 +92,8 @@ fn adapter(provider: &Contract, consumer: &Contract, body: &str) -> String {
 
 async fn prepare(host: &Host, executor: &Executor, source: String) -> ExecutableFacet {
     executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            host,
             BundledJsArtifact::new("adapters", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

@@ -470,6 +470,12 @@
         },
         principal: metadata.principal,
         codeVersion: metadata.codeVersion,
+        get observationHostId() {
+          return sync("observation_host_id");
+        },
+        get observationId() {
+          return sync("observation_id");
+        },
         get signal() {
           return once("signal", () => sync("context_signal"));
         },

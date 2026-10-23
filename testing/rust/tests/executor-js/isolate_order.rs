@@ -42,7 +42,7 @@ fn isolate_order_child() {
     )
     .unwrap();
     let facet = driver
-        .run_until(first.prepare(host.id(), artifact, "default".into()))
+        .run_until(first.prepare_for_host(&host, artifact, "default".into()))
         .unwrap();
     driver
         .run_until(
@@ -103,7 +103,7 @@ fn manual_driver_with_entered_tokio_runtime_evaluates_and_closes() {
     )
     .unwrap();
     let facet = driver
-        .run_until(executor.prepare(host.id(), artifact, "default".into()))
+        .run_until(executor.prepare_for_host(&host, artifact, "default".into()))
         .unwrap();
     driver
         .run_until(

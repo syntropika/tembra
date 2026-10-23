@@ -186,8 +186,8 @@ export default {{name:'schedule',uses:[native],setup(scope,declare){{
         consumer = serde_json::to_string(consumer.descriptor()).unwrap()
     );
     let facet = executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            &host,
             BundledJsArtifact::new("schedule", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

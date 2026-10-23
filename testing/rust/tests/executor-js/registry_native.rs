@@ -196,8 +196,8 @@ export default {{
         serde_json::to_string(consumer.descriptor()).unwrap()
     );
     let facet = executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            &host,
             BundledJsArtifact::new("registry", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

@@ -112,6 +112,32 @@ impl WasmManagedContext {
     pub fn code_version(&self) -> std::result::Result<f64, JsValue> {
         Ok(self.record().map_err(failure)?.context.code_version() as f64)
     }
+    /// Returns the decimal local Host domain for diagnostics, without conferring authority.
+    ///
+    /// # Errors
+    /// Refuses an ended record; it does not acquire another owner or extend the scope.
+    #[wasm_bindgen(js_name = observationHostId)]
+    pub fn observation_host_id(&self) -> std::result::Result<String, JsValue> {
+        Ok(self
+            .record()
+            .map_err(failure)?
+            .context
+            .host_id()
+            .to_string())
+    }
+    /// Returns an optional decimal diagnostic operation ID, which may be a root or ancestor.
+    ///
+    /// # Errors
+    /// Refuses an ended record. A physical join requires a matching healthy Core event.
+    #[wasm_bindgen(js_name = observationId)]
+    pub fn observation_id(&self) -> std::result::Result<Option<String>, JsValue> {
+        Ok(self
+            .record()
+            .map_err(failure)?
+            .context
+            .observation_id()
+            .map(|id| id.to_string()))
+    }
     /// # Errors
     /// Refuses an ended record. The returned capability only observes cancellation.
     pub fn signal(&self) -> std::result::Result<WasmSignal, JsValue> {

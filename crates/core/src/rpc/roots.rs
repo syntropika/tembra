@@ -399,7 +399,9 @@ impl RootRegistry {
             state.carriers.borrow_mut().insert(link);
             let (context, scope) =
                 Context::new_root(host.id, state.local, state.version, principal);
-            let context = context.with_cancellation(state.stopped.child());
+            let context = context
+                .with_cancellation(state.stopped.child())
+                .observe_root(host.observations.clone());
             context.set_attachment(Rc::new(HostAttachment(Rc::downgrade(&host))));
             context.set_attachment(Rc::new(RootLease {
                 registry: Rc::downgrade(self),

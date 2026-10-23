@@ -52,8 +52,8 @@ fn token(name: &str, release: bool) -> Rc<Contract> {
 
 async fn install(host: &Host, executor: &Executor, name: &str, source: String) {
     let facet = executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            host,
             BundledJsArtifact::new(name, source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

@@ -168,24 +168,42 @@ impl RegistryStore {
 
     pub(super) fn table(&self, name: &str, context: Option<&Context>) -> Result<RegistrySnapshot> {
         let host = self.check_host()?;
-        if let Some(context) = context {
-            context.check(host.id)?;
+
+        let mut observation = crate::observability::start(
+            &host.observations,
+            crate::observability::Operation::RegistryRead,
+            name,
+            None,
+            None,
+            None,
+        );
+        let result = (|| {
+            if let Some(context) = context {
+                context.check(host.id)?;
+                if let Some(observation) = &mut observation {
+                    observation.context(context);
+                }
+            }
+            let installed = self.installed.borrow();
+            let version = context.map_or(installed.current, Context::code_version);
+            let epoch = installed
+                .epochs
+                .get(&version)
+                .filter(|epoch| epoch.epoch.admitted.get())
+                .ok_or_else(superseded)?;
+            Ok(RegistrySnapshot {
+                table: epoch
+                    .tables
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| Rc::new(Table::new(Vec::new()))),
+                version,
+            })
+        })();
+        if let Some(observation) = &mut observation {
+            observation.result(&result);
         }
-        let installed = self.installed.borrow();
-        let version = context.map_or(installed.current, Context::code_version);
-        let epoch = installed
-            .epochs
-            .get(&version)
-            .filter(|epoch| epoch.epoch.admitted.get())
-            .ok_or_else(superseded)?;
-        Ok(RegistrySnapshot {
-            table: epoch
-                .tables
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| Rc::new(Table::new(Vec::new()))),
-            version,
-        })
+        result
     }
 
     pub(super) fn subscribe(

@@ -151,7 +151,17 @@ impl WasmHost {
     /// to the ordinary constructor's name and clock checks. No trusted identity is accepted.
     #[wasm_bindgen(js_name = withOptions)]
     pub fn with_options(name: JsValue, options: JsValue) -> Result<WasmHost, JsValue> {
-        Self::from_options(name, crate::options::consumer_linger(&options)?)
+        let consumer_linger = crate::options::consumer_linger(&options)?;
+        let value = crate::boundary::json(&options)?;
+        let observations = value
+            .get("observability")
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    failure(RuntimeError::invalid("observability", error.to_string()))
+                })
+            })
+            .transpose()?;
+        Self::from_options(name, consumer_linger, observations)
     }
 }
 
@@ -159,6 +169,7 @@ impl WasmHost {
     fn from_options(
         name: JsValue,
         consumer_linger: tembra_core::rpc::ConsumerLingerOptions,
+        observability: Option<tembra_core::ObservationOptions>,
     ) -> Result<Self, JsValue> {
         let name = text(&name)?;
         if name.is_empty() {
@@ -168,12 +179,13 @@ impl WasmHost {
             )));
         }
         let driver = BrowserDriver::new().map_err(failure)?;
+        let mut options = HostOptions::new(name, Value::Null).with_consumer_linger(consumer_linger);
+        if let Some(observability) = observability {
+            options = options.with_observability(observability);
+        }
         Ok(Self {
             inner: Rc::new(WebHost {
-                host: Host::new(
-                    HostOptions::new(name, Value::Null).with_consumer_linger(consumer_linger),
-                    driver.clone(),
-                ),
+                host: Host::new(options, driver.clone()),
                 driver,
                 contexts: RefCell::default(),
                 callback_errors: RefCell::default(),
@@ -184,6 +196,15 @@ impl WasmHost {
 
 #[wasm_bindgen]
 impl WasmHost {
+    /// Drains bounded core metadata. This never executes JavaScript observer callbacks.
+    #[wasm_bindgen(js_name = observationsJson)]
+    pub fn observations_json(&self, limit: u32) -> String {
+        match self.inner.host.observations() {
+            Some(observations) => serde_json::json!({"events": observations.drain(limit as usize), "statistics": observations.statistics()}).to_string(),
+            None => "null".to_owned(),
+        }
+    }
+
     /// Installs the embedding-issued Host incarnation for parent-child RPC.
     ///
     /// # Errors

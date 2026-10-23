@@ -18,6 +18,12 @@ import type { RawContext, RawReference, RawRegistryView } from "../host/executor
 import { facetInputs, readyReference } from "../host/index.js";
 import type { DynamicFacet, LoadableFacet, FacetInput, TembraHost } from "../host/index.js";
 import {
+  checkObservationLimit,
+  drainFinalObservations,
+  decodeObservationBatch,
+} from "../host/observability.js";
+import type { ObservationBatch, ObservationOptions } from "../host/observability.js";
+import {
   registerManagerBridge,
   closeManagedHosts,
   disposeManagerLinks,
@@ -48,6 +54,7 @@ export type {
 
 export type CreateNodeHostOptions = {
   readonly name?: string;
+  readonly observability?: ObservationOptions;
   /** Directory used for relative source paths. Defaults to the working directory at Host creation. */
   readonly moduleBase?: string | URL;
   /** Explicit addon path for development or an application-provided binary distribution. */
@@ -64,10 +71,11 @@ export async function createHost(options: CreateNodeHostOptions = {}): Promise<N
     throw executorFailure("host_name", "host name is empty");
   }
   const moduleBase = nodeModuleBase(options.moduleBase);
-  const transport = nativeTransport(options.name ?? "node", options.binary);
+  const transport = nativeTransport(options.name ?? "node", options.binary, options.observability);
   const evaluator = nodeEsmEvaluator(transport.authority);
   let closing: Promise<void> | undefined;
   let closedDiagnostics: NodeHostDiagnostics | undefined;
+  let closedObservations: ObservationBatch | null | undefined;
   const preparations = new Set<Promise<unknown>>();
   const check = () => {
     if (closing) {
@@ -216,6 +224,15 @@ export async function createHost(options: CreateNodeHostOptions = {}): Promise<N
       check();
       transport.request("cancel", [context.handle]);
     },
+    observations(limit: number) {
+      checkObservationLimit(limit);
+      if (closedObservations !== undefined) {
+        const { result, remaining } = drainFinalObservations(closedObservations, limit);
+        closedObservations = remaining;
+        return result;
+      }
+      return decodeObservationBatch(transport.request("observations", [limit]));
+    },
     diagnostics() {
       return closedDiagnostics ?? snapshotDiagnostics();
     },
@@ -234,6 +251,10 @@ export async function createHost(options: CreateNodeHostOptions = {}): Promise<N
         } finally {
           disposeManagerLinks(host);
           transport.flush();
+          closedObservations = transport.request<ObservationBatch | null>(
+            "observations",
+            [1_048_576],
+          );
           closedDiagnostics = snapshotDiagnostics();
           transport.dispose();
         }

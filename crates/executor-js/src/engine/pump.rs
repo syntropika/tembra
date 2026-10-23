@@ -6,6 +6,7 @@ type Promise = LocalBoxFuture<
 >;
 struct PreparedWork {
     evaluation: Evaluation,
+    observation: Option<tembra_core::observability::ObservationSpan>,
     host: u64,
     module: usize,
     export: String,
@@ -109,6 +110,7 @@ pub(super) async fn pump(engine: Weak<Engine>, mut requests: mpsc::UnboundedRece
                         }
                         Request::Prepare {
                             host,
+                            mut observation,
                             artifact,
                             export,
                             reply,
@@ -116,6 +118,7 @@ pub(super) async fn pump(engine: Weak<Engine>, mut requests: mpsc::UnboundedRece
                             Ok((module, evaluation)) => {
                                 let mut work = Box::new(PreparedWork {
                                     evaluation,
+                                    observation,
                                     host,
                                     module,
                                     export,
@@ -131,22 +134,29 @@ pub(super) async fn pump(engine: Weak<Engine>, mut requests: mpsc::UnboundedRece
                                 );
                             }
                             Err(error) => {
+                                if let Some(observation) = &mut observation {
+                                    observation.result::<()>(&Err(error.clone()));
+                                }
                                 let _ = reply.send(Err(error));
                             }
                         },
-                        Request::Invoke(job) => {
+                        Request::Invoke(mut job) => {
                             if !job.args.compatible(&engine, &job.callback) {
-                                let _ = job.reply.send(Err(invalid(
+                                let error = invalid(
                                     "foreign_generation",
                                     "callback argument belongs to another runtime generation",
-                                )));
+                                );
+                                job.args.observe_result::<()>(&Err(error.clone()));
+                                let _ = job.reply.send(Err(error));
                                 continue;
                             }
 
                             if engine.counters.get().physical_jobs
                                 >= engine.options.max_physical_jobs
                             {
-                                let _ = job.reply.send(Err(limit("physical_jobs")));
+                                let error = limit("physical_jobs");
+                                job.args.observe_result::<()>(&Err(error.clone()));
+                                let _ = job.reply.send(Err(error));
                                 continue;
                             }
                             let promise: Promise = {
@@ -191,13 +201,16 @@ pub(super) async fn pump(engine: Weak<Engine>, mut requests: mpsc::UnboundedRece
         }
         while let Poll::Ready(Some(result)) = Pin::new(&mut pending).poll_next(cx) {
             match result {
-                Settled::Prepared { work, result } => {
+                Settled::Prepared { mut work, result } => {
                     let result = result.map_err(js_error).and_then(|()| {
                         binding::prepare_definition(&engine, work.host, work.module, &work.export)
                     });
+                    if let Some(observation) = &mut work.observation {
+                        observation.result(&result);
+                    }
                     let _ = work.reply.send(result);
                 }
-                Settled::Invoked { job, result } => {
+                Settled::Invoked { mut job, result } => {
                     let result =
                         result
                             .map_err(promise_error)
@@ -233,6 +246,7 @@ pub(super) async fn pump(engine: Weak<Engine>, mut requests: mpsc::UnboundedRece
                                 }
                             });
                     engine.update(|c| c.physical_jobs -= 1);
+                    job.args.observe_result(&result);
                     let _ = job.reply.send(result);
                     drop(job.owner);
                     drop(job.lease);

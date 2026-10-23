@@ -159,8 +159,8 @@ export default {{
     }
     async fn prepare(&self, source: String) -> ExecutableFacet {
         self.executor
-            .prepare(
-                self.host.id(),
+            .prepare_for_host(
+                &self.host,
                 BundledJsArtifact::new("reload", source, vec!["default".into()]).unwrap(),
                 "default".into(),
             )

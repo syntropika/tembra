@@ -36,6 +36,7 @@ pub struct HostOptions {
     pub principal_key: Rc<dyn Fn(&Value) -> String>,
     pub ready_timeout: std::time::Duration,
     rpc_limits: HostRpcLimits,
+    observability: Option<crate::ObservationOptions>,
     consumer_linger: crate::rpc::ConsumerLingerOptions,
 }
 
@@ -47,9 +48,16 @@ impl HostOptions {
             principal_key: Rc::new(ToString::to_string),
             ready_timeout: std::time::Duration::from_secs(60),
             rpc_limits: HostRpcLimits::default(),
+            observability: None,
             consumer_linger: crate::rpc::ConsumerLingerOptions::default(),
         }
     }
+    /// Enables bounded metadata collection; no observer callbacks or export run in the Host.
+    pub fn with_observability(mut self, options: crate::ObservationOptions) -> Self {
+        self.observability = Some(options);
+        self
+    }
+
     /// Installs a checked optional idle-consumer policy before Host construction.
     /// Idle attachments consume connection and provider hold/state budgets. Real demand can evict
     /// idle entries on its connection; active holds still retain their normal admission limits.
@@ -98,6 +106,7 @@ struct ActivationDependency {
 
 pub(crate) struct HostInner {
     pub id: u64,
+    pub(crate) observations: Option<crate::Observations>,
     pub name: String,
     pub principal: Value,
     pub principal_key: Rc<dyn Fn(&Value) -> String>,
@@ -141,10 +150,22 @@ impl Host {
             next.set(id + 1);
             id
         });
+        let observations = options
+            .observability
+            .map(|options| crate::Observations::new(options, driver.clone(), id));
+        let driver: Rc<dyn Driver> = if let Some(observations) = &observations {
+            Rc::new(crate::observability::ObservedDriver {
+                inner: driver,
+                observations: observations.clone(),
+            })
+        } else {
+            driver
+        };
         let epochs = crate::epoch::EpochAuthority::new();
         Self {
             inner: Rc::new_cyclic(|weak| HostInner {
                 id,
+                observations: observations.clone(),
                 name: options.name,
                 principal: options.self_principal,
                 principal_key: options.principal_key,
@@ -156,7 +177,7 @@ impl Host {
                 next_root: Cell::new(0),
                 in_factory: Cell::new(0),
                 factory_pass: RefCell::default(),
-                publication_queue: PublicationQueue::new(),
+                publication_queue: PublicationQueue::observed(observations.clone()),
                 activation_waits: RefCell::new(HashMap::new()),
                 ready_timeout: options.ready_timeout,
                 closing: Cell::new(false),
@@ -177,6 +198,11 @@ impl Host {
                 rpc_limits: options.rpc_limits,
             }),
         }
+    }
+
+    /// Returns the collection consumer when enabled at construction, including after shutdown.
+    pub fn observations(&self) -> Option<crate::Observations> {
+        self.inner.observations.clone()
     }
 
     pub fn rpc_limits(&self) -> &HostRpcLimits {
@@ -248,7 +274,22 @@ impl Host {
         input: Value,
         options: GetOptions,
     ) -> Result<Reference> {
-        self.inner.hold(contract, input, options)
+        let mut observation = crate::observability::start(
+            &self.inner.observations,
+            crate::observability::Operation::Acquisition,
+            contract.name(),
+            None,
+            None,
+            None,
+        );
+        let result = self.inner.hold(contract, input, options);
+        if let (Some(observation), Ok(reference)) = (&mut observation, &result) {
+            observation.acquired(reference.observation_claim_id(), reference.object_id());
+        }
+        if let Some(observation) = &mut observation {
+            observation.result(&result);
+        }
+        result
     }
 
     /// Acquires a claim and waits for its readiness.
@@ -507,43 +548,57 @@ impl Context {
         input: Value,
         mut options: GetOptions,
     ) -> Result<Reference> {
-        let host = self
-            .attachment::<HostAttachment>()
-            .and_then(|attachment| attachment.0.upgrade())
-            .ok_or_else(|| RuntimeError::invalid("foreign_ctx", "context has no host"))?;
-        self.check(host.id)?;
-        if options.principal.is_none() {
-            options.principal = Some(self.principal().clone());
-        }
-        let reference = host.hold(contract, input, options)?;
-        let _activation_wait = reference
-            .claim
-            .local_object()
-            .map(|object| host.initializer_wait(self, object))
-            .transpose()?
-            .flatten();
-        let owned = reference.clone();
-        self.on_settle(move || owned.release())?;
-        let cancelled =
-            futures::future::select(self.cancellation().cancelled(), self.scope_ended())
-                .map(|either| match either {
-                    futures::future::Either::Left((error, _))
-                    | futures::future::Either::Right((error, _)) => error,
-                })
-                .boxed_local();
-        let result = match futures::future::select(reference.ready().boxed_local(), cancelled).await
-        {
-            futures::future::Either::Left((result, _)) => result,
-            futures::future::Either::Right((error, _)) => {
+        let mut observation = self.observe(
+            crate::observability::Operation::Acquisition,
+            contract.name(),
+        );
+        let result = async {
+            let host = self
+                .attachment::<HostAttachment>()
+                .and_then(|attachment| attachment.0.upgrade())
+                .ok_or_else(|| RuntimeError::invalid("foreign_ctx", "context has no host"))?;
+            self.check(host.id)?;
+            if options.principal.is_none() {
+                options.principal = Some(self.principal().clone());
+            }
+            let reference = host.hold(contract, input, options)?;
+            if let Some(observation) = &mut observation {
+                observation.acquired(reference.observation_claim_id(), reference.object_id());
+            }
+            let _activation_wait = reference
+                .claim
+                .local_object()
+                .map(|object| host.initializer_wait(self, object))
+                .transpose()?
+                .flatten();
+            let owned = reference.clone();
+            self.on_settle(move || owned.release())?;
+            let cancelled =
+                futures::future::select(self.cancellation().cancelled(), self.scope_ended())
+                    .map(|either| match either {
+                        futures::future::Either::Left((error, _))
+                        | futures::future::Either::Right((error, _)) => error,
+                    })
+                    .boxed_local();
+            let result =
+                match futures::future::select(reference.ready().boxed_local(), cancelled).await {
+                    futures::future::Either::Left((result, _)) => result,
+                    futures::future::Either::Right((error, _)) => {
+                        reference.release();
+                        return Err(error);
+                    }
+                };
+            if let Err(error) = self.check(host.id).and(result) {
                 reference.release();
                 return Err(error);
             }
-        };
-        if let Err(error) = self.check(host.id).and(result) {
-            reference.release();
-            return Err(error);
+            Ok(reference)
         }
-        Ok(reference)
+        .await;
+        if let Some(observation) = &mut observation {
+            observation.result(&result);
+        }
+        result
     }
 }
 
@@ -559,7 +614,9 @@ impl HostInner {
         let root_id = self.next_root_id();
         let epoch = self.epochs.current();
         let (ctx, scope) = Context::new_root(self.id, root_id, epoch.version.get(), principal);
-        let ctx = ctx.with_cancellation(epoch.cancellation.child());
+        let ctx = ctx
+            .with_cancellation(epoch.cancellation.child())
+            .observe_root(self.observations.clone());
         ctx.set_attachment(Rc::new(HostAttachment(Rc::downgrade(self))));
         self.roots.register_origin(&ctx);
         (ctx, scope)
@@ -624,68 +681,72 @@ impl HostInner {
         if self.closing.get() {
             return Err(RuntimeError::unavailable("closed", "host is closing"));
         }
-        let input = contract.normalize_input(&input).map_err(contract_error)?;
-        if contract.kind() == ContractKind::Remote
-            && contract
-                .resolve_host(&input)
+        let (service, provider_input, identity, principal) = {
+            let consumer = contract
+                .prepare_acquisition_input(&input)
+                .map_err(contract_error)?;
+            if contract.kind() == ContractKind::Remote
+                && consumer.resolve_host().map_err(contract_error)?.as_deref()
+                    != Some(self.name.as_str())
+            {
+                return self.rpc_hold_remote(
+                    contract.clone(),
+                    consumer.into_value(),
+                    options.state,
+                    None,
+                    None,
+                );
+            }
+            let service = self
+                .services
+                .borrow()
+                .get(contract.name())
+                .cloned()
+                .ok_or_else(|| RuntimeError::unavailable("unknown_type", "type is not served"))?;
+            service.bind(&contract)?;
+            if consumer
+                .resolve_host()
                 .map_err(contract_error)?
-                .as_deref()
-                != Some(self.name.as_str())
-        {
-            return self.rpc_hold_remote(contract, input, options.state, None, None);
-        }
-        let service = self
-            .services
-            .borrow()
-            .get(contract.name())
-            .cloned()
-            .ok_or_else(|| RuntimeError::unavailable("unknown_type", "type is not served"))?;
-        service.bind(&contract)?;
-        let input = contract.normalize_input(&input).map_err(contract_error)?;
-        if contract
-            .resolve_host(&input)
-            .map_err(contract_error)?
-            .is_some_and(|name| name != self.name)
-        {
-            return Err(RuntimeError::invalid(
-                "placement",
-                "input resolves to another host",
-            ));
-        }
-        let provider_input = service
-            .contract()
-            .normalize_input(&input)
-            .map_err(contract_error)?;
-        if contract.identity(&input).map_err(contract_error)?
-            != service
-                .contract()
-                .identity(&provider_input)
-                .map_err(contract_error)?
-        {
-            return Err(RuntimeError::new(
-                ErrorCode::ContractMismatch,
-                "identity",
-                "consumer and provider normalize to different object identities",
-            ));
-        }
-        let principal = if service.options().lifetime == Lifetime::Host {
-            if contract.identity(&input).map_err(contract_error)?
-                != contract
-                    .identity(&serde_json::json!({}))
-                    .map_err(contract_error)?
+                .is_some_and(|name| name != self.name)
             {
                 return Err(RuntimeError::invalid(
-                    "input",
-                    "host object input must identify its singleton",
+                    "placement",
+                    "input resolves to another host",
                 ));
             }
-            self.principal.clone()
-        } else {
-            options.principal.unwrap_or_else(|| self.principal.clone())
+            let provider = service
+                .contract()
+                .prepare_acquisition_input(consumer.value())
+                .map_err(contract_error)?;
+            let identity = consumer.identity().map_err(contract_error)?;
+            if identity != provider.identity().map_err(contract_error)? {
+                return Err(RuntimeError::new(
+                    ErrorCode::ContractMismatch,
+                    "identity",
+                    "consumer and provider normalize to different object identities",
+                ));
+            }
+            let principal = if service.options().lifetime == Lifetime::Host {
+                let singleton = contract
+                    .prepare_acquisition_input(&serde_json::json!({}))
+                    .map_err(contract_error)?;
+                if identity != singleton.identity().map_err(contract_error)? {
+                    return Err(RuntimeError::invalid(
+                        "input",
+                        "host object input must identify its singleton",
+                    ));
+                }
+                self.principal.clone()
+            } else {
+                options.principal.unwrap_or_else(|| self.principal.clone())
+            };
+            let identity = identity.to_owned();
+            let provider_input = provider.into_value();
+            (service, provider_input, identity, principal)
         };
         let key = Address(
             contract.name().into(),
-            contract.identity(&input).map_err(contract_error)?,
+            identity,
             (self.principal_key)(&principal),
         );
         let existing = self.objects.borrow().get(&key).cloned();
@@ -1068,146 +1129,163 @@ impl HostInner {
     }
 
     async fn prepare_activation(self: &Rc<Self>, object: &Rc<ObjectRecord>) -> Result<()> {
-        object.cancellation.check()?;
-        // The service retains retry authority. An object needs its factory for this pass only;
-        // retained address handles must not retain its callback after managed cleanup.
-        let factory = object
-            .factory
-            .borrow_mut()
-            .take()
-            .expect("object activation consumes its factory once");
-        let implementation = {
-            let pass = Rc::new(crate::object::FactoryScope {
-                target: crate::host::reload::DeclarationTarget::Activation,
-                implementation_owners: RefCell::new(Vec::new()),
-            });
-            let previous = self.factory_pass.replace(Rc::downgrade(&pass));
-            self.in_factory.set(self.in_factory.get() + 1);
-            let _guard = FactoryPass {
-                host: self,
-                _pass: pass.clone(),
-                previous,
+        let mut observation = crate::observability::start(
+            &self.observations,
+            crate::observability::Operation::Activation,
+            "activation",
+            None,
+            Some(object.id),
+            None,
+        );
+        let result = async {
+            object.cancellation.check()?;
+            // The service retains retry authority. An object needs its factory for this pass only;
+            // retained address handles must not retain its callback after managed cleanup.
+            let factory = object
+                .factory
+                .borrow_mut()
+                .take()
+                .expect("object activation consumes its factory once");
+            let implementation = {
+                let pass = Rc::new(crate::object::FactoryScope {
+                    target: crate::host::reload::DeclarationTarget::Activation,
+                    implementation_owners: RefCell::new(Vec::new()),
+                });
+                let previous = self.factory_pass.replace(Rc::downgrade(&pass));
+                self.in_factory.set(self.in_factory.get() + 1);
+                let _guard = FactoryPass {
+                    host: self,
+                    _pass: pass.clone(),
+                    previous,
+                };
+                let mut declaration = Declaration {
+                    host: self.clone(),
+                    object: object.clone(),
+                    pass: Rc::downgrade(&pass),
+                };
+                factory(
+                    object.input.clone(),
+                    object.principal.clone(),
+                    &mut declaration,
+                )
+                .map(|implementation| pass.attach_implementation_owners(implementation))
             };
-            let mut declaration = Declaration {
-                host: self.clone(),
-                object: object.clone(),
-                pass: Rc::downgrade(&pass),
-            };
-            factory(
-                object.input.clone(),
-                object.principal.clone(),
-                &mut declaration,
-            )
-            .map(|implementation| pass.attach_implementation_owners(implementation))
-        };
-        drop(factory);
-        let mut implementation = implementation?;
-        Self::validate_implementation(&object.contract, &implementation)?;
-        let variant = implementation.variant.as_deref().unwrap_or("");
-        let members = object
-            .contract
-            .members(variant)
-            .expect("validated implementation variant");
-        let mut exposures = Vec::new();
-        for (name, source) in &mut implementation.states {
-            let Member::State { schema } = &members[name] else {
-                unreachable!()
-            };
-            if !object.state.owns(source) {
-                *source = object.state.forward(source.clone())?;
-            }
-            let _ = schema;
-            let service = object
-                .activation_service
-                .borrow()
-                .clone()
-                .expect("activation service retained");
-            exposures.push(
-                object
-                    .state
-                    .expose_definition(source, service.state_definition(variant, name))?,
-            );
-        }
-        *object.state_exposures.borrow_mut() = exposures;
-        *object.implementation.borrow_mut() = Some(Rc::new(implementation));
-        let resources = object.resources.borrow().clone();
-        let references: Vec<_> = object.dependencies.borrow().values().cloned().collect();
-        let resource_opens = resources
-            .into_iter()
-            .map(|resource| self.open_resource(object.clone(), resource));
-        let dependencies = async move {
-            let results = futures::future::join_all(references.iter().map(Reference::ready)).await;
-            results.into_iter().collect::<Result<Vec<_>>>().map(|_| ())
-        };
-        let (opens, deps) = futures::join!(futures::future::join_all(resource_opens), dependencies);
-        let resources = object.resources.borrow().clone();
-        for resource in resources {
-            let opening = resource.opening.borrow_mut().take();
-            drop(opening);
-        }
-        for result in opens {
-            result?;
-        }
-        deps?;
-        object.cancellation.check()?;
-        let hydration = object.state.hydrate_external();
-        let stopped = futures::future::select(
-            object.cancellation.cancelled(),
-            self.driver.sleep(self.ready_timeout),
-        )
-        .map(|result| match result {
-            futures::future::Either::Left((error, _)) => error,
-            futures::future::Either::Right(_) => RuntimeError::unavailable(
-                "ready_timeout",
-                "external state hydration deadline elapsed",
-            ),
-        })
-        .boxed_local();
-        match futures::future::select(hydration, stopped).await {
-            futures::future::Either::Left((result, _)) => result?,
-            futures::future::Either::Right((error, _)) => return Err(error),
-        }
-        let initializers = object.state.take_initializers();
-        let cancellation = object.cancellation.child();
-        let failure = Rc::new(RefCell::new(None));
-        futures::future::join_all(initializers.into_iter().map(|plan| {
-            let host = self.clone();
-            let object = object.clone();
-            let cancellation = cancellation.clone();
-            let failure = failure.clone();
-            async move {
-                let result = async {
-                    let (ctx, _scope) = host.new_root(host.principal.clone());
-                    let ctx = ctx.with_cancellation(cancellation.child());
-                    ctx.set_attachment(Rc::new(InitializingObject(Rc::downgrade(&object))));
-                    ctx.check(host.id)?;
-                    let value = (plan.initialize)(ctx).await?;
-                    cancellation.check()?;
-                    object.state.initialize(vec![(plan.cell, value)])
+            drop(factory);
+            let mut implementation = implementation?;
+            Self::validate_implementation(&object.contract, &implementation)?;
+            let variant = implementation.variant.as_deref().unwrap_or("");
+            let members = object
+                .contract
+                .members(variant)
+                .expect("validated implementation variant");
+            let mut exposures = Vec::new();
+            for (name, source) in &mut implementation.states {
+                let Member::State { schema } = &members[name] else {
+                    unreachable!()
+                };
+                if !object.state.owns(source) {
+                    *source = object.state.forward(source.clone())?;
                 }
-                .await;
-                if let Err(error) = result {
-                    let first = {
-                        let mut failure = failure.borrow_mut();
-                        if failure.is_none() {
-                            *failure = Some(error.clone());
-                            true
-                        } else {
-                            false
+                let _ = schema;
+                let service = object
+                    .activation_service
+                    .borrow()
+                    .clone()
+                    .expect("activation service retained");
+                exposures.push(
+                    object
+                        .state
+                        .expose_definition(source, service.state_definition(variant, name))?,
+                );
+            }
+            *object.state_exposures.borrow_mut() = exposures;
+            *object.implementation.borrow_mut() = Some(Rc::new(implementation));
+            let resources = object.resources.borrow().clone();
+            let references: Vec<_> = object.dependencies.borrow().values().cloned().collect();
+            let resource_opens = resources
+                .into_iter()
+                .map(|resource| self.open_resource(object.clone(), resource));
+            let dependencies = async move {
+                let results =
+                    futures::future::join_all(references.iter().map(Reference::ready)).await;
+                results.into_iter().collect::<Result<Vec<_>>>().map(|_| ())
+            };
+            let (opens, deps) =
+                futures::join!(futures::future::join_all(resource_opens), dependencies);
+            let resources = object.resources.borrow().clone();
+            for resource in resources {
+                let opening = resource.opening.borrow_mut().take();
+                drop(opening);
+            }
+            for result in opens {
+                result?;
+            }
+            deps?;
+            object.cancellation.check()?;
+            let hydration = object.state.hydrate_external();
+            let stopped = futures::future::select(
+                object.cancellation.cancelled(),
+                self.driver.sleep(self.ready_timeout),
+            )
+            .map(|result| match result {
+                futures::future::Either::Left((error, _)) => error,
+                futures::future::Either::Right(_) => RuntimeError::unavailable(
+                    "ready_timeout",
+                    "external state hydration deadline elapsed",
+                ),
+            })
+            .boxed_local();
+            match futures::future::select(hydration, stopped).await {
+                futures::future::Either::Left((result, _)) => result?,
+                futures::future::Either::Right((error, _)) => return Err(error),
+            }
+            let initializers = object.state.take_initializers();
+            let cancellation = object.cancellation.child();
+            let failure = Rc::new(RefCell::new(None));
+            futures::future::join_all(initializers.into_iter().map(|plan| {
+                let host = self.clone();
+                let object = object.clone();
+                let cancellation = cancellation.clone();
+                let failure = failure.clone();
+                async move {
+                    let result = async {
+                        let (ctx, _scope) = host.new_root(host.principal.clone());
+                        let ctx = ctx.with_cancellation(cancellation.child());
+                        ctx.set_attachment(Rc::new(InitializingObject(Rc::downgrade(&object))));
+                        ctx.check(host.id)?;
+                        let value = (plan.initialize)(ctx).await?;
+                        cancellation.check()?;
+                        object.state.initialize(vec![(plan.cell, value)])
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        let first = {
+                            let mut failure = failure.borrow_mut();
+                            if failure.is_none() {
+                                *failure = Some(error.clone());
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if first {
+                            cancellation.cancel(error);
                         }
-                    };
-                    if first {
-                        cancellation.cancel(error);
                     }
                 }
+            }))
+            .await;
+            if let Some(error) = failure.borrow_mut().take() {
+                return Err(error);
             }
-        }))
-        .await;
-        if let Some(error) = failure.borrow_mut().take() {
-            return Err(error);
+            object.cancellation.check()?;
+            Ok(())
         }
-        object.cancellation.check()?;
-        Ok(())
+        .await;
+        if let Some(observation) = &mut observation {
+            observation.result(&result);
+        }
+        result
     }
 
     pub(crate) fn validate_implementation(
@@ -1330,35 +1408,50 @@ impl HostInner {
         let host = self.clone();
         let selected = resource.clone();
         let future = async move {
-            let spec = selected.spec();
-            let dependencies: Vec<_> = spec
-                .deps
-                .iter()
-                .map(|dependency| match dependency {
-                    ResourceDependency::Reference(reference) => {
-                        let reference = reference.clone();
-                        async move { reference.ready().await }.boxed_local()
-                    }
-                    ResourceDependency::Resource(resource) => host
-                        .open_resource(object.clone(), resource.0.clone())
-                        .boxed_local(),
-                })
-                .collect();
-            for result in futures::future::join_all(dependencies).await {
-                result?;
+            let mut observation = crate::observability::start(
+                &host.observations,
+                crate::observability::Operation::ResourceOpen,
+                &selected.name,
+                None,
+                Some(object.id),
+                None,
+            );
+            let result = async {
+                let spec = selected.spec();
+                let dependencies: Vec<_> = spec
+                    .deps
+                    .iter()
+                    .map(|dependency| match dependency {
+                        ResourceDependency::Reference(reference) => {
+                            let reference = reference.clone();
+                            async move { reference.ready().await }.boxed_local()
+                        }
+                        ResourceDependency::Resource(resource) => host
+                            .open_resource(object.clone(), resource.0.clone())
+                            .boxed_local(),
+                    })
+                    .collect();
+                for result in futures::future::join_all(dependencies).await {
+                    result?;
+                }
+                object.cancellation.check()?;
+                let value = (spec.open)(object.cancellation.clone()).await?;
+                *selected.value.borrow_mut() = Some(value);
+                object.opened.borrow_mut().push(selected.clone());
+                if object.cancellation.is_cancelled() {
+                    selected.close().await?;
+                    return Err(RuntimeError::aborted(
+                        "late_open",
+                        "resource completed after cancellation",
+                    ));
+                }
+                Ok(())
             }
-            object.cancellation.check()?;
-            let value = (spec.open)(object.cancellation.clone()).await?;
-            *selected.value.borrow_mut() = Some(value);
-            object.opened.borrow_mut().push(selected.clone());
-            if object.cancellation.is_cancelled() {
-                selected.close().await?;
-                return Err(RuntimeError::aborted(
-                    "late_open",
-                    "resource completed after cancellation",
-                ));
+            .await;
+            if let Some(observation) = &mut observation {
+                observation.result(&result);
             }
-            Ok(())
+            result
         }
         .boxed_local()
         .shared();
@@ -1409,147 +1502,163 @@ impl HostInner {
         force: bool,
         reason: Option<RuntimeError>,
     ) -> Result<()> {
-        if object.phase.get() == Phase::Disposed {
-            return Ok(());
-        }
-        if object.phase.get() == Phase::Disposing {
-            object.disposed().await;
-            return Ok(());
-        }
-        if object.phase.get() == Phase::Activating {
+        let mut observation = crate::observability::start(
+            &self.observations,
+            crate::observability::Operation::Disposal,
+            "disposal",
+            None,
+            Some(object.id),
+            None,
+        );
+        let result = async {
+            if object.phase.get() == Phase::Disposed {
+                return Ok(());
+            }
+            if object.phase.get() == Phase::Disposing {
+                object.disposed().await;
+                return Ok(());
+            }
+            if object.phase.get() == Phase::Activating {
+                object.host_pin.set(false);
+                object.cancellation.cancel(
+                    reason.unwrap_or_else(|| RuntimeError::aborted("disposal", "object disposed")),
+                );
+                let _ = object.ready().await;
+                object.disposed().await;
+                return Ok(());
+            }
+            object.phase.set(Phase::Disposing);
             object.host_pin.set(false);
-            object.cancellation.cancel(
-                reason.unwrap_or_else(|| RuntimeError::aborted("disposal", "object disposed")),
-            );
-            let _ = object.ready().await;
-            object.disposed().await;
-            return Ok(());
-        }
-        object.phase.set(Phase::Disposing);
-        object.host_pin.set(false);
-        let error = reason
-            .unwrap_or_else(|| RuntimeError::new(ErrorCode::Gone, "disposed", "object disposed"));
-        if force {
-            *object.error.borrow_mut() = Some(error.clone());
-        }
-        let activities = object
-            .installed
-            .borrow()
-            .values()
-            .filter_map(|installed| installed.declarations.activity_runs.borrow().clone())
-            .collect::<Vec<_>>();
-        for run in activities {
-            run.stop(error.clone()).start();
-        }
-        // Resource open observes activation ownership, which ends on every disposal.
-        // Ordinary disposal still lets already admitted method Contexts settle normally.
-        object.cancellation.cancel(error.clone());
-        if force {
-            let tokens: Vec<_> = object
-                .active_contexts
+            let error = reason.unwrap_or_else(|| {
+                RuntimeError::new(ErrorCode::Gone, "disposed", "object disposed")
+            });
+            if force {
+                *object.error.borrow_mut() = Some(error.clone());
+            }
+            let activities = object
+                .installed
                 .borrow()
                 .values()
-                .map(|entry| entry.cancellation.clone())
-                .collect();
-            for token in tokens {
-                token.cancel(error.clone());
+                .filter_map(|installed| installed.declarations.activity_runs.borrow().clone())
+                .collect::<Vec<_>>();
+            for run in activities {
+                run.stop(error.clone()).start();
             }
-            let claims: Vec<_> = object
-                .claims
-                .borrow()
-                .iter()
-                .filter_map(Weak::upgrade)
-                .collect();
-            for claim in claims {
-                claim.mark_gone(error.clone());
-            }
-        }
-        while object.invocations.get() > 0 {
-            let (send, receive) = futures::channel::oneshot::channel();
-            object.idle_waiters.borrow_mut().push(send);
-            let _ = receive.await;
-        }
-        let mut errors = Vec::new();
-        match self.registries.remove_owner(object.id) {
-            Ok(mut candidate) => match self.registries.preflight(&candidate) {
-                Ok(()) => {
-                    let hold = self.publication_queue.hold();
-                    let publications = self.registries.adopt(&mut candidate);
-                    self.publication_queue.append_registry_batch(publications);
-                    candidate.finish();
-                    drop(hold);
+            // Resource open observes activation ownership, which ends on every disposal.
+            // Ordinary disposal still lets already admitted method Contexts settle normally.
+            object.cancellation.cancel(error.clone());
+            if force {
+                let tokens: Vec<_> = object
+                    .active_contexts
+                    .borrow()
+                    .values()
+                    .map(|entry| entry.cancellation.clone())
+                    .collect();
+                for token in tokens {
+                    token.cancel(error.clone());
                 }
+                let claims: Vec<_> = object
+                    .claims
+                    .borrow()
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .collect();
+                for claim in claims {
+                    claim.mark_gone(error.clone());
+                }
+            }
+            while object.invocations.get() > 0 {
+                let (send, receive) = futures::channel::oneshot::channel();
+                object.idle_waiters.borrow_mut().push(send);
+                let _ = receive.await;
+            }
+            let mut errors = Vec::new();
+            match self.registries.remove_owner(object.id) {
+                Ok(mut candidate) => match self.registries.preflight(&candidate) {
+                    Ok(()) => {
+                        let hold = self.publication_queue.hold();
+                        let publications = self.registries.adopt(&mut candidate);
+                        self.publication_queue.append_registry_batch(publications);
+                        candidate.finish();
+                        drop(hold);
+                    }
+                    Err(error) => errors.push(error),
+                },
                 Err(error) => errors.push(error),
-            },
-            Err(error) => errors.push(error),
-        }
-        let versions = object
-            .installed
-            .borrow()
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut opened = Vec::new();
-        for version in &versions {
-            for resource in version.declarations.resources.opened() {
-                if !opened.iter().any(|other| Rc::ptr_eq(other, resource)) {
-                    opened.push(resource.clone());
+            }
+            let versions = object
+                .installed
+                .borrow()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut opened = Vec::new();
+            for version in &versions {
+                for resource in version.declarations.resources.opened() {
+                    if !opened.iter().any(|other| Rc::ptr_eq(other, resource)) {
+                        opened.push(resource.clone());
+                    }
                 }
             }
-        }
-        for resource in std::mem::take(&mut *object.opened.borrow_mut()) {
-            if !opened.iter().any(|other| Rc::ptr_eq(other, &resource)) {
-                opened.push(resource);
+            for resource in std::mem::take(&mut *object.opened.borrow_mut()) {
+                if !opened.iter().any(|other| Rc::ptr_eq(other, &resource)) {
+                    opened.push(resource);
+                }
             }
-        }
-        for resource in opened.into_iter().rev() {
-            if let Err(error) = resource.close().await {
-                errors.push(error);
+            for resource in opened.into_iter().rev() {
+                if let Err(error) = resource.close().await {
+                    errors.push(error);
+                }
             }
-        }
-        object.state.terminate(error.clone());
-        let exposures = std::mem::take(&mut *object.state_exposures.borrow_mut());
-        drop(exposures);
-        let refs = std::mem::take(&mut *object.dependencies.borrow_mut());
-        for reference in refs.values() {
-            reference.release();
-        }
-        for version in &versions {
-            for reference in version.declarations.dependencies.values() {
+            object.state.terminate(error.clone());
+            let exposures = std::mem::take(&mut *object.state_exposures.borrow_mut());
+            drop(exposures);
+            let refs = std::mem::take(&mut *object.dependencies.borrow_mut());
+            for reference in refs.values() {
                 reference.release();
             }
-            version.declarations.activities.clear().start();
+            for version in &versions {
+                for reference in version.declarations.dependencies.values() {
+                    reference.release();
+                }
+                version.declarations.activities.clear().start();
+            }
+            drop(versions);
+            let implementation = object.implementation.borrow_mut().take();
+            let views = std::mem::take(&mut *object.adapter_views.borrow_mut());
+            drop((implementation, views));
+            let resources = std::mem::take(&mut *object.resources.borrow_mut());
+            for resource in &resources {
+                let opening = resource.opening.borrow_mut().take();
+                drop(opening);
+            }
+            drop(resources);
+            let factory = object.factory.borrow_mut().take();
+            let installed = std::mem::take(&mut *object.installed.borrow_mut());
+            let activation_service = object.activation_service.borrow_mut().take();
+            drop((factory, installed, activation_service));
+            object.activities.clear().start();
+            object.phase.set(Phase::Disposed);
+            object.notify_claims();
+            let waiters = std::mem::take(&mut *object.dispose_waiters.borrow_mut());
+            for waiter in waiters {
+                let _ = waiter.send(());
+            }
+            if self
+                .objects
+                .borrow()
+                .get(&object.key)
+                .is_some_and(|stored| Rc::ptr_eq(stored, &object))
+            {
+                self.objects.borrow_mut().remove(&object.key);
+            }
+            aggregate(errors)
         }
-        drop(versions);
-        let implementation = object.implementation.borrow_mut().take();
-        let views = std::mem::take(&mut *object.adapter_views.borrow_mut());
-        drop((implementation, views));
-        let resources = std::mem::take(&mut *object.resources.borrow_mut());
-        for resource in &resources {
-            let opening = resource.opening.borrow_mut().take();
-            drop(opening);
+        .await;
+        if let Some(observation) = &mut observation {
+            observation.result(&result);
         }
-        drop(resources);
-        let factory = object.factory.borrow_mut().take();
-        let installed = std::mem::take(&mut *object.installed.borrow_mut());
-        let activation_service = object.activation_service.borrow_mut().take();
-        drop((factory, installed, activation_service));
-        object.activities.clear().start();
-        object.phase.set(Phase::Disposed);
-        object.notify_claims();
-        let waiters = std::mem::take(&mut *object.dispose_waiters.borrow_mut());
-        for waiter in waiters {
-            let _ = waiter.send(());
-        }
-        if self
-            .objects
-            .borrow()
-            .get(&object.key)
-            .is_some_and(|stored| Rc::ptr_eq(stored, &object))
-        {
-            self.objects.borrow_mut().remove(&object.key);
-        }
-        aggregate(errors)
+        result
     }
 
     async fn dispose_bulk(

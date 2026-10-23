@@ -122,13 +122,21 @@ The other maintained Rust examples use the same public typed API. Each introduce
 
 | Example | What it adds | Command |
 | --- | --- | --- |
-| [Native values](../examples/rust/basics/native-values.rs) | Pass an `Rc<Cell<u32>>` through a local typed method, preserving identity. | `just run-example local` |
-| [State](../examples/rust/basics/state.rs) | Derive a value, observe changes and retain an immutable snapshot. | `just run-example state` |
-| [Facets](../examples/rust/facets/install.rs) | Group typed provider registrations and install the facet. | `just run-example facets` |
+| [Native values](../examples/rust/examples/native-values.rs) | Pass an `Rc<Cell<u32>>` through a local typed method, preserving identity. | `just run-example local` |
+| [State](../examples/rust/examples/state.rs) | Derive a value, observe changes and retain an immutable snapshot. | `just run-example state` |
+| [Facets](../examples/rust/examples/facets.rs) | Group typed provider registrations and install the facet. | `just run-example facets` |
+| [Driver](../examples/rust/examples/driver.rs) | Spawn jobs and sleep on the manual driver's virtual clock. | `just run-example driver` |
+| [Dependencies](../examples/rust/examples/dependencies.rs) | Declare an object dependency, re-expose and derive its state, call it under one context. | `just run-example dependencies` |
+| [Addresses](../examples/rust/examples/addresses.rs) | Acquire independent objects from one service through input and principal. | `just run-example addresses` |
+| [Lifetime](../examples/rust/examples/lifetime.rs) | Release the last claim, then reacquire before and after disposal. | `just run-example lifetime` |
+| [Hooks](../examples/rust/examples/hooks.rs) | Run named waterfall hooks and contribute plugins from a facet installed later. | `just run-example hooks` |
+| [Hook strategies](../examples/rust/examples/hook-strategies.rs) | Run series, bail, waterfall, middleware and parallel hooks from one provider. | `just run-example hook-strategies` |
 
 Without just, run `cargo run --locked -p tembra-example-rust --example local`, replacing `local`
-with `state` or `facets` as needed. These examples do not require assembling core descriptors,
-handlers or execution adapters.
+with any name from the table. Every example is one file under
+[examples/rust/examples](../examples/rust/examples); shared code lives under
+[examples/rust/helpers](../examples/rust/helpers). The hook examples use the `tembra-hooks` crate;
+the others use only the typed API.
 
 Continue with the [guide](guide.md) for TypeScript Hosts and platform loaders, the
 [architecture](architecture.md) for module responsibilities, and the [specification](spec.md)

@@ -201,7 +201,7 @@ export default {{
     );
     let artifact = BundledJsArtifact::new("portable", source, vec!["default".into()]).unwrap();
     let facet = executor
-        .prepare(host.id(), artifact, "default".into())
+        .prepare_for_host(&host, artifact, "default".into())
         .await
         .unwrap();
     host.install_executable(facet, LoadOptions::default())
@@ -350,7 +350,7 @@ export default {{
     );
     let artifact = BundledJsArtifact::new("state-profile", source, vec!["default".into()]).unwrap();
     let facet = executor
-        .prepare(host.id(), artifact, "default".into())
+        .prepare_for_host(&host, artifact, "default".into())
         .await
         .unwrap();
     host.install_executable(facet, LoadOptions::default())

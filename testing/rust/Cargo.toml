@@ -11,6 +11,7 @@ default = ["native", "codegen"]
 native = ["tembra/native"]
 codegen = ["dep:tembra-codegen"]
 embedded-executor = ["dep:tembra-executor-js"]
+observability-bench = []
 
 [dependencies]
 serde.workspace = true
@@ -537,3 +538,29 @@ path = "tests/hooks/prepared.rs"
 [[test]]
 name = "hooks-prepared-lifecycle"
 path = "tests/hooks/prepared_lifecycle.rs"
+
+[[test]]
+name = "core-observability"
+path = "tests/core/observability.rs"
+
+[dev-dependencies]
+criterion = { version = "=0.8.2", default-features = false, features = ["cargo_bench_support"] }
+hdrhistogram = { version = "=7.6.0", default-features = false }
+
+[[bench]]
+name = "runtime"
+harness = false
+
+[[bench]]
+name = "composed"
+harness = false
+
+[[bench]]
+name = "executor"
+harness = false
+required-features = ["embedded-executor"]
+
+[[test]]
+name = "executor-js-observability"
+path = "tests/executor-js/observability.rs"
+required-features = ["embedded-executor"]

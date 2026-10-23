@@ -44,6 +44,8 @@ enum BindingTarget {
 }
 
 pub(crate) struct Claim {
+    observation: RefCell<Option<crate::observability::Span>>,
+    observation_id: Option<u64>,
     pub host: Weak<HostInner>,
     pub backing: ReferenceBacking,
     pub contract: Rc<tembra_contracts::Contract>,
@@ -200,6 +202,9 @@ impl Claim {
             return;
         }
         self.ended.set(Some(RefStatus::Released));
+        if let Some(mut observation) = self.observation.borrow_mut().take() {
+            observation.finish(crate::observability::Outcome::Ok);
+        }
         let error = RuntimeError::new(ErrorCode::Released, "released", "reference released");
         let waiters = std::mem::take(&mut *self.waiters.borrow_mut());
         for waiter in waiters.into_values() {
@@ -233,6 +238,9 @@ impl Claim {
             return;
         }
         self.ended.set(Some(RefStatus::Gone));
+        if let Some(mut observation) = self.observation.borrow_mut().take() {
+            observation.result::<()>(&Err(error.clone()));
+        }
         *self.error.borrow_mut() = Some(error.clone());
         if let Some(object) = self.local_object() {
             object
@@ -917,7 +925,22 @@ impl Reference {
         contract: Rc<tembra_contracts::Contract>,
         wants_state: bool,
     ) -> Self {
+        let object_id = match &backing {
+            ReferenceBacking::Local(object) => Some(object.id),
+            ReferenceBacking::Remote(_) => None,
+        };
+        let observation = crate::observability::start(
+            &host.observations,
+            crate::observability::Operation::Claim,
+            contract.name(),
+            None,
+            object_id,
+            None,
+        );
+        let observation_id = observation.as_ref().map(crate::observability::Span::id);
         let claim = Rc::new(Claim {
+            observation: RefCell::new(observation),
+            observation_id,
             host: Rc::downgrade(host),
             backing,
             contract,
@@ -961,6 +984,13 @@ impl Reference {
                 format!("remote:{}", remote.target),
             ),
         }
+    }
+
+    /// Actual independent claim identity when collection was enabled at construction.
+    /// Clones share this ID; separate acquisitions of one object have different IDs.
+    /// The identifier remains diagnostic after release and grants no authority.
+    pub fn observation_claim_id(&self) -> Option<u64> {
+        self.claim.observation_id
     }
 
     pub fn object_id(&self) -> u64 {
@@ -1317,109 +1347,132 @@ impl Reference {
             .host
             .upgrade()
             .ok_or_else(|| RuntimeError::unavailable("host", "host no longer exists"))?;
-        if host.in_factory.get() > 0 {
-            return Err(RuntimeError::new(
-                ErrorCode::NotReady,
-                "factory",
-                "references cannot be called inside a factory",
-            ));
-        }
-        self.claim.check()?;
-        self.claim.check_method_publication(&host)?;
-        let (context, _root_scope) = if let Some(ctx) = ctx {
-            ctx.check(host.id)?;
-            (ctx.clone(), None)
-        } else {
-            let (ctx, scope) = host.new_root(host.principal.clone());
-            (ctx, Some(scope))
-        };
-        let _activation_wait = self
-            .claim
-            .local_object()
-            .map(|object| host.initializer_wait(&context, object))
-            .transpose()?
-            .flatten();
-        let cancelled =
-            futures::future::select(context.cancellation().cancelled(), context.scope_ended())
-                .map(|either| match either {
-                    futures::future::Either::Left((error, _))
-                    | futures::future::Either::Right((error, _)) => error,
-                })
-                .boxed_local();
-        let ready = match futures::future::select(self.ready().boxed_local(), cancelled).await {
-            futures::future::Either::Left((result, _)) => result,
-            futures::future::Either::Right((error, _)) => return Err(error),
-        };
-        context.check(host.id)?;
-        ready?;
-        self.claim.check()?;
-        if self.claim.local()?.phase.get() != Phase::Live {
-            return Err(RuntimeError::new(
-                ErrorCode::Gone,
-                "gone",
-                "object is not live",
-            ));
-        }
-        let object = self.claim.local()?.clone();
-        let implementation = self.implementation_view_at(context.code_version())?;
-        if !matches!(
-            self.contract()
-                .members(implementation.variant.as_deref().unwrap_or(""))
-                .and_then(|members| members.get(name)),
-            Some(tembra_contracts::Member::Method { .. })
-        ) {
-            return Err(RuntimeError::new(
-                ErrorCode::NotInVariant,
-                "method",
-                "method is absent from the consumer contract",
-            ));
-        }
-        let method = implementation.methods.get(name).ok_or_else(|| {
-            RuntimeError::new(
-                ErrorCode::NotInVariant,
-                "method",
-                "method is not in the reference shape",
-            )
-        })?;
-        let returns_value = matches!(
-            self.claim
-                .contract
-                .members("")
-                .and_then(|members| members.get(name)),
-            Some(tembra_contracts::Member::Method {
-                result: Some(_),
-                ..
-            })
+        let mut observation = crate::observability::start(
+            &host.observations,
+            crate::observability::Operation::NativeCall,
+            name,
+            None,
+            Some(self.object_id()),
+            self.claim.observation_id,
         );
-        if method.args != TypeId::of::<A>()
-            || (returns_value && method.result != TypeId::of::<R>())
-            || (!returns_value && TypeId::of::<R>() != TypeId::of::<()>())
-        {
-            return Err(RuntimeError::invalid(
-                "native_type",
-                "native method argument or result type mismatch",
-            ));
+        let result = async {
+            if host.in_factory.get() > 0 {
+                return Err(RuntimeError::new(
+                    ErrorCode::NotReady,
+                    "factory",
+                    "references cannot be called inside a factory",
+                ));
+            }
+            self.claim.check()?;
+            self.claim.check_method_publication(&host)?;
+            let (context, _root_scope) = if let Some(ctx) = ctx {
+                ctx.check(host.id)?;
+                (ctx.clone(), None)
+            } else {
+                let (ctx, scope) = host.new_root(host.principal.clone());
+                (ctx, Some(scope))
+            };
+            if let Some(observation) = &mut observation {
+                observation.context(&context);
+            }
+            let observation_id = observation
+                .as_ref()
+                .map(crate::observability::Span::id)
+                .or(context.observation_id());
+            let context = context.with_observation_id(observation_id);
+            let _activation_wait = self
+                .claim
+                .local_object()
+                .map(|object| host.initializer_wait(&context, object))
+                .transpose()?
+                .flatten();
+            let cancelled =
+                futures::future::select(context.cancellation().cancelled(), context.scope_ended())
+                    .map(|either| match either {
+                        futures::future::Either::Left((error, _))
+                        | futures::future::Either::Right((error, _)) => error,
+                    })
+                    .boxed_local();
+            let ready = match futures::future::select(self.ready().boxed_local(), cancelled).await {
+                futures::future::Either::Left((result, _)) => result,
+                futures::future::Either::Right((error, _)) => return Err(error),
+            };
+            context.check(host.id)?;
+            ready?;
+            self.claim.check()?;
+            if self.claim.local()?.phase.get() != Phase::Live {
+                return Err(RuntimeError::new(
+                    ErrorCode::Gone,
+                    "gone",
+                    "object is not live",
+                ));
+            }
+            let object = self.claim.local()?.clone();
+            let implementation = self.implementation_view_at(context.code_version())?;
+            if !matches!(
+                self.contract()
+                    .members(implementation.variant.as_deref().unwrap_or(""))
+                    .and_then(|members| members.get(name)),
+                Some(tembra_contracts::Member::Method { .. })
+            ) {
+                return Err(RuntimeError::new(
+                    ErrorCode::NotInVariant,
+                    "method",
+                    "method is absent from the consumer contract",
+                ));
+            }
+            let method = implementation.methods.get(name).ok_or_else(|| {
+                RuntimeError::new(
+                    ErrorCode::NotInVariant,
+                    "method",
+                    "method is not in the reference shape",
+                )
+            })?;
+            let returns_value = matches!(
+                self.claim
+                    .contract
+                    .members("")
+                    .and_then(|members| members.get(name)),
+                Some(tembra_contracts::Member::Method {
+                    result: Some(_),
+                    ..
+                })
+            );
+            if method.args != TypeId::of::<A>()
+                || (returns_value && method.result != TypeId::of::<R>())
+                || (!returns_value && TypeId::of::<R>() != TypeId::of::<()>())
+            {
+                return Err(RuntimeError::invalid(
+                    "native_type",
+                    "native method argument or result type mismatch",
+                ));
+            }
+            let invoke = method.invoke.clone();
+            let (child, _invocation) = crate::invocation::enter_with_receipt(
+                &host,
+                object.clone(),
+                implementation.clone(),
+                &context,
+                receipt,
+            )?;
+            let result = invoke(Box::new(args), child).await?;
+            if !returns_value {
+                return (Box::new(()) as Box<dyn std::any::Any>)
+                    .downcast::<R>()
+                    .map(|value| *value)
+                    .map_err(|_| {
+                        RuntimeError::invalid("native_type", "void method requires unit result")
+                    });
+            }
+            result.downcast::<R>().map(|value| *value).map_err(|_| {
+                RuntimeError::invalid("native_type", "native method returned an unexpected type")
+            })
         }
-        let invoke = method.invoke.clone();
-        let (child, _invocation) = crate::invocation::enter_with_receipt(
-            &host,
-            object.clone(),
-            implementation.clone(),
-            &context,
-            receipt,
-        )?;
-        let result = invoke(Box::new(args), child).await?;
-        if !returns_value {
-            return (Box::new(()) as Box<dyn std::any::Any>)
-                .downcast::<R>()
-                .map(|value| *value)
-                .map_err(|_| {
-                    RuntimeError::invalid("native_type", "void method requires unit result")
-                });
+        .await;
+        if let Some(observation) = &mut observation {
+            observation.result(&result);
         }
-        result.downcast::<R>().map(|value| *value).map_err(|_| {
-            RuntimeError::invalid("native_type", "native method returned an unexpected type")
-        })
+        result
     }
 
     fn implementation_view(&self) -> Result<Rc<crate::Implementation>> {
@@ -1520,171 +1573,194 @@ impl Reference {
             .host
             .upgrade()
             .ok_or_else(|| RuntimeError::unavailable("host", "host no longer exists"))?;
-        if host.in_factory.get() > 0 {
-            return Err(RuntimeError::new(
-                ErrorCode::NotReady,
-                "factory",
-                "references cannot be called inside a factory",
-            ));
-        }
-        self.claim.check()?;
-        self.claim.check_method_publication(&host)?;
-        let (context, _root_scope) = if let Some(ctx) = ctx {
-            ctx.check(host.id)?;
-            (ctx.clone(), None)
-        } else {
-            let (ctx, guard) = host.new_root(host.principal.clone());
-            (ctx, Some(guard))
-        };
-        let _activation_wait = self
-            .claim
-            .local_object()
-            .map(|object| host.initializer_wait(&context, object))
-            .transpose()?
-            .flatten();
-        let stopped =
-            futures::future::select(context.cancellation().cancelled(), context.scope_ended())
-                .map(|value| match value {
-                    futures::future::Either::Left((error, _))
-                    | futures::future::Either::Right((error, _)) => error,
-                })
-                .boxed_local();
-        let ready = match futures::future::select(self.ready().boxed_local(), stopped).await {
-            futures::future::Either::Left((ready, _)) => ready,
-            futures::future::Either::Right((error, _)) => return Err(error),
-        };
-        context.check(host.id)?;
-        ready?;
-        self.claim.check()?;
-        if let ReferenceBacking::Remote(remote) = &self.claim.backing {
-            return remote.call(name, args, &context).await;
-        }
-        let object = self.claim.local()?.clone();
-        let implementation = self.implementation_view_at(context.code_version())?;
-        let variant = implementation.variant.as_deref().unwrap_or("");
-        let consumer = self
-            .contract()
-            .members(variant)
-            .and_then(|members| members.get(name));
-        let Some(Member::Method {
-            args: consumer_args,
-            result: consumer_result,
-        }) = consumer
-        else {
-            return Err(RuntimeError::new(
-                ErrorCode::NotInVariant,
-                "method",
-                "method is absent from the consumer contract",
-            ));
-        };
-        let provider = object
-            .installed
-            .borrow()
-            .get(&context.code_version())
-            .map(|installed| installed.service.contract().clone())
-            .ok_or_else(crate::epoch::superseded)?;
-        let validation_contract = if provider.version() == self.contract().version() {
-            &provider
-        } else {
-            self.contract()
-        };
-        let Some(Member::Method {
-            args: provider_args,
-            result: provider_result,
-        }) = validation_contract
-            .members(variant)
-            .and_then(|members| members.get(name))
-        else {
-            return Err(RuntimeError::new(
-                ErrorCode::ContractMismatch,
-                "method",
-                "selected implementation has no method schema",
-            ));
-        };
-        if [
-            consumer_args,
-            consumer_result,
-            provider_args,
-            provider_result,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|schema| matches!(schema, ValueSchema::Native(_)))
-        {
-            return Err(RuntimeError::invalid(
-                "native_type",
-                "native method schemas require an explicit portable binding contract",
-            ));
-        }
-        let args = match (consumer_args, provider_args, args) {
-            (None, None, None) => None,
-            (Some(_), Some(_), Some(value)) => {
-                let value = self
-                    .contract()
-                    .clean_method_args(variant, name, &value)
-                    .map_err(|error| RuntimeError::invalid("args", error.message))?;
-                self.contract()
-                    .validate_method_args(variant, name, &value)
-                    .map_err(|error| RuntimeError::invalid("args", error.message))?;
-                let value = validation_contract
-                    .clean_method_args(variant, name, &value)
-                    .map_err(|error| RuntimeError::invalid("args", error.message))?;
-                validation_contract
-                    .validate_method_args(variant, name, &value)
-                    .map_err(|error| RuntimeError::invalid("args", error.message))?;
-                Some(value)
-            }
-            _ => {
-                return Err(RuntimeError::invalid(
-                    "args",
-                    "argument presence differs from the bound method contract",
+        let mut observation = crate::observability::start(
+            &host.observations,
+            crate::observability::Operation::PortableCall,
+            name,
+            None,
+            Some(self.object_id()),
+            self.claim.observation_id,
+        );
+        let result = async {
+            if host.in_factory.get() > 0 {
+                return Err(RuntimeError::new(
+                    ErrorCode::NotReady,
+                    "factory",
+                    "references cannot be called inside a factory",
                 ));
             }
-        };
-        let invoke = implementation
-            .json_methods
-            .get(name)
-            .cloned()
-            .ok_or_else(|| {
-                RuntimeError::invalid(
-                    "native_type",
-                    "method has no portable binding; use the native typed route",
-                )
-            })?;
-        let (child, _invocation) = crate::invocation::enter_with_receipt(
-            &host,
-            object.clone(),
-            implementation.clone(),
-            &context,
-            receipt,
-        )?;
-        let result = invoke(args, child).await?;
-        if let Some(schema) = provider_result {
-            let ValueSchema::Portable(_) = schema else {
-                return Err(RuntimeError::invalid(
-                    "native_type",
-                    "native result cannot cross a portable boundary",
+            self.claim.check()?;
+            self.claim.check_method_publication(&host)?;
+            let (context, _root_scope) = if let Some(ctx) = ctx {
+                ctx.check(host.id)?;
+                (ctx.clone(), None)
+            } else {
+                let (ctx, guard) = host.new_root(host.principal.clone());
+                (ctx, Some(guard))
+            };
+            if let Some(observation) = &mut observation {
+                observation.context(&context);
+            }
+            let observation_id = observation
+                .as_ref()
+                .map(crate::observability::Span::id)
+                .or(context.observation_id());
+            let context = context.with_observation_id(observation_id);
+            let _activation_wait = self
+                .claim
+                .local_object()
+                .map(|object| host.initializer_wait(&context, object))
+                .transpose()?
+                .flatten();
+            let stopped =
+                futures::future::select(context.cancellation().cancelled(), context.scope_ended())
+                    .map(|value| match value {
+                        futures::future::Either::Left((error, _))
+                        | futures::future::Either::Right((error, _)) => error,
+                    })
+                    .boxed_local();
+            let ready = match futures::future::select(self.ready().boxed_local(), stopped).await {
+                futures::future::Either::Left((ready, _)) => ready,
+                futures::future::Either::Right((error, _)) => return Err(error),
+            };
+            context.check(host.id)?;
+            ready?;
+            self.claim.check()?;
+            if let ReferenceBacking::Remote(remote) = &self.claim.backing {
+                return remote.call(name, args, &context).await;
+            }
+            let object = self.claim.local()?.clone();
+            let implementation = self.implementation_view_at(context.code_version())?;
+            let variant = implementation.variant.as_deref().unwrap_or("");
+            let consumer = self
+                .contract()
+                .members(variant)
+                .and_then(|members| members.get(name));
+            let Some(Member::Method {
+                args: consumer_args,
+                result: consumer_result,
+            }) = consumer
+            else {
+                return Err(RuntimeError::new(
+                    ErrorCode::NotInVariant,
+                    "method",
+                    "method is absent from the consumer contract",
                 ));
             };
-            let value = result.as_ref().ok_or_else(|| {
-                RuntimeError::invalid("result", "provider omitted its declared result")
+            let provider = object
+                .installed
+                .borrow()
+                .get(&context.code_version())
+                .map(|installed| installed.service.contract().clone())
+                .ok_or_else(crate::epoch::superseded)?;
+            let validation_contract = if provider.version() == self.contract().version() {
+                &provider
+            } else {
+                self.contract()
+            };
+            let Some(Member::Method {
+                args: provider_args,
+                result: provider_result,
+            }) = validation_contract
+                .members(variant)
+                .and_then(|members| members.get(name))
+            else {
+                return Err(RuntimeError::new(
+                    ErrorCode::ContractMismatch,
+                    "method",
+                    "selected implementation has no method schema",
+                ));
+            };
+            if [
+                consumer_args,
+                consumer_result,
+                provider_args,
+                provider_result,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|schema| matches!(schema, ValueSchema::Native(_)))
+            {
+                return Err(RuntimeError::invalid(
+                    "native_type",
+                    "native method schemas require an explicit portable binding contract",
+                ));
+            }
+            let args = match (consumer_args, provider_args, args) {
+                (None, None, None) => None,
+                (Some(_), Some(_), Some(value)) => {
+                    let value = self
+                        .contract()
+                        .clean_method_args(variant, name, &value)
+                        .map_err(|error| RuntimeError::invalid("args", error.message))?;
+                    self.contract()
+                        .validate_method_args(variant, name, &value)
+                        .map_err(|error| RuntimeError::invalid("args", error.message))?;
+                    let value = validation_contract
+                        .clean_method_args(variant, name, &value)
+                        .map_err(|error| RuntimeError::invalid("args", error.message))?;
+                    validation_contract
+                        .validate_method_args(variant, name, &value)
+                        .map_err(|error| RuntimeError::invalid("args", error.message))?;
+                    Some(value)
+                }
+                _ => {
+                    return Err(RuntimeError::invalid(
+                        "args",
+                        "argument presence differs from the bound method contract",
+                    ));
+                }
+            };
+            let invoke = implementation
+                .json_methods
+                .get(name)
+                .cloned()
+                .ok_or_else(|| {
+                    RuntimeError::invalid(
+                        "native_type",
+                        "method has no portable binding; use the native typed route",
+                    )
+                })?;
+            let (child, _invocation) = crate::invocation::enter_with_receipt(
+                &host,
+                object.clone(),
+                implementation.clone(),
+                &context,
+                receipt,
+            )?;
+            let result = invoke(args, child).await?;
+            if let Some(schema) = provider_result {
+                let ValueSchema::Portable(_) = schema else {
+                    return Err(RuntimeError::invalid(
+                        "native_type",
+                        "native result cannot cross a portable boundary",
+                    ));
+                };
+                let value = result.as_ref().ok_or_else(|| {
+                    RuntimeError::invalid("result", "provider omitted its declared result")
+                })?;
+                validation_contract
+                    .validate_method_result(variant, name, value)
+                    .map_err(|error| RuntimeError::invalid("result", error.message))?;
+            }
+            if consumer_result.is_none() {
+                return Ok(None);
+            }
+            let value = result.ok_or_else(|| {
+                RuntimeError::invalid("result", "provider omitted the consumer result")
             })?;
-            validation_contract
-                .validate_method_result(variant, name, value)
-                .map_err(|error| RuntimeError::invalid("result", error.message))?;
+            if let Some(ValueSchema::Portable(_)) = consumer_result {
+                self.contract()
+                    .validate_method_result(variant, name, &value)
+                    .map_err(|error| RuntimeError::invalid("result", error.message))?;
+            }
+            Ok(Some(value))
         }
-        if consumer_result.is_none() {
-            return Ok(None);
+        .await;
+        if let Some(observation) = &mut observation {
+            observation.result(&result);
         }
-        let value = result.ok_or_else(|| {
-            RuntimeError::invalid("result", "provider omitted the consumer result")
-        })?;
-        if let Some(ValueSchema::Portable(_)) = consumer_result {
-            self.contract()
-                .validate_method_result(variant, name, &value)
-                .map_err(|error| RuntimeError::invalid("result", error.message))?;
-        }
-        Ok(Some(value))
+        result
     }
 }
 

@@ -12,6 +12,15 @@ import type {
 } from "../executor.js";
 import type { AnyHookDefinition } from "../hooks.js";
 import { canonicalJson } from "../portable.js";
+import type { ObservationBatch } from "./observability.js";
+
+export type {
+  ObservationOptions,
+  ObservationOperation,
+  Observation,
+  ObservationBatch,
+  ObservationStatistics,
+} from "./observability.js";
 
 function snapshotArtifact(artifact: EsmArtifactV1): EsmArtifactV1 {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Only serialization occurs here; the platform validates the captured artifact.
@@ -90,6 +99,8 @@ export type TembraHost = {
   registry<T>(definition: Registry<T>): RegistryView<T>;
   cancel(context: ContextHandle): void;
   diagnostics(): Readonly<Record<string, unknown>>;
+  /** Drains at most limit events; null means collection was disabled at construction. */
+  observations(limit: number): ObservationBatch | null;
   /** Joins managed cleanup. Cancellation alone does not prove physical callback completion. */
   close(): Promise<void>;
 };

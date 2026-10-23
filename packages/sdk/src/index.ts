@@ -23,4 +23,9 @@ export type {
   ModuleFacet,
   ArtifactFacet,
   LoadableFacet,
+  ObservationOptions,
+  ObservationOperation,
+  Observation,
+  ObservationBatch,
+  ObservationStatistics,
 } from "./host/index.js";

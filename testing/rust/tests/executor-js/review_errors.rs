@@ -50,8 +50,8 @@ async fn facet(
         serde_json::to_string(token.descriptor()).unwrap(),
     );
     executor
-        .prepare(
-            host.id(),
+        .prepare_for_host(
+            host,
             BundledJsArtifact::new("review", source, vec!["default".into()]).unwrap(),
             "default".into(),
         )

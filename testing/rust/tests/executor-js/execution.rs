@@ -120,7 +120,7 @@ export default {
         &(serde_json::to_string(contract.descriptor()).unwrap()),
     );
     let facet = executor
-        .prepare(host.id(), artifact(source), "default".into())
+        .prepare_for_host(&host, artifact(source), "default".into())
         .await
         .unwrap();
     let startup = host
@@ -214,7 +214,7 @@ export default {
         &(serde_json::to_string(d.descriptor()).unwrap()),
     );
     let facet = executor
-        .prepare(host.id(), artifact(source), "default".into())
+        .prepare_for_host(&host, artifact(source), "default".into())
         .await
         .unwrap();
     host.install_executable(
