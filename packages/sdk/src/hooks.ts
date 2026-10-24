@@ -11,7 +11,7 @@ import type {
   RegisteredOperation,
 } from "./executor.js";
 import { canonicalJson, clonePortable, fingerprint } from "./portable.js";
-import { normalizeSchema, object } from "./schema.js";
+import { prepareSchema, object } from "./schema.js";
 
 /** Ordered series, first-stop bail, value-transforming waterfall, scoped middleware, or parallel fan-out. */
 export type HookStrategy = "series" | "bail" | "waterfall" | "middleware" | "parallel";
@@ -256,7 +256,7 @@ function position(value: unknown): ValueDescriptor | null {
     }
     return native(record.native);
   }
-  return normalizeSchema(value);
+  return prepareSchema(value);
 }
 function terminalProfile(
   value: unknown,

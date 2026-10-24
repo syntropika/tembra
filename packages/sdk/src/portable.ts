@@ -109,12 +109,16 @@ export function assertPortable(source: unknown): asserts source is JsonValue {
 /** Validates and deep-copies a portable tree; invalid input throws ContractError without mutation. */
 export function clonePortable(value: unknown): JsonValue {
   assertPortable(value);
+  return copyPortable(value);
+}
+
+function copyPortable(value: JsonValue): JsonValue {
   if (Array.isArray(value)) {
-    return value.map(clonePortable);
+    return value.map(copyPortable);
   }
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, clonePortable(entry)]),
+      Object.entries(value).map(([key, entry]) => [key, copyPortable(entry)]),
     );
   }
   return value;

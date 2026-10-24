@@ -46,6 +46,14 @@ descriptor-only. State declarations and hook profiles retain preparation with th
 Consumer and provider checks, hook encoding, reload admission and per-value errors remain at their
 original boundaries, including deferred refusals when a normalized schema exceeds a later budget.
 
+The TypeScript SDK retains normalized schemas with immutable contract and hook descriptors.
+Validation and cleaning reuse that preparation while checking each actual value. External schemas,
+including mutable results returned by `normalizeSchema`, are checked again; merely freezing an
+external object does not grant it trusted preparation. `normalizeSchema` always compiles a new
+mutable copy and applies its requested compilation limits. Portable cloning validates a complete tree before copying, and schema
+ingestion checks its constructed portable tree once rather than revalidating every subtree.
+Returned copies remain detached from caller data.
+
 The portable profile limits canonical JSON to 1 MiB and nesting to 128 containers. Numbers must be
 finite, and integral values must fit the shared safe integer range
 `-9_007_199_254_740_991..=9_007_199_254_740_991`. Rust state uses this profile even when its contract

@@ -8,6 +8,7 @@ import {
   canonicalIdentity,
   normalizeInput,
   normalizeSchema,
+  prepareSchema,
   object,
 } from "./schema.js";
 import type { Schema } from "./schema.js";
@@ -218,7 +219,7 @@ function valueDescriptor(value: unknown, kind: "local" | "remote"): ValueDescrip
     }
     return { native: marker.native };
   }
-  return normalizeSchema(value);
+  return prepareSchema(value);
 }
 
 function freeze<T>(value: T): T {
@@ -274,7 +275,7 @@ function descriptorMember(value: unknown, kind: "local" | "remote"): MemberDescr
     exactKeys(member, ["kind", "schema"], "member");
     return {
       kind: "state",
-      schema: normalizeSchema(member.schema),
+      schema: prepareSchema(member.schema),
     };
   } else if (member.kind === "opaque") {
     exactKeys(member, ["kind", "id"], "member");
@@ -319,7 +320,7 @@ function descriptor(source: unknown, external: boolean): Descriptor {
     "descriptor",
   );
   assertDescriptorMetadata(raw);
-  const input = normalizeSchema(raw.input);
+  const input = prepareSchema(raw.input);
   assertUnambiguousInput(input);
   const sourceVariants = object(raw.variants, "descriptor");
   const variants = emptyRecord<Record<string, MemberDescriptor>>();
