@@ -36,6 +36,8 @@ const keywords = new Set([
   "uniqueItems",
   ...annotations,
 ]);
+const preparedSchemas = new WeakMap<object, Schema>();
+const unambiguousSchemas = new WeakSet<object>();
 const kinds = new Set(["null", "boolean", "integer", "number", "string", "array", "object"]);
 
 function assertObject(value: unknown, reason: string): asserts value is Record<string, unknown> {
@@ -98,7 +100,6 @@ function schemaData(
     ? schemaArray(source, depth, active)
     : schemaRecord(source, depth, active, context);
   active.delete(source);
-  assertPortable(result);
   return result;
 }
 function schemaArray(source: unknown[], depth: number, active: Set<object>): JsonValue[] {
@@ -180,6 +181,7 @@ export function normalizeSchema(source: unknown, limits: Partial<CompileLimits> 
     );
   }
   const root = schemaData(source);
+  assertPortable(root);
   let nodes = 0;
   // Preserve boolean provenance through reference chains after true normalizes to {}.
   const booleanTrueResults = new WeakSet();
@@ -342,6 +344,31 @@ export function normalizeSchema(source: unknown, limits: Partial<CompileLimits> 
     return output;
   }
   return compile(root, "/", 0, new Set());
+}
+
+function schemaForValue(source: unknown): Schema {
+  const prepared =
+    source !== null && typeof source === "object" ? preparedSchemas.get(source) : undefined;
+  return prepared ?? normalizeSchema(source);
+}
+
+/** Retains immutable schema preparation with the contract or hook descriptor that owns it. */
+export function prepareSchema(source: unknown): Schema {
+  const schema = schemaForValue(source);
+  if (typeof schema !== "boolean" && !preparedSchemas.has(schema)) {
+    freezeData(schema);
+    preparedSchemas.set(schema, schema);
+  }
+  return schema;
+}
+
+function freezeData(value: JsonValue): void {
+  if (value !== null && typeof value === "object") {
+    for (const child of Object.values(value)) {
+      freezeData(child);
+    }
+    Object.freeze(value);
+  }
 }
 
 function validateRequired(output: Record<string, JsonValue>, path: string): void {
@@ -561,7 +588,7 @@ function checkNormalized(schema: Schema, value: unknown): boolean {
  */
 export function validateValue(schema: unknown, value: unknown): boolean {
   assertPortable(value);
-  return checkNormalized(normalizeSchema(schema), value);
+  return checkNormalized(schemaForValue(schema), value);
 }
 
 /** Checks portable data and schema conformance; mismatch throws ContractError with reason validation. */
@@ -706,7 +733,13 @@ function signature(schema: Schema, path = "/"): JsonValue {
 }
 
 export function assertUnambiguousInput(schema: Schema): void {
+  if (typeof schema !== "boolean" && unambiguousSchemas.has(schema)) {
+    return;
+  }
   signature(schema);
+  if (typeof schema !== "boolean" && preparedSchemas.has(schema)) {
+    unambiguousSchemas.add(schema);
+  }
 }
 
 function transform(
@@ -806,7 +839,7 @@ function transformObject(
  */
 export function normalizeInput(schema: unknown, input: unknown = null): JsonValue {
   assertPortable(input);
-  const normalized = normalizeSchema(schema);
+  const normalized = schemaForValue(schema);
   assertUnambiguousInput(normalized);
   const value = transform(normalized, input ?? {}, true, false);
   if (!checkNormalized(normalized, value)) {
@@ -817,7 +850,7 @@ export function normalizeInput(schema: unknown, input: unknown = null): JsonValu
 
 /** Normalized input identity as canonical JSON, omitting declared properties equal to their defaults. */
 export function canonicalIdentity(schema: unknown, input: unknown = null): string {
-  const normalized = normalizeSchema(schema);
+  const normalized = schemaForValue(schema);
   return canonicalJson(transform(normalized, normalizeInput(normalized, input), false, true));
 }
 
@@ -827,7 +860,7 @@ export function canonicalIdentity(schema: unknown, input: unknown = null): strin
  */
 export function cleanArguments(schema: unknown, value: unknown): JsonValue {
   assertPortable(value);
-  const normalized = normalizeSchema(schema);
+  const normalized = schemaForValue(schema);
   assertUnambiguousInput(normalized);
   return transform(normalized, value, false, false);
 }
