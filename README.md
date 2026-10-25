@@ -114,7 +114,11 @@ available while their consumer closes.
 `commit()` / `abort()` handle for infrastructure coordination. Compatible code keeps already-admitted
 roots on their old implementation. New roots use the adopted implementation. A state version
 increase requires the owning facet's `migrate(previous, previousVersion)` callback. Incompatible
-changes drain affected physical work before migration; stale state writes are rejected.
+changes wait for complete roots that already touched the affected object or facet, including their
+reentrant calls, and for owned tasks to settle. Other roots cannot enter those scopes during the
+gate. Commit rejects older contexts for the upgraded scopes; compatible scopes keep admitting them.
+A missed deadline aborts the reload. Start reloads outside a root that uses an affected scope:
+awaiting a reload inside that root would make it wait for itself. Stale state writes are rejected.
 
 An unchanged resource name, version, exclusivity and dependency list preserves its handle. An
 exclusive replacement closes the previous resource before opening its successor. Failed preparation

@@ -243,7 +243,10 @@ impl Inner {
         Ok(owner)
     }
     fn facet_busy(&self, owner: Id) -> bool {
-        self.owner_calls.contains(&Owner::Facet(owner)) || self.facet_tasks.contains(&owner)
+        self.facet_roots.contains(&owner) || self.facet_tasks.contains(&owner)
+    }
+    fn gate_object_busy(&self, object: Id) -> bool {
+        self.object_roots.contains(&object) || self.objects[&object].tasks != 0
     }
     pub fn owner(&self, owner: Owner) -> Result<()> {
         match owner {
@@ -345,9 +348,23 @@ impl Inner {
         if let Some(root) = self.roots.remove(&id) {
             for object in root.touched {
                 self.object_roots.remove(&object, id);
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.gated.contains(&object))
+                {
+                    self.wake(WaitKey::Owner(Owner::Object(object)));
+                }
             }
             for facet in root.facets {
                 self.facet_roots.remove(&facet, id);
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.gated_facets.contains_key(&facet))
+                {
+                    self.wake(WaitKey::Owner(Owner::Facet(facet)));
+                }
             }
             self.release_version(root.version);
         }

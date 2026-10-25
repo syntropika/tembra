@@ -9,14 +9,23 @@ const precision = await Bun.build({
 });
 if (!precision.success) throw new AggregateError(precision.logs, "Precision fixture build failed");
 const precisionSource = await precision.outputs[0]!.text();
+const rootGate = await Bun.build({
+  entrypoints: [new URL("../test/root-gate.ts", import.meta.url).pathname],
+  target: "browser",
+  format: "esm",
+});
+if (!rootGate.success) throw new AggregateError(rootGate.logs, "Root gate fixture build failed");
+const rootGateSource = await rootGate.outputs[0]!.text();
 
 const worker = `import {createHost} from '/packages/sdk/dist/browser.js';
 import {WasmKernel} from '/packages/sdk/dist/wasm/tembra.js';
 import {verifyIdentifierPrecision} from '/precision.js';
+import {verifyExclusiveRootGate} from '/root-gate.js';
 onmessage = async () => {
   try {
     const host = await createHost();
     if(verifyIdentifierPrecision(()=>new WasmKernel())!==9) throw new Error('Worker identity precision failed');
+    await verifyExclusiveRootGate(host);
     await host.install({name:'worker',apiVersion:1,services:{worker:{create(self){return {state:self.state(0n)}},methods:{add({state},ctx,value){return state.update(ctx,current=>current+value)}}}}});
     const ref = await host.get('worker','main');
     const value = await ref.add(1n << 100n);
@@ -28,9 +37,11 @@ const html = `<!doctype html><html><body>running<script type="module">
 import {createHost} from '/packages/sdk/dist/browser.js';
 import {WasmKernel} from '/packages/sdk/dist/wasm/tembra.js';
 import {verifyIdentifierPrecision} from '/precision.js';
+import {verifyExclusiveRootGate} from '/root-gate.js';
 try {
   const host = await createHost();
   if(verifyIdentifierPrecision(()=>new WasmKernel())!==9) throw new Error('Browser identity precision failed');
+  await verifyExclusiveRootGate(host);
   await host.install({name:'browser',apiVersion:1,services:{counter:{create(self){return {state:self.state({value:0,items:[]})}},methods:{add({state},ctx){state.update(ctx,current=>({...current,value:current.value+1,items:[...current.items,1]}))}}}}});
   const ref = await host.get('counter','main');
   let updates = 0;
@@ -56,6 +67,8 @@ const server = Bun.serve({
   async fetch(request) {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/") return new Response(html, { headers: { "content-type": "text/html" } });
+    if (pathname === "/root-gate.js")
+      return new Response(rootGateSource, { headers: { "content-type": "text/javascript" } });
     if (pathname === "/precision.js")
       return new Response(precisionSource, { headers: { "content-type": "text/javascript" } });
     if (pathname === "/worker.js")
@@ -134,7 +147,7 @@ try {
     output = response.result.value ?? "";
     if (output === "TEMBRA_BROWSER_PASS") {
       console.log(
-        "Browser and Worker acceptance passed, including 9 identifier precision boundaries each",
+        "Browser and Worker acceptance passed, including root gates and 9 identifier precision boundaries each",
       );
       break;
     }

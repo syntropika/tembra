@@ -172,7 +172,8 @@ impl Host {
     }
 
     /// Stops first access by old roots while allowing already admitted roots to reenter.
-    /// The adapter must drain physical calls before committing migrations or exclusive handoff.
+    /// Returns true only after their complete roots and owned tasks physically settle. Ending or
+    /// cancelling a root does not release its lease while a callback is still running.
     pub fn gate(&self, ticket: Id, objects: &[Id]) -> Result<bool> {
         let mut inner = self.inner.borrow_mut();
         let pending = inner
@@ -203,9 +204,7 @@ impl Host {
             .expect("pending exists")
             .gated
             .extend(objects);
-        Ok(objects
-            .iter()
-            .all(|id| inner.objects[id].calls == 0 && inner.objects[id].tasks == 0))
+        Ok(objects.iter().all(|id| !inner.gate_object_busy(*id)))
     }
 
     /// Adopts declarations and private migrated states in one synchronous step.
@@ -231,11 +230,7 @@ impl Host {
         {
             return Err(conflict(Reason::GateBusy));
         }
-        if pending
-            .gated
-            .iter()
-            .any(|id| inner.objects[id].calls > 0 || inner.objects[id].tasks > 0)
-        {
+        if pending.gated.iter().any(|id| inner.gate_object_busy(*id)) {
             return Err(conflict(Reason::GateBusy));
         }
         // Claims may arrive while adapters open resources. Recheck them before adoption.
@@ -301,6 +296,9 @@ impl Host {
         let version = inner.version;
         for owner in pending.gated_facets.keys() {
             inner.facet_min.insert(*owner, version);
+        }
+        for id in &pending.gated {
+            inner.objects.get_mut(id).expect("gated object").min_version = version;
         }
         let services = pending
             .services

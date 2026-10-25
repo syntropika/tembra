@@ -126,6 +126,70 @@ fn compatible_reload_keeps_admitted_code() {
 }
 
 #[test]
+fn gate_waits_for_the_whole_root_and_fences_old_contexts_after_commit() {
+    let host = Host::new();
+    install(&host, facet());
+    let object = acquire(&host, vec!["main"]);
+    host.ready(object.object).unwrap();
+    let unrelated = acquire(&host, vec!["unrelated"]);
+    host.ready(unrelated.object).unwrap();
+    let admitted = host.begin_root("host").unwrap();
+    let first = host
+        .begin_call(object.reference, admitted, "increment")
+        .unwrap();
+    host.finish_call(first.id).unwrap();
+    let late = host.begin_root("host").unwrap();
+    let other_call = host
+        .begin_call(unrelated.reference, late, "increment")
+        .unwrap();
+    host.finish_call(other_call.id).unwrap();
+    let reload = host.prepare(vec![facet()], vec![]).unwrap();
+    assert!(
+        !host.gate(reload.id, &[object.object]).unwrap(),
+        "a root retains its object lease between calls"
+    );
+    assert_eq!(
+        host.commit(reload.id, vec![]).unwrap_err().reason,
+        "gate_busy"
+    );
+    assert_eq!(
+        host.begin_call(object.reference, late, "increment")
+            .unwrap_err()
+            .reason,
+        "upgrade_conflict"
+    );
+    let reentry = host
+        .begin_call(object.reference, admitted, "increment")
+        .unwrap();
+    host.end_root(admitted).unwrap();
+    assert!(
+        !host.gate(reload.id, &[object.object]).unwrap(),
+        "ending the observer must not release a physical call"
+    );
+    host.finish_call(reentry.id).unwrap();
+    assert!(host.gate(reload.id, &[object.object]).unwrap());
+    host.commit(reload.id, vec![]).unwrap();
+    assert_eq!(
+        host.begin_call(object.reference, late, "increment")
+            .unwrap_err()
+            .reason,
+        "upgrade_conflict"
+    );
+    let other_call = host
+        .begin_call(unrelated.reference, late, "increment")
+        .unwrap();
+    host.finish_call(other_call.id).unwrap();
+    let fresh = host.begin_root("host").unwrap();
+    let call = host
+        .begin_call(object.reference, fresh, "increment")
+        .unwrap();
+    assert_eq!(call.code_version, reload.code_version);
+    host.finish_call(call.id).unwrap();
+    host.end_root(fresh).unwrap();
+    host.end_root(late).unwrap();
+}
+
+#[test]
 fn migration_gates_first_access_and_rejects_old_writes() {
     let h = Host::new();
     install(&h, facet());
@@ -147,6 +211,7 @@ fn migration_gates_first_access_and_rejects_old_writes() {
     h.finish_call(reentry.id).unwrap();
     assert_eq!(h.commit(r.id, vec![]).unwrap_err().reason, "gate_busy");
     h.finish_call(call.id).unwrap();
+    h.end_root(admitted).unwrap();
     assert!(h.gate(r.id, &[a.object]).unwrap());
     h.commit(
         r.id,
@@ -159,7 +224,7 @@ fn migration_gates_first_access_and_rejects_old_writes() {
     )
     .unwrap();
     assert_eq!(
-        h.begin_call(a.reference, admitted, "increment")
+        h.begin_call(a.reference, late, "increment")
             .unwrap_err()
             .reason,
         "upgrade_conflict"

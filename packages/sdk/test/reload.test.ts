@@ -2,7 +2,176 @@ import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
 import { facet } from "../src/facet.ts";
 import { deferred } from "../src/runtime/records.ts";
-import { ActionType } from "../src/protocol.ts";
+import { ActionType, KernelOp } from "../src/protocol.ts";
+import type { Context } from "../src/runtime/context.ts";
+import type { Host } from "../src/host.ts";
+import type { Resource } from "../src/types.ts";
+
+function watchReloadWait(host: Host) {
+  const waiting = deferred<void>();
+  let program: number | undefined;
+  let stopSettled = false;
+  const request = host.session.kernel.port.request.bind(host.session.kernel.port);
+  const commands = spyOn(host.session.kernel.port, "request").mockImplementation((metadata) => {
+    const answer = request(metadata);
+    const input = JSON.parse(metadata);
+    const output = JSON.parse(answer);
+    if (input.op === KernelOp.ScopesReloadRegistered) program = output.ok;
+    if (input.op === KernelOp.ProgramCompleteStep && input.program === program) stopSettled = true;
+    // The shared Rust program reaches its gate after acknowledging the old scope's Stop effect.
+    if (input.op === KernelOp.Drain && stopSettled && output.ok?.length === 0) waiting.resolve();
+    return answer;
+  });
+  return { waiting: waiting.promise, restore: () => commands.mockRestore() };
+}
+
+for (const facetOwned of [false, true]) {
+  test(`exclusive ${facetOwned ? "facet" : "object"} replacement waits for complete roots and permits their reentry`, async () => {
+    const host = createHost();
+    const events: string[] = [];
+    const entered = deferred<void>();
+    const reenter = deferred<void>();
+    const reentered = deferred<void>();
+    const finish = deferred<void>();
+    const releaseLate = deferred<void>();
+    const lateContext = deferred<Context>();
+    const definition = (version: number) => {
+      let facetConnection: Resource<number>;
+      const options = {
+        version,
+        exclusive: true,
+        open() {
+          events.push(`open:${version}`);
+          return version;
+        },
+        close(value: number) {
+          events.push(`close:${value}`);
+        },
+      };
+      return facet({
+        name: "root-gate",
+        apiVersion: 1,
+        create(self) {
+          if (facetOwned) facetConnection = self.resource("connection", options);
+        },
+        services: {
+          item: {
+            create(self) {
+              return {
+                connection: facetOwned ? facetConnection : self.resource("connection", options),
+              };
+            },
+            methods: { read: ({ connection }) => connection.value },
+          },
+        },
+      });
+    };
+    await host.install(definition(1));
+    const reference = await host.get("item", "main");
+    const observer = watchReloadWait(host);
+    const late = host.root(async (ctx) => {
+      lateContext.resolve(ctx);
+      await releaseLate.promise;
+    });
+    const admitted = host.root(async (ctx) => {
+      expect(await reference.read(ctx)).toBe(1);
+      entered.resolve();
+      await reenter.promise;
+      expect(await reference.read(ctx)).toBe(1);
+      reentered.resolve();
+      await finish.promise;
+    });
+    let replacing: Promise<unknown> | undefined;
+    try {
+      await entered.promise;
+      let replaced = false;
+      replacing = host.reload([definition(2)]).then(() => {
+        replaced = true;
+      });
+      await observer.waiting;
+      expect(replaced).toBe(false);
+      expect(events).toEqual(["open:1"]);
+      await expect(reference.read(await lateContext.promise)).rejects.toMatchObject({
+        reason: "upgrade_conflict",
+      });
+      reenter.resolve();
+      await reentered.promise;
+      expect(replaced).toBe(false);
+      expect(events).toEqual(["open:1"]);
+      finish.resolve();
+      await admitted;
+      await replacing;
+      expect(events).toEqual(["open:1", "close:1", "open:2"]);
+      await expect(reference.read(await lateContext.promise)).rejects.toMatchObject({
+        reason: "upgrade_conflict",
+      });
+      expect(await reference.read()).toBe(2);
+    } finally {
+      reenter.resolve();
+      finish.resolve();
+      releaseLate.resolve();
+      await Promise.allSettled([admitted, late, replacing]);
+      observer.restore();
+      reference.release();
+      await host.close();
+    }
+    expect(events).toEqual(["open:1", "close:1", "open:2", "close:2"]);
+  });
+}
+
+test("an exclusive replacement deadline preserves the connection of its blocking root", async () => {
+  let now = 0;
+  const host = createHost({ now: () => now });
+  const events: string[] = [];
+  const definition = (version: number) =>
+    facet({
+      name: "root-deadline",
+      apiVersion: 1,
+      services: {
+        item: {
+          create(self) {
+            return {
+              connection: self.resource("connection", {
+                version,
+                exclusive: true,
+                open() {
+                  events.push(`open:${version}`);
+                  return version;
+                },
+                close(value) {
+                  events.push(`close:${value}`);
+                },
+              }),
+            };
+          },
+          methods: { read: ({ connection }) => connection.value },
+        },
+      },
+    });
+  await host.install(definition(1));
+  const reference = await host.get("item", "main");
+  const observer = watchReloadWait(host);
+  try {
+    await host.root(async (ctx) => {
+      expect(await reference.read(ctx)).toBe(1);
+      const replacing = host
+        .reload([definition(2)], { deadline: 1000 })
+        .catch((error: unknown) => error);
+      await observer.waiting;
+      now = 1000;
+      host.session.kernel.command(KernelOp.Tick, { now });
+      host.session.flush();
+      expect(await replacing).toMatchObject({ reason: "reload_deadline" });
+      expect(events).toEqual(["open:1"]);
+      expect(await reference.read(ctx)).toBe(1);
+    });
+    expect(await reference.read()).toBe(1);
+  } finally {
+    observer.restore();
+    reference.release();
+    await host.close();
+  }
+});
 
 test("closing refuses a new replacement before capturing its factory", async () => {
   const host = createHost();
