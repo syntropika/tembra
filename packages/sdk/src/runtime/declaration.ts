@@ -65,6 +65,7 @@ export class Declaration {
     return handle;
   }
 
+  /** Facet factories cannot depend on their own services; object factories may use sibling services. */
   get(
     service: string,
     key: string | readonly string[],
@@ -73,6 +74,8 @@ export class Declaration {
     this.check();
     const requirement = this.session.requirement(this.environment, service);
     const resolved = requirement.service;
+    if (!this.environment.object && this.environment.facet.definition.services?.[resolved])
+      refuse(Errors.Invalid.DependencyCycle);
     const identity = JSON.stringify([resolved, key, options.principal ?? this.principal]);
     const existing = this.environment.dependencies.get(identity);
     if (existing) return existing;

@@ -125,6 +125,11 @@ export const Errors = Object.freeze({
       Reason.CoordinationLimits,
       "Invalid coordination limits",
     ),
+    DependencyCycle: define(
+      Code.Invalid,
+      Reason.DependencyCycle,
+      "Facet factories cannot acquire their own services",
+    ),
     DependencyService: define(Code.Invalid, Reason.DependencyService, "Invalid dependency service"),
     DuplicateListener: define(Code.Invalid, Reason.DuplicateListener, "Invalid duplicate listener"),
     DuplicateResource: define(Code.Invalid, Reason.DuplicateResource, "Invalid duplicate resource"),
