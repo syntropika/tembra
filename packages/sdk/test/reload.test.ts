@@ -847,3 +847,57 @@ test("exclusive handoff closes and restores its nonexclusive resource dependents
   expect([connections, watchers]).toEqual([0, 0]);
   expect(host.session.resources.closedRecords.size).toBe(0);
 });
+
+for (const commit of [false, true])
+  test(`migration ${commit ? "adopts" : "discards"} selectors created during the prepared window`, async () => {
+    const host = createHost();
+    let migrations = 0;
+    const definition = (version: number) =>
+      facet({
+        name: "late-selection",
+        apiVersion: 1,
+        services: {
+          item: {
+            create(self) {
+              return {
+                state: self.state(
+                  { count: 1 },
+                  {
+                    version,
+                    migrate(previous: any) {
+                      migrations++;
+                      return { count: previous.count + 10 };
+                    },
+                  },
+                ),
+              };
+            },
+            methods: { read: ({ state }) => state.value },
+          },
+        },
+      });
+    await host.install(definition(1));
+    const reference = await host.get("item", "main");
+    let computations = 0;
+    const early = reference.state.select<number>((value) => {
+      computations++;
+      return value.count;
+    });
+    const prepared = await host.prepare([definition(2)]);
+    const late = reference.state.select<number>((value) => value.count);
+    const child = early.select((value) => value * 2);
+    const seen: number[] = [];
+    late.subscribe((value) => seen.push(value));
+    try {
+      expect(late.value).toBe(1);
+      if (commit) await prepared.commit();
+      else await prepared.abort();
+      expect([early.value, late.value, child.value]).toEqual(commit ? [11, 11, 22] : [1, 1, 2]);
+      expect(seen).toEqual(commit ? [1, 11] : [1]);
+      expect(computations).toBe(commit ? 2 : 1);
+      expect(migrations).toBe(1);
+    } finally {
+      reference.release();
+      await host.close();
+    }
+  });

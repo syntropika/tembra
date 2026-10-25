@@ -864,6 +864,13 @@ impl Host {
                     return Ok(Step::Prepared);
                 }
                 Phase::Adopt => {
+                    // Rollback is no longer possible. Reused connections retain their next scope.
+                    #[cfg(feature = "subscriptions")]
+                    for pair in &program.replacements {
+                        if let Some(scope) = pair.previous {
+                            self.stop_scope_listeners(scope, false)?;
+                        }
+                    }
                     effects.push(Effect::Adopt {
                         replacements: program.replacements.clone(),
                     });

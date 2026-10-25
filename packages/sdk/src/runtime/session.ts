@@ -223,6 +223,12 @@ export class Session implements StateBackend {
     let controller = this.controllers.get(root);
     if (!controller) {
       controller = new AbortController();
+      try {
+        this.kernel.command(KernelOp.CheckRoot, { root });
+      } catch (error) {
+        if (!(error instanceof TembraError) || error.code !== Code.Cancelled) throw error;
+        controller.abort(error);
+      }
       this.controllers.set(root, controller);
     }
     return controller.signal;

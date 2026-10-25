@@ -1,4 +1,5 @@
 import { Errors } from "../errors.ts";
+import { Code } from "../identifiers.ts";
 import {
   ActionType,
   EffectType,
@@ -16,6 +17,11 @@ import type { Environment, ResourceRecord } from "./records.ts";
 import type { Session } from "./session.ts";
 
 type ProgramResult = typeof StepType.Prepared | typeof StepType.Complete;
+
+// Rust strings cannot represent isolated UTF-16 surrogates, including one cut by truncation.
+function errorText(value: string, limit: number): string {
+  return value.slice(0, limit).replace(/[\uD800-\uDFFF]/gu, "\uFFFD");
+}
 
 /** Language effects only. The Rust program owns readiness, ordering, gates and recovery decisions. */
 export class Programs {
@@ -84,10 +90,35 @@ export class Programs {
       this.session.track(
         Promise.allSettled(action.effects!.map((effect) => this.execute(effect))).then(
           (settled) => {
+            // Reserve fixed envelope overhead, then budget worst-case JSON escaping (6 bytes/code unit).
+            const limit = Math.max(
+              0,
+              Math.min(
+                2048,
+                Math.floor((1024 * 1024 - 128 - settled.length * 96) / (12 * settled.length)),
+              ),
+            );
             const results = settled.map((result) => {
               if (result.status === "fulfilled") return { value: result.value ?? null };
-              const { code, reason, message } = failure(result.reason);
-              return { error: { code, reason, message } };
+              try {
+                const { code, reason, message } = failure(result.reason);
+                if (
+                  !Object.values(Code).includes(code) ||
+                  typeof reason !== "string" ||
+                  typeof message !== "string"
+                )
+                  return { error: Errors.Unavailable.Callback };
+                return {
+                  error: {
+                    code,
+                    reason: errorText(reason, limit),
+                    message: errorText(message, limit),
+                  },
+                };
+              } catch {
+                // Even a mutated Error with throwing getters must acknowledge physical settlement.
+                return { error: Errors.Unavailable.Callback };
+              }
             });
             this.session.kernel.command(KernelOp.ProgramCompleteStep, {
               program: action.id,
@@ -231,9 +262,9 @@ export class Programs {
   private candidate(environment: Environment, candidate: unknown): number {
     const state = environment.state!;
     const value = validate(candidate, state.options);
-    const selected = state.binding.prepare(value);
     const id = this.session.values.put(value);
-    state.publish = () => this.session.publish(state.binding.adopt(selected, value));
+    state.publish = () =>
+      this.session.publish(state.binding.adopt(state.binding.prepare(value), value));
     return id;
   }
 }

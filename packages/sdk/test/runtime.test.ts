@@ -244,3 +244,74 @@ test("engine delivers source events once and reuses unchanged source connections
   await host.close();
   expect(callbacks.size).toBe(0);
 });
+
+for (const commit of [false, true])
+  test(`${commit ? "committing" : "aborting"} a source replacement handles connections before old calls finish`, async () => {
+    const host = createHost();
+    const sources = [0, 1].map(() => {
+      const callbacks = new Set<(value: number) => void>();
+      return {
+        callbacks,
+        subscribe(callback: (value: number) => void) {
+          callbacks.add(callback);
+          return () => {
+            callbacks.delete(callback);
+          };
+        },
+      };
+    });
+    const entered = deferred<void>();
+    const finish = deferred<void>();
+    const delivered = deferred<void>();
+    const seen: number[] = [];
+    const definition = (version: number) =>
+      facet({
+        name: "source-replacement",
+        apiVersion: 1,
+        services: {
+          item: {
+            create(self) {
+              self.on(
+                "events",
+                sources[version - 1]!,
+                (_ctx, value) => {
+                  seen.push(value);
+                  delivered.resolve();
+                },
+                { maxPending: 1 },
+              );
+            },
+            methods: {
+              async slow() {
+                entered.resolve();
+                await finish.promise;
+                return version;
+              },
+            },
+          },
+        },
+      });
+    await host.install(definition(1));
+    const reference = await host.get("item", "main");
+    const running = reference.slow();
+    await entered.promise;
+    try {
+      const prepared = await host.prepare([definition(2)]);
+      expect(sources.map((source) => source.callbacks.size)).toEqual([1, 1]);
+      if (commit) await prepared.commit();
+      else await prepared.abort();
+      expect(sources.map((source) => source.callbacks.size)).toEqual(commit ? [0, 1] : [1, 0]);
+      for (let index = 0; index < 10; index++)
+        for (const callback of sources[commit ? 0 : 1]!.callbacks) callback(index);
+      for (const callback of sources[commit ? 1 : 0]!.callbacks) callback(42);
+      await delivered.promise;
+      expect(seen).toEqual([42]);
+      expect(host.errors()).toEqual([]);
+    } finally {
+      finish.resolve();
+      expect(await running).toBe(1);
+      reference.release();
+      await host.close();
+    }
+    expect(sources.map((source) => source.callbacks.size)).toEqual([0, 0]);
+  });

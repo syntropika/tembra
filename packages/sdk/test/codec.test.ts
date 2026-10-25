@@ -76,3 +76,14 @@ test("external shallow freezing does not bypass recursive state protection", () 
   cycle.self = cycle;
   expect(() => protect(cycle)).toThrow();
 });
+
+test("portable BigInt decimal text matches the Rust integer contract", () => {
+  for (const decimal of ["0", "-0", "7", "-7", "9007199254740993", "-18446744073709551616"])
+    expect(jsonCodec.deserialize(utf8(JSON.stringify({ $tembra: ["bigint", decimal] })))).toBe(
+      BigInt(decimal),
+    );
+  for (const decimal of ["", "-", "+7", "007", "-007", "00", "-00", "1.0", " 7", "７"])
+    expect(() =>
+      jsonCodec.deserialize(utf8(JSON.stringify({ $tembra: ["bigint", decimal] }))),
+    ).toThrow();
+});

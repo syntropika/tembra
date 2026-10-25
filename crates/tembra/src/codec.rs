@@ -55,7 +55,10 @@ impl<'de> serde::Deserialize<'de> for Integer {
 pub fn bigint(decimal: impl Into<String>) -> Result<Value> {
     let decimal = decimal.into();
     let digits = decimal.strip_prefix('-').unwrap_or(&decimal);
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+    if digits.is_empty()
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
         return Err(Error::invalid(Reason::Bigint, "expected a decimal integer"));
     }
     Ok(json!({"$tembra": ["bigint", decimal]}))
@@ -70,4 +73,32 @@ pub fn encode(value: &Value) -> Result<Vec<u8>> {
 pub fn decode(bytes: &[u8]) -> Result<Value> {
     serde_json::from_slice(bytes)
         .map_err(|error| Error::invalid(Reason::Serialization, error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_integer_text_matches_javascript() {
+        for decimal in [
+            "0",
+            "-0",
+            "7",
+            "-7",
+            "9007199254740993",
+            "-18446744073709551616",
+        ] {
+            let integer = Integer(decimal.into());
+            let wire = serde_json::to_value(&integer).unwrap();
+            assert_eq!(serde_json::from_value::<Integer>(wire).unwrap(), integer);
+        }
+        for decimal in ["", "-", "+7", "007", "-007", "00", "-00", "1.0", " 7", "７"] {
+            assert!(bigint(decimal).is_err(), "accepted {decimal:?}");
+            assert!(serde_json::to_value(Integer(decimal.into())).is_err());
+            assert!(
+                serde_json::from_value::<Integer>(json!({"$tembra": ["bigint", decimal]})).is_err()
+            );
+        }
+    }
 }
