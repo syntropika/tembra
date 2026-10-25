@@ -14,6 +14,7 @@ export interface ServiceDefinition {
   create?: (self: Declaration) => unknown;
   methods: Record<string, Handler>;
   lifetime?: Lifetime;
+  /** Idle milliseconds to retain an unreferenced object and its running tasks; defaults to zero. */
   linger?: number;
   access?: (principal: string) => { methods: readonly string[] };
 }

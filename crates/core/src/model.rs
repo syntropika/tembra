@@ -35,6 +35,7 @@ pub struct Service {
     pub name: String,
     pub methods: BTreeSet<String>,
     pub lifetime: Lifetime,
+    /// Keeps an unreferenced object and its tasks live until this idle duration expires.
     pub linger_ms: u32,
 }
 impl Service {

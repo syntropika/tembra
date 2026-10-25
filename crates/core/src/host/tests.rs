@@ -85,6 +85,121 @@ fn an_unrelated_task_does_not_exhaust_the_retained_version_limit() {
     host.finish_task(task).unwrap();
 }
 
+fn lingering_object(host: &Host, linger_ms: u32) -> Acquisition {
+    let mut facet = Facet::new("linger", 1);
+    let mut service = Service::new("linger", ["read"]);
+    service.linger_ms = linger_ms;
+    facet.services.push(service);
+    let reload = host.prepare(vec![facet], vec![]).unwrap();
+    host.commit(reload.id, vec![]).unwrap();
+    let claim = host
+        .acquire(
+            Address {
+                service: "linger".into(),
+                key: vec!["main".into()],
+                principal: "host".into(),
+            },
+            1,
+            BTreeSet::new(),
+        )
+        .unwrap();
+    host.ready(claim.object).unwrap();
+    host.drain();
+    claim
+}
+
+#[test]
+fn linger_keeps_tasks_alive_and_reacquisition_resets_the_idle_deadline() {
+    let host = Host::new();
+    let claim = lingering_object(&host, 100);
+    let address = host.object_address(claim.object).unwrap();
+    let task = host.begin_task(Owner::Object(claim.object)).unwrap();
+    host.release(claim.reference).unwrap();
+    assert!(host.drain().is_empty());
+    assert_eq!(host.next_idle(), Some(100));
+    let root = host.task_root(task, "host").unwrap();
+    host.end_root(root).unwrap();
+    host.tick(50).unwrap();
+    let again = host.acquire(address.clone(), 1, BTreeSet::new()).unwrap();
+    assert_eq!(again.object, claim.object);
+    assert!(!again.activate);
+    assert_eq!(host.next_idle(), None);
+    host.tick(150).unwrap();
+    assert!(host.drain().is_empty());
+    host.release(again.reference).unwrap();
+    host.tick(249).unwrap();
+    assert_eq!(host.next_idle(), Some(1));
+    assert!(host.drain().is_empty());
+    host.tick(250).unwrap();
+    assert_eq!(host.drain(), [Action::CancelTask(task)]);
+    assert_eq!(
+        host.task_root(task, "host").unwrap_err().code,
+        Code::Cancelled
+    );
+    assert_eq!(
+        host.acquire(address.clone(), 1, BTreeSet::new())
+            .unwrap_err()
+            .reason,
+        Reason::Disposing.as_str()
+    );
+    assert_eq!(
+        host.disposed(claim.object).unwrap_err().reason,
+        Reason::CleanupBusy.as_str()
+    );
+    host.tick(251).unwrap();
+    assert!(host.drain().is_empty());
+    host.finish_task(task).unwrap();
+    assert_eq!(host.drain(), [Action::DisposeObject(claim.object)]);
+    host.disposed(claim.object).unwrap();
+    let next = host.acquire(address, 1, BTreeSet::new()).unwrap();
+    assert_ne!(next.object, claim.object);
+    host.close();
+    assert_eq!(host.drain(), [Action::DisposeObject(next.object)]);
+    host.disposed(next.object).unwrap();
+    host.finish_close().unwrap();
+}
+
+#[test]
+fn zero_linger_and_shutdown_cancel_tasks_without_waiting_for_a_linger_deadline() {
+    for linger_ms in [0, 60_000] {
+        let host = Host::new();
+        let claim = lingering_object(&host, linger_ms);
+        let task = host.begin_task(Owner::Object(claim.object)).unwrap();
+        host.release(claim.reference).unwrap();
+        if linger_ms == 0 {
+            assert_eq!(host.drain(), [Action::CancelTask(task)]);
+        } else {
+            assert!(host.drain().is_empty());
+            host.close();
+            assert_eq!(host.drain(), [Action::CancelTask(task)]);
+            assert_eq!(host.next_idle(), None);
+        }
+        host.finish_task(task).unwrap();
+        assert_eq!(host.drain(), [Action::DisposeObject(claim.object)]);
+        host.disposed(claim.object).unwrap();
+        host.close();
+        host.finish_close().unwrap();
+    }
+}
+
+#[test]
+fn a_task_finishing_during_linger_preserves_the_original_deadline() {
+    let host = Host::new();
+    let claim = lingering_object(&host, 100);
+    let task = host.begin_task(Owner::Object(claim.object)).unwrap();
+    host.release(claim.reference).unwrap();
+    assert!(host.drain().is_empty());
+    host.tick(40).unwrap();
+    host.finish_task(task).unwrap();
+    assert!(host.drain().is_empty());
+    assert_eq!(host.next_idle(), Some(60));
+    host.tick(100).unwrap();
+    assert_eq!(host.drain(), [Action::DisposeObject(claim.object)]);
+    host.disposed(claim.object).unwrap();
+    host.close();
+    host.finish_close().unwrap();
+}
+
 #[test]
 fn shutdown_releases_only_the_dependents_of_each_object() {
     let host = Host::new();

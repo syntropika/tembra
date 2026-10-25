@@ -311,6 +311,16 @@ impl Inner {
         {
             return;
         }
+        if !self.closing && object.phase == Status::Live && object.linger_ms != 0 {
+            let since = *object.idle_at.get_or_insert(self.now);
+            let deadline = since.saturating_add(u64::from(object.linger_ms));
+            if self.now < deadline {
+                self.idle.entry(deadline).or_default().insert(id);
+                return;
+            }
+        }
+        // Cancellation starts retirement; reacquisition must wait for physical task settlement.
+        object.phase = Status::Gone;
         for task in self.owner_tasks.members(&Owner::Object(id)) {
             let record = self.tasks.get_mut(&task).expect("indexed task");
             if !record.cancelled {
@@ -321,16 +331,7 @@ impl Inner {
         if object.tasks != 0 {
             return;
         }
-        if !self.closing && object.phase == Status::Live && object.linger_ms != 0 {
-            let since = *object.idle_at.get_or_insert(self.now);
-            let deadline = since.saturating_add(u64::from(object.linger_ms));
-            if self.now < deadline {
-                self.idle.entry(deadline).or_default().insert(id);
-                return;
-            }
-        }
         object.disposing = true;
-        object.phase = Status::Gone;
         self.wake(WaitKey::Object(id));
         self.actions.push_back(Action::DisposeObject(id));
     }
