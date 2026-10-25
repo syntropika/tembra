@@ -248,6 +248,7 @@ impl Host {
     }
 
     /// Builds the shared reload policy after language factories have reported their declarations.
+    /// The deadline starts at this host's most recent [`Host::tick`].
     pub fn reload_registered_scopes(&self, ticket: Id, deadline_ms: u64) -> Result<Id> {
         let inner = self.inner.borrow();
         let pending = inner
@@ -300,6 +301,7 @@ impl Host {
     }
 
     /// Accepts explicit pairs for native integrations with independently declared scopes.
+    /// The deadline starts at this host's most recent [`Host::tick`].
     pub fn reload_scopes(
         &self,
         ticket: Id,

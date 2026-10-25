@@ -80,6 +80,7 @@ export class Replacements {
       program = session.kernel.command<number>(KernelOp.ScopesReloadRegistered, {
         ticket: reload.id,
         deadline: options.deadline ?? 5000,
+        now: session.now(),
       });
       this.#program = program;
       await session.programs.run(program);

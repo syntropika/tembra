@@ -74,24 +74,33 @@ impl Kernel {
                 numbers(request, "scopes")?,
                 optional_identity(request, "object")?
             )?)),
-            KernelOp::ScopesReloadRegistered => Ok(json!(
-                h.reload_registered_scopes(id("ticket")?, wide(request, "deadline")?)?
-            )),
-            KernelOp::ScopesReload => {
-                let pairs = array(request, "replacements")?
-                    .iter()
-                    .map(|pair| {
-                        Ok(Replacement {
-                            previous: optional_identity(pair, "previous")?,
-                            next: optional_identity(pair, "next")?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(json!(h.reload_scopes(
-                    id("ticket")?,
-                    pairs,
-                    wide(request, "deadline")?
-                )?))
+            KernelOp::ScopesReloadRegistered | KernelOp::ScopesReload => {
+                let ticket = id("ticket")?;
+                let deadline = wide(request, "deadline")?;
+                let pairs = if op == KernelOp::ScopesReload {
+                    Some(
+                        array(request, "replacements")?
+                            .iter()
+                            .map(|pair| {
+                                Ok(Replacement {
+                                    previous: optional_identity(pair, "previous")?,
+                                    next: optional_identity(pair, "next")?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    )
+                } else {
+                    None
+                };
+                // Refresh host-relative monotonic time only after parsing the complete request.
+                // Callers that already tick explicitly may omit this field.
+                if request.get("now").is_some() {
+                    h.tick(wide(request, "now")?)?;
+                }
+                Ok(json!(match pairs {
+                    Some(pairs) => h.reload_scopes(ticket, pairs, deadline)?,
+                    None => h.reload_registered_scopes(ticket, deadline)?,
+                }))
             }
             KernelOp::ProgramRun => {
                 h.run_program(id("program")?)?;

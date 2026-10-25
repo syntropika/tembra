@@ -135,6 +135,7 @@ export interface HostOptions {
   serialization?: Codec;
   load?: (location: string | URL) => Promise<FacetDefinition>;
   onError?: (error: Error) => void;
+  /** Monotonic milliseconds from any origin; each host measures time relative to its creation. */
   now?: () => number;
   native?: NativeAdapter;
   resources?: Readonly<Record<string, ResourceOptions<unknown>>>;

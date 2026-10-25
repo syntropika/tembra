@@ -30,6 +30,62 @@ fn enum_names_preserve_closed_parsing_and_extensible_failure_reasons() {
 }
 
 #[test]
+fn reload_deadlines_use_the_supplied_clock_without_a_separate_tick() {
+    for op in [KernelOp::ScopesReloadRegistered, KernelOp::ScopesReload] {
+        let kernel = Kernel::new();
+        let reload = kernel
+            .host
+            .prepare(vec![Facet::new("clock", 1)], vec![])
+            .unwrap();
+        let mut request = json!({
+            "op":op.as_str(),"ticket":reload.id,"deadline":50,"now":10_000,
+            "replacements":[]
+        });
+        request["deadline"] = json!("invalid");
+        assert_eq!(
+            kernel.execute(&request).unwrap_err().reason,
+            Reason::Metadata.as_str()
+        );
+        kernel.host.tick(0).unwrap();
+        request["deadline"] = json!(50);
+        request["now"] = json!("invalid");
+        assert_eq!(
+            kernel.execute(&request).unwrap_err().reason,
+            Reason::Metadata.as_str()
+        );
+        kernel.host.tick(0).unwrap();
+        request["now"] = json!(10_000);
+        kernel.execute(&request).unwrap();
+        assert_eq!(kernel.host.next_deadline(), Some(10_050));
+        request["now"] = json!(9_999);
+        assert_eq!(
+            kernel.execute(&request).unwrap_err().reason,
+            Reason::Clock.as_str()
+        );
+        kernel.host.tick(10_049).unwrap();
+        assert_eq!(kernel.host.next_deadline(), Some(10_050));
+    }
+}
+
+#[test]
+fn reloads_can_still_use_an_explicitly_ticked_clock() {
+    for op in [KernelOp::ScopesReloadRegistered, KernelOp::ScopesReload] {
+        let kernel = Kernel::new();
+        let reload = kernel
+            .host
+            .prepare(vec![Facet::new("clock", 1)], vec![])
+            .unwrap();
+        kernel.host.tick(10_000).unwrap();
+        kernel
+            .execute(&json!({
+                "op":op.as_str(),"ticket":reload.id,"deadline":50,"replacements":[]
+            }))
+            .unwrap();
+        assert_eq!(kernel.host.next_deadline(), Some(10_050));
+    }
+}
+
+#[test]
 fn candidate_lookup_is_ticket_scoped_and_provider_metadata_is_per_service() {
     let kernel = Kernel::new();
     let execute = |request: serde_json::Value| kernel.execute(&request).unwrap();
