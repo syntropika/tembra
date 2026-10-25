@@ -54,6 +54,18 @@ for (const codec of [undefined, messagePackCodec])
                   value: value.value + amount,
                 })).value;
               },
+              increment(
+                _local,
+                _ctx,
+                values: { positive: number; negative: number; timestamp: number; big: bigint },
+              ) {
+                return {
+                  positive: values.positive + 1,
+                  negative: values.negative - 1,
+                  timestamp: values.timestamp + 1,
+                  big: values.big + 1n,
+                };
+              },
             },
           },
         },
@@ -69,6 +81,19 @@ for (const codec of [undefined, messagePackCodec])
       .select<bigint>((value) => value.value)
       .subscribe((value) => values.push(value));
     expect(await ref.add(1n << 100n)).toBe(1n << 100n);
+    expect(
+      await ref.increment({
+        positive: 2 ** 32,
+        negative: -(2 ** 31) - 1,
+        timestamp: 1_760_000_000_123,
+        big: 1n,
+      }),
+    ).toEqual({
+      positive: 2 ** 32 + 1,
+      negative: -(2 ** 31) - 2,
+      timestamp: 1_760_000_000_124,
+      big: 2n,
+    });
     await Promise.resolve();
     expect(ref.state.value.value).toBe(1n << 100n);
     expect(values).toEqual([0n, 1n << 100n]);

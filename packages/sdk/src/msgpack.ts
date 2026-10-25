@@ -14,10 +14,9 @@ extensions.register({
   },
 });
 
-/** Optional codec. Extension 1 preserves arbitrary BigInt values without a size-dependent type. */
+/** Numbers remain Numbers; extension 1 preserves arbitrary BigInts independently of integer size. */
 export const messagePackCodec: Codec = Object.freeze({
   id: CodecId.MessagePack,
   serialize: (value: unknown) => encode(value, { extensionCodec: extensions }),
-  deserialize: (bytes: Uint8Array) =>
-    decode(bytes, { useBigInt64: true, extensionCodec: extensions }),
+  deserialize: (bytes: Uint8Array) => decode(bytes, { extensionCodec: extensions }),
 });
