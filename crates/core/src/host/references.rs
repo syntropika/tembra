@@ -31,6 +31,8 @@ impl Host {
 
     /// Acquires an independent claim. Cloning its numeric identity does not create another claim.
     /// A disposing object is never resurrected or overlapped at the same address.
+    /// New instances require roots from their creation version or later; reacquisition preserves
+    /// an existing instance's minimum version.
     pub fn acquire(
         &self,
         address: Address,
@@ -105,7 +107,7 @@ impl Host {
                     idle_at: None,
                     linger_ms,
                     gate: None,
-                    min_version: 1,
+                    min_version: code_version,
                     state: None,
                     dependencies: BTreeSet::new(),
                 },

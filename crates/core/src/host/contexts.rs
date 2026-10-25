@@ -54,6 +54,7 @@ impl Host {
     }
 
     /// Admits one physical call against its root's retained implementation version.
+    /// Refuses roots older than the object's minimum version before retaining a call.
     pub fn begin_call(&self, reference: Id, root: Id, method: &str) -> Result<Invocation> {
         let mut inner = self.inner.borrow_mut();
         let context = inner.check_root(root)?;

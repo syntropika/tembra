@@ -104,6 +104,49 @@ fn stale_candidate_and_foreign_owner_leave_state_unchanged() {
 }
 
 #[test]
+fn old_roots_refuse_new_and_recreated_objects_without_admitting_calls() {
+    for recreate in [false, true] {
+        let h = Host::new();
+        install(&h, facet());
+        let retained = acquire(&h, vec!["retained"]);
+        h.ready(retained.object).unwrap();
+        let old = h.begin_root("host").unwrap();
+        if recreate {
+            let previous = acquire(&h, vec!["fresh"]);
+            h.ready(previous.object).unwrap();
+            h.release(previous.reference).unwrap();
+            assert!(h.drain().contains(&Action::DisposeObject(previous.object)));
+            h.disposed(previous.object).unwrap();
+        }
+        install(&h, facet());
+        let fresh = acquire(&h, vec!["fresh"]);
+        let snapshot = h.initialize_state(fresh.object, 77, 1).unwrap();
+        h.ready(fresh.object).unwrap();
+        let before = h.diagnostics().calls;
+        let error = h.begin_call(fresh.reference, old, "increment").unwrap_err();
+        assert_eq!(error.code, Code::Conflict);
+        assert_eq!(error.reason, Reason::UpgradeConflict.as_str());
+        let error = h
+            .begin_operation(retained.facet, old, 1, Some(fresh.object))
+            .unwrap_err();
+        assert_eq!(error.reason, Reason::UpgradeConflict.as_str());
+        assert_eq!(h.diagnostics().calls, before);
+        assert_eq!(h.status(fresh.reference).unwrap(), Status::Live);
+        assert_eq!(h.snapshot(fresh.object).unwrap(), snapshot);
+        let retained_call = h.begin_call(retained.reference, old, "increment").unwrap();
+        assert_eq!(retained_call.facet, retained.facet);
+        h.finish_call(retained_call.id).unwrap();
+        let current = h.begin_root("host").unwrap();
+        let call = h.begin_call(fresh.reference, current, "increment").unwrap();
+        assert_eq!(call.facet, fresh.facet);
+        assert_eq!(call.code_version, fresh.code_version);
+        h.finish_call(call.id).unwrap();
+        h.end_root(current).unwrap();
+        h.end_root(old).unwrap();
+    }
+}
+
+#[test]
 fn compatible_reload_keeps_admitted_code() {
     let h = Host::new();
     install(&h, facet());
