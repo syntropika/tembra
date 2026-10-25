@@ -12,7 +12,6 @@ hooks = ["tembra-core/hooks"]
 subscriptions = ["tembra-core/subscriptions"]
 views = ["tembra-core/views"]
 telemetry = ["tembra-core/telemetry"]
-review = ["hooks", "subscriptions", "views"]
 
 [dependencies]
 tembra-core.workspace = true

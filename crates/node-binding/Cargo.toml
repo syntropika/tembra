@@ -15,7 +15,6 @@ hooks = ["tembra-bridge/hooks"]
 subscriptions = ["tembra-bridge/subscriptions"]
 views = ["tembra-bridge/views"]
 telemetry = ["tembra-bridge/telemetry"]
-review = ["hooks", "subscriptions", "views"]
 
 [dependencies]
 napi = { version = "=3.14.2", default-features = false, features = ["napi8", "dyn-symbols"] }

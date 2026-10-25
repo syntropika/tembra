@@ -8,12 +8,9 @@ description = "Optional V8 execution adapter for Tembra"
 
 [features]
 default = []
-review = [
-  "tembra/review",
-  "tembra-bridge/hooks",
-  "tembra-bridge/subscriptions",
-  "tembra-bridge/views",
-]
+hooks = ["tembra/hooks", "tembra-bridge/hooks"]
+subscriptions = ["tembra/subscriptions", "tembra-bridge/subscriptions"]
+views = ["tembra/views", "tembra-bridge/views"]
 
 [dependencies]
 tembra = { path = "../tembra" }

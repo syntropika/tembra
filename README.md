@@ -138,8 +138,7 @@ plans participants; facet callbacks define their behavior. SDK helpers include s
 bail, parallel and middleware. Sources use `self.on(name, source, callback, options)`. Rust owns the
 bounded delivery queue, reuse decisions and delivery scheduling; JS executes each requested callback.
 
-Hooks, subscriptions and reference views remain review features. Rust defaults omit them. Enable
-`hooks`, `subscriptions` and `views` separately, or `review` on the Node/WASM wrapper crates.
+Rust defaults omit optional capabilities. Enable `hooks`, `subscriptions` and `views` separately;
 `telemetry` is independently optional.
 
 RPC uses a host-selected codec over a byte transport. JSON is the default, with explicit BigInt and

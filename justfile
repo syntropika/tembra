@@ -11,10 +11,10 @@ build-sdk:
     bun packages/sdk/scripts/build-sdk.ts
 
 build-node:
-    node packages/sdk/scripts/build-bindings.ts native --debug --features=review,telemetry
+    node packages/sdk/scripts/build-bindings.ts native --debug --features=hooks,subscriptions,views,telemetry
 
 build-wasm:
-    node packages/sdk/scripts/build-bindings.ts wasm --features=review
+    node packages/sdk/scripts/build-bindings.ts wasm --features=hooks,subscriptions,views
 
 fmt:
     cargo fmt --all
