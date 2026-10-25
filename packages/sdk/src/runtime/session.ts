@@ -642,6 +642,7 @@ export class Session implements StateBackend {
     return this.observe(physical, ctx.signal);
   }
 
+  /** Fresh callback roots inherit owner identity; supplied roots retain the caller's authority. */
   async owned<T>(
     environment: Environment,
     operation: number,
@@ -662,7 +663,9 @@ export class Session implements StateBackend {
         this.flush();
       }
     };
-    return root === undefined ? this.root(execute) : execute(new Context(this, root));
+    return root === undefined
+      ? this.root(execute, false, undefined, this.principalFor(environment.object?.id ?? 0))
+      : execute(new Context(this, root));
   }
 
   async observe<T>(physical: Promise<T>, signal: AbortSignal): Promise<T> {
