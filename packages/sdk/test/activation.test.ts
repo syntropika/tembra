@@ -4,6 +4,115 @@ import { createHost } from "../src/node.ts";
 import { facet } from "../src/facet.ts";
 import { deferred } from "../src/runtime/records.ts";
 import type { Reload } from "../src/kernel.ts";
+import { Reason } from "../src/identifiers.ts";
+
+for (const mode of ["activation", "reload"] as const)
+  for (const outcome of mode === "reload"
+    ? (["ready", "failed", "shutdown", "deadline"] as const)
+    : (["ready", "failed", "shutdown"] as const))
+    test(`${mode} waits for an external resource and settles on ${outcome}`, async () => {
+      let now = 0;
+      const host = createHost({ now: () => now });
+      const opened = deferred<AbortSignal>();
+      const declared = deferred<void>();
+      const finish = deferred<void>();
+      let opens = 0;
+      let baseCloses = 0;
+      const definition = (dependent: boolean) =>
+        facet({
+          name: "consumer",
+          apiVersion: 1,
+          services: {
+            consumer: {
+              create(self) {
+                if (!dependent) return { value: 0 };
+                const base = self.resource<number>("dynamic");
+                const connection = self.resource("connection", {
+                  deps: [base],
+                  open: () => {
+                    opens++;
+                    return base.value + 1;
+                  },
+                });
+                declared.resolve();
+                return connection;
+              },
+              methods: { read: (connection) => connection.value },
+            },
+          },
+        });
+      await host.install(definition(mode === "activation"));
+      let reference = mode === "reload" ? await host.get("consumer", "main") : undefined;
+      host.resource("dynamic", {
+        open: async (signal) => {
+          opened.resolve(signal);
+          await finish.promise;
+          if (outcome === "failed") throw new Error("External connection failed");
+          return 41;
+        },
+        close: () => {
+          baseCloses++;
+        },
+      });
+      const signal = await opened.promise;
+      const operation =
+        mode === "activation"
+          ? host.get("consumer", "main")
+          : host.reload([definition(true)], { deadline: 1000 }).then(() => reference!);
+      let settled = false;
+      operation.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      try {
+        await declared.promise;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(opens).toBe(0);
+        if (outcome === "shutdown") {
+          let closed = false;
+          const closing = host.close().then(() => {
+            closed = true;
+          });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(signal.aborted).toBe(true);
+          expect(closed).toBe(false);
+          finish.resolve();
+          await expect(operation).rejects.toThrow();
+          await closing;
+        } else if (outcome === "deadline") {
+          now = 1000;
+          host.session.kernel.command(KernelOp.Tick, { now });
+          host.session.flush();
+          await expect(operation).rejects.toMatchObject({ reason: Reason.ReloadDeadline });
+          expect(signal.aborted).toBe(false);
+          expect(opens).toBe(0);
+          expect(await reference!.read()).toBe(0);
+        } else {
+          finish.resolve();
+          if (outcome === "failed") {
+            await expect(operation).rejects.toThrow();
+            expect(opens).toBe(0);
+            if (reference) expect(await reference.read()).toBe(0);
+          } else {
+            reference = await operation;
+            expect(await reference!.read()).toBe(42);
+            expect(opens).toBe(1);
+          }
+        }
+      } finally {
+        finish.resolve();
+        await operation.catch(() => {});
+        reference?.release();
+        await host.close();
+      }
+      expect(baseCloses).toBe(outcome === "failed" ? 0 : 1);
+      expect(host.diagnostics()).toMatchObject({ resources: 0, objects: 0, pendingJobs: 0 });
+    });
 
 test("concurrent facets share physical host resource activation", async () => {
   const opened = deferred<void>();

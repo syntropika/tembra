@@ -129,6 +129,7 @@ impl Host {
             return Ok(false);
         }
         record.closing = true;
+        inner.wake(WaitKey::Resource(resource));
         inner.actions.push_back(Action::CloseResource(resource));
         Ok(true)
     }

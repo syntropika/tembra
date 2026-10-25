@@ -34,6 +34,186 @@ fn complete(host: &Host, program: Id, effects: &[Effect]) {
     .unwrap();
 }
 
+fn waiting_resource(host: &Host, name: &str) -> (Id, Id, Id) {
+    let base = host
+        .resource(Owner::Host, format!("base-{name}"), 1, false, vec![])
+        .unwrap();
+    let dependent = host
+        .resource(
+            Owner::Host,
+            format!("dependent-{name}"),
+            1,
+            false,
+            vec![base.id],
+        )
+        .unwrap();
+    let scope = host_scope(host, vec![dependent.id], vec![]);
+    host.inner
+        .borrow_mut()
+        .scopes
+        .get_mut(&scope)
+        .unwrap()
+        .active = false;
+    let program = host.activate_scope(scope).unwrap();
+    host.run_program(program).unwrap();
+    (base.id, dependent.id, program)
+}
+
+#[test]
+fn external_resource_readiness_wakes_only_its_waiting_activation() {
+    let host = Host::new();
+    let waiting: Vec<_> = (0..32)
+        .map(|index| waiting_resource(&host, &index.to_string()))
+        .collect();
+    assert!(host.drain().is_empty());
+    let visits = host.inner.borrow().program_visits;
+    for _ in 0..100 {
+        assert!(host.drain().is_empty());
+    }
+    assert_eq!(host.inner.borrow().program_visits, visits);
+    let unrelated = host
+        .resource(Owner::Host, "unrelated".into(), 1, false, vec![])
+        .unwrap();
+    host.resource_opened(unrelated.id, host.allocate_handle().unwrap())
+        .unwrap();
+    assert!(host.drain().is_empty());
+    assert_eq!(host.inner.borrow().program_visits, visits);
+    let (base, dependent, program) = waiting[0];
+    host.resource_opened(base, host.allocate_handle().unwrap())
+        .unwrap();
+    assert_eq!(
+        host.drain(),
+        [Action::Execute {
+            program,
+            effects: vec![Effect::Open {
+                resource: dependent
+            }]
+        }]
+    );
+    assert_eq!(host.inner.borrow().program_visits, visits + 1);
+    host.resource_opened(dependent, host.allocate_handle().unwrap())
+        .unwrap();
+    complete(
+        &host,
+        program,
+        &[Effect::Open {
+            resource: dependent,
+        }],
+    );
+    let mut completed = false;
+    for _ in 0..8 {
+        for action in host.drain() {
+            match action {
+                Action::Execute {
+                    program: id,
+                    effects,
+                } => {
+                    assert_eq!(id, program);
+                    complete(&host, id, &effects);
+                }
+                Action::ProgramComplete { program: id, error } => {
+                    assert_eq!(id, program);
+                    assert!(error.is_none());
+                    completed = true;
+                }
+                other => panic!("unexpected action: {other:?}"),
+            }
+        }
+    }
+    assert!(completed);
+    let inner = host.inner.borrow();
+    assert_eq!(inner.programs.len(), waiting.len() - 1);
+    assert!(!inner.waiters.contains(&WaitKey::Resource(base)));
+}
+
+fn settle_failed_consumer(host: &Host, consumer: Id) {
+    let mut failed = false;
+    for _ in 0..32 {
+        for action in host.drain() {
+            match action {
+                Action::Execute { program, effects } => {
+                    for effect in &effects {
+                        assert!(!matches!(effect, Effect::Open { .. }));
+                        if let Effect::Close { resource } = effect {
+                            host.resource_closed(*resource).unwrap();
+                        }
+                    }
+                    complete(host, program, &effects);
+                }
+                Action::ProgramComplete { program, error } if program == consumer => {
+                    assert_eq!(error.unwrap().reason, Reason::Resource.as_str());
+                    failed = true;
+                }
+                Action::ProgramComplete { error, .. } => assert!(error.is_none()),
+                _ => {}
+            }
+        }
+    }
+    assert!(failed);
+    assert!(host.inner.borrow().programs.is_empty());
+}
+
+#[test]
+fn closing_an_unopened_provider_wakes_and_rejects_its_waiting_consumer() {
+    let host = Host::new();
+    let (base, _, consumer) = waiting_resource(&host, "closing");
+    let provider_scope = host_scope(&host, vec![base], vec![]);
+    assert!(host.drain().is_empty());
+    let cleanup = host.cleanup_scopes(vec![provider_scope], None).unwrap();
+    host.run_program(cleanup).unwrap();
+    settle_failed_consumer(&host, consumer);
+    assert_eq!(host.diagnostics().resources, 0);
+    host.close();
+    host.finish_close().unwrap();
+}
+
+#[test]
+fn retirement_wakes_a_consumer_even_when_another_dependency_is_still_pending() {
+    let host = Host::new();
+    let base = host
+        .resource(Owner::Host, "base".into(), 1, false, vec![])
+        .unwrap();
+    host.resource_opened(base.id, host.allocate_handle().unwrap())
+        .unwrap();
+    let provider = host_scope(&host, vec![base.id], vec![]);
+    let blocker = host
+        .resource(Owner::Host, "blocker".into(), 1, false, vec![])
+        .unwrap();
+    let dependent = host
+        .resource(
+            Owner::Host,
+            "consumer".into(),
+            1,
+            false,
+            vec![base.id, blocker.id],
+        )
+        .unwrap();
+    let scope = host_scope(&host, vec![dependent.id], vec![]);
+    host.inner
+        .borrow_mut()
+        .scopes
+        .get_mut(&scope)
+        .unwrap()
+        .active = false;
+    let consumer = host.activate_scope(scope).unwrap();
+    host.run_program(consumer).unwrap();
+    assert!(host.drain().is_empty());
+    assert!(
+        host.inner
+            .borrow()
+            .waiters
+            .contains(&WaitKey::Resource(base.id))
+    );
+    let cleanup = host.cleanup_scopes(vec![provider], None).unwrap();
+    host.run_program(cleanup).unwrap();
+    settle_failed_consumer(&host, consumer);
+    assert!(host.close_resource(blocker.id).unwrap());
+    host.resource_closed(blocker.id).unwrap();
+    host.close();
+    host.drain();
+    host.finish_close().unwrap();
+}
+
 #[test]
 fn overlapping_cleanup_has_one_physical_closer_and_waits_for_it() {
     let host = Host::new();

@@ -217,6 +217,7 @@ impl Host {
         Ok(())
     }
 
+    /// Activates a scope, suspending on indexed resource readiness when another program opens a dependency.
     pub fn activate_scope(&self, scope: Id) -> Result<Id> {
         let mut inner = self.inner.borrow_mut();
         if !inner.scopes.contains_key(&scope) {
@@ -762,23 +763,48 @@ impl Host {
                             let resource = inner
                                 .resources
                                 .get(id)
+                                .filter(|resource| !resource.closing)
                                 .ok_or_else(|| gone(Reason::Resource))?;
                             if resource.value.is_none() {
                                 missing = true;
-                                if resource.dependencies.iter().all(|id| {
-                                    inner
+                                let mut ready = true;
+                                for dependency in &resource.dependencies {
+                                    let record = inner
                                         .resources
-                                        .get(id)
-                                        .is_some_and(|resource| resource.value.is_some())
-                                }) && unique.insert(*id)
-                                {
+                                        .get(dependency)
+                                        .filter(|resource| !resource.closing)
+                                        .ok_or_else(|| gone(Reason::Resource))?;
+                                    // Retired scopes cannot supply dependencies to new activations.
+                                    if inner.resource_scopes.contains(dependency)
+                                        && !inner.resource_claims.contains(dependency)
+                                    {
+                                        return Err(gone(Reason::Resource));
+                                    }
+                                    if record.value.is_none() {
+                                        ready = false;
+                                    }
+                                }
+                                if ready && unique.insert(*id) {
                                     effects.push(Effect::Open { resource: *id });
+                                } else if !ready {
+                                    // A ready sibling dependency may retire while another opens.
+                                    program.waiting.extend(
+                                        resource
+                                            .dependencies
+                                            .iter()
+                                            .map(|id| WaitKey::Resource(*id)),
+                                    );
                                 }
                             }
                         }
                     }
                     if missing && effects.is_empty() {
-                        return Err(conflict(Reason::ResourceDependencies));
+                        if program.waiting.is_empty() {
+                            return Err(conflict(Reason::ResourceDependencies));
+                        }
+                        return Ok(Step::Wait {
+                            deadline: program.deadline,
+                        });
                     }
                     if !missing {
                         program.phase = Phase::Prepare;
@@ -1547,6 +1573,9 @@ impl crate::host::Inner {
                 self.scopes.get_mut(id).expect("checked scope").closing = true;
                 for resource in scope.resources {
                     self.resource_claims.remove(&resource, *id);
+                    if !self.resource_claims.contains(&resource) {
+                        self.wake(WaitKey::Resource(resource));
+                    }
                 }
             }
         }
