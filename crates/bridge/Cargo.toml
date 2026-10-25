@@ -1,0 +1,21 @@
+[package]
+name = "tembra-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Metadata-only adapter protocol for the Tembra kernel"
+
+[features]
+default = []
+hooks = ["tembra-core/hooks"]
+subscriptions = ["tembra-core/subscriptions"]
+views = ["tembra-core/views"]
+telemetry = ["tembra-core/telemetry"]
+
+[dependencies]
+tembra-core.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

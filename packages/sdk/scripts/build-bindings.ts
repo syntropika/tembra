@@ -1,91 +1,49 @@
-import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
-const sdk = fileURLToPath(new URL("../", import.meta.url));
-const [kind] = process.argv.slice(2);
+const destination = fileURLToPath(new URL("../dist/", import.meta.url));
+const mode = process.argv[2] ?? "native";
 const debug = process.argv.includes("--debug");
+const features = process.argv.find((argument) => argument.startsWith("--features="))?.slice(11);
+
+function run(command: string, arguments_: string[]) {
+  const result = spawnSync(command, arguments_, { cwd: root, stdio: "inherit" });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`${command} exited with ${result.status}`);
+}
+
 const profile = debug ? "debug" : "release";
-const cargo = (args: readonly string[]): void => {
-  execFileSync("cargo", args, { cwd: root, stdio: "inherit" });
-};
-const metadata: unknown = JSON.parse(
-  execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
-    cwd: root,
-    encoding: "utf-8",
-  }),
-);
-if (
-  metadata === null ||
-  typeof metadata !== "object" ||
-  !("target_directory" in metadata) ||
-  typeof metadata.target_directory !== "string" ||
-  metadata.target_directory.length === 0
-) {
-  throw new TypeError("Cargo metadata must declare a target_directory path");
-}
-const flags = debug ? [] : ["--release"];
-if (kind === "native") {
-  const dependencies = execFileSync(
-    "cargo",
-    ["tree", "--locked", "-p", "tembra-node-binding", "--edges", "normal", "--prefix", "none"],
-    { cwd: root, encoding: "utf-8" },
-  );
-  if (/^(?:tembra-executor-js|deno_core|deno_v8|v8)\s/mu.test(dependencies)) {
-    throw new Error(
-      "Node binding must use the Node runtime without an embedded JavaScript executor",
-    );
-  }
-  cargo(["build", "--locked", "-p", "tembra-node-binding", ...flags]);
-  const libraries: Readonly<Partial<Record<NodeJS.Platform, string>>> = {
-    win32: "tembra_node_binding.dll",
-    darwin: "libtembra_node_binding.dylib",
-    linux: "libtembra_node_binding.so",
-  };
-  const library = libraries[process.platform];
-  if (library === undefined) {
-    throw new Error("native binding build does not support this platform");
-  }
-  const output = path.join(
-    sdk,
-    "dist",
-    "native",
-    `tembra.${process.platform}-${process.arch}.node`,
-  );
-  mkdirSync(path.dirname(output), { recursive: true });
-  copyFileSync(path.join(metadata.target_directory, profile, library), output);
-} else if (kind === "wasm") {
-  cargo([
-    "build",
-    "--locked",
-    "-p",
-    "tembra-browser-wasm",
+const arguments_ = ["build", "-p", mode === "wasm" ? "tembra-browser-wasm" : "tembra-node-binding"];
+if (!debug) arguments_.push("--release");
+if (features) arguments_.push("--features", features);
+
+if (mode === "wasm") {
+  arguments_.push("--target", "wasm32-unknown-unknown");
+  run("cargo", arguments_);
+  mkdirSync(path.join(destination, "wasm"), { recursive: true });
+  run("wasm-bindgen", [
     "--target",
-    "wasm32-unknown-unknown",
-    ...flags,
+    "web",
+    "--out-dir",
+    path.join(destination, "wasm"),
+    "--out-name",
+    "tembra",
+    path.join(root, "target", "wasm32-unknown-unknown", profile, "tembra_browser_wasm.wasm"),
   ]);
-  const output = path.join(sdk, "dist", "wasm");
-  rmSync(output, { recursive: true, force: true });
-  execFileSync(
-    "wasm-bindgen",
-    [
-      "--target",
-      "web",
-      "--out-dir",
-      output,
-      "--out-name",
-      "tembra_browser_wasm",
-      path.join(
-        metadata.target_directory,
-        "wasm32-unknown-unknown",
-        profile,
-        "tembra_browser_wasm.wasm",
-      ),
-    ],
-    { cwd: root, stdio: "inherit" },
+} else if (mode === "native") {
+  run("cargo", arguments_);
+  mkdirSync(path.join(destination, "native"), { recursive: true });
+  const library =
+    process.platform === "win32"
+      ? "tembra_node_binding.dll"
+      : process.platform === "darwin"
+        ? "libtembra_node_binding.dylib"
+        : "libtembra_node_binding.so";
+  copyFileSync(
+    path.join(root, "target", profile, library),
+    path.join(destination, "native", "tembra.node"),
   );
-} else {
-  throw new Error("expected native or wasm");
-}
+} else throw new Error("Choose native or wasm");

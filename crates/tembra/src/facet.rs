@@ -1,138 +1,124 @@
-use crate::{Declaration, ProviderContract, Result, core, token::factory};
-use std::rc::Rc;
+use crate::{Context, Declaration, Error, Result, core};
+use futures::{FutureExt, future::LocalBoxFuture};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value;
+use std::{any::Any, collections::BTreeMap, future::Future, rc::Rc};
 
-/// A stable native facet using typed provider factories and the core's installation lifecycle.
+pub(crate) type Data = Rc<dyn Any>;
+pub(crate) type Factory = Rc<dyn Fn(Declaration) -> Result<Data>>;
+pub(crate) type LocalMethod =
+    Rc<dyn Fn(Data, Context, Box<dyn Any>) -> LocalBoxFuture<'static, Result<Box<dyn Any>>>>;
+pub(crate) type PortableMethod =
+    Rc<dyn Fn(Data, Context, Value) -> LocalBoxFuture<'static, Result<Value>>>;
 #[derive(Clone)]
-pub struct NativeFacet {
-    inner: core::NativeFacet,
+pub(crate) struct Implementation {
+    pub factory: Factory,
+    pub local: BTreeMap<String, LocalMethod>,
+    pub portable: BTreeMap<String, PortableMethod>,
 }
 
-impl NativeFacet {
-    /// Stores synchronous declarations; setup runs when the core installs the facet.
-    ///
-    /// # Errors
-    /// Returns invalid facet-name errors before invoking setup or mutating a Host.
+/// A typed service. Methods execute once; only the portable entrypoint invokes serde.
+pub struct Service<E> {
+    pub(crate) metadata: core::Service,
+    pub(crate) implementation: Implementation,
+    marker: std::marker::PhantomData<E>,
+}
+
+impl<E: 'static> Service<E> {
     pub fn new(
         name: impl Into<String>,
-        uses: Vec<Rc<crate::contracts::Contract>>,
-        setup: impl Fn(&core::FacetScope, &mut FacetDeclaration<'_, '_>) -> Result<()> + 'static,
-    ) -> Result<Self> {
-        Ok(Self {
-            inner: core::NativeFacet::new(name, uses, move |scope, declaration| {
-                setup(scope, &mut FacetDeclaration { inner: declaration })
-            })?,
-        })
+        create: impl Fn(Declaration) -> Result<E> + 'static,
+    ) -> Self {
+        Self {
+            metadata: core::Service::new(name, std::iter::empty::<String>()),
+            implementation: Implementation {
+                factory: Rc::new(move |declaration| Ok(Rc::new(create(declaration)?) as Data)),
+                local: BTreeMap::new(),
+                portable: BTreeMap::new(),
+            },
+            marker: std::marker::PhantomData,
+        }
     }
 
-    pub fn core(&self) -> &core::NativeFacet {
-        &self.inner
-    }
-}
-
-impl From<NativeFacet> for core::NativeFacet {
-    fn from(facet: NativeFacet) -> Self {
-        facet.inner
-    }
-}
-
-/// Setup-only typed declaration authority; retaining a facet scope cannot extend this borrow.
-pub struct FacetDeclaration<'a, 'b> {
-    inner: &'a mut core::FacetDeclaration<'b>,
-}
-
-impl<'a, 'b> FacetDeclaration<'a, 'b> {
-    /// Borrows actual Core setup authority; no factory or Context can construct setup authority.
-    pub fn from_core(inner: &'a mut core::FacetDeclaration<'b>) -> Self {
-        Self { inner }
+    pub fn lifetime(mut self, lifetime: core::Lifetime, linger_ms: u32) -> Self {
+        self.metadata.lifetime = lifetime;
+        self.metadata.linger_ms = linger_ms;
+        self
     }
 
-    /// Prepares a typed State definition once in this actual setup run.
-    /// # Errors
-    /// Rejects invalid setup and static schema/profile failures before any instance exists.
-    /// Names remain local to the cells that instantiate this definition.
-    pub fn state<
-        T: crate::serde::Serialize
-            + crate::serde::de::DeserializeOwned
-            + crate::schemars::JsonSchema
-            + 'static,
-    >(
-        &mut self,
-        name: impl Into<String>,
-    ) -> Result<crate::StateDefinition<T>> {
+    pub fn method<A, R, F, Fut>(mut self, name: impl Into<String>, handle: F) -> Self
+    where
+        A: DeserializeOwned + 'static,
+        R: Serialize + 'static,
+        F: Fn(Rc<E>, Context, A) -> Fut + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+    {
         let name = name.into();
-        let metadata = self.inner.prepare_metadata(|| {
-            let schema =
-                crate::contracts::schema_for::<T>().map_err(crate::state::contract_error)?;
-            crate::state_definition::Metadata::prepare(name, schema)
-        })?;
-        Ok(crate::StateDefinition::from_metadata(metadata))
-    }
-
-    /// Prepares a descriptor-defined State schema for DTOs without JsonSchema.
-    /// # Errors
-    /// Rejects invalid setup and schema/profile failures during registration.
-    pub fn state_schema<
-        T: crate::serde::Serialize + crate::serde::de::DeserializeOwned + 'static,
-    >(
-        &mut self,
-        name: impl Into<String>,
-        schema: crate::serde_json::Value,
-    ) -> Result<crate::StateDefinition<T>> {
-        let metadata = self
-            .inner
-            .prepare_metadata(|| crate::state_definition::Metadata::prepare(name.into(), schema))?;
-        Ok(crate::StateDefinition::from_metadata(metadata))
-    }
-
-    /// Registers a typed provider using default referenced-object lifecycle.
-    ///
-    /// # Errors
-    /// Returns descriptor/admission errors before installation; activation errors are observed
-    /// by the core startup waiter. Application factory effects cannot be rolled back.
-    pub fn serve<C, P, F>(&mut self, contract: C, create: F) -> Result<()>
-    where
-        C: ProviderContract<P> + 'static,
-        P: 'static,
-        F: Fn(C::Input, serde_json::Value, &mut Declaration<'_>) -> Result<P> + 'static,
-    {
-        self.serve_with_options(contract, create, core::ServeOptions::default())
-    }
-
-    /// Registers a typed provider with explicit lifecycle and adapter options.
-    ///
-    /// # Errors
-    /// Has the same failure effects as [`Self::serve`].
-    pub fn serve_with_options<C, P, F>(
-        &mut self,
-        contract: C,
-        create: F,
-        options: core::ServeOptions,
-    ) -> Result<()>
-    where
-        C: ProviderContract<P> + 'static,
-        P: 'static,
-        F: Fn(C::Input, serde_json::Value, &mut Declaration<'_>) -> Result<P> + 'static,
-    {
-        self.inner
-            .serve(contract.descriptor()?, factory(contract, create), options)
-    }
-
-    pub fn core_mut(&mut self) -> &mut core::FacetDeclaration<'b> {
-        self.inner
+        let handle = Rc::new(handle);
+        let portable = handle.clone();
+        self.implementation.local.insert(
+            name.clone(),
+            Rc::new(move |environment, context, arguments| {
+                let result = environment
+                    .downcast::<E>()
+                    .map_err(|_| type_error())
+                    .and_then(|environment| {
+                        let arguments = arguments.downcast::<A>().map_err(|_| type_error())?;
+                        Ok(handle(environment, context, *arguments))
+                    });
+                async move { Ok(Box::new(result?.await?) as Box<dyn Any>) }.boxed_local()
+            }),
+        );
+        self.implementation.portable.insert(
+            name.clone(),
+            Rc::new(move |environment, context, arguments| {
+                let result = environment
+                    .downcast::<E>()
+                    .map_err(|_| type_error())
+                    .and_then(|environment| {
+                        let arguments = serde_json::from_value(arguments)
+                            .map_err(|error| Error::invalid("arguments", error.to_string()))?;
+                        Ok(portable(environment, context, arguments))
+                    });
+                async move {
+                    serde_json::to_value(result?.await?)
+                        .map_err(|error| Error::invalid("result", error.to_string()))
+                }
+                .boxed_local()
+            }),
+        );
+        self.metadata.methods.insert(name);
+        self
     }
 }
 
-impl crate::Host {
-    /// Installs stable native declarations and returns the core-owned startup waiter.
-    ///
-    /// # Errors
-    /// Refuses duplicate/name/admission or synchronous setup failures. Dropping the returned
-    /// waiter abandons readiness observation; it does not undo installed declarations.
-    pub fn install(
-        &self,
-        facet: NativeFacet,
-        options: core::LoadOptions,
-    ) -> Result<core::FacetStartup> {
-        self.core().install(facet.inner, options)
+pub(crate) fn type_error() -> Error {
+    Error::invalid(
+        "rust_type",
+        "native argument or result type does not match the method",
+    )
+}
+
+/// Native facets are compiled with their application. No schema or generated compatibility file.
+pub struct Facet {
+    pub(crate) metadata: core::Facet,
+    pub(crate) services: BTreeMap<String, Implementation>,
+}
+impl Facet {
+    pub fn new(name: impl Into<String>, api_version: u32) -> Self {
+        Self {
+            metadata: core::Facet::new(name, api_version),
+            services: BTreeMap::new(),
+        }
+    }
+    pub fn requires(mut self, requirement: core::Requirement) -> Self {
+        self.metadata.requires.push(requirement);
+        self
+    }
+    pub fn service<E>(mut self, service: Service<E>) -> Self {
+        self.services
+            .insert(service.metadata.name.clone(), service.implementation);
+        self.metadata.services.push(service.metadata);
+        self
     }
 }

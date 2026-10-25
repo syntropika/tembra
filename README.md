@@ -1,152 +1,167 @@
 # Tembra
 
-A Rust runtime for typed services, managed objects, reactive state and reloadable JavaScript,
-native and in browser WebAssembly.
+Tembra is an in-memory runtime for versioned facets: services with immutable state, explicit
+references, resources, tasks and declared dependencies. A facet owns its validation and business
+logic. Tembra owns admission, revisions, lifetime and replacement.
 
-Tembra keeps object identity, lifetimes and state in one Rust core. Node-API and browser JavaScript
-bindings, and the optional embedded V8 executor, build on the same runtime model.
+This branch replaces the previous schema-based API. Existing applications must migrate their
+facet declarations; the legacy API and generated contract adapters are removed.
 
-## How it works
+## One engine
 
-Declare a contract, register a provider and acquire a typed reference. The host resolves objects by
-contract name, normalized input and principal, then manages their dependencies and resources.
-References call the current implementation and expose its reactive state.
+`tembra-core` implements the shared lifecycle in Rust. It decides when to open and close resources,
+wait for physical work, gate a migration, adopt a replacement, recover an exclusive resource and
+release retired scopes. Platform adapters receive execution requests and acknowledge callback
+settlement. They do not implement a second lifecycle state machine.
 
-- **Typed contracts:** Rust macros and TypeScript declarations describe services; portable contracts
-  validate values across language and remote boundaries.
-- **Managed lifetimes:** references retain objects, dependencies and resources until cleanup.
-- **Reactive state:** atomic local updates, immutable snapshots, derived values and revisioned deltas.
-- **RPC:** shared connection logic with native and browser WebSocket adapters.
-- **Facets and hooks:** compose implementations through versioned registries and explicit hook pipelines.
-- **JavaScript reload:** compatible replacement retains object identity, references and state; admitted
-  calls keep their execution version while new calls use the committed version.
+JavaScript values and callbacks stay in their JavaScript realm. The engine receives opaque handles
+and metadata. Native Rust calls use native values. Serialization applies when values actually cross
+a language or transport boundary.
 
-The host supplies scheduling, transport and trusted capabilities through adapters. Compilation,
-dependency resolution and file watching live in external tooling.
+| Component             | Responsibility                                                               |
+| --------------------- | ---------------------------------------------------------------------------- |
+| `crates/core`         | Language-neutral ownership and lifecycle engine; no third-party dependencies |
+| `crates/bridge`       | Metadata command and execution-request envelopes                             |
+| `crates/tembra`       | Typed Rust declarations, values and native callback execution                |
+| `crates/browser-wasm` | The engine compiled to WASM; no interpreter, filesystem or DOM               |
+| `crates/node-binding` | Node-API access to the same engine                                           |
+| `crates/executor-js`  | One embedded V8 runtime per Rust host                                        |
+| `packages/sdk`        | JS declarations, callback/value handles, platform bindings and build tooling |
 
-## Build from source
+Node and browser hosts execute JavaScript in their existing realm. Embedded Rust hosts use V8.
+A WASM build does not run native Rust plugins or include a JavaScript interpreter.
 
-Install Git, Rustup, just 1.21 or later, Bun 1.4.3 and the Node.js version in
-[`.node-version`](.node-version). Node acceptance requires the actual Node runtime; workspace
-test orchestration must not force Bun's `--bun` Node alias. The checked-in toolchain selects
-Rust 1.99.0, rustfmt, Clippy and the WebAssembly target. Native builds need a C/C++ toolchain;
-the JavaScript executor also builds or downloads its pinned V8 dependency.
+## A facet
 
-```sh
-git clone https://github.com/syntropika/tembra.git
-cd tembra
-just setup
-just install-ts
-just run-rust-example
+```ts
+import { facet } from "@tembra/sdk";
+
+export default facet({
+  name: "counter",
+  apiVersion: 1,
+  services: {
+    counter: {
+      create(self) {
+        return {
+          state: self.state(
+            { count: 0 },
+            {
+              version: 1,
+              validate(value) {
+                if (!Number.isInteger(value.count) || value.count < 0)
+                  throw new Error("Count must be a nonnegative integer");
+              },
+            },
+          ),
+        };
+      },
+      methods: {
+        increment({ state }, ctx, amount: number) {
+          return state.update(ctx, (current) => ({ count: current.count + amount })).count;
+        },
+      },
+    },
+  },
+});
 ```
 
-The counter prints `Count: 1` and completes managed shutdown. Its
-[entrypoint](examples/rust/src/main.rs) registers a provider, acquires a reference and increments
-managed state. The [contract and provider](examples/rust/src/counter.rs) are exercised by the
-[counter integration tests](testing/rust/tests/examples/counter.rs), including overflow refusal.
+```ts
+import { createHost } from "@tembra/sdk/node";
+import counter from "./counter.js";
 
-## Rust
-
-Declare a local contract and implement its generated provider trait:
-
-```rust
-use tembra::prelude::*;
-
-#[tembra::contract(local, name = "example.counter", version = 1)]
-trait Counter {
-    #[state]
-    fn count(&self) -> u32;
-    async fn increment(&self) -> Result<u32>;
-}
-
-struct CounterService {
-    count: Cell<u32>,
-}
-
-impl CounterProvider for CounterService {
-    fn count(&self) -> Readable<u32> {
-        self.count.readable()
-    }
-
-    async fn increment(&self, ctx: Context) -> Result<u32> {
-        self.count.change(&ctx, |count| {
-            *count = count.checked_add(1).ok_or_else(|| {
-                RuntimeError::invalid("counter_overflow", "counter reached its maximum value")
-            })?;
-            Ok(())
-        })?;
-        self.count.value()
-    }
-}
-
-fn main() -> Result<()> {
-    tembra::native::run("example", (), |host| async move {
-        let facet = tembra::NativeFacet::new("counter", vec![], |_, setup| {
-            let count = setup.state::<u32>("count")?;
-            setup.serve(Counter, move |_, _, declaration| {
-                Ok(CounterService {
-                    count: declaration.state(count.value(0)?)?,
-                })
-            })
-        })?;
-        host.install(facet, Default::default())?.await?;
-        let counter = host.get(Counter, CounterInput {}).await?;
-        counter.increment().await?;
-        println!("Count: {}", counter.count().value()?);
-        drop(counter);
-        Ok(())
-    })
-}
+const host = createHost();
+await host.install(counter);
+const reference = await host.get("counter", ["main"]);
+await reference.increment(1);
+console.log(reference.state.value.count);
+reference.release();
+await host.close();
 ```
 
-Enable the `native` feature for this runner. It awaits host shutdown after the callback finishes,
-including on error. Local Rust method values stay native; portable remote calls use runtime
-validation. At `u32::MAX`, this provider refuses the increment without changing state.
+The browser entrypoint exports an asynchronous `createHost()` that loads the WASM kernel. It also
+works in a module Worker. Applications can inject a kernel, module loader, host clock or codec.
 
-## Integrations
+Factories declare synchronously. Resource opening and tasks run after declaration. Local state
+snapshots are recursively frozen plain data; repeated reads preserve identity. Selectors compare
+with `Object.is`. Updates prepare and validate a candidate, check the invocation and revision,
+adopt atomically, then notify observers. A rejected candidate leaves current state unchanged.
 
-| Environment | Entry point | Source |
-| --- | --- | --- |
-| Rust | `tembra::prelude`, `tembra::native::run` | [Typed facade](crates/tembra) |
-| Node.js | `@tembra/sdk/node` over the Rust Host through Node-API | [Node bindings](crates/node-binding) |
-| Embedded JavaScript | Optional V8 executor for Rust applications | [Executor](crates/executor-js) |
-| Browser | `@tembra/sdk/browser` over the Rust WASM core | [WASM bindings](crates/browser-wasm) |
-| TypeScript contracts | `@tembra/sdk` | [SDK](packages/sdk) |
-| Builds and development | `@tembra/sdk/tooling` programmatic API | [SDK tooling](packages/sdk/src/tooling) |
+## Ownership and replacement
 
-The TypeScript SDK provides declarations and bindings over the Rust core. Platform Host usage is
-documented in the [guide](docs/guide.md#typescript-hosts).
+Object identity is the service namespace, a tuple of string keys and a trusted principal. An
+explicitly acquired reference is released explicitly; context-scoped dependencies belong to their
+scope. Resources belong to the host, facet or object where they are declared. Dependencies remain
+available while their consumer closes.
+
+`host.reload([facet])` prepares and commits a replacement. `host.prepare([facet])` exposes an explicit
+`commit()` / `abort()` handle for infrastructure coordination. Compatible code keeps already-admitted
+roots on their old implementation. New roots use the adopted implementation. A state version
+increase requires the owning facet's `migrate(previous, previousVersion)` callback. Incompatible
+changes drain affected physical work before migration; stale state writes are rejected.
+
+An unchanged resource name, version, exclusivity and dependency list preserves its handle. An
+exclusive replacement closes the previous resource before opening its successor. Failed preparation
+attempts to restore the previous resource; external effects are not a durable transaction.
+
+Cancellation is cooperative. Abandoning an observer or aborting its signal does not mean a callback
+has stopped. Tasks, calls and resource openers retain ownership until they physically settle. Host
+shutdown waits for that work; it cannot forcibly terminate an uncooperative callback.
+
+## Hooks, sources and infrastructure
+
+Hooks and their contributions are declared together with the facet and its `requires`. The engine
+plans participants; facet callbacks define their behavior. SDK helpers include series, waterfall,
+bail, parallel and middleware. Sources use `self.on(name, source, callback, options)`. Rust owns the
+bounded delivery queue, reuse decisions and delivery scheduling; JS executes each requested callback.
+
+Hooks, subscriptions and reference views remain review features. Rust defaults omit them. Enable
+`hooks`, `subscriptions` and `views` separately, or `review` on the Node/WASM wrapper crates.
+`telemetry` is independently optional.
+
+RPC uses a host-selected codec over a byte transport. JSON is the default, with explicit BigInt and
+byte-array representations. The optional MessagePack entrypoint preserves arbitrary-size BigInts.
+Custom codecs must agree at both ends. Authentication, routing, persistence, databases and durable
+coordination belong to infrastructure or applications. The optional coordinator is an in-memory
+prepare/vote/commit helper; it provides no durable distributed transaction guarantee.
+
+## Build facets
+
+The SDK build tool runs on Bun and emits one self-contained artifact per target:
+
+```ts
+import { build } from "@tembra/sdk/tooling";
+
+await build({
+  builds: {
+    web: { entry: "src/counter.ts", platform: "browser" },
+    server: { entry: "src/counter.ts", platform: "embedded" },
+  },
+});
+```
+
+Targets are `browser`, `worker`, `node` and `embedded`. Browser builds select browser package
+conditions. Node builtins and explicitly declared `nativeExternals` require a Node host. Embedded
+builds expose neither Node nor DOM APIs; provide environment capabilities through declared services
+and resources. Runtime dependency discovery and unresolved dynamic module names are rejected.
+Embedded artifacts use an IIFE to avoid retaining replaced modules in V8's ESM module map.
 
 ## Development
 
-Use the [justfile](justfile) for project commands:
+Use the versions pinned in the repository tool configuration, including Bun, Rust and wasm-bindgen.
 
 ```sh
-just check-all
-just test-doc
+just install
+just build-sdk
+just build-node
+just test
+just build-wasm
+bun packages/sdk/scripts/test-browser.ts
+just check
 ```
 
-`check-all` runs Rust and TypeScript tests, formatting, strict lint, dependency checks, WebAssembly
-compilation and the native counter. It does not launch a browser. `test-doc` executes Rust
-documentation examples. TypeScript build and development tools are functions exported by
-`@tembra/sdk/tooling`; applications own their configuration, cancellation and delivery adapters.
+Native integration tests use the actual Node addon. Browser acceptance launches Chrome to exercise
+both the browser and module Worker. Embedded integration uses V8 with a native Rust provider through
+the same kernel. Build the SDK before running the embedded tests directly.
 
-Native facets remain fixed for their Host lifetime. Hot reload targets JavaScript implementations.
-State retained through a compatible reload is in-memory state; applications supply durable storage.
-A disconnected remote call can have an unknown execution outcome and is not automatically retried.
-
-## Documentation
-
-- [Guide](docs/guide.md): contracts, objects, state and language integrations.
-- [Tutorial](docs/tutorial.md): run and understand the Rust counter.
-- [Runtime behavior](docs/spec.md): lifecycle, state, reload and remote-call guarantees.
-- [Observability](docs/observability.md): bounded metadata, timing guarantees and benchmarks.
-- [Architecture](docs/architecture.md): platform loaders, bindings and the authoritative Rust core.
-
-## Acknowledgements
-
-Tembra draws on [Chord](https://github.com/earendil-works/pi/tree/e17e2e10556cea6b674bb627726bef8ceed90065/packages/chord)
-for its managed object model, reactive state and reload semantics, and on
-[Cordis](https://github.com/cordiverse/cordis) for its approach to composable services and plugin
-lifecycles. Thanks to their authors and contributors. Tembra implements its own Rust runtime and
-protocol; compatibility with either project is not implied.
+Size and performance results must identify the build profile, enabled features, runtime and workload.
+A partial engine build is not a complete replacement benchmark.

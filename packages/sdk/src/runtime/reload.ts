@@ -1,0 +1,127 @@
+import { TembraError } from "../error.ts";
+import type { Reload } from "../kernel.ts";
+import type { FacetDefinition, PreparedReload, ReloadOptions, ReloadReport } from "../types.ts";
+import type { FacetRecord } from "./records.ts";
+import type { Session } from "./session.ts";
+
+/** Captures JS factories and exposes the engine's transaction handle. No reload policy lives here. */
+export class Replacements {
+  #pending: Promise<PreparedReload> | undefined;
+  #program: number | undefined;
+  constructor(readonly session: Session) {}
+
+  async replace(
+    definitions: readonly FacetDefinition[],
+    options: ReloadOptions = {},
+    remove: readonly string[] = [],
+  ): Promise<ReloadReport> {
+    return (await this.prepare(definitions, options, remove)).commit();
+  }
+  prepare(
+    definitions: readonly FacetDefinition[],
+    options: ReloadOptions = {},
+    remove: readonly string[] = [],
+  ): Promise<PreparedReload> {
+    if (this.#pending) return Promise.reject(new TembraError("conflict", "reload_running"));
+    const pending = this.capture(definitions, options, remove);
+    this.#pending = pending;
+    pending.catch(() => {
+      if (this.#pending === pending) this.#pending = undefined;
+    });
+    return pending;
+  }
+  async cancel(): Promise<void> {
+    if (this.#program !== undefined) {
+      this.session.kernel.command("program-abort", { program: this.#program });
+      this.session.flush();
+    }
+    const ticket = await this.#pending?.catch(() => undefined);
+    if (ticket?.status === "prepared") await ticket.abort();
+  }
+
+  private async capture(
+    definitions: readonly FacetDefinition[],
+    options: ReloadOptions,
+    remove: readonly string[],
+  ): Promise<PreparedReload> {
+    const session = this.session;
+    const declarations = session.facets.declarations(definitions);
+    const reload = session.kernel.command<Reload>("prepare", {
+      facets: declarations.metadata,
+      remove,
+    });
+    const records: FacetRecord[] = reload.facets.map((info) => ({
+      info,
+      definition: declarations.definitions.find((definition) => definition.name === info.name)!,
+    }));
+    let program: number | undefined;
+    try {
+      for (const record of records) session.facets.scope(record);
+      for (const id of reload.objects) {
+        const object = session.objects.get(id);
+        if (!object) continue;
+        const record = records.find(
+          (record) => record.definition.services?.[object.address.service],
+        );
+        if (record) session.createEnvironment(object, record);
+      }
+      program = session.kernel.command<number>("scopes-reload-registered", {
+        ticket: reload.id,
+        deadline: options.deadline ?? 5000,
+      });
+      this.#program = program;
+      await session.programs.run(program);
+    } catch (error) {
+      this.#program = undefined;
+      if (program === undefined) {
+        session.kernel.command("abort", { ticket: reload.id });
+        const scopes = reload.facets.flatMap((facet) =>
+          session.kernel.command<number[]>("scopes-for-facet", { facet: facet.id }),
+        );
+        await session.programs.cleanup(scopes.map((scope) => session.programs.scopes.get(scope)!));
+      }
+      throw error;
+    }
+    this.#program = undefined;
+    const id = program;
+    const report = {
+      codeVersion: reload.codeVersion,
+      facets: records.map((record) => record.info.name),
+    };
+    let status: PreparedReload["status"] = "prepared";
+    return {
+      report,
+      get status() {
+        return status;
+      },
+      commit: async () => {
+        if (status !== "prepared") throw new TembraError("conflict", "reload_ticket");
+        try {
+          session.kernel.command("program-commit", { program: id });
+        } catch (error) {
+          session.kernel.command("program-abort", { program: id });
+          await session.programs.run(id).catch(() => {});
+          status = "aborted";
+          this.#pending = undefined;
+          throw error;
+        }
+        status = "committed";
+        this.#pending = undefined;
+        await session.programs.run(id);
+        return report;
+      },
+      abort: async () => {
+        if (status === "aborted") return;
+        if (status !== "prepared") throw new TembraError("conflict", "already_committed");
+        status = "aborted";
+        this.#pending = undefined;
+        session.kernel.command("program-abort", { program: id });
+        try {
+          await session.programs.run(id);
+        } catch (error) {
+          if (!(error instanceof TembraError) || error.reason !== "reload_aborted") throw error;
+        }
+      },
+    };
+  }
+}

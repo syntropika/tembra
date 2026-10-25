@@ -1,22 +1,29 @@
-//! Browser scheduling and capability bindings around the shared Rust runtime.
-//!
-//! JavaScript owns explicit references and subscriptions; core state and RPC remain in Rust.
+//! Browser adapter for metadata commands. No JavaScript engine, loader, callbacks or values.
 
-#![cfg(target_arch = "wasm32")]
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 
-mod boundary;
-mod driver;
-mod executor;
-mod intrinsics;
-mod ipc;
-mod options;
-mod readable;
-mod runtime;
-mod socket;
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct WasmKernel {
+    kernel: tembra_bridge::Kernel,
+}
 
-pub use boundary::*;
-pub use driver::BrowserDriver;
-pub use executor::*;
-pub use readable::WasmSubscription;
-pub use runtime::{WasmConnection, WasmHost};
-pub use socket::{BrowserLinkOptions, websocket_link};
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+impl WasmKernel {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
+    pub fn new() -> Self {
+        Self {
+            kernel: tembra_bridge::Kernel::new(),
+        }
+    }
+
+    pub fn request(&self, metadata: &str) -> String {
+        self.kernel.request(metadata)
+    }
+}
+
+impl Default for WasmKernel {
+    fn default() -> Self {
+        Self::new()
+    }
+}

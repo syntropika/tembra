@@ -1,31 +1,9 @@
-export { Type } from "typebox";
-export type { Static, TSchema } from "typebox";
-// oxlint-disable-next-line oxc/no-barrel-file -- this package entry is the stable public SDK facade; consumers retain tree-shaken bundles
-export * from "./binding.js";
-export * from "./contracts.js";
-export * from "./error.js";
-export * from "./executor.js";
-export * from "./hooks.js";
-export * from "./portable.js";
-export { defineRegistry } from "./registries.js";
-export {
-  assertValid,
-  canonicalIdentity,
-  cleanArguments,
-  normalizeInput,
-  normalizeSchema,
-  validateValue,
-} from "./schema.js";
-export type { CompileLimits, Schema } from "./schema.js";
-export type {
-  TembraHost,
-  DynamicFacet,
-  ModuleFacet,
-  ArtifactFacet,
-  LoadableFacet,
-  ObservationOptions,
-  ObservationOperation,
-  Observation,
-  ObservationBatch,
-  ObservationStatistics,
-} from "./host/index.js";
+export { facet } from "./facet.ts";
+export { TembraError } from "./error.ts";
+export { jsonCodec } from "./codec.ts";
+export { series, waterfall, bail, parallel, middleware } from "./hooks.ts";
+export type { Codec } from "./codec.ts";
+export type { Context } from "./runtime/context.ts";
+export type { Declaration } from "./runtime/declaration.ts";
+export type { Readable, State, StateOptions } from "./state.ts";
+export type * from "./types.ts";

@@ -3,24 +3,31 @@ name = "tembra-node-binding"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = []
+hooks = ["tembra-bridge/hooks"]
+subscriptions = ["tembra-bridge/subscriptions"]
+views = ["tembra-bridge/views"]
+telemetry = ["tembra-bridge/telemetry"]
+review = ["hooks", "subscriptions", "views"]
+
 [dependencies]
 napi = { version = "=3.14.2", default-features = false, features = ["napi8", "dyn-symbols"] }
 napi-derive = "=3.6.12"
-tembra-core.workspace = true
-tembra-hooks.workspace = true
-tembra-contracts.workspace = true
-tembra-native = { path = "../native" }
-futures.workspace = true
-serde_json.workspace = true
-tokio = { version = "1.53.3", features = ["rt", "time", "net"] }
+tembra-bridge.workspace = true
 
 [build-dependencies]
 napi-build = "=2.6.0"
 
 [lints]
 workspace = true
+
+# The derive macro expands into the napi runtime dependency.
+[package.metadata.cargo-machete]
+ignored = ["napi"]

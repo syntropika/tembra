@@ -2,23 +2,31 @@
 name = "tembra-executor-js"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.99"
-description = "Same-Host JavaScript ESM execution adapter for Tembra"
+rust-version.workspace = true
+license.workspace = true
+description = "Optional V8 execution adapter for Tembra"
+
+[features]
+default = []
+review = [
+  "tembra/review",
+  "tembra-bridge/hooks",
+  "tembra-bridge/subscriptions",
+  "tembra-bridge/views",
+]
 
 [dependencies]
-tembra-core.workspace = true
-tembra-hooks.workspace = true
-futures.workspace = true
-serde.workspace = true
+tembra = { path = "../tembra" }
+tembra-bridge.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-deno_core = { version = "=0.412.0", default-features = false, features = ["v8", "v8_use_custom_libcxx", "reactor-tokio"] }
-scoped-tls-hkt = "=0.1.5"
-tokio = { version = "1.53.3", features = ["rt"] }
-
-[dev-dependencies]
-tembra-native = { path = "../native" }
-tokio = { version = "1.53.3", features = ["rt", "time", "sync"] }
+futures.workspace = true
+deno_core = { version = "=0.412.0", default-features = false, features = [
+  "v8",
+  "v8_use_custom_libcxx",
+  "reactor-tokio",
+] }
+deno_error = "0.7.1"
+tokio = { version = "1.53.3", features = ["rt", "time"] }
 
 [lints]
 workspace = true

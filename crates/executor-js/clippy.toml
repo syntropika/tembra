@@ -1,2 +1,0 @@
-# Keep adapter suggestions consistent with its separately declared compiler floor.
-msrv = "1.99"

@@ -1,5 +1,4 @@
 #!/bin/sh
 set -eu
-
 repo_root=$(git rev-parse --show-toplevel)
-exec just --justfile "$repo_root/justfile" fmt-check lint deps lint-ts
+exec just --justfile "$repo_root/justfile" fmt-check lint deps

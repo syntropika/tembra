@@ -3,24 +3,22 @@ name = "tembra"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Typed Rust contracts, providers and managed references for Tembra"
+license.workspace = true
+description = "Managed Rust facets and native execution for Tembra"
 
 [features]
 default = []
-native = ["dep:tembra-native", "dep:tokio"]
+hooks = ["tembra-core/hooks"]
+subscriptions = ["tembra-core/subscriptions"]
+views = ["tembra-core/views"]
+telemetry = ["tembra-core/telemetry"]
+review = ["hooks", "subscriptions", "views"]
 
 [dependencies]
+tembra-core.workspace = true
 futures.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-schemars.workspace = true
-tembra-core.workspace = true
-tembra-contracts.workspace = true
-tembra-macros.workspace = true
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tembra-native = { path = "../native", optional = true }
-tokio = { version = "1.53.3", features = ["rt", "time", "net"], optional = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 
 [lints]
 workspace = true
