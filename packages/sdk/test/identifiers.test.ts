@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { Code, Lifetime, Reason, ReloadStatus, Status } from "../src/identifiers.ts";
 import { Errors, type ErrorDescriptor } from "../src/errors.ts";
 import { failure, TembraError } from "../src/error.ts";
@@ -67,6 +68,35 @@ test("named operations retain native wire errors and refuse unknown operations w
     TembraError,
   );
   await host.close();
+});
+
+test("structured failures accept foreign realms and custom reasons but reject malformed fields", () => {
+  const descriptor = { code: Code.Invalid, reason: "quota", message: "Quota exceeded" };
+  const foreign: unknown = runInNewContext(
+    "Object.assign(new Error(message), { code, reason })",
+    descriptor,
+  );
+  expect(foreign).not.toBeInstanceOf(Error);
+  for (const input of [descriptor, foreign]) {
+    expect(failure(input)).toBeInstanceOf(TembraError);
+    expect(failure(input)).toMatchObject({ ...descriptor, cause: input });
+  }
+  for (const input of [
+    null,
+    undefined,
+    "failure",
+    { ...descriptor, code: "custom" },
+    { ...descriptor, code: "toString" },
+    { ...descriptor, code: null },
+    { ...descriptor, reason: 1 },
+    { ...descriptor, message: undefined },
+  ]) {
+    expect(failure(input)).toMatchObject({
+      code: Code.Unavailable,
+      reason: Reason.Callback,
+      cause: input,
+    });
+  }
 });
 
 // These calls are never executed: tsc checks that closed names cannot silently widen to string.
