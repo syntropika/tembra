@@ -46,17 +46,25 @@ impl Host {
                 declaration,
             });
         }
+        let facet_indices: BTreeMap<_, _> =
+            facets.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
         let lookup = |id: &Id| {
-            facets
-                .iter()
-                .find(|f| f.id == *id)
+            facet_indices
+                .get(id)
+                .map(|index| &facets[*index])
                 .or_else(|| inner.facets.get(id))
         };
         let mut services = BTreeMap::new();
         for id in current.values() {
             let facet = lookup(id).expect("prepared facet exists");
             for service in &facet.declaration.services {
-                if services.insert(service.name.clone(), facet).is_some() {
+                if services
+                    .insert(
+                        service.name.clone(),
+                        (facet.id, service.clone(), facet.declaration.api_version),
+                    )
+                    .is_some()
+                {
                     return Err(Error::invalid(Reason::DuplicateService, &service.name));
                 }
             }
@@ -74,11 +82,9 @@ impl Host {
                     return Err(conflict(Reason::ApiVersion));
                 }
                 for (name, methods) in &requirement.methods {
-                    let service = provider
-                        .declaration
-                        .services
-                        .iter()
-                        .find(|s| &s.name == name)
+                    let (_, service, _) = services
+                        .get(name)
+                        .filter(|(facet, _, _)| *facet == provider.id)
                         .ok_or_else(|| Error::invalid(Reason::DependencyService, name))?;
                     if !methods.is_subset(&service.methods) {
                         return Err(conflict(Reason::MissingMethod));
@@ -107,20 +113,12 @@ impl Host {
             if object.disposing {
                 continue;
             }
-            let provider = services
+            let (_, service, api_version) = services
                 .get(&object.address.service)
                 .ok_or_else(|| conflict(Reason::LiveConsumer))?;
-            if reference.expected_api != 0
-                && reference.expected_api != provider.declaration.api_version
-            {
+            if reference.expected_api != 0 && reference.expected_api != *api_version {
                 return Err(conflict(Reason::ApiVersion));
             }
-            let service = provider
-                .declaration
-                .services
-                .iter()
-                .find(|s| s.name == object.address.service)
-                .expect("service exists");
             if !reference.methods.is_subset(&service.methods) {
                 return Err(conflict(Reason::MissingMethod));
             }
@@ -131,38 +129,30 @@ impl Host {
         {
             return Err(conflict(Reason::ActivationBusy));
         }
-        let services = services
-            .into_iter()
-            .map(|(name, facet)| {
-                let service = facet
-                    .declaration
-                    .services
-                    .iter()
-                    .find(|service| service.name == name)
-                    .expect("declared service")
-                    .clone();
-                (name, (facet.id, service, facet.declaration.api_version))
-            })
-            .collect();
         let ticket = reserve(&mut next)?;
-        let reload = Reload {
+        let mut reload = Reload {
             id: ticket,
             code_version: version,
             facets,
             objects,
+            providers: BTreeMap::new(),
         };
         inner.next = next;
         for object in &reload.objects {
-            inner
-                .objects
-                .get_mut(object)
-                .expect("checked object")
-                .preparing = true;
+            let object = inner.objects.get_mut(object).expect("checked object");
+            object.preparing = true;
+            let name = &object.address.service;
+            if !reload.providers.contains_key(name)
+                && let Some((facet, _, _)) = services.get(name)
+            {
+                reload.providers.insert(name.clone(), *facet);
+            }
         }
         inner.pending = Some(Pending {
             reload: reload.clone(),
             objects: reload.objects.iter().copied().collect(),
             current,
+            facet_indices,
             services,
             owners: reload.facets.iter().map(|facet| facet.owner).collect(),
             gated: BTreeSet::new(),
@@ -211,6 +201,7 @@ impl Host {
     ///
     /// # Guarantees
     /// All refusal checks precede adoption. Failure preserves installed declarations and state.
+    /// Compatible services keep their object identities and state when their provider facet changes.
     /// Adapter I/O, resource handoffs and other external effects are outside this guarantee.
     ///
     /// # Errors
@@ -317,28 +308,20 @@ impl Host {
         inner.versions.insert(version, pending.current);
         for id in &pending.reload.objects {
             let old = inner.objects[id].facet;
-            let name = inner.facets[&old].declaration.name.clone();
-            let replacement = inner.current().get(&name).copied();
-            let service_name = inner.objects[id].address.service.clone();
-            let service = replacement.and_then(|facet| {
-                inner.facets[&facet]
-                    .declaration
-                    .services
-                    .iter()
-                    .find(|s| s.name == service_name)
-                    .cloned()
-            });
-            if let (Some(facet), Some(_)) = (replacement, &service) {
+            let replacement = inner.services[&version]
+                .get(&inner.objects[id].address.service)
+                .map(|(facet, service)| (*facet, service.lifetime, service.linger_ms));
+            if let Some((facet, _, _)) = replacement {
                 inner.facet_objects.remove(&old, *id);
                 inner.facet_objects.insert(facet, *id);
             }
             let object = inner.objects.get_mut(id).expect("object exists");
             object.gate = None;
             object.preparing = false;
-            if let (Some(facet), Some(service)) = (replacement, service) {
+            if let Some((facet, lifetime, linger_ms)) = replacement {
                 object.facet = facet;
-                object.pinned = service.lifetime == Lifetime::Host;
-                object.linger_ms = service.linger_ms;
+                object.pinned = lifetime == Lifetime::Host;
+                object.linger_ms = linger_ms;
             } else {
                 object.pinned = false;
                 object.phase = Status::Gone;
@@ -453,6 +436,30 @@ impl Host {
             .get(name)
             .ok_or_else(|| gone(Reason::Facet))?;
         Ok(inner.facets[id].clone())
+    }
+
+    /// Resolves a declaration in an isolated candidate without changing installed lookups.
+    ///
+    /// # Errors
+    /// Refuses stale or foreign tickets and facet names absent from the candidate.
+    pub fn prepared_facet(&self, ticket: Id, name: &str) -> Result<InstalledFacet> {
+        let inner = self.inner.borrow();
+        let pending = inner
+            .pending
+            .as_ref()
+            .filter(|p| p.reload.id == ticket)
+            .ok_or_else(|| conflict(Reason::ReloadTicket))?;
+        let id = pending
+            .current
+            .get(name)
+            .ok_or_else(|| gone(Reason::Facet))?;
+        Ok(pending
+            .facet_indices
+            .get(id)
+            .map(|index| &pending.reload.facets[*index])
+            .or_else(|| inner.facets.get(id))
+            .expect("candidate facet exists")
+            .clone())
     }
 
     pub fn version(&self) -> Version {

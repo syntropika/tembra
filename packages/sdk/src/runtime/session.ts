@@ -692,6 +692,7 @@ export class Session implements StateBackend {
       try {
         provider = this.kernel.command<KernelFacet>(KernelOp.FacetNamed, {
           name: requirement.facet ?? alias,
+          ticket: environment.facet.ticket,
         });
       } catch (error) {
         if (

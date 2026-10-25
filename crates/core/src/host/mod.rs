@@ -100,6 +100,7 @@ pub(crate) struct Pending {
     pub(crate) reload: Reload,
     pub(crate) current: BTreeMap<String, Id>,
     pub(crate) objects: BTreeSet<Id>,
+    facet_indices: BTreeMap<Id, usize>,
     services: BTreeMap<String, (Id, Service, Version)>,
     owners: BTreeSet<Id>,
     gated: BTreeSet<Id>,

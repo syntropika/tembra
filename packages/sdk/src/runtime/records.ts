@@ -17,6 +17,7 @@ export interface FacetRecord {
   info: KernelFacet;
   definition: FacetDefinition;
   scope?: Environment;
+  ticket?: number | undefined;
 }
 export interface Address {
   service: string;

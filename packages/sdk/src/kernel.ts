@@ -57,6 +57,7 @@ export interface Reload {
   codeVersion: number;
   facets: KernelFacet[];
   objects: number[];
+  providers: Record<string, number>;
 }
 export interface Effect {
   type: EffectType;

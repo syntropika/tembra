@@ -12,6 +12,58 @@ fn sdk_source() -> String {
 }
 
 #[test]
+fn javascript_provider_moves_preserve_state_and_candidate_dependencies() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    tokio::task::LocalSet::new().block_on(
+        &executor,
+        async {
+            let mut runtime = Runtime::new(Host::new(TokioExecutor), sdk_source()).unwrap();
+            let result = runtime
+                .evaluate(
+                    r#"(async () => {
+          const provider = (name, serves) => ({name, apiVersion: 1, services: serves ? {item: {
+            create(self) { return {state: self.state(0)}; },
+            methods: {
+              read: ({state}) => [state.value, name],
+              increment: ({state}, ctx) => state.update(ctx, value => value + 1)
+            }
+          }} : {}});
+          const consumer = facet => ({name: 'consumer', apiVersion: 1,
+            requires: {source: {facet, apiVersion: 1, methods: ['read']}},
+            services: {client: {
+              create(self) {
+                const source = self.get('source', 'main');
+                self.resource('cache', {deps: [source], open: () => null,
+                  close: (_value, ctx) => source.read(ctx)});
+                return {source};
+              },
+              methods: {read: ({source}, ctx) => source.read(ctx)}
+            }}
+          });
+          await host.install([provider('a', true), consumer('a')]);
+          const reference = await host.get('item', 'main');
+          const client = await host.get('client', 'main');
+          await reference.increment();
+          await host.reload([provider('a', false), provider('b', true), consumer('b')]);
+          const result = await client.read();
+          reference.release(); client.release();
+          return result;
+        })()"#,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result, json!([1, "b"]));
+            runtime.close().await.unwrap();
+            assert_eq!(runtime.native().kernel().diagnostics().objects, 0);
+        }
+        .boxed_local(),
+    );
+}
+
+#[test]
 fn javascript_uses_native_provider_through_one_kernel() {
     let source = sdk_source();
     let executor = tokio::runtime::Builder::new_current_thread()

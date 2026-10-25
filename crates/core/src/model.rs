@@ -246,6 +246,8 @@ pub struct Reload {
     pub code_version: Version,
     pub facets: Vec<InstalledFacet>,
     pub objects: Vec<Id>,
+    /// Candidate providers for affected service identities, shared with language adapters.
+    pub providers: BTreeMap<String, Id>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

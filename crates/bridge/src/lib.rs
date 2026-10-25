@@ -145,7 +145,7 @@ impl Kernel {
                 let remove = strings_optional(request, "remove")?;
                 let reload = h.prepare(facets, remove)?;
                 Ok(
-                    json!({"id":reload.id,"codeVersion":reload.code_version,"facets":reload.facets.iter().map(facet_value).collect::<Vec<_>>(),"objects":reload.objects}),
+                    json!({"id":reload.id,"codeVersion":reload.code_version,"facets":reload.facets.iter().map(facet_value).collect::<Vec<_>>(),"objects":reload.objects,"providers":reload.providers}),
                 )
             }
             KernelOp::Gate => Ok(json!(h.gate(id("ticket")?, &numbers(request, "objects")?)?)),
@@ -180,7 +180,14 @@ impl Kernel {
                     .collect::<Vec<_>>()
             )),
             KernelOp::Facet => Ok(facet_value(&h.facet(id("id")?)?)),
-            KernelOp::FacetNamed => Ok(facet_value(&h.facet_named(text(request, "name")?)?)),
+            KernelOp::FacetNamed => {
+                let name = text(request, "name")?;
+                let facet = match optional_identity(request, "ticket")? {
+                    Some(ticket) => h.prepared_facet(ticket, name)?,
+                    None => h.facet_named(name)?,
+                };
+                Ok(facet_value(&facet))
+            }
             KernelOp::NextDeadline => Ok(json!(h.next_deadline())),
             KernelOp::Address => {
                 let a = h.object_address(id("object")?)?;

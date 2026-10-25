@@ -57,21 +57,26 @@ export class Replacements {
       facets: declarations.metadata,
       remove,
     });
+    const definitionsByName = new Map(
+      declarations.definitions.map((definition) => [definition.name, definition]),
+    );
     const records: FacetRecord[] = reload.facets.map((info) => ({
       info,
-      definition: declarations.definitions.find((definition) => definition.name === info.name)!,
+      definition: definitionsByName.get(info.name)!,
+      ticket: reload.id,
     }));
+    const recordsById = new Map(records.map((record) => [record.info.id, record]));
     let program: number | undefined;
     try {
       for (const record of records) session.facets.scope(record);
       for (const id of reload.objects) {
         const object = session.objects.get(id);
         if (!object) continue;
-        const record = records.find(
-          (record) => record.definition.services?.[object.address.service],
-        );
+        const facet = reload.providers[object.address.service];
+        const record = facet === undefined ? undefined : recordsById.get(facet);
         if (record) session.createEnvironment(object, record);
       }
+      for (const record of records) record.ticket = undefined;
       program = session.kernel.command<number>(KernelOp.ScopesReloadRegistered, {
         ticket: reload.id,
         deadline: options.deadline ?? 5000,
