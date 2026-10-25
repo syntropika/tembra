@@ -56,6 +56,7 @@ pub(crate) struct Inner {
     pub scope_versions: VersionCounts<Owner>,
     pub scope_code_versions: BTreeMap<Id, Version>,
     pub scope_activations: BTreeMap<Id, Id>,
+    pub scope_programs: Index<Id>,
     pub non_host_scopes: usize,
     pub resource_versions: VersionCounts<Id>,
     pub current_owners: BTreeSet<Id>,
@@ -134,6 +135,11 @@ impl Inner {
     }
     pub fn remove_program(&mut self, id: Id) {
         if let Some(program) = self.programs.remove(&id) {
+            for pair in &program.replacements {
+                for scope in [pair.previous, pair.next].into_iter().flatten() {
+                    self.scope_programs.remove(&scope, id);
+                }
+            }
             if let Some(scope) = program.activation_scope {
                 self.scope_activations.remove(&scope);
                 self.wake(WaitKey::Scope(scope));
@@ -142,6 +148,7 @@ impl Inner {
                 self.waiters.remove(&key, id);
             }
             self.remove_deadline(program.deadline, id);
+            self.wake(WaitKey::Program(id));
         }
         self.ready_programs.remove(&id);
     }

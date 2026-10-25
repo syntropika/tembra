@@ -38,6 +38,7 @@ impl Host {
                 scope_versions: VersionCounts::default(),
                 scope_code_versions: BTreeMap::new(),
                 scope_activations: BTreeMap::new(),
+                scope_programs: Index::default(),
                 non_host_scopes: 0,
                 resource_versions: VersionCounts::default(),
                 current_owners: BTreeSet::new(),
@@ -171,12 +172,36 @@ impl Host {
         Ok(())
     }
 
+    /// Stops admissions and cancels pending reloads. Their scopes remain reserved until physical
+    /// effects settle; cleanup then runs in dependency order. Call `finish_close` after draining.
     pub fn close(&self) {
         let mut inner = self.inner.borrow_mut();
         if inner.closing {
             return;
         }
         inner.closing = true;
+        let programs = inner
+            .programs
+            .iter_mut()
+            .filter_map(|(id, program)| program.close_reload().then_some(*id))
+            .collect::<Vec<_>>();
+        inner.ready_programs.extend(programs);
+        let unowned = inner
+            .pending
+            .as_ref()
+            .filter(|pending| {
+                !inner
+                    .programs
+                    .values()
+                    .any(|program| program.ticket == Some(pending.reload.id))
+            })
+            .map(|pending| pending.reload.id);
+        drop(inner);
+        if let Some(ticket) = unowned {
+            self.abort(ticket)
+                .expect("pending reload without a program");
+        }
+        let mut inner = self.inner.borrow_mut();
         inner.idle.clear();
         let roots: Vec<_> = inner.roots.keys().copied().collect();
         for root in roots {

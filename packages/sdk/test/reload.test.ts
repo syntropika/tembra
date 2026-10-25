@@ -2,6 +2,212 @@ import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
 import { facet } from "../src/facet.ts";
 import { deferred } from "../src/runtime/records.ts";
+import { ActionType } from "../src/protocol.ts";
+
+test("closing refuses a new replacement before capturing its factory", async () => {
+  const host = createHost();
+  await host.install(facet({ name: "closing", apiVersion: 1 }));
+  let captured = false;
+  const closing = host.close();
+  await expect(
+    host.reload([
+      facet({
+        name: "closing",
+        apiVersion: 1,
+        create() {
+          captured = true;
+        },
+      }),
+    ]),
+  ).rejects.toMatchObject({ code: "closed", reason: "host" });
+  await closing;
+  expect(captured).toBe(false);
+});
+
+test("closing cancels a replacement but waits for its physical opener", async () => {
+  const host = createHost();
+  const entered = deferred<void>();
+  const cancelled = deferred<void>();
+  const finish = deferred<void>();
+  const closed: number[] = [];
+  const started: number[] = [];
+  const definition = (version: number) =>
+    facet({
+      name: "closing-reload",
+      apiVersion: 1,
+      create(self) {
+        self.resource("connection", {
+          version,
+          async open(signal) {
+            if (version === 2) {
+              signal.addEventListener("abort", () => cancelled.resolve(), { once: true });
+              entered.resolve();
+              await finish.promise;
+            }
+            return version;
+          },
+          close(value) {
+            closed.push(value);
+          },
+        });
+        self.task(() => {
+          started.push(version);
+        });
+      },
+    });
+  await host.install(definition(1));
+  const replacement = host.reload([definition(2)]).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  await entered.promise;
+  let settled = false;
+  const closing = host.close().then(() => {
+    settled = true;
+  });
+  await cancelled.promise;
+  expect(settled).toBe(false);
+  expect(closed).toEqual([]);
+  finish.resolve();
+  expect(await replacement).toMatchObject({ code: "cancelled", reason: "reload_aborted" });
+  await closing;
+  expect(closed.sort()).toEqual([1, 2]);
+  expect(started).toEqual([1]);
+  expect(host.errors()).toEqual([]);
+  expect(host.diagnostics()).toMatchObject({ objects: 0, resources: 0, pendingJobs: 0 });
+});
+
+test("closing aborts prepared replacements including an empty transaction", async () => {
+  for (const empty of [false, true]) {
+    const host = createHost();
+    const definitions = empty ? [] : [facet({ name: "prepared", apiVersion: 1 })];
+    await host.install(definitions);
+    const prepared = await host.prepare(definitions);
+    await host.close();
+    expect(prepared.status).toBe("aborted");
+    await prepared.abort();
+    await expect(prepared.commit()).rejects.toMatchObject({ reason: "reload_ticket" });
+    expect(host.errors()).toEqual([]);
+  }
+});
+
+test("closing between prepared delivery and ticket publication observes the abort", async () => {
+  const host = createHost();
+  const definition = facet({ name: "prepared-race", apiVersion: 1 });
+  await host.install(definition);
+  const entered = deferred<void>();
+  const dispatch = host.session.programs.dispatch.bind(host.session.programs);
+  let closing: Promise<void> | undefined;
+  const delivery = spyOn(host.session.programs, "dispatch").mockImplementation((action) => {
+    dispatch(action);
+    if (action.type === ActionType.ProgramPrepared && !closing) {
+      closing = host.close();
+      entered.resolve();
+    }
+  });
+  try {
+    const preparing = host.prepare([definition]).catch((error: unknown) => error);
+    await entered.promise;
+    expect(await preparing).toMatchObject({ reason: "reload_aborted" });
+    await closing;
+    expect(host.errors()).toEqual([]);
+  } finally {
+    delivery.mockRestore();
+    await host.close();
+  }
+});
+
+test("closing releases calls blocking an exclusive replacement", async () => {
+  const host = createHost();
+  const entered = deferred<void>();
+  const opened: number[] = [];
+  const closed: number[] = [];
+  const definition = (version: number) =>
+    facet({
+      name: "gated-close",
+      apiVersion: 1,
+      services: {
+        item: {
+          create(self) {
+            self.resource("exclusive", {
+              version,
+              exclusive: true,
+              open() {
+                opened.push(version);
+                return version;
+              },
+              close(value) {
+                closed.push(value);
+              },
+            });
+          },
+          methods: {
+            async wait(_self, ctx) {
+              await new Promise<void>((resolve) => {
+                ctx.signal.addEventListener("abort", () => resolve(), { once: true });
+                entered.resolve();
+              });
+            },
+          },
+        },
+      },
+    });
+  await host.install(definition(1));
+  const reference = await host.get("item", "main");
+  const call = reference.wait().catch(() => {});
+  await entered.promise;
+  const replacement = host.reload([definition(2)]).catch((error: unknown) => error);
+  await host.close();
+  await call;
+  expect(await replacement).toMatchObject({ reason: "reload_aborted" });
+  expect(opened).toEqual([1]);
+  expect(closed).toEqual([1]);
+  expect(host.errors()).toEqual([]);
+});
+
+test("closing an exclusive handoff does not reopen the retired resource", async () => {
+  const host = createHost();
+  const entered = deferred<void>();
+  const finish = deferred<void>();
+  const cancelled = deferred<void>();
+  const opened: number[] = [];
+  const closed: number[] = [];
+  const definition = (version: number) =>
+    facet({
+      name: "exclusive-close",
+      apiVersion: 1,
+      create(self) {
+        self.resource("exclusive", {
+          version,
+          exclusive: true,
+          async open(signal) {
+            opened.push(version);
+            if (version === 2) {
+              signal.addEventListener("abort", () => cancelled.resolve(), { once: true });
+              entered.resolve();
+              await finish.promise;
+            }
+            return version;
+          },
+          close(value) {
+            closed.push(value);
+          },
+        });
+      },
+    });
+  await host.install(definition(1));
+  const replacement = host.reload([definition(2)]).catch((error: unknown) => error);
+  await entered.promise;
+  const closing = host.close();
+  await cancelled.promise;
+  expect(closed).toEqual([1]);
+  finish.resolve();
+  await closing;
+  expect(await replacement).toMatchObject({ reason: "reload_aborted" });
+  expect(opened).toEqual([1, 2]);
+  expect(closed).toEqual([1, 2]);
+  expect(host.errors()).toEqual([]);
+});
 
 test("compatible replacement preserves old roots while new roots use new code", async () => {
   const host = createHost();

@@ -11,6 +11,7 @@ import type { Session } from "./session.ts";
 export class Replacements {
   #pending: Promise<PreparedReload> | undefined;
   #program: number | undefined;
+  #prepared: PreparedReload | undefined;
   constructor(readonly session: Session) {}
 
   async replace(
@@ -25,6 +26,7 @@ export class Replacements {
     options: ReloadOptions = {},
     remove: readonly string[] = [],
   ): Promise<PreparedReload> {
+    if (this.session.closing) return Promise.reject(new TembraError(Errors.Closed.Host));
     if (this.#pending) return Promise.reject(new TembraError(Errors.Conflict.ReloadRunning));
     const pending = this.capture(definitions, options, remove);
     this.#pending = pending;
@@ -34,12 +36,14 @@ export class Replacements {
     return pending;
   }
   async cancel(): Promise<void> {
+    if (this.#prepared?.status === ReloadStatus.Prepared) return this.#prepared.abort();
     if (this.#program !== undefined) {
       this.session.kernel.command(KernelOp.ProgramAbort, { program: this.#program });
+      const settled = this.session.programs.run(this.#program);
       this.session.flush();
+      await settled.catch(() => {});
     }
-    const ticket = await this.#pending?.catch(() => undefined);
-    if (ticket?.status === ReloadStatus.Prepared) await ticket.abort();
+    await this.#pending?.catch(() => undefined);
   }
 
   private async capture(
@@ -74,6 +78,8 @@ export class Replacements {
       });
       this.#program = program;
       await session.programs.run(program);
+      // Preparation may have settled just before close; observe physical abort before returning.
+      if (session.closing) await session.programs.run(program);
     } catch (error) {
       this.#program = undefined;
       if (program === undefined) {
@@ -92,13 +98,14 @@ export class Replacements {
       facets: records.map((record) => record.info.name),
     };
     let status: PreparedReload["status"] = ReloadStatus.Prepared;
-    return {
+    return (this.#prepared = {
       report,
       get status() {
         return status;
       },
       commit: async () => {
         if (status !== ReloadStatus.Prepared) throw new TembraError(Errors.Conflict.ReloadTicket);
+        this.#prepared = undefined;
         try {
           session.kernel.command(KernelOp.ProgramCommit, { program: id });
         } catch (error) {
@@ -118,6 +125,7 @@ export class Replacements {
         if (status !== ReloadStatus.Prepared)
           throw new TembraError(Errors.Conflict.AlreadyCommitted);
         status = ReloadStatus.Aborted;
+        this.#prepared = undefined;
         this.#pending = undefined;
         session.kernel.command(KernelOp.ProgramAbort, { program: id });
         try {
@@ -126,6 +134,6 @@ export class Replacements {
           if (!(error instanceof TembraError) || error.reason !== Reason.ReloadAborted) throw error;
         }
       },
-    };
+    });
   }
 }

@@ -113,11 +113,12 @@ pub(crate) enum WaitKey {
     Reference(Id),
     HostScopes,
     Resource(Id),
+    Program(Id),
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
-    ticket: Option<Id>,
-    replacements: Vec<Replacement>,
+    pub(crate) ticket: Option<Id>,
+    pub(crate) replacements: Vec<Replacement>,
     previous_scopes: BTreeMap<Id, Option<Id>>,
     scope_set: BTreeSet<Id>,
     scopes: Vec<Id>,
@@ -144,6 +145,7 @@ pub(crate) struct Program {
 impl Host {
     pub fn register_scope(&self, scope: Scope) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
+        inner.open()?;
         inner.owner(scope.owner)?;
         if scope.id == 0
             || inner.scopes.contains_key(&scope.id)
@@ -305,6 +307,7 @@ impl Host {
         deadline_ms: u64,
     ) -> Result<Id> {
         let mut inner = self.inner.borrow_mut();
+        inner.open()?;
         let reload = inner
             .pending
             .as_ref()
@@ -440,6 +443,11 @@ impl Host {
             .collect();
         program.replacements = replacements;
         let id = inner.id()?;
+        for pair in &program.replacements {
+            for scope in [pair.previous, pair.next].into_iter().flatten() {
+                inner.scope_programs.insert(scope, id);
+            }
+        }
         inner
             .program_deadlines
             .entry(program.deadline.expect("reload deadline"))
@@ -642,6 +650,9 @@ impl Host {
             let mut effects = Vec::new();
             match program.phase {
                 Phase::Stop => {
+                    if program.ticket.is_none() && self.wait_for_reloads(id, program) {
+                        return Ok(Step::Wait { deadline: None });
+                    }
                     if program.ticket.is_some() {
                         effects.extend(program.replacements.iter().filter_map(|pair| {
                             pair.previous.map(|scope| Effect::Stop {
@@ -831,6 +842,14 @@ impl Host {
                     program.phase = Phase::Start;
                 }
                 Phase::Start | Phase::Resume => {
+                    if self.inner.borrow().closing {
+                        program.phase = if program.phase == Phase::Resume {
+                            Phase::AbortDrop
+                        } else {
+                            Phase::Complete
+                        };
+                        continue;
+                    }
                     if program.ticket.is_none() {
                         let objects: Vec<_> = {
                             let inner = self.inner.borrow();
@@ -919,6 +938,11 @@ impl Host {
                     }
                 }
                 Phase::Restore => {
+                    if self.inner.borrow().closing {
+                        self.abort(program.ticket.expect("reload"))?;
+                        program.phase = Phase::AbortDrop;
+                        continue;
+                    }
                     for old in &program.exclusive {
                         if self.inner.borrow().resources.contains_key(&old.id)
                             || program.restored.contains_key(&old.id)
@@ -1087,6 +1111,17 @@ impl Host {
                 .scopes
                 .iter()
                 .filter(|id| {
+                    let leased = inner
+                        .scope_programs
+                        .members(id)
+                        .filter(|active| *active != program_id)
+                        .collect::<Vec<_>>();
+                    if !leased.is_empty() {
+                        program
+                            .waiting
+                            .extend(leased.into_iter().map(WaitKey::Program));
+                        return false;
+                    }
                     if inner.closing
                         && inner.non_host_scopes != 0
                         && inner
@@ -1144,6 +1179,21 @@ impl Host {
             .filter_map(|id| inner.scopes.get(id))
             .flat_map(|scope| scope.resources.iter().copied())
             .collect()
+    }
+
+    // Scope leases prevent cleanup from racing a reload's pending adapter effects.
+    fn wait_for_reloads(&self, id: Id, program: &mut Program) -> bool {
+        let inner = self.inner.borrow();
+        for scope in &program.scopes {
+            program.waiting.extend(
+                inner
+                    .scope_programs
+                    .members(scope)
+                    .filter(|active| *active != id)
+                    .map(WaitKey::Program),
+            );
+        }
+        !program.waiting.is_empty()
     }
     fn closers(
         &self,
@@ -1406,6 +1456,19 @@ impl Host {
     }
 }
 impl Program {
+    pub(crate) fn close_reload(&mut self) -> bool {
+        if self.ticket.is_none() {
+            return false;
+        }
+        if !self.committed {
+            self.error.get_or_insert_with(|| {
+                Error::new(Code::Cancelled, Reason::ReloadAborted, "reload was aborted")
+            });
+        }
+        self.running = true;
+        true
+    }
+
     fn new(scopes: Vec<Id>, phase: Phase) -> Self {
         Self {
             ticket: None,

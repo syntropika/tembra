@@ -892,8 +892,8 @@ export class Session implements StateBackend {
       clearTimeout(this.#linger);
       this.#linger = undefined;
       this.#lingerDeadline = undefined;
-      await this.replacements.cancel();
       this.kernel.command(KernelOp.Close);
+      await this.replacements.cancel();
       this.flush();
       for (;;) {
         const pending = [...this.jobs];
