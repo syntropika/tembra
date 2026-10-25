@@ -751,7 +751,13 @@ export class Session implements StateBackend {
       for (;;) {
         const actions = this.kernel.command<Action[]>(KernelOp.Drain);
         if (!actions.length) break;
-        for (const action of actions) this.action(action);
+        for (const action of actions) {
+          try {
+            this.action(action);
+          } catch (error) {
+            this.report(error);
+          }
+        }
       }
     } finally {
       this.#flushing = false;
@@ -804,11 +810,7 @@ export class Session implements StateBackend {
         // Local updates already staged their selectors. Foreign Rust updates enter JS only here.
         if (!this.values.has(snapshot.value)) {
           const candidate = this.value<any>(snapshot.value);
-          try {
-            this.publish(object.binding.adopt(object.binding.prepare(candidate), candidate));
-          } catch (error) {
-            this.report(error);
-          }
+          this.publish(object.binding.adopt(object.binding.prepare(candidate), candidate));
         }
         break;
       }

@@ -95,6 +95,63 @@ fn javascript_uses_native_provider_through_one_kernel() {
 }
 
 #[test]
+fn native_state_decode_failure_does_not_replace_the_call_result_or_lose_disposal() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    tokio::task::LocalSet::new().block_on(
+        &executor,
+        async {
+            let native = Host::new(TokioExecutor);
+            native
+                .install(vec![Facet::new("native", 1).service(
+                    Service::new("native", |self_| self_.state(0_u64, 1, |_| Ok(()))).method(
+                        "update",
+                        |state, context, (power,): (u32,)| async move {
+                            tokio::task::yield_now().await;
+                            state.update(&context, |_| Ok(1_u64 << power))?;
+                            Ok(())
+                        },
+                    ),
+                )])
+                .unwrap();
+            let mut runtime = Runtime::new(native, sdk_source()).unwrap();
+            let result = runtime
+                .evaluate(
+                    r#"(async () => {
+          const reference = await host.get('native', 'main');
+          const calling = reference.update(60);
+          for (let turn = 0; turn < 8 && !host.diagnostics().calls; turn++) await Promise.resolve();
+          if (host.diagnostics().calls !== 1) throw new Error('Native call was not admitted');
+          reference.release();
+          const value = await calling;
+          await host.close();
+          return {
+            value,
+            errors: host.errors().map(({code, reason}) => ({code, reason})),
+            objects: host.diagnostics().objects,
+            values: host.diagnostics().values
+          };
+        })()"#,
+                )
+                .await;
+            let closing = runtime.close().await;
+            assert_eq!(
+                result.unwrap(),
+                json!({
+                    "value": null, "errors": [{"code": "invalid", "reason": "json_number"}],
+                    "objects": 0, "values": 0,
+                })
+            );
+            closing.unwrap();
+            assert_eq!(runtime.native().kernel().diagnostics().objects, 0);
+        }
+        .boxed_local(),
+    );
+}
+
+#[test]
 fn portable_results_copy_the_codec_view_without_iterating_bytes() {
     let executor = tokio::runtime::Builder::new_current_thread()
         .enable_all()

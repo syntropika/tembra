@@ -30,13 +30,15 @@ export class TembraError extends Error {
 
 /** Normalizes failures from other bundles or realms without relying on their constructors. */
 export function failure(error: unknown): TembraError {
-  if (error instanceof TembraError) return error;
-  if (isDescriptor(error)) return new TembraError(error, error.message, { cause: error });
-  return new TembraError(
-    Errors.Unavailable.Callback,
-    error instanceof Error ? error.message : String(error),
-    { cause: error },
-  );
+  let message = Errors.Unavailable.Callback.message;
+  try {
+    if (error instanceof TembraError) return error;
+    if (isDescriptor(error)) return new TembraError(error, error.message, { cause: error });
+    message = String(error instanceof Error ? error.message : error);
+  } catch {
+    // Arbitrary thrown values must not interrupt error reporting or effect acknowledgement.
+  }
+  return new TembraError(Errors.Unavailable.Callback, message, { cause: error });
 }
 
 export function refuse(error: ErrorDescriptor, message = error.message): never {

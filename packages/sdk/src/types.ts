@@ -135,6 +135,7 @@ export interface HostOptions {
   kernel: KernelPort;
   serialization?: Codec;
   load?: (location: string | URL) => Promise<FacetDefinition>;
+  /** Receives adapter and observer failures; throwing from this callback cannot interrupt dispatch. */
   onError?: (error: Error) => void;
   /** Monotonic milliseconds from any origin; each host measures time relative to its creation. */
   now?: () => number;
