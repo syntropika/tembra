@@ -1,3 +1,5 @@
+import { Code, Lifetime } from "./identifiers.ts";
+import { ActionType, EffectType, KernelOp, OwnerKind } from "./protocol.ts";
 import { TembraError } from "./error.ts";
 
 /** Implemented by Node-API, browser WASM, and embedded V8's native binding. */
@@ -12,14 +14,16 @@ export interface KernelFeatures {
   views: boolean;
   telemetry: boolean;
 }
-export type Owner = { kind: "host" } | { kind: "facet" | "object"; id: number };
+export type Owner =
+  | { kind: typeof OwnerKind.Host }
+  | { kind: typeof OwnerKind.Facet | typeof OwnerKind.Object; id: number };
 export interface KernelFacet {
   id: number;
   owner: number;
   codeVersion: number;
   name: string;
   apiVersion: number;
-  services: { name: string; methods: string[]; lifetime: "referenced" | "host"; linger: number }[];
+  services: { name: string; methods: string[]; lifetime: Lifetime; linger: number }[];
   hooks: string[];
   requires: {
     facet: string;
@@ -55,7 +59,7 @@ export interface Reload {
   objects: number[];
 }
 export interface Effect {
-  type: string;
+  type: EffectType;
   scope?: number;
   previous?: number | null;
   resource?: number;
@@ -65,13 +69,13 @@ export interface Effect {
   replacements?: { previous: number | null; next: number | null }[];
 }
 export interface Action {
-  type: string;
+  type: ActionType;
   id: number;
   revision?: string;
   effects?: Effect[];
   payload?: number;
   operation?: number;
-  error?: { code: string; reason: string; message: string } | null;
+  error?: { code: Code; reason: string; message: string } | null;
 }
 export interface Diagnostics {
   objects: number;
@@ -88,16 +92,15 @@ export interface Diagnostics {
 export class Kernel {
   readonly features: KernelFeatures;
   constructor(readonly port: KernelPort) {
-    this.features = this.command("features");
+    this.features = this.command(KernelOp.Features);
   }
 
-  command<T = null>(op: string, fields: Record<string, unknown> = {}): T {
+  command<T = null>(op: KernelOp, fields: Record<string, unknown> = {}): T {
     const envelope = JSON.parse(this.port.request(JSON.stringify({ ...fields, op }))) as {
       ok?: T;
-      error?: { code: string; reason: string; message: string };
+      error?: { code: Code; reason: string; message: string };
     };
-    if (envelope.error)
-      throw new TembraError(envelope.error.code, envelope.error.reason, envelope.error.message);
+    if (envelope.error) throw new TembraError(envelope.error);
     return envelope.ok as T;
   }
 }

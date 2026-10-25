@@ -1,3 +1,4 @@
+import { EnvironmentPhase } from "../protocol.ts";
 import type { KernelFacet, Owner } from "../kernel.ts";
 import type { StateBinding, StateOptions } from "../state.ts";
 import type { Context } from "./context.ts";
@@ -38,7 +39,7 @@ export interface Environment {
   owner: Owner;
   facet: FacetRecord;
   object?: ObjectRecord;
-  phase: "declaring" | "prepared" | "live" | "closed";
+  phase: EnvironmentPhase;
   value: any;
   dependencies: Map<string, DynamicReference>;
   resources: Map<string, ResourceRecord>;

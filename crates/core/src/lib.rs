@@ -16,7 +16,7 @@ mod subscriptions;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 
-pub use error::{Code, Error, Result};
+pub use error::{Code, Error, Reason, Result};
 #[cfg(feature = "hooks")]
 pub use hooks::*;
 pub use host::Host;

@@ -1,4 +1,5 @@
 //! Language-neutral lifecycle programs. Adapters execute effects; this module decides their order.
+use crate::Reason;
 use crate::{
     Code, Error, Host, Id, Migration, Owner, Resource, Result, Snapshot, Version,
     host::{conflict, gone},
@@ -152,7 +153,7 @@ impl Host {
                 .any(|id| !inner.scopes.contains_key(id))
         {
             return Err(Error::invalid(
-                "scope",
+                Reason::Scope,
                 "scope identity and parents must be valid",
             ));
         }
@@ -163,7 +164,7 @@ impl Host {
                 .is_none_or(|resource| resource.owner != scope.owner)
         }) {
             return Err(Error::invalid(
-                "scope_resource",
+                Reason::ScopeResource,
                 "scope must own its declared resources",
             ));
         }
@@ -217,7 +218,7 @@ impl Host {
     pub fn activate_scope(&self, scope: Id) -> Result<Id> {
         let mut inner = self.inner.borrow_mut();
         if !inner.scopes.contains_key(&scope) {
-            return Err(gone("scope"));
+            return Err(gone(Reason::Scope));
         }
         let id = inner.id()?;
         if let Some(program) = inner.scope_activations.get(&scope) {
@@ -234,7 +235,7 @@ impl Host {
     pub fn cleanup_scopes(&self, scopes: Vec<Id>, object: Option<Id>) -> Result<Id> {
         let mut inner = self.inner.borrow_mut();
         if scopes.iter().any(|id| !inner.scopes.contains_key(id)) {
-            return Err(gone("scope"));
+            return Err(gone(Reason::Scope));
         }
         inner.begin_cleanup(&scopes);
         let id = inner.id()?;
@@ -251,7 +252,7 @@ impl Host {
             .pending
             .as_ref()
             .filter(|pending| pending.reload.id == ticket)
-            .ok_or_else(|| conflict("reload_ticket"))?;
+            .ok_or_else(|| conflict(Reason::ReloadTicket))?;
         let mut pairs = BTreeMap::<Owner, Replacement>::new();
         let previous = inner
             .current()
@@ -286,7 +287,7 @@ impl Host {
                         &mut pair.previous
                     };
                     if slot.replace(id).is_some() {
-                        return Err(conflict("ambiguous_scope"));
+                        return Err(conflict(Reason::AmbiguousScope));
                     }
                 }
             }
@@ -308,11 +309,14 @@ impl Host {
             .pending
             .as_ref()
             .filter(|pending| pending.reload.id == ticket)
-            .ok_or_else(|| conflict("reload_ticket"))?
+            .ok_or_else(|| conflict(Reason::ReloadTicket))?
             .reload
             .clone();
         if deadline_ms == 0 {
-            return Err(Error::invalid("deadline", "deadline must be positive"));
+            return Err(Error::invalid(
+                Reason::Deadline,
+                "deadline must be positive",
+            ));
         }
         let mut program = Program::new(
             replacements.iter().filter_map(|pair| pair.next).collect(),
@@ -323,29 +327,29 @@ impl Host {
         for pair in &replacements {
             let previous = pair
                 .previous
-                .map(|id| inner.scopes.get(&id).ok_or_else(|| gone("scope")))
+                .map(|id| inner.scopes.get(&id).ok_or_else(|| gone(Reason::Scope)))
                 .transpose()?;
             let next = pair
                 .next
-                .map(|id| inner.scopes.get(&id).ok_or_else(|| gone("scope")))
+                .map(|id| inner.scopes.get(&id).ok_or_else(|| gone(Reason::Scope)))
                 .transpose()?;
             if let (Some(previous), Some(next)) = (previous, next)
                 && previous.owner != next.owner
             {
-                return Err(conflict("scope_owner"));
+                return Err(conflict(Reason::ScopeOwner));
             }
             if let Some(previous) = previous {
                 program.retained.extend(&previous.resources);
             }
             if let Some(next) = next {
                 if !reload.facets.iter().any(|facet| facet.id == next.facet) {
-                    return Err(conflict("scope_facet"));
+                    return Err(conflict(Reason::ScopeFacet));
                 }
                 if let (Owner::Object(object), Some(version)) = (next.owner, next.state_version) {
                     let snapshot = inner
                         .objects
                         .get(&object)
-                        .ok_or_else(|| gone("object"))?
+                        .ok_or_else(|| gone(Reason::Object))?
                         .state
                         .unwrap_or(Snapshot {
                             value: 0,
@@ -353,12 +357,12 @@ impl Host {
                             version: 0,
                         });
                     if version < snapshot.version {
-                        return Err(conflict("state_version"));
+                        return Err(conflict(Reason::StateVersion));
                     }
                     if version > snapshot.version {
                         if snapshot.version != 0 && !next.migrate {
                             return Err(Error::invalid(
-                                "migration_required",
+                                Reason::MigrationRequired,
                                 "state version changes require migration",
                             ));
                         }
@@ -382,7 +386,7 @@ impl Host {
                             match next.owner {
                                 Owner::Object(id) => program.objects.push(id),
                                 Owner::Facet(id) => program.facets.push(id),
-                                Owner::Host => return Err(conflict("host_resource_reload")),
+                                Owner::Host => return Err(conflict(Reason::HostResourceReload)),
                             }
                         }
                     }
@@ -410,16 +414,16 @@ impl Host {
                 .members(&resource.id)
                 .any(|scope| !previous_scopes.contains(&scope))
             {
-                return Err(conflict("exclusive_dependent"));
+                return Err(conflict(Reason::ExclusiveDependent));
             }
             match resource.owner {
                 Owner::Object(id) => program.objects.push(id),
                 Owner::Facet(id) => program.facets.push(id),
-                Owner::Host => return Err(conflict("host_resource_reload")),
+                Owner::Host => return Err(conflict(Reason::HostResourceReload)),
             }
             for id in inner.dependents.members(&resource.id) {
                 if !previous_resources.contains(&id) {
-                    return Err(conflict("exclusive_dependent"));
+                    return Err(conflict(Reason::ExclusiveDependent));
                 }
                 pending.push(inner.resources[&id].clone());
             }
@@ -453,9 +457,9 @@ impl Host {
         let crate::host::Inner {
             programs, scopes, ..
         } = &mut *inner;
-        let program = programs.get_mut(&id).ok_or_else(|| gone("program"))?;
+        let program = programs.get_mut(&id).ok_or_else(|| gone(Reason::Program))?;
         if program.pending.len() != results.len() || results.is_empty() {
-            return Err(conflict("effect_results"));
+            return Err(conflict(Reason::EffectResults));
         }
         for (effect, result) in std::mem::take(&mut program.pending)
             .into_iter()
@@ -471,12 +475,15 @@ impl Host {
             }
             if let Effect::Migrate { scope, .. } | Effect::Initialize { scope } = effect {
                 let value = result.value.ok_or_else(|| {
-                    Error::invalid("migration_value", "migration must return a value identity")
+                    Error::invalid(
+                        Reason::MigrationValue,
+                        "migration must return a value identity",
+                    )
                 })?;
                 let snapshot = program.expected[&scope];
                 let declared = &scopes[&scope];
                 let Owner::Object(object) = declared.owner else {
-                    return Err(conflict("state_owner"));
+                    return Err(conflict(Reason::StateOwner));
                 };
                 program.migrations.push(Migration {
                     object,
@@ -501,12 +508,17 @@ impl Host {
     pub fn commit_program(&self, id: Id) -> Result<()> {
         let (ticket, migrations) = {
             let inner = self.inner.borrow();
-            let program = inner.programs.get(&id).ok_or_else(|| gone("program"))?;
+            let program = inner
+                .programs
+                .get(&id)
+                .ok_or_else(|| gone(Reason::Program))?;
             if program.phase != Phase::Prepared {
-                return Err(conflict("program_phase"));
+                return Err(conflict(Reason::ProgramPhase));
             }
             (
-                program.ticket.ok_or_else(|| conflict("reload_ticket"))?,
+                program
+                    .ticket
+                    .ok_or_else(|| conflict(Reason::ReloadTicket))?,
                 program.migrations.clone(),
             )
         };
@@ -521,7 +533,7 @@ impl Host {
                         version: 0,
                     }) != *expected
                     {
-                        return Err(conflict("state_revision"));
+                        return Err(conflict(Reason::StateRevision));
                     }
                 }
             }
@@ -540,15 +552,18 @@ impl Host {
 
     pub fn abort_program(&self, id: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let program = inner.programs.get_mut(&id).ok_or_else(|| gone("program"))?;
+        let program = inner
+            .programs
+            .get_mut(&id)
+            .ok_or_else(|| gone(Reason::Program))?;
         if matches!(
             program.phase,
             Phase::Adopt | Phase::Start | Phase::Drop | Phase::Complete
         ) {
-            return Err(conflict("already_committed"));
+            return Err(conflict(Reason::AlreadyCommitted));
         }
         program.error.get_or_insert_with(|| {
-            Error::new(Code::Cancelled, "reload_aborted", "reload was aborted")
+            Error::new(Code::Cancelled, Reason::ReloadAborted, "reload was aborted")
         });
         program.running = true;
         inner.ready_programs.insert(id);
@@ -557,7 +572,10 @@ impl Host {
 
     pub fn next_step(&self, id: Id) -> Result<Step> {
         let mut inner = self.inner.borrow_mut();
-        let mut program = inner.programs.remove(&id).ok_or_else(|| gone("program"))?;
+        let mut program = inner
+            .programs
+            .remove(&id)
+            .ok_or_else(|| gone(Reason::Program))?;
         for key in std::mem::take(&mut program.waiting) {
             inner.waiters.remove(&key, id);
         }
@@ -585,7 +603,7 @@ impl Host {
             .get(&id)
             .is_some_and(|program| !matches!(program.phase, Phase::Complete | Phase::Failed))
         {
-            return Err(conflict("program_running"));
+            return Err(conflict(Reason::ProgramRunning));
         }
         inner.remove_program(id);
         Ok(())
@@ -593,7 +611,7 @@ impl Host {
 
     fn advance(&self, id: Id, program: &mut Program) -> Result<Step> {
         if !program.pending.is_empty() {
-            return Err(conflict("effects_running"));
+            return Err(conflict(Reason::EffectsRunning));
         }
         loop {
             if program
@@ -602,7 +620,7 @@ impl Host {
             {
                 program
                     .error
-                    .get_or_insert_with(|| conflict("reload_deadline"));
+                    .get_or_insert_with(|| conflict(Reason::ReloadDeadline));
                 program.deadline = None;
             }
             if program.error.is_some()
@@ -696,7 +714,7 @@ impl Host {
                     }) {
                         return Err(Error::new(
                             Code::Unavailable,
-                            "dependency",
+                            Reason::Dependency,
                             "scope dependency failed",
                         ));
                     }
@@ -728,8 +746,10 @@ impl Host {
                     let mut unique = BTreeSet::new();
                     for scope in &program.scopes {
                         for id in &inner.scopes[scope].resources {
-                            let resource =
-                                inner.resources.get(id).ok_or_else(|| gone("resource"))?;
+                            let resource = inner
+                                .resources
+                                .get(id)
+                                .ok_or_else(|| gone(Reason::Resource))?;
                             if resource.value.is_none() {
                                 missing = true;
                                 if resource.dependencies.iter().all(|id| {
@@ -745,7 +765,7 @@ impl Host {
                         }
                     }
                     if missing && effects.is_empty() {
-                        return Err(conflict("resource_dependencies"));
+                        return Err(conflict(Reason::ResourceDependencies));
                     }
                     if !missing {
                         program.phase = Phase::Prepare;
@@ -845,7 +865,10 @@ impl Host {
                         program.scopes.clone()
                     };
                     for scope in scopes {
-                        let record = inner.scopes.get_mut(&scope).ok_or_else(|| gone("scope"))?;
+                        let record = inner
+                            .scopes
+                            .get_mut(&scope)
+                            .ok_or_else(|| gone(Reason::Scope))?;
                         if !record.active {
                             record.active = true;
                             effects.push(Effect::Start { scope });
@@ -1225,11 +1248,14 @@ impl Host {
         let owner = inner
             .resources
             .get(&resource)
-            .ok_or_else(|| gone("resource"))?
+            .ok_or_else(|| gone(Reason::Resource))?
             .owner;
-        let scope = inner.scopes.get_mut(&scope).ok_or_else(|| gone("scope"))?;
+        let scope = inner
+            .scopes
+            .get_mut(&scope)
+            .ok_or_else(|| gone(Reason::Scope))?;
         if scope.owner != owner {
-            return Err(conflict("scope_owner"));
+            return Err(conflict(Reason::ScopeOwner));
         }
         if !scope.resources.contains(&resource) {
             scope.resources.push(resource);
@@ -1251,7 +1277,7 @@ impl Host {
         inner
             .programs
             .get_mut(&id)
-            .ok_or_else(|| gone("program"))?
+            .ok_or_else(|| gone(Reason::Program))?
             .running = true;
         inner.ready_programs.insert(id);
         Ok(())
@@ -1272,7 +1298,7 @@ impl Host {
                 if program.deadline.is_some_and(|deadline| now >= deadline)
                     && program.error.is_none()
                 {
-                    program.error = Some(conflict("reload_deadline"));
+                    program.error = Some(conflict(Reason::ReloadDeadline));
                     program.deadline = None;
                     program.running = true;
                 }
@@ -1443,7 +1469,7 @@ impl crate::host::Inner {
                 && let Some(record) = self.programs.get_mut(&program)
             {
                 record.error.get_or_insert_with(|| {
-                    Error::new(Code::Cancelled, "scope_closed", "scope is closing")
+                    Error::new(Code::Cancelled, Reason::ScopeClosed, "scope is closing")
                 });
                 record.running = true;
                 self.ready_programs.insert(program);

@@ -1,3 +1,4 @@
+use crate::Reason;
 use crate::{
     Code, Error, Host, Id, Result, Version,
     host::{conflict, gone},
@@ -24,7 +25,7 @@ impl Host {
     pub fn initialize_state(&self, object: Id, value: Id, version: Version) -> Result<Snapshot> {
         if value == 0 || version == 0 {
             return Err(Error::invalid(
-                "state",
+                Reason::State,
                 "value and state version must be nonzero",
             ));
         }
@@ -32,9 +33,9 @@ impl Host {
         let object = inner
             .objects
             .get_mut(&object)
-            .ok_or_else(|| gone("object"))?;
+            .ok_or_else(|| gone(Reason::Object))?;
         if object.phase != crate::Status::Loading || object.state.is_some() {
-            return Err(conflict("state_initialized"));
+            return Err(conflict(Reason::StateInitialized));
         }
         let snapshot = Snapshot {
             value,
@@ -51,7 +52,7 @@ impl Host {
             .objects
             .get(&object)
             .and_then(|o| o.state)
-            .ok_or_else(|| gone("state"))
+            .ok_or_else(|| gone(Reason::State))
     }
 
     /// Captures the revision before adapter code prepares and validates a candidate.
@@ -65,10 +66,13 @@ impl Host {
         self.check_state_call(call, object)?;
         let snapshot = self.snapshot(object)?;
         if snapshot.revision != expected {
-            return Err(conflict("state_revision"));
+            return Err(conflict(Reason::StateRevision));
         }
         if value == 0 {
-            return Err(Error::invalid("value", "zero is not a value identity"));
+            return Err(Error::invalid(
+                Reason::Value,
+                "zero is not a value identity",
+            ));
         }
         Ok(PreparedState {
             host: self.clone(),
@@ -85,18 +89,21 @@ impl Host {
 
     fn check_state_call(&self, call: Id, object: Id) -> Result<()> {
         let inner = self.inner.borrow();
-        let call = inner.calls.get(&call).ok_or_else(|| gone("call"))?;
+        let call = inner.calls.get(&call).ok_or_else(|| gone(Reason::Call))?;
         inner.check_root(call.root)?;
         if call.object != object {
             return Err(Error::new(
                 Code::Forbidden,
-                "state_owner",
+                Reason::StateOwner,
                 "only an entered owner invocation may mutate state",
             ));
         }
-        let record = inner.objects.get(&object).ok_or_else(|| gone("object"))?;
+        let record = inner
+            .objects
+            .get(&object)
+            .ok_or_else(|| gone(Reason::Object))?;
         if call.code_version < record.min_version {
-            return Err(conflict("upgrade_conflict"));
+            return Err(conflict(Reason::UpgradeConflict));
         }
         Ok(())
     }
@@ -114,10 +121,10 @@ impl PreparedState {
         let object = inner
             .objects
             .get_mut(&self.object)
-            .ok_or_else(|| gone("object"))?;
-        let previous = object.state.ok_or_else(|| gone("state"))?;
+            .ok_or_else(|| gone(Reason::Object))?;
+        let previous = object.state.ok_or_else(|| gone(Reason::State))?;
         if previous.revision != self.expected {
-            return Err(conflict("state_revision"));
+            return Err(conflict(Reason::StateRevision));
         }
         if previous.value == self.value {
             return Ok(previous);
@@ -125,7 +132,7 @@ impl PreparedState {
         let revision = previous
             .revision
             .checked_add(1)
-            .ok_or_else(|| conflict("revision_exhausted"))?;
+            .ok_or_else(|| conflict(Reason::RevisionExhausted))?;
         let snapshot = Snapshot {
             value: self.value,
             revision,

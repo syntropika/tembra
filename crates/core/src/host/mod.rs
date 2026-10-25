@@ -1,3 +1,4 @@
+use crate::Reason;
 mod contexts;
 mod facets;
 mod lifecycle;
@@ -161,7 +162,7 @@ impl Inner {
     }
     pub fn open(&self) -> Result<()> {
         if self.closing {
-            Err(Error::new(Code::Closed, "host", "host is closing"))
+            Err(Error::new(Code::Closed, Reason::Host, "host is closing"))
         } else {
             Ok(())
         }
@@ -170,18 +171,22 @@ impl Inner {
         let root = self
             .roots
             .get(&id)
-            .ok_or_else(|| Error::new(Code::Expired, "root", "scope has ended"))?;
+            .ok_or_else(|| Error::new(Code::Expired, Reason::Root, "scope has ended"))?;
         if !root.active {
-            return Err(Error::new(Code::Expired, "root", "scope has ended"));
+            return Err(Error::new(Code::Expired, Reason::Root, "scope has ended"));
         }
         if root.cancelled {
-            return Err(Error::new(Code::Cancelled, "root", "scope is cancelled"));
+            return Err(Error::new(
+                Code::Cancelled,
+                Reason::Root,
+                "scope is cancelled",
+            ));
         }
         Ok(root)
     }
     fn root(&mut self, version: Version, principal: String, cleanup: bool) -> Result<Id> {
         if !self.versions.contains_key(&version) {
-            return Err(conflict("superseded"));
+            return Err(conflict(Reason::Superseded));
         }
         let id = self.id()?;
         *self.version_users.entry(version).or_default() += 1;
@@ -204,14 +209,18 @@ impl Inner {
         let services = self
             .services
             .get(&version)
-            .ok_or_else(|| conflict("superseded"))?;
+            .ok_or_else(|| conflict(Reason::Superseded))?;
         services
             .get(name)
             .map(|(facet, service)| (*facet, service))
-            .ok_or_else(|| Error::new(Code::Unavailable, "unknown_service", name))
+            .ok_or_else(|| Error::new(Code::Unavailable, Reason::UnknownService, name))
     }
     fn check_facet(&self, facet: Id, root: Id, version: Version) -> Result<Id> {
-        let owner = self.facets.get(&facet).ok_or_else(|| gone("facet"))?.owner;
+        let owner = self
+            .facets
+            .get(&facet)
+            .ok_or_else(|| gone(Reason::Facet))?
+            .owner;
         if self
             .facet_min
             .get(&owner)
@@ -222,7 +231,7 @@ impl Inner {
                 .and_then(|pending| pending.gated_facets.get(&owner))
                 .is_some_and(|allowed| !allowed.contains(&root))
         {
-            return Err(conflict("upgrade_conflict"));
+            return Err(conflict(Reason::UpgradeConflict));
         }
         Ok(owner)
     }
@@ -235,7 +244,7 @@ impl Inner {
                 if !self.closed {
                     Ok(())
                 } else {
-                    Err(gone("host"))
+                    Err(gone(Reason::Host))
                 }
             }
             Owner::Facet(id) => {
@@ -247,7 +256,7 @@ impl Inner {
                 {
                     Ok(())
                 } else {
-                    Err(gone("facet"))
+                    Err(gone(Reason::Facet))
                 }
             }
             Owner::Object(id) => {
@@ -258,7 +267,7 @@ impl Inner {
                 {
                     Ok(())
                 } else {
-                    Err(gone("object"))
+                    Err(gone(Reason::Object))
                 }
             }
         }
@@ -372,16 +381,16 @@ impl Inner {
     }
 }
 
-pub(crate) fn gone(kind: &str) -> Error {
+pub(crate) fn gone(kind: Reason) -> Error {
     Error::new(Code::Gone, kind, format!("{kind} is no longer available"))
 }
-pub(crate) fn conflict(reason: &str) -> Error {
-    Error::new(Code::Conflict, reason, reason.replace('_', " "))
+pub(crate) fn conflict(reason: Reason) -> Error {
+    Error::new(Code::Conflict, reason, reason.as_str().replace('_', " "))
 }
 fn exhausted() -> Error {
     Error::new(
         Code::Exhausted,
-        "identities",
+        Reason::Identities,
         "identity or revision space exhausted",
     )
 }
@@ -393,7 +402,7 @@ fn reserve(next: &mut Id) -> Result<Id> {
 fn validate_facet(facet: &Facet) -> Result<()> {
     if facet.name.is_empty() || facet.api_version == 0 {
         return Err(Error::invalid(
-            "facet",
+            Reason::Facet,
             "facet name and api version are required",
         ));
     }
@@ -402,7 +411,7 @@ fn validate_facet(facet: &Facet) -> Result<()> {
     {
         return Err(Error::new(
             Code::Unsupported,
-            "hooks",
+            Reason::Hooks,
             "hooks were excluded from this build",
         ));
     }
@@ -419,13 +428,13 @@ fn validate_facet(facet: &Facet) -> Result<()> {
             })
         {
             return Err(Error::invalid(
-                "service",
+                Reason::Service,
                 "invalid or duplicate service/member name",
             ));
         }
         if service.lifetime == Lifetime::Host && service.linger_ms != 0 {
             return Err(Error::invalid(
-                "linger",
+                Reason::Linger,
                 "host-lifetime objects cannot linger",
             ));
         }

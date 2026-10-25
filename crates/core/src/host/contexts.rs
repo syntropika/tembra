@@ -1,4 +1,5 @@
 use super::*;
+use crate::Reason;
 
 impl Host {
     pub fn begin_root(&self, principal: impl Into<String>) -> Result<Id> {
@@ -12,7 +13,7 @@ impl Host {
     pub fn cleanup_root(&self, principal: impl Into<String>) -> Result<Id> {
         let mut inner = self.inner.borrow_mut();
         if inner.closed {
-            return Err(Error::new(Code::Closed, "host", "host is closed"));
+            return Err(Error::new(Code::Closed, Reason::Host, "host is closed"));
         }
         let version = inner.version;
         inner.root(version, principal.into(), true)
@@ -24,7 +25,10 @@ impl Host {
 
     pub fn end_root(&self, root: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let record = inner.roots.get_mut(&root).ok_or_else(|| gone("root"))?;
+        let record = inner
+            .roots
+            .get_mut(&root)
+            .ok_or_else(|| gone(Reason::Root))?;
         record.active = false;
         if record.calls == 0 {
             inner.remove_root(root);
@@ -34,7 +38,10 @@ impl Host {
 
     pub fn cancel_root(&self, root: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let record = inner.roots.get_mut(&root).ok_or_else(|| gone("root"))?;
+        let record = inner
+            .roots
+            .get_mut(&root)
+            .ok_or_else(|| gone(Reason::Root))?;
         if !record.cancelled {
             record.cancelled = true;
             inner.actions.push_back(Action::CancelRoot(root));
@@ -51,17 +58,17 @@ impl Host {
         let mut inner = self.inner.borrow_mut();
         let context = inner.check_root(root)?;
         if inner.closing && !context.cleanup {
-            return Err(Error::new(Code::Closed, "host", "host is closing"));
+            return Err(Error::new(Code::Closed, Reason::Host, "host is closing"));
         }
         let version = context.version;
         let reference = inner
             .references
             .get(&reference)
-            .ok_or_else(|| gone("reference"))?;
+            .ok_or_else(|| gone(Reason::Reference))?;
         if reference.released {
             return Err(Error::new(
                 Code::Released,
-                "reference",
+                Reason::Reference,
                 "reference is released",
             ));
         }
@@ -74,38 +81,41 @@ impl Host {
         {
             return Err(Error::new(
                 Code::Forbidden,
-                "method",
+                Reason::Method,
                 "method is not exposed",
             ));
         }
         if !reference.methods.is_empty() && !reference.methods.contains(method) {
             return Err(Error::new(
                 Code::Forbidden,
-                "method",
+                Reason::Method,
                 "method was not required",
             ));
         }
-        let record = inner.objects.get(&object).ok_or_else(|| gone("object"))?;
+        let record = inner
+            .objects
+            .get(&object)
+            .ok_or_else(|| gone(Reason::Object))?;
         if record.phase != Status::Live || record.disposing {
             return Err(Error::new(
                 Code::Unavailable,
-                "not_ready",
+                Reason::NotReady,
                 "object is not live",
             ));
         }
         if version < record.min_version {
-            return Err(conflict("upgrade_conflict"));
+            return Err(conflict(Reason::UpgradeConflict));
         }
         if record
             .gate
             .as_ref()
             .is_some_and(|allowed| !allowed.contains(&root))
         {
-            return Err(conflict("upgrade_conflict"));
+            return Err(conflict(Reason::UpgradeConflict));
         }
         let (facet, service) = inner.find_service(&record.address.service, version)?;
         if !service.methods.contains(method) {
-            return Err(Error::invalid("method", "method is not declared"));
+            return Err(Error::invalid(Reason::Method, "method is not declared"));
         }
         let facet_owner = inner.check_facet(facet, root, version)?;
         let id = inner.id()?;
@@ -138,7 +148,10 @@ impl Host {
     /// Marks actual callback settlement, independently from logical cancellation or caller release.
     pub fn finish_call(&self, call: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let call = inner.calls.remove(&call).ok_or_else(|| gone("call"))?;
+        let call = inner
+            .calls
+            .remove(&call)
+            .ok_or_else(|| gone(Reason::Call))?;
         let facet_owner = inner.facets[&call.facet].owner;
         for owner in [
             Owner::Host,
@@ -170,7 +183,7 @@ impl Host {
             .calls
             .get(&call)
             .cloned()
-            .ok_or_else(|| gone("call"))
+            .ok_or_else(|| gone(Reason::Call))
     }
 
     /// Enters a facet-owned operation such as a hook contribution without exposing a service.
@@ -187,20 +200,23 @@ impl Host {
         let snapshot = inner
             .versions
             .get(&version)
-            .ok_or_else(|| conflict("superseded"))?;
+            .ok_or_else(|| conflict(Reason::Superseded))?;
         if inner
             .facets
             .get(&facet)
             .is_none_or(|record| snapshot.get(&record.declaration.name) != Some(&facet))
             || operation == 0
         {
-            return Err(gone("operation"));
+            return Err(gone(Reason::Operation));
         }
         let facet_owner = inner.check_facet(facet, root, version)?;
         if let Some(object) = object {
-            let record = inner.objects.get(&object).ok_or_else(|| gone("object"))?;
+            let record = inner
+                .objects
+                .get(&object)
+                .ok_or_else(|| gone(Reason::Object))?;
             if record.phase != Status::Live || record.disposing {
-                return Err(gone("object"));
+                return Err(gone(Reason::Object));
             }
             if version < record.min_version
                 || record
@@ -208,11 +224,11 @@ impl Host {
                     .as_ref()
                     .is_some_and(|roots| !roots.contains(&root))
             {
-                return Err(conflict("upgrade_conflict"));
+                return Err(conflict(Reason::UpgradeConflict));
             }
             let (expected, _) = inner.find_service(&record.address.service, version)?;
             if expected != facet {
-                return Err(conflict("operation_owner"));
+                return Err(conflict(Reason::OperationOwner));
             }
         }
         let id = inner.id()?;

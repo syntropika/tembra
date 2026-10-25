@@ -86,6 +86,23 @@ snapshots are recursively frozen plain data; repeated reads preserve identity. S
 with `Object.is`. Updates prepare and validate a candidate, check the invocation and revision,
 adopt atomically, then notify observers. A rejected candidate leaves current state unchanged.
 
+Use the exported `Lifetime`, `Status`, `ReloadStatus`, `Code`, `Reason` and `HookCapability` objects
+for built-in names, for example `lifetime: Lifetime.Host`. Adapter commands and execution requests
+also use closed named vocabularies; their serialized string values remain unchanged.
+
+JavaScript failures carry the same `code`, `reason` and `message` fields as Rust errors. Built-in
+descriptors keep their default messages together with their identities:
+
+```ts
+import { Errors, TembraError } from "@tembra/sdk";
+
+throw new TembraError(Errors.Invalid.StateValidation);
+```
+
+Facets can also supply an error descriptor with a built-in `Code`, their own reason and a message.
+Service names, object keys, principals and custom hook capabilities remain application-defined.
+These named values require no schema, code generation or service argument/result declarations.
+
 ## Ownership and replacement
 
 Object identity is the service namespace, a tuple of string keys and a trusted principal. An
@@ -129,12 +146,12 @@ prepare/vote/commit helper; it provides no durable distributed transaction guara
 The SDK build tool runs on Bun and emits one self-contained artifact per target:
 
 ```ts
-import { build } from "@tembra/sdk/tooling";
+import { build, Platform } from "@tembra/sdk/tooling";
 
 await build({
   builds: {
-    web: { entry: "src/counter.ts", platform: "browser" },
-    server: { entry: "src/counter.ts", platform: "embedded" },
+    web: { entry: "src/counter.ts", platform: Platform.Browser },
+    server: { entry: "src/counter.ts", platform: Platform.Embedded },
   },
 });
 ```

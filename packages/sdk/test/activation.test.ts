@@ -1,3 +1,4 @@
+import { EffectType, KernelOp, OwnerKind } from "../src/protocol.ts";
 import { expect, test } from "bun:test";
 import { createHost } from "../src/node.ts";
 import { facet } from "../src/facet.ts";
@@ -265,15 +266,15 @@ test("native opener cancellation signals the provider and retains its physical f
     native: {
       hasFacet: (id) => id === facetId,
       activate: async (object) => {
-        const resource = host.session.kernel.command<{ id: number }>("resource", {
-          owner: { kind: "object", id: object },
+        const resource = host.session.kernel.command<{ id: number }>(KernelOp.Resource, {
+          owner: { kind: OwnerKind.Object, id: object },
           name: "native",
           version: 1,
           dependencies: [],
         });
-        host.session.kernel.command("scope-register", {
-          scope: host.session.kernel.command<number>("allocate"),
-          owner: { kind: "object", id: object },
+        host.session.kernel.command(KernelOp.ScopeRegister, {
+          scope: host.session.kernel.command<number>(KernelOp.Allocate),
+          owner: { kind: OwnerKind.Object, id: object },
           facet: facetId,
           parents: [],
           dependencies: [],
@@ -284,13 +285,13 @@ test("native opener cancellation signals the provider and retains its physical f
       invoke: async () => undefined,
       dispose: async () => {},
       effect: async (effect) => {
-        if (effect.type === "open") {
+        if (effect.type === EffectType.Open) {
           opened.resolve();
           await finish.promise;
           settled = true;
           if (cancellation) throw new Error("Native opener cancelled");
-        } else if (effect.type === "close") {
-          host.session.kernel.command("resource-closed", { resource: effect.resource });
+        } else if (effect.type === EffectType.Close) {
+          host.session.kernel.command(KernelOp.ResourceClosed, { resource: effect.resource });
         }
       },
       cancelEffect: async () => {
@@ -302,11 +303,11 @@ test("native opener cancellation signals the provider and retains its physical f
       },
     },
   });
-  const prepared = host.session.kernel.command<Reload>("prepare", {
+  const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
     facets: [{ name: "native", apiVersion: 1, services: [{ name: "native", methods: [] }] }],
   });
   facetId = prepared.facets[0]!.id;
-  host.session.kernel.command("commit", { ticket: prepared.id });
+  host.session.kernel.command(KernelOp.Commit, { ticket: prepared.id });
   const getting = host.get("native", "main");
   getting.catch(() => {});
   await opened.promise;

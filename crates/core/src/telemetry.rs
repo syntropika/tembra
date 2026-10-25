@@ -1,4 +1,5 @@
 //! Optional bounded metadata collection. Payloads and exporters stay outside the kernel.
+use crate::Reason;
 use crate::{Error, Id, Result};
 use std::collections::VecDeque;
 
@@ -23,7 +24,7 @@ impl Telemetry {
     pub fn new(capacity: usize, sample_every: u64) -> Result<Self> {
         if capacity == 0 || sample_every == 0 {
             return Err(Error::invalid(
-                "telemetry",
+                Reason::Telemetry,
                 "capacity and sampling interval must be positive",
             ));
         }

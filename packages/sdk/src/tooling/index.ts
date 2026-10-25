@@ -6,7 +6,13 @@ import path from "node:path";
 import resolve from "enhanced-resolve";
 import ts from "typescript";
 
-export type Platform = "browser" | "worker" | "node" | "embedded";
+export const Platform = Object.freeze({
+  Browser: "browser",
+  Worker: "worker",
+  Node: "node",
+  Embedded: "embedded",
+} as const);
+export type Platform = (typeof Platform)[keyof typeof Platform];
 export interface BuildTarget {
   entry: string;
   platform: Platform;
@@ -34,7 +40,7 @@ export function defineConfig<const C extends BuildConfig>(config: C): C {
 
 function external(specifier: string, target: BuildTarget): boolean {
   return (
-    target.platform === "node" &&
+    target.platform === Platform.Node &&
     (builtinModules.includes(specifier.replace(/^node:/, "")) ||
       (target.nativeExternals ?? []).some(
         (name) => specifier === name || specifier.startsWith(`${name}/`),
@@ -43,13 +49,13 @@ function external(specifier: string, target: BuildTarget): boolean {
 }
 
 function resolver(root: string, target: BuildTarget): Bun.BunPlugin {
-  const web = target.platform === "browser" || target.platform === "worker";
+  const web = target.platform === Platform.Browser || target.platform === Platform.Worker;
   const resolveModule = resolve.create.sync({
     fileSystem: fs,
     conditionNames: [
       ...(web
         ? ["browser"]
-        : target.platform === "node"
+        : target.platform === Platform.Node
           ? ["node", "node-addons"]
           : ["tembra-embedded"]),
       "import",
@@ -147,18 +153,15 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
   const outDir = path.resolve(root, config.outDir ?? "dist/tembra");
   const artifacts: Artifact[] = [];
   for (const [name, target] of Object.entries(config.builds)) {
-    if (
-      !/^[\w-]+$/.test(name) ||
-      !["browser", "worker", "node", "embedded"].includes(target.platform)
-    )
+    if (!/^[\w-]+$/.test(name) || !Object.values(Platform).includes(target.platform))
       throw new Error("Invalid build name or platform");
     const entry = path.resolve(root, target.entry);
     if (target.typecheck !== false) typecheck(entry, root);
     const result = await Bun.build({
-      entrypoints: [target.platform === "embedded" ? "tembra:entry" : entry],
+      entrypoints: [target.platform === Platform.Embedded ? "tembra:entry" : entry],
       root,
-      format: target.platform === "embedded" ? "iife" : "esm",
-      target: target.platform === "node" ? "node" : "browser",
+      format: target.platform === Platform.Embedded ? "iife" : "esm",
+      target: target.platform === Platform.Node ? "node" : "browser",
       splitting: false,
       minify: target.minify ?? true,
       ...(target.define ? { define: { ...target.define } } : {}),
@@ -186,7 +189,7 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
           ts.isNamedExports(statement.exportClause) &&
           statement.exportClause.elements.some((element) => element.name.text === "default")),
     );
-    if (target.platform !== "embedded" && !hasDefault)
+    if (target.platform !== Platform.Embedded && !hasDefault)
       throw new Error(`Build ${name} must export a default facet`);
     function verify(node: ts.Node): void {
       let specifier: ts.Expression | undefined;

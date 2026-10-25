@@ -1,3 +1,5 @@
+import { Errors } from "./errors.ts";
+
 import { TembraError, refuse } from "./error.ts";
 import type { Invocation, Snapshot } from "./kernel.ts";
 import { protect } from "./values.ts";
@@ -151,7 +153,7 @@ export class StateBinding<T = unknown> {
       arguments.length >= 3 ? initial! : backend.value<T>(backend.snapshot(object).value);
   }
   check(): void {
-    if (this.closed) throw new TembraError("gone", "state", "State owner is gone");
+    if (this.closed) throw new TembraError(Errors.Gone.State, "State owner is gone");
   }
   get value(): Readonly<T> {
     this.check();
@@ -256,10 +258,10 @@ export class StateBinding<T = unknown> {
 
 export function validate<T>(candidate: T, options: StateOptions<T>): Readonly<T> {
   if (candidate && typeof (candidate as { then?: unknown }).then === "function")
-    refuse("async_state", "State updates and migrations must be synchronous");
+    refuse(Errors.Invalid.AsyncState, "State updates and migrations must be synchronous");
   const protectedValue = protect(candidate);
   const result = options.validate?.(protectedValue);
   if (result !== undefined && result !== true)
-    refuse("state_validation", "Facet rejected the candidate state");
+    refuse(Errors.Invalid.StateValidation, "Facet rejected the candidate state");
   return protectedValue;
 }

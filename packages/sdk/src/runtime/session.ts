@@ -1,3 +1,6 @@
+import { Errors } from "../errors.ts";
+import { ActionType, EnvironmentPhase, KernelOp, Outcome, OwnerKind } from "../protocol.ts";
+import { Code, Reason, Status } from "../identifiers.ts";
 import { failure, refuse, TembraError } from "../error.ts";
 import { jsonCodec } from "../codec.ts";
 import { Telemetry } from "../telemetry.ts";
@@ -87,11 +90,11 @@ export class Session implements StateBackend {
   constructor(readonly options: HostOptions) {
     this.kernel = new Kernel(options.kernel);
     if (options.telemetry && !this.kernel.features.telemetry)
-      throw new TembraError("unsupported", "telemetry");
+      throw new TembraError(Errors.Unsupported.Telemetry);
     this.telemetry = options.telemetry
       ? new Telemetry(options.telemetry.capacity, options.telemetry.sampleEvery)
       : undefined;
-    this.values = new Values(() => this.kernel.command<number>("allocate"));
+    this.values = new Values(() => this.kernel.command<number>(KernelOp.Allocate));
     this.codec = options.serialization ?? jsonCodec;
     this.name = options.name ?? "host";
     this.principal = options.principal ?? "host";
@@ -111,23 +114,23 @@ export class Session implements StateBackend {
       },
       definition: { name: "$host", apiVersion: 1 },
     };
-    this.hostScope = this.environment({ kind: "host" }, hostFacet);
+    this.hostScope = this.environment({ kind: OwnerKind.Host }, hostFacet);
     for (const [name, declaration] of Object.entries(options.resources ?? {})) {
       new Declaration(this, this.hostScope).resource(name, declaration);
     }
     for (const [name, resource] of this.hostScope.resources)
       this.#hostResources.set(name, resource);
-    this.hostScope.phase = "prepared";
+    this.hostScope.phase = EnvironmentPhase.Prepared;
     this.programs.register(this.hostScope);
   }
 
   environment(owner: Owner, facet: FacetRecord, object?: ObjectRecord): Environment {
     const environment: Environment = {
-      id: this.kernel.command<number>("allocate"),
+      id: this.kernel.command<number>(KernelOp.Allocate),
       owner,
       facet,
       ...(object ? { object } : {}),
-      phase: "declaring",
+      phase: EnvironmentPhase.Declaring,
       value: {},
       dependencies: new Map(),
       resources: new Map(),
@@ -142,11 +145,11 @@ export class Session implements StateBackend {
     return this.objects.get(object)?.address.principal ?? this.principal;
   }
   snapshot(object: number): Snapshot {
-    return this.kernel.command("snapshot", { object });
+    return this.kernel.command(KernelOp.Snapshot, { object });
   }
   value<T>(id: number): T {
     if (this.values.has(id)) return this.values.get<T>(id);
-    if (!this.options.native) refuse("value_gone");
+    if (!this.options.native) refuse(Errors.Invalid.ValueGone);
     const value = this.options.native.value(id) as T;
     this.values.set(id, value);
     return value;
@@ -155,7 +158,7 @@ export class Session implements StateBackend {
   check(value: unknown, object: number): Invocation {
     const ctx = context(value, this);
     if (!ctx.invocation || ctx.invocation.object !== object)
-      throw new TembraError("forbidden", "state_owner");
+      throw new TembraError(Errors.Forbidden.StateOwner);
     return ctx.invocation;
   }
 
@@ -163,7 +166,7 @@ export class Session implements StateBackend {
     const invocation = this.check(value, object);
     const id = this.values.put(candidate);
     try {
-      return this.kernel.command("state-adopt", {
+      return this.kernel.command(KernelOp.StateAdopt, {
         call: invocation.id,
         object,
         revision,
@@ -239,7 +242,7 @@ export class Session implements StateBackend {
     } finally {
       for (const reference of this.rootReferences.get(root) ?? []) this.release(reference);
       this.rootReferences.delete(root);
-      if (!this.#finalDiagnostics) this.kernel.command("end-root", { root });
+      if (!this.#finalDiagnostics) this.kernel.command(KernelOp.EndRoot, { root });
       this.controllers.delete(root);
       this.flush();
     }
@@ -252,13 +255,13 @@ export class Session implements StateBackend {
     ctx?: Context,
   ): DynamicReference {
     if (ctx) context(ctx, this);
-    this.kernel.command("tick", { now: this.now() });
+    this.kernel.command(KernelOp.Tick, { now: this.now() });
     const address: Address = {
       service,
       key: typeof key === "string" ? [key] : [...key],
       principal: options.principal ?? ctx?.principal ?? this.principal,
     };
-    const acquired = this.kernel.command<Acquisition>("acquire", {
+    const acquired = this.kernel.command<Acquisition>(KernelOp.Acquire, {
       ...address,
       apiVersion: options.apiVersion ?? 0,
       methods: options.methods ?? [],
@@ -280,7 +283,7 @@ export class Session implements StateBackend {
           this.activate(record, acquired).then(activation.resolve, (error) => {
             record.error = error;
             try {
-              this.kernel.command("fail", { object: record.id });
+              this.kernel.command(KernelOp.Fail, { object: record.id });
             } catch {
               /* A concurrent close may already retire activation. */
             }
@@ -307,8 +310,8 @@ export class Session implements StateBackend {
     try {
       this.referenceMethods(record, methods, access);
     } catch (error) {
-      this.kernel.command("release", { reference: record.id });
-      this.kernel.command("forget", { reference: record.id });
+      this.kernel.command(KernelOp.Release, { reference: record.id });
+      this.kernel.command(KernelOp.Forget, { reference: record.id });
       this.flush();
       throw error;
     }
@@ -328,11 +331,11 @@ export class Session implements StateBackend {
       owned.add(record.id);
     }
     const check = () => {
-      if (record.released) throw new TembraError("released", "reference");
-      if (this.closing) throw new TembraError("gone", "reference");
+      if (record.released) throw new TembraError(Errors.Released.Reference);
+      if (this.closing) throw new TembraError(Errors.Gone.Reference);
       const object = this.objects.get(record.object);
-      if (!object || object.disposing || object.error) throw new TembraError("gone", "reference");
-      if (!object.live) throw new TembraError("unavailable", "not_ready");
+      if (!object || object.disposing || object.error) throw new TembraError(Errors.Gone.Reference);
+      if (!object.live) throw new TembraError(Errors.Unavailable.NotReady);
     };
     const target = {
       get ready() {
@@ -340,15 +343,15 @@ export class Session implements StateBackend {
       },
       get status() {
         return record.released
-          ? "released"
+          ? Status.Released
           : recordSession.closing
-            ? "gone"
-            : recordSession.kernel.command("status", { reference: record.id });
+            ? Status.Gone
+            : recordSession.kernel.command(KernelOp.Status, { reference: record.id });
       },
       get state() {
         check();
         const binding = recordSession.objects.get(record.object)?.binding;
-        if (!binding) refuse("state", "Service does not expose state");
+        if (!binding) refuse(Errors.Invalid.State, "Service does not expose state");
         return consumerState(binding, check, record.stateCleanups);
       },
       release: () => this.release(record.id),
@@ -356,7 +359,7 @@ export class Session implements StateBackend {
         check();
         const object = this.objects.get(record.object)!;
         const resource = object.versions.get(object.facet)?.resources.get(name);
-        if (!resource?.options.opaque) throw new TembraError("forbidden", "opaque", name);
+        if (!resource?.options.opaque) throw new TembraError(Errors.Forbidden.Opaque, name);
         return resource.handle.value;
       },
     };
@@ -405,7 +408,7 @@ export class Session implements StateBackend {
   reference(value: unknown): ReferenceRecord {
     const issued = typeof value === "object" && value !== null ? references.get(value) : undefined;
     if (!issued || issued.session !== this)
-      refuse("reference", "An issued local reference is required");
+      refuse(Errors.Invalid.Reference, "An issued local reference is required");
     return issued.record;
   }
 
@@ -414,7 +417,7 @@ export class Session implements StateBackend {
     if (definition) return definition;
     let metadata = this.#facetMetadata.get(id);
     if (!metadata) {
-      metadata = this.kernel.command<KernelFacet>("facet", { id });
+      metadata = this.kernel.command<KernelFacet>(KernelOp.Facet, { id });
       this.#facetMetadata.set(id, metadata);
     }
     return metadata;
@@ -426,7 +429,7 @@ export class Session implements StateBackend {
     access?: ServiceDefinition["access"],
     resetAccess = false,
   ): void {
-    if (access && !this.kernel.features.views) throw new TembraError("unsupported", "views");
+    if (access && !this.kernel.features.views) throw new TembraError(Errors.Unsupported.Views);
     const allowed = access ? new Set(access(record.address.principal).methods) : undefined;
     const visible = new Set(
       [...methods].filter(
@@ -436,7 +439,7 @@ export class Session implements StateBackend {
       ),
     );
     if (access || (resetAccess && this.kernel.features.views))
-      this.kernel.command("restrict", { reference: record.id, methods: [...visible] });
+      this.kernel.command(KernelOp.Restrict, { reference: record.id, methods: [...visible] });
     record.methods = visible;
   }
 
@@ -451,7 +454,7 @@ export class Session implements StateBackend {
       } catch (error) {
         reference.methods.clear();
         if (!reference.released && this.kernel.features.views)
-          this.kernel.command("restrict", { reference: reference.id, methods: [] });
+          this.kernel.command(KernelOp.Restrict, { reference: reference.id, methods: [] });
         this.report(error);
       }
     }
@@ -475,9 +478,9 @@ export class Session implements StateBackend {
       this.forgetReference(record);
       return;
     }
-    this.kernel.command("tick", { now: this.now() });
-    this.kernel.command("release", { reference: id });
-    this.kernel.command("forget", { reference: id });
+    this.kernel.command(KernelOp.Tick, { now: this.now() });
+    this.kernel.command(KernelOp.Release, { reference: id });
+    this.kernel.command(KernelOp.Forget, { reference: id });
     this.forgetReference(record);
     this.flush();
     this.scheduleLinger();
@@ -492,12 +495,12 @@ export class Session implements StateBackend {
         object.address.key,
         object.address.principal,
       );
-      const scopes = this.kernel.command<number[]>("scopes-for-owner", {
-        owner: { kind: "object", id: object.id },
+      const scopes = this.kernel.command<number[]>(KernelOp.ScopesForOwner, {
+        owner: { kind: OwnerKind.Object, id: object.id },
       });
       await Promise.all(
         scopes.map((scope) =>
-          this.programs.run(this.kernel.command<number>("scope-activate", { scope })),
+          this.programs.run(this.kernel.command<number>(KernelOp.ScopeActivate, { scope })),
         ),
       );
       try {
@@ -508,30 +511,33 @@ export class Session implements StateBackend {
       }
     } else {
       const facet = this.facets.records.get(acquired.facet);
-      if (!facet) refuse("facet_gone");
+      if (!facet) refuse(Errors.Invalid.FacetGone);
       await this.facets.ready(facet);
       const environment = this.createEnvironment(object, facet);
       object.versions.set(facet.info.id, environment);
       await this.openEnvironment(environment);
     }
-    if (this.kernel.command<string>("status", { reference: acquired.reference }) === "loading")
-      this.kernel.command("ready", { object: object.id });
+    if (
+      this.kernel.command<Status>(KernelOp.Status, { reference: acquired.reference }) ===
+      Status.Loading
+    )
+      this.kernel.command(KernelOp.Ready, { object: object.id });
     object.live = true;
     this.flush();
   }
 
   createEnvironment(object: ObjectRecord, facet: FacetRecord): Environment {
     const definition = facet.definition.services?.[object.address.service];
-    if (!definition) refuse("service_gone");
-    const environment = this.environment({ kind: "object", id: object.id }, facet, object);
+    if (!definition) refuse(Errors.Invalid.ServiceGone);
+    const environment = this.environment({ kind: OwnerKind.Object, id: object.id }, facet, object);
     try {
       const value = definition.create?.(new Declaration(this, environment)) ?? {};
       if (value && typeof (value as { then?: unknown }).then === "function")
-        refuse("async_factory", "Factories must be synchronous");
+        refuse(Errors.Invalid.AsyncFactory, "Factories must be synchronous");
       environment.value = value;
       return environment;
     } finally {
-      environment.phase = "prepared";
+      environment.phase = EnvironmentPhase.Prepared;
       this.programs.register(environment);
     }
   }
@@ -541,16 +547,16 @@ export class Session implements StateBackend {
   }
 
   readyHostScope(): Promise<void> {
-    if (this.closing) return Promise.reject(new TembraError("closed", "host"));
+    if (this.closing) return Promise.reject(new TembraError(Errors.Closed.Host));
     if (this.#hostActivation) return this.#hostActivation;
     const activation = (async () => {
-      if (this.hostScope.phase === "closed")
+      if (this.hostScope.phase === EnvironmentPhase.Closed)
         this.hostScope = await this.redeclareHostScope(this.hostScope);
       await this.openEnvironment(this.hostScope);
       while (this.#pendingHostScopes.size) {
         let environment = this.#pendingHostScopes.values().next().value!;
         if (
-          environment.phase === "closed" ||
+          environment.phase === EnvironmentPhase.Closed ||
           [...environment.resources.values()].some((resource) =>
             this.resources
               .dependencyIds(resource.options)
@@ -576,9 +582,9 @@ export class Session implements StateBackend {
 
   private async redeclareHostScope(previous: Environment): Promise<Environment> {
     await this.programs.cleanup([previous]);
-    const environment = this.environment({ kind: "host" }, previous.facet);
+    const environment = this.environment({ kind: OwnerKind.Host }, previous.facet);
     this.resources.redeclare(environment, previous);
-    environment.phase = "prepared";
+    environment.phase = EnvironmentPhase.Prepared;
     this.programs.register(environment);
     return environment;
   }
@@ -590,10 +596,10 @@ export class Session implements StateBackend {
     ctx: Context,
   ): Promise<unknown> {
     context(ctx, this);
-    if (reference.released) throw new TembraError("released", "reference");
+    if (reference.released) throw new TembraError(Errors.Released.Reference);
     await reference.ready;
     ctx.check();
-    const invocation = this.kernel.command<Invocation>("begin-call", {
+    const invocation = this.kernel.command<Invocation>(KernelOp.BeginCall, {
       reference: reference.id,
       root: ctx.root,
       method,
@@ -603,7 +609,7 @@ export class Session implements StateBackend {
       (async () => {
         const sampled = this.telemetry?.sample();
         const started = sampled ? this.now() : 0;
-        let outcome: "ok" | "error" = "ok";
+        let outcome: Outcome = Outcome.Ok;
         try {
           if (this.options.native?.hasFacet(invocation.facet))
             return await this.options.native.invoke(invocation, arguments_, entered);
@@ -611,10 +617,10 @@ export class Session implements StateBackend {
           const environment = object?.versions.get(invocation.facet);
           const handle =
             environment?.facet.definition.services?.[reference.address.service]?.methods[method];
-          if (!environment || !handle) throw new TembraError("gone", "implementation");
+          if (!environment || !handle) throw new TembraError(Errors.Gone.Implementation);
           return await handle(environment.value, entered, ...arguments_);
         } catch (error) {
-          outcome = "error";
+          outcome = Outcome.Error;
           throw error;
         } finally {
           if (sampled)
@@ -626,8 +632,8 @@ export class Session implements StateBackend {
               duration: this.now() - started,
               outcome,
             });
-          this.kernel.command("tick", { now: this.now() });
-          this.kernel.command("finish-call", { call: invocation.id });
+          this.kernel.command(KernelOp.Tick, { now: this.now() });
+          this.kernel.command(KernelOp.FinishCall, { call: invocation.id });
           this.flush();
           this.scheduleLinger();
         }
@@ -643,7 +649,7 @@ export class Session implements StateBackend {
     root?: number,
   ): Promise<T> {
     const execute = async (ctx: Context) => {
-      const invocation = this.kernel.command<Invocation>("begin-operation", {
+      const invocation = this.kernel.command<Invocation>(KernelOp.BeginOperation, {
         facet: environment.facet.info.id,
         root: ctx.root,
         operation,
@@ -652,7 +658,7 @@ export class Session implements StateBackend {
       try {
         return await handle(new Context(this, ctx.root, invocation));
       } finally {
-        this.kernel.command("finish-call", { call: invocation.id });
+        this.kernel.command(KernelOp.FinishCall, { call: invocation.id });
         this.flush();
       }
     };
@@ -663,7 +669,7 @@ export class Session implements StateBackend {
     if (signal.aborted) throw signal.reason;
     let abort!: () => void;
     const cancelled = new Promise<never>((_, reject) => {
-      abort = () => reject(signal.reason ?? new TembraError("cancelled", "root"));
+      abort = () => reject(signal.reason ?? new TembraError(Errors.Cancelled.Root));
       signal.addEventListener("abort", abort, { once: true });
     });
     try {
@@ -684,11 +690,15 @@ export class Session implements StateBackend {
     )) {
       let provider: KernelFacet;
       try {
-        provider = this.kernel.command<KernelFacet>("facet-named", {
+        provider = this.kernel.command<KernelFacet>(KernelOp.FacetNamed, {
           name: requirement.facet ?? alias,
         });
       } catch (error) {
-        if (error instanceof TembraError && error.code === "gone" && error.reason === "facet")
+        if (
+          error instanceof TembraError &&
+          error.code === Code.Gone &&
+          error.reason === Reason.Facet
+        )
           continue;
         throw error;
       }
@@ -699,26 +709,26 @@ export class Session implements StateBackend {
           : provider.services.find((s) => s.name === service);
       if (!selected) continue;
       const methods = requirement.services?.[selected.name] ?? requirement.methods;
-      if (!methods) throw new TembraError("forbidden", "undeclared_service", service);
+      if (!methods) throw new TembraError(Errors.Forbidden.UndeclaredService, service);
       return { service: selected.name, apiVersion: requirement.apiVersion, methods };
     }
-    throw new TembraError("forbidden", "undeclared_dependency", service);
+    throw new TembraError(Errors.Forbidden.UndeclaredDependency, service);
   }
 
   hostResource<T>(name: string): Resource<T> {
     const resource = this.#hostResources.get(name);
-    if (!resource) throw new TembraError("forbidden", "host_resource", name);
+    if (!resource) throw new TembraError(Errors.Forbidden.HostResource, name);
     return resource.handle;
   }
 
   resource<T>(name: string, options: ResourceOptions<T>): Resource<T> {
-    if (this.closing) throw new TembraError("closed", "host");
-    if (this.#hostResources.has(name)) refuse("duplicate_resource");
-    const environment = this.environment({ kind: "host" }, this.hostScope.facet);
+    if (this.closing) throw new TembraError(Errors.Closed.Host);
+    if (this.#hostResources.has(name)) refuse(Errors.Invalid.DuplicateResource);
+    const environment = this.environment({ kind: OwnerKind.Host }, this.hostScope.facet);
     try {
       const resource = new Declaration(this, environment).resource(name, options);
       this.#hostResources.set(name, environment.resources.get(name)!);
-      environment.phase = "prepared";
+      environment.phase = EnvironmentPhase.Prepared;
       this.programs.register(environment);
       this.#pendingHostScopes.add(environment);
       this.track(this.readyHostScope()).catch((error) => this.report(error));
@@ -738,7 +748,7 @@ export class Session implements StateBackend {
     this.#flushing = true;
     try {
       for (;;) {
-        const actions = this.kernel.command<Action[]>("drain");
+        const actions = this.kernel.command<Action[]>(KernelOp.Drain);
         if (!actions.length) break;
         for (const action of actions) this.action(action);
       }
@@ -750,43 +760,43 @@ export class Session implements StateBackend {
 
   private action(action: Action): void {
     switch (action.type) {
-      case "execute":
-      case "cancel-effects":
-      case "program-prepared":
-      case "program-complete":
+      case ActionType.Execute:
+      case ActionType.CancelEffects:
+      case ActionType.ProgramPrepared:
+      case ActionType.ProgramComplete:
         this.programs.dispatch(action);
         break;
-      case "drop-value":
+      case ActionType.DropValue:
         this.values.drop(action.id);
         this.options.native?.dropValue?.(action.id);
         break;
-      case "cancel-root":
-        this.controllers.get(action.id)?.abort(new TembraError("cancelled", "root"));
+      case ActionType.CancelRoot:
+        this.controllers.get(action.id)?.abort(new TembraError(Errors.Cancelled.Root));
         break;
-      case "cancel-task":
+      case ActionType.CancelTask:
         this.activities.cancel(action.id);
         break;
-      case "deliver":
+      case ActionType.Deliver:
         this.activities.deliver(action.id, action.payload!, action.operation!);
         break;
-      case "detach-subscription":
+      case ActionType.DetachSubscription:
         this.activities.detach(action.id);
         break;
-      case "subscription-failed":
+      case ActionType.SubscriptionFailed:
         this.activities.failed(action.id);
         break;
-      case "dispose":
+      case ActionType.Dispose:
         this.track(this.dispose(action.id), true);
         break;
-      case "close-resource": {
+      case ActionType.CloseResource: {
         // Resource callbacks execute only in response to the engine's ordered program effect.
         break;
       }
-      case "retire-facet":
+      case ActionType.RetireFacet:
         this.#facetMetadata.delete(action.id);
         this.facets.retire(action.id);
         break;
-      case "state": {
+      case ActionType.State: {
         const object = this.objects.get(action.id);
         if (!object?.binding) break;
         const snapshot = this.snapshot(action.id);
@@ -810,12 +820,12 @@ export class Session implements StateBackend {
     object.disposing ??= (async () => {
       const errors: unknown[] = [];
       await object.activation.catch(() => {});
-      const scopes = this.kernel.command<number[]>("scopes-for-owner", {
-        owner: { kind: "object", id },
+      const scopes = this.kernel.command<number[]>(KernelOp.ScopesForOwner, {
+        owner: { kind: OwnerKind.Object, id },
       });
       try {
         if (scopes.length)
-          await this.programs.run(this.kernel.command<number>("scopes-cleanup", { scopes }));
+          await this.programs.run(this.kernel.command<number>(KernelOp.ScopesCleanup, { scopes }));
       } catch (error) {
         errors.push(error);
       }
@@ -825,7 +835,7 @@ export class Session implements StateBackend {
         errors.push(error);
       }
       object.binding?.close();
-      this.kernel.command("disposed", { object: id });
+      this.kernel.command(KernelOp.Disposed, { object: id });
       this.objects.delete(id);
       this.flush();
       if (errors.length) throw new AggregateError(errors, "Object cleanup failed");
@@ -834,7 +844,7 @@ export class Session implements StateBackend {
   }
 
   async closeEnvironment(environment: Environment): Promise<void> {
-    if (environment.phase !== "closed") await this.programs.cleanup([environment]);
+    if (environment.phase !== EnvironmentPhase.Closed) await this.programs.cleanup([environment]);
   }
 
   /** Revokes a JS handle after the engine has released its claim. */
@@ -848,7 +858,7 @@ export class Session implements StateBackend {
 
   scheduleLinger(): void {
     if (this.closing) return;
-    const deadline = this.kernel.command<number | null>("next-deadline") ?? undefined;
+    const deadline = this.kernel.command<number | null>(KernelOp.NextDeadline) ?? undefined;
     if (deadline === this.#lingerDeadline) return;
     if (this.#linger !== undefined) clearTimeout(this.#linger);
     this.#linger = undefined;
@@ -859,7 +869,7 @@ export class Session implements StateBackend {
         if (this.#lingerDeadline !== deadline) return;
         this.#linger = undefined;
         this.#lingerDeadline = undefined;
-        this.kernel.command("tick", { now: this.now() });
+        this.kernel.command(KernelOp.Tick, { now: this.now() });
         this.flush();
       },
       Math.max(0, deadline - this.now()),
@@ -870,7 +880,7 @@ export class Session implements StateBackend {
   diagnostics(): Diagnostics & { values: number; pendingJobs: number } {
     if (this.#finalDiagnostics) return this.#finalDiagnostics;
     return {
-      ...this.kernel.command<Diagnostics>("diagnostics"),
+      ...this.kernel.command<Diagnostics>(KernelOp.Diagnostics),
       values: this.values.size,
       pendingJobs: this.jobs.size,
     };
@@ -883,7 +893,7 @@ export class Session implements StateBackend {
       this.#linger = undefined;
       this.#lingerDeadline = undefined;
       await this.replacements.cancel();
-      this.kernel.command("close");
+      this.kernel.command(KernelOp.Close);
       this.flush();
       for (;;) {
         const pending = [...this.jobs];
@@ -891,7 +901,7 @@ export class Session implements StateBackend {
         await Promise.allSettled(pending);
         this.flush();
       }
-      this.kernel.command("finish-close");
+      this.kernel.command(KernelOp.FinishClose);
       this.values.clear();
       for (const reference of this.references.values()) this.forgetReference(reference);
       this.references.clear();

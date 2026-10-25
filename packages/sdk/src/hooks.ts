@@ -1,9 +1,11 @@
+import { Errors } from "./errors.ts";
+import { HookCapability } from "./identifiers.ts";
 import { TembraError } from "./error.ts";
 import type { HookDefinition } from "./types.ts";
 
 export function series(): HookDefinition {
   return {
-    capabilities: ["observe"],
+    capabilities: [HookCapability.Observe],
     async run(ctx, input, participants) {
       for (const participant of participants) await participant(ctx, input);
     },
@@ -12,7 +14,7 @@ export function series(): HookDefinition {
 
 export function waterfall(): HookDefinition {
   return {
-    capabilities: ["transform"],
+    capabilities: [HookCapability.Transform],
     async run(ctx, value, participants) {
       for (const participant of participants) value = await participant(ctx, value);
       return value;
@@ -22,7 +24,7 @@ export function waterfall(): HookDefinition {
 
 export function bail(): HookDefinition {
   return {
-    capabilities: ["decide"],
+    capabilities: [HookCapability.Decide],
     async run(ctx, value, participants) {
       for (const participant of participants) {
         const result = await participant(ctx, value);
@@ -34,7 +36,7 @@ export function bail(): HookDefinition {
 
 export function parallel(): HookDefinition {
   return {
-    capabilities: ["observe"],
+    capabilities: [HookCapability.Observe],
     async run(ctx, value, participants) {
       const settled = await Promise.allSettled(
         participants.map((participant) => participant(ctx, value)),
@@ -50,11 +52,11 @@ export function middleware(
   terminal: (context: import("./runtime/context.ts").Context, input: any) => unknown,
 ): HookDefinition {
   return {
-    capabilities: ["transform", "decide"],
+    capabilities: [HookCapability.Transform, HookCapability.Decide],
     async run(ctx, input, participants) {
       let active = true;
       async function invoke(index: number, value: unknown): Promise<unknown> {
-        if (!active) throw new TembraError("expired", "next", "Continuation scope has ended");
+        if (!active) throw new TembraError(Errors.Expired.Next, "Continuation scope has ended");
         ctx.check();
         const participant = participants[index];
         if (!participant) return terminal(ctx, value);
@@ -62,8 +64,8 @@ export function middleware(
         let pending: Promise<unknown> | undefined;
         let open = true;
         const next = (nextValue: unknown) => {
-          if (!open || !active) return Promise.reject(new TembraError("expired", "next"));
-          if (used) return Promise.reject(new TembraError("invalid", "next_used"));
+          if (!open || !active) return Promise.reject(new TembraError(Errors.Expired.Next));
+          if (used) return Promise.reject(new TembraError(Errors.Invalid.NextUsed));
           used = true;
           pending = invoke(index + 1, nextValue);
           // A caller may catch the rejection normally; no special recovery operation exists.

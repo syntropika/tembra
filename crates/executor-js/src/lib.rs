@@ -11,7 +11,9 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
+use tembra::core::Reason;
 use tembra::{Error, Host, Result};
+use tembra_bridge::protocol::{EffectType, NativeOp};
 
 #[derive(Clone)]
 pub struct TokioExecutor;
@@ -106,72 +108,72 @@ async fn op_tembra_native(
             value[name]
                 .as_u64()
                 .and_then(|number| number.try_into().ok())
-                .ok_or_else(|| Error::invalid("arguments", name))
+                .ok_or_else(|| Error::invalid(Reason::Arguments, name))
         };
-        match operation.as_str() {
-            "activate" => {
+        match NativeOp::parse(&operation) {
+            Some(NativeOp::Activate) => {
                 native.activate(
                     id("object")?,
                     id("facet")?,
                     value["service"]
                         .as_str()
-                        .ok_or_else(|| Error::invalid("service", "missing service"))?,
+                        .ok_or_else(|| Error::invalid(Reason::Service, "missing service"))?,
                 )?;
                 Ok(Value::Null)
             }
-            "dispose" => {
+            Some(NativeOp::Dispose) => {
                 native.dispose(id("object")?).await?;
                 Ok(Value::Null)
             }
-            "cancel-effect" => {
+            Some(NativeOp::CancelEffect) => {
                 native.cancel_effect(&tembra::core::Effect::Open {
                     resource: id("resource")?,
                 });
                 Ok(Value::Null)
             }
-            "effect" => {
+            Some(NativeOp::Effect) => {
                 use tembra::core::Effect;
-                let effect = match value["type"].as_str() {
-                    Some("open") => Effect::Open {
+                let effect = match value["type"].as_str().and_then(EffectType::parse) {
+                    Some(EffectType::Open) => Effect::Open {
                         resource: id("resource")?,
                     },
-                    Some("close") => Effect::Close {
+                    Some(EffectType::Close) => Effect::Close {
                         resource: id("resource")?,
                     },
-                    Some("drop") => Effect::Drop {
+                    Some(EffectType::Drop) => Effect::Drop {
                         scope: id("scope")?,
                     },
-                    Some("stop") => Effect::Stop {
+                    Some(EffectType::Stop) => Effect::Stop {
                         scope: id("scope")?,
                         keep_listeners: false,
                     },
-                    Some("prepare") => Effect::Prepare {
+                    Some(EffectType::Prepare) => Effect::Prepare {
                         scope: id("scope")?,
                         previous: None,
                     },
-                    Some("start") => Effect::Start {
+                    Some(EffectType::Start) => Effect::Start {
                         scope: id("scope")?,
                     },
-                    _ => return Err(Error::invalid("native_effect", "unsupported effect")),
+                    _ => return Err(Error::invalid(Reason::NativeEffect, "unsupported effect")),
                 };
                 Ok(native
                     .execute_effect(&effect)
                     .await?
                     .map_or(Value::Null, |id| json!(id)))
             }
-            "invoke" => {
+            Some(NativeOp::Invoke) => {
                 let invocation = &value["invocation"];
                 let call = native.kernel().invocation(
                     invocation["id"]
                         .as_u64()
                         .and_then(|id| id.try_into().ok())
-                        .ok_or_else(|| Error::invalid("invocation", "missing invocation"))?,
+                        .ok_or_else(|| Error::invalid(Reason::Invocation, "missing invocation"))?,
                 )?;
                 native
                     .invoke_portable(call, value["arguments"].clone())
                     .await
             }
-            _ => Err(Error::invalid("operation", operation)),
+            _ => Err(Error::invalid(Reason::Operation, operation)),
         }
     }
     .await;
@@ -277,36 +279,40 @@ impl Runtime {
                     .make_shared();
             let buffer = v8::ArrayBuffer::with_backing_store(scope, &backing);
             let bytes = v8::Uint8Array::new(scope, buffer, 0, length)
-                .ok_or_else(|| Error::invalid("memory", "cannot allocate boundary value"))?;
+                .ok_or_else(|| Error::invalid(Reason::Memory, "cannot allocate boundary value"))?;
             let global = scope.get_current_context().global(scope);
             let key = v8::String::new(scope, "__tembraRequest")
-                .ok_or_else(|| Error::invalid("memory", "cannot allocate boundary key"))?;
+                .ok_or_else(|| Error::invalid(Reason::Memory, "cannot allocate boundary key"))?;
             global.set(scope, key.into(), bytes.into());
         }
         let value = self.resolve_script("(async () => { const codec = host.session.codec; const request = codec.deserialize(globalThis.__tembraRequest); delete globalThis.__tembraRequest; const reference = await host.get(request.service, request.key); try { const result = await reference[request.method](...request.arguments); return codec.serialize(result ?? null); } finally { reference.release(); } })()").await?;
         let bytes = {
             deno_core::scope!(scope, self.js);
             let value = v8::Local::new(scope, value);
-            let view = v8::Local::<v8::Uint8Array>::try_from(value)
-                .map_err(|_| Error::invalid("byte_result", "codec must return a Uint8Array"))?;
+            let view = v8::Local::<v8::Uint8Array>::try_from(value).map_err(|_| {
+                Error::invalid(Reason::ByteResult, "codec must return a Uint8Array")
+            })?;
             let buffer = view
                 .buffer(scope)
-                .ok_or_else(|| Error::invalid("byte_result", "codec result has no buffer"))?;
+                .ok_or_else(|| Error::invalid(Reason::ByteResult, "codec result has no buffer"))?;
             if buffer.was_detached() {
                 return Err(Error::invalid(
-                    "byte_result",
+                    Reason::ByteResult,
                     "codec result buffer is detached",
                 ));
             }
             let length = view.byte_length();
             // The safe V8 copying API takes an i32-sized destination, including shared views.
             if length > i32::MAX as usize {
-                return Err(Error::invalid("byte_result", "codec result is too large"));
+                return Err(Error::invalid(
+                    Reason::ByteResult,
+                    "codec result is too large",
+                ));
             }
             let mut bytes = vec![0; length];
             if view.copy_contents(&mut bytes) != length {
                 return Err(Error::invalid(
-                    "byte_result",
+                    Reason::ByteResult,
                     "codec result copy was incomplete",
                 ));
             }
@@ -359,5 +365,5 @@ impl Runtime {
     }
 }
 fn js_error(error: impl std::fmt::Display) -> Error {
-    Error::invalid("javascript", error.to_string())
+    Error::invalid(Reason::Javascript, error.to_string())
 }

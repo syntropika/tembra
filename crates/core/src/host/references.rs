@@ -1,4 +1,5 @@
 use super::*;
+use crate::Reason;
 
 impl Inner {
     // A released claim cannot retain dependency edges after its record is forgotten.
@@ -25,7 +26,7 @@ impl Host {
             .objects
             .get(&object)
             .map(|o| o.address.clone())
-            .ok_or_else(|| gone("object"))
+            .ok_or_else(|| gone(Reason::Object))
     }
 
     /// Acquires an independent claim. Cloning its numeric identity does not create another claim.
@@ -40,17 +41,17 @@ impl Host {
         inner.open()?;
         if address.service.is_empty() || address.key.is_empty() {
             return Err(Error::invalid(
-                "address",
+                Reason::Address,
                 "service and key must be nonempty",
             ));
         }
         let (facet, service) = inner.find_service(&address.service, inner.version)?;
         let declaration = &inner.facets[&facet];
         if api_version != 0 && api_version != declaration.declaration.api_version {
-            return Err(conflict("api_version"));
+            return Err(conflict(Reason::ApiVersion));
         }
         if !methods.is_subset(&service.methods) {
-            return Err(conflict("missing_method"));
+            return Err(conflict(Reason::MissingMethod));
         }
         let code_version = inner.version;
         let lifetime = service.lifetime;
@@ -59,7 +60,7 @@ impl Host {
             && (address.key != ["main"] || address.principal != "host")
         {
             return Err(Error::invalid(
-                "host_address",
+                Reason::HostAddress,
                 "host-lifetime objects use key main and the host principal",
             ));
         }
@@ -69,14 +70,14 @@ impl Host {
                 pending.current.get(&inner.facets[&facet].declaration.name) != Some(&facet)
             })
         {
-            return Err(conflict("reload_preparing"));
+            return Err(conflict(Reason::ReloadPreparing));
         }
         if existing.is_some_and(|id| {
             inner.objects[&id].disposing || inner.objects[&id].phase == Status::Gone
         }) {
             return Err(Error::new(
                 Code::Unavailable,
-                "disposing",
+                Reason::Disposing,
                 "the previous instance is still closing",
             ));
         }
@@ -148,9 +149,9 @@ impl Host {
         let record = inner
             .objects
             .get_mut(&object)
-            .ok_or_else(|| gone("object"))?;
+            .ok_or_else(|| gone(Reason::Object))?;
         if record.phase != Status::Loading || record.disposing {
-            return Err(gone("object"));
+            return Err(gone(Reason::Object));
         }
         record.phase = Status::Live;
         inner.wake(WaitKey::Object(object));
@@ -165,14 +166,14 @@ impl Host {
             .references
             .get(&reference)
             .filter(|r| !r.released)
-            .ok_or_else(|| gone("reference"))?
+            .ok_or_else(|| gone(Reason::Reference))?
             .object;
         let mut pending = vec![target];
         let mut visited = BTreeSet::new();
         while let Some(id) = pending.pop() {
             if id == object {
                 return Err(Error::invalid(
-                    "dependency_cycle",
+                    Reason::DependencyCycle,
                     "object dependency graph must be acyclic",
                 ));
             }
@@ -191,9 +192,9 @@ impl Host {
         let record = inner
             .objects
             .get_mut(&object)
-            .ok_or_else(|| gone("object"))?;
+            .ok_or_else(|| gone(Reason::Object))?;
         if record.disposing {
-            return Err(gone("object"));
+            return Err(gone(Reason::Object));
         }
         if record.dependencies.insert(reference) {
             inner.object_dependents.insert(target, reference);
@@ -206,7 +207,7 @@ impl Host {
         let record = inner
             .objects
             .get_mut(&object)
-            .ok_or_else(|| gone("object"))?;
+            .ok_or_else(|| gone(Reason::Object))?;
         record.phase = Status::Gone;
         record.pinned = false;
         inner.wake(WaitKey::Object(object));
@@ -219,7 +220,7 @@ impl Host {
         let record = inner
             .objects
             .get_mut(&object)
-            .ok_or_else(|| gone("object"))?;
+            .ok_or_else(|| gone(Reason::Object))?;
         record.dependencies.remove(&reference);
         if let Some(target) = inner
             .references
@@ -237,7 +238,7 @@ impl Host {
         let record = inner
             .references
             .get(&reference)
-            .ok_or_else(|| gone("reference"))?;
+            .ok_or_else(|| gone(Reason::Reference))?;
         if record.released {
             return Ok(Status::Released);
         }
@@ -256,7 +257,7 @@ impl Host {
         let reference = inner
             .references
             .get_mut(&reference)
-            .ok_or_else(|| gone("reference"))?;
+            .ok_or_else(|| gone(Reason::Reference))?;
         if reference.released {
             return Ok(());
         }
@@ -279,7 +280,7 @@ impl Host {
             .get(&reference)
             .is_some_and(|r| !r.released)
         {
-            return Err(conflict("live_reference"));
+            return Err(conflict(Reason::LiveReference));
         }
         let target = inner
             .references
@@ -302,9 +303,9 @@ impl Host {
         let reference = inner
             .references
             .get_mut(&reference)
-            .ok_or_else(|| gone("reference"))?;
+            .ok_or_else(|| gone(Reason::Reference))?;
         if reference.released {
-            return Err(gone("reference"));
+            return Err(gone(Reason::Reference));
         }
         reference.allowed = Some(allowed);
         Ok(())

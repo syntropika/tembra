@@ -1,3 +1,6 @@
+import { Errors } from "./errors.ts";
+import { CoordinationDecision } from "./protocol.ts";
+
 import { TembraError } from "./error.ts";
 
 export interface Participant<T> {
@@ -17,15 +20,15 @@ export async function coordinate<T>(
     !Number.isFinite(deadline) ||
     deadline <= 0
   )
-    throw new TembraError("invalid", "coordination_limits");
+    throw new TembraError(Errors.Invalid.CoordinationLimits);
   const controller = new AbortController();
   const prepared = new Map<Participant<T>, T>();
-  let decision: "preparing" | "commit" | "abort" = "preparing";
+  let decision: CoordinationDecision = CoordinationDecision.Preparing;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const preparation = Promise.all(
     participants.map(async (participant) => {
       const ticket = await participant.prepare(controller.signal);
-      if (decision === "abort") await participant.abort(ticket);
+      if (decision === CoordinationDecision.Abort) await participant.abort(ticket);
       else prepared.set(participant, ticket);
     }),
   );
@@ -33,12 +36,15 @@ export async function coordinate<T>(
     await Promise.race([
       preparation,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new TembraError("conflict", "prepare_deadline")), deadline);
+        timer = setTimeout(
+          () => reject(new TembraError(Errors.Conflict.PrepareDeadline)),
+          deadline,
+        );
       }),
     ]);
-    decision = "commit";
+    decision = CoordinationDecision.Commit;
   } catch (error) {
-    decision = "abort";
+    decision = CoordinationDecision.Abort;
     controller.abort(error);
     const aborted = await Promise.allSettled(
       [...prepared].map(([participant, ticket]) => participant.abort(ticket)),

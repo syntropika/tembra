@@ -1,3 +1,6 @@
+import { Errors } from "../errors.ts";
+import { KernelOp } from "../protocol.ts";
+
 import { TembraError } from "../error.ts";
 import type { Invocation } from "../kernel.ts";
 import type { AcquisitionOptions, DynamicReference } from "../types.ts";
@@ -15,16 +18,19 @@ export class Context {
     issued.set(this, this);
   }
   get principal(): string {
-    return this.session.kernel.command<string>("root-principal", { root: this.root });
+    return this.session.kernel.command<string>(KernelOp.RootPrincipal, { root: this.root });
   }
   get signal(): AbortSignal {
     return this.session.signal(this.root);
   }
   check(): void {
-    this.session.kernel.command("check-context", { root: this.root, call: this.invocation?.id });
+    this.session.kernel.command(KernelOp.CheckContext, {
+      root: this.root,
+      call: this.invocation?.id,
+    });
   }
   cancel(): void {
-    this.session.kernel.command("cancel-root", { root: this.root });
+    this.session.kernel.command(KernelOp.CancelRoot, { root: this.root });
     this.session.flush();
   }
   get(
@@ -43,7 +49,7 @@ export class Context {
 
 export function context(value: unknown, session: Session): Context {
   if (typeof value !== "object" || value === null || issued.get(value)?.session !== session) {
-    throw new TembraError("forbidden", "context", "An issued context from this host is required");
+    throw new TembraError(Errors.Forbidden.Context, "An issued context from this host is required");
   }
   const result = issued.get(value)!;
   result.check();

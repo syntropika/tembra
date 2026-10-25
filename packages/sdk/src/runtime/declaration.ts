@@ -1,3 +1,6 @@
+import { Errors } from "../errors.ts";
+import { EnvironmentPhase, KernelOp } from "../protocol.ts";
+
 import { refuse } from "../error.ts";
 import type { Readable, State, StateOptions } from "../state.ts";
 import { StateBinding, validate } from "../state.ts";
@@ -22,8 +25,8 @@ export class Declaration {
     readonly environment: Environment,
   ) {}
   private check(): void {
-    if (this.environment.phase !== "declaring")
-      refuse("factory_expired", "Declarations must be synchronous");
+    if (this.environment.phase !== EnvironmentPhase.Declaring)
+      refuse(Errors.Invalid.FactoryExpired, "Declarations must be synchronous");
   }
   get principal(): string {
     return this.session.principalFor(this.environment.object?.id ?? 0);
@@ -39,9 +42,10 @@ export class Declaration {
     this.check();
     const environment = this.environment;
     const object = environment.object;
-    if (!object || environment.state) refuse("state", "An object declares exactly one state");
+    if (!object || environment.state)
+      refuse(Errors.Invalid.State, "An object declares exactly one state");
     const version = options.version ?? 1;
-    if (!Number.isInteger(version) || version <= 0) refuse("state_version");
+    if (!Number.isInteger(version) || version <= 0) refuse(Errors.Invalid.StateVersion);
     let binding = object.binding;
     if (!binding && object.live)
       binding = new StateBinding(this.session, object.id, validate(initial, options));
@@ -49,7 +53,7 @@ export class Declaration {
       const value = validate(initial, options);
       const id = this.session.values.put(value);
       try {
-        this.session.kernel.command("state-init", { object: object.id, value: id, version });
+        this.session.kernel.command(KernelOp.StateInit, { object: object.id, value: id, version });
       } catch (error) {
         this.session.values.drop(id);
         throw error;
@@ -80,7 +84,7 @@ export class Declaration {
     });
     if (this.environment.object) {
       try {
-        this.session.kernel.command("dependency", {
+        this.session.kernel.command(KernelOp.Dependency, {
           object: this.environment.object.id,
           reference: this.session.reference(reference).id,
         });
@@ -96,7 +100,7 @@ export class Declaration {
   resource<T>(name: string, options?: ResourceOptions<T>): Resource<T> {
     this.check();
     if (!options) return this.session.hostResource<T>(name);
-    if (this.environment.resources.has(name)) refuse("duplicate_resource", name);
+    if (this.environment.resources.has(name)) refuse(Errors.Invalid.DuplicateResource, name);
     const resource = this.session.resources.declare(this.environment, name, options);
     this.environment.resources.set(name, resource);
     return resource.handle;
@@ -104,7 +108,7 @@ export class Declaration {
 
   task(start: (scope: TaskScope) => Completion<void>): void {
     this.check();
-    if (typeof start !== "function") refuse("task");
+    if (typeof start !== "function") refuse(Errors.Invalid.Task);
     this.environment.tasks.push({ start });
   }
 
@@ -115,18 +119,21 @@ export class Declaration {
     options: ListenerOptions = {},
   ): void {
     this.check();
-    if (!this.session.kernel.features.subscriptions) refuse("subscriptions_disabled");
+    if (!this.session.kernel.features.subscriptions) refuse(Errors.Invalid.SubscriptionsDisabled);
     if (options.maxBytes !== undefined && !options.sizeOf)
-      refuse("subscription_size", "A local byte budget requires an explicit sizeOf function");
+      refuse(
+        Errors.Invalid.SubscriptionSize,
+        "A local byte budget requires an explicit sizeOf function",
+      );
     if (!name || this.environment.listeners.some((listener) => listener.name === name))
-      refuse("duplicate_listener", name);
+      refuse(Errors.Invalid.DuplicateListener, name);
     this.environment.listeners.push({ name, source, handle, options });
   }
 
   hook(name: string): { run(context: Context, input?: unknown): Promise<unknown> } {
     this.check();
-    if (!this.session.kernel.features.hooks) refuse("hooks_disabled");
-    if (!this.environment.facet.definition.hooks?.[name]) refuse("hook", name);
+    if (!this.session.kernel.features.hooks) refuse(Errors.Invalid.HooksDisabled);
+    if (!this.environment.facet.definition.hooks?.[name]) refuse(Errors.Invalid.Hook, name);
     return {
       run: (context, input) => this.session.runHook(this.environment, name, context, input),
     };

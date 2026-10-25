@@ -1,3 +1,6 @@
+import { Errors } from "../errors.ts";
+import { EnvironmentPhase, KernelOp } from "../protocol.ts";
+
 import { TembraError, refuse } from "../error.ts";
 import type { Resource, ResourceOptions } from "../types.ts";
 import type { Environment, ResourceRecord } from "./records.ts";
@@ -18,7 +21,7 @@ export class Resources {
         typeof dependency === "object" && dependency !== null ? issued.get(dependency) : undefined;
       if (resource) {
         if (resource.session !== this.session)
-          refuse("resource_host", "Resource dependencies must belong to the same host");
+          refuse(Errors.Invalid.ResourceHost, "Resource dependencies must belong to the same host");
         dependencies.push(resource.id);
       } else {
         this.session.reference(dependency);
@@ -28,7 +31,7 @@ export class Resources {
   }
 
   private register(environment: Environment, name: string, options: ResourceOptions<any>): number {
-    return this.session.kernel.command<{ id: number; value: number | null }>("resource", {
+    return this.session.kernel.command<{ id: number; value: number | null }>(KernelOp.Resource, {
       owner: environment.owner,
       name,
       version: options.version ?? 1,
@@ -49,7 +52,7 @@ export class Resources {
   }
 
   declare<T>(environment: Environment, name: string, options: ResourceOptions<T>): ResourceRecord {
-    if (!name || typeof options.open !== "function") refuse("resource");
+    if (!name || typeof options.open !== "function") refuse(Errors.Invalid.Resource);
     const id = this.register(environment, name, options);
     const reused = this.records.get(id);
     if (reused) return reused;
@@ -57,9 +60,9 @@ export class Resources {
     const controller = new AbortController();
     const handle: Resource<T> = Object.freeze({
       get value() {
-        if (environment.phase === "declaring")
-          refuse("resource_in_factory", "Resources open after declaration");
-        const value = record.session.kernel.command<number>("resource-value", {
+        if (environment.phase === EnvironmentPhase.Declaring)
+          refuse(Errors.Invalid.ResourceInFactory, "Resources open after declaration");
+        const value = record.session.kernel.command<number>(KernelOp.ResourceValue, {
           resource: record.id,
         });
         return record.session.value<T>(value);
@@ -93,7 +96,10 @@ export class Resources {
             const value = await options.open(record.controller.signal);
             const id = this.session.values.put(value);
             try {
-              this.session.kernel.command("resource-opened", { resource: record.id, value: id });
+              this.session.kernel.command(KernelOp.ResourceOpened, {
+                resource: record.id,
+                value: id,
+              });
             } catch (error) {
               this.session.values.drop(id);
               if (options.close) await this.session.root((ctx) => options.close!(value, ctx), true);
@@ -117,7 +123,7 @@ export class Resources {
 
   async close(record: ResourceRecord): Promise<void> {
     record.closed ??= (async () => {
-      record.controller.abort(new TembraError("cancelled", "resource"));
+      record.controller.abort(new TembraError(Errors.Cancelled.Resource));
       await record.started?.catch(() => {});
       try {
         if (record.value !== undefined && record.options.close) {
@@ -125,7 +131,7 @@ export class Resources {
           await this.session.root((ctx) => record.options.close!(value, ctx), true);
         }
       } finally {
-        this.session.kernel.command("resource-closed", { resource: record.id });
+        this.session.kernel.command(KernelOp.ResourceClosed, { resource: record.id });
         this.records.delete(record.id);
         this.closedRecords.set(record.id, record);
         this.session.flush();

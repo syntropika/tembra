@@ -1,3 +1,5 @@
+import { Errors } from "./errors.ts";
+
 import type { Host } from "./host.ts";
 import { TembraError } from "./error.ts";
 
@@ -53,7 +55,7 @@ export function router<
     get(service: string, key: string | readonly string[], options?: any): ReturnType<H["get"]> {
       const name = route(service, typeof key === "string" ? [key] : key);
       const host = hosts.get(name);
-      if (!host) throw new TembraError("unavailable", "route", name);
+      if (!host) throw new TembraError(Errors.Unavailable.Route, name);
       return host.get(service, key, options);
     },
   };

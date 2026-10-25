@@ -1,5 +1,6 @@
 //! Portable values use the same tagged JSON convention as the JavaScript SDK.
 //! Custom infrastructure codecs may replace this wire policy without changing the kernel.
+use crate::core::Reason;
 use crate::{Error, Result};
 use serde_json::{Value, json};
 
@@ -55,7 +56,7 @@ pub fn bigint(decimal: impl Into<String>) -> Result<Value> {
     let decimal = decimal.into();
     let digits = decimal.strip_prefix('-').unwrap_or(&decimal);
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(Error::invalid("bigint", "expected a decimal integer"));
+        return Err(Error::invalid(Reason::Bigint, "expected a decimal integer"));
     }
     Ok(json!({"$tembra": ["bigint", decimal]}))
 }
@@ -63,9 +64,10 @@ pub fn bytes(value: &[u8]) -> Value {
     json!({"$tembra": ["bytes", value]})
 }
 pub fn encode(value: &Value) -> Result<Vec<u8>> {
-    serde_json::to_vec(value).map_err(|error| Error::invalid("serialization", error.to_string()))
+    serde_json::to_vec(value)
+        .map_err(|error| Error::invalid(Reason::Serialization, error.to_string()))
 }
 pub fn decode(bytes: &[u8]) -> Result<Value> {
     serde_json::from_slice(bytes)
-        .map_err(|error| Error::invalid("serialization", error.to_string()))
+        .map_err(|error| Error::invalid(Reason::Serialization, error.to_string()))
 }

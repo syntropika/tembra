@@ -1,3 +1,4 @@
+import { KernelOp } from "./protocol.ts";
 import type {
   AcquisitionOptions,
   Completion,
@@ -66,7 +67,7 @@ export class Host {
   }
   installedFacets() {
     return this.session.kernel
-      .command<import("./kernel.ts").KernelFacet[]>("facets")
+      .command<import("./kernel.ts").KernelFacet[]>(KernelOp.Facets)
       .map((info) => {
         const definition = this.session.facets.records.get(info.id)?.definition;
         const description = Object.freeze({
@@ -87,3 +88,7 @@ export function createHost(options: HostOptions): Host {
   return new Host(options);
 }
 export { facet };
+
+export { Code, Reason, Lifetime, Status, ReloadStatus, HookCapability } from "./identifiers.ts";
+
+export { Errors, type ErrorDescriptor } from "./errors.ts";

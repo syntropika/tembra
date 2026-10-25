@@ -1,3 +1,4 @@
+use crate::core::Reason;
 use crate::{Context, Declaration, Error, Result, core};
 use futures::{FutureExt, future::LocalBoxFuture};
 use serde::{Serialize, de::DeserializeOwned};
@@ -76,13 +77,14 @@ impl<E: 'static> Service<E> {
                     .downcast::<E>()
                     .map_err(|_| type_error())
                     .and_then(|environment| {
-                        let arguments = serde_json::from_value(arguments)
-                            .map_err(|error| Error::invalid("arguments", error.to_string()))?;
+                        let arguments = serde_json::from_value(arguments).map_err(|error| {
+                            Error::invalid(Reason::Arguments, error.to_string())
+                        })?;
                         Ok(portable(environment, context, arguments))
                     });
                 async move {
                     serde_json::to_value(result?.await?)
-                        .map_err(|error| Error::invalid("result", error.to_string()))
+                        .map_err(|error| Error::invalid(Reason::Result, error.to_string()))
                 }
                 .boxed_local()
             }),
@@ -94,7 +96,7 @@ impl<E: 'static> Service<E> {
 
 pub(crate) fn type_error() -> Error {
     Error::invalid(
-        "rust_type",
+        Reason::RustType,
         "native argument or result type does not match the method",
     )
 }

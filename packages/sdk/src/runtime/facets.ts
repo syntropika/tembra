@@ -1,3 +1,6 @@
+import { Errors } from "../errors.ts";
+import { EnvironmentPhase, KernelOp, OwnerKind } from "../protocol.ts";
+import { Lifetime } from "../identifiers.ts";
 import { facet } from "../facet.ts";
 import { refuse, TembraError } from "../error.ts";
 import type { KernelFacet, Reload } from "../kernel.ts";
@@ -20,14 +23,14 @@ export class Facets {
     metadata: unknown[];
   } {
     const captured = definitions.map((definition) => facet(definition));
-    const current = this.session.kernel.command<KernelFacet[]>("facets");
+    const current = this.session.kernel.command<KernelFacet[]>(KernelOp.Facets);
     const lookup = (name: string) => captured.find((f) => f.name === name);
     const metadata = captured.map((definition) => {
       if (
         !this.session.kernel.features.views &&
         Object.values(definition.services ?? {}).some((service) => service.access)
       )
-        throw new TembraError("unsupported", "views");
+        throw new TembraError(Errors.Unsupported.Views);
       const requires = Object.entries(definition.requires ?? {}).map(([alias, requirement]) => {
         const name = requirement.facet ?? alias;
         const provider = lookup(name);
@@ -37,7 +40,7 @@ export class Facets {
           : (info?.services.map((s) => s.name) ?? []);
         const service = names.includes(alias) ? alias : names.length === 1 ? names[0] : undefined;
         if (requirement.methods && !service)
-          refuse("dependency_service", `Use explicit services for ${name}`);
+          refuse(Errors.Invalid.DependencyService, `Use explicit services for ${name}`);
         return {
           facet: name,
           apiVersion: requirement.apiVersion,
@@ -49,12 +52,12 @@ export class Facets {
       });
       for (const [alias, hooks] of Object.entries(definition.contributes ?? {})) {
         const requirement = definition.requires?.[alias];
-        if (!requirement) refuse("hook_dependency", alias);
+        if (!requirement) refuse(Errors.Invalid.HookDependency, alias);
         for (const [hook, contribution] of Object.entries(hooks)) {
-          if (!requirement.hooks?.includes(hook)) refuse("hook_dependency", hook);
+          if (!requirement.hooks?.includes(hook)) refuse(Errors.Invalid.HookDependency, hook);
           const priority = typeof contribution === "function" ? 0 : (contribution.priority ?? 0);
           if (!Number.isInteger(priority) || priority < -0x8000_0000 || priority > 0x7fff_ffff)
-            refuse("priority");
+            refuse(Errors.Invalid.Priority);
         }
       }
       return {
@@ -65,7 +68,7 @@ export class Facets {
         services: Object.entries(definition.services ?? {}).map(([name, service]) => ({
           name,
           methods: Object.keys(service.methods),
-          lifetime: service.lifetime ?? "referenced",
+          lifetime: service.lifetime ?? Lifetime.Referenced,
           linger: service.linger ?? 0,
         })),
       };
@@ -74,12 +77,14 @@ export class Facets {
   }
 
   async install(definitions: readonly FacetDefinition[]): Promise<void> {
-    const current = this.session.kernel.command<KernelFacet[]>("facets");
+    const current = this.session.kernel.command<KernelFacet[]>(KernelOp.Facets);
     if (definitions.some((f) => current.some((installed) => installed.name === f.name)))
-      refuse("facet_installed", "Use reload to replace an installed facet");
+      refuse(Errors.Invalid.FacetInstalled, "Use reload to replace an installed facet");
     const prepared = this.declarations(definitions);
-    const reload = this.session.kernel.command<Reload>("prepare", { facets: prepared.metadata });
-    this.session.kernel.command("commit", { ticket: reload.id });
+    const reload = this.session.kernel.command<Reload>(KernelOp.Prepare, {
+      facets: prepared.metadata,
+    });
+    this.session.kernel.command(KernelOp.Commit, { ticket: reload.id });
     const records = reload.facets.map((info) => ({
       info,
       definition: prepared.definitions.find((f) => f.name === info.name)!,
@@ -88,7 +93,7 @@ export class Facets {
     for (const record of records) this.registerContributions(record);
     await Promise.all(records.map((record) => this.ready(record)));
     for (const record of records) {
-      for (const service of record.info.services.filter((s) => s.lifetime === "host")) {
+      for (const service of record.info.services.filter((s) => s.lifetime === Lifetime.Host)) {
         const reference = await this.session.get(service.name, "main", { principal: "host" });
         reference.release();
       }
@@ -98,28 +103,31 @@ export class Facets {
 
   scope(record: FacetRecord): Environment {
     if (record.scope) return record.scope;
-    const environment = this.session.environment({ kind: "facet", id: record.info.owner }, record);
+    const environment = this.session.environment(
+      { kind: OwnerKind.Facet, id: record.info.owner },
+      record,
+    );
     record.scope = environment;
     try {
       const value = record.definition.create?.(new Declaration(this.session, environment)) ?? {};
       if (value && typeof (value as { then?: unknown }).then === "function")
-        refuse("async_factory");
+        refuse(Errors.Invalid.AsyncFactory);
       environment.value = value;
     } finally {
-      environment.phase = "prepared";
+      environment.phase = EnvironmentPhase.Prepared;
       this.session.programs.register(environment);
     }
     return environment;
   }
 
   ready(record: FacetRecord): Promise<void> {
-    if (record.scope?.phase === "live") return Promise.resolve();
+    if (record.scope?.phase === EnvironmentPhase.Live) return Promise.resolve();
     let ready = this.#ready.get(record.info.id);
     if (!ready) {
       ready = (async () => {
         try {
           await this.session.readyHostScope();
-          if (record.scope?.phase === "closed") delete record.scope;
+          if (record.scope?.phase === EnvironmentPhase.Closed) delete record.scope;
           const scope = this.scope(record);
           await this.session.openEnvironment(scope);
         } catch (error) {
@@ -144,14 +152,14 @@ export class Facets {
       const requirement = record.definition.requires![alias]!;
       const target = requirement.facet ?? alias;
       for (const [hook, contribution] of Object.entries(hooks)) {
-        const operation = this.session.kernel.command<number>("allocate");
+        const operation = this.session.kernel.command<number>(KernelOp.Allocate);
         const key = JSON.stringify([record.info.name, target, hook]);
         if (!this.#ordinals.has(key)) this.#ordinals.set(key, this.#nextOrdinal++);
         this.operations.set(operation, {
           facet: record,
           handler: typeof contribution === "function" ? contribution : contribution.handle,
         });
-        this.session.kernel.command("contribute", {
+        this.session.kernel.command(KernelOp.Contribute, {
           facet: record.info.id,
           target,
           hook,
@@ -170,17 +178,17 @@ export class Facets {
     input: unknown,
   ): Promise<unknown> {
     const definition = environment.facet.definition.hooks?.[name];
-    if (!definition) refuse("hook", name);
-    const plan = this.session.kernel.command<number[]>("hook-plan", {
+    if (!definition) refuse(Errors.Invalid.Hook, name);
+    const plan = this.session.kernel.command<number[]>(KernelOp.HookPlan, {
       root: context.root,
       target: environment.facet.info.name,
       hook: name,
     });
     const participants: Participant[] = plan.map((operation) => async (ctx, input, next) => {
       const contributor = this.operations.get(operation);
-      if (!contributor) throw new TembraError("gone", "contribution");
+      if (!contributor) throw new TembraError(Errors.Gone.Contribution);
       const scope = contributor.facet.scope;
-      if (!scope) throw new TembraError("unavailable", "facet_scope");
+      if (!scope) throw new TembraError(Errors.Unavailable.FacetScope);
       return this.session.owned(
         scope,
         operation,
@@ -192,9 +200,11 @@ export class Facets {
   }
 
   retire(id: number): void {
-    const scopes = this.session.kernel.command<number[]>("scopes-for-facet", { facet: id });
+    const scopes = this.session.kernel.command<number[]>(KernelOp.ScopesForFacet, { facet: id });
     const cleanup = scopes.length
-      ? this.session.programs.run(this.session.kernel.command<number>("scopes-cleanup", { scopes }))
+      ? this.session.programs.run(
+          this.session.kernel.command<number>(KernelOp.ScopesCleanup, { scopes }),
+        )
       : Promise.resolve();
     this.session.track(
       cleanup.then(() => {

@@ -1,3 +1,5 @@
+import { Errors } from "./errors.ts";
+import { Code, HookCapability, Lifetime, Reason, ReloadStatus, Status } from "./identifiers.ts";
 import { Host } from "./host.ts";
 import { jsonCodec } from "./codec.ts";
 import { TembraError } from "./error.ts";
@@ -51,11 +53,10 @@ globals.clearTimeout ??= (id: number) => {
 function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host {
   const codec = options.serialization ?? jsonCodec;
   if (codec.id !== ops.op_tembra_codec!())
-    throw new TembraError("conflict", "codec", "The Rust and JS host codecs must agree");
+    throw new TembraError(Errors.Conflict.Codec, "The Rust and JS host codecs must agree");
   function answer(bytes: Uint8Array): any {
     const envelope = codec.deserialize(bytes) as any;
-    if (envelope.error)
-      throw new TembraError(envelope.error.code, envelope.error.reason, envelope.error.message);
+    if (envelope.error) throw new TembraError(envelope.error);
     return envelope.ok;
   }
   return new Host({
@@ -89,4 +90,14 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
   });
 }
 
-globals.Tembra = Object.freeze({ createHost, jsonCodec });
+globals.Tembra = Object.freeze({
+  createHost,
+  jsonCodec,
+  Code,
+  Reason,
+  Lifetime,
+  Status,
+  ReloadStatus,
+  HookCapability,
+  Errors,
+});

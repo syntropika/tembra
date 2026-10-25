@@ -1,3 +1,4 @@
+use crate::Reason;
 use crate::{
     Code, Error, Host, Id, Result,
     host::{conflict, gone},
@@ -21,14 +22,14 @@ impl Host {
         let mut inner = self.inner.borrow_mut();
         if contribution.operation == 0 {
             return Err(Error::invalid(
-                "operation",
+                Reason::Operation,
                 "operation identity is required",
             ));
         }
         let facet = inner
             .facets
             .get(&contribution.facet)
-            .ok_or_else(|| gone("facet"))?;
+            .ok_or_else(|| gone(Reason::Facet))?;
         let own = facet.declaration.name == contribution.target;
         if !own
             && !facet
@@ -39,7 +40,7 @@ impl Host {
         {
             return Err(Error::new(
                 Code::Forbidden,
-                "hook_dependency",
+                Reason::HookDependency,
                 "hook use must be declared in requires",
             ));
         }
@@ -47,16 +48,16 @@ impl Host {
             .current()
             .get(&contribution.target)
             .and_then(|id| inner.facets.get(id))
-            .ok_or_else(|| gone("facet"))?;
+            .ok_or_else(|| gone(Reason::Facet))?;
         if !target.declaration.hooks.contains(&contribution.hook) {
-            return Err(gone("hook"));
+            return Err(gone(Reason::Hook));
         }
         if inner
             .contributions
             .iter()
             .any(|c| c.facet == contribution.facet && c.operation == contribution.operation)
         {
-            return Err(conflict("duplicate_contribution"));
+            return Err(conflict(Reason::DuplicateContribution));
         }
         inner.contributions.push(contribution);
         inner.contributions.sort_by_key(|c| (c.priority, c.ordinal));
@@ -75,10 +76,10 @@ impl Host {
         let snapshot = inner
             .versions
             .get(&version)
-            .ok_or_else(|| conflict("superseded"))?;
-        let target_id = snapshot.get(target).ok_or_else(|| gone("facet"))?;
+            .ok_or_else(|| conflict(Reason::Superseded))?;
+        let target_id = snapshot.get(target).ok_or_else(|| gone(Reason::Facet))?;
         if !inner.facets[target_id].declaration.hooks.contains(hook) {
-            return Err(gone("hook"));
+            return Err(gone(Reason::Hook));
         }
         let plan: Rc<[Id]> = inner
             .contributions

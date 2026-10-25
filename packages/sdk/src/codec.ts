@@ -1,3 +1,6 @@
+import { Errors } from "./errors.ts";
+import { CodecTag, CodecId } from "./protocol.ts";
+
 import { refuse } from "./error.ts";
 
 /** Selected once by infrastructure. Local calls and local state reads do not use a codec. */
@@ -10,31 +13,31 @@ export interface Codec {
 const marker = "$tembra";
 
 function pack(value: unknown, visiting: WeakSet<object>): unknown {
-  if (typeof value === "bigint") return { [marker]: ["bigint", value.toString()] };
-  if (value instanceof Uint8Array) return { [marker]: ["bytes", [...value]] };
+  if (typeof value === "bigint") return { [marker]: [CodecTag.Bigint, value.toString()] };
+  if (value instanceof Uint8Array) return { [marker]: [CodecTag.Bytes, [...value]] };
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value)))
-      refuse("json_number", "Use BigInt for integers outside the safe Number range");
+      refuse(Errors.Invalid.JsonNumber, "Use BigInt for integers outside the safe Number range");
     return value;
   }
   if (typeof value !== "object")
-    refuse("json_value", "This JSON codec requires explicit portable values");
-  if (visiting.has(value)) refuse("json_cycle");
+    refuse(Errors.Invalid.JsonValue, "This JSON codec requires explicit portable values");
+  if (visiting.has(value)) refuse(Errors.Invalid.JsonCycle);
   const prototype = Object.getPrototypeOf(value);
   if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null)
-    refuse("json_type", "Supply a codec for custom object types");
+    refuse(Errors.Invalid.JsonType, "Supply a codec for custom object types");
   visiting.add(value);
   try {
     if (Array.isArray(value)) return Array.from(value, (child) => pack(child, visiting));
     const entries = Reflect.ownKeys(value).map((key) => {
-      if (typeof key !== "string") refuse("json_symbol");
+      if (typeof key !== "string") refuse(Errors.Invalid.JsonSymbol);
       const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
-      if (!Object.hasOwn(descriptor, "value")) refuse("json_accessor");
+      if (!Object.hasOwn(descriptor, "value")) refuse(Errors.Invalid.JsonAccessor);
       return [key, pack(descriptor.value, visiting)];
     });
     return Object.hasOwn(value, marker)
-      ? { [marker]: ["object", entries] }
+      ? { [marker]: [CodecTag.Object, entries] }
       : Object.fromEntries(entries);
   } finally {
     visiting.delete(value);
@@ -44,33 +47,33 @@ function pack(value: unknown, visiting: WeakSet<object>): unknown {
 function unpack(value: unknown): unknown {
   if (value === null || typeof value !== "object") {
     if (typeof value === "number" && Number.isInteger(value) && !Number.isSafeInteger(value))
-      refuse("json_number");
+      refuse(Errors.Invalid.JsonNumber);
     return value;
   }
   if (Array.isArray(value)) return value.map(unpack);
   if (Object.hasOwn(value, marker)) {
     const tag = (value as Record<string, unknown>)[marker];
     if (Object.keys(value).length !== 1 || !Array.isArray(tag) || tag.length !== 2)
-      refuse("json_tag");
+      refuse(Errors.Invalid.JsonTag);
     const [type, data] = tag;
-    if (type === "bigint" && typeof data === "string" && /^-?(0|[1-9]\d*)$/.test(data))
+    if (type === CodecTag.Bigint && typeof data === "string" && /^-?(0|[1-9]\d*)$/.test(data))
       return BigInt(data);
     if (
-      type === "bytes" &&
+      type === CodecTag.Bytes &&
       Array.isArray(data) &&
       data.every((v) => Number.isInteger(v) && v >= 0 && v <= 255)
     )
       return Uint8Array.from(data);
-    if (type === "object" && Array.isArray(data)) {
+    if (type === CodecTag.Object && Array.isArray(data)) {
       if (
         !data.every(
           (entry) => Array.isArray(entry) && entry.length === 2 && typeof entry[0] === "string",
         )
       )
-        refuse("json_tag");
+        refuse(Errors.Invalid.JsonTag);
       return Object.fromEntries(data.map(([key, child]) => [key, unpack(child)]));
     }
-    refuse("json_tag", "Unknown or malformed portable type tag");
+    refuse(Errors.Invalid.JsonTag, "Unknown or malformed portable type tag");
   }
   return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, unpack(child)]));
 }
@@ -112,11 +115,11 @@ export function text(bytes: Uint8Array): string {
           : first >= 0xf0 && first <= 0xf4
             ? 3
             : -1;
-    if (count < 0 || index + count > bytes.length) refuse("utf8");
+    if (count < 0 || index + count > bytes.length) refuse(Errors.Invalid.Utf8);
     let point = first & (0x7f >> (count + 1));
     for (let offset = 0; offset < count; offset++) {
       const next = bytes[index++]!;
-      if ((next & 0xc0) !== 0x80) refuse("utf8");
+      if ((next & 0xc0) !== 0x80) refuse(Errors.Invalid.Utf8);
       point = (point << 6) | (next & 63);
     }
     if (
@@ -124,14 +127,14 @@ export function text(bytes: Uint8Array): string {
       point > 0x10ffff ||
       (point >= 0xd800 && point <= 0xdfff)
     )
-      refuse("utf8");
+      refuse(Errors.Invalid.Utf8);
     output.push(String.fromCodePoint(point));
   }
   return output.join("");
 }
 
 export const jsonCodec: Codec = Object.freeze({
-  id: "tembra-json/1",
+  id: CodecId.Json,
   serialize: (value: unknown) => utf8(JSON.stringify(pack(value, new WeakSet()))),
   deserialize: (bytes: Uint8Array) => unpack(JSON.parse(text(bytes))),
 });

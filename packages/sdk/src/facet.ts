@@ -1,16 +1,20 @@
+import { Errors } from "./errors.ts";
+
 import { refuse } from "./error.ts";
 import type { FacetDefinition, ServiceDefinition } from "./types.ts";
 
 /** Captures executable declarations. No structural schemas or generated contracts are required. */
 export function facet<const F extends FacetDefinition>(definition: F): Readonly<F> {
   if (!definition.name || !Number.isInteger(definition.apiVersion) || definition.apiVersion <= 0)
-    refuse("facet", "A facet needs a name and positive API version");
+    refuse(Errors.Invalid.Facet, "A facet needs a name and positive API version");
   const services = Object.fromEntries(
     Object.entries(definition.services ?? {}).map(([name, service]) => {
-      if (!name || !service.methods || typeof service.methods !== "object") refuse("service");
-      if (service.create && typeof service.create !== "function") refuse("factory");
+      if (!name || !service.methods || typeof service.methods !== "object")
+        refuse(Errors.Invalid.Service);
+      if (service.create && typeof service.create !== "function") refuse(Errors.Invalid.Factory);
       for (const handler of Object.values(service.methods)) {
-        if (typeof handler !== "function") refuse("method", "Methods must be functions");
+        if (typeof handler !== "function")
+          refuse(Errors.Invalid.Method, "Methods must be functions");
       }
       const copy: ServiceDefinition = {
         ...service,
@@ -43,7 +47,7 @@ export function facet<const F extends FacetDefinition>(definition: F): Readonly<
   );
   const hooks = Object.fromEntries(
     Object.entries(definition.hooks ?? {}).map(([name, hook]) => {
-      if (typeof hook.run !== "function") refuse("hook", "Hooks need a run function");
+      if (typeof hook.run !== "function") refuse(Errors.Invalid.Hook, "Hooks need a run function");
       return [
         name,
         Object.freeze({ ...hook, capabilities: Object.freeze([...(hook.capabilities ?? [])]) }),

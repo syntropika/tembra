@@ -1,4 +1,7 @@
 //! Metadata-only adapter protocol. User arguments, state values and callbacks never enter JSON here.
+pub mod protocol;
+use protocol::{ActionType, EffectType, KernelOp, StepType};
+
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use tembra_core::*;
@@ -19,25 +22,32 @@ impl Kernel {
     pub fn request(&self, request: &str) -> String {
         let result = if request.len() > 1024 * 1024 {
             Err(Error::invalid(
-                "metadata_size",
+                Reason::MetadataSize,
                 "metadata exceeds one mebibyte",
             ))
         } else {
             serde_json::from_str::<Value>(request)
-                .map_err(|e| Error::invalid("metadata", e.to_string()))
+                .map_err(|e| Error::invalid(Reason::Metadata, e.to_string()))
                 .and_then(|value| self.execute(&value))
         };
         match result { Ok(value) => json!({"ok":value}), Err(error) => json!({"error":{"code":error.code.as_str(),"reason":error.reason,"message":error.message}}) }.to_string()
     }
 
     pub fn execute(&self, request: &Value) -> Result<Value> {
-        let op = text(request, "op")?;
+        let name = text(request, "op")?;
+        let op = KernelOp::parse(name).ok_or_else(|| {
+            Error::new(
+                Code::Unsupported,
+                Reason::Operation,
+                format!("operation {name} is unavailable in this build"),
+            )
+        })?;
         let h = &self.host;
         let id = |key| number(request, key);
         let unit = || Ok(Value::Null);
         match op {
-            "allocate" => Ok(json!(h.allocate_handle()?)),
-            "scope-register" => {
+            KernelOp::Allocate => Ok(json!(h.allocate_handle()?)),
+            KernelOp::ScopeRegister => {
                 h.register_scope(Scope {
                     id: id("scope")?,
                     owner: owner(request)?,
@@ -52,22 +62,22 @@ impl Kernel {
                 })?;
                 unit()
             }
-            "scope-exists" => Ok(json!(h.scope_exists(id("scope")?))),
-            "scopes-for-owner" => Ok(json!(h.scopes_for_owner(owner(request)?))),
-            "scopes-for-facet" => Ok(json!(h.scopes_for_facet(id("facet")?))),
-            "scope-add-resource" => {
+            KernelOp::ScopeExists => Ok(json!(h.scope_exists(id("scope")?))),
+            KernelOp::ScopesForOwner => Ok(json!(h.scopes_for_owner(owner(request)?))),
+            KernelOp::ScopesForFacet => Ok(json!(h.scopes_for_facet(id("facet")?))),
+            KernelOp::ScopeAddResource => {
                 h.add_scope_resource(id("scope")?, id("resource")?)?;
                 unit()
             }
-            "scope-activate" => Ok(json!(h.activate_scope(id("scope")?)?)),
-            "scopes-cleanup" => Ok(json!(h.cleanup_scopes(
+            KernelOp::ScopeActivate => Ok(json!(h.activate_scope(id("scope")?)?)),
+            KernelOp::ScopesCleanup => Ok(json!(h.cleanup_scopes(
                 numbers(request, "scopes")?,
                 optional_number(request, "object")?
             )?)),
-            "scopes-reload-registered" => Ok(json!(
+            KernelOp::ScopesReloadRegistered => Ok(json!(
                 h.reload_registered_scopes(id("ticket")?, wide(request, "deadline")?)?
             )),
-            "scopes-reload" => {
+            KernelOp::ScopesReload => {
                 let pairs = array(request, "replacements")?
                     .iter()
                     .map(|pair| {
@@ -83,12 +93,12 @@ impl Kernel {
                     wide(request, "deadline")?
                 )?))
             }
-            "program-run" => {
+            KernelOp::ProgramRun => {
                 h.run_program(id("program")?)?;
                 unit()
             }
-            "program-next" => Ok(step_value(h.next_step(id("program")?)?)),
-            "program-complete-step" => {
+            KernelOp::ProgramNext => Ok(step_value(h.next_step(id("program")?)?)),
+            KernelOp::ProgramCompleteStep => {
                 let results = array(request, "results")?
                     .iter()
                     .map(|result| {
@@ -112,22 +122,22 @@ impl Kernel {
                 h.complete_step(id("program")?, results)?;
                 unit()
             }
-            "program-commit" => {
+            KernelOp::ProgramCommit => {
                 h.commit_program(id("program")?)?;
                 unit()
             }
-            "program-abort" => {
+            KernelOp::ProgramAbort => {
                 h.abort_program(id("program")?)?;
                 unit()
             }
-            "program-forget" => {
+            KernelOp::ProgramForget => {
                 h.forget_program(id("program")?)?;
                 unit()
             }
-            "features" => Ok(
+            KernelOp::Features => Ok(
                 json!({"hooks":cfg!(feature="hooks"),"subscriptions":cfg!(feature="subscriptions"),"views":cfg!(feature="views"),"telemetry":cfg!(feature="telemetry")}),
             ),
-            "prepare" => {
+            KernelOp::Prepare => {
                 let facets = array(request, "facets")?
                     .iter()
                     .map(parse_facet)
@@ -138,11 +148,11 @@ impl Kernel {
                     json!({"id":reload.id,"codeVersion":reload.code_version,"facets":reload.facets.iter().map(facet_value).collect::<Vec<_>>(),"objects":reload.objects}),
                 )
             }
-            "gate" => Ok(json!(h.gate(id("ticket")?, &numbers(request, "objects")?)?)),
-            "gate-facets" => Ok(json!(
+            KernelOp::Gate => Ok(json!(h.gate(id("ticket")?, &numbers(request, "objects")?)?)),
+            KernelOp::GateFacets => Ok(json!(
                 h.gate_facets(id("ticket")?, &numbers(request, "owners")?)?
             )),
-            "commit" => {
+            KernelOp::Commit => {
                 let migrations = request
                     .get("migrations")
                     .and_then(Value::as_array)
@@ -159,24 +169,24 @@ impl Kernel {
                     .collect::<Result<Vec<_>>>()?;
                 Ok(json!(h.commit(id("ticket")?, migrations)?))
             }
-            "abort" => {
+            KernelOp::Abort => {
                 h.abort(id("ticket")?)?;
                 unit()
             }
-            "facets" => Ok(json!(
+            KernelOp::Facets => Ok(json!(
                 h.installed_facets()
                     .iter()
                     .map(facet_value)
                     .collect::<Vec<_>>()
             )),
-            "facet" => Ok(facet_value(&h.facet(id("id")?)?)),
-            "facet-named" => Ok(facet_value(&h.facet_named(text(request, "name")?)?)),
-            "next-deadline" => Ok(json!(h.next_deadline())),
-            "address" => {
+            KernelOp::Facet => Ok(facet_value(&h.facet(id("id")?)?)),
+            KernelOp::FacetNamed => Ok(facet_value(&h.facet_named(text(request, "name")?)?)),
+            KernelOp::NextDeadline => Ok(json!(h.next_deadline())),
+            KernelOp::Address => {
                 let a = h.object_address(id("object")?)?;
                 Ok(json!({"service":a.service,"key":a.key,"principal":a.principal}))
             }
-            "acquire" => {
+            KernelOp::Acquire => {
                 let address = Address {
                     service: text(request, "service")?.into(),
                     key: strings(request, "key")?,
@@ -191,105 +201,100 @@ impl Kernel {
                     json!({"reference":result.reference,"object":result.object,"facet":result.facet,"codeVersion":result.code_version,"activate":result.activate}),
                 )
             }
-            "ready" => {
+            KernelOp::Ready => {
                 h.ready(id("object")?)?;
                 unit()
             }
-            "dependency" => {
+            KernelOp::Dependency => {
                 h.dependency(id("object")?, id("reference")?)?;
                 unit()
             }
-            "undepend" => {
+            KernelOp::Undepend => {
                 h.detach_dependency(id("object")?, id("reference")?)?;
                 unit()
             }
-            "fail" => {
+            KernelOp::Fail => {
                 h.fail(id("object")?)?;
                 unit()
             }
-            "status" => Ok(json!(match h.status(id("reference")?)? {
-                Status::Loading => "loading",
-                Status::Live => "live",
-                Status::Released => "released",
-                Status::Gone => "gone",
-            })),
-            "release" => {
+            KernelOp::Status => Ok(json!(h.status(id("reference")?)?.as_str())),
+            KernelOp::Release => {
                 h.release(id("reference")?)?;
                 unit()
             }
-            "forget" => {
+            KernelOp::Forget => {
                 h.forget_reference(id("reference")?)?;
                 unit()
             }
-            "root" => Ok(json!(h.begin_root(text(request, "principal")?)?)),
-            "cleanup-root" => Ok(json!(h.cleanup_root(text(request, "principal")?)?)),
-            "root-principal" => Ok(json!(h.root_principal(id("root")?)?)),
-            "check-context" => {
+            KernelOp::Root => Ok(json!(h.begin_root(text(request, "principal")?)?)),
+            KernelOp::CleanupRoot => Ok(json!(h.cleanup_root(text(request, "principal")?)?)),
+            KernelOp::RootPrincipal => Ok(json!(h.root_principal(id("root")?)?)),
+            KernelOp::CheckContext => {
                 let root = id("root")?;
                 h.check_root(root)?;
                 if let Some(call) = optional_number(request, "call")?
                     && h.invocation(call)?.root != root
                 {
                     return Err(Error::invalid(
-                        "context",
+                        Reason::Context,
                         "invocation belongs to another root",
                     ));
                 }
                 unit()
             }
-            "check-root" => {
+            KernelOp::CheckRoot => {
                 h.check_root(id("root")?)?;
                 unit()
             }
-            "end-root" => {
+            KernelOp::EndRoot => {
                 h.end_root(id("root")?)?;
                 unit()
             }
-            "cancel-root" => {
+            KernelOp::CancelRoot => {
                 h.cancel_root(id("root")?)?;
                 unit()
             }
-            "begin-call" => Ok(invocation_value(&h.begin_call(
+            KernelOp::BeginCall => Ok(invocation_value(&h.begin_call(
                 id("reference")?,
                 id("root")?,
                 text(request, "method")?,
             )?)),
-            "begin-operation" => Ok(invocation_value(&h.begin_operation(
+            KernelOp::BeginOperation => Ok(invocation_value(&h.begin_operation(
                 id("facet")?,
                 id("root")?,
                 id("operation")?,
                 optional_number(request, "object")?,
             )?)),
-            "finish-call" => {
+            KernelOp::FinishCall => {
                 h.finish_call(id("call")?)?;
                 unit()
             }
-            "invocation" => Ok(invocation_value(&h.invocation(id("call")?)?)),
-            "state-init" => Ok(snapshot_value(h.initialize_state(
+            KernelOp::Invocation => Ok(invocation_value(&h.invocation(id("call")?)?)),
+            KernelOp::StateInit => Ok(snapshot_value(h.initialize_state(
                 id("object")?,
                 id("value")?,
                 id("version")?,
             )?)),
-            "snapshot" => Ok(snapshot_value(h.snapshot(id("object")?)?)),
-            "state-adopt" => Ok(snapshot_value(h.adopt_state(
+            KernelOp::Snapshot => Ok(snapshot_value(h.snapshot(id("object")?)?)),
+            KernelOp::StateAdopt => Ok(snapshot_value(h.adopt_state(
                 id("call")?,
                 id("object")?,
                 wide(request, "revision")?,
                 id("value")?,
             )?)),
-            "task" => Ok(json!(h.begin_task(owner(request)?)?)),
-            "task-root" => Ok(json!(
+            KernelOp::Task => Ok(json!(h.begin_task(owner(request)?)?)),
+            KernelOp::TaskRoot => Ok(json!(
                 h.task_root(id("task")?, text(request, "principal")?)?
             )),
-            "stop-task" => {
+            KernelOp::StopTask => {
                 h.stop_task(id("task")?)?;
                 unit()
             }
-            "finish-task" => {
+            KernelOp::FinishTask => {
                 h.finish_task(id("task")?)?;
                 unit()
             }
-            "resource" => {
+            KernelOp::Resource => {
                 let r = h.resource(
                     owner(request)?,
                     text(request, "name")?.into(),
@@ -299,47 +304,47 @@ impl Kernel {
                 )?;
                 Ok(json!({"id":r.id,"value":r.value}))
             }
-            "resource-opened" => {
+            KernelOp::ResourceOpened => {
                 h.resource_opened(id("resource")?, id("value")?)?;
                 unit()
             }
-            "resource-value" => Ok(json!(h.resource_value(id("resource")?)?)),
-            "close-resource" => Ok(json!(
+            KernelOp::ResourceValue => Ok(json!(h.resource_value(id("resource")?)?)),
+            KernelOp::CloseResource => Ok(json!(
                 h.close_resource_before(id("resource")?, optional_number(request, "before")?)?
             )),
-            "resource-closed" => {
+            KernelOp::ResourceClosed => {
                 h.resource_closed(id("resource")?)?;
                 unit()
             }
-            "disposed" => {
+            KernelOp::Disposed => {
                 h.disposed(id("object")?)?;
                 unit()
             }
-            "tick" => {
+            KernelOp::Tick => {
                 h.tick(wide(request, "now")?)?;
                 unit()
             }
-            "next-wake" => Ok(json!(h.next_wake())),
-            "next-idle" => Ok(json!(h.next_idle())),
-            "close" => {
+            KernelOp::NextWake => Ok(json!(h.next_wake())),
+            KernelOp::NextIdle => Ok(json!(h.next_idle())),
+            KernelOp::Close => {
                 h.close();
                 unit()
             }
-            "finish-close" => {
+            KernelOp::FinishClose => {
                 h.finish_close()?;
                 unit()
             }
-            "diagnostics" => {
+            KernelOp::Diagnostics => {
                 let d = h.diagnostics();
                 Ok(
                     json!({"objects":d.objects,"references":d.references,"roots":d.roots,"calls":d.calls,"resources":d.resources,"tasks":d.tasks,"facets":d.facets,"closing":d.closing,"codeVersion":h.version()}),
                 )
             }
-            "drain" => Ok(json!(
+            KernelOp::Drain => Ok(json!(
                 h.drain().into_iter().map(action_value).collect::<Vec<_>>()
             )),
             #[cfg(feature = "views")]
-            "restrict" => {
+            KernelOp::Restrict => {
                 h.restrict(
                     id("reference")?,
                     strings(request, "methods")?.into_iter().collect(),
@@ -347,7 +352,7 @@ impl Kernel {
                 unit()
             }
             #[cfg(feature = "hooks")]
-            "contribute" => {
+            KernelOp::Contribute => {
                 h.contribute(Contribution {
                     facet: id("facet")?,
                     target: text(request, "target")?.into(),
@@ -357,19 +362,19 @@ impl Kernel {
                         .as_i64()
                         .unwrap_or(0)
                         .try_into()
-                        .map_err(|_| Error::invalid("priority", "priority exceeds i32"))?,
+                        .map_err(|_| Error::invalid(Reason::Priority, "priority exceeds i32"))?,
                     ordinal: id("ordinal")?,
                 })?;
                 unit()
             }
             #[cfg(feature = "hooks")]
-            "hook-plan" => Ok(json!(&*h.hook_plan(
+            KernelOp::HookPlan => Ok(json!(&*h.hook_plan(
                 id("root")?,
                 text(request, "target")?,
                 text(request, "hook")?
             )?)),
             #[cfg(feature = "subscriptions")]
-            "listen" => Ok(json!(h.listen(
+            KernelOp::Listen => Ok(json!(h.listen(
                 id("scope")?,
                 optional_number(request, "previous")?,
                 text(request, "name")?.into(),
@@ -381,7 +386,7 @@ impl Kernel {
                 request["coalesce"].as_bool().unwrap_or(false)
             )?)),
             #[cfg(feature = "subscriptions")]
-            "subscribe" => Ok(json!(h.subscribe(
+            KernelOp::Subscribe => Ok(json!(h.subscribe(
                 owner(request)?,
                 id("source")?,
                 id("operation")?,
@@ -390,7 +395,7 @@ impl Kernel {
                 request["coalesce"].as_bool().unwrap_or(false)
             )?)),
             #[cfg(feature = "subscriptions")]
-            "enqueue" => {
+            KernelOp::Enqueue => {
                 h.enqueue(
                     id("subscription")?,
                     Delivery {
@@ -401,23 +406,24 @@ impl Kernel {
                 unit()
             }
             #[cfg(feature = "subscriptions")]
-            "next-delivery" => Ok(h
+            KernelOp::NextDelivery => Ok(h
                 .next_delivery(id("subscription")?)?
                 .map_or(Value::Null, |d| json!(d.payload))),
             #[cfg(feature = "subscriptions")]
-            "finish-delivery" => {
+            KernelOp::FinishDelivery => {
                 h.finish_delivery(id("subscription")?)?;
                 unit()
             }
             #[cfg(feature = "subscriptions")]
-            "unsubscribe" => {
+            KernelOp::Unsubscribe => {
                 h.unsubscribe(id("subscription")?)?;
                 unit()
             }
+            #[allow(unreachable_patterns)] // Optional feature arms are absent in minimal builds.
             _ => Err(Error::new(
                 Code::Unsupported,
-                "operation",
-                format!("operation {op} is unavailable in this build"),
+                Reason::Operation,
+                format!("operation {} is unavailable in this build", op.as_str()),
             )),
         }
     }
@@ -426,15 +432,15 @@ impl Kernel {
 fn step_value(step: Step) -> Value {
     match step {
         Step::Wait { deadline } => {
-            json!({"type":"wait", "deadline":deadline.map(|deadline|deadline.to_string())})
+            json!({"type":StepType::Wait.as_str(), "deadline":deadline.map(|deadline|deadline.to_string())})
         }
-        Step::Prepared => json!({"type":"prepared"}),
-        Step::Complete => json!({"type":"complete"}),
+        Step::Prepared => json!({"type":StepType::Prepared.as_str()}),
+        Step::Complete => json!({"type":StepType::Complete.as_str()}),
         Step::Failed(error) => {
-            json!({"type":"failed","error":{"code":error.code.as_str(),"reason":error.reason,"message":error.message}})
+            json!({"type":StepType::Failed.as_str(),"error":{"code":error.code.as_str(),"reason":error.reason,"message":error.message}})
         }
         Step::Execute(effects) => {
-            json!({"type":"execute","effects":effects.into_iter().map(effect_value).collect::<Vec<_>>()})
+            json!({"type":StepType::Execute.as_str(),"effects":effects.into_iter().map(effect_value).collect::<Vec<_>>()})
         }
     }
 }
@@ -446,77 +452,79 @@ fn effect_value(effect: Effect) -> Value {
         Effect::Stop {
             scope,
             keep_listeners,
-        } => json!({"type":"stop","scope":scope,"keepListeners":keep_listeners}),
-        Effect::Open { resource } => json!({"type":"open","resource":resource}),
-        Effect::Close { resource } => json!({"type":"close","resource":resource}),
+        } => json!({"type":EffectType::Stop.as_str(),"scope":scope,"keepListeners":keep_listeners}),
+        Effect::Open { resource } => json!({"type":EffectType::Open.as_str(),"resource":resource}),
+        Effect::Close { resource } => {
+            json!({"type":EffectType::Close.as_str(),"resource":resource})
+        }
         Effect::Restore { previous, resource } => {
-            json!({"type":"restore","previous":previous,"resource":resource})
+            json!({"type":EffectType::Restore.as_str(),"previous":previous,"resource":resource})
         }
         Effect::Prepare { scope, previous } => {
-            json!({"type":"prepare","scope":scope,"previous":previous})
+            json!({"type":EffectType::Prepare.as_str(),"scope":scope,"previous":previous})
         }
-        Effect::Validate { scope, value } => json!({"type":"validate","scope":scope,"value":value}),
-        Effect::Initialize { scope } => json!({"type":"initialize","scope":scope}),
+        Effect::Validate { scope, value } => {
+            json!({"type":EffectType::Validate.as_str(),"scope":scope,"value":value})
+        }
+        Effect::Initialize { scope } => {
+            json!({"type":EffectType::Initialize.as_str(),"scope":scope})
+        }
         Effect::Migrate {
             scope,
             value,
             version,
-        } => json!({"type":"migrate","scope":scope,"value":value,"version":version}),
-        Effect::Adopt { replacements } => {
-            json!({"type":"adopt","replacements":replacements.into_iter().map(|pair|json!({"previous":pair.previous,"next":pair.next})).collect::<Vec<_>>()})
+        } => {
+            json!({"type":EffectType::Migrate.as_str(),"scope":scope,"value":value,"version":version})
         }
-        Effect::Start { scope } => json!({"type":"start","scope":scope}),
-        Effect::Drop { scope } => json!({"type":"drop","scope":scope}),
+        Effect::Adopt { replacements } => {
+            json!({"type":EffectType::Adopt.as_str(),"replacements":replacements.into_iter().map(|pair|json!({"previous":pair.previous,"next":pair.next})).collect::<Vec<_>>()})
+        }
+        Effect::Start { scope } => json!({"type":EffectType::Start.as_str(),"scope":scope}),
+        Effect::Drop { scope } => json!({"type":EffectType::Drop.as_str(),"scope":scope}),
     }
 }
 
 fn parse_code(code: &str) -> Code {
-    match code {
-        "unavailable" => Code::Unavailable,
-        "released" => Code::Released,
-        "gone" => Code::Gone,
-        "expired" => Code::Expired,
-        "cancelled" => Code::Cancelled,
-        "forbidden" => Code::Forbidden,
-        "conflict" => Code::Conflict,
-        "unsupported" => Code::Unsupported,
-        "closed" => Code::Closed,
-        "exhausted" => Code::Exhausted,
-        _ => Code::Invalid,
-    }
+    Code::parse(code).unwrap_or(Code::Invalid)
 }
 
 fn action_value(action: Action) -> Value {
     match action {
         Action::Execute { program, effects } => {
-            json!({"type":"execute","id":program,"effects":effects.into_iter().map(effect_value).collect::<Vec<_>>()})
+            json!({"type":ActionType::Execute.as_str(),"id":program,"effects":effects.into_iter().map(effect_value).collect::<Vec<_>>()})
         }
         Action::CancelEffects { program, effects } => {
-            json!({"type":"cancel-effects","id":program,"effects":effects.into_iter().map(effect_value).collect::<Vec<_>>()})
+            json!({"type":ActionType::CancelEffects.as_str(),"id":program,"effects":effects.into_iter().map(effect_value).collect::<Vec<_>>()})
         }
-        Action::ProgramPrepared(id) => json!({"type":"program-prepared","id":id}),
+        Action::ProgramPrepared(id) => json!({"type":ActionType::ProgramPrepared.as_str(),"id":id}),
         Action::ProgramComplete { program, error } => {
-            json!({"type":"program-complete","id":program,"error":error.map(error_value)})
+            json!({"type":ActionType::ProgramComplete.as_str(),"id":program,"error":error.map(error_value)})
         }
-        Action::DisposeObject(id) => json!({"type":"dispose","id":id}),
-        Action::CloseResource(id) => json!({"type":"close-resource","id":id}),
-        Action::DropValue(id) => json!({"type":"drop-value","id":id}),
-        Action::CancelRoot(id) => json!({"type":"cancel-root","id":id}),
-        Action::CancelTask(id) => json!({"type":"cancel-task","id":id}),
-        Action::RetireFacet(id) => json!({"type":"retire-facet","id":id}),
+        Action::DisposeObject(id) => json!({"type":ActionType::Dispose.as_str(),"id":id}),
+        Action::CloseResource(id) => json!({"type":ActionType::CloseResource.as_str(),"id":id}),
+        Action::DropValue(id) => json!({"type":ActionType::DropValue.as_str(),"id":id}),
+        Action::CancelRoot(id) => json!({"type":ActionType::CancelRoot.as_str(),"id":id}),
+        Action::CancelTask(id) => json!({"type":ActionType::CancelTask.as_str(),"id":id}),
+        Action::RetireFacet(id) => json!({"type":ActionType::RetireFacet.as_str(),"id":id}),
         Action::StateChanged { object, revision } => {
-            json!({"type":"state","id":object,"revision":revision.to_string()})
+            json!({"type":ActionType::State.as_str(),"id":object,"revision":revision.to_string()})
         }
         #[cfg(feature = "subscriptions")]
-        Action::SubscriptionFailed(id) => json!({"type":"subscription-failed","id":id}),
+        Action::SubscriptionFailed(id) => {
+            json!({"type":ActionType::SubscriptionFailed.as_str(),"id":id})
+        }
         #[cfg(feature = "subscriptions")]
-        Action::DetachSubscription(id) => json!({"type":"detach-subscription","id":id}),
+        Action::DetachSubscription(id) => {
+            json!({"type":ActionType::DetachSubscription.as_str(),"id":id})
+        }
         #[cfg(feature = "subscriptions")]
         Action::Deliver {
             subscription,
             payload,
             operation,
-        } => json!({"type":"deliver","id":subscription,"payload":payload,"operation":operation}),
+        } => {
+            json!({"type":ActionType::Deliver.as_str(),"id":subscription,"payload":payload,"operation":operation})
+        }
     }
 }
 fn invocation_value(i: &Invocation) -> Value {
@@ -527,7 +535,7 @@ fn snapshot_value(s: Snapshot) -> Value {
 }
 fn facet_value(f: &InstalledFacet) -> Value {
     json!({"id":f.id,"owner":f.owner,"codeVersion":f.code_version,"name":f.declaration.name,"apiVersion":f.declaration.api_version,
-        "services":f.declaration.services.iter().map(|s|json!({"name":s.name,"methods":s.methods,"lifetime":if s.lifetime==Lifetime::Host{"host"}else{"referenced"},"linger":s.linger_ms})).collect::<Vec<_>>(),"hooks":f.declaration.hooks,
+        "services":f.declaration.services.iter().map(|s|json!({"name":s.name,"methods":s.methods,"lifetime":s.lifetime.as_str(),"linger":s.linger_ms})).collect::<Vec<_>>(),"hooks":f.declaration.hooks,
         "requires":f.declaration.requires.iter().map(|requirement|json!({"facet":requirement.facet,"apiVersion":requirement.api_version,"services":requirement.methods,"hooks":requirement.hooks})).collect::<Vec<_>>()})
 }
 fn parse_facet(f: &Value) -> Result<Facet> {
@@ -540,7 +548,7 @@ fn parse_facet(f: &Value) -> Result<Facet> {
                 lifetime: match s["lifetime"].as_str().unwrap_or("referenced") {
                     "host" => Lifetime::Host,
                     "referenced" => Lifetime::Referenced,
-                    _ => return Err(Error::invalid("lifetime", "unknown lifetime")),
+                    _ => return Err(Error::invalid(Reason::Lifetime, "unknown lifetime")),
                 },
                 linger_ms: optional_number(s, "linger")?.unwrap_or(0),
             })
@@ -559,11 +567,13 @@ fn parse_facet(f: &Value) -> Result<Facet> {
                         key.clone(),
                         value
                             .as_array()
-                            .ok_or_else(|| Error::invalid("requires", "methods must be an array"))?
+                            .ok_or_else(|| {
+                                Error::invalid(Reason::Requires, "methods must be an array")
+                            })?
                             .iter()
                             .map(|v| {
                                 v.as_str().map(String::from).ok_or_else(|| {
-                                    Error::invalid("requires", "method must be text")
+                                    Error::invalid(Reason::Requires, "method must be text")
                                 })
                             })
                             .collect::<Result<BTreeSet<_>>>()?,
@@ -591,19 +601,19 @@ fn owner(v: &Value) -> Result<Owner> {
         Some("host") => Ok(Owner::Host),
         Some("facet") => Ok(Owner::Facet(number(&v["owner"], "id")?)),
         Some("object") => Ok(Owner::Object(number(&v["owner"], "id")?)),
-        _ => Err(Error::invalid("owner", "invalid owner")),
+        _ => Err(Error::invalid(Reason::Owner, "invalid owner")),
     }
 }
 fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key]
         .as_str()
-        .ok_or_else(|| Error::invalid("metadata", format!("{key} must be text")))
+        .ok_or_else(|| Error::invalid(Reason::Metadata, format!("{key} must be text")))
 }
 fn number(v: &Value, key: &str) -> Result<Id> {
     v[key]
         .as_u64()
         .and_then(|n| n.try_into().ok())
-        .ok_or_else(|| Error::invalid("metadata", format!("{key} must be a u32")))
+        .ok_or_else(|| Error::invalid(Reason::Metadata, format!("{key} must be a u32")))
 }
 fn optional_number(v: &Value, key: &str) -> Result<Option<Id>> {
     if v.get(key).is_none_or(Value::is_null) {
@@ -619,7 +629,7 @@ fn wide(v: &Value, key: &str) -> Result<u64> {
         .or_else(|| v[key].as_u64())
         .ok_or_else(|| {
             Error::invalid(
-                "metadata",
+                Reason::Metadata,
                 format!("{key} must be an unsigned revision or clock"),
             )
         })
@@ -627,7 +637,7 @@ fn wide(v: &Value, key: &str) -> Result<u64> {
 fn array<'a>(v: &'a Value, key: &str) -> Result<&'a Vec<Value>> {
     v[key]
         .as_array()
-        .ok_or_else(|| Error::invalid("metadata", format!("{key} must be an array")))
+        .ok_or_else(|| Error::invalid(Reason::Metadata, format!("{key} must be an array")))
 }
 fn strings(v: &Value, key: &str) -> Result<Vec<String>> {
     array(v, key)?
@@ -635,7 +645,7 @@ fn strings(v: &Value, key: &str) -> Result<Vec<String>> {
         .map(|v| {
             v.as_str()
                 .map(String::from)
-                .ok_or_else(|| Error::invalid("metadata", "expected text"))
+                .ok_or_else(|| Error::invalid(Reason::Metadata, "expected text"))
         })
         .collect()
 }
@@ -652,7 +662,7 @@ fn numbers(v: &Value, key: &str) -> Result<Vec<Id>> {
         .map(|v| {
             v.as_u64()
                 .and_then(|n| n.try_into().ok())
-                .ok_or_else(|| Error::invalid("metadata", "expected u32"))
+                .ok_or_else(|| Error::invalid(Reason::Metadata, "expected u32"))
         })
         .collect()
 }

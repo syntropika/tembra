@@ -1,3 +1,4 @@
+use crate::core::Reason;
 use crate::{
     Error, Facet, Result, State, core,
     facet::{Data, Implementation, type_error},
@@ -120,7 +121,7 @@ impl Host {
                 .any(|installed| installed.declaration.name == facet.metadata.name)
         }) {
             return Err(Error::invalid(
-                "facet_installed",
+                Reason::FacetInstalled,
                 "compiled native facets cannot be replaced",
             ));
         }
@@ -139,7 +140,7 @@ impl Host {
         self.kernel().check_root(root)?;
         if invocation.as_ref().is_some_and(|call| call.root != root) {
             return Err(Error::invalid(
-                "context",
+                Reason::Context,
                 "invocation belongs to another root",
             ));
         }
@@ -211,7 +212,7 @@ impl Host {
             .get(&facet)
             .and_then(|services| services.get(service))
             .cloned()
-            .ok_or_else(|| Error::invalid("native_service", service))?;
+            .ok_or_else(|| Error::invalid(Reason::NativeService, service))?;
         let resources = Rc::new(RefCell::new(Vec::new()));
         let declaration = Declaration {
             host: self.clone(),
@@ -250,7 +251,7 @@ impl Host {
             let objects = self.0.objects.borrow();
             let object = objects
                 .get(&call.object)
-                .ok_or_else(|| Error::invalid("native_object", "object is not activated"))?;
+                .ok_or_else(|| Error::invalid(Reason::NativeObject, "object is not activated"))?;
             (
                 object.environment.clone(),
                 object
@@ -258,7 +259,7 @@ impl Host {
                     .portable
                     .get(&call.method)
                     .cloned()
-                    .ok_or_else(|| Error::invalid("native_method", &call.method))?,
+                    .ok_or_else(|| Error::invalid(Reason::NativeMethod, &call.method))?,
             )
         };
         handle(environment, self.context(call.root, Some(call))?, arguments).await
@@ -270,7 +271,7 @@ impl Host {
             .borrow()
             .get(&id)
             .and_then(|record| record.portable.clone())
-            .ok_or_else(|| Error::invalid("local_value", "this Rust value is not portable"))?;
+            .ok_or_else(|| Error::invalid(Reason::LocalValue, "this Rust value is not portable"))?;
         encoder()
     }
     pub(crate) fn store<T: Serialize + 'static>(
@@ -284,7 +285,7 @@ impl Host {
         let encoder: Option<Encoder> = portable.then(|| {
             Rc::new(move || {
                 serde_json::to_value(&*serialized)
-                    .map_err(|error| Error::invalid("serialization", error.to_string()))
+                    .map_err(|error| Error::invalid(Reason::Serialization, error.to_string()))
             }) as Encoder
         });
         self.0.values.borrow_mut().insert(
@@ -326,7 +327,7 @@ impl Host {
             }
         }) {
             self.0.active.set(self.0.active.get() - 1);
-            return Err(Error::invalid("executor", error.to_string()));
+            return Err(Error::invalid(Reason::Executor, error.to_string()));
         }
         Ok(receive)
     }
@@ -427,7 +428,7 @@ impl Host {
         Ok(async move {
             receive
                 .await
-                .map_err(|_| Error::invalid("executor", "engine completion was dropped"))?
+                .map_err(|_| Error::invalid(Reason::Executor, "engine completion was dropped"))?
         }
         .boxed_local()
         .shared())
@@ -487,7 +488,7 @@ impl Host {
             | core::Effect::Start { .. } => {}
             _ => {
                 return Err(Error::invalid(
-                    "native_effect",
+                    Reason::NativeEffect,
                     "effect has no registered native callback",
                 ));
             }
@@ -502,7 +503,7 @@ impl Host {
     pub async fn close(&self) -> Result<()> {
         if self.0.external_actions.get() {
             return Err(Error::invalid(
-                "driver",
+                Reason::Driver,
                 "the shared JS adapter owns host shutdown",
             ));
         }
@@ -562,7 +563,7 @@ impl Context {
     pub fn invocation(&self) -> Result<core::Invocation> {
         self.call
             .clone()
-            .ok_or_else(|| Error::invalid("context", "an entered invocation is required"))
+            .ok_or_else(|| Error::invalid(Reason::Context, "an entered invocation is required"))
     }
 }
 
@@ -614,7 +615,7 @@ impl Declaration {
             .any(|dependency| !self.host.same(&dependency.host))
         {
             return Err(Error::invalid(
-                "resource_host",
+                Reason::ResourceHost,
                 "resource dependencies belong to another host",
             ));
         }
@@ -738,7 +739,7 @@ impl Reference {
         }
         match self.host.kernel().status(self.id)? {
             core::Status::Live => Ok(()),
-            _ => Err(Error::invalid("not_ready", "object is not live")),
+            _ => Err(Error::invalid(Reason::NotReady, "object is not live")),
         }
     }
     pub async fn call<A: 'static, R: 'static>(
@@ -748,7 +749,7 @@ impl Reference {
         arguments: A,
     ) -> Result<R> {
         if !self.host.same(&context.host) {
-            return Err(Error::invalid("context", "foreign host context"));
+            return Err(Error::invalid(Reason::Context, "foreign host context"));
         }
         context.check()?;
         self.ready().await?;
@@ -769,7 +770,7 @@ impl Reference {
         };
         let Some((environment, handle)) = selected else {
             self.host.kernel().finish_call(call.id)?;
-            return Err(Error::invalid("native_method", method));
+            return Err(Error::invalid(Reason::NativeMethod, method));
         };
         let host = self.host.clone();
         let entered = host.context(call.root, Some(call.clone()))?;
@@ -780,7 +781,7 @@ impl Reference {
             result
         })?;
         let result = receive.await.map_err(|_| {
-            Error::invalid("executor", "executor stopped before callback settled")
+            Error::invalid(Reason::Executor, "executor stopped before callback settled")
         })??;
         result
             .downcast::<R>()

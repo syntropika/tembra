@@ -1,4 +1,5 @@
 use super::*;
+use crate::Reason;
 
 impl Host {
     pub fn begin_task(&self, owner: Owner) -> Result<Id> {
@@ -29,9 +30,13 @@ impl Host {
     pub fn task_root(&self, task: Id, principal: impl Into<String>) -> Result<Id> {
         let mut inner = self.inner.borrow_mut();
         inner.open()?;
-        let record = inner.tasks.get(&task).ok_or_else(|| gone("task"))?;
+        let record = inner.tasks.get(&task).ok_or_else(|| gone(Reason::Task))?;
         if record.cancelled {
-            return Err(Error::new(Code::Cancelled, "task", "task is cancelled"));
+            return Err(Error::new(
+                Code::Cancelled,
+                Reason::Task,
+                "task is cancelled",
+            ));
         }
         let version = inner.version;
         inner.root(version, principal.into(), false)
@@ -39,7 +44,10 @@ impl Host {
 
     pub fn stop_task(&self, task: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let task_record = inner.tasks.get_mut(&task).ok_or_else(|| gone("task"))?;
+        let task_record = inner
+            .tasks
+            .get_mut(&task)
+            .ok_or_else(|| gone(Reason::Task))?;
         if !task_record.cancelled {
             task_record.cancelled = true;
             inner.actions.push_back(Action::CancelTask(task));
@@ -50,7 +58,10 @@ impl Host {
     pub fn finish_task(&self, task: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let task_id = task;
-        let task = inner.tasks.remove(&task).ok_or_else(|| gone("task"))?;
+        let task = inner
+            .tasks
+            .remove(&task)
+            .ok_or_else(|| gone(Reason::Task))?;
         if let Some(facet) = inner.task_facet(task.owner) {
             inner.facet_tasks.remove(&facet, task_id);
         }

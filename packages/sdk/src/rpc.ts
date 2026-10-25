@@ -1,3 +1,6 @@
+import { Errors } from "./errors.ts";
+import { RpcEvent, RpcOp } from "./protocol.ts";
+import { Code, Status } from "./identifiers.ts";
 import type { Host } from "./host.ts";
 import type { Context } from "./runtime/context.ts";
 import type { DynamicReference } from "./types.ts";
@@ -21,11 +24,11 @@ export interface Limits {
 }
 interface Wire {
   id?: number;
-  op?: string;
+  op?: RpcOp;
   payload?: any;
   ok?: any;
-  error?: { code: string; reason: string; message: string };
-  event?: string;
+  error?: { code: Code; reason: string; message: string };
+  event?: RpcEvent;
 }
 function errorValue(error: unknown) {
   const value = failure(error);
@@ -51,10 +54,10 @@ class Channel {
       (frame) => {
         if (this.closed) return;
         try {
-          if (frame.length > this.maxFrame) throw new TembraError("exhausted", "frame_size");
+          if (frame.length > this.maxFrame) throw new TembraError(Errors.Exhausted.FrameSize);
           const message = this.codec.deserialize(frame);
           if (!message || typeof message !== "object" || Array.isArray(message))
-            throw new TembraError("invalid", "rpc_frame");
+            throw new TembraError(Errors.Invalid.RpcFrame);
           receive(message);
         } catch (error) {
           options.onError?.(error);
@@ -65,12 +68,12 @@ class Channel {
     );
   }
   async send(message: Wire): Promise<void> {
-    if (this.closed) throw new TembraError("gone", "connection");
+    if (this.closed) throw new TembraError(Errors.Gone.Connection);
     const frame = this.codec.serialize(message);
-    if (frame.length > this.maxFrame) throw new TembraError("exhausted", "frame_size");
+    if (frame.length > this.maxFrame) throw new TembraError(Errors.Exhausted.FrameSize);
     await this.transport.send(frame);
   }
-  close(error: unknown = new TembraError("gone", "connection")): void {
+  close(error: unknown = new TembraError(Errors.Gone.Connection)): void {
     if (this.closed) return;
     this.closed = true;
     this.#detach?.();
@@ -145,17 +148,14 @@ export class RemoteHost {
       transport,
       options,
       (message) => {
-        if (message.event === "state") {
+        if (message.event === RpcEvent.State) {
           this.#states.get(message.payload.reference)?.adopt(message.payload.value);
           return;
         }
         const pending = message.id && this.#pending.get(message.id);
         if (!pending) return;
         this.#pending.delete(message.id!);
-        if (message.error)
-          pending.reject(
-            new TembraError(message.error.code, message.error.reason, message.error.message),
-          );
+        if (message.error) pending.reject(new TembraError(message.error));
         else pending.resolve(message.ok);
       },
       (error) => {
@@ -165,19 +165,19 @@ export class RemoteHost {
       },
     );
   }
-  async request(op: string, payload: unknown, signal?: AbortSignal): Promise<any> {
+  async request(op: RpcOp, payload: unknown, signal?: AbortSignal): Promise<any> {
     signal?.throwIfAborted();
     if (this.#pending.size >= this.channel.maxPending)
-      throw new TembraError("exhausted", "pending_requests");
+      throw new TembraError(Errors.Exhausted.PendingRequests);
     const id = ++this.#next;
-    if (!Number.isSafeInteger(id)) throw new TembraError("exhausted", "request_ids");
+    if (!Number.isSafeInteger(id)) throw new TembraError(Errors.Exhausted.RequestIds);
     let abort: (() => void) | undefined;
     const result = new Promise((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });
       abort = () => {
         this.#pending.delete(id);
-        reject(signal?.reason ?? new TembraError("cancelled", "request"));
-        void this.channel.send({ op: "cancel", payload: { id } }).catch(() => {});
+        reject(signal?.reason ?? new TembraError(Errors.Cancelled.Request));
+        void this.channel.send({ op: RpcOp.Cancel, payload: { id } }).catch(() => {});
       };
       signal?.addEventListener("abort", abort, { once: true });
       void this.channel.send({ id, op, payload }).catch((error) => {
@@ -192,7 +192,7 @@ export class RemoteHost {
     }
   }
   installedFacets(): Promise<unknown> {
-    return this.request("describe", null);
+    return this.request(RpcOp.Describe, null);
   }
   async get(
     service: string,
@@ -200,15 +200,15 @@ export class RemoteHost {
     options: { signal?: AbortSignal } = {},
   ): Promise<DynamicReference> {
     const acquired = await this.request(
-      "get",
+      RpcOp.Get,
       { service, key: typeof key === "string" ? [key] : key },
       options.signal,
     );
     const id = acquired.reference as number;
     let released = false;
     const check = () => {
-      if (released) throw new TembraError("released", "reference");
-      if (this.channel.closed) throw new TembraError("gone", "connection");
+      if (released) throw new TembraError(Errors.Released.Reference);
+      if (this.channel.closed) throw new TembraError(Errors.Gone.Connection);
     };
     const state = Object.hasOwn(acquired, "state")
       ? new RemoteState(acquired.state, check, (error) => this.channel.options.onError?.(error))
@@ -217,25 +217,24 @@ export class RemoteHost {
     const target = {
       ready: Promise.resolve(),
       get status() {
-        return released ? "released" : peer.channel.closed ? "gone" : "live";
+        return released ? Status.Released : peer.channel.closed ? Status.Gone : Status.Live;
       },
       get state() {
         check();
-        if (!state) throw new TembraError("invalid", "state");
+        if (!state) throw new TembraError(Errors.Invalid.State);
         return state;
       },
       release: () => {
         if (released) return;
         released = true;
         this.#states.delete(id);
-        void this.request("release", { reference: id }).catch((error) =>
+        void this.request(RpcOp.Release, { reference: id }).catch((error) =>
           this.channel.options.onError?.(error),
         );
       },
       opaque() {
         throw new TembraError(
-          "unsupported",
-          "remote_opaque",
+          Errors.Unsupported.RemoteOpaque,
           "Opaque resources are local to their language environment",
         );
       },
@@ -254,7 +253,7 @@ export class RemoteHost {
               ? (arguments_.pop() as Context).signal
               : undefined;
           return this.request(
-            "call",
+            RpcOp.Call,
             { reference: id, method: property, arguments: arguments_ },
             signal,
           );
@@ -297,7 +296,7 @@ export function serve(
       while (Object.hasOwn(record, "pending") && !record.closed) {
         const value = record.pending;
         delete record.pending;
-        await channel.send({ event: "state", payload: { reference, value } });
+        await channel.send({ event: RpcEvent.State, payload: { reference, value } });
       }
     })()
       .catch((error) => channel.close(error))
@@ -309,7 +308,7 @@ export function serve(
     transport,
     options,
     (message) => {
-      if (message.op === "cancel") {
+      if (message.op === RpcOp.Cancel) {
         const request = requests.get(message.payload?.id);
         if (request) request.cancelled = true;
         calls.get(message.payload?.id)?.cancel();
@@ -317,12 +316,12 @@ export function serve(
       }
       const id = message.id;
       if (!Number.isSafeInteger(id) || !id || id <= 0 || !message.op) {
-        channel.close(new TembraError("invalid", "rpc_request"));
+        channel.close(new TembraError(Errors.Invalid.RpcRequest));
         return;
       }
       if (pending >= channel.maxPending || requests.has(id)) {
         void channel
-          .send({ id, error: errorValue(new TembraError("exhausted", "pending_requests")) })
+          .send({ id, error: errorValue(new TembraError(Errors.Exhausted.PendingRequests)) })
           .catch(() => channel.close());
         return;
       }
@@ -332,25 +331,25 @@ export function serve(
       void (async () => {
         const payload = message.payload;
         switch (message.op) {
-          case "describe":
+          case RpcOp.Describe:
             return host.installedFacets().map(({ describe, ...info }) => info);
-          case "get": {
+          case RpcOp.Get: {
             if (
               typeof payload?.service !== "string" ||
               !Array.isArray(payload.key) ||
               !payload.key.every((key: unknown) => typeof key === "string")
             )
-              throw new TembraError("invalid", "address");
+              throw new TembraError(Errors.Invalid.Address);
             if (options.allow && !options.allow(payload.service, payload.key))
-              throw new TembraError("forbidden", "service");
+              throw new TembraError(Errors.Forbidden.Service);
             if (references.size >= channel.maxPending)
-              throw new TembraError("exhausted", "remote_references");
+              throw new TembraError(Errors.Exhausted.RemoteReferences);
             const reference = await host.get(payload.service, payload.key, {
               principal: options.principal,
             });
             if (channel.closed || request.cancelled) {
               reference.release();
-              throw new TembraError("gone", "connection");
+              throw new TembraError(Errors.Gone.Connection);
             }
             const referenceId = ++next;
             const methods = new Set(host.session.reference(reference).methods);
@@ -379,7 +378,7 @@ export function serve(
             }
             return { reference: referenceId, methods: [...methods], ...snapshot };
           }
-          case "release": {
+          case RpcOp.Release: {
             const record = references.get(payload?.reference);
             if (record) {
               record.closed = true;
@@ -389,7 +388,7 @@ export function serve(
             }
             return null;
           }
-          case "call": {
+          case RpcOp.Call: {
             const record = references.get(payload?.reference);
             if (
               !record ||
@@ -398,8 +397,8 @@ export function serve(
               !Array.isArray(payload.arguments) ||
               typeof record.reference[payload.method] !== "function"
             )
-              throw new TembraError("forbidden", "method");
-            if (request.cancelled) throw new TembraError("cancelled", "request");
+              throw new TembraError(Errors.Forbidden.Method);
+            if (request.cancelled) throw new TembraError(Errors.Cancelled.Request);
             return host.root(
               async (ctx) => {
                 calls.set(id, ctx);
@@ -415,13 +414,13 @@ export function serve(
             );
           }
           default:
-            throw new TembraError("invalid", "rpc_operation");
+            throw new TembraError(Errors.Invalid.RpcOperation);
         }
       })()
         .then(
           async (ok) => {
             await channel.send({ id, ok });
-            if (message.op === "get") {
+            if (message.op === RpcOp.Get) {
               const record = references.get(ok.reference);
               if (record) {
                 record.active = true;

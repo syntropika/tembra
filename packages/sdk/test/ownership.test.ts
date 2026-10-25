@@ -1,3 +1,4 @@
+import { KernelOp } from "../src/protocol.ts";
 import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
 import { facet } from "../src/facet.ts";
@@ -78,7 +79,7 @@ test("native provider metadata is looked up once by acquired facet identity", as
       },
     },
   });
-  const prepared = host.session.kernel.command<Reload>("prepare", {
+  const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
     facets: [
       {
         name: "native",
@@ -88,7 +89,7 @@ test("native provider metadata is looked up once by acquired facet identity", as
     ],
   });
   facetId = prepared.facets[0]!.id;
-  host.session.kernel.command("commit", { ticket: prepared.id });
+  host.session.kernel.command(KernelOp.Commit, { ticket: prepared.id });
   const commands = spyOn(host.session.kernel, "command");
   try {
     const first = await host.get("native", "first");

@@ -1,3 +1,4 @@
+import { Lifetime, ReloadStatus, Status } from "./identifiers.ts";
 import type { Context } from "./runtime/context.ts";
 import type { Declaration } from "./runtime/declaration.ts";
 import type { Codec } from "./codec.ts";
@@ -12,7 +13,7 @@ export type Handler = (environment: any, context: Context, ...arguments_: any[])
 export interface ServiceDefinition {
   create?: (self: Declaration) => unknown;
   methods: Record<string, Handler>;
-  lifetime?: "referenced" | "host";
+  lifetime?: Lifetime;
   linger?: number;
   access?: (principal: string) => { methods: readonly string[] };
 }
@@ -79,7 +80,7 @@ export interface ListenerOptions {
 
 export interface ReferenceBase<T = unknown> {
   readonly ready: Promise<void>;
-  readonly status: "loading" | "live" | "released" | "gone";
+  readonly status: Status;
   readonly state: Readable<T>;
   release(): void;
   opaque<R = unknown>(name: string): R;
@@ -100,7 +101,7 @@ export interface ReloadReport {
 }
 export interface PreparedReload {
   readonly report: ReloadReport;
-  readonly status: "prepared" | "committed" | "aborted";
+  readonly status: ReloadStatus;
   commit(): Promise<ReloadReport>;
   abort(): Promise<void>;
 }

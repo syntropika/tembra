@@ -18,6 +18,14 @@ pub enum Lifetime {
     Referenced,
     Host,
 }
+impl Lifetime {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Referenced => "referenced",
+            Self::Host => "host",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Service {
@@ -82,6 +90,16 @@ pub enum Status {
     Live,
     Released,
     Gone,
+}
+impl Status {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Loading => "loading",
+            Self::Live => "live",
+            Self::Released => "released",
+            Self::Gone => "gone",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

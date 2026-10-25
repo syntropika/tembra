@@ -1,4 +1,5 @@
 use super::*;
+use crate::Reason;
 
 impl Host {
     /// Reserves one opaque adapter value, callback or source identity in the host's namespace.
@@ -81,15 +82,18 @@ impl Host {
     /// Completes adapter cleanup. In-flight calls/tasks and owned resources must already settle.
     pub fn disposed(&self, object: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let record = inner.objects.get(&object).ok_or_else(|| gone("object"))?;
+        let record = inner
+            .objects
+            .get(&object)
+            .ok_or_else(|| gone(Reason::Object))?;
         if record.calls != 0
             || record.tasks != 0
             || inner.owner_resources.contains(&Owner::Object(object))
         {
-            return Err(conflict("cleanup_busy"));
+            return Err(conflict(Reason::CleanupBusy));
         }
         if !record.disposing {
-            return Err(conflict("object_state"));
+            return Err(conflict(Reason::ObjectState));
         }
         let record = inner.objects.remove(&object).expect("checked object");
         inner.addresses.remove(&record.address);
@@ -142,7 +146,7 @@ impl Host {
     pub fn tick(&self, now: u64) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         if now < inner.now {
-            return Err(Error::invalid("clock", "clock must be monotonic"));
+            return Err(Error::invalid(Reason::Clock, "clock must be monotonic"));
         }
         inner.now = now;
         while inner
@@ -231,7 +235,7 @@ impl Host {
             || !inner.scopes.is_empty()
             || !inner.programs.is_empty()
         {
-            return Err(conflict("cleanup_busy"));
+            return Err(conflict(Reason::CleanupBusy));
         }
         inner.closed = true;
         inner.references.clear();

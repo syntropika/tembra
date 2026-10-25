@@ -43,3 +43,7 @@ export async function createHost(options: BrowserHostOptions = {}): Promise<Host
 
 export { facet };
 export type { Host };
+
+export { Code, Reason, Lifetime, Status, ReloadStatus, HookCapability } from "./identifiers.ts";
+
+export { Errors, type ErrorDescriptor } from "./errors.ts";

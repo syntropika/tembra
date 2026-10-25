@@ -1,4 +1,5 @@
 use super::*;
+use crate::Reason;
 
 impl Host {
     /// Prepares an isolated replacement. No installed declaration or object state changes.
@@ -10,17 +11,17 @@ impl Host {
         let mut inner = self.inner.borrow_mut();
         inner.open()?;
         if inner.pending.is_some() {
-            return Err(conflict("reload_running"));
+            return Err(conflict(Reason::ReloadRunning));
         }
         if inner.versions.len() >= 32 {
-            return Err(conflict("retained_versions"));
+            return Err(conflict(Reason::RetainedVersions));
         }
         let version = inner.version.checked_add(1).ok_or_else(exhausted)?;
         let mut current = inner.current().clone();
         let mut names = BTreeSet::new();
         for name in &remove {
             if !names.insert(name.clone()) {
-                return Err(Error::invalid("duplicate", name));
+                return Err(Error::invalid(Reason::Duplicate, name));
             }
             current.remove(name);
         }
@@ -29,7 +30,7 @@ impl Host {
         for declaration in declarations {
             validate_facet(&declaration)?;
             if !names.insert(declaration.name.clone()) {
-                return Err(Error::invalid("duplicate", &declaration.name));
+                return Err(Error::invalid(Reason::Duplicate, &declaration.name));
             }
             let id = reserve(&mut next)?;
             let owner = inner
@@ -56,7 +57,7 @@ impl Host {
             let facet = lookup(id).expect("prepared facet exists");
             for service in &facet.declaration.services {
                 if services.insert(service.name.clone(), facet).is_some() {
-                    return Err(Error::invalid("duplicate_service", &service.name));
+                    return Err(Error::invalid(Reason::DuplicateService, &service.name));
                 }
             }
         }
@@ -67,10 +68,10 @@ impl Host {
                     .get(&requirement.facet)
                     .and_then(lookup)
                     .ok_or_else(|| {
-                        Error::new(Code::Unavailable, "dependency", &requirement.facet)
+                        Error::new(Code::Unavailable, Reason::Dependency, &requirement.facet)
                     })?;
                 if provider.declaration.api_version != requirement.api_version {
-                    return Err(conflict("api_version"));
+                    return Err(conflict(Reason::ApiVersion));
                 }
                 for (name, methods) in &requirement.methods {
                     let service = provider
@@ -78,13 +79,13 @@ impl Host {
                         .services
                         .iter()
                         .find(|s| &s.name == name)
-                        .ok_or_else(|| Error::invalid("dependency_service", name))?;
+                        .ok_or_else(|| Error::invalid(Reason::DependencyService, name))?;
                     if !methods.is_subset(&service.methods) {
-                        return Err(conflict("missing_method"));
+                        return Err(conflict(Reason::MissingMethod));
                     }
                 }
                 if !requirement.hooks.is_subset(&provider.declaration.hooks) {
-                    return Err(conflict("missing_hook"));
+                    return Err(conflict(Reason::MissingHook));
                 }
             }
         }
@@ -108,11 +109,11 @@ impl Host {
             }
             let provider = services
                 .get(&object.address.service)
-                .ok_or_else(|| conflict("live_consumer"))?;
+                .ok_or_else(|| conflict(Reason::LiveConsumer))?;
             if reference.expected_api != 0
                 && reference.expected_api != provider.declaration.api_version
             {
-                return Err(conflict("api_version"));
+                return Err(conflict(Reason::ApiVersion));
             }
             let service = provider
                 .declaration
@@ -121,14 +122,14 @@ impl Host {
                 .find(|s| s.name == object.address.service)
                 .expect("service exists");
             if !reference.methods.is_subset(&service.methods) {
-                return Err(conflict("missing_method"));
+                return Err(conflict(Reason::MissingMethod));
             }
         }
         if objects
             .iter()
             .any(|id| inner.objects[id].phase == Status::Loading)
         {
-            return Err(conflict("activation_busy"));
+            return Err(conflict(Reason::ActivationBusy));
         }
         let services = services
             .into_iter()
@@ -178,9 +179,9 @@ impl Host {
             .pending
             .as_ref()
             .filter(|p| p.reload.id == ticket)
-            .ok_or_else(|| conflict("reload_ticket"))?;
+            .ok_or_else(|| conflict(Reason::ReloadTicket))?;
         if objects.iter().any(|id| !pending.objects.contains(id)) {
-            return Err(Error::invalid("gate_object", "object is not affected"));
+            return Err(Error::invalid(Reason::GateObject, "object is not affected"));
         }
         for id in objects {
             let roots = if inner.objects[id].gate.is_none() {
@@ -188,7 +189,10 @@ impl Host {
             } else {
                 None
             };
-            let object = inner.objects.get_mut(id).ok_or_else(|| gone("object"))?;
+            let object = inner
+                .objects
+                .get_mut(id)
+                .ok_or_else(|| gone(Reason::Object))?;
             if object.gate.is_none() {
                 object.gate = roots;
             }
@@ -219,20 +223,20 @@ impl Host {
             .pending
             .as_ref()
             .filter(|p| p.reload.id == ticket)
-            .ok_or_else(|| conflict("reload_ticket"))?;
+            .ok_or_else(|| conflict(Reason::ReloadTicket))?;
         if pending
             .gated_facets
             .keys()
             .any(|owner| inner.facet_busy(*owner))
         {
-            return Err(conflict("gate_busy"));
+            return Err(conflict(Reason::GateBusy));
         }
         if pending
             .gated
             .iter()
             .any(|id| inner.objects[id].calls > 0 || inner.objects[id].tasks > 0)
         {
-            return Err(conflict("gate_busy"));
+            return Err(conflict(Reason::GateBusy));
         }
         // Claims may arrive while adapters open resources. Recheck them before adoption.
         for reference in pending
@@ -253,22 +257,22 @@ impl Host {
             let (_, service, api_version) = pending
                 .services
                 .get(&object.address.service)
-                .ok_or_else(|| conflict("live_consumer"))?;
+                .ok_or_else(|| conflict(Reason::LiveConsumer))?;
             if (reference.expected_api != 0 && reference.expected_api != *api_version)
                 || !reference.methods.is_subset(&service.methods)
             {
-                return Err(conflict("live_consumer"));
+                return Err(conflict(Reason::LiveConsumer));
             }
         }
         let mut migrated = BTreeSet::new();
         for migration in &migrations {
             if !migrated.insert(migration.object) || !pending.gated.contains(&migration.object) {
-                return Err(conflict("migration_gate"));
+                return Err(conflict(Reason::MigrationGate));
             }
             let state = inner
                 .objects
                 .get(&migration.object)
-                .ok_or_else(|| gone("object"))?
+                .ok_or_else(|| gone(Reason::Object))?
                 .state
                 .unwrap_or(Snapshot {
                     value: 0,
@@ -276,11 +280,11 @@ impl Host {
                     version: 0,
                 });
             if state.revision != migration.expected_revision {
-                return Err(conflict("state_revision"));
+                return Err(conflict(Reason::StateRevision));
             }
             if migration.value == 0 || migration.state_version <= state.version {
                 return Err(Error::invalid(
-                    "state_version",
+                    Reason::StateVersion,
                     "migration must advance the state version",
                 ));
             }
@@ -374,7 +378,7 @@ impl Host {
     pub fn abort(&self, ticket: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         if inner.pending.as_ref().is_none_or(|p| p.reload.id != ticket) {
-            return Err(conflict("reload_ticket"));
+            return Err(conflict(Reason::ReloadTicket));
         }
         for id in inner.pending.take().expect("pending exists").reload.objects {
             if let Some(object) = inner.objects.get_mut(&id) {
@@ -393,7 +397,7 @@ impl Host {
             .pending
             .as_ref()
             .filter(|pending| pending.reload.id == ticket)
-            .ok_or_else(|| conflict("reload_ticket"))?;
+            .ok_or_else(|| conflict(Reason::ReloadTicket))?;
         if owners.iter().any(|owner| {
             !pending
                 .reload
@@ -401,7 +405,7 @@ impl Host {
                 .iter()
                 .any(|facet| facet.owner == *owner)
         }) {
-            return Err(Error::invalid("gate_facet", "facet is not affected"));
+            return Err(Error::invalid(Reason::GateFacet, "facet is not affected"));
         }
         for owner in owners {
             if inner
@@ -440,13 +444,16 @@ impl Host {
             .facets
             .get(&id)
             .cloned()
-            .ok_or_else(|| gone("facet"))
+            .ok_or_else(|| gone(Reason::Facet))
     }
 
     /// Resolves one current declaration without enumerating unrelated installed facets.
     pub fn facet_named(&self, name: &str) -> Result<InstalledFacet> {
         let inner = self.inner.borrow();
-        let id = inner.current().get(name).ok_or_else(|| gone("facet"))?;
+        let id = inner
+            .current()
+            .get(name)
+            .ok_or_else(|| gone(Reason::Facet))?;
         Ok(inner.facets[id].clone())
     }
 

@@ -1,3 +1,6 @@
+import { Errors } from "../errors.ts";
+import { KernelOp } from "../protocol.ts";
+import { Reason, ReloadStatus } from "../identifiers.ts";
 import { TembraError } from "../error.ts";
 import type { Reload } from "../kernel.ts";
 import type { FacetDefinition, PreparedReload, ReloadOptions, ReloadReport } from "../types.ts";
@@ -22,7 +25,7 @@ export class Replacements {
     options: ReloadOptions = {},
     remove: readonly string[] = [],
   ): Promise<PreparedReload> {
-    if (this.#pending) return Promise.reject(new TembraError("conflict", "reload_running"));
+    if (this.#pending) return Promise.reject(new TembraError(Errors.Conflict.ReloadRunning));
     const pending = this.capture(definitions, options, remove);
     this.#pending = pending;
     pending.catch(() => {
@@ -32,11 +35,11 @@ export class Replacements {
   }
   async cancel(): Promise<void> {
     if (this.#program !== undefined) {
-      this.session.kernel.command("program-abort", { program: this.#program });
+      this.session.kernel.command(KernelOp.ProgramAbort, { program: this.#program });
       this.session.flush();
     }
     const ticket = await this.#pending?.catch(() => undefined);
-    if (ticket?.status === "prepared") await ticket.abort();
+    if (ticket?.status === ReloadStatus.Prepared) await ticket.abort();
   }
 
   private async capture(
@@ -46,7 +49,7 @@ export class Replacements {
   ): Promise<PreparedReload> {
     const session = this.session;
     const declarations = session.facets.declarations(definitions);
-    const reload = session.kernel.command<Reload>("prepare", {
+    const reload = session.kernel.command<Reload>(KernelOp.Prepare, {
       facets: declarations.metadata,
       remove,
     });
@@ -65,7 +68,7 @@ export class Replacements {
         );
         if (record) session.createEnvironment(object, record);
       }
-      program = session.kernel.command<number>("scopes-reload-registered", {
+      program = session.kernel.command<number>(KernelOp.ScopesReloadRegistered, {
         ticket: reload.id,
         deadline: options.deadline ?? 5000,
       });
@@ -74,9 +77,9 @@ export class Replacements {
     } catch (error) {
       this.#program = undefined;
       if (program === undefined) {
-        session.kernel.command("abort", { ticket: reload.id });
+        session.kernel.command(KernelOp.Abort, { ticket: reload.id });
         const scopes = reload.facets.flatMap((facet) =>
-          session.kernel.command<number[]>("scopes-for-facet", { facet: facet.id }),
+          session.kernel.command<number[]>(KernelOp.ScopesForFacet, { facet: facet.id }),
         );
         await session.programs.cleanup(scopes.map((scope) => session.programs.scopes.get(scope)!));
       }
@@ -88,38 +91,39 @@ export class Replacements {
       codeVersion: reload.codeVersion,
       facets: records.map((record) => record.info.name),
     };
-    let status: PreparedReload["status"] = "prepared";
+    let status: PreparedReload["status"] = ReloadStatus.Prepared;
     return {
       report,
       get status() {
         return status;
       },
       commit: async () => {
-        if (status !== "prepared") throw new TembraError("conflict", "reload_ticket");
+        if (status !== ReloadStatus.Prepared) throw new TembraError(Errors.Conflict.ReloadTicket);
         try {
-          session.kernel.command("program-commit", { program: id });
+          session.kernel.command(KernelOp.ProgramCommit, { program: id });
         } catch (error) {
-          session.kernel.command("program-abort", { program: id });
+          session.kernel.command(KernelOp.ProgramAbort, { program: id });
           await session.programs.run(id).catch(() => {});
-          status = "aborted";
+          status = ReloadStatus.Aborted;
           this.#pending = undefined;
           throw error;
         }
-        status = "committed";
+        status = ReloadStatus.Committed;
         this.#pending = undefined;
         await session.programs.run(id);
         return report;
       },
       abort: async () => {
-        if (status === "aborted") return;
-        if (status !== "prepared") throw new TembraError("conflict", "already_committed");
-        status = "aborted";
+        if (status === ReloadStatus.Aborted) return;
+        if (status !== ReloadStatus.Prepared)
+          throw new TembraError(Errors.Conflict.AlreadyCommitted);
+        status = ReloadStatus.Aborted;
         this.#pending = undefined;
-        session.kernel.command("program-abort", { program: id });
+        session.kernel.command(KernelOp.ProgramAbort, { program: id });
         try {
           await session.programs.run(id);
         } catch (error) {
-          if (!(error instanceof TembraError) || error.reason !== "reload_aborted") throw error;
+          if (!(error instanceof TembraError) || error.reason !== Reason.ReloadAborted) throw error;
         }
       },
     };

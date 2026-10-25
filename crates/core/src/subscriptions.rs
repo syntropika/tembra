@@ -1,3 +1,4 @@
+use crate::Reason;
 use crate::{
     Action, Code, Error, Host, Id, Owner, Result,
     host::{conflict, gone},
@@ -46,7 +47,7 @@ impl Host {
         inner.owner(owner)?;
         if source == 0 || operation == 0 || max_pending == 0 || max_bytes == Some(0) {
             return Err(Error::invalid(
-                "subscription",
+                Reason::Subscription,
                 "positive identities and queue limits are required",
             ));
         }
@@ -95,7 +96,7 @@ impl Host {
             .borrow()
             .scopes
             .get(&scope)
-            .ok_or_else(|| gone("scope"))?
+            .ok_or_else(|| gone(Reason::Scope))?
             .owner;
         {
             let mut inner = self.inner.borrow_mut();
@@ -230,12 +231,15 @@ impl Host {
         let connection = inner
             .subscriptions
             .get_mut(&subscription)
-            .ok_or_else(|| gone("subscription"))?;
+            .ok_or_else(|| gone(Reason::Subscription))?;
         if connection.stopped {
-            return Err(gone("subscription"));
+            return Err(gone(Reason::Subscription));
         }
         if delivery.payload == 0 {
-            return Err(Error::invalid("payload", "payload identity is required"));
+            return Err(Error::invalid(
+                Reason::Payload,
+                "payload identity is required",
+            ));
         }
         let mut dropped = Vec::new();
         if connection.coalesce {
@@ -268,7 +272,7 @@ impl Host {
                 .push_back(Action::SubscriptionFailed(subscription));
             return Err(Error::new(
                 Code::Exhausted,
-                "subscription_queue",
+                Reason::SubscriptionQueue,
                 "subscription queue exceeded its limit",
             ));
         }
@@ -280,9 +284,9 @@ impl Host {
         let connection = inner
             .subscriptions
             .get_mut(&subscription)
-            .ok_or_else(|| gone("subscription"))?;
+            .ok_or_else(|| gone(Reason::Subscription))?;
         if connection.running.is_some() {
-            return Err(conflict("subscription_busy"));
+            return Err(conflict(Reason::SubscriptionBusy));
         }
         if connection.stopped {
             return Ok(None);
@@ -300,11 +304,11 @@ impl Host {
         let connection = inner
             .subscriptions
             .get_mut(&subscription)
-            .ok_or_else(|| gone("subscription"))?;
+            .ok_or_else(|| gone(Reason::Subscription))?;
         let payload = connection
             .running
             .take()
-            .ok_or_else(|| conflict("subscription_idle"))?;
+            .ok_or_else(|| conflict(Reason::SubscriptionIdle))?;
         let remove = connection.stopped;
         inner.actions.push_back(Action::DropValue(payload));
         if remove {

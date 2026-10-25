@@ -1,3 +1,4 @@
+import { KernelOp } from "../src/protocol.ts";
 import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
 import { facet } from "../src/facet.ts";
@@ -53,17 +54,17 @@ test("foreign state publication adopts the kernel snapshot despite a failing con
     native: {
       hasFacet: (id) => id === facetId,
       activate: async (object) => {
-        const value = host.session.kernel.command<number>("allocate");
+        const value = host.session.kernel.command<number>(KernelOp.Allocate);
         values.set(value, { count: 0 });
-        host.session.kernel.command("state-init", { object, value, version: 1 });
+        host.session.kernel.command(KernelOp.StateInit, { object, value, version: 1 });
       },
       invoke: async (invocation) => {
-        const previous = host.session.kernel.command<Snapshot>("snapshot", {
+        const previous = host.session.kernel.command<Snapshot>(KernelOp.Snapshot, {
           object: invocation.object,
         });
-        const value = host.session.kernel.command<number>("allocate");
+        const value = host.session.kernel.command<number>(KernelOp.Allocate);
         values.set(value, { count: values.get(previous.value)!.count + 1 });
-        host.session.kernel.command("state-adopt", {
+        host.session.kernel.command(KernelOp.StateAdopt, {
           call: invocation.id,
           object: invocation.object,
           revision: previous.revision,
@@ -78,13 +79,13 @@ test("foreign state publication adopts the kernel snapshot despite a failing con
       },
     },
   });
-  const prepared = host.session.kernel.command<Reload>("prepare", {
+  const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
     facets: [
       { name: "native", apiVersion: 1, services: [{ name: "native", methods: ["increment"] }] },
     ],
   });
   facetId = prepared.facets[0]!.id;
-  host.session.kernel.command("commit", { ticket: prepared.id });
+  host.session.kernel.command(KernelOp.Commit, { ticket: prepared.id });
   const reference = await host.get("native", "main");
   reference.state.select((value) => {
     if (value.count) throw new Error("Foreign selector failed");
@@ -136,8 +137,8 @@ test("reference release detaches retained state subscriptions and selections", a
       );
       if (index % 2) {
         const id = host.session.reference(reference).id;
-        host.session.kernel.command("release", { reference: id });
-        host.session.kernel.command("forget", { reference: id });
+        host.session.kernel.command(KernelOp.Release, { reference: id });
+        host.session.kernel.command(KernelOp.Forget, { reference: id });
         host.session.revoke(id);
       } else reference.release();
     }

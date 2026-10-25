@@ -1,3 +1,4 @@
+import { CodecId } from "./protocol.ts";
 import { decode, encode, ExtensionCodec } from "@msgpack/msgpack";
 import type { Codec } from "./codec.ts";
 import { text, utf8 } from "./codec.ts";
@@ -15,7 +16,7 @@ extensions.register({
 
 /** Optional codec. Extension 1 preserves arbitrary BigInt values without a size-dependent type. */
 export const messagePackCodec: Codec = Object.freeze({
-  id: "tembra-msgpack/1",
+  id: CodecId.MessagePack,
   serialize: (value: unknown) => encode(value, { extensionCodec: extensions }),
   deserialize: (bytes: Uint8Array) =>
     decode(bytes, { useBigInt64: true, extensionCodec: extensions }),

@@ -1,10 +1,11 @@
+import { Outcome } from "./protocol.ts";
 export interface Trace {
   service: string;
   method: string;
   root: number;
   codeVersion: number;
   duration: number;
-  outcome: "ok" | "error";
+  outcome: Outcome;
 }
 
 /** Bounded opt-in timing. Exporters remain an infrastructure concern. */

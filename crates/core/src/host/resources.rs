@@ -1,4 +1,5 @@
 use super::*;
+use crate::Reason;
 
 impl Host {
     pub fn resource(
@@ -13,14 +14,14 @@ impl Host {
         inner.owner(owner)?;
         if name.is_empty() || version == 0 {
             return Err(Error::invalid(
-                "resource",
+                Reason::Resource,
                 "resource name and version are required",
             ));
         }
         for dependency in &dependencies {
             if !inner.resources.get(dependency).is_some_and(|r| !r.closing) {
                 return Err(Error::invalid(
-                    "resource_dependency",
+                    Reason::ResourceDependency,
                     "dependency must be declared and live",
                 ));
             }
@@ -40,7 +41,7 @@ impl Host {
             return Ok(existing.clone());
         }
         if inner.pending.is_none() && inner.resource_names.contains(&named) {
-            return Err(conflict("resource_version"));
+            return Err(conflict(Reason::ResourceVersion));
         }
         let id = inner.id()?;
         let resource = Resource {
@@ -68,15 +69,18 @@ impl Host {
 
     pub fn resource_opened(&self, resource: Id, value: Id) -> Result<()> {
         if value == 0 {
-            return Err(Error::invalid("value", "zero is not a value identity"));
+            return Err(Error::invalid(
+                Reason::Value,
+                "zero is not a value identity",
+            ));
         }
         let mut inner = self.inner.borrow_mut();
         let resource = inner
             .resources
             .get_mut(&resource)
-            .ok_or_else(|| gone("resource"))?;
+            .ok_or_else(|| gone(Reason::Resource))?;
         if resource.closing || resource.value.is_some() {
-            return Err(conflict("resource_state"));
+            return Err(conflict(Reason::ResourceState));
         }
         let id = resource.id;
         resource.value = Some(value);
@@ -89,13 +93,13 @@ impl Host {
         let resource = inner
             .resources
             .get(&resource)
-            .ok_or_else(|| gone("resource"))?;
+            .ok_or_else(|| gone(Reason::Resource))?;
         if resource.closing {
-            return Err(gone("resource"));
+            return Err(gone(Reason::Resource));
         }
         resource
             .value
-            .ok_or_else(|| Error::new(Code::Unavailable, "not_ready", "resource is not open"))
+            .ok_or_else(|| Error::new(Code::Unavailable, Reason::NotReady, "resource is not open"))
     }
 
     /// Requests closure only after every resource dependent has closed.
@@ -107,7 +111,7 @@ impl Host {
     pub fn close_resource_before(&self, resource: Id, before: Option<Version>) -> Result<bool> {
         let mut inner = self.inner.borrow_mut();
         if !inner.resources.contains_key(&resource) {
-            return Err(gone("resource"));
+            return Err(gone(Reason::Resource));
         }
         let owner = inner.resources[&resource].owner;
         if inner.owner_busy(owner, inner.resources[&resource].code_version, before) {
@@ -134,9 +138,9 @@ impl Host {
         let record = inner
             .resources
             .get(&resource)
-            .ok_or_else(|| gone("resource"))?;
+            .ok_or_else(|| gone(Reason::Resource))?;
         if !record.closing {
-            return Err(conflict("resource_state"));
+            return Err(conflict(Reason::ResourceState));
         }
         let record = inner.resources.remove(&resource).expect("checked resource");
         inner.owner_resources.remove(&record.owner, resource);

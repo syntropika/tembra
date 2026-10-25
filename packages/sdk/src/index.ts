@@ -7,3 +7,7 @@ export type { Context } from "./runtime/context.ts";
 export type { Declaration } from "./runtime/declaration.ts";
 export type { Readable, State, StateOptions } from "./state.ts";
 export type * from "./types.ts";
+
+export { Code, Reason, Lifetime, Status, ReloadStatus, HookCapability } from "./identifiers.ts";
+
+export { Errors, type ErrorDescriptor } from "./errors.ts";
