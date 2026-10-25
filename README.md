@@ -121,8 +121,11 @@ A missed deadline aborts the reload. Start reloads outside a root that uses an a
 awaiting a reload inside that root would make it wait for itself. Stale state writes are rejected.
 
 An unchanged resource name, version, exclusivity and dependency list preserves its handle. An
-exclusive replacement closes the previous resource before opening its successor. Failed preparation
-attempts to restore the previous resource; external effects are not a durable transaction.
+adopted declaration supplies the callbacks for that retained resource; preparation and abort leave
+its current callbacks intact. Increase the resource version when its physical value or cleanup
+contract changes. An exclusive replacement closes the previous resource before opening its successor.
+Failed preparation attempts to restore the previous resource; external effects are not a durable
+transaction.
 
 Cancellation is cooperative. Abandoning an observer or aborting its signal does not mean a callback
 has stopped. Tasks, calls and resource openers retain ownership until they physically settle. Host

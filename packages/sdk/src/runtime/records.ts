@@ -43,6 +43,7 @@ export interface Environment {
   value: any;
   dependencies: Map<string, DynamicReference>;
   resources: Map<string, ResourceRecord>;
+  resourceDeclarations?: Map<ResourceRecord, ResourceOptions<any>>;
   tasks: TaskDefinition[];
   listeners: ListenerDefinition[];
   state?: {

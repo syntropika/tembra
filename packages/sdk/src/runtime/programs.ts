@@ -184,6 +184,9 @@ export class Programs {
         for (const pair of effect.replacements!) {
           if (!pair.next) continue;
           const next = this.scopes.get(pair.next)!;
+          for (const [resource, declaration] of next.resourceDeclarations ?? [])
+            resource.options = declaration;
+          delete next.resourceDeclarations;
           facets.set(next.facet.info.id, next.facet);
           if (next.object) {
             if (next.state) next.object.binding = next.state.binding;

@@ -55,7 +55,11 @@ export class Resources {
     if (!name || typeof options.open !== "function") refuse(Errors.Invalid.Resource);
     const id = this.register(environment, name, options);
     const reused = this.records.get(id);
-    if (reused) return reused;
+    if (reused) {
+      // The engine's adoption effect publishes candidates; abort leaves live callbacks intact.
+      (environment.resourceDeclarations ??= new Map()).set(reused, options);
+      return reused;
+    }
     let ready = deferred<void>();
     const controller = new AbortController();
     const handle: Resource<T> = Object.freeze({
@@ -92,8 +96,9 @@ export class Resources {
       },
       start: () => {
         record.started ??= (async () => {
+          const declaration = record.options;
           try {
-            const value = await options.open(record.controller.signal);
+            const value = await declaration.open(record.controller.signal);
             const id = this.session.values.put(value);
             try {
               this.session.kernel.command(KernelOp.ResourceOpened, {
@@ -102,7 +107,8 @@ export class Resources {
               });
             } catch (error) {
               this.session.values.drop(id);
-              if (options.close) await this.session.root((ctx) => options.close!(value, ctx), true);
+              if (declaration.close)
+                await this.session.root((ctx) => declaration.close!(value, ctx), true);
               throw error;
             }
             record.value = id;
