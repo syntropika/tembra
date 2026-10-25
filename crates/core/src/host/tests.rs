@@ -1,5 +1,37 @@
 use super::*;
 
+#[test]
+fn identities_cross_u32_and_stop_at_the_javascript_safe_integer_limit() {
+    let host = Host::new();
+    host.inner.borrow_mut().next = u32::MAX.into();
+    assert_eq!(host.allocate_handle().unwrap(), u64::from(u32::MAX));
+    assert_eq!(host.allocate_handle().unwrap(), u64::from(u32::MAX) + 1);
+    host.inner.borrow_mut().next = 9_007_199_254_740_990;
+    assert_eq!(host.allocate_handle().unwrap(), 9_007_199_254_740_990);
+    assert_eq!(host.allocate_handle().unwrap(), 9_007_199_254_740_991);
+    let next = host.inner.borrow().next;
+    for _ in 0..2 {
+        let error = host.allocate_handle().unwrap_err();
+        assert_eq!(error.code, Code::Exhausted);
+        assert_eq!(error.reason, Reason::Identities.as_str());
+        assert_eq!(host.inner.borrow().next, next);
+    }
+}
+
+#[test]
+fn multi_identity_reservation_at_the_limit_leaves_preparation_unchanged() {
+    let host = Host::new();
+    host.inner.borrow_mut().next = MAX_ID;
+    let before = host.diagnostics();
+    let error = host
+        .prepare(vec![Facet::new("limit", 1)], vec![])
+        .unwrap_err();
+    assert_eq!(error.code, Code::Exhausted);
+    assert_eq!(host.diagnostics(), before);
+    assert!(host.inner.borrow().pending.is_none());
+    assert_eq!(host.allocate_handle().unwrap(), MAX_ID);
+}
+
 fn install(host: &Host) -> InstalledFacet {
     let reload = host
         .prepare(vec![Facet::new("example", 1)], vec![])

@@ -308,7 +308,7 @@ impl Host {
             .map(|(name, (facet, service, _))| (name, (facet, service)))
             .collect();
         for id in pending.current.values() {
-            inner.facet_versions.insert(*id, version);
+            inner.facet_versions.insert(*id, version.into());
         }
         inner.services.insert(version, services);
         inner.current_owners = pending

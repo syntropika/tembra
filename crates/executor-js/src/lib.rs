@@ -40,17 +40,23 @@ fn op_tembra_kernel(state: &mut OpState, #[string] request: String) -> String {
     state.borrow::<Rc<Bindings>>().kernel.request(&request)
 }
 #[op2(fast)]
-fn op_tembra_has_facet(state: &mut OpState, id: u32) -> bool {
-    state.borrow::<Rc<Bindings>>().native.has_facet(id)
+fn op_tembra_has_facet(
+    state: &mut OpState,
+    id: f64,
+) -> std::result::Result<bool, deno_error::JsErrorBox> {
+    Ok(state
+        .borrow::<Rc<Bindings>>()
+        .native
+        .has_facet(number_id(id)?))
 }
 #[op2]
 #[buffer]
 fn op_tembra_value(
     state: &mut OpState,
-    id: u32,
+    id: f64,
 ) -> std::result::Result<Vec<u8>, deno_error::JsErrorBox> {
     let bindings = state.borrow::<Rc<Bindings>>();
-    encode_answer(bindings, bindings.native.portable_value(id))
+    encode_answer(bindings, bindings.native.portable_value(number_id(id)?))
 }
 #[op2]
 #[string]
@@ -58,8 +64,24 @@ fn op_tembra_codec(state: &mut OpState) -> String {
     state.borrow::<Rc<Bindings>>().codec.id().into()
 }
 #[op2(fast)]
-fn op_tembra_drop_value(state: &mut OpState, id: u32) {
-    state.borrow::<Rc<Bindings>>().native.drop_value(id);
+fn op_tembra_drop_value(
+    state: &mut OpState,
+    id: f64,
+) -> std::result::Result<(), deno_error::JsErrorBox> {
+    state
+        .borrow::<Rc<Bindings>>()
+        .native
+        .drop_value(number_id(id)?);
+    Ok(())
+}
+
+fn number_id(id: f64) -> std::result::Result<tembra::core::Id, deno_error::JsErrorBox> {
+    if !(0.0..=tembra::core::MAX_ID as f64).contains(&id) || id.fract() != 0.0 {
+        return Err(deno_error::JsErrorBox::generic(
+            "identity must be a safe unsigned integer",
+        ));
+    }
+    Ok(id as tembra::core::Id)
 }
 #[op2(fast)]
 fn op_tembra_now(state: &mut OpState) -> f64 {
@@ -104,10 +126,10 @@ async fn op_tembra_native(
     let native = bindings.native.clone();
     let result = async {
         let value = bindings.codec.deserialize(&payload)?;
-        let id = |name: &str| -> Result<u32> {
+        let id = |name: &str| -> Result<tembra::core::Id> {
             value[name]
                 .as_u64()
-                .and_then(|number| number.try_into().ok())
+                .filter(|number| *number <= tembra::core::MAX_ID)
                 .ok_or_else(|| Error::invalid(Reason::Arguments, name))
         };
         match NativeOp::parse(&operation) {
@@ -166,7 +188,7 @@ async fn op_tembra_native(
                 let call = native.kernel().invocation(
                     invocation["id"]
                         .as_u64()
-                        .and_then(|id| id.try_into().ok())
+                        .filter(|id| *id <= tembra::core::MAX_ID)
                         .ok_or_else(|| Error::invalid(Reason::Invocation, "missing invocation"))?,
                 )?;
                 native

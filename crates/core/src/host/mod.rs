@@ -369,7 +369,7 @@ impl Inner {
         if let Some(facets) = self.versions.remove(&version) {
             self.services.remove(&version);
             for id in facets.into_values() {
-                self.facet_versions.remove(&id, version);
+                self.facet_versions.remove(&id, version.into());
                 self.collect_facet(id);
             }
             #[cfg(feature = "hooks")]
@@ -403,7 +403,10 @@ fn exhausted() -> Error {
 }
 fn reserve(next: &mut Id) -> Result<Id> {
     let id = *next;
-    *next = next.checked_add(1).ok_or_else(exhausted)?;
+    if id > MAX_ID {
+        return Err(exhausted());
+    }
+    *next += 1;
     Ok(id)
 }
 fn validate_facet(facet: &Facet) -> Result<()> {

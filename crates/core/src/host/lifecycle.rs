@@ -3,6 +3,9 @@ use crate::Reason;
 
 impl Host {
     /// Reserves one opaque adapter value, callback or source identity in the host's namespace.
+    ///
+    /// # Errors
+    /// After [`MAX_ID`] is issued, returns `exhausted/identities` without advancing the counter.
     pub fn allocate_handle(&self) -> Result<Id> {
         self.inner.borrow_mut().id()
     }

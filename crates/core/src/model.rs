@@ -1,8 +1,11 @@
 use crate::Error;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Host-local identities are never reused. Zero is reserved for an absent identity.
-pub type Id = u32;
+/// Host-local identities are never reused. Generated IDs fit exactly in a JavaScript Number;
+/// zero is reserved for an absent identity.
+pub type Id = u64;
+/// Largest generated identity, shared by every adapter without JSON precision loss.
+pub const MAX_ID: Id = (1 << 53) - 1;
 pub type Version = u32;
 
 /// Stable identity. Tuple boundaries are preserved; keys are not delimiter-joined.

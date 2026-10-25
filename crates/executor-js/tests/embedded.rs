@@ -22,6 +22,13 @@ fn javascript_uses_native_provider_through_one_kernel() {
         let native = Host::new(TokioExecutor);
         native.install(vec![Facet::new("storage", 1).service(Service::new("storage", |self_| self_.state(0_i32, 1, |_| Ok(()))).method("add", |state, context, (amount,): (i32,)| async move { Ok(*state.update(&context, |value| Ok(value + amount))?) }))]).unwrap();
         let mut runtime = Runtime::new(native, source).unwrap();
+        let id = runtime.native().kernel().installed_facets()[0].id;
+        let precision = runtime.evaluate(&format!(r#"(() => {{
+          const has = Deno.core.ops.op_tembra_has_facet;
+          const invalid = [2 ** 53, -1, 1.5, NaN, Infinity].map(id => {{ try {{ has(id); return false; }} catch {{ return true; }} }});
+          return [has({id}), has({wide}), has(Number.MAX_SAFE_INTEGER), ...invalid];
+        }})()"#, wide = id + (1_u64 << 32))).await.unwrap();
+        assert_eq!(precision, json!([true, false, false, true, true, true, true, true]));
         runtime.install("client", r#"globalThis.__tembraFacet = { name: 'client', apiVersion: 1, requires: { storage: { apiVersion: 1, methods: ['add'] } }, services: { client: {
           create(self) { return { storage: self.get('storage', 'main') }; },
           methods: { async run({storage}, ctx, value) { await new Promise(resolve => setTimeout(resolve, 1)); return storage.add(value, ctx); } }

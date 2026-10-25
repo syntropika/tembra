@@ -43,7 +43,7 @@ impl Kernel {
             )
         })?;
         let h = &self.host;
-        let id = |key| number(request, key);
+        let id = |key| identity(request, key);
         let unit = || Ok(Value::Null);
         match op {
             KernelOp::Allocate => Ok(json!(h.allocate_handle()?)),
@@ -72,7 +72,7 @@ impl Kernel {
             KernelOp::ScopeActivate => Ok(json!(h.activate_scope(id("scope")?)?)),
             KernelOp::ScopesCleanup => Ok(json!(h.cleanup_scopes(
                 numbers(request, "scopes")?,
-                optional_number(request, "object")?
+                optional_identity(request, "object")?
             )?)),
             KernelOp::ScopesReloadRegistered => Ok(json!(
                 h.reload_registered_scopes(id("ticket")?, wide(request, "deadline")?)?
@@ -82,8 +82,8 @@ impl Kernel {
                     .iter()
                     .map(|pair| {
                         Ok(Replacement {
-                            previous: optional_number(pair, "previous")?,
-                            next: optional_number(pair, "next")?,
+                            previous: optional_identity(pair, "previous")?,
+                            next: optional_identity(pair, "next")?,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -114,7 +114,7 @@ impl Kernel {
                                     )
                                 });
                         Ok(Completion {
-                            value: optional_number(result, "value")?,
+                            value: optional_identity(result, "value")?,
                             error,
                         })
                     })
@@ -160,9 +160,9 @@ impl Kernel {
                     .flatten()
                     .map(|m| {
                         Ok(Migration {
-                            object: number(m, "object")?,
+                            object: identity(m, "object")?,
                             expected_revision: wide(m, "revision")?,
-                            value: number(m, "value")?,
+                            value: identity(m, "value")?,
                             state_version: number(m, "version")?,
                         })
                     })
@@ -232,7 +232,7 @@ impl Kernel {
             KernelOp::CheckContext => {
                 let root = id("root")?;
                 h.check_root(root)?;
-                if let Some(call) = optional_number(request, "call")?
+                if let Some(call) = optional_identity(request, "call")?
                     && h.invocation(call)?.root != root
                 {
                     return Err(Error::invalid(
@@ -263,7 +263,7 @@ impl Kernel {
                 id("facet")?,
                 id("root")?,
                 id("operation")?,
-                optional_number(request, "object")?,
+                optional_identity(request, "object")?,
             )?)),
             KernelOp::FinishCall => {
                 h.finish_call(id("call")?)?;
@@ -273,7 +273,7 @@ impl Kernel {
             KernelOp::StateInit => Ok(snapshot_value(h.initialize_state(
                 id("object")?,
                 id("value")?,
-                id("version")?,
+                number(request, "version")?,
             )?)),
             KernelOp::Snapshot => Ok(snapshot_value(h.snapshot(id("object")?)?)),
             KernelOp::StateAdopt => Ok(snapshot_value(h.adopt_state(
@@ -298,7 +298,7 @@ impl Kernel {
                 let r = h.resource(
                     owner(request)?,
                     text(request, "name")?.into(),
-                    id("version")?,
+                    number(request, "version")?,
                     request["exclusive"].as_bool().unwrap_or(false),
                     numbers_optional(request, "dependencies")?,
                 )?;
@@ -363,7 +363,7 @@ impl Kernel {
                         .unwrap_or(0)
                         .try_into()
                         .map_err(|_| Error::invalid(Reason::Priority, "priority exceeds i32"))?,
-                    ordinal: id("ordinal")?,
+                    ordinal: number(request, "ordinal")?,
                 })?;
                 unit()
             }
@@ -376,12 +376,12 @@ impl Kernel {
             #[cfg(feature = "subscriptions")]
             KernelOp::Listen => Ok(json!(h.listen(
                 id("scope")?,
-                optional_number(request, "previous")?,
+                optional_identity(request, "previous")?,
                 text(request, "name")?.into(),
                 id("source")?,
-                optional_number(request, "sizing")?.unwrap_or(0),
+                optional_identity(request, "sizing")?.unwrap_or(0),
                 id("operation")?,
-                id("maxPending")? as usize,
+                number(request, "maxPending")? as usize,
                 optional_number(request, "maxBytes")?.map(|value| value as usize),
                 request["coalesce"].as_bool().unwrap_or(false)
             )?)),
@@ -390,7 +390,7 @@ impl Kernel {
                 owner(request)?,
                 id("source")?,
                 id("operation")?,
-                id("maxPending")? as usize,
+                number(request, "maxPending")? as usize,
                 optional_number(request, "maxBytes")?.map(|v| v as usize),
                 request["coalesce"].as_bool().unwrap_or(false)
             )?)),
@@ -599,8 +599,8 @@ fn parse_facet(f: &Value) -> Result<Facet> {
 fn owner(v: &Value) -> Result<Owner> {
     match v["owner"]["kind"].as_str() {
         Some("host") => Ok(Owner::Host),
-        Some("facet") => Ok(Owner::Facet(number(&v["owner"], "id")?)),
-        Some("object") => Ok(Owner::Object(number(&v["owner"], "id")?)),
+        Some("facet") => Ok(Owner::Facet(identity(&v["owner"], "id")?)),
+        Some("object") => Ok(Owner::Object(identity(&v["owner"], "id")?)),
         _ => Err(Error::invalid(Reason::Owner, "invalid owner")),
     }
 }
@@ -609,13 +609,13 @@ fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
         .as_str()
         .ok_or_else(|| Error::invalid(Reason::Metadata, format!("{key} must be text")))
 }
-fn number(v: &Value, key: &str) -> Result<Id> {
+fn number(v: &Value, key: &str) -> Result<u32> {
     v[key]
         .as_u64()
         .and_then(|n| n.try_into().ok())
         .ok_or_else(|| Error::invalid(Reason::Metadata, format!("{key} must be a u32")))
 }
-fn optional_number(v: &Value, key: &str) -> Result<Option<Id>> {
+fn optional_number(v: &Value, key: &str) -> Result<Option<u32>> {
     if v.get(key).is_none_or(Value::is_null) {
         Ok(None)
     } else {
@@ -656,15 +656,23 @@ fn strings_optional(v: &Value, key: &str) -> Result<Vec<String>> {
         strings(v, key)
     }
 }
+fn identity_value(v: &Value) -> Result<Id> {
+    v.as_u64()
+        .filter(|id| *id <= MAX_ID)
+        .ok_or_else(|| Error::invalid(Reason::Metadata, "identity must be a safe unsigned integer"))
+}
+fn identity(v: &Value, key: &str) -> Result<Id> {
+    identity_value(&v[key])
+}
+fn optional_identity(v: &Value, key: &str) -> Result<Option<Id>> {
+    if v.get(key).is_none_or(Value::is_null) {
+        Ok(None)
+    } else {
+        identity(v, key).map(Some)
+    }
+}
 fn numbers(v: &Value, key: &str) -> Result<Vec<Id>> {
-    array(v, key)?
-        .iter()
-        .map(|v| {
-            v.as_u64()
-                .and_then(|n| n.try_into().ok())
-                .ok_or_else(|| Error::invalid(Reason::Metadata, "expected u32"))
-        })
-        .collect()
+    array(v, key)?.iter().map(identity_value).collect()
 }
 fn numbers_optional(v: &Value, key: &str) -> Result<Vec<Id>> {
     if v.get(key).is_none() {

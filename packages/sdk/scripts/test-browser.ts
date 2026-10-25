@@ -2,10 +2,21 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+const precision = await Bun.build({
+  entrypoints: [new URL("../test/precision.ts", import.meta.url).pathname],
+  target: "browser",
+  format: "esm",
+});
+if (!precision.success) throw new AggregateError(precision.logs, "Precision fixture build failed");
+const precisionSource = await precision.outputs[0]!.text();
+
 const worker = `import {createHost} from '/packages/sdk/dist/browser.js';
+import {WasmKernel} from '/packages/sdk/dist/wasm/tembra.js';
+import {verifyIdentifierPrecision} from '/precision.js';
 onmessage = async () => {
   try {
     const host = await createHost();
+    if(verifyIdentifierPrecision(()=>new WasmKernel())!==9) throw new Error('Worker identity precision failed');
     await host.install({name:'worker',apiVersion:1,services:{worker:{create(self){return {state:self.state(0n)}},methods:{add({state},ctx,value){return state.update(ctx,current=>current+value)}}}}});
     const ref = await host.get('worker','main');
     const value = await ref.add(1n << 100n);
@@ -15,8 +26,11 @@ onmessage = async () => {
 };`;
 const html = `<!doctype html><html><body>running<script type="module">
 import {createHost} from '/packages/sdk/dist/browser.js';
+import {WasmKernel} from '/packages/sdk/dist/wasm/tembra.js';
+import {verifyIdentifierPrecision} from '/precision.js';
 try {
   const host = await createHost();
+  if(verifyIdentifierPrecision(()=>new WasmKernel())!==9) throw new Error('Browser identity precision failed');
   await host.install({name:'browser',apiVersion:1,services:{counter:{create(self){return {state:self.state({value:0,items:[]})}},methods:{add({state},ctx){state.update(ctx,current=>({...current,value:current.value+1,items:[...current.items,1]}))}}}}});
   const ref = await host.get('counter','main');
   let updates = 0;
@@ -42,6 +56,8 @@ const server = Bun.serve({
   async fetch(request) {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/") return new Response(html, { headers: { "content-type": "text/html" } });
+    if (pathname === "/precision.js")
+      return new Response(precisionSource, { headers: { "content-type": "text/javascript" } });
     if (pathname === "/worker.js")
       return new Response(worker, { headers: { "content-type": "text/javascript" } });
     if (!pathname.startsWith("/packages/sdk/dist/"))
@@ -117,7 +133,9 @@ try {
     );
     output = response.result.value ?? "";
     if (output === "TEMBRA_BROWSER_PASS") {
-      console.log("Browser and Worker acceptance passed");
+      console.log(
+        "Browser and Worker acceptance passed, including 9 identifier precision boundaries each",
+      );
       break;
     }
     if (output.startsWith("TEMBRA_BROWSER_FAIL")) throw new Error(output);
