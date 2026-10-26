@@ -2,6 +2,7 @@ use super::*;
 use crate::Reason;
 
 impl Inner {
+    /// Remove reverse reference memberships from the target object.
     // A released claim cannot retain dependency edges after its record is forgotten.
     fn unlink_reference(&mut self, reference: Id, target: Id) {
         self.object_dependents.remove(&target, reference);
@@ -20,6 +21,7 @@ impl Inner {
 }
 
 impl Host {
+    /// Read the canonical address of a retained object.
     pub fn object_address(&self, object: Id) -> Result<Address> {
         self.inner
             .borrow()
@@ -146,6 +148,7 @@ impl Host {
         })
     }
 
+    /// Publish successful activation and wake dependent scopes.
     pub fn ready(&self, object: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let record = inner
@@ -204,6 +207,7 @@ impl Host {
         Ok(())
     }
 
+    /// Retire a failed activation and wake its dependents.
     pub fn fail(&self, object: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let record = inner
@@ -217,6 +221,7 @@ impl Host {
         Ok(())
     }
 
+    /// Remove an object's dependency claim and reverse membership.
     pub fn detach_dependency(&self, object: Id, reference: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let record = inner
@@ -235,6 +240,7 @@ impl Host {
         Ok(())
     }
 
+    /// Read the reference's current lifecycle status.
     pub fn status(&self, reference: Id) -> Result<Status> {
         let inner = self.inner.borrow();
         let record = inner
@@ -253,6 +259,7 @@ impl Host {
             .map_or(Status::Gone, |o| o.phase))
     }
 
+    /// Release one claim and reconsider object retirement.
     pub fn release(&self, reference: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let reference_id = reference;
@@ -292,13 +299,12 @@ impl Host {
         if let Some(target) = target {
             inner.unlink_reference(reference, target);
             inner.object_references.remove(&target, reference);
-        }
-        if let Some(target) = target {
             inner.maybe_dispose(target);
         }
         Ok(())
     }
 
+    /// Replace the reference's visible method set.
     #[cfg(feature = "views")]
     pub fn restrict(&self, reference: Id, allowed: BTreeSet<String>) -> Result<()> {
         let mut inner = self.inner.borrow_mut();

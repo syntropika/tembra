@@ -1,7 +1,7 @@
+import { facet } from "./authoring/facet.ts";
+import type { HostOptions } from "./authoring/types.ts";
+import type { KernelPort } from "./bridge/kernel.ts";
 import { Host } from "./host.ts";
-import { facet } from "./facet.ts";
-import type { HostOptions } from "./types.ts";
-import type { KernelPort } from "./kernel.ts";
 
 export interface WasmModule {
   WasmKernel: new () => KernelPort;
@@ -36,7 +36,9 @@ export async function createHost(options: BrowserHostOptions = {}): Promise<Host
         const base = options.baseURL ?? globalThis.location?.href;
         const url =
           location instanceof URL ? location : base ? new URL(location, base) : new URL(location);
-        return facet((await import(url.href)).default as import("./types.ts").FacetDefinition);
+        return facet(
+          (await import(url.href)).default as import("./authoring/types.ts").FacetDefinition,
+        );
       }),
   });
 }
@@ -44,6 +46,13 @@ export async function createHost(options: BrowserHostOptions = {}): Promise<Host
 export { facet };
 export type { Host };
 
-export { Code, Reason, Lifetime, Status, ReloadStatus, HookCapability } from "./identifiers.ts";
+export {
+  Code,
+  HookCapability,
+  Lifetime,
+  Reason,
+  ReloadStatus,
+  Status,
+} from "./bridge/identifiers.ts";
 
 export { Errors, type ErrorDescriptor } from "./errors.ts";

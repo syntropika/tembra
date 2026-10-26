@@ -5,7 +5,9 @@ macro_rules! names {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         pub enum $name { $($variant),+ }
         impl $name {
+            /// Return the stable wire name for this variant.
             pub const fn as_str(self) -> &'static str { match self { $(Self::$variant => $wire),+ } }
+            /// Reject wire names outside this protocol enum.
             pub fn parse(value: &str) -> Option<Self> {
                 match value { $($wire => Some(Self::$variant),)+ _ => None }
             }

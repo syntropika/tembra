@@ -1,12 +1,12 @@
-import { Errors } from "../errors.ts";
-import { EnvironmentPhase, KernelOp, OwnerKind } from "../protocol.ts";
-import { Lifetime } from "../identifiers.ts";
-import { facet } from "../facet.ts";
+import { Declaration } from "../authoring/declaration.ts";
+import { facet } from "../authoring/facet.ts";
+import type { ContributionHandler, FacetDefinition, Participant } from "../authoring/types.ts";
+import { Lifetime } from "../bridge/identifiers.ts";
+import type { KernelFacet, Reload } from "../bridge/kernel.ts";
+import { EnvironmentPhase, KernelOp, OwnerKind } from "../bridge/protocol.ts";
 import { refuse, TembraError } from "../error.ts";
-import type { KernelFacet, Reload } from "../kernel.ts";
-import type { FacetDefinition, ContributionHandler, Participant } from "../types.ts";
-import type { Context } from "./context.ts";
-import { Declaration } from "./declaration.ts";
+import { Errors } from "../errors.ts";
+import { Context, context as checkedContext } from "./context.ts";
 import type { Environment, FacetRecord } from "./records.ts";
 import type { Session } from "./session.ts";
 
@@ -16,8 +16,11 @@ export class Facets {
   #ready = new Map<number, Promise<void>>();
   #ordinals = new Map<string, number>();
   #nextOrdinal = 0;
+
+  /** Retain local implementations and contribution callbacks. */
   constructor(readonly session: Session) {}
 
+  /** Capture definitions and encode their kernel-owned contracts. */
   declarations(definitions: readonly FacetDefinition[]): {
     definitions: FacetDefinition[];
     metadata: unknown[];
@@ -76,6 +79,7 @@ export class Facets {
     return { definitions: captured, metadata };
   }
 
+  /** Commit new facet metadata before opening its scopes. */
   async install(definitions: readonly FacetDefinition[]): Promise<void> {
     const current = this.session.kernel.command<KernelFacet[]>(KernelOp.Facets);
     if (definitions.some((f) => current.some((installed) => installed.name === f.name)))
@@ -94,16 +98,19 @@ export class Facets {
     await Promise.all(records.map((record) => this.ready(record)));
     for (const record of records) {
       for (const service of record.info.services.filter((s) => s.lifetime === Lifetime.Host)) {
-        const reference = await this.session.get(service.name, "main", { principal: "host" });
+        const reference = await this.session.handles.get(service.name, "main", {
+          principal: "host",
+        });
         reference.release();
       }
     }
-    this.session.flush();
+    this.session.lifecycle.flush();
   }
 
+  /** Declare one shared scope for this facet version. */
   scope(record: FacetRecord): Environment {
     if (record.scope) return record.scope;
-    const environment = this.session.environment(
+    const environment = this.session.scopes.environment(
       { kind: OwnerKind.Facet, id: record.info.owner },
       record,
     );
@@ -120,16 +127,17 @@ export class Facets {
     return environment;
   }
 
+  /** Share pending activation and clean up failed facet scopes. */
   ready(record: FacetRecord): Promise<void> {
     if (record.scope?.phase === EnvironmentPhase.Live) return Promise.resolve();
     let ready = this.#ready.get(record.info.id);
     if (!ready) {
       ready = (async () => {
         try {
-          await this.session.readyHostScope();
+          await this.session.scopes.readyHostScope();
           if (record.scope?.phase === EnvironmentPhase.Closed) delete record.scope;
           const scope = this.scope(record);
-          await this.session.openEnvironment(scope);
+          await this.session.programs.activate(scope.id);
         } catch (error) {
           if (record.scope) {
             await this.session.programs.cleanup([record.scope]);
@@ -147,6 +155,7 @@ export class Facets {
     return ready;
   }
 
+  /** Register callback identities with stable contribution order. */
   registerContributions(record: FacetRecord): void {
     for (const [alias, hooks] of Object.entries(record.definition.contributes ?? {})) {
       const requirement = record.definition.requires![alias]!;
@@ -171,12 +180,14 @@ export class Facets {
     }
   }
 
+  /** Validate the caller and execute the kernel's admitted hook plan. */
   async runHook(
     environment: Environment,
     name: string,
     context: Context,
     input: unknown,
   ): Promise<unknown> {
+    context = checkedContext(context, this.session);
     const definition = environment.facet.definition.hooks?.[name];
     if (!definition) refuse(Errors.Invalid.Hook, name);
     const plan = this.session.kernel.command<number[]>(KernelOp.HookPlan, {
@@ -189,7 +200,7 @@ export class Facets {
       if (!contributor) throw new TembraError(Errors.Gone.Contribution);
       const scope = contributor.facet.scope;
       if (!scope) throw new TembraError(Errors.Unavailable.FacetScope);
-      return this.session.owned(
+      return this.session.calls.owned(
         scope,
         operation,
         (entered) => contributor.handler(entered, input, next),
@@ -199,13 +210,10 @@ export class Facets {
     return definition.run(context, input, participants);
   }
 
+  /** Clean up a retired version before removing its callbacks. */
   retire(id: number): void {
     const scopes = this.session.kernel.command<number[]>(KernelOp.ScopesForFacet, { facet: id });
-    const cleanup = scopes.length
-      ? this.session.programs.run(
-          this.session.kernel.command<number>(KernelOp.ScopesCleanup, { scopes }),
-        )
-      : Promise.resolve();
+    const cleanup = this.session.programs.cleanupScopes(scopes);
     this.session.track(
       cleanup.then(() => {
         for (const [operation, contribution] of this.operations)

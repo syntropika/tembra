@@ -1,4 +1,4 @@
-import { Outcome } from "./protocol.ts";
+import { Outcome } from "./bridge/protocol.ts";
 export interface Trace {
   service: string;
   method: string;
@@ -12,6 +12,8 @@ export interface Trace {
 export class Telemetry {
   #events: Trace[] = [];
   #next = 0;
+
+  /** Configure a bounded buffer with a fixed sampling interval. */
   constructor(
     readonly capacity = 256,
     readonly sampleEvery = 1,
@@ -24,13 +26,19 @@ export class Telemetry {
     )
       throw new RangeError("Invalid telemetry limits");
   }
+
+  /** Select calls at the configured sampling interval. */
   sample(): boolean {
     return this.#next++ % this.sampleEvery === 0;
   }
+
+  /** Append one sampled call, replacing the oldest record when full. */
   record(trace: Trace): void {
     if (this.#events.length === this.capacity) this.#events.shift();
     this.#events.push(trace);
   }
+
+  /** Return buffered samples and clear their retained references. */
   drain(): readonly Trace[] {
     return this.#events.splice(0);
   }

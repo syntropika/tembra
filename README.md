@@ -18,15 +18,15 @@ JavaScript values and callbacks stay in their JavaScript realm. The engine recei
 and metadata. Native Rust calls use native values. Serialization applies when values actually cross
 a language or transport boundary.
 
-| Component             | Responsibility                                                               |
-| --------------------- | ---------------------------------------------------------------------------- |
-| `crates/core`         | Language-neutral ownership and lifecycle engine; no third-party dependencies |
-| `crates/bridge`       | Metadata command and execution-request envelopes                             |
-| `crates/tembra`       | Typed Rust declarations, values and native callback execution                |
-| `crates/browser-wasm` | The engine compiled to WASM; no interpreter, filesystem or DOM               |
-| `crates/node-binding` | Node-API access to the same engine                                           |
-| `crates/executor-js`  | One embedded V8 runtime per Rust host                                        |
-| `packages/sdk`        | JS declarations, callback/value handles, platform bindings and build tooling |
+| Component             | Responsibility                                                                         |
+| --------------------- | -------------------------------------------------------------------------------------- |
+| `crates/core`         | Language-neutral ownership and lifecycle engine; no third-party dependencies           |
+| `crates/bridge`       | Metadata command and execution-request envelopes                                       |
+| `crates/tembra`       | Typed Rust declarations, values and native callback execution                          |
+| `crates/browser-wasm` | The engine compiled to WASM; no interpreter, filesystem or DOM                         |
+| `crates/node-binding` | Node-API access to the same engine                                                     |
+| `crates/executor-js`  | One embedded V8 runtime per Rust host                                                  |
+| `packages/sdk`        | JS declarations, callback/value handles, platform bindings and optional infrastructure |
 
 Node and browser hosts execute JavaScript in their existing realm. Embedded Rust hosts use V8.
 A WASM build does not run native Rust plugins or include a JavaScript interpreter.
@@ -149,7 +149,7 @@ prepare/vote/commit helper; it provides no durable distributed transaction guara
 
 ## Build facets
 
-The SDK build tool runs on Bun and emits one self-contained artifact per target:
+The build tool runs on Bun and emits one self-contained artifact per target:
 
 ```ts
 import { build, Platform } from "@tembra/sdk/tooling";
@@ -161,6 +161,8 @@ await build({
   },
 });
 ```
+
+Install `@tembra/sdk` once. Build tooling is available through `@tembra/sdk/tooling`.
 
 Targets are `browser`, `worker`, `node` and `embedded`. Browser builds select browser package
 conditions. Node builtins and explicitly declared `nativeExternals` require a Node host. Embedded

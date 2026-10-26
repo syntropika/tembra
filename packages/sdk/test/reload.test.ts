@@ -160,7 +160,7 @@ test("an exclusive replacement deadline preserves the connection of its blocking
       await observer.waiting;
       now = 1000;
       host.session.kernel.command(KernelOp.Tick, { now });
-      host.session.flush();
+      host.session.lifecycle.flush();
       expect(await replacing).toMatchObject({ reason: "reload_deadline" });
       expect(events).toEqual(["open:1"]);
       expect(await reference.read(ctx)).toBe(1);

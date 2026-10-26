@@ -6,10 +6,12 @@ fn facet() -> Facet {
     f.services.push(Service::new("counter", ["increment"]));
     f
 }
+
 fn install(host: &Host, facet: Facet) {
     let r = host.prepare(vec![facet], vec![]).unwrap();
     host.commit(r.id, vec![]).unwrap();
 }
+
 fn acquire(host: &Host, key: Vec<&str>) -> Acquisition {
     host.acquire(
         Address {

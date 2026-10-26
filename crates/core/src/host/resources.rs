@@ -2,6 +2,7 @@ use super::*;
 use crate::Reason;
 
 impl Host {
+    /// Resolve a named resource under its declaration owner.
     pub fn resource(
         &self,
         owner: Owner,
@@ -67,6 +68,7 @@ impl Host {
         Ok(resource)
     }
 
+    /// Publish the value after its physical opener settles.
     pub fn resource_opened(&self, resource: Id, value: Id) -> Result<()> {
         if value == 0 {
             return Err(Error::invalid(
@@ -88,6 +90,7 @@ impl Host {
         Ok(())
     }
 
+    /// Read an opened resource value or reject unavailable storage.
     pub fn resource_value(&self, resource: Id) -> Result<Id> {
         let inner = self.inner.borrow();
         let resource = inner
@@ -134,6 +137,7 @@ impl Host {
         Ok(true)
     }
 
+    /// Remove the resource and wake its indexed dependents.
     pub fn resource_closed(&self, resource: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let record = inner

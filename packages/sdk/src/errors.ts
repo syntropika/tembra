@@ -1,4 +1,4 @@
-import { Code, Reason } from "./identifiers.ts";
+import { Code, Reason } from "./bridge/identifiers.ts";
 
 /** Shared error shape, also used by Rust and transport envelopes. Facets may supply custom reasons. */
 export interface ErrorDescriptor {
@@ -7,6 +7,7 @@ export interface ErrorDescriptor {
   readonly message: string;
 }
 
+/** Freeze a named group of structured error descriptors. */
 function define(code: Code, reason: string, message: string): Readonly<ErrorDescriptor> {
   return Object.freeze({ code, reason, message });
 }

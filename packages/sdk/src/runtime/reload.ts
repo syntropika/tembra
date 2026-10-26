@@ -1,9 +1,14 @@
-import { Errors } from "../errors.ts";
-import { KernelOp } from "../protocol.ts";
-import { Reason, ReloadStatus } from "../identifiers.ts";
+import type {
+  FacetDefinition,
+  PreparedReload,
+  ReloadOptions,
+  ReloadReport,
+} from "../authoring/types.ts";
+import { Reason, ReloadStatus } from "../bridge/identifiers.ts";
+import type { Reload } from "../bridge/kernel.ts";
+import { KernelOp } from "../bridge/protocol.ts";
 import { TembraError } from "../error.ts";
-import type { Reload } from "../kernel.ts";
-import type { FacetDefinition, PreparedReload, ReloadOptions, ReloadReport } from "../types.ts";
+import { Errors } from "../errors.ts";
 import type { FacetRecord } from "./records.ts";
 import type { Session } from "./session.ts";
 
@@ -12,8 +17,11 @@ export class Replacements {
   #pending: Promise<PreparedReload> | undefined;
   #program: number | undefined;
   #prepared: PreparedReload | undefined;
+
+  /** Track one replacement candidate for this session. */
   constructor(readonly session: Session) {}
 
+  /** Prepare and commit a replacement in one operation. */
   async replace(
     definitions: readonly FacetDefinition[],
     options: ReloadOptions = {},
@@ -21,6 +29,8 @@ export class Replacements {
   ): Promise<ReloadReport> {
     return (await this.prepare(definitions, options, remove)).commit();
   }
+
+  /** Reject overlapping replacement attempts before capturing callbacks. */
   prepare(
     definitions: readonly FacetDefinition[],
     options: ReloadOptions = {},
@@ -35,17 +45,20 @@ export class Replacements {
     });
     return pending;
   }
+
+  /** Abort pending preparation and wait for physical recovery. */
   async cancel(): Promise<void> {
     if (this.#prepared?.status === ReloadStatus.Prepared) return this.#prepared.abort();
     if (this.#program !== undefined) {
       this.session.kernel.command(KernelOp.ProgramAbort, { program: this.#program });
       const settled = this.session.programs.run(this.#program);
-      this.session.flush();
+      this.session.lifecycle.flush();
       await settled.catch(() => {});
     }
     await this.#pending?.catch(() => undefined);
   }
 
+  /** Bind candidate callbacks to the kernel's prepared replacement. */
   private async capture(
     definitions: readonly FacetDefinition[],
     options: ReloadOptions,
@@ -74,7 +87,7 @@ export class Replacements {
         if (!object) continue;
         const facet = reload.providers[object.address.service];
         const record = facet === undefined ? undefined : recordsById.get(facet);
-        if (record) session.createEnvironment(object, record);
+        if (record) session.scopes.createEnvironment(object, record);
       }
       for (const record of records) record.ticket = undefined;
       program = session.kernel.command<number>(KernelOp.ScopesReloadRegistered, {
@@ -93,7 +106,7 @@ export class Replacements {
         const scopes = reload.facets.flatMap((facet) =>
           session.kernel.command<number[]>(KernelOp.ScopesForFacet, { facet: facet.id }),
         );
-        await session.programs.cleanup(scopes.map((scope) => session.programs.scopes.get(scope)!));
+        await session.programs.cleanupScopes(scopes);
       }
       throw error;
     }
@@ -106,9 +119,11 @@ export class Replacements {
     let status: PreparedReload["status"] = ReloadStatus.Prepared;
     return (this.#prepared = {
       report,
+      /** Read whether this prepared candidate can still commit or abort. */
       get status() {
         return status;
       },
+      /** Publish a prepared candidate once, then await its activation. */
       commit: async () => {
         if (status !== ReloadStatus.Prepared) throw new TembraError(Errors.Conflict.ReloadTicket);
         this.#prepared = undefined;
@@ -126,6 +141,7 @@ export class Replacements {
         await session.programs.run(id);
         return report;
       },
+      /** Discard an uncommitted candidate and await physical recovery. */
       abort: async () => {
         if (status === ReloadStatus.Aborted) return;
         if (status !== ReloadStatus.Prepared)

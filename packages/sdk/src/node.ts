@@ -1,10 +1,10 @@
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { facet } from "./authoring/facet.ts";
+import type { HostOptions } from "./authoring/types.ts";
+import type { KernelPort } from "./bridge/kernel.ts";
 import { Host } from "./host.ts";
-import { facet } from "./facet.ts";
-import type { HostOptions } from "./types.ts";
-import type { KernelPort } from "./kernel.ts";
 
 export type NodeHostOptions = Omit<HostOptions, "kernel"> & { kernel?: KernelPort };
 
@@ -30,7 +30,9 @@ export function createHost(options: NodeHostOptions = {}): Host {
               : pathToFileURL(path.resolve(location));
         if (!/\.m?js$/.test(url.pathname))
           throw new Error("Load a prebuilt JavaScript facet bundle");
-        return facet((await import(url.href)).default as import("./types.ts").FacetDefinition);
+        return facet(
+          (await import(url.href)).default as import("./authoring/types.ts").FacetDefinition,
+        );
       }),
   });
 }
@@ -38,6 +40,13 @@ export function createHost(options: NodeHostOptions = {}): Host {
 export { facet };
 export type { Host };
 
-export { Code, Reason, Lifetime, Status, ReloadStatus, HookCapability } from "./identifiers.ts";
+export {
+  Code,
+  HookCapability,
+  Lifetime,
+  Reason,
+  ReloadStatus,
+  Status,
+} from "./bridge/identifiers.ts";
 
 export { Errors, type ErrorDescriptor } from "./errors.ts";

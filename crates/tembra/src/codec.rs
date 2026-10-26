@@ -5,18 +5,27 @@ use crate::{Error, Result};
 use serde_json::{Value, json};
 
 pub trait Codec {
+    /// Return the stable codec identity shared with other adapters.
     fn id(&self) -> &str;
+    /// Encode portable values using this codec's wire contract.
     fn serialize(&self, value: &Value) -> Result<Vec<u8>>;
+    /// Decode portable values without narrowing large integers.
     fn deserialize(&self, bytes: &[u8]) -> Result<Value>;
 }
+
 pub struct Json;
 impl Codec for Json {
+    /// Return the stable codec identity shared with other adapters.
     fn id(&self) -> &str {
         "tembra-json/1"
     }
+
+    /// Encode portable values using this codec's wire contract.
     fn serialize(&self, value: &Value) -> Result<Vec<u8>> {
         encode(value)
     }
+
+    /// Decode portable values without narrowing large integers.
     fn deserialize(&self, bytes: &[u8]) -> Result<Value> {
         decode(bytes)
     }
@@ -26,6 +35,7 @@ impl Codec for Json {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Integer(pub String);
 impl serde::Serialize for Integer {
+    /// Encode portable values using this codec's wire contract.
     fn serialize<S: serde::Serializer>(
         &self,
         serializer: S,
@@ -36,6 +46,7 @@ impl serde::Serialize for Integer {
     }
 }
 impl<'de> serde::Deserialize<'de> for Integer {
+    /// Decode portable values without narrowing large integers.
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
@@ -52,6 +63,7 @@ impl<'de> serde::Deserialize<'de> for Integer {
     }
 }
 
+/// Validate decimal integer text and wrap it in the portable tag.
 pub fn bigint(decimal: impl Into<String>) -> Result<Value> {
     let decimal = decimal.into();
     let digits = decimal.strip_prefix('-').unwrap_or(&decimal);
@@ -63,13 +75,19 @@ pub fn bigint(decimal: impl Into<String>) -> Result<Value> {
     }
     Ok(json!({"$tembra": ["bigint", decimal]}))
 }
+
+/// Wrap bytes in the portable tagged representation.
 pub fn bytes(value: &[u8]) -> Value {
     json!({"$tembra": ["bytes", value]})
 }
+
+/// Encode a portable JSON value or report serialization failure.
 pub fn encode(value: &Value) -> Result<Vec<u8>> {
     serde_json::to_vec(value)
         .map_err(|error| Error::invalid(Reason::Serialization, error.to_string()))
 }
+
+/// Decode JSON bytes or report malformed serialized data.
 pub fn decode(bytes: &[u8]) -> Result<Value> {
     serde_json::from_slice(bytes)
         .map_err(|error| Error::invalid(Reason::Serialization, error.to_string()))

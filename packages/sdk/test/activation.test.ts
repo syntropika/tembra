@@ -87,7 +87,7 @@ for (const mode of ["activation", "reload"] as const)
         } else if (outcome === "deadline") {
           now = 1000;
           host.session.kernel.command(KernelOp.Tick, { now });
-          host.session.flush();
+          host.session.lifecycle.flush();
           await expect(operation).rejects.toMatchObject({ reason: Reason.ReloadDeadline });
           expect(signal.aborted).toBe(false);
           expect(opens).toBe(0);
@@ -230,7 +230,7 @@ test("host resource retry preserves issued handles and dependent resource metada
       },
     },
   });
-  const original = host.session.hostResource<number>("connection");
+  const original = host.session.scopes.hostResource<number>("connection");
   const definition = facet({
     name: "consumer",
     apiVersion: 1,
@@ -315,7 +315,7 @@ test("retry refreshes a pending dynamic resource's dependency IDs after a failed
       },
     },
   });
-  const base = host.session.hostResource<number>("base");
+  const base = host.session.scopes.hostResource<number>("base");
   const dependent = host.resource("dependent", { deps: [base], open: () => base.value + 1 });
   try {
     await expect(host.install(facet({ name: "first", apiVersion: 1 }))).rejects.toThrow(
@@ -338,7 +338,7 @@ test("a failed dynamic resource leaves live host resources usable and retries it
     facet({ name: "live", apiVersion: 1, services: { live: { methods: { read: () => 7 } } } }),
   );
   const reference = await host.get("live", "main");
-  const base = host.session.hostResource<number>("base");
+  const base = host.session.scopes.hostResource<number>("base");
   const dynamic = host.resource("dynamic", {
     deps: [base],
     open: () => {
@@ -354,7 +354,7 @@ test("a failed dynamic resource leaves live host resources usable and retries it
     expect(await reference.read()).toBe(7);
     expect(base.value).toBe(41);
     await host.install(facet({ name: "retry", apiVersion: 1 }));
-    expect(host.session.hostResource("dynamic")).toBe(dynamic);
+    expect(host.session.scopes.hostResource("dynamic")).toBe(dynamic);
     expect(dynamic.value).toBe(42);
     expect(attempts).toBe(2);
   } finally {

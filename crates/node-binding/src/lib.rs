@@ -8,6 +8,7 @@ pub struct NodeKernel {
 
 #[napi]
 impl NodeKernel {
+    /// Create one kernel and its metadata bridge.
     #[napi(constructor)]
     pub fn new() -> Self {
         Self {
@@ -15,6 +16,7 @@ impl NodeKernel {
         }
     }
 
+    /// Execute one metadata request without retaining language values.
     #[napi]
     pub fn request(&self, metadata: String) -> String {
         self.kernel.request(&metadata)
@@ -22,6 +24,7 @@ impl NodeKernel {
 }
 
 impl Default for NodeKernel {
+    /// Create a binding with a fresh kernel.
     fn default() -> Self {
         Self::new()
     }

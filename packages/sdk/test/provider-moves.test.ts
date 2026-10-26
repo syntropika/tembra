@@ -77,7 +77,7 @@ for (const abort of [false, true]) {
       ]);
       const reference = await host.get("item", "main");
       const unrelated = await host.get("other", "main");
-      const id = host.session.reference(reference).object;
+      const id = host.session.handles.reference(reference).object;
       const state = reference.state as Readable<number>;
       let reacquired;
       try {
@@ -97,7 +97,7 @@ for (const abort of [false, true]) {
         if (abort || !linked) expect(after.resource).toBe(before.resource);
         else expect(after.resource.owner).toBe("b");
         reacquired = await host.get("item", "main");
-        expect(host.session.reference(reacquired).object).toBe(id);
+        expect(host.session.handles.reference(reacquired).object).toBe(id);
         expect(unrelatedFactories).toBe(1);
         expect(events.filter((event) => event.startsWith("factory:"))).toEqual([
           "factory:a",

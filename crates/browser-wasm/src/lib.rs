@@ -10,6 +10,7 @@ pub struct WasmKernel {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl WasmKernel {
+    /// Create one kernel and its metadata bridge.
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new() -> Self {
         Self {
@@ -17,12 +18,14 @@ impl WasmKernel {
         }
     }
 
+    /// Execute one metadata request without retaining language values.
     pub fn request(&self, metadata: &str) -> String {
         self.kernel.request(metadata)
     }
 }
 
 impl Default for WasmKernel {
+    /// Create a binding with a fresh kernel.
     fn default() -> Self {
         Self::new()
     }

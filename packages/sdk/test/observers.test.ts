@@ -95,7 +95,7 @@ test("foreign state publication adopts the kernel snapshot despite a failing con
   reference.state.subscribe((value) => seen.push(value.count));
   try {
     await reference.increment();
-    const object = host.session.reference(reference).object;
+    const object = host.session.handles.reference(reference).object;
     const snapshot = host.session.snapshot(object);
     expect(reference.state.value).toEqual(host.session.value(snapshot.value));
     expect(reference.state.value.count).toBe(1);
@@ -111,7 +111,7 @@ test("reference release detaches retained state subscriptions and selections", a
   const host = createHost();
   await host.install(counter());
   const keeper = await host.get("counter", "main");
-  const object = host.session.reference(keeper).object;
+  const object = host.session.handles.reference(keeper).object;
   const binding = host.session.objects.get(object)!.binding!;
   const original = binding.subscribe.bind(binding);
   let active = 0;
@@ -136,10 +136,10 @@ test("reference release detaches retained state subscriptions and selections", a
         }),
       );
       if (index % 2) {
-        const id = host.session.reference(reference).id;
+        const id = host.session.handles.reference(reference).id;
         host.session.kernel.command(KernelOp.Release, { reference: id });
         host.session.kernel.command(KernelOp.Forget, { reference: id });
-        host.session.revoke(id);
+        host.session.handles.revoke(id);
       } else reference.release();
     }
     expect(active).toBe(0);

@@ -7,8 +7,8 @@ import type { Reload } from "../src/kernel.ts";
 test("resource dependencies reject foreign handles even when host-local IDs collide", async () => {
   const first = createHost({ resources: { base: { open: () => "first" } } });
   const second = createHost({ resources: { base: { open: () => "second" } } });
-  const foreign = first.session.hostResource("base");
-  const local = second.session.hostResource("base");
+  const foreign = first.session.scopes.hostResource("base");
+  const local = second.session.scopes.hostResource("base");
   const foreignRecord = first.session.resources.records.values().next().value!;
   const localRecord = second.session.resources.records.values().next().value!;
   expect(foreignRecord.id).toBe(localRecord.id);
@@ -115,7 +115,7 @@ test("disposing one object does not traverse unrelated JS reference records", as
   );
   const first = await host.get("local", "first");
   const second = await host.get("local", "second");
-  const object = host.session.reference(first).object;
+  const object = host.session.handles.reference(first).object;
   const traversal = spyOn(host.session.references, "values").mockImplementation(() => {
     throw new Error("Unrelated reference traversal during object disposal");
   });

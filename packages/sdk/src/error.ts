@@ -1,8 +1,9 @@
+import { Code } from "./bridge/identifiers.ts";
 import { Errors, type ErrorDescriptor } from "./errors.ts";
-import { Code } from "./identifiers.ts";
 
 const codes: ReadonlySet<unknown> = new Set(Object.values(Code));
 
+/** Check for a structured error descriptor. */
 function isDescriptor(value: unknown): value is ErrorDescriptor {
   return (
     typeof value === "object" &&
@@ -20,6 +21,8 @@ function isDescriptor(value: unknown): value is ErrorDescriptor {
 export class TembraError extends Error {
   readonly code: Code;
   readonly reason: string;
+
+  /** Preserve the error code and reason with a readable message. */
   constructor(error: ErrorDescriptor, message = error.message, options?: ErrorOptions) {
     super(message, options);
     this.name = "TembraError";
@@ -41,6 +44,7 @@ export function failure(error: unknown): TembraError {
   return new TembraError(Errors.Unavailable.Callback, message, { cause: error });
 }
 
+/** Throw a structured error for a rejected operation. */
 export function refuse(error: ErrorDescriptor, message = error.message): never {
   throw new TembraError(error, message);
 }

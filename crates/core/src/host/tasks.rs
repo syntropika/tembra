@@ -2,6 +2,7 @@ use super::*;
 use crate::Reason;
 
 impl Host {
+    /// Retain an owner's implementation version for physical task work.
     pub fn begin_task(&self, owner: Owner) -> Result<Id> {
         let mut inner = self.inner.borrow_mut();
         inner.open()?;
@@ -27,6 +28,7 @@ impl Host {
         Ok(id)
     }
 
+    /// Issue an operation root under a live task's retained version.
     pub fn task_root(&self, task: Id, principal: impl Into<String>) -> Result<Id> {
         let mut inner = self.inner.borrow_mut();
         inner.open()?;
@@ -42,6 +44,7 @@ impl Host {
         inner.root(version, principal.into(), false)
     }
 
+    /// Request task cancellation without releasing its ownership.
     pub fn stop_task(&self, task: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let task_record = inner
@@ -55,6 +58,7 @@ impl Host {
         Ok(())
     }
 
+    /// Release physical task ownership and wake dependent cleanup.
     pub fn finish_task(&self, task: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let task_id = task;
@@ -72,8 +76,6 @@ impl Host {
             let facet = inner.objects[&object].facet;
             let owner = inner.facets[&facet].owner;
             inner.settled_owner(Owner::Facet(owner));
-        }
-        if let Owner::Object(object) = task.owner {
             inner
                 .objects
                 .get_mut(&object)

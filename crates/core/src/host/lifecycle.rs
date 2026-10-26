@@ -9,76 +9,16 @@ impl Host {
     pub fn allocate_handle(&self) -> Result<Id> {
         self.inner.borrow_mut().id()
     }
+
+    /// Create an empty kernel with no platform dependencies.
     pub fn new() -> Self {
         Self {
             inner: Rc::new(RefCell::new(Inner {
                 next: 1,
                 version: 1,
-                closing: false,
-                closed: false,
-                facets: BTreeMap::new(),
                 versions: BTreeMap::from([(1, BTreeMap::new())]),
                 services: BTreeMap::from([(1, BTreeMap::new())]),
-                objects: BTreeMap::new(),
-                addresses: BTreeMap::new(),
-                references: BTreeMap::new(),
-                object_references: Index::default(),
-                roots: BTreeMap::new(),
-                calls: BTreeMap::new(),
-                resources: BTreeMap::new(),
-                tasks: BTreeMap::new(),
-                actions: VecDeque::new(),
-                pending: None,
-                now: 0,
-                idle: BTreeMap::new(),
-                facet_min: BTreeMap::new(),
-                scopes: BTreeMap::new(),
-                programs: BTreeMap::new(),
-                ready_programs: BTreeSet::new(),
-                program_deadlines: BTreeMap::new(),
-                waiters: Index::default(),
-                owner_scopes: Index::default(),
-                scope_versions: VersionCounts::default(),
-                scope_code_versions: BTreeMap::new(),
-                scope_activations: BTreeMap::new(),
-                scope_programs: Index::default(),
-                non_host_scopes: 0,
-                resource_versions: VersionCounts::default(),
-                current_owners: BTreeSet::new(),
-                facet_scopes: Index::default(),
-                scope_children: Index::default(),
-                resource_scopes: Index::default(),
-                resource_claims: Index::default(),
-                owner_resources: Index::default(),
-                resource_names: Index::default(),
-                dependents: Index::default(),
-                owner_tasks: Index::default(),
-                owner_calls: Index::default(),
-                facet_objects: Index::default(),
-                facet_versions: Index::default(),
-                version_users: BTreeMap::new(),
-                object_roots: Index::default(),
-                facet_roots: Index::default(),
-                facet_tasks: Index::default(),
-                object_dependents: Index::default(),
-                scope_dependencies: Index::default(),
-                reference_scopes: Index::default(),
-                #[cfg(test)]
-                program_visits: 0,
-                #[cfg(feature = "hooks")]
-                contributions: Vec::new(),
-                #[cfg(feature = "hooks")]
-                plans: BTreeMap::new(),
-                #[cfg(feature = "subscriptions")]
-                subscriptions: BTreeMap::new(),
-                #[cfg(feature = "subscriptions")]
-                scope_listeners: Index::default(),
-                #[cfg(feature = "subscriptions")]
-                owner_listeners: Index::default(),
-                #[cfg(feature = "subscriptions")]
-                ready_deliveries: BTreeSet::new(),
-                #[cfg(all(test, feature = "subscriptions"))]
-                delivery_visits: 0,
+                ..Inner::default()
             })),
         }
     }
@@ -138,6 +78,7 @@ impl Host {
         Ok(())
     }
 
+    /// Read the earliest indexed object retirement deadline.
     pub fn next_idle(&self) -> Option<u64> {
         let inner = self.inner.borrow();
         inner
@@ -253,6 +194,7 @@ impl Host {
         }
     }
 
+    /// Release kernel storage only after physical ownership settles.
     pub fn finish_close(&self) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         if !inner.closing
@@ -297,6 +239,7 @@ impl Host {
         Ok(())
     }
 
+    /// Advance ready work and return pending adapter actions.
     pub fn drain(&self) -> Vec<Action> {
         self.pump_programs();
         #[cfg(feature = "subscriptions")]
@@ -304,6 +247,7 @@ impl Host {
         self.inner.borrow_mut().actions.drain(..).collect()
     }
 
+    /// Count retained kernel records without activating services.
     pub fn diagnostics(&self) -> Diagnostics {
         let inner = self.inner.borrow();
         Diagnostics {

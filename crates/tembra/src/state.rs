@@ -12,6 +12,7 @@ pub struct State<T> {
     marker: PhantomData<T>,
 }
 impl<T> Clone for State<T> {
+    /// Share the same state owner without copying its value.
     fn clone(&self) -> Self {
         Self {
             host: self.host.clone(),
@@ -22,6 +23,7 @@ impl<T> Clone for State<T> {
     }
 }
 impl<T: Serialize + 'static> State<T> {
+    /// Bind typed state access to one kernel object.
     pub(crate) fn new(
         host: Host,
         object: core::Id,
@@ -42,6 +44,8 @@ impl<T: Serialize + 'static> State<T> {
             marker: PhantomData,
         })
     }
+
+    /// Read the typed value identified by the current snapshot.
     pub fn value(&self) -> Result<Rc<T>> {
         self.host
             .value(self.host.kernel().snapshot(self.object)?.value)

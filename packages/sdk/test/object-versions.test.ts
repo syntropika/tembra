@@ -33,7 +33,7 @@ test("old roots refuse freshly activated objects and retain their existing imple
           reason: Reason.UpgradeConflict,
         });
         expect(executed).toEqual([1]);
-        expect(host.session.diagnostics().calls).toBe(0);
+        expect(host.session.lifecycle.diagnostics().calls).toBe(0);
         expect(await retained.read(ctx)).toBe(1);
         expect(await host.root((current) => fresh.read(current))).toBe(2);
         expect(await retained.read()).toBe(2);
@@ -46,6 +46,6 @@ test("old roots refuse freshly activated objects and retain their existing imple
     retained.release();
     await host.close();
   }
-  expect(host.session.diagnostics().calls).toBe(0);
-  expect(host.session.diagnostics().objects).toBe(0);
+  expect(host.session.lifecycle.diagnostics().calls).toBe(0);
+  expect(host.session.lifecycle.diagnostics().objects).toBe(0);
 });

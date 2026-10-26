@@ -68,7 +68,7 @@ for (const failure of ["decode", "drop", "unprintable"] as const)
       facetId = prepared.facets[0]!.id;
       host.session.kernel.command(KernelOp.Commit, { ticket: prepared.id });
       const reference = await host.get("native", "main");
-      const object = host.session.reference(reference).object;
+      const object = host.session.handles.reference(reference).object;
       const seen: number[] = [];
       host.session.objects
         .get(object)!
@@ -94,7 +94,7 @@ for (const failure of ["decode", "drop", "unprintable"] as const)
         if (failure !== "decode") expect(errors[0]?.cause).toBe(callbackError);
         expect(reported).toBe(1);
         const next = await host.get("native", "main");
-        expect(host.session.reference(next).object).not.toBe(object);
+        expect(host.session.handles.reference(next).object).not.toBe(object);
         expect(next.state.value).toEqual({ count: 0 });
         next.release();
       } finally {

@@ -2,6 +2,7 @@ use super::*;
 use crate::Reason;
 
 impl Host {
+    /// Pin the current implementation version for a new operation root.
     pub fn begin_root(&self, principal: impl Into<String>) -> Result<Id> {
         let mut inner = self.inner.borrow_mut();
         inner.open()?;
@@ -19,10 +20,12 @@ impl Host {
         inner.root(version, principal.into(), true)
     }
 
+    /// Require an active root that has not been cancelled.
     pub fn check_root(&self, root: Id) -> Result<()> {
         self.inner.borrow().check_root(root).map(|_| ())
     }
 
+    /// End logical admission while physical calls retain the root.
     pub fn end_root(&self, root: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let record = inner
@@ -36,6 +39,7 @@ impl Host {
         Ok(())
     }
 
+    /// Emit cancellation once without ending physical calls.
     pub fn cancel_root(&self, root: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let record = inner
@@ -49,6 +53,7 @@ impl Host {
         Ok(())
     }
 
+    /// Read the identity retained by an active root.
     pub fn root_principal(&self, root: Id) -> Result<String> {
         Ok(self.inner.borrow().check_root(root)?.principal.clone())
     }
@@ -128,22 +133,7 @@ impl Host {
             code_version: version,
             method: method.into(),
         };
-        inner.facet_roots.insert(facet_owner, root);
-        inner.owner_calls.insert(Owner::Host, id);
-        inner.owner_calls.insert(Owner::Facet(facet_owner), id);
-        inner.owner_calls.insert(Owner::Object(object), id);
-        inner.object_roots.insert(object, root);
-        inner.calls.insert(id, call.clone());
-        let context = inner.roots.get_mut(&root).expect("checked root");
-        context.calls += 1;
-        context.touched.insert(object);
-        context.facets.insert(facet_owner);
-        inner
-            .objects
-            .get_mut(&object)
-            .expect("checked object")
-            .calls += 1;
-        Ok(call)
+        Ok(inner.retain_call(call, facet_owner))
     }
 
     /// Marks actual callback settlement, independently from logical cancellation or caller release.
@@ -178,6 +168,7 @@ impl Host {
         Ok(())
     }
 
+    /// Read the record for a physically active call.
     pub fn invocation(&self, call: Id) -> Result<Invocation> {
         self.inner
             .borrow()
@@ -241,34 +232,31 @@ impl Host {
             code_version: version,
             method: operation.to_string(),
         };
-        inner.facet_roots.insert(facet_owner, root);
-        inner.owner_calls.insert(Owner::Host, id);
-        inner.owner_calls.insert(Owner::Facet(facet_owner), id);
-        if let Some(object) = object {
-            inner.owner_calls.insert(Owner::Object(object), id);
-            inner.object_roots.insert(object, root);
-            inner
-                .roots
-                .get_mut(&root)
-                .expect("checked root")
-                .touched
-                .insert(object);
-        }
-        inner.calls.insert(id, invocation.clone());
-        inner.roots.get_mut(&root).expect("checked root").calls += 1;
-        inner
-            .roots
-            .get_mut(&root)
-            .expect("checked root")
-            .facets
-            .insert(facet_owner);
-        if let Some(object) = object {
-            inner
-                .objects
-                .get_mut(&object)
+        Ok(inner.retain_call(invocation, facet_owner))
+    }
+}
+
+impl Inner {
+    /// Retain physical call ownership and its reverse indexes together.
+    fn retain_call(&mut self, call: Invocation, facet_owner: Id) -> Invocation {
+        self.facet_roots.insert(facet_owner, call.root);
+        self.owner_calls.insert(Owner::Host, call.id);
+        self.owner_calls.insert(Owner::Facet(facet_owner), call.id);
+        if call.object != 0 {
+            self.owner_calls.insert(Owner::Object(call.object), call.id);
+            self.object_roots.insert(call.object, call.root);
+            self.objects
+                .get_mut(&call.object)
                 .expect("checked object")
                 .calls += 1;
         }
-        Ok(invocation)
+        let root = self.roots.get_mut(&call.root).expect("checked root");
+        root.calls += 1;
+        root.facets.insert(facet_owner);
+        if call.object != 0 {
+            root.touched.insert(call.object);
+        }
+        self.calls.insert(call.id, call.clone());
+        call
     }
 }

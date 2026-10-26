@@ -20,7 +20,7 @@ for (const close of [false, true])
     });
     await started.promise;
     const closing = close ? host.close() : undefined;
-    if (close) host.session.flush();
+    if (close) host.session.lifecycle.flush();
     resume.resolve();
     try {
       await running;

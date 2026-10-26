@@ -5,7 +5,7 @@ use crate::{
 };
 
 /// Immutable metadata. Values remain owned by their language adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Snapshot {
     pub value: Id,
     pub revision: u64,
@@ -22,6 +22,7 @@ pub struct PreparedState {
 }
 
 impl Host {
+    /// Attach initial state once while the object is loading.
     pub fn initialize_state(&self, object: Id, value: Id, version: Version) -> Result<Snapshot> {
         if value == 0 || version == 0 {
             return Err(Error::invalid(
@@ -46,6 +47,7 @@ impl Host {
         Ok(snapshot)
     }
 
+    /// Read state metadata without decoding the adapter-owned value.
     pub fn snapshot(&self, object: Id) -> Result<Snapshot> {
         self.inner
             .borrow()
@@ -83,10 +85,12 @@ impl Host {
         })
     }
 
+    /// Check and adopt a candidate against its expected revision.
     pub fn adopt_state(&self, call: Id, object: Id, expected: u64, value: Id) -> Result<Snapshot> {
         self.prepare_state(call, object, expected, value)?.adopt()
     }
 
+    /// Require a live owner call at the object's accepted version.
     fn check_state_call(&self, call: Id, object: Id) -> Result<()> {
         let inner = self.inner.borrow();
         let call = inner.calls.get(&call).ok_or_else(|| gone(Reason::Call))?;

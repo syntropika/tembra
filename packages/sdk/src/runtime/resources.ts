@@ -1,10 +1,9 @@
+import { EnvironmentPhase, KernelOp } from "../bridge/protocol.ts";
 import { Errors } from "../errors.ts";
-import { EnvironmentPhase, KernelOp } from "../protocol.ts";
 
+import type { Resource, ResourceOptions } from "../authoring/types.ts";
 import { TembraError, refuse } from "../error.ts";
-import type { Resource, ResourceOptions } from "../types.ts";
 import type { Environment, ResourceRecord } from "./records.ts";
-import { deferred } from "./records.ts";
 import type { Session } from "./session.ts";
 
 const issued = new WeakMap<object, ResourceRecord & { session: Session }>();
@@ -12,8 +11,16 @@ const issued = new WeakMap<object, ResourceRecord & { session: Session }>();
 export class Resources {
   readonly records = new Map<number, ResourceRecord>();
   readonly closedRecords = new Map<number, ResourceRecord>();
+
+  /** Retain callbacks for live and closed resource identities. */
   constructor(readonly session: Session) {}
 
+  /** Resolve a live or recently closed callback record by its kernel identity. */
+  find(id: number): ResourceRecord | undefined {
+    return this.records.get(id) ?? this.closedRecords.get(id);
+  }
+
+  /** Validate local dependency ownership and collect resource identities. */
   dependencyIds(options: ResourceOptions<any>): number[] {
     const dependencies: number[] = [];
     for (const dependency of options.deps ?? []) {
@@ -24,12 +31,13 @@ export class Resources {
           refuse(Errors.Invalid.ResourceHost, "Resource dependencies must belong to the same host");
         dependencies.push(resource.id);
       } else {
-        this.session.reference(dependency);
+        this.session.handles.reference(dependency);
       }
     }
     return dependencies;
   }
 
+  /** Ask Rust to resolve this named resource declaration. */
   private register(environment: Environment, name: string, options: ResourceOptions<any>): number {
     return this.session.kernel.command<{ id: number; value: number | null }>(KernelOp.Resource, {
       owner: environment.owner,
@@ -40,6 +48,7 @@ export class Resources {
     }).id;
   }
 
+  /** Rebind closed host resources to a fresh declared scope. */
   redeclare(environment: Environment, previous: Environment): void {
     for (const resource of previous.resources.values()) {
       this.records.delete(resource.id);
@@ -51,6 +60,7 @@ export class Resources {
     }
   }
 
+  /** Issue a local resource handle and retain its physical callbacks. */
   declare<T>(environment: Environment, name: string, options: ResourceOptions<T>): ResourceRecord {
     if (!name || typeof options.open !== "function") refuse(Errors.Invalid.Resource);
     const id = this.register(environment, name, options);
@@ -60,9 +70,9 @@ export class Resources {
       (environment.resourceDeclarations ??= new Map()).set(reused, options);
       return reused;
     }
-    let ready = deferred<void>();
     const controller = new AbortController();
     const handle: Resource<T> = Object.freeze({
+      /** Read the opened resource value after declaration has finished. */
       get value() {
         if (environment.phase === EnvironmentPhase.Declaring)
           refuse(Errors.Invalid.ResourceInFactory, "Resources open after declaration");
@@ -76,47 +86,37 @@ export class Resources {
     const record = {
       id,
       name,
-      owner: environment.owner,
       options,
       handle,
       dependencies: this.dependencyIds(options),
-      ready: ready.promise,
       controller,
-      exclusive: options.exclusive ?? false,
-      version: options.version ?? 1,
       session: this.session,
+      /** Clear physical completion state before reopening a restored resource. */
       reset: (id: number) => {
         record.id = id;
         record.controller = new AbortController();
-        ready = deferred<void>();
-        record.ready = ready.promise;
         delete record.value;
         delete record.closed;
         delete record.started;
       },
+      /** Share one opener promise until its physical callback settles. */
       start: () => {
         record.started ??= (async () => {
           const declaration = record.options;
+          const value = await declaration.open(record.controller.signal);
+          const id = this.session.values.put(value);
           try {
-            const value = await declaration.open(record.controller.signal);
-            const id = this.session.values.put(value);
-            try {
-              this.session.kernel.command(KernelOp.ResourceOpened, {
-                resource: record.id,
-                value: id,
-              });
-            } catch (error) {
-              this.session.values.drop(id);
-              if (declaration.close)
-                await this.session.root((ctx) => declaration.close!(value, ctx), true);
-              throw error;
-            }
-            record.value = id;
-            ready.resolve();
+            this.session.kernel.command(KernelOp.ResourceOpened, {
+              resource: record.id,
+              value: id,
+            });
           } catch (error) {
-            ready.reject(error);
+            this.session.values.drop(id);
+            if (declaration.close)
+              await this.session.calls.root((ctx) => declaration.close!(value, ctx), true);
             throw error;
           }
+          record.value = id;
         })();
         record.started.catch(() => {});
         return record.started;
@@ -127,6 +127,7 @@ export class Resources {
     return record;
   }
 
+  /** Wait for opening and closing callbacks before acknowledging release. */
   async close(record: ResourceRecord): Promise<void> {
     record.closed ??= (async () => {
       record.controller.abort(new TembraError(Errors.Cancelled.Resource));
@@ -134,18 +135,19 @@ export class Resources {
       try {
         if (record.value !== undefined && record.options.close) {
           const value = this.session.value(record.value);
-          await this.session.root((ctx) => record.options.close!(value, ctx), true);
+          await this.session.calls.root((ctx) => record.options.close!(value, ctx), true);
         }
       } finally {
         this.session.kernel.command(KernelOp.ResourceClosed, { resource: record.id });
         this.records.delete(record.id);
         this.closedRecords.set(record.id, record);
-        this.session.flush();
+        this.session.lifecycle.flush();
       }
     })();
     return record.closed;
   }
 
+  /** Rebind a restored resource and wait for its new value. */
   async reopen(record: ResourceRecord, id: number): Promise<void> {
     this.closedRecords.delete(record.id);
     record.reset(id);

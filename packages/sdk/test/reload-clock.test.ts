@@ -25,7 +25,7 @@ for (const origin of [0, 1_700_000_000_000]) {
               await new Promise((resolve) => setTimeout(resolve, 0));
               now += 10;
               host.session.kernel.command(KernelOp.Tick, { now: host.session.now() });
-              host.session.flush();
+              host.session.lifecycle.flush();
             }
             opened.push(version);
             return version;
@@ -97,18 +97,18 @@ test("an idle host still expires a slow reload and waits for physical settlement
     await entered.promise;
     now = 10_049;
     host.session.kernel.command(KernelOp.Tick, { now });
-    host.session.flush();
+    host.session.lifecycle.flush();
     expect(cancelled).toBe(false);
     now = 10_050;
     host.session.kernel.command(KernelOp.Tick, { now });
-    host.session.flush();
+    host.session.lifecycle.flush();
     expect(cancelled).toBe(true);
     expect(settled).toBe(false);
     expect(closed).toEqual([]);
     finish.resolve();
     expect(await replacing).toMatchObject({ code: Code.Conflict, reason: Reason.ReloadDeadline });
     expect(closed).toEqual([2]);
-    expect(host.session.diagnostics().resources).toBe(1);
+    expect(host.session.lifecycle.diagnostics().resources).toBe(1);
   } finally {
     finish.resolve();
     await replacing;

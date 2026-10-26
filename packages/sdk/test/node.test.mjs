@@ -102,3 +102,11 @@ test("published entrypoints preserve structured failures across RPC and engine e
     await host.close();
   }
 });
+
+test("published SDK tooling exports its build interface", async () => {
+  const tooling = await import("../dist/tooling/index.js");
+  assert.equal(typeof tooling.build, "function");
+  assert.equal(tooling.Platform.Embedded, "embedded");
+  const config = { builds: {} };
+  assert.equal(tooling.defineConfig(config), config);
+});

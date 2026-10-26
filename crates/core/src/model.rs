@@ -21,7 +21,9 @@ pub enum Lifetime {
     Referenced,
     Host,
 }
+
 impl Lifetime {
+    /// Return the stable wire name for this variant.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Referenced => "referenced",
@@ -38,7 +40,9 @@ pub struct Service {
     /// Keeps an unreferenced object and its tasks live until this idle duration expires.
     pub linger_ms: u32,
 }
+
 impl Service {
+    /// Create a declaration with explicit identity and default options.
     pub fn new(
         name: impl Into<String>,
         methods: impl IntoIterator<Item = impl Into<String>>,
@@ -68,7 +72,9 @@ pub struct Facet {
     pub requires: Vec<Requirement>,
     pub hooks: BTreeSet<String>,
 }
+
 impl Facet {
+    /// Create a declaration with explicit identity and default options.
     pub fn new(name: impl Into<String>, api_version: Version) -> Self {
         Self {
             name: name.into(),
@@ -95,7 +101,9 @@ pub enum Status {
     Released,
     Gone,
 }
+
 impl Status {
+    /// Return the stable wire name for this variant.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Loading => "loading",
@@ -214,6 +222,7 @@ pub(crate) struct Object {
     pub state: Option<crate::Snapshot>,
     pub dependencies: BTreeSet<Id>,
 }
+
 #[derive(Clone, Debug)]
 pub(crate) struct Reference {
     pub object: Id,
@@ -223,6 +232,7 @@ pub(crate) struct Reference {
     #[cfg(feature = "views")]
     pub allowed: Option<BTreeSet<String>>,
 }
+
 #[derive(Clone, Debug)]
 pub(crate) struct Root {
     pub version: Version,
@@ -234,6 +244,7 @@ pub(crate) struct Root {
     pub facets: BTreeSet<Id>,
     pub cleanup: bool,
 }
+
 #[derive(Clone, Debug)]
 pub(crate) struct Task {
     pub owner: Owner,

@@ -21,6 +21,7 @@ pub struct Telemetry {
 }
 
 impl Telemetry {
+    /// Allocate a bounded trace buffer with a fixed sampling interval.
     pub fn new(capacity: usize, sample_every: u64) -> Result<Self> {
         if capacity == 0 || sample_every == 0 {
             return Err(Error::invalid(
@@ -36,6 +37,8 @@ impl Telemetry {
             events: VecDeque::new(),
         })
     }
+
+    /// Sample an event and account for overwritten records.
     pub fn record(&mut self, observation: Observation) {
         self.seen = self.seen.wrapping_add(1);
         if !self.seen.is_multiple_of(self.sample_every) {
@@ -47,10 +50,14 @@ impl Telemetry {
         }
         self.events.push_back(observation);
     }
+
+    /// Return buffered events and clear retained trace storage.
     pub fn drain(&mut self, limit: usize) -> Vec<Observation> {
         let count = limit.min(self.events.len());
         self.events.drain(..count).collect()
     }
+
+    /// Read the number of trace records lost to the capacity limit.
     pub fn dropped(&self) -> u64 {
         self.dropped
     }

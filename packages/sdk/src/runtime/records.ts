@@ -1,7 +1,3 @@
-import { EnvironmentPhase } from "../protocol.ts";
-import type { KernelFacet, Owner } from "../kernel.ts";
-import type { StateBinding, StateOptions } from "../state.ts";
-import type { Context } from "./context.ts";
 import type {
   Completion,
   DynamicReference,
@@ -11,7 +7,11 @@ import type {
   Resource,
   ResourceOptions,
   TaskScope,
-} from "../types.ts";
+} from "../authoring/types.ts";
+import type { KernelFacet, Owner } from "../bridge/kernel.ts";
+import { EnvironmentPhase } from "../bridge/protocol.ts";
+import type { StateBinding, StateOptions } from "../state.ts";
+import type { Context } from "./context.ts";
 
 export interface FacetRecord {
   info: KernelFacet;
@@ -50,7 +50,6 @@ export interface Environment {
   state?: {
     initial: any;
     options: StateOptions<any>;
-    handle: unknown;
     binding: StateBinding<any>;
     publish?: () => void;
   };
@@ -58,21 +57,20 @@ export interface Environment {
 export interface ResourceRecord {
   id: number;
   name: string;
-  owner: Owner;
   options: ResourceOptions<any>;
   handle: Resource<any>;
   dependencies: number[];
-  ready: Promise<void>;
+  /** Share one physical resource-open operation. */
   start(): Promise<void>;
   started?: Promise<void>;
   controller: AbortController;
   value?: number;
   closed?: Promise<void>;
-  exclusive: boolean;
-  version: number;
+  /** Rebind a restored resource to its new kernel identity. */
   reset(id: number): void;
 }
 export interface TaskDefinition {
+  /** Run the task callback under its scope's cancellation signal. */
   start(scope: TaskScope): Completion<void>;
   running?: TaskRecord;
 }
@@ -90,13 +88,12 @@ export interface ListenerDefinition {
 }
 export interface ListenerRecord {
   id: number;
-  source: EventSource<any>;
+  /** Remove the source subscription. */
   detach(): void;
   done?: Promise<void>;
   definition: ListenerDefinition;
   environment: Environment;
   stopped: boolean;
-  active: boolean;
 }
 export interface ReferenceRecord {
   id: number;
@@ -108,12 +105,14 @@ export interface ReferenceRecord {
   stateCleanups: Set<() => void>;
   context?: Context;
   released: boolean;
-  dependency?: boolean;
 }
 
+/** Create a promise with explicit completion functions. */
 export function deferred<T>(): {
   promise: Promise<T>;
+  /** Settle the shared completion with its result. */
   resolve(value: T): void;
+  /** Reject the shared completion without an unhandled rejection. */
   reject(error: unknown): void;
 } {
   let resolve!: (value: T) => void;

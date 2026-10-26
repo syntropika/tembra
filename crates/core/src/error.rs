@@ -35,6 +35,7 @@ impl Code {
         }
     }
 
+    /// Return the stable wire name of this error field.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Invalid => "invalid",
@@ -164,7 +165,9 @@ pub enum Reason {
     UpgradeConflict,
     Value,
 }
+
 impl Reason {
+    /// Return the stable wire name of this error field.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ActivationBusy => "activation_busy",
@@ -278,12 +281,16 @@ impl Reason {
         }
     }
 }
+
 impl From<Reason> for String {
+    /// Preserve a reason as an owned wire string.
     fn from(reason: Reason) -> Self {
         reason.as_str().into()
     }
 }
+
 impl std::fmt::Display for Reason {
+    /// Write the error field in its stable textual form.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -298,6 +305,7 @@ pub struct Error {
 }
 
 impl Error {
+    /// Create a structured error with an explicit code and reason.
     pub fn new(code: Code, reason: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -305,11 +313,15 @@ impl Error {
             message: message.into(),
         }
     }
+
+    /// Create an invalid-input error with a specific reason.
     pub fn invalid(reason: impl Into<String>, message: impl Into<String>) -> Self {
         Self::new(Code::Invalid, reason, message)
     }
 }
+
 impl fmt::Display for Error {
+    /// Format the error category, reason and message for diagnostics.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -320,5 +332,6 @@ impl fmt::Display for Error {
         )
     }
 }
+
 impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;

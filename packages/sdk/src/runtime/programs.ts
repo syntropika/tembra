@@ -1,24 +1,21 @@
-import { Errors } from "../errors.ts";
-import { Code } from "../identifiers.ts";
+import { Code } from "../bridge/identifiers.ts";
 import {
   ActionType,
   EffectType,
   EnvironmentPhase,
   KernelOp,
   OwnerKind,
-  StepType,
-} from "../protocol.ts";
+} from "../bridge/protocol.ts";
+import { Errors } from "../errors.ts";
 
+import type { Action, Effect } from "../bridge/kernel.ts";
 import { failure, TembraError } from "../error.ts";
 import { validate } from "../state.ts";
-import { deferred } from "./records.ts";
-import type { Action, Effect } from "../kernel.ts";
 import type { Environment, ResourceRecord } from "./records.ts";
+import { deferred } from "./records.ts";
 import type { Session } from "./session.ts";
 
-type ProgramResult = typeof StepType.Prepared | typeof StepType.Complete;
-
-// Rust strings cannot represent isolated UTF-16 surrogates, including one cut by truncation.
+/** Bound callback error text without emitting isolated UTF-16 surrogates. */
 function errorText(value: string, limit: number): string {
   return value.slice(0, limit).replace(/[\uD800-\uDFFF]/gu, "\uFFFD");
 }
@@ -26,12 +23,13 @@ function errorText(value: string, limit: number): string {
 /** Language effects only. The Rust program owns readiness, ordering, gates and recovery decisions. */
 export class Programs {
   readonly scopes = new Map<number, Environment>();
-  #pending = new Map<number, ReturnType<typeof deferred<ProgramResult>>>();
+  #pending = new Map<number, ReturnType<typeof deferred<void>>>();
+
+  /** Retain effect scopes and pending program completions. */
   constructor(readonly session: Session) {}
 
+  /** Describe a declared scope to the Rust lifecycle engine. */
   register(environment: Environment): void {
-    if (this.session.kernel.command<boolean>(KernelOp.ScopeExists, { scope: environment.id }))
-      return;
     const parent =
       environment.owner.kind === OwnerKind.Host
         ? undefined
@@ -44,7 +42,7 @@ export class Programs {
       facet: environment.facet.info.id,
       parents: parent ? [parent.id] : [],
       dependencies: [...environment.dependencies.values()].map(
-        (reference) => this.session.reference(reference).id,
+        (reference) => this.session.handles.reference(reference).id,
       ),
       resources: [...environment.resources.values()].map((resource) => resource.id),
       stateVersion: environment.state?.options.version ?? (environment.state ? 1 : undefined),
@@ -52,31 +50,35 @@ export class Programs {
     });
   }
 
-  activate(environment: Environment): Promise<void> {
-    this.register(environment);
-    return this.run(
-      this.session.kernel.command<number>(KernelOp.ScopeActivate, { scope: environment.id }),
-    ).then(() => {});
+  /** Activate an already registered scope and wait for its program. */
+  activate(scope: number): Promise<void> {
+    return this.run(this.session.kernel.command<number>(KernelOp.ScopeActivate, { scope }));
   }
 
-  cleanup(environments: readonly Environment[], object?: number): Promise<void> {
+  /** Ask the kernel to retire existing scopes and await completion. */
+  cleanup(environments: readonly Environment[]): Promise<void> {
     const scopes = environments
       .map((environment) => environment.id)
       .filter((scope) => this.session.kernel.command<boolean>(KernelOp.ScopeExists, { scope }));
-    if (!scopes.length && object === undefined) return Promise.resolve();
-    return this.run(
-      this.session.kernel.command<number>(KernelOp.ScopesCleanup, { scopes, object }),
-    ).then(() => {});
+    return this.cleanupScopes(scopes);
   }
 
-  run(program: number): Promise<ProgramResult> {
+  /** Run cleanup for kernel-issued scope identities without resolving JS callbacks. */
+  cleanupScopes(scopes: readonly number[]): Promise<void> {
+    return scopes.length
+      ? this.run(this.session.kernel.command<number>(KernelOp.ScopesCleanup, { scopes }))
+      : Promise.resolve();
+  }
+
+  /** Share one completion promise for a kernel program. */
+  run(program: number): Promise<void> {
     const pending = this.#pending.get(program);
     if (pending) return pending.promise;
-    const completion = deferred<ProgramResult>();
+    const completion = deferred<void>();
     this.#pending.set(program, completion);
     try {
       this.session.kernel.command(KernelOp.ProgramRun, { program });
-      this.session.flush();
+      this.session.lifecycle.flush();
     } catch (error) {
       this.#pending.delete(program);
       completion.reject(error);
@@ -124,16 +126,14 @@ export class Programs {
               program: action.id,
               results,
             });
-            this.session.flush();
+            this.session.lifecycle.flush();
           },
         ),
       );
     } else if (action.type === ActionType.CancelEffects) {
       for (const effect of action.effects!) {
         if (effect.type !== EffectType.Open && effect.type !== EffectType.Restore) continue;
-        const resource =
-          this.session.resources.records.get(effect.resource!) ??
-          this.session.resources.closedRecords.get(effect.resource!);
+        const resource = this.session.resources.find(effect.resource!);
         if (resource) resource.controller.abort(new TembraError(Errors.Cancelled.EngineEffect));
         else if (this.session.options.native?.cancelEffect) {
           const cancel = this.session.options.native.cancelEffect.bind(this.session.options.native);
@@ -152,28 +152,25 @@ export class Programs {
           this.session.cleanupErrors.push(error);
           this.session.report(error);
         }
-      } else
-        completion?.resolve(
-          action.type === ActionType.ProgramPrepared ? StepType.Prepared : StepType.Complete,
-        );
+      } else completion?.resolve();
     }
   }
 
+  /** Resolve a live or recently closed resource callback record. */
   private resource(id: number): ResourceRecord {
-    const direct =
-      this.session.resources.records.get(id) ?? this.session.resources.closedRecords.get(id);
+    const direct = this.session.resources.find(id);
     if (direct) return direct;
     throw new TembraError(Errors.Gone.Resource);
   }
 
+  /** Execute a language effect without deciding lifecycle order. */
   private async execute(effect: Effect): Promise<number | void> {
     const environment = effect.scope === undefined ? undefined : this.scopes.get(effect.scope);
     if (effect.scope !== undefined && !environment && this.session.options.native)
       return this.session.options.native.effect(effect);
     if (
       (effect.type === EffectType.Close || effect.type === EffectType.Open) &&
-      !this.session.resources.records.has(effect.resource!) &&
-      !this.session.resources.closedRecords.has(effect.resource!) &&
+      !this.session.resources.find(effect.resource!) &&
       this.session.options.native
     )
       return this.session.options.native.effect(effect);
@@ -188,7 +185,7 @@ export class Programs {
         await this.session.resources.reopen(this.resource(effect.previous!), effect.resource!);
         break;
       case EffectType.Stop:
-        if (environment) await this.session.activities.stop(environment, effect.keepListeners);
+        if (environment) await this.session.activities.stop(environment);
         break;
       case EffectType.Prepare: {
         if (!environment) throw new TembraError(Errors.Gone.Scope);
@@ -231,7 +228,7 @@ export class Programs {
         }
         for (const pair of effect.replacements!) {
           const next = pair.next ? this.scopes.get(pair.next) : undefined;
-          if (next?.object) this.session.refreshReferences(next.object, next.facet);
+          if (next?.object) this.session.handles.refreshReferences(next.object, next.facet);
         }
         for (const pair of effect.replacements!)
           if (pair.next) this.scopes.get(pair.next)?.state?.publish?.();
@@ -246,7 +243,7 @@ export class Programs {
       case EffectType.Drop: {
         if (!environment) break;
         for (const reference of environment.dependencies.values())
-          this.session.revoke(this.session.reference(reference).id);
+          this.session.handles.revoke(this.session.handles.reference(reference).id);
         environment.dependencies.clear();
         for (const resource of environment.resources.values())
           this.session.resources.closedRecords.delete(resource.id);
@@ -259,6 +256,8 @@ export class Programs {
         throw new TembraError(Errors.Unsupported.EngineEffect, effect.type);
     }
   }
+
+  /** Validate and retain candidate state before later publication. */
   private candidate(environment: Environment, candidate: unknown): number {
     const state = environment.state!;
     const value = validate(candidate, state.options);

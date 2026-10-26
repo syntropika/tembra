@@ -26,6 +26,7 @@ pub struct Service<E> {
 }
 
 impl<E: 'static> Service<E> {
+    /// Create a native declaration with explicit identity and default options.
     pub fn new(
         name: impl Into<String>,
         create: impl Fn(Declaration) -> Result<E> + 'static,
@@ -41,12 +42,14 @@ impl<E: 'static> Service<E> {
         }
     }
 
+    /// Set the ownership policy and optional idle retention period.
     pub fn lifetime(mut self, lifetime: core::Lifetime, linger_ms: u32) -> Self {
         self.metadata.lifetime = lifetime;
         self.metadata.linger_ms = linger_ms;
         self
     }
 
+    /// Bind one callback to typed local and portable entrypoints.
     pub fn method<A, R, F, Fut>(mut self, name: impl Into<String>, handle: F) -> Self
     where
         A: DeserializeOwned + 'static,
@@ -94,6 +97,7 @@ impl<E: 'static> Service<E> {
     }
 }
 
+/// Report an argument or result type mismatch at native dispatch.
 pub(crate) fn type_error() -> Error {
     Error::invalid(
         Reason::RustType,
@@ -106,17 +110,23 @@ pub struct Facet {
     pub(crate) metadata: core::Facet,
     pub(crate) services: BTreeMap<String, Implementation>,
 }
+
 impl Facet {
+    /// Create a native declaration with explicit identity and default options.
     pub fn new(name: impl Into<String>, api_version: u32) -> Self {
         Self {
             metadata: core::Facet::new(name, api_version),
             services: BTreeMap::new(),
         }
     }
+
+    /// Add an explicit versioned facet dependency.
     pub fn requires(mut self, requirement: core::Requirement) -> Self {
         self.metadata.requires.push(requirement);
         self
     }
+
+    /// Attach a typed service and its callback implementation.
     pub fn service<E>(mut self, service: Service<E>) -> Self {
         self.services
             .insert(service.metadata.name.clone(), service.implementation);
