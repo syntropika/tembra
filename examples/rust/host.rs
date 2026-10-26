@@ -7,7 +7,7 @@ use tembra::{Host, Result};
 
 /// Run the example on a local executor without a separate async runtime.
 fn main() -> Result<()> {
-    // 1. Supply the executor that drives calls and cleanup.
+    // 1. Supply the executor that runs calls and cleanup.
     let mut executor = LocalPool::new();
     let host = Host::new(executor.spawner());
 
