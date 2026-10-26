@@ -33,6 +33,7 @@ deps:
 
 test: build-node build-wasm build-sdk
     cargo test --locked --workspace --all-features
+    bun test scripts/release.test.ts
     bun run --cwd packages/ts/sdk test
     bun run --cwd packages/ts/sdk test:node
     bun run --cwd packages/ts/react-native test

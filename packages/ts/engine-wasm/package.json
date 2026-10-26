@@ -1,6 +1,12 @@
 {
   "name": "@tembra/engine-wasm",
   "version": "0.1.0",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/syntropika/tembra.git",
+    "directory": "packages/ts/engine-wasm"
+  },
   "files": [
     "dist"
   ],
@@ -11,6 +17,9 @@
       "default": "./dist/tembra.js"
     },
     "./tembra_bg.wasm": "./dist/tembra_bg.wasm"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "bun build.ts"

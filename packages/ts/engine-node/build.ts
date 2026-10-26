@@ -25,5 +25,5 @@ const target = path.resolve(root, process.env.CARGO_TARGET_DIR ?? "target");
 mkdirSync(destination, { recursive: true });
 copyFileSync(
   path.join(target, debug ? "debug" : "release", library),
-  path.join(destination, "tembra.node"),
+  path.join(destination, `tembra-${process.platform}-${process.arch}.node`),
 );

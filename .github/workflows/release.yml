@@ -1,0 +1,228 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - name: Check tag, versions and main ancestry
+        id: tag
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref_name }}
+        run: |
+          if [ "$RELEASE_EVENT" = push ]; then
+            git merge-base --is-ancestor HEAD origin/main
+            tag="$RELEASE_REF"
+          else
+            tag="v$(bun -p 'require("./package.json").version')"
+          fi
+          bun scripts/release.ts validate "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  quality:
+    needs: validate
+    uses: ./.github/workflows/quality.yml
+
+  node:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x64
+          - os: ubuntu-22.04-arm
+            platform: linux-arm64
+          - os: macos-15-intel
+            platform: darwin-x64
+          - os: macos-15
+            platform: darwin-arm64
+          - os: windows-2022
+            platform: win32-x64
+          - os: windows-11-arm
+            platform: win32-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - run: node packages/ts/engine-node/build.ts --features=hooks,subscriptions,views,telemetry
+      - name: Load the release addon on its target platform
+        run: node -e "const {NodeKernel}=require('./packages/ts/engine-node/index.cjs'); new NodeKernel()"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: node-${{ matrix.platform }}
+          path: packages/ts/engine-node/dist/tembra-${{ matrix.platform }}.node
+          if-no-files-found: error
+
+  ios:
+    needs: validate
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - run: bun run --cwd packages/ts/react-native build:ios
+      - run: swift test --package-path packages/swift
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: react-native-ios
+          path: packages/ts/react-native/native/swift
+          if-no-files-found: error
+
+  android:
+    needs: validate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+        with:
+          gradle-version: 8.11.1
+          cache-disabled: true
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+      - run: cargo install cargo-ndk --locked --version 4.1.2
+      - run: bun install --frozen-lockfile
+      - name: Build all Android ABIs
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+        run: bun run --cwd packages/ts/react-native build:android --abis arm64-v8a,armeabi-v7a,x86,x86_64
+      - run: gradle -p packages/kotlin -PtembraAndroid=true :android:testReleaseUnitTest
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: react-native-android
+          path: packages/ts/react-native/native/maven
+          if-no-files-found: error
+
+  package:
+    needs: [validate, quality, node, ios, android]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - run: cargo install wasm-bindgen-cli --locked --version 0.2.129
+      - run: bun run --cwd packages/ts/engine-wasm build --features=hooks,subscriptions,views,telemetry
+      - run: bun run --cwd packages/ts/sdk build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: node-*
+          merge-multiple: true
+          path: packages/ts/engine-node/dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: react-native-ios
+          path: packages/ts/react-native/native/swift
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: react-native-android
+          path: packages/ts/react-native/native/maven
+      - name: Pack npm artifacts
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: bun scripts/release.ts pack "$RELEASE_TAG" "$RUNNER_TEMP/release"
+      - name: Verify standalone crate archives
+        run: cargo package --locked --workspace --exclude tembra-node-binding --all-features
+      - name: Install and execute packed Node and WASM packages
+        run: bun scripts/release/smoke.ts "$RUNNER_TEMP/release/npm" "$RUNNER_TEMP/release-smoke"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-release
+          path: ${{ runner.temp }}/release/npm
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: crate-release
+          path: target/package/*.crate
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [validate, package]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      USE_CRATES_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          registry-url: https://registry.npmjs.org
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-release
+          path: ${{ runner.temp }}/release/npm
+      - name: Authenticate to crates.io with OIDC
+        id: crates
+        if: env.USE_CRATES_TOKEN != 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: crate-release
+          path: ${{ runner.temp }}/release/crates
+      - name: Publish crates in dependency order
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || steps.crates.outputs.token }}
+        run: bun scripts/release.ts publish-crates "$RELEASE_TAG" "$RUNNER_TEMP/release/crates"
+      - name: Publish npm archives in dependency order
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bun scripts/release.ts publish-npm "$RELEASE_TAG" "$RUNNER_TEMP/release/npm"

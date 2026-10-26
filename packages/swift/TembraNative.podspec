@@ -3,7 +3,7 @@ Pod::Spec.new do |s|
   s.version = '0.1.0'
   s.summary = 'Swift bindings for the Tembra metadata kernel'
   s.homepage = 'https://github.com/syntropika/tembra'
-  s.license = 'MIT'
+  s.license = 'Apache-2.0'
   s.authors = 'Tembra contributors'
   s.source = { :git => 'https://github.com/syntropika/tembra.git', :tag => s.version.to_s }
   s.platforms = { :ios => '15.1', :osx => '11.0' }

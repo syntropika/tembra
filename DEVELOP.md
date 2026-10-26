@@ -1,6 +1,7 @@
 # Development
 
 This guide covers the development environment and repository checks.
+For tag builds and registry publication, see the [release guide](docs/releases.md).
 For runtime concepts and language APIs, see the [Tembra guide](docs/README.md).
 For module layout and code style, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -57,7 +58,8 @@ bun run --cwd packages/ts/engine-wasm build --features=hooks,subscriptions,views
 bun run --cwd packages/ts/sdk build
 ```
 
-Bun runs all repository build scripts. Node runs SDK compatibility tests.
+Bun runs the repository build scripts. The release matrix also runs the Node-only engine
+build script directly with the pinned Node version. Node runs SDK compatibility tests.
 
 Engine package builds default to release mode. Pass `--debug` for a development build.
 `just build-node` selects debug mode; `just build-wasm` selects release mode. Cargo compiles

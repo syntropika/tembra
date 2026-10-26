@@ -1,6 +1,8 @@
 {
   "name": "@tembra/sdk",
   "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
   "workspaces": [
     "packages/ts/sdk",
     "packages/ts/engine-node",

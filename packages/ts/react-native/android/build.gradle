@@ -39,7 +39,9 @@ repositories {
     mavenCentral()
 }
 
+def tembraVersion = new groovy.json.JsonSlurper().parse(file("../package.json")).version
+
 dependencies {
     implementation("com.facebook.react:react-android")
-    implementation("dev.tembra:tembra-kotlin:0.1.0")
+    implementation("dev.tembra:tembra-kotlin:${tembraVersion}")
 }

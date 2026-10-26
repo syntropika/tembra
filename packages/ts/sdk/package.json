@@ -1,6 +1,12 @@
 {
   "name": "@tembra/sdk",
   "version": "0.1.0",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/syntropika/tembra.git",
+    "directory": "packages/ts/sdk"
+  },
   "files": [
     "src",
     "dist"
@@ -78,6 +84,9 @@
       "import": "./dist/telemetry.js"
     },
     "./embedded-runtime": "./dist/embedded.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "bun build.ts",

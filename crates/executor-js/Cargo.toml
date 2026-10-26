@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Optional V8 execution adapter for Tembra"
 
 [features]
@@ -13,7 +14,7 @@ subscriptions = ["tembra/subscriptions", "tembra-bridge/subscriptions"]
 views = ["tembra/views", "tembra-bridge/views"]
 
 [dependencies]
-tembra = { path = "../tembra" }
+tembra = { path = "../tembra", version = "=0.1.0" }
 tembra-bridge.workspace = true
 serde_json.workspace = true
 futures.workspace = true

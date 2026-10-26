@@ -1,6 +1,12 @@
 {
   "name": "@tembra/engine-node",
   "version": "0.1.0",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/syntropika/tembra.git",
+    "directory": "packages/ts/engine-node"
+  },
   "files": [
     "dist",
     "index.cjs",
@@ -12,6 +18,9 @@
       "types": "./index.d.ts",
       "default": "./index.cjs"
     }
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "bun build.ts"

@@ -8,7 +8,7 @@ Pod::Spec.new do |s|
   s.homepage = 'https://github.com/syntropika/tembra'
   s.license = package['license']
   s.authors = 'Tembra contributors'
-  s.source = { :git => 'https://github.com/syntropika/tembra.git', :tag => s.version.to_s }
+  s.source = { :git => 'https://github.com/syntropika/tembra.git', :tag => "v#{s.version}" }
   s.platforms = { :ios => '15.1' }
   s.swift_version = '5.9'
   s.source_files = 'ios/**/*.{h,mm,swift}', 'native/swift/Sources/**/*.swift'

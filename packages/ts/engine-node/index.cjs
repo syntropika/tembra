@@ -1,1 +1,1 @@
-module.exports = require("./dist/tembra.node");
+module.exports = require(`./dist/tembra-${process.platform}-${process.arch}.node`);
