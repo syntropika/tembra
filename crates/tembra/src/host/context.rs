@@ -47,6 +47,7 @@ impl Drop for RootGuard {
         if let Err(error) = self.host.kernel().end_root(self.root) {
             self.host.0.errors.borrow_mut().push(error);
         }
+        self.host.end_context(self.root);
         self.host.flush();
     }
 }
@@ -108,7 +109,10 @@ impl Context {
 
     /// Signal root cancellation without releasing physical ownership.
     pub fn cancel(&self) -> Result<()> {
-        self.host.kernel().cancel_root(self.root)
+        self.host.kernel().cancel_root(self.root)?;
+        self.host.cancel_context(self.root);
+        self.host.flush();
+        Ok(())
     }
 
     /// Read the identity retained by this root.
@@ -121,5 +125,107 @@ impl Context {
         self.call
             .clone()
             .ok_or_else(|| Error::invalid(Reason::Context, "an entered invocation is required"))
+    }
+}
+
+impl Context {
+    /// Observe cancellation of this operation's root, including host shutdown.
+    pub fn signal(&self) -> Cancellation {
+        self.host.context_signal(self.root)
+    }
+}
+
+impl Host {
+    fn context_signal(&self, root: core::Id) -> Cancellation {
+        let mut signals = self.0.context_signals.borrow_mut();
+        signals.retain(|_, signal| signal.strong_count() != 0);
+        if let Some(signal) = signals.get(&root).and_then(std::rc::Weak::upgrade) {
+            return Cancellation(signal);
+        }
+        let signal = Cancellation::new("root");
+        if self.kernel().check_root(root).is_err() {
+            signal.cancel();
+        }
+        signals.insert(root, Rc::downgrade(&signal.0));
+        signal
+    }
+
+    /// Mirror a shared kernel cancellation action into native context signals.
+    pub fn cancel_context(&self, root: core::Id) {
+        if let Some(signal) = self
+            .0
+            .context_signals
+            .borrow()
+            .get(&root)
+            .and_then(std::rc::Weak::upgrade)
+        {
+            Cancellation(signal).cancel();
+        }
+    }
+}
+
+impl Context {
+    /// Acquire a reference whose claim is revoked when this operation's root ends.
+    pub fn get(
+        &self,
+        service: &str,
+        key: Vec<String>,
+        options: crate::AcquisitionOptions,
+    ) -> Result<Rc<Reference>> {
+        self.check()?;
+        let reference =
+            Rc::new(
+                self.host
+                    .get_with_options(service, key, &self.principal()?, options)?,
+            );
+        self.host
+            .0
+            .root_references
+            .borrow_mut()
+            .entry(self.root)
+            .or_default()
+            .push(reference.clone());
+        Ok(reference)
+    }
+}
+
+impl Context {
+    /// Access the native environment shared by the currently entered orb.
+    pub fn orb<T: 'static>(&self) -> Result<Rc<T>> {
+        self.check()?;
+        let call = self.invocation()?;
+        self.host
+            .0
+            .orb_values
+            .borrow()
+            .get(&call.orb)
+            .cloned()
+            .ok_or_else(|| Error::invalid(Reason::Orb, "orb environment unavailable"))?
+            .downcast::<T>()
+            .map_err(|_| type_error())
+    }
+
+    /// Access a host-owned resource during an active operation.
+    pub fn resource<T: 'static>(&self, name: &str) -> Result<Resource<T>> {
+        self.check()?;
+        self.host.resource(name)
+    }
+}
+
+impl Host {
+    /// Revoke native claims acquired inside a root whose logical wait has ended.
+    /// Shared drivers call this for roots they issue themselves.
+    pub fn end_context(&self, root: core::Id) {
+        let references = self
+            .0
+            .root_references
+            .borrow_mut()
+            .remove(&root)
+            .unwrap_or_default();
+        for reference in references {
+            if let Err(error) = reference.release() {
+                self.0.errors.borrow_mut().push(error);
+            }
+        }
     }
 }

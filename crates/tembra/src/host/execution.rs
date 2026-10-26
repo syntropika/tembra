@@ -28,7 +28,17 @@ impl Host {
     /// Drain native-owned actions. A shared JS adapter owns its own drain.
     pub fn flush(&self) {
         if self.0.external_actions.get() {
+            if let Some(wake) = self.0.driver_wake.borrow().clone() {
+                wake();
+            }
             return;
+        }
+        if self.0.flushing.replace(true) {
+            return;
+        }
+        let _guard = FlushGuard(self.clone());
+        if self.kernel().next_deadline().is_some() {
+            self.tick();
         }
         loop {
             let actions = self.kernel().drain();
@@ -37,8 +47,28 @@ impl Host {
             }
             for action in actions {
                 match action {
+                    #[cfg(feature = "subscriptions")]
+                    core::Action::Deliver {
+                        subscription,
+                        operation,
+                        payload,
+                    } => {
+                        self.deliver(subscription, operation, payload);
+                    }
+                    #[cfg(feature = "subscriptions")]
+                    core::Action::DetachSubscription(subscription) => {
+                        self.detach_listener(subscription);
+                    }
+                    #[cfg(feature = "subscriptions")]
+                    core::Action::SubscriptionFailed(subscription) => {
+                        self.detach_listener(subscription);
+                    }
+                    core::Action::StateChanged { object, .. } => self.publish_state(object),
+                    core::Action::CancelTask(task) => self.cancel_task(task),
+                    core::Action::CancelRoot(root) => self.cancel_context(root),
                     core::Action::DropValue(id) => self.drop_value(id),
                     core::Action::DisposeObject(id) => {
+                        self.0.observers.borrow_mut().remove(&id);
                         let host = self.clone();
                         if let Err(error) = self.spawn(async move {
                             if let Err(error) = host.dispose(id).await {
@@ -77,6 +107,9 @@ impl Host {
                             .into_iter()
                             .map(completion)
                             .collect();
+                            if !host.0.external_actions.get() {
+                                host.tick();
+                            }
                             host.kernel().complete_step(program, results)?;
                             host.flush();
                             Ok(())
@@ -130,9 +163,8 @@ impl Host {
 
     /// Signal a pending native opener without claiming it has settled.
     pub(super) fn cancel_resource(&self, resource: core::Id) {
-        if let Some((signal, send)) = self.0.cancellations.borrow_mut().remove(&resource) {
-            signal.cancelled.set(true);
-            let _ = send.send(());
+        if let Some(signal) = self.0.cancellations.borrow_mut().remove(&resource) {
+            signal.cancel();
         }
     }
 
@@ -171,13 +203,19 @@ impl Host {
     pub(super) fn execute_immediate(&self, effect: &core::Effect) -> Result<Option<core::Id>> {
         match effect {
             core::Effect::Drop { scope } => {
+                self.0.scopes.borrow_mut().remove(scope);
                 if let Some(object) = self.0.scope_objects.borrow_mut().remove(scope) {
                     self.0.objects.borrow_mut().remove(&object);
                 }
             }
-            core::Effect::Stop { .. }
-            | core::Effect::Prepare { .. }
-            | core::Effect::Start { .. } => {}
+            core::Effect::Stop { scope, .. } => self.stop_scope(*scope)?,
+            core::Effect::Start { scope } => self.start_scope(*scope)?,
+            core::Effect::Prepare { scope, .. } => {
+                #[cfg(feature = "subscriptions")]
+                self.prepare_listeners(*scope)?;
+                #[cfg(not(feature = "subscriptions"))]
+                let _ = scope;
+            }
             _ => {
                 return Err(Error::invalid(
                     Reason::NativeEffect,
@@ -197,5 +235,13 @@ fn completion(result: Result<Option<core::Id>>) -> core::Completion {
             value: None,
             error: Some(error),
         },
+    }
+}
+
+struct FlushGuard(Host);
+impl Drop for FlushGuard {
+    fn drop(&mut self) {
+        self.0.0.flushing.set(false);
+        self.0.schedule_deadline();
     }
 }

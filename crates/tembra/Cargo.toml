@@ -22,6 +22,15 @@ path = "../../examples/rust/lifetime.rs"
 name = "executor"
 path = "../../examples/rust/executor.rs"
 
+[[example]]
+name = "hooks"
+path = "../../examples/rust/hooks.rs"
+required-features = ["hooks"]
+
+[[example]]
+name = "composition"
+path = "../../examples/rust/composition.rs"
+
 [features]
 default = []
 hooks = ["tembra-core/hooks"]
@@ -34,6 +43,7 @@ tembra-core.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
+futures-timer = "3"
 
 [lints]
 workspace = true

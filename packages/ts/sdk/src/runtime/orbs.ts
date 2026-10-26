@@ -15,7 +15,6 @@ export class Orbs {
   readonly operations = new Map<number, { orb: OrbRecord; handler: ContributionHandler }>();
   #ready = new Map<number, Promise<void>>();
   #ordinals = new Map<string, number>();
-  #nextOrdinal = 0;
 
   /** Retain local implementations and contribution callbacks. */
   constructor(readonly session: Session) {}
@@ -163,7 +162,11 @@ export class Orbs {
       for (const [hook, contribution] of Object.entries(hooks)) {
         const operation = this.session.kernel.command<number>(KernelOp.Allocate);
         const key = JSON.stringify([record.info.name, target, hook]);
-        if (!this.#ordinals.has(key)) this.#ordinals.set(key, this.#nextOrdinal++);
+        if (!this.#ordinals.has(key))
+          this.#ordinals.set(
+            key,
+            this.session.kernel.command<number>(KernelOp.ContributionOrdinal),
+          );
         this.operations.set(operation, {
           orb: record,
           handler: typeof contribution === "function" ? contribution : contribution.handle,
@@ -196,18 +199,34 @@ export class Orbs {
       hook: name,
     });
     const participants: Participant[] = plan.map((operation) => async (ctx, input, next) => {
-      const contributor = this.operations.get(operation);
-      if (!contributor) throw new TembraError(Errors.Gone.Contribution);
-      const scope = contributor.orb.scope;
-      if (!scope) throw new TembraError(Errors.Unavailable.OrbScope);
-      return this.session.calls.owned(
-        scope,
-        operation,
-        (entered) => contributor.handler(entered, input, next),
-        ctx,
-      );
+      return this.runContribution(operation, ctx, input, next);
     });
     return definition.run(context, input, participants);
+  }
+
+  /** Execute a participant from either adapter under its own managed orb invocation. */
+  async runContribution(
+    operation: number,
+    ctx: Context,
+    input: unknown,
+    next?: (input: unknown) => Promise<unknown>,
+  ): Promise<unknown> {
+    ctx = checkedContext(ctx, this.session);
+    const contributor = this.operations.get(operation);
+    if (!contributor) {
+      const native = this.session.options.native;
+      if (native?.hasContribution?.(operation) && native.contribute)
+        return native.contribute(operation, ctx, input);
+      throw new TembraError(Errors.Gone.Contribution);
+    }
+    const scope = contributor.orb.scope;
+    if (!scope) throw new TembraError(Errors.Unavailable.OrbScope);
+    return this.session.calls.owned(
+      scope,
+      operation,
+      (entered) => contributor.handler(entered, input, next),
+      ctx,
+    );
   }
 
   /** Clean up a retired version before removing its callbacks. */

@@ -1,14 +1,28 @@
 //! Retain an idle resource, then expire it with a host-owned clock.
 
-use futures::{FutureExt, executor::LocalPool};
+use futures::{FutureExt, executor::LocalPool, future::LocalBoxFuture};
+use std::{cell::Cell, rc::Rc};
+use tembra::Clock;
 use tembra::{Host, Orb, Result, Service, core::Lifetime};
+
+#[derive(Clone, Default)]
+struct ManualClock(Rc<Cell<u64>>);
+impl Clock for ManualClock {
+    fn now_ms(&self) -> u64 {
+        self.0.get()
+    }
+    fn sleep(&self, _milliseconds: u64) -> LocalBoxFuture<'static, ()> {
+        futures::future::pending().boxed_local()
+    }
+}
 
 const CONNECTION: &str = "example.connection";
 
 /// Show reuse during linger and reconstruction after expiry.
 fn main() -> Result<()> {
     let mut executor = LocalPool::new();
-    let host = Host::new(executor.spawner());
+    let clock = ManualClock::default();
+    let host = Host::with_clock(tembra::core::Host::new(), executor.spawner(), clock.clone());
 
     // 1. Declare a managed resource and a 100 ms idle retention period.
     let service = Service::new(CONNECTION, |declaration| {
@@ -44,7 +58,7 @@ fn main() -> Result<()> {
     drop(second);
 
     // 4. Supply monotonic elapsed time; no real sleep is needed here.
-    host.kernel().tick(100)?;
+    clock.0.set(100);
     host.flush();
     executor.run_until_stalled();
 

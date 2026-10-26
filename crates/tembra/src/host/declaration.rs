@@ -2,13 +2,24 @@
 
 use super::*;
 
+#[derive(Clone)]
 pub struct Declaration {
     pub(super) host: Host,
     pub(super) object: core::Id,
-    pub(super) resources: Rc<RefCell<Vec<core::Id>>>,
+    pub(super) owner: core::Owner,
+    pub(super) orb: core::Id,
+    pub(super) draft: Rc<super::scopes::Draft>,
 }
 
 impl Declaration {
+    pub(super) fn check_declaration(&self) -> Result<()> {
+        if self.draft.sealed.get() {
+            Err(Error::invalid(Reason::ScopeClosed, "declaration has ended"))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Read the native object's canonical service address.
     pub fn address(&self) -> Result<core::Address> {
         self.host.kernel().object_address(self.object)
@@ -21,6 +32,7 @@ impl Declaration {
         version: u32,
         validate: impl Fn(&T) -> Result<()> + 'static,
     ) -> Result<State<T>> {
+        self.check_declaration()?;
         State::new(self.host.clone(), self.object, initial, version, validate)
     }
 
@@ -50,6 +62,20 @@ impl Declaration {
         open: impl FnOnce(ResourceSignal) -> LocalBoxFuture<'static, Result<T>> + 'static,
         close: impl FnOnce(Rc<T>, Context) -> LocalBoxFuture<'static, Result<()>> + 'static,
     ) -> Result<Resource<T>> {
+        self.check_declaration()?;
+        if self.draft.resource_names.borrow().contains(name) {
+            return Err(Error::invalid(
+                Reason::Resource,
+                "resource names must be unique in a declaration",
+            ));
+        }
+        if self.owner == core::Owner::Host && self.host.0.host_resources.borrow().contains_key(name)
+        {
+            return Err(Error::invalid(
+                Reason::Resource,
+                "host resource names must be unique",
+            ));
+        }
         if dependencies
             .iter()
             .any(|dependency| !self.host.same(&dependency.host))
@@ -60,7 +86,7 @@ impl Declaration {
             ));
         }
         let record = self.host.kernel().resource(
-            core::Owner::Object(self.object),
+            self.owner,
             name.into(),
             version,
             false,
@@ -69,23 +95,26 @@ impl Declaration {
                 .map(|dependency| dependency.id)
                 .collect(),
         )?;
-        self.resources.borrow_mut().push(record.id);
+        self.draft.resource_names.borrow_mut().insert(name.into());
+        self.draft.resources.borrow_mut().push(record.id);
+        if self.owner == core::Owner::Host {
+            self.host.0.host_resources.borrow_mut().insert(
+                name.into(),
+                ResourceKey {
+                    host: self.host.clone(),
+                    id: record.id,
+                    version,
+                },
+            );
+        }
         let host = self.host.clone();
         let resource = record.id;
-        let (send, receive) = oneshot::channel();
-        let signal = ResourceSignal {
-            cancelled: Rc::new(Cell::new(false)),
-            wait: async move {
-                let _ = receive.await;
-            }
-            .boxed_local()
-            .shared(),
-        };
+        let signal = ResourceSignal::new("resource");
         self.host
             .0
             .cancellations
             .borrow_mut()
-            .insert(resource, (signal.clone(), send));
+            .insert(resource, signal.clone());
         self.host.0.openers.borrow_mut().insert(
             resource,
             Box::new(move || {
@@ -117,6 +146,7 @@ impl Declaration {
             key: ResourceKey {
                 host: self.host.clone(),
                 id: resource,
+                version,
             },
             marker: std::marker::PhantomData,
         })

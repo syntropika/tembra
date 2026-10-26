@@ -17,7 +17,7 @@ fn javascript_rust_contexts_preserve_branches_and_owner_revocation() {
     tokio::task::LocalSet::new().block_on(
         &executor,
         async {
-            let native = Host::new(TokioExecutor);
+            let native = Host::new(TokioExecutor::new());
             native
                 .install(vec![Orb::new("probe", 1).service(
                     Service::new("probe", |_| Ok(())).method(
@@ -61,7 +61,7 @@ fn mixed_context_frames_reclaim_and_root_issued_opaque_sources_remain_usable() {
     tokio::task::LocalSet::new().block_on(
         &executor,
         async {
-            let host = Host::new(TokioExecutor);
+            let host = Host::new(TokioExecutor::new());
             let issued_by = host.clone();
             host.install(vec![
                 Orb::new("native.context", 1).service(

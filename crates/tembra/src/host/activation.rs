@@ -16,26 +16,17 @@ impl Host {
             .and_then(|services| services.get(service))
             .cloned()
             .ok_or_else(|| Error::invalid(Reason::NativeService, service))?;
-        let resources = Rc::new(RefCell::new(Vec::new()));
-        let declaration = Declaration {
-            host: self.clone(),
-            object,
-            resources: resources.clone(),
-        };
-        let result = (implementation.factory)(declaration);
-        let scope = self.kernel().allocate_handle()?;
-        self.kernel().register_scope(core::Scope {
-            id: scope,
-            owner: core::Owner::Object(object),
-            orb,
-            parents: Vec::new(),
-            dependencies: Vec::new(),
-            resources: resources.borrow().clone(),
-            state_version: None,
-            migrate: false,
-            active: false,
-            closing: false,
-        })?;
+        let declaration = self.declaration(core::Owner::Object(object), orb);
+        let result = (implementation.factory)(declaration.clone());
+        let parents = self
+            .0
+            .orb_scopes
+            .borrow()
+            .get(&orb)
+            .copied()
+            .into_iter()
+            .collect();
+        let scope = self.register_declaration(&declaration, parents)?;
         self.0.scope_objects.borrow_mut().insert(scope, object);
         self.0.objects.borrow_mut().insert(
             object,

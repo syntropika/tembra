@@ -73,6 +73,7 @@ export const KernelOp = Object.freeze({
   Drain: "drain",
   Restrict: "restrict",
   Contribute: "contribute",
+  ContributionOrdinal: "contribution-ordinal",
   HookPlan: "hook-plan",
   Listen: "listen",
   Subscribe: "subscribe",
@@ -131,6 +132,7 @@ export const NativeOp = Object.freeze({
   CancelEffect: "cancel-effect",
   Effect: "effect",
   Invoke: "invoke",
+  Contribute: "contribute",
 } as const);
 export type NativeOp = ValueOf<typeof NativeOp>;
 

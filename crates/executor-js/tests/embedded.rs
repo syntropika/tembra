@@ -20,7 +20,7 @@ fn javascript_provider_moves_preserve_state_and_candidate_dependencies() {
     tokio::task::LocalSet::new().block_on(
         &executor,
         async {
-            let mut runtime = Runtime::new(Host::new(TokioExecutor), sdk_source()).unwrap();
+            let mut runtime = Runtime::new(Host::new(TokioExecutor::new()), sdk_source()).unwrap();
             let result = runtime
                 .evaluate(
                     r#"(async () => {
@@ -71,7 +71,7 @@ fn javascript_uses_native_provider_through_one_kernel() {
         .build()
         .unwrap();
     tokio::task::LocalSet::new().block_on(&executor, async {
-        let native = Host::new(TokioExecutor);
+        let native = Host::new(TokioExecutor::new());
         native.install(vec![Orb::new("storage", 1).service(Service::new("storage", |self_| self_.state(0_i32, 1, |_| Ok(()))).method("add", |state, context, (amount,): (i32,)| async move { Ok(*state.update(&context, |value| Ok(value + amount))?) }))]).unwrap();
         let mut runtime = Runtime::new(native, source).unwrap();
         let id = runtime.native().kernel().installed_orbs()[0].id;
@@ -103,7 +103,7 @@ fn native_state_decode_failure_does_not_replace_the_call_result_or_lose_disposal
     tokio::task::LocalSet::new().block_on(
         &executor,
         async {
-            let native = Host::new(TokioExecutor);
+            let native = Host::new(TokioExecutor::new());
             native
                 .install(vec![Orb::new("native", 1).service(
                     Service::new("native", |self_| self_.state(0_u64, 1, |_| Ok(()))).method(
@@ -159,7 +159,7 @@ fn portable_results_copy_the_codec_view_without_iterating_bytes() {
         .unwrap();
     tokio::task::LocalSet::new().block_on(&executor, async {
         let mut runtime = Runtime::with_codec(
-            Host::new(TokioExecutor),
+            Host::new(TokioExecutor::new()),
             sdk_source(),
             std::rc::Rc::new(tembra::codec::Json),
             r#"({
@@ -236,7 +236,7 @@ fn codec_results_support_shared_views_and_refuse_detached_views() {
             }})"#
             );
             let mut runtime = Runtime::with_codec(
-                Host::new(TokioExecutor),
+                Host::new(TokioExecutor::new()),
                 sdk_source(),
                 std::rc::Rc::new(tembra::codec::Json),
                 &codec,

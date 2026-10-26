@@ -48,6 +48,7 @@ export class Calls {
       for (const reference of session.rootReferences.get(root) ?? [])
         session.handles.release(reference);
       session.rootReferences.delete(root);
+      session.options.native?.rootEnded?.(root);
       if (!session.lifecycle.closedDiagnostics) session.kernel.command(KernelOp.EndRoot, { root });
       session.controllers.delete(root);
       session.lifecycle.flush();

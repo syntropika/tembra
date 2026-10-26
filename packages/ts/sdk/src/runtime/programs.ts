@@ -70,6 +70,11 @@ export class Programs {
       : Promise.resolve();
   }
 
+  /** Keep both adapters informed when they await the same kernel activation. */
+  pending(program: number): boolean {
+    return this.#pending.has(program);
+  }
+
   /** Share one completion promise for a kernel program. */
   run(program: number): Promise<void> {
     const pending = this.#pending.get(program);

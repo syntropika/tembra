@@ -67,7 +67,7 @@ export class Session implements StateBackend {
     this.name = options.name ?? "host";
     this.principal = options.principal ?? "host";
     const clock = options.now ?? (() => performance.now());
-    const origin = clock();
+    const origin = options.clockOrigin ?? clock();
     this.now = () => Math.floor(clock() - origin);
     const hostOrb: OrbRecord = {
       info: {

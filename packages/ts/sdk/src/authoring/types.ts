@@ -126,6 +126,21 @@ export interface PreparedReload {
 }
 
 export interface NativeAdapter {
+  /** Revoke native reference claims issued inside a JS-owned root. */
+  rootEnded?(root: number): void;
+  /** Return a native service's principal-specific method policy when configured. */
+  access?(orb: number, service: string, principal: string): readonly string[] | undefined;
+  /** Await native callbacks while this realm keeps dispatching their replies. */
+  settled?(): Promise<void>;
+  /** Mirror shared kernel notifications into native callback storage. */
+  notify?(action: import("../bridge/kernel.ts").Action): boolean;
+
+  /** Check whether Rust owns a managed hook participant. */
+  hasContribution?(operation: number): boolean;
+
+  /** Execute a native hook participant while retaining its physical lifetime. */
+  contribute?(operation: number, context: Context, input: unknown): Promise<unknown>;
+
   /** Check whether Rust owns this orb implementation. */
   hasOrb(id: number): boolean;
 
@@ -162,6 +177,8 @@ export interface NativeAdapter {
 }
 
 export interface HostOptions {
+  /** Explicit monotonic origin for adapters sharing an already-running kernel. */
+  clockOrigin?: number;
   name?: string;
   principal?: string;
   kernel: KernelPort;

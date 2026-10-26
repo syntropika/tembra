@@ -76,6 +76,16 @@ impl<T: Serialize + 'static> State<T> {
             self.host.drop_value(value);
             return Err(error);
         }
-        self.host.value(value)
+        let result = self.host.value(value);
+        self.host.publish_state(self.object);
+        self.host.flush();
+        result
+    }
+}
+
+impl<T: 'static> State<T> {
+    /// Read or observe immutable snapshots owned by this state object.
+    pub fn readable(&self) -> crate::Readable<T> {
+        crate::Readable::new(self.host.clone(), self.object, None)
     }
 }

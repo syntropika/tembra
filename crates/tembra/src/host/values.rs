@@ -20,7 +20,10 @@ impl Host {
                     .ok_or_else(|| Error::invalid(Reason::NativeMethod, &call.method))?,
             )
         };
-        handle(environment, self.context(call.root, Some(call))?, arguments).await
+        let entered = self.context(call.root, Some(call))?;
+        self.spawn(async move { handle(environment, entered, arguments).await })?
+            .await
+            .map_err(|_| Error::invalid(Reason::Executor, "native callback executor stopped"))?
     }
 
     /// Encode a value only if its declaration permits language crossing.

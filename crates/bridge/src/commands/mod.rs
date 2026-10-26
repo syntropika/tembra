@@ -267,6 +267,8 @@ impl Kernel {
                 unit()
             }
             #[cfg(feature = "hooks")]
+            KernelOp::ContributionOrdinal => Ok(json!(h.contribution_ordinal()?)),
+            #[cfg(feature = "hooks")]
             KernelOp::Contribute => {
                 h.contribute(Contribution {
                     orb: id("orb")?,

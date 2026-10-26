@@ -18,19 +18,31 @@ use std::{
     rc::Rc,
 };
 
+mod acquisition;
 mod activation;
+mod clock;
 mod context;
 mod declaration;
+#[cfg(feature = "subscriptions")]
+mod events;
 mod execution;
+#[cfg(feature = "hooks")]
+mod hooks;
 mod reference;
 mod resources;
+mod scopes;
+mod signals;
+mod tasks;
 mod values;
 
+pub use acquisition::AcquisitionOptions;
 pub use context::Context;
 pub use declaration::Declaration;
 pub use reference::Reference;
-pub use resources::{Resource, ResourceKey, ResourceSignal};
+pub use resources::{Cancellation, Resource, ResourceKey, ResourceSignal};
+pub use tasks::TaskScope;
 
+type ForeignDispatcher = Rc<dyn Fn(Value) -> LocalBoxFuture<'static, Result<Value>>>;
 type Encoder = Rc<dyn Fn() -> Result<Value>>;
 struct ValueRecord {
     value: Data,
@@ -47,17 +59,39 @@ type Opener = Box<dyn FnOnce() -> LocalBoxFuture<'static, Result<()>>>;
 type Closer = Box<dyn FnOnce(Context) -> LocalBoxFuture<'static, Result<()>>>;
 
 struct Inner {
+    #[cfg(feature = "hooks")]
+    hooks: hooks::Hooks,
+    #[cfg(feature = "subscriptions")]
+    listeners: RefCell<BTreeMap<core::Id, Rc<events::Listener>>>,
+    scopes: RefCell<BTreeMap<core::Id, scopes::NativeScope>>,
+    host_scopes: RefCell<Vec<core::Id>>,
+    scope_activations: RefCell<BTreeMap<core::Id, Shared<LocalBoxFuture<'static, Result<()>>>>>,
+    orb_scopes: RefCell<BTreeMap<core::Id, core::Id>>,
+    orb_factories: RefCell<BTreeMap<core::Id, crate::orb::Factory>>,
+    orb_declaring: RefCell<BTreeSet<core::Id>>,
+    orb_values: RefCell<BTreeMap<core::Id, Data>>,
+    host_resources: RefCell<BTreeMap<String, ResourceKey>>,
+    root_references: RefCell<BTreeMap<core::Id, Vec<Rc<Reference>>>>,
+    task_signals: RefCell<BTreeMap<core::Id, Cancellation>>,
+    clock: Rc<dyn crate::Clock>,
+    deadline: RefCell<Option<(u64, futures::future::AbortHandle)>>,
     kernel: core::Host,
     executor: Rc<dyn LocalSpawn>,
     orbs: RefCell<BTreeMap<core::Id, BTreeMap<String, Implementation>>>,
     objects: RefCell<BTreeMap<core::Id, Object>>,
     scope_objects: RefCell<BTreeMap<core::Id, core::Id>>,
+    observers: RefCell<BTreeMap<core::Id, Vec<std::rc::Weak<crate::readable::Observer>>>>,
     values: RefCell<BTreeMap<core::Id, ValueRecord>>,
     closers: RefCell<BTreeMap<core::Id, Closer>>,
     openers: RefCell<BTreeMap<core::Id, Opener>>,
-    cancellations: RefCell<BTreeMap<core::Id, (ResourceSignal, oneshot::Sender<()>)>>,
+    cancellations: RefCell<BTreeMap<core::Id, ResourceSignal>>,
+    context_signals: RefCell<BTreeMap<core::Id, std::rc::Weak<resources::CancellationState>>>,
     errors: RefCell<Vec<Error>>,
     external_actions: Cell<bool>,
+    driver_wake: RefCell<Option<Rc<dyn Fn()>>>,
+    foreign_dispatcher: RefCell<Option<ForeignDispatcher>>,
+    foreign_objects: RefCell<BTreeMap<core::Id, Shared<LocalBoxFuture<'static, Result<()>>>>>,
+    flushing: Cell<bool>,
     active: Cell<usize>,
     settled: RefCell<Vec<oneshot::Sender<()>>>,
     programs: RefCell<BTreeMap<core::Id, oneshot::Sender<Result<()>>>>,
@@ -76,18 +110,49 @@ impl Host {
 
     /// Attach native callbacks to an existing shared kernel.
     pub fn with_kernel(kernel: core::Host, executor: impl LocalSpawn + 'static) -> Self {
+        Self::with_clock(kernel, executor, crate::clock::SystemClock::default())
+    }
+
+    /// Create a host with an embedding-supplied monotonic clock and timer.
+    pub fn with_clock(
+        kernel: core::Host,
+        executor: impl LocalSpawn + 'static,
+        clock: impl crate::Clock + 'static,
+    ) -> Self {
         Self(Rc::new(Inner {
+            #[cfg(feature = "hooks")]
+            hooks: hooks::Hooks::default(),
+            #[cfg(feature = "subscriptions")]
+            listeners: RefCell::new(BTreeMap::new()),
+            scopes: RefCell::new(BTreeMap::new()),
+            host_scopes: RefCell::new(Vec::new()),
+            scope_activations: RefCell::new(BTreeMap::new()),
+            orb_scopes: RefCell::new(BTreeMap::new()),
+            orb_factories: RefCell::new(BTreeMap::new()),
+            orb_declaring: RefCell::new(BTreeSet::new()),
+            orb_values: RefCell::new(BTreeMap::new()),
+            host_resources: RefCell::new(BTreeMap::new()),
+            root_references: RefCell::new(BTreeMap::new()),
+            task_signals: RefCell::new(BTreeMap::new()),
+            clock: Rc::new(clock),
+            deadline: RefCell::new(None),
             kernel,
             executor: Rc::new(executor),
             orbs: RefCell::new(BTreeMap::new()),
             objects: RefCell::new(BTreeMap::new()),
             scope_objects: RefCell::new(BTreeMap::new()),
+            observers: RefCell::new(BTreeMap::new()),
             values: RefCell::new(BTreeMap::new()),
             closers: RefCell::new(BTreeMap::new()),
             openers: RefCell::new(BTreeMap::new()),
             cancellations: RefCell::new(BTreeMap::new()),
+            context_signals: RefCell::new(BTreeMap::new()),
             errors: RefCell::new(Vec::new()),
             external_actions: Cell::new(false),
+            driver_wake: RefCell::new(None),
+            foreign_dispatcher: RefCell::new(None),
+            foreign_objects: RefCell::new(BTreeMap::new()),
+            flushing: Cell::new(false),
             active: Cell::new(0),
             settled: RefCell::new(Vec::new()),
             programs: RefCell::new(BTreeMap::new()),
@@ -112,6 +177,9 @@ impl Host {
     /// Give the shared JS adapter exclusive ownership of action dispatch.
     pub fn delegate_actions(&self) {
         self.0.external_actions.set(true);
+        if let Some((_, timer)) = self.0.deadline.borrow_mut().take() {
+            timer.abort();
+        }
     }
 
     /// Install compiled native orbs without replacing existing implementations.
@@ -127,53 +195,50 @@ impl Host {
                 "compiled native orbs cannot be replaced",
             ));
         }
+        #[cfg(feature = "hooks")]
+        self.validate_hooks(&orbs)?;
         let reload = self.kernel().prepare(
             orbs.iter().map(|orb| orb.metadata.clone()).collect(),
             Vec::new(),
         )?;
         self.kernel().commit(reload.id, Vec::new())?;
+        let mut factories = Vec::new();
         for (orb, info) in orbs.into_iter().zip(reload.orbs) {
+            factories.push(info.id);
+            self.0
+                .orb_factories
+                .borrow_mut()
+                .insert(info.id, orb.factory);
+            #[cfg(feature = "hooks")]
+            self.install_hooks(info.id, orb.hooks, orb.contributions)?;
             self.0.orbs.borrow_mut().insert(info.id, orb.services);
+        }
+        for orb in factories {
+            self.ensure_orb(orb)?;
+        }
+        let pinned = self
+            .kernel()
+            .installed_orbs()
+            .into_iter()
+            .filter(|info| self.has_orb(info.id))
+            .flat_map(|info| info.declaration.services)
+            .filter(|service| service.lifetime == core::Lifetime::Host)
+            .collect::<Vec<_>>();
+        for service in pinned {
+            self.get(&service.name, vec!["main".into()], "host")?
+                .release()?;
         }
         Ok(())
     }
 
     /// Acquire an object reference and schedule its native activation.
     pub fn get(&self, service: &str, key: Vec<String>, principal: &str) -> Result<Reference> {
-        let acquired = self.kernel().acquire(
-            core::Address {
-                service: service.into(),
-                key,
-                principal: principal.into(),
-            },
-            0,
-            BTreeSet::new(),
-        )?;
-        if acquired.activate {
-            let scope = match self.activate(acquired.object, acquired.orb, service) {
-                Ok(scope) => scope,
-                Err(error) => {
-                    self.kernel().fail(acquired.object)?;
-                    self.kernel().release(acquired.reference)?;
-                    self.flush();
-                    return Err(error);
-                }
-            };
-            let program = self.kernel().activate_scope(scope)?;
-            let activation = self.run(program)?;
-            self.0
-                .objects
-                .borrow_mut()
-                .get_mut(&acquired.object)
-                .expect("activated object")
-                .activation = Some(activation);
-        }
-        Ok(Reference {
-            host: self.clone(),
-            id: acquired.reference,
-            object: acquired.object,
-            released: Cell::new(false),
-        })
+        self.get_with_options(
+            service,
+            key,
+            principal,
+            crate::AcquisitionOptions::default(),
+        )
     }
 
     /// Drain errors collected during callback execution and cleanup.
@@ -197,9 +262,28 @@ impl Host {
             let _ = receive.await;
             self.flush();
         }
+        self.finish_close()
+    }
+
+    /// Release native callback storage after the shared driver has physically settled shutdown.
+    /// The kernel refuses premature completion without discarding active owners.
+    pub fn finish_close(&self) -> Result<()> {
         self.kernel().finish_close()?;
+        self.0.observers.borrow_mut().clear();
+        self.0.scopes.borrow_mut().clear();
+        self.0.driver_wake.borrow_mut().take();
+        self.0.foreign_dispatcher.borrow_mut().take();
+        self.0.root_references.borrow_mut().clear();
         self.0.values.borrow_mut().clear();
         self.0.orbs.borrow_mut().clear();
+        self.0.orb_values.borrow_mut().clear();
+        self.0.orb_factories.borrow_mut().clear();
+        self.0.orb_scopes.borrow_mut().clear();
+        self.0.scope_activations.borrow_mut().clear();
+        self.0.host_resources.borrow_mut().clear();
+        self.0.foreign_objects.borrow_mut().clear();
+        #[cfg(feature = "hooks")]
+        self.clear_hooks();
         self.0.scope_objects.borrow_mut().clear();
         if let Some(error) = self.errors().into_iter().next() {
             return Err(error);

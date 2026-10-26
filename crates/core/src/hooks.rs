@@ -17,6 +17,20 @@ pub struct Contribution {
 }
 
 impl Host {
+    /// Reserve stable registration order shared by all language adapters.
+    pub fn contribution_ordinal(&self) -> Result<u32> {
+        let mut inner = self.inner.borrow_mut();
+        let ordinal = inner.contribution_ordinal;
+        inner.contribution_ordinal = ordinal.checked_add(1).ok_or_else(|| {
+            Error::new(
+                Code::Exhausted,
+                Reason::Operation,
+                "contribution order exhausted",
+            )
+        })?;
+        Ok(ordinal)
+    }
+
     /// Registers metadata once. Pipeline composition and all values belong to orb code.
     pub fn contribute(&self, contribution: Contribution) -> Result<()> {
         let mut inner = self.inner.borrow_mut();

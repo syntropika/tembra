@@ -30,17 +30,21 @@ impl Runtime {
         js_codec: &str,
     ) -> Result<Self> {
         native.delegate_actions();
+        let extensions = vec![
+            tembra_ops::init(),
+            super::bridge::tembra_callback_ops::init(),
+        ];
         let mut js = JsRuntime::new(RuntimeOptions {
-            extensions: vec![tembra_ops::init()],
+            extensions,
             ..Default::default()
         });
         js.op_state().borrow_mut().put(Rc::new(Bindings {
+            callbacks: super::bridge::CallbackBridge::attach(&native),
             kernel: tembra_bridge::Kernel {
                 host: native.kernel(),
             },
             native: native.clone(),
             codec: codec.clone(),
-            started: Instant::now(),
             timers: RefCell::new(BTreeMap::new()),
         }));
         js.execute_script("tembra:runtime", sdk_source.into())
@@ -195,8 +199,10 @@ impl Runtime {
 
     /// Wait for JS cleanup and native physical callbacks to settle.
     pub async fn close(&mut self) -> Result<()> {
-        self.evaluate("host.close().then(() => null)").await?;
-        Ok(())
+        let result = self.evaluate("host.close().then(() => null)").await;
+        let native = self.native.finish_close();
+        result?;
+        native
     }
 }
 

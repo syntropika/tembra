@@ -45,6 +45,12 @@ export class Lifecycle {
   /** Execute one action using its owning JS module. */
   private action(action: Action): void {
     const session = this.session;
+    const nativeHandled = session.options.native?.notify?.(action);
+    if (
+      nativeHandled &&
+      !(action.type === ActionType.ProgramComplete && session.programs.pending(action.id))
+    )
+      return;
     switch (action.type) {
       case ActionType.Execute:
       case ActionType.CancelEffects:
@@ -100,7 +106,13 @@ export class Lifecycle {
   private async dispose(id: number): Promise<void> {
     const session = this.session;
     const object = session.objects.get(id);
-    if (!object) return;
+    if (!object) {
+      // Native contexts can acquire objects before any JS reference mirrors them.
+      await session.options.native?.dispose(id);
+      session.kernel.command(KernelOp.Disposed, { object: id });
+      this.flush();
+      return;
+    }
     object.disposing ??= (async () => {
       const errors: unknown[] = [];
       await object.activation.catch(() => {});
@@ -172,6 +184,8 @@ export class Lifecycle {
       await session.replacements.cancel();
       this.flush();
       for (;;) {
+        await session.options.native?.settled?.();
+        this.flush();
         const pending = [...session.jobs];
         if (!pending.length) break;
         await Promise.allSettled(pending);

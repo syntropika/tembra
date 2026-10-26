@@ -89,6 +89,7 @@ names! {
         Drain => "drain",
         Restrict => "restrict",
         Contribute => "contribute",
+        ContributionOrdinal => "contribution-ordinal",
         HookPlan => "hook-plan",
         Listen => "listen",
         Subscribe => "subscribe",
@@ -155,5 +156,6 @@ names! {
         CancelEffect => "cancel-effect",
         Effect => "effect",
         Invoke => "invoke",
+        Contribute => "contribute",
     }
 }

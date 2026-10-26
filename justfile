@@ -45,6 +45,8 @@ examples:
     cargo run --locked -p tembra --example addresses
     cargo run --locked -p tembra --example lifetime
     cargo run --locked -p tembra --example executor
+    cargo run --locked -p tembra --features hooks --example hooks
+    cargo run --locked -p tembra --example composition
 
 check: fmt-check build-node build-wasm build-sdk
     bun run typecheck

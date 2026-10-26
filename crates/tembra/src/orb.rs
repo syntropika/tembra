@@ -3,6 +3,8 @@ use crate::{Context, Declaration, Error, Result, core};
 use futures::{FutureExt, future::LocalBoxFuture};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+#[cfg(feature = "views")]
+use std::collections::BTreeSet;
 use std::{any::Any, collections::BTreeMap, future::Future, rc::Rc};
 
 pub(crate) type Data = Rc<dyn Any>;
@@ -11,11 +13,16 @@ pub(crate) type LocalMethod =
     Rc<dyn Fn(Data, Context, Box<dyn Any>) -> LocalBoxFuture<'static, Result<Box<dyn Any>>>>;
 pub(crate) type PortableMethod =
     Rc<dyn Fn(Data, Context, Value) -> LocalBoxFuture<'static, Result<Value>>>;
+#[cfg(feature = "views")]
+type Access = Rc<dyn Fn(&str) -> BTreeSet<String>>;
+
 #[derive(Clone)]
 pub(crate) struct Implementation {
     pub factory: Factory,
     pub local: BTreeMap<String, LocalMethod>,
     pub portable: BTreeMap<String, PortableMethod>,
+    #[cfg(feature = "views")]
+    pub access: Option<Access>,
 }
 
 /// A typed service. Methods execute once; only the portable entrypoint invokes serde.
@@ -37,6 +44,8 @@ impl<E: 'static> Service<E> {
                 factory: Rc::new(move |declaration| Ok(Rc::new(create(declaration)?) as Data)),
                 local: BTreeMap::new(),
                 portable: BTreeMap::new(),
+                #[cfg(feature = "views")]
+                access: None,
             },
             marker: std::marker::PhantomData,
         }
@@ -108,7 +117,12 @@ pub(crate) fn type_error() -> Error {
 /// Native orbs are compiled with their application. No schema or generated compatibility file.
 pub struct Orb {
     pub(crate) metadata: core::Orb,
+    pub(crate) factory: Factory,
     pub(crate) services: BTreeMap<String, Implementation>,
+    #[cfg(feature = "hooks")]
+    pub(crate) hooks: BTreeMap<String, std::any::TypeId>,
+    #[cfg(feature = "hooks")]
+    pub(crate) contributions: Vec<crate::hooks::Contribution>,
 }
 
 impl Orb {
@@ -116,7 +130,12 @@ impl Orb {
     pub fn new(name: impl Into<String>, api_version: u32) -> Self {
         Self {
             metadata: core::Orb::new(name, api_version),
+            factory: Rc::new(|_| Ok(Rc::new(()) as Data)),
             services: BTreeMap::new(),
+            #[cfg(feature = "hooks")]
+            hooks: BTreeMap::new(),
+            #[cfg(feature = "hooks")]
+            contributions: Vec::new(),
         }
     }
 
@@ -131,6 +150,56 @@ impl Orb {
         self.services
             .insert(service.metadata.name.clone(), service.implementation);
         self.metadata.services.push(service.metadata);
+        self
+    }
+}
+
+#[cfg(feature = "hooks")]
+impl Orb {
+    /// Declare an orb-owned hook contract.
+    pub fn hook<A: 'static, R: 'static>(mut self, hook: crate::Hook<A, R>) -> Self {
+        self.hooks.insert(hook.name.clone(), hook.signature());
+        self.metadata.hooks.insert(hook.name);
+        self
+    }
+
+    /// Contribute a typed callback. External targets must also be listed in `requires`.
+    /// Lower priorities run first; ties retain contribution registration order.
+    pub fn contribute<A, R, F, Fut>(
+        mut self,
+        target: impl Into<String>,
+        hook: &crate::Hook<A, R>,
+        priority: i32,
+        handle: F,
+    ) -> Self
+    where
+        A: DeserializeOwned + 'static,
+        R: 'static,
+        F: Fn(Context, A) -> Fut + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+    {
+        self.contributions
+            .push(hook.contribution(target.into(), priority, handle));
+        self
+    }
+}
+
+impl Orb {
+    /// Create one shared environment for this orb and declare orb-owned resources and work.
+    pub fn create<T: 'static>(
+        mut self,
+        create: impl Fn(Declaration) -> Result<T> + 'static,
+    ) -> Self {
+        self.factory = Rc::new(move |declaration| Ok(Rc::new(create(declaration)?) as Data));
+        self
+    }
+}
+
+#[cfg(feature = "views")]
+impl<E: 'static> Service<E> {
+    /// Restrict acquired references to the methods permitted for their principal.
+    pub fn access(mut self, policy: impl Fn(&str) -> BTreeSet<String> + 'static) -> Self {
+        self.implementation.access = Some(Rc::new(policy));
         self
     }
 }

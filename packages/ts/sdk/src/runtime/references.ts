@@ -30,6 +30,33 @@ export class References {
   #metadata = new Map<number, KernelOrb>();
   #byObject = new Map<number, Set<ReferenceRecord>>();
 
+  /** Activate an object reserved by the native facade in this shared kernel. */
+  activateAcquired(acquired: Acquisition, address: Address): Promise<void> {
+    const session = this.session;
+    let object = session.objects.get(acquired.object);
+    if (!object) {
+      const activation = deferred<void>();
+      object = {
+        id: acquired.object,
+        address,
+        orb: acquired.orb,
+        versions: new Map(),
+        activation: activation.promise,
+      };
+      session.objects.set(object.id, object);
+      const record = object;
+      session.track(
+        session.scopes.activate(record, acquired).then(activation.resolve, (error) => {
+          record.error = error;
+          session.kernel.command(KernelOp.Fail, { object: record.id });
+          activation.reject(error);
+          session.lifecycle.flush();
+        }),
+      );
+    }
+    return object.activation;
+  }
+
   /** Acquire ownership and create a local service handle. */
   hold(
     service: string,
@@ -90,7 +117,10 @@ export class References {
       released: false,
       ...(ctx ? { context: ctx } : {}),
     };
-    const access = session.orbs.records.get(acquired.orb)?.definition.services?.[service]?.access;
+    const nativeAccess = session.options.native?.access?.(acquired.orb, service, address.principal);
+    const access = nativeAccess
+      ? () => ({ methods: nativeAccess })
+      : session.orbs.records.get(acquired.orb)?.definition.services?.[service]?.access;
     try {
       this.referenceMethods(record, methods, access);
     } catch (error) {
