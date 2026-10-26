@@ -8,7 +8,7 @@ test("a source-only SDK runs a native host and builds orbs from an external proj
   const root = await mkdtemp(path.join(tmpdir(), "tembra-source-package-"));
   try {
     const sdk = fileURLToPath(new URL("../", import.meta.url));
-    const installed = path.join(root, "node_modules/@tembra/sdk");
+    const installed = path.join(root, "node_modules/@syntropika/tembra-sdk");
     await mkdir(installed, { recursive: true });
     await cp(path.join(sdk, "src"), path.join(installed, "src"), { recursive: true });
     await cp(path.join(sdk, "package.json"), path.join(installed, "package.json"));
@@ -16,14 +16,14 @@ test("a source-only SDK runs a native host and builds orbs from an external proj
     await writeFile(path.join(root, "package.json"), '{"type":"module"}');
     await writeFile(
       path.join(root, "orb.ts"),
-      `import { orb } from "@tembra/sdk";
+      `import { orb } from "@syntropika/tembra-sdk";
        export default orb({ name: "source", apiVersion: 1,
          services: { counter: { methods: { read() { return 42; } } } } });`,
     );
     await writeFile(
       path.join(root, "consumer.ts"),
-      `import { createHost } from "@tembra/sdk/node";
-       import { build, Platform } from "@tembra/sdk/tooling";
+      `import { createHost } from "@syntropika/tembra-sdk/node";
+       import { build, Platform } from "@syntropika/tembra-sdk/tooling";
        import declaration from "./orb.ts";
        const host = createHost();
        try {

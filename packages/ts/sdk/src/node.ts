@@ -13,7 +13,7 @@ export function createHost(options: NodeHostOptions = {}): Host {
   const require = createRequire(import.meta.url);
   const binding = options.kernel
     ? undefined
-    : (require("@tembra/engine-node") as {
+    : (require("@syntropika/tembra-engine-node") as {
         NodeKernel: new () => KernelPort;
       });
   return new Host({

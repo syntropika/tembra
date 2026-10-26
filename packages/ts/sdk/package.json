@@ -1,5 +1,5 @@
 {
-  "name": "@tembra/sdk",
+  "name": "@syntropika/tembra-sdk",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "repository": {
@@ -95,8 +95,8 @@
     "test:node": "node --test test/node.test.mjs"
   },
   "dependencies": {
-    "@tembra/engine-node": "workspace:*",
-    "@tembra/engine-wasm": "workspace:*",
+    "@syntropika/tembra-engine-node": "workspace:*",
+    "@syntropika/tembra-engine-wasm": "workspace:*",
     "enhanced-resolve": "5.26.0",
     "typescript": "5.9.3"
   },

@@ -80,7 +80,7 @@ const browserSDK = await Bun.build({
     {
       name: "browser-engine-asset",
       setup(builder) {
-        builder.onResolve({ filter: /^@tembra\/engine-wasm$/ }, () => ({
+        builder.onResolve({ filter: /^@syntropika\/tembra-engine-wasm$/ }, () => ({
           path: "/packages/ts/engine-wasm/dist/tembra.js",
           external: true,
         }));

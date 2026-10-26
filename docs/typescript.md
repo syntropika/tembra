@@ -7,8 +7,8 @@ Application values stay in the JS runtime until a language or transport boundary
 ## Run an orb in Node
 
 ```ts
-import { orb, type Context, type State } from "@tembra/sdk";
-import { createHost } from "@tembra/sdk/node";
+import { orb, type Context, type State } from "@syntropika/tembra-sdk";
+import { createHost } from "@syntropika/tembra-sdk/node";
 
 type Counter = { count: State<number> };
 
@@ -52,20 +52,20 @@ Keep runtime validation in the orb even when application code supplies TypeScrip
 
 ## Browser and Worker
 
-Import `createHost` from `@tembra/sdk/browser` and await it.
-It loads `@tembra/engine-wasm` unless the application supplies a kernel or WASM module.
+Import `createHost` from `@syntropika/tembra-sdk/browser` and await it.
+It loads `@syntropika/tembra-engine-wasm` unless the application supplies a kernel or WASM module.
 Serve the generated WASM asset with its loader, or set `wasmInput`.
 The same entrypoint works in a module Worker.
 
 ## React Native
 
-Import `createHost` from `@tembra/react-native` for iOS and Android.
+Import `createHost` from `@syntropika/tembra-react-native` for iOS and Android.
 It creates a host synchronously through the native TurboModule.
 See the [React Native guide](react-native.md) for installation and cleanup.
 
 ## Packages
 
-Node uses `@tembra/engine-node` and its compiled native addon.
+Node uses `@syntropika/tembra-engine-node` and its compiled native addon.
 Build the engines for a local checkout; SDK source imports do not compile Rust.
 Bun uses the SDK's TypeScript source exports. Node's default ESM exports use built JavaScript.
 The root Git package points to SDK sources and declares exact engine package versions.

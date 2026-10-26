@@ -1,5 +1,5 @@
 {
-  "name": "@tembra/react-native",
+  "name": "@syntropika/tembra-react-native",
   "version": "0.1.0",
   "description": "Tembra for React Native with Swift and Kotlin bindings to the Rust engine",
   "license": "Apache-2.0",
@@ -38,13 +38,13 @@
     "test": "bun test test"
   },
   "devDependencies": {
-    "@tembra/sdk": "workspace:*",
+    "@syntropika/tembra-sdk": "workspace:*",
     "@types/react": "^19.0.0",
     "react": "19.1.1",
     "react-native": "0.82.1"
   },
   "peerDependencies": {
-    "@tembra/sdk": "0.1.0",
+    "@syntropika/tembra-sdk": "0.1.0",
     "react": ">=19",
     "react-native": ">=0.82 <1"
   },

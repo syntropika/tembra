@@ -22,7 +22,7 @@ export async function createHost(options: BrowserHostOptions = {}): Promise<Host
     const module =
       typeof supplied === "function"
         ? await supplied()
-        : (supplied ?? ((await import("@tembra/engine-wasm")) as WasmModule));
+        : (supplied ?? ((await import("@syntropika/tembra-engine-wasm")) as WasmModule));
     await module.default?.(options.wasmInput);
     kernel = new module.WasmKernel();
   }

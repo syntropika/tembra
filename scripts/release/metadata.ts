@@ -65,7 +65,11 @@ export function validate(root: string, tag: string): { version: string; channel:
       throw new Error(`${item.name} version does not match ${tag}`);
     for (const section of ["dependencies", "optionalDependencies", "peerDependencies"]) {
       for (const [name, version] of Object.entries(item[section] ?? {})) {
-        if (name.startsWith("@tembra/") && version !== "workspace:*" && version !== release.version)
+        if (
+          name.startsWith("@syntropika/tembra-") &&
+          version !== "workspace:*" &&
+          version !== release.version
+        )
           throw new Error(`${item.name} has an inconsistent ${name} dependency`);
       }
     }

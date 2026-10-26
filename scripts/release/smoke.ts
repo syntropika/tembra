@@ -23,17 +23,17 @@ execFileSync(
     "--no-fund",
     "--no-package-lock",
     ...packages
-      .filter((item) => item.name !== "@tembra/react-native")
+      .filter((item) => item.name !== "@syntropika/tembra-react-native")
       .map((item) => path.resolve(archives, item.filename)),
   ],
   { cwd: directory, stdio: "inherit" },
 );
 const script = `
 import {readFileSync} from 'node:fs';
-import {createHost as nodeHost} from '@tembra/sdk/node';
-import init from '@tembra/engine-wasm';
-await init({module_or_path:readFileSync(new URL(import.meta.resolve('@tembra/engine-wasm/tembra_bg.wasm')))});
-const {createHost:browserHost}=await import('@tembra/sdk/browser');
+import {createHost as nodeHost} from '@syntropika/tembra-sdk/node';
+import init from '@syntropika/tembra-engine-wasm';
+await init({module_or_path:readFileSync(new URL(import.meta.resolve('@syntropika/tembra-engine-wasm/tembra_bg.wasm')))});
+const {createHost:browserHost}=await import('@syntropika/tembra-sdk/browser');
 for (const create of [nodeHost,browserHost]) {
   const host=await create();
   await host.install({name:'packed',apiVersion:1,services:{packed:{methods:{read:()=>42}}}});

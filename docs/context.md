@@ -24,7 +24,7 @@ await reference.increment(tagged);
 console.log(tagged.value(Trace));
 ```
 
-Import `ContextKey` from `@tembra/sdk`.
+Import `ContextKey` from `@syntropika/tembra-sdk`.
 `with()` derives a new context. It keeps the principal, execution version and validity period.
 The original context and sibling branches keep their own values.
 Calls and hook contributions inherit the frame supplied by their caller.

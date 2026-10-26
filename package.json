@@ -1,5 +1,5 @@
 {
-  "name": "@tembra/sdk",
+  "name": "@syntropika/tembra-sdk",
   "version": "0.1.0",
   "private": true,
   "license": "Apache-2.0",
@@ -96,8 +96,8 @@
     "test:browser": "bun packages/ts/test/browser.ts"
   },
   "dependencies": {
-    "@tembra/engine-node": "0.1.0",
-    "@tembra/engine-wasm": "0.1.0",
+    "@syntropika/tembra-engine-node": "0.1.0",
+    "@syntropika/tembra-engine-wasm": "0.1.0",
     "enhanced-resolve": "5.26.0",
     "typescript": "5.9.3"
   },

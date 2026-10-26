@@ -36,7 +36,7 @@ The host selects it. Both sides of a boundary must use the same contract.
 The default JSON codec uses explicit tags for BigInt and bytes.
 Use JS `BigInt` for integers outside the safe `Number` range.
 Rust provides `codec::Integer` for portable decimal integers.
-The optional `@tembra/sdk/msgpack` codec preserves BigInts with an extension type.
+The optional `@syntropika/tembra-sdk/msgpack` codec preserves BigInts with an extension type.
 Binary encoding alone does not fix numeric precision.
 Provide a custom codec for other data types.
 
@@ -44,7 +44,7 @@ Provide a custom codec for other data types.
 
 `serve(host, transport, options)` exposes a host.
 `new RemoteHost(transport, options)` connects a client.
-Import both from `@tembra/sdk/rpc`.
+Import both from `@syntropika/tembra-sdk/rpc`.
 The transport supplies `send`, `listen` and `close` over byte frames.
 Server infrastructure supplies the trusted principal and acquisition policy.
 

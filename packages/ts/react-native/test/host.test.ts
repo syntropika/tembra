@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import { NodeKernel } from "@tembra/engine-node";
+import { NodeKernel } from "@syntropika/tembra-engine-node";
 import type { Spec } from "../src/NativeTembra.ts";
 
 const kernels = new Map<string, NodeKernel>();

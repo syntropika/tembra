@@ -1,6 +1,6 @@
 # Tembra for React Native
 
-`@tembra/react-native` runs TypeScript orbs on iOS and Android.
+`@syntropika/tembra-react-native` runs TypeScript orbs on iOS and Android.
 Swift and Kotlin bindings connect the SDK to the shared Rust kernel.
 The package requires React Native 0.82 or newer with the New Architecture.
 

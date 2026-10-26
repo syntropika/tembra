@@ -41,10 +41,10 @@ test("staged npm archives resolve workspace dependencies without shipping develo
     writeFileSync(
       path.join(source, "package.json"),
       JSON.stringify({
-        name: "@tembra/sdk",
+        name: "@syntropika/tembra-sdk",
         version: "0.1.0",
         files: ["src"],
-        dependencies: { "@tembra/engine-node": "workspace:*" },
+        dependencies: { "@syntropika/tembra-engine-node": "workspace:*" },
         devDependencies: { typescript: "*" },
         scripts: { prepare: "exit 1" },
       }),
@@ -52,7 +52,7 @@ test("staged npm archives resolve workspace dependencies without shipping develo
     const output = path.join(root, "release");
     const staged = stagePackage(root, "sdk", output, "0.1.0");
     const item = manifest(staged);
-    expect(item.dependencies).toEqual({ "@tembra/engine-node": "0.1.0" });
+    expect(item.dependencies).toEqual({ "@syntropika/tembra-engine-node": "0.1.0" });
     expect(item.devDependencies).toBeUndefined();
     const [packed] = JSON.parse(
       execFileSync("npm", ["pack", "--ignore-scripts", "--json"], {
@@ -81,12 +81,17 @@ test("publication resumes identical versions and stops on conflicting bytes or r
       path.join(root, "packages.json"),
       JSON.stringify([
         {
-          name: "@tembra/engine-node",
+          name: "@syntropika/tembra-engine-node",
           version: "0.1.0",
           filename: "engine.tgz",
           integrity: "sha512-engine",
         },
-        { name: "@tembra/sdk", version: "0.1.0", filename: "sdk.tgz", integrity: "sha512-sdk" },
+        {
+          name: "@syntropika/tembra-sdk",
+          version: "0.1.0",
+          filename: "sdk.tgz",
+          integrity: "sha512-sdk",
+        },
       ]),
     );
     const submissions: string[] = [];

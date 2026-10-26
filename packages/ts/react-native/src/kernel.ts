@@ -1,4 +1,4 @@
-import type { KernelPort } from "@tembra/sdk/runtime";
+import type { KernelPort } from "@syntropika/tembra-sdk/runtime";
 import type { Spec } from "./NativeTembra.ts";
 
 /** Own one native handle for the complete lifetime of a JavaScript host. */

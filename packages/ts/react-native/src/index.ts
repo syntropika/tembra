@@ -1,9 +1,9 @@
-import type { HostOptions } from "@tembra/sdk";
-import { Host } from "@tembra/sdk/runtime";
+import type { HostOptions } from "@syntropika/tembra-sdk";
+import { Host } from "@syntropika/tembra-sdk/runtime";
 import NativeTembra from "./NativeTembra.ts";
 import { NativeKernelPort } from "./kernel.ts";
 
-export * from "@tembra/sdk";
+export * from "@syntropika/tembra-sdk";
 export type { Host };
 export type ReactNativeHostOptions = Omit<HostOptions, "kernel" | "native">;
 

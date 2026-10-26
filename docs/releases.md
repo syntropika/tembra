@@ -9,11 +9,11 @@ npm's `next` channel; stable versions use `latest`. Build metadata suffixes are 
 
 The workflow publishes these npm packages in dependency order:
 
-- `@tembra/engine-node`: native binaries for Linux, macOS and Windows, on x64 and arm64.
+- `@syntropika/tembra-engine-node`: native binaries for Linux, macOS and Windows, on x64 and arm64.
   Linux binaries target glibc and are built on Ubuntu 22.04; musl is not included.
-- `@tembra/engine-wasm`: the JavaScript loader, declarations and WASM binary.
-- `@tembra/sdk`: source entrypoints, built JavaScript, declarations and the embedded runtime.
-- `@tembra/react-native`: Swift sources and an XCFramework for iOS, simulators and macOS;
+- `@syntropika/tembra-engine-wasm`: the JavaScript loader, declarations and WASM binary.
+- `@syntropika/tembra-sdk`: source entrypoints, built JavaScript, declarations and the embedded runtime.
+- `@syntropika/tembra-react-native`: Swift sources and an XCFramework for iOS, simulators and macOS;
   an Android Maven package containing arm64-v8a, armeabi-v7a, x86 and x86_64 libraries.
 
 The publishable Rust workspace crates are `tembra-core`, `tembra-bridge`, `tembra`,
@@ -35,6 +35,9 @@ to appear in the Actions interface.
 
 ## Registry setup
 
+The npm packages use the `@syntropika` organization scope. The publishing account
+must have permission to publish these four Tembra packages in that organization.
+
 Configure trusted publishing for each package and crate with this GitHub repository
 and workflow filename `release.yml`. The publish job has `id-token: write`; build jobs
 have read-only repository access. For npm, allow direct `npm publish` and ensure the
@@ -44,7 +47,8 @@ version includes an npm CLI compatible with trusted publishing.
 For initial publication or registries without trusted publisher configuration, add
 repository secrets `NPM_TOKEN` and `CARGO_REGISTRY_TOKEN` with the necessary package
 publication permissions. Tokens are available only to their publication steps.
-The crates.io OIDC action is used when its fallback token is absent. npm automatically
+Limit the npm token to the `@syntropika` Tembra packages, including permission to create
+them for the first release. The crates.io OIDC action is used when its fallback token is absent. npm automatically
 selects OIDC or the supplied token. Use npm and crates.io account settings to configure
 publishers; do not put credentials in a manifest or tag.
 
@@ -57,7 +61,8 @@ Before creating a tag, update the shared Cargo version, exact internal Cargo dep
 versions, the root npm version, all four npm package versions, internal npm requirements
 and the React Native SDK peer version. Kotlin artifacts and the Android adapter derive
 their version from the React Native manifest; the podspec uses the same version with a
-`v` tag prefix. Refresh both lockfiles and commit the version changes to `main`.
+`v` tag prefix. Refresh both lockfiles, commit the version changes to `main` and push
+`main` before pushing the tag.
 
 For example, after setting all versions to `0.2.0`:
 
@@ -71,9 +76,9 @@ git push origin v0.2.0
 ```
 
 The workflow does not modify versions or create tags. It rejects a mismatched tag
-before building or requesting publication credentials. The root npm manifest is a private workspace manifest; `@tembra/sdk` itself is public.
+before building or requesting publication credentials. The root npm manifest is a private workspace manifest; `@syntropika/tembra-sdk` itself is public.
 All registry packages use Apache-2.0.
-the published SDK is staged from `packages/ts/sdk`, with workspace requirements resolved
+The published SDK is staged from `packages/ts/sdk`, with workspace requirements resolved
 to the release version and development dependencies omitted. Generated artifacts never
 need to be committed.
 

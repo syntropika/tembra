@@ -5,8 +5,8 @@
     "": {
       "name": "tembra-typescript",
       "dependencies": {
-        "@tembra/engine-node": "0.1.0",
-        "@tembra/engine-wasm": "0.1.0",
+        "@syntropika/tembra-engine-node": "0.1.0",
+        "@syntropika/tembra-engine-wasm": "0.1.0",
         "enhanced-resolve": "5.26.0",
         "typescript": "5.9.3",
       },
@@ -22,34 +22,34 @@
       },
     },
     "packages/ts/engine-node": {
-      "name": "@tembra/engine-node",
+      "name": "@syntropika/tembra-engine-node",
       "version": "0.1.0",
     },
     "packages/ts/engine-wasm": {
-      "name": "@tembra/engine-wasm",
+      "name": "@syntropika/tembra-engine-wasm",
       "version": "0.1.0",
     },
     "packages/ts/react-native": {
-      "name": "@tembra/react-native",
+      "name": "@syntropika/tembra-react-native",
       "version": "0.1.0",
       "devDependencies": {
-        "@tembra/sdk": "workspace:*",
+        "@syntropika/tembra-sdk": "workspace:*",
         "@types/react": "^19.0.0",
         "react": "19.1.1",
         "react-native": "0.82.1",
       },
       "peerDependencies": {
-        "@tembra/sdk": "0.1.0",
+        "@syntropika/tembra-sdk": "0.1.0",
         "react": ">=19",
         "react-native": ">=0.82 <1",
       },
     },
     "packages/ts/sdk": {
-      "name": "@tembra/sdk",
+      "name": "@syntropika/tembra-sdk",
       "version": "0.1.0",
       "dependencies": {
-        "@tembra/engine-node": "workspace:*",
-        "@tembra/engine-wasm": "workspace:*",
+        "@syntropika/tembra-engine-node": "workspace:*",
+        "@syntropika/tembra-engine-wasm": "workspace:*",
         "enhanced-resolve": "5.26.0",
         "typescript": "5.9.3",
       },
@@ -271,13 +271,13 @@
 
     "@sinonjs/fake-timers": ["@sinonjs/fake-timers@10.3.0", "", { "dependencies": { "@sinonjs/commons": "^3.0.0" } }, "sha512-V4BG07kuYSUkTCSBHG8G8TNhM+F19jXFWnQtzj+we8DrkpSBCee9Z3Ms8yiGer/dlmhe35/Xdgyo3/0rQKg7YA=="],
 
-    "@tembra/engine-node": ["@tembra/engine-node@workspace:packages/ts/engine-node"],
+    "@syntropika/tembra-engine-node": ["@syntropika/tembra-engine-node@workspace:packages/ts/engine-node"],
 
-    "@tembra/engine-wasm": ["@tembra/engine-wasm@workspace:packages/ts/engine-wasm"],
+    "@syntropika/tembra-engine-wasm": ["@syntropika/tembra-engine-wasm@workspace:packages/ts/engine-wasm"],
 
-    "@tembra/react-native": ["@tembra/react-native@workspace:packages/ts/react-native"],
+    "@syntropika/tembra-react-native": ["@syntropika/tembra-react-native@workspace:packages/ts/react-native"],
 
-    "@tembra/sdk": ["@tembra/sdk@workspace:packages/ts/sdk"],
+    "@syntropika/tembra-sdk": ["@syntropika/tembra-sdk@workspace:packages/ts/sdk"],
 
     "@types/babel__core": ["@types/babel__core@7.20.5", "", { "dependencies": { "@babel/parser": "^7.20.7", "@babel/types": "^7.20.7", "@types/babel__generator": "*", "@types/babel__template": "*", "@types/babel__traverse": "*" } }, "sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA=="],
 

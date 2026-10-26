@@ -1,13 +1,13 @@
 # React Native
 
-Use `@tembra/react-native` to run TypeScript orbs on iOS and Android.
+Use `@syntropika/tembra-react-native` to run TypeScript orbs on iOS and Android.
 The package requires React Native 0.82 or newer with the New Architecture.
 Swift and Kotlin bindings connect its TurboModule to the Rust kernel.
 Application values and callbacks stay in the JavaScript runtime.
 
 ## Install
 
-Install `@tembra/react-native` and the same version of `@tembra/sdk` in your application.
+Install `@syntropika/tembra-react-native` and the same version of `@syntropika/tembra-sdk` in your application.
 Run CocoaPods installation for iOS. Rebuild the native application after installation.
 React Native Codegen generates the native interfaces during that build.
 Expo applications need a development build with native modules.
@@ -18,7 +18,7 @@ For a source checkout, first build the native libraries in [DEVELOP.md](../DEVEL
 ## Run an orb
 
 ```ts
-import { createHost, orb } from "@tembra/react-native";
+import { createHost, orb } from "@syntropika/tembra-react-native";
 
 const host = createHost();
 try {

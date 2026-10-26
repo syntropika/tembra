@@ -51,7 +51,7 @@ export function stagePackage(root: string, name: string, output: string, version
   for (const section of ["dependencies", "optionalDependencies", "peerDependencies"]) {
     for (const [dependency, requirement] of Object.entries(item[section] ?? {})) {
       if (typeof requirement === "string" && requirement.startsWith("workspace:")) {
-        if (!dependency.startsWith("@tembra/"))
+        if (!dependency.startsWith("@syntropika/tembra-"))
           throw new Error(`Unknown workspace dependency: ${dependency}`);
         item[section][dependency] = version;
       }

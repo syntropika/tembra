@@ -11,7 +11,7 @@ Rust and JS failures share three fields:
 In TypeScript, use the exported descriptors:
 
 ```ts
-import { Errors, TembraError } from "@tembra/sdk";
+import { Errors, TembraError } from "@syntropika/tembra-sdk";
 
 throw new TembraError(Errors.Invalid.StateValidation);
 ```

@@ -32,14 +32,14 @@ An execution action contains the effects for one program step.
 
 ## Language packages
 
-| Package                                                          | Responsibility                                                                                         |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| [@tembra/sdk](../packages/ts/sdk/src/index.ts)                   | Declare orbs, keep JS values and execute effects. Also expose optional infrastructure and build tools. |
-| [@tembra/engine-node](../packages/ts/engine-node/package.json)   | Build and package the native Node binding.                                                             |
-| [@tembra/engine-wasm](../packages/ts/engine-wasm/package.json)   | Build and package the WASM module, loader and types.                                                   |
-| [TembraNative](../packages/swift/Package.swift)                  | Package Swift bindings and the Rust libraries for iOS and macOS.                                       |
-| [tembra-kotlin](../packages/kotlin/build.gradle.kts)             | Package the same Kotlin bindings for the JVM and Android.                                              |
-| [@tembra/react-native](../packages/ts/react-native/src/index.ts) | Connect the SDK to the mobile kernel through a TurboModule.                                            |
+| Package                                                                     | Responsibility                                                                                         |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| [@syntropika/tembra-sdk](../packages/ts/sdk/src/index.ts)                   | Declare orbs, keep JS values and execute effects. Also expose optional infrastructure and build tools. |
+| [@syntropika/tembra-engine-node](../packages/ts/engine-node/package.json)   | Build and package the native Node binding.                                                             |
+| [@syntropika/tembra-engine-wasm](../packages/ts/engine-wasm/package.json)   | Build and package the WASM module, loader and types.                                                   |
+| [TembraNative](../packages/swift/Package.swift)                             | Package Swift bindings and the Rust libraries for iOS and macOS.                                       |
+| [tembra-kotlin](../packages/kotlin/build.gradle.kts)                        | Package the same Kotlin bindings for the JVM and Android.                                              |
+| [@syntropika/tembra-react-native](../packages/ts/react-native/src/index.ts) | Connect the SDK to the mobile kernel through a TurboModule.                                            |
 
 Node, browsers and React Native run callbacks in their existing JavaScript runtime.
 WASM contains the kernel and bridge. It contains no JS interpreter, DOM or filesystem.

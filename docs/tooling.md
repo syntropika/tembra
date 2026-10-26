@@ -1,11 +1,11 @@
 # Build tools
 
 Build tooling resolves JavaScript dependencies before the orb runs.
-Import it from `@tembra/sdk/tooling` and run it with Bun.
+Import it from `@syntropika/tembra-sdk/tooling` and run it with Bun.
 The SDK and engines keep separate builds.
 
 ```ts
-import { build, Platform } from "@tembra/sdk/tooling";
+import { build, Platform } from "@syntropika/tembra-sdk/tooling";
 
 await build({
   builds: {
