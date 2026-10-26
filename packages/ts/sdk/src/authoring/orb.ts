@@ -1,12 +1,12 @@
 import { Errors } from "../errors.ts";
 
 import { refuse } from "../error.ts";
-import type { FacetDefinition, ServiceDefinition } from "./types.ts";
+import type { OrbDefinition, ServiceDefinition } from "./types.ts";
 
 /** Captures executable declarations. No structural schemas or generated contracts are required. */
-export function facet<const F extends FacetDefinition>(definition: F): Readonly<F> {
+export function orb<const F extends OrbDefinition>(definition: F): Readonly<F> {
   if (!definition.name || !Number.isInteger(definition.apiVersion) || definition.apiVersion <= 0)
-    refuse(Errors.Invalid.Facet, "A facet needs a name and positive API version");
+    refuse(Errors.Invalid.Orb, "An orb needs a name and positive API version");
   const services = Object.fromEntries(
     Object.entries(definition.services ?? {}).map(([name, service]) => {
       if (!name || !service.methods || typeof service.methods !== "object")

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Action, Address, Facet, Service};
+use crate::{Action, Address, Orb, Service};
 use std::collections::VecDeque;
 
 fn host_scope(host: &Host, resources: Vec<Id>, parents: Vec<Id>) -> Id {
@@ -7,7 +7,7 @@ fn host_scope(host: &Host, resources: Vec<Id>, parents: Vec<Id>) -> Id {
     host.register_scope(Scope {
         id,
         owner: Owner::Host,
-        facet: 0,
+        orb: 0,
         parents,
         dependencies: vec![],
         resources,

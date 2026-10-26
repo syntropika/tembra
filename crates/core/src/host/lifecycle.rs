@@ -70,8 +70,8 @@ impl Host {
                 inner.remove_subscription(listener);
             }
         }
-        inner.facet_objects.remove(&record.facet, object);
-        inner.collect_facet(record.facet);
+        inner.orb_objects.remove(&record.orb, object);
+        inner.collect_orb(record.orb);
         for id in targets {
             inner.maybe_dispose(id);
         }
@@ -215,10 +215,10 @@ impl Host {
         inner.roots.clear();
         inner.version_users.clear();
         inner.object_roots = Index::default();
-        inner.facet_roots = Index::default();
-        inner.facet_versions = Index::default();
-        inner.facets.clear();
-        inner.facet_min.clear();
+        inner.orb_roots = Index::default();
+        inner.orb_versions = Index::default();
+        inner.orbs.clear();
+        inner.orb_min.clear();
         inner.current_owners.clear();
         inner.idle.clear();
         #[cfg(feature = "hooks")]
@@ -257,7 +257,7 @@ impl Host {
             calls: inner.calls.len(),
             resources: inner.resources.len(),
             tasks: inner.tasks.len(),
-            facets: inner.current().len(),
+            orbs: inner.current().len(),
             closing: inner.closing,
         }
     }

@@ -9,7 +9,7 @@ export const KernelOp = Object.freeze({
   ScopeRegister: "scope-register",
   ScopeExists: "scope-exists",
   ScopesForOwner: "scopes-for-owner",
-  ScopesForFacet: "scopes-for-facet",
+  ScopesForOrb: "scopes-for-orb",
   ScopeAddResource: "scope-add-resource",
   ScopeActivate: "scope-activate",
   ScopesCleanup: "scopes-cleanup",
@@ -24,12 +24,12 @@ export const KernelOp = Object.freeze({
   Features: "features",
   Prepare: "prepare",
   Gate: "gate",
-  GateFacets: "gate-facets",
+  GateOrbs: "gate-orbs",
   Commit: "commit",
   Abort: "abort",
-  Facets: "facets",
-  Facet: "facet",
-  FacetNamed: "facet-named",
+  Orbs: "orbs",
+  Orb: "orb",
+  OrbNamed: "orb-named",
   NextDeadline: "next-deadline",
   Address: "address",
   Acquire: "acquire",
@@ -93,7 +93,7 @@ export const ActionType = Object.freeze({
   DropValue: "drop-value",
   CancelRoot: "cancel-root",
   CancelTask: "cancel-task",
-  RetireFacet: "retire-facet",
+  RetireOrb: "retire-orb",
   State: "state",
   SubscriptionFailed: "subscription-failed",
   DetachSubscription: "detach-subscription",
@@ -150,7 +150,7 @@ export type RpcEvent = ValueOf<typeof RpcEvent>;
 
 export const OwnerKind = Object.freeze({
   Host: "host",
-  Facet: "facet",
+  Orb: "orb",
   Object: "object",
 } as const);
 export type OwnerKind = ValueOf<typeof OwnerKind>;

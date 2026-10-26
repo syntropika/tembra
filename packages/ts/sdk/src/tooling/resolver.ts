@@ -44,10 +44,10 @@ export function resolver(root: string, target: BuildTarget): Bun.BunPlugin {
     setup(builder) {
       builder.onResolve({ filter: /^tembra:entry$/ }, () => ({
         path: "entry",
-        namespace: "tembra-facet",
+        namespace: "tembra-orb",
       }));
-      builder.onLoad({ filter: /.*/, namespace: "tembra-facet" }, () => ({
-        contents: `import facet from ${JSON.stringify(path.resolve(root, target.entry))}; globalThis.__tembraFacet = facet;`,
+      builder.onLoad({ filter: /.*/, namespace: "tembra-orb" }, () => ({
+        contents: `import orb from ${JSON.stringify(path.resolve(root, target.entry))}; globalThis.__tembraOrb = orb;`,
         loader: "js",
       }));
       builder.onResolve({ filter: /.*/ }, (request) => {
@@ -82,7 +82,7 @@ export function resolver(root: string, target: BuildTarget): Bun.BunPlugin {
             const argument = node.arguments[0];
             if (!argument || !ts.isStringLiteralLike(argument))
               throw new Error(
-                `${request.path}: dynamic module names must be resolved before publishing a facet`,
+                `${request.path}: dynamic module names must be resolved before publishing an orb`,
               );
           }
           ts.forEachChild(node, check);

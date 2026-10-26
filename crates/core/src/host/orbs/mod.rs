@@ -1,4 +1,4 @@
-//! Installed and prepared facet lookup.
+//! Installed and prepared orb lookup.
 
 use super::*;
 
@@ -7,57 +7,51 @@ mod gate;
 mod prepare;
 
 impl Host {
-    /// Describe the facets in the current implementation version.
-    pub fn installed_facets(&self) -> Vec<InstalledFacet> {
+    /// Describe the orbs in the current implementation version.
+    pub fn installed_orbs(&self) -> Vec<InstalledOrb> {
         let inner = self.inner.borrow();
         inner
             .current()
             .values()
-            .map(|id| inner.facets[id].clone())
+            .map(|id| inner.orbs[id].clone())
             .collect()
     }
 
-    /// Read metadata for a retained facet identity.
-    pub fn facet(&self, id: Id) -> Result<InstalledFacet> {
+    /// Read metadata for a retained orb identity.
+    pub fn orb(&self, id: Id) -> Result<InstalledOrb> {
         self.inner
             .borrow()
-            .facets
+            .orbs
             .get(&id)
             .cloned()
-            .ok_or_else(|| gone(Reason::Facet))
+            .ok_or_else(|| gone(Reason::Orb))
     }
 
-    /// Resolves one current declaration without enumerating unrelated installed facets.
-    pub fn facet_named(&self, name: &str) -> Result<InstalledFacet> {
+    /// Resolves one current declaration without enumerating unrelated installed orbs.
+    pub fn orb_named(&self, name: &str) -> Result<InstalledOrb> {
         let inner = self.inner.borrow();
-        let id = inner
-            .current()
-            .get(name)
-            .ok_or_else(|| gone(Reason::Facet))?;
-        Ok(inner.facets[id].clone())
+        let id = inner.current().get(name).ok_or_else(|| gone(Reason::Orb))?;
+        Ok(inner.orbs[id].clone())
     }
 
     /// Resolves a declaration in an isolated candidate without changing installed lookups.
     ///
     /// # Errors
-    /// Refuses stale or foreign tickets and facet names absent from the candidate.
-    pub fn prepared_facet(&self, ticket: Id, name: &str) -> Result<InstalledFacet> {
+    /// Refuses stale or foreign tickets and orb names absent from the candidate.
+    pub fn prepared_orb(&self, ticket: Id, name: &str) -> Result<InstalledOrb> {
         let inner = self.inner.borrow();
         let pending = inner
             .pending
             .as_ref()
             .filter(|p| p.reload.id == ticket)
             .ok_or_else(|| conflict(Reason::ReloadTicket))?;
-        let id = pending
-            .current
-            .get(name)
-            .ok_or_else(|| gone(Reason::Facet))?;
+        let id = pending.current.get(name).ok_or_else(|| gone(Reason::Orb))?;
         Ok(pending
-            .facet_indices
+            .orb_indices
             .get(id)
-            .map(|index| &pending.reload.facets[*index])
-            .or_else(|| inner.facets.get(id))
-            .expect("candidate facet exists")
+            .map(|index| &pending.reload.orbs[*index])
+            .or_else(|| inner.orbs.get(id))
+            .expect("candidate orb exists")
             .clone())
     }
 

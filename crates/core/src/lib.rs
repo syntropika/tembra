@@ -1,4 +1,4 @@
-//! A language-neutral kernel for facets, managed objects and versioned operations.
+//! A language-neutral kernel for orbs, managed objects and versioned operations.
 //!
 //! The kernel stores opaque value and callback identities. The adapter that issued an identity
 //! owns its value, performs validation, and executes user code outside kernel borrows.

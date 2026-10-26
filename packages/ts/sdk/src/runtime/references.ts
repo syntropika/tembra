@@ -5,12 +5,12 @@ import type {
   ServiceDefinition,
 } from "../authoring/types.ts";
 import { Status } from "../bridge/identifiers.ts";
-import type { Acquisition, KernelFacet } from "../bridge/kernel.ts";
+import type { Acquisition, KernelOrb } from "../bridge/kernel.ts";
 import { KernelOp } from "../bridge/protocol.ts";
 import { refuse, TembraError } from "../error.ts";
 import { Errors } from "../errors.ts";
 import { Context, context, isContext } from "./context.ts";
-import type { Address, FacetRecord, ObjectRecord, ReferenceRecord } from "./records.ts";
+import type { Address, OrbRecord, ObjectRecord, ReferenceRecord } from "./records.ts";
 import { deferred } from "./records.ts";
 import type { Session } from "./session.ts";
 
@@ -27,7 +27,7 @@ export class References {
   /** Retain handle metadata and index references by object. */
   constructor(readonly session: Session) {}
 
-  #metadata = new Map<number, KernelFacet>();
+  #metadata = new Map<number, KernelOrb>();
   #byObject = new Map<number, Set<ReferenceRecord>>();
 
   /** Acquire ownership and create a local service handle. */
@@ -56,7 +56,7 @@ export class References {
       object = {
         id: acquired.object,
         address,
-        facet: acquired.facet,
+        orb: acquired.orb,
         versions: new Map(),
         activation: activation.promise,
       };
@@ -77,7 +77,7 @@ export class References {
         );
       });
     }
-    const provider = this.facetMetadata(acquired.facet);
+    const provider = this.orbMetadata(acquired.orb);
     const methods = new Set(provider.services.find((s) => s.name === service)?.methods ?? []);
     const record: ReferenceRecord = {
       id: acquired.reference,
@@ -90,8 +90,7 @@ export class References {
       released: false,
       ...(ctx ? { context: ctx } : {}),
     };
-    const access = session.facets.records.get(acquired.facet)?.definition.services?.[service]
-      ?.access;
+    const access = session.orbs.records.get(acquired.orb)?.definition.services?.[service]?.access;
     try {
       this.referenceMethods(record, methods, access);
     } catch (error) {
@@ -148,7 +147,7 @@ export class References {
       opaque: (name: string) => {
         check();
         const object = session.objects.get(record.object)!;
-        const resource = object.versions.get(object.facet)?.resources.get(name);
+        const resource = object.versions.get(object.orb)?.resources.get(name);
         if (!resource?.options.opaque) throw new TembraError(Errors.Forbidden.Opaque, name);
         return resource.handle.value;
       },
@@ -205,13 +204,13 @@ export class References {
     return issued.record;
   }
 
-  /** Cache native facet metadata once per version. */
-  private facetMetadata(id: number): KernelFacet {
-    const definition = this.session.facets.records.get(id)?.info;
+  /** Cache native orb metadata once per version. */
+  private orbMetadata(id: number): KernelOrb {
+    const definition = this.session.orbs.records.get(id)?.info;
     if (definition) return definition;
     let metadata = this.#metadata.get(id);
     if (!metadata) {
-      metadata = this.session.kernel.command<KernelFacet>(KernelOp.Facet, { id });
+      metadata = this.session.kernel.command<KernelOrb>(KernelOp.Orb, { id });
       this.#metadata.set(id, metadata);
     }
     return metadata;
@@ -243,9 +242,9 @@ export class References {
   }
 
   /** Update only references indexed under the changed object. */
-  refreshReferences(object: ObjectRecord, facet: FacetRecord): void {
+  refreshReferences(object: ObjectRecord, orb: OrbRecord): void {
     const session = this.session;
-    const service = facet.definition.services?.[object.address.service];
+    const service = orb.definition.services?.[object.address.service];
     if (!service) return;
     const methods = Object.keys(service.methods);
     for (const reference of this.#byObject.get(object.id) ?? []) {
@@ -298,9 +297,9 @@ export class References {
     this.forget(record);
   }
 
-  /** Remove cached metadata for a retired facet version. */
-  retire(facet: number): void {
-    this.#metadata.delete(facet);
+  /** Remove cached metadata for a retired orb version. */
+  retire(orb: number): void {
+    this.#metadata.delete(orb);
   }
 
   /** Detach all remaining observers during host shutdown. */

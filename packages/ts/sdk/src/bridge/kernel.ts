@@ -19,8 +19,8 @@ export interface KernelFeatures {
 }
 export type Owner =
   | { kind: typeof OwnerKind.Host }
-  | { kind: typeof OwnerKind.Facet | typeof OwnerKind.Object; id: number };
-export interface KernelFacet {
+  | { kind: typeof OwnerKind.Orb | typeof OwnerKind.Object; id: number };
+export interface KernelOrb {
   id: number;
   owner: number;
   codeVersion: number;
@@ -29,7 +29,7 @@ export interface KernelFacet {
   services: { name: string; methods: string[]; lifetime: Lifetime; linger: number }[];
   hooks: string[];
   requires: {
-    facet: string;
+    orb: string;
     apiVersion: number;
     services: Record<string, string[]>;
     hooks: string[];
@@ -38,7 +38,7 @@ export interface KernelFacet {
 export interface Acquisition {
   reference: number;
   object: number;
-  facet: number;
+  orb: number;
   codeVersion: number;
   activate: boolean;
 }
@@ -46,7 +46,7 @@ export interface Invocation {
   id: number;
   root: number;
   object: number;
-  facet: number;
+  orb: number;
   codeVersion: number;
   method: string;
 }
@@ -58,7 +58,7 @@ export interface Snapshot {
 export interface Reload {
   id: number;
   codeVersion: number;
-  facets: KernelFacet[];
+  orbs: KernelOrb[];
   objects: number[];
   providers: Record<string, number>;
 }
@@ -88,7 +88,7 @@ export interface Diagnostics {
   calls: number;
   resources: number;
   tasks: number;
-  facets: number;
+  orbs: number;
   closing: boolean;
   codeVersion: number;
 }

@@ -10,7 +10,7 @@ fn delivery_and_scope_changes_visit_only_affected_listeners() {
         host.register_scope(Scope {
             id: scope,
             owner: Owner::Host,
-            facet: 0,
+            orb: 0,
             parents: vec![],
             dependencies: vec![],
             resources: vec![],
@@ -85,7 +85,7 @@ fn retiring_a_previous_scope_preserves_successor_delivery_readiness() {
         host.register_scope(Scope {
             id,
             owner: Owner::Host,
-            facet: 0,
+            orb: 0,
             parents: vec![],
             dependencies: vec![],
             resources: vec![],

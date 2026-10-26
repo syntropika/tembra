@@ -32,27 +32,25 @@ impl Host {
         Ok(objects.iter().all(|id| !inner.gate_object_busy(*id)))
     }
 
-    /// Drains an exclusive facet-owned resource, including hook invocations without an object.
-    pub fn gate_facets(&self, ticket: Id, owners: &[Id]) -> Result<bool> {
+    /// Drains an exclusive orb-owned resource, including hook invocations without an object.
+    pub fn gate_orbs(&self, ticket: Id, owners: &[Id]) -> Result<bool> {
         let mut inner = self.inner.borrow_mut();
         let Inner {
-            pending,
-            facet_roots,
-            ..
+            pending, orb_roots, ..
         } = &mut *inner;
         let pending = pending
             .as_mut()
             .filter(|pending| pending.reload.id == ticket)
             .ok_or_else(|| conflict(Reason::ReloadTicket))?;
         if owners.iter().any(|owner| !pending.owners.contains(owner)) {
-            return Err(Error::invalid(Reason::GateFacet, "facet is not affected"));
+            return Err(Error::invalid(Reason::GateOrb, "orb is not affected"));
         }
         for owner in owners {
             pending
-                .gated_facets
+                .gated_orbs
                 .entry(*owner)
-                .or_insert_with(|| facet_roots.members(owner).collect());
+                .or_insert_with(|| orb_roots.members(owner).collect());
         }
-        Ok(owners.iter().all(|owner| !inner.facet_busy(*owner)))
+        Ok(owners.iter().all(|owner| !inner.orb_busy(*owner)))
     }
 }

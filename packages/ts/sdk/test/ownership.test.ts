@@ -1,7 +1,7 @@
 import { KernelOp } from "../src/protocol.ts";
 import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
-import { facet } from "../src/facet.ts";
+import { orb } from "../src/orb.ts";
 import type { Reload } from "../src/kernel.ts";
 
 test("resource dependencies reject foreign handles even when host-local IDs collide", async () => {
@@ -12,9 +12,9 @@ test("resource dependencies reject foreign handles even when host-local IDs coll
   const foreignRecord = first.session.resources.records.values().next().value!;
   const localRecord = second.session.resources.records.values().next().value!;
   expect(foreignRecord.id).toBe(localRecord.id);
-  await first.install(facet({ name: "first", apiVersion: 1 }));
+  await first.install(orb({ name: "first", apiVersion: 1 }));
   await second.install(
-    facet({
+    orb({
       name: "second",
       apiVersion: 1,
       services: {
@@ -49,14 +49,14 @@ test("resource dependencies reject foreign handles even when host-local IDs coll
 test("acquiring JS services does not request unrelated installed metadata", async () => {
   const host = createHost();
   await host.install(
-    facet({ name: "local", apiVersion: 1, services: { local: { methods: { read: () => 42 } } } }),
+    orb({ name: "local", apiVersion: 1, services: { local: { methods: { read: () => 42 } } } }),
   );
   const commands = spyOn(host.session.kernel, "command");
   try {
     const first = await host.get("local", "first");
     const second = await host.get("local", "second");
     expect(await first.read()).toBe(42);
-    expect(commands.mock.calls.filter(([op]) => op === "facets")).toHaveLength(0);
+    expect(commands.mock.calls.filter(([op]) => op === "orbs")).toHaveLength(0);
     first.release();
     second.release();
   } finally {
@@ -65,11 +65,11 @@ test("acquiring JS services does not request unrelated installed metadata", asyn
   }
 });
 
-test("native provider metadata is looked up once by acquired facet identity", async () => {
-  let facetId = 0;
+test("native provider metadata is looked up once by acquired orb identity", async () => {
+  let orbId = 0;
   const host = createHost({
     native: {
-      hasFacet: (id) => id === facetId,
+      hasOrb: (id) => id === orbId,
       activate: async () => {},
       invoke: async (_invocation, arguments_) => arguments_[0],
       dispose: async () => {},
@@ -80,7 +80,7 @@ test("native provider metadata is looked up once by acquired facet identity", as
     },
   });
   const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
-    facets: [
+    orbs: [
       {
         name: "native",
         apiVersion: 1,
@@ -88,7 +88,7 @@ test("native provider metadata is looked up once by acquired facet identity", as
       },
     ],
   });
-  facetId = prepared.facets[0]!.id;
+  orbId = prepared.orbs[0]!.id;
   host.session.kernel.command(KernelOp.Commit, { ticket: prepared.id });
   const commands = spyOn(host.session.kernel, "command");
   try {
@@ -96,10 +96,8 @@ test("native provider metadata is looked up once by acquired facet identity", as
     const second = await host.get("native", "second");
     expect(await first.echo(42)).toBe(42);
     expect(await second.echo(43)).toBe(43);
-    expect(commands.mock.calls.filter(([op]) => op === "facets")).toHaveLength(0);
-    expect(commands.mock.calls.filter(([op]) => op === "facet")).toEqual([
-      ["facet", { id: facetId }],
-    ]);
+    expect(commands.mock.calls.filter(([op]) => op === "orbs")).toHaveLength(0);
+    expect(commands.mock.calls.filter(([op]) => op === "orb")).toEqual([["orb", { id: orbId }]]);
     first.release();
     second.release();
   } finally {
@@ -111,7 +109,7 @@ test("native provider metadata is looked up once by acquired facet identity", as
 test("disposing one object does not traverse unrelated JS reference records", async () => {
   const host = createHost();
   await host.install(
-    facet({ name: "local", apiVersion: 1, services: { local: { methods: { read: () => 42 } } } }),
+    orb({ name: "local", apiVersion: 1, services: { local: { methods: { read: () => 42 } } } }),
   );
   const first = await host.get("local", "first");
   const second = await host.get("local", "second");
@@ -131,20 +129,20 @@ test("disposing one object does not traverse unrelated JS reference records", as
   }
 });
 
-test("declared aliases resolve the current provider without listing unrelated facets", async () => {
+test("declared aliases resolve the current provider without listing unrelated orbs", async () => {
   const host = createHost();
   const provider = (version: number) =>
-    facet({
+    orb({
       name: "provider",
       apiVersion: 1,
       services: { storage: { methods: { read: () => version } } },
     });
   await host.install([
     provider(1),
-    facet({
+    orb({
       name: "consumer",
       apiVersion: 1,
-      requires: { store: { facet: "provider", apiVersion: 1, methods: ["read"] } },
+      requires: { store: { orb: "provider", apiVersion: 1, methods: ["read"] } },
       services: {
         consumer: {
           create(self) {
@@ -154,15 +152,15 @@ test("declared aliases resolve the current provider without listing unrelated fa
         },
       },
     }),
-    facet({ name: "unrelated", apiVersion: 1 }),
+    orb({ name: "unrelated", apiVersion: 1 }),
   ]);
   let commands = spyOn(host.session.kernel, "command");
   try {
     const first = await host.get("consumer", "first");
     expect(await first.read()).toBe(1);
-    expect(commands.mock.calls.filter(([op]) => op === "facets")).toHaveLength(0);
-    expect(commands.mock.calls.filter(([op]) => op === "facet-named")).toEqual([
-      ["facet-named", { name: "provider" }],
+    expect(commands.mock.calls.filter(([op]) => op === "orbs")).toHaveLength(0);
+    expect(commands.mock.calls.filter(([op]) => op === "orb-named")).toEqual([
+      ["orb-named", { name: "provider" }],
     ]);
     commands.mockRestore();
     await host.reload([provider(2)]);
@@ -170,9 +168,9 @@ test("declared aliases resolve the current provider without listing unrelated fa
     const second = await host.get("consumer", "second");
     expect(await first.read()).toBe(2);
     expect(await second.read()).toBe(2);
-    expect(commands.mock.calls.filter(([op]) => op === "facets")).toHaveLength(0);
-    expect(commands.mock.calls.filter(([op]) => op === "facet-named")).toEqual([
-      ["facet-named", { name: "provider" }],
+    expect(commands.mock.calls.filter(([op]) => op === "orbs")).toHaveLength(0);
+    expect(commands.mock.calls.filter(([op]) => op === "orb-named")).toEqual([
+      ["orb-named", { name: "provider" }],
     ]);
     first.release();
     second.release();
@@ -185,7 +183,7 @@ test("declared aliases resolve the current provider without listing unrelated fa
 test("local references do not expose inherited object members as service methods", async () => {
   const host = createHost();
   await host.install(
-    facet({ name: "local", apiVersion: 1, services: { local: { methods: { read: () => 42 } } } }),
+    orb({ name: "local", apiVersion: 1, services: { local: { methods: { read: () => 42 } } } }),
   );
   const reference = await host.get("local", "main");
   try {

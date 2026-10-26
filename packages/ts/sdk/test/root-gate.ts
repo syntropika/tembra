@@ -1,4 +1,4 @@
-import { facet } from "../src/facet.ts";
+import { orb } from "../src/orb.ts";
 import { deferred } from "../src/runtime/records.ts";
 import type { Host } from "../src/host.ts";
 import type { Context } from "../src/runtime/context.ts";
@@ -14,7 +14,7 @@ export async function verifyExclusiveRootGate(host: Host): Promise<void> {
     if (!condition) throw new Error(message);
   };
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "root-gate-acceptance",
       apiVersion: 1,
       services: {

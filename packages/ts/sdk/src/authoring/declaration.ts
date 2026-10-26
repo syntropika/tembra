@@ -37,9 +37,9 @@ export class Declaration {
     return this.session.principalFor(this.environment.object?.id ?? 0);
   }
 
-  /** Read the shared value created by the facet factory. */
-  get facet(): unknown {
-    return this.environment.facet.scope?.value;
+  /** Read the shared value created by the orb factory. */
+  get orb(): unknown {
+    return this.environment.orb.scope?.value;
   }
 
   /** Read the object key, or the default key outside an object. */
@@ -75,7 +75,7 @@ export class Declaration {
     return handle;
   }
 
-  /** Facet factories cannot depend on their own services; object factories may use sibling services. */
+  /** Orb factories cannot depend on their own services; object factories may use sibling services. */
   get(
     service: string,
     key: string | readonly string[],
@@ -84,7 +84,7 @@ export class Declaration {
     this.check();
     const requirement = this.session.scopes.requirement(this.environment, service);
     const resolved = requirement.service;
-    if (!this.environment.object && this.environment.facet.definition.services?.[resolved])
+    if (!this.environment.object && this.environment.orb.definition.services?.[resolved])
       refuse(Errors.Invalid.DependencyCycle);
     const identity = JSON.stringify([resolved, key, options.principal ?? this.principal]);
     const existing = this.environment.dependencies.get(identity);
@@ -153,10 +153,10 @@ export class Declaration {
   } {
     this.check();
     if (!this.session.kernel.features.hooks) refuse(Errors.Invalid.HooksDisabled);
-    if (!this.environment.facet.definition.hooks?.[name]) refuse(Errors.Invalid.Hook, name);
+    if (!this.environment.orb.definition.hooks?.[name]) refuse(Errors.Invalid.Hook, name);
     return {
       /** Require an issued context before entering the declared hook. */
-      run: (context, input) => this.session.facets.runHook(this.environment, name, context, input),
+      run: (context, input) => this.session.orbs.runHook(this.environment, name, context, input),
     };
   }
 }

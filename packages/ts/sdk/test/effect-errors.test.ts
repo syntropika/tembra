@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
-import { facet } from "../src/facet.ts";
+import { orb } from "../src/orb.ts";
 import { TembraError } from "../src/error.ts";
 import { Errors } from "../src/errors.ts";
 import { KernelOp } from "../src/protocol.ts";
@@ -29,7 +29,7 @@ for (const kind of ["unprintable", "oversized", "hostile", "unicode"] as const)
       });
     let closed = 0;
     await host.install(
-      facet({
+      orb({
         name: "effect-errors",
         apiVersion: 1,
         services: {

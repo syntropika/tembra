@@ -1,7 +1,7 @@
 use crate::core::Reason;
 use crate::{
-    Error, Facet, Result, State, core,
-    facet::{Data, Implementation, type_error},
+    Error, Orb, Result, State, core,
+    orb::{Data, Implementation, type_error},
 };
 use futures::{
     FutureExt,
@@ -49,7 +49,7 @@ type Closer = Box<dyn FnOnce(Context) -> LocalBoxFuture<'static, Result<()>>>;
 struct Inner {
     kernel: core::Host,
     executor: Rc<dyn LocalSpawn>,
-    facets: RefCell<BTreeMap<core::Id, BTreeMap<String, Implementation>>>,
+    orbs: RefCell<BTreeMap<core::Id, BTreeMap<String, Implementation>>>,
     objects: RefCell<BTreeMap<core::Id, Object>>,
     scope_objects: RefCell<BTreeMap<core::Id, core::Id>>,
     values: RefCell<BTreeMap<core::Id, ValueRecord>>,
@@ -79,7 +79,7 @@ impl Host {
         Self(Rc::new(Inner {
             kernel,
             executor: Rc::new(executor),
-            facets: RefCell::new(BTreeMap::new()),
+            orbs: RefCell::new(BTreeMap::new()),
             objects: RefCell::new(BTreeMap::new()),
             scope_objects: RefCell::new(BTreeMap::new()),
             values: RefCell::new(BTreeMap::new()),
@@ -104,9 +104,9 @@ impl Host {
         Rc::ptr_eq(&self.0, &other.0)
     }
 
-    /// Check whether this adapter retains the facet implementation.
-    pub fn has_facet(&self, id: core::Id) -> bool {
-        self.0.facets.borrow().contains_key(&id)
+    /// Check whether this adapter retains the orb implementation.
+    pub fn has_orb(&self, id: core::Id) -> bool {
+        self.0.orbs.borrow().contains_key(&id)
     }
 
     /// Give the shared JS adapter exclusive ownership of action dispatch.
@@ -114,26 +114,26 @@ impl Host {
         self.0.external_actions.set(true);
     }
 
-    /// Install compiled native facets without replacing existing implementations.
-    pub fn install(&self, facets: Vec<Facet>) -> Result<()> {
-        let current = self.kernel().installed_facets();
-        if facets.iter().any(|facet| {
+    /// Install compiled native orbs without replacing existing implementations.
+    pub fn install(&self, orbs: Vec<Orb>) -> Result<()> {
+        let current = self.kernel().installed_orbs();
+        if orbs.iter().any(|orb| {
             current
                 .iter()
-                .any(|installed| installed.declaration.name == facet.metadata.name)
+                .any(|installed| installed.declaration.name == orb.metadata.name)
         }) {
             return Err(Error::invalid(
-                Reason::FacetInstalled,
-                "compiled native facets cannot be replaced",
+                Reason::OrbInstalled,
+                "compiled native orbs cannot be replaced",
             ));
         }
         let reload = self.kernel().prepare(
-            facets.iter().map(|facet| facet.metadata.clone()).collect(),
+            orbs.iter().map(|orb| orb.metadata.clone()).collect(),
             Vec::new(),
         )?;
         self.kernel().commit(reload.id, Vec::new())?;
-        for (facet, info) in facets.into_iter().zip(reload.facets) {
-            self.0.facets.borrow_mut().insert(info.id, facet.services);
+        for (orb, info) in orbs.into_iter().zip(reload.orbs) {
+            self.0.orbs.borrow_mut().insert(info.id, orb.services);
         }
         Ok(())
     }
@@ -150,7 +150,7 @@ impl Host {
             BTreeSet::new(),
         )?;
         if acquired.activate {
-            let scope = match self.activate(acquired.object, acquired.facet, service) {
+            let scope = match self.activate(acquired.object, acquired.orb, service) {
                 Ok(scope) => scope,
                 Err(error) => {
                     self.kernel().fail(acquired.object)?;
@@ -199,7 +199,7 @@ impl Host {
         }
         self.kernel().finish_close()?;
         self.0.values.borrow_mut().clear();
-        self.0.facets.borrow_mut().clear();
+        self.0.orbs.borrow_mut().clear();
         self.0.scope_objects.borrow_mut().clear();
         if let Some(error) = self.errors().into_iter().next() {
             return Err(error);

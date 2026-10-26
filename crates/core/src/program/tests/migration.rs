@@ -3,9 +3,9 @@ use super::*;
 #[test]
 fn prepared_validation_rejects_a_later_write_before_adoption() {
     let host = Host::new();
-    let mut facet = Facet::new("state", 1);
-    facet.services.push(Service::new("state", ["write"]));
-    let initial = host.prepare(vec![facet.clone()], vec![]).unwrap();
+    let mut orb = Orb::new("state", 1);
+    orb.services.push(Service::new("state", ["write"]));
+    let initial = host.prepare(vec![orb.clone()], vec![]).unwrap();
     host.commit(initial.id, vec![]).unwrap();
     let claim = host
         .acquire(
@@ -20,12 +20,12 @@ fn prepared_validation_rejects_a_later_write_before_adoption() {
         .unwrap();
     host.initialize_state(claim.object, 100, 1).unwrap();
     host.ready(claim.object).unwrap();
-    let register = |facet| {
+    let register = |orb| {
         let id = host.allocate_handle().unwrap();
         host.register_scope(Scope {
             id,
             owner: Owner::Object(claim.object),
-            facet,
+            orb,
             parents: vec![],
             dependencies: vec![],
             resources: vec![],
@@ -37,9 +37,9 @@ fn prepared_validation_rejects_a_later_write_before_adoption() {
         .unwrap();
         id
     };
-    let previous = register(claim.facet);
-    let reload = host.prepare(vec![facet], vec![]).unwrap();
-    let next = register(reload.facets[0].id);
+    let previous = register(claim.orb);
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
+    let next = register(reload.orbs[0].id);
     let program = host
         .reload_scopes(
             reload.id,
@@ -76,9 +76,9 @@ fn prepared_validation_rejects_a_later_write_before_adoption() {
 #[test]
 fn invalid_state_completion_recovers_and_drops_other_candidates() {
     let host = Host::new();
-    let mut facet = Facet::new("state", 1);
-    facet.services.push(Service::new("state", ["read"]));
-    let initial = host.prepare(vec![facet.clone()], vec![]).unwrap();
+    let mut orb = Orb::new("state", 1);
+    orb.services.push(Service::new("state", ["read"]));
+    let initial = host.prepare(vec![orb.clone()], vec![]).unwrap();
     host.commit(initial.id, vec![]).unwrap();
     let claims: Vec<_> = ["first", "second"]
         .into_iter()
@@ -98,12 +98,12 @@ fn invalid_state_completion_recovers_and_drops_other_candidates() {
             claim
         })
         .collect();
-    let register = |object, facet, state_version| {
+    let register = |object, orb, state_version| {
         let id = host.allocate_handle().unwrap();
         host.register_scope(Scope {
             id,
             owner: Owner::Object(object),
-            facet,
+            orb,
             parents: vec![],
             dependencies: vec![],
             resources: vec![],
@@ -117,15 +117,15 @@ fn invalid_state_completion_recovers_and_drops_other_candidates() {
     };
     let previous: Vec<_> = claims
         .iter()
-        .map(|claim| register(claim.object, claim.facet, None))
+        .map(|claim| register(claim.object, claim.orb, None))
         .collect();
-    let reload = host.prepare(vec![facet], vec![]).unwrap();
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
     let replacements = claims
         .iter()
         .zip(previous.iter())
         .map(|(claim, previous)| Replacement {
             previous: Some(*previous),
-            next: Some(register(claim.object, reload.facets[0].id, Some(1))),
+            next: Some(register(claim.object, reload.orbs[0].id, Some(1))),
         })
         .collect();
     let program = host.reload_scopes(reload.id, replacements, 100).unwrap();

@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { facet } from "./authoring/facet.ts";
+import { orb } from "./authoring/orb.ts";
 import type { HostOptions } from "./authoring/types.ts";
 import type { KernelPort } from "./bridge/kernel.ts";
 import { Host } from "./host.ts";
@@ -28,16 +28,15 @@ export function createHost(options: NodeHostOptions = {}): Host {
             : /^[a-z]+:/i.test(location)
               ? new URL(location)
               : pathToFileURL(path.resolve(location));
-        if (!/\.m?js$/.test(url.pathname))
-          throw new Error("Load a prebuilt JavaScript facet bundle");
-        return facet(
-          (await import(url.href)).default as import("./authoring/types.ts").FacetDefinition,
+        if (!/\.m?js$/.test(url.pathname)) throw new Error("Load a prebuilt JavaScript orb bundle");
+        return orb(
+          (await import(url.href)).default as import("./authoring/types.ts").OrbDefinition,
         );
       }),
   });
 }
 
-export { facet };
+export { orb };
 export type { Host };
 
 export {

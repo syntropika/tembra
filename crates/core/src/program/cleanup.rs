@@ -34,7 +34,7 @@ impl Host {
             }
         }
         inner.owner_scopes.remove(&record.owner, scope);
-        inner.facet_scopes.remove(&record.facet, scope);
+        inner.orb_scopes.remove(&record.orb, scope);
         for parent in &record.parents {
             inner.scope_children.remove(parent, scope);
             inner.wake(WaitKey::Scope(*parent));

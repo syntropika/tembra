@@ -3,14 +3,14 @@
 use super::*;
 
 impl Inner {
-    /// Resolve the facet owner responsible for an owned task.
-    pub fn task_facet(&self, owner: Owner) -> Option<Id> {
+    /// Resolve the orb owner responsible for an owned task.
+    pub fn task_orb(&self, owner: Owner) -> Option<Id> {
         match owner {
-            Owner::Facet(id) => Some(id),
+            Owner::Orb(id) => Some(id),
             Owner::Object(id) => self
                 .objects
                 .get(&id)
-                .map(|object| self.facets[&object.facet].owner),
+                .map(|object| self.orbs[&object.orb].owner),
             Owner::Host => None,
         }
     }
@@ -66,7 +66,7 @@ impl Inner {
         reserve(&mut self.next)
     }
 
-    /// Read the published facet-name index.
+    /// Read the published orb-name index.
     pub fn current(&self) -> &BTreeMap<String, Id> {
         &self.versions[&self.version]
     }
@@ -121,7 +121,7 @@ impl Inner {
                 calls: 0,
                 contexts: BTreeSet::new(),
                 touched: BTreeSet::new(),
-                facets: BTreeSet::new(),
+                orbs: BTreeSet::new(),
                 cleanup,
             },
         );
@@ -136,25 +136,21 @@ impl Inner {
             .ok_or_else(|| conflict(Reason::Superseded))?;
         services
             .get(name)
-            .map(|(facet, service)| (*facet, service))
+            .map(|(orb, service)| (*orb, service))
             .ok_or_else(|| Error::new(Code::Unavailable, Reason::UnknownService, name))
     }
 
-    /// Reject calls below the facet's version or admission gate.
-    pub(super) fn check_facet(&self, facet: Id, root: Id, version: Version) -> Result<Id> {
-        let owner = self
-            .facets
-            .get(&facet)
-            .ok_or_else(|| gone(Reason::Facet))?
-            .owner;
+    /// Reject calls below the orb's version or admission gate.
+    pub(super) fn check_orb(&self, orb: Id, root: Id, version: Version) -> Result<Id> {
+        let owner = self.orbs.get(&orb).ok_or_else(|| gone(Reason::Orb))?.owner;
         if self
-            .facet_min
+            .orb_min
             .get(&owner)
             .is_some_and(|minimum| version < *minimum)
             || self
                 .pending
                 .as_ref()
-                .and_then(|pending| pending.gated_facets.get(&owner))
+                .and_then(|pending| pending.gated_orbs.get(&owner))
                 .is_some_and(|allowed| !allowed.contains(&root))
         {
             return Err(conflict(Reason::UpgradeConflict));
@@ -162,9 +158,9 @@ impl Inner {
         Ok(owner)
     }
 
-    /// Check indexed root and task ownership for a facet.
-    pub(super) fn facet_busy(&self, owner: Id) -> bool {
-        self.facet_roots.contains(&owner) || self.facet_tasks.contains(&owner)
+    /// Check indexed root and task ownership for an orb.
+    pub(super) fn orb_busy(&self, owner: Id) -> bool {
+        self.orb_roots.contains(&owner) || self.orb_tasks.contains(&owner)
     }
 
     /// Check whether an object still has roots or tasks.
@@ -172,7 +168,7 @@ impl Inner {
         self.object_roots.contains(&object) || self.objects[&object].tasks != 0
     }
 
-    /// Require a live host, facet or object declaration owner.
+    /// Require a live host, orb or object declaration owner.
     pub fn owner(&self, owner: Owner) -> Result<()> {
         match owner {
             Owner::Host => {
@@ -182,7 +178,7 @@ impl Inner {
                     Err(gone(Reason::Host))
                 }
             }
-            Owner::Facet(id) => {
+            Owner::Orb(id) => {
                 if self.current_owners.contains(&id)
                     || self
                         .pending
@@ -191,7 +187,7 @@ impl Inner {
                 {
                     Ok(())
                 } else {
-                    Err(gone(Reason::Facet))
+                    Err(gone(Reason::Orb))
                 }
             }
             Owner::Object(id) => {
@@ -298,14 +294,14 @@ impl Inner {
                     self.wake(WaitKey::Owner(Owner::Object(object)));
                 }
             }
-            for facet in root.facets {
-                self.facet_roots.remove(&facet, id);
+            for orb in root.orbs {
+                self.orb_roots.remove(&orb, id);
                 if self
                     .pending
                     .as_ref()
-                    .is_some_and(|pending| pending.gated_facets.contains_key(&facet))
+                    .is_some_and(|pending| pending.gated_orbs.contains_key(&orb))
                 {
-                    self.wake(WaitKey::Owner(Owner::Facet(facet)));
+                    self.wake(WaitKey::Owner(Owner::Orb(orb)));
                 }
             }
             self.release_version(root.version);
@@ -313,15 +309,15 @@ impl Inner {
         leases
     }
 
-    /// Retire facet callbacks after all version and object claims end.
-    pub fn collect_facet(&mut self, id: Id) {
-        if !self.facet_versions.contains(&id)
-            && !self.facet_objects.contains(&id)
-            && self.facets.remove(&id).is_some()
+    /// Retire orb callbacks after all version and object claims end.
+    pub fn collect_orb(&mut self, id: Id) {
+        if !self.orb_versions.contains(&id)
+            && !self.orb_objects.contains(&id)
+            && self.orbs.remove(&id).is_some()
         {
-            self.actions.push_back(Action::RetireFacet(id));
+            self.actions.push_back(Action::RetireOrb(id));
             #[cfg(feature = "hooks")]
-            self.contributions.retain(|c| c.facet != id);
+            self.contributions.retain(|c| c.orb != id);
         }
     }
 
@@ -330,11 +326,11 @@ impl Inner {
         if version == self.version || self.version_users.contains_key(&version) {
             return;
         }
-        if let Some(facets) = self.versions.remove(&version) {
+        if let Some(orbs) = self.versions.remove(&version) {
             self.services.remove(&version);
-            for id in facets.into_values() {
-                self.facet_versions.remove(&id, version.into());
-                self.collect_facet(id);
+            for id in orbs.into_values() {
+                self.orb_versions.remove(&id, version.into());
+                self.collect_orb(id);
             }
             #[cfg(feature = "hooks")]
             {

@@ -58,14 +58,14 @@ impl Service {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Requirement {
-    pub facet: String,
+    pub orb: String,
     pub api_version: Version,
     pub methods: BTreeMap<String, BTreeSet<String>>,
     pub hooks: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Facet {
+pub struct Orb {
     pub name: String,
     pub api_version: Version,
     pub services: Vec<Service>,
@@ -73,7 +73,7 @@ pub struct Facet {
     pub hooks: BTreeSet<String>,
 }
 
-impl Facet {
+impl Orb {
     /// Create a declaration with explicit identity and default options.
     pub fn new(name: impl Into<String>, api_version: Version) -> Self {
         Self {
@@ -87,11 +87,11 @@ impl Facet {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InstalledFacet {
+pub struct InstalledOrb {
     pub id: Id,
     pub owner: Id,
     pub code_version: Version,
-    pub declaration: Facet,
+    pub declaration: Orb,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,7 +118,7 @@ impl Status {
 pub struct Acquisition {
     pub reference: Id,
     pub object: Id,
-    pub facet: Id,
+    pub orb: Id,
     pub code_version: Version,
     pub activate: bool,
 }
@@ -130,7 +130,7 @@ pub struct Invocation {
     pub id: Id,
     pub root: Id,
     pub object: Id,
-    pub facet: Id,
+    pub orb: Id,
     pub code_version: Version,
     pub method: String,
 }
@@ -138,7 +138,7 @@ pub struct Invocation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Owner {
     Host,
-    Facet(Id),
+    Orb(Id),
     Object(Id),
 }
 
@@ -176,7 +176,7 @@ pub enum Action {
     DropValue(Id),
     CancelRoot(Id),
     CancelTask(Id),
-    RetireFacet(Id),
+    RetireOrb(Id),
     StateChanged {
         object: Id,
         revision: u64,
@@ -201,14 +201,14 @@ pub struct Diagnostics {
     pub calls: usize,
     pub resources: usize,
     pub tasks: usize,
-    pub facets: usize,
+    pub orbs: usize,
     pub closing: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Object {
     pub address: Address,
-    pub facet: Id,
+    pub orb: Id,
     pub phase: Status,
     pub references: usize,
     pub calls: usize,
@@ -243,7 +243,7 @@ pub(crate) struct Root {
     pub cancelled: bool,
     pub calls: usize,
     pub touched: BTreeSet<Id>,
-    pub facets: BTreeSet<Id>,
+    pub orbs: BTreeSet<Id>,
     pub cleanup: bool,
 }
 
@@ -258,7 +258,7 @@ pub(crate) struct Task {
 pub struct Reload {
     pub id: Id,
     pub code_version: Version,
-    pub facets: Vec<InstalledFacet>,
+    pub orbs: Vec<InstalledOrb>,
     pub objects: Vec<Id>,
     /// Candidate providers for affected service identities, shared with language adapters.
     pub providers: BTreeMap<String, Id>,

@@ -1,6 +1,6 @@
 import { Code, Reason } from "./bridge/identifiers.ts";
 
-/** Shared error shape, also used by Rust and transport envelopes. Facets may supply custom reasons. */
+/** Shared error shape, also used by Rust and transport envelopes. Orbs may supply custom reasons. */
 export interface ErrorDescriptor {
   readonly code: Code;
   readonly reason: string;
@@ -82,7 +82,7 @@ export const Errors = Object.freeze({
     StateOwner: define(
       Code.Forbidden,
       Reason.StateOwner,
-      "Only the owning facet may change this state",
+      "Only the owning orb may change this state",
     ),
     UndeclaredDependency: define(
       Code.Forbidden,
@@ -129,18 +129,18 @@ export const Errors = Object.freeze({
     DependencyCycle: define(
       Code.Invalid,
       Reason.DependencyCycle,
-      "Facet factories cannot acquire their own services",
+      "Orb factories cannot acquire their own services",
     ),
     DependencyService: define(Code.Invalid, Reason.DependencyService, "Invalid dependency service"),
     DuplicateListener: define(Code.Invalid, Reason.DuplicateListener, "Invalid duplicate listener"),
     DuplicateResource: define(Code.Invalid, Reason.DuplicateResource, "Invalid duplicate resource"),
     EventSource: define(Code.Invalid, Reason.EventSource, "Invalid event source"),
-    Facet: define(Code.Invalid, Reason.Facet, "A facet needs a name and positive API version"),
-    FacetGone: define(Code.Invalid, Reason.FacetGone, "Invalid facet gone"),
-    FacetInstalled: define(
+    Orb: define(Code.Invalid, Reason.Orb, "An orb needs a name and positive API version"),
+    OrbGone: define(Code.Invalid, Reason.OrbGone, "Invalid orb gone"),
+    OrbInstalled: define(
       Code.Invalid,
-      Reason.FacetInstalled,
-      "Use reload to replace an installed facet",
+      Reason.OrbInstalled,
+      "Use reload to replace an installed orb",
     ),
     Factory: define(Code.Invalid, Reason.Factory, "Invalid factory"),
     FactoryExpired: define(Code.Invalid, Reason.FactoryExpired, "Declarations must be synchronous"),
@@ -187,7 +187,7 @@ export const Errors = Object.freeze({
     StateValidation: define(
       Code.Invalid,
       Reason.StateValidation,
-      "The facet rejected the state candidate",
+      "The orb rejected the state candidate",
     ),
     StateValue: define(Code.Invalid, Reason.StateValue, "State cannot contain accessors"),
     StateVersion: define(Code.Invalid, Reason.StateVersion, "Invalid state version"),
@@ -211,7 +211,7 @@ export const Errors = Object.freeze({
   }),
   Unavailable: Object.freeze({
     Callback: define(Code.Unavailable, Reason.Callback, "A callback failed"),
-    FacetScope: define(Code.Unavailable, Reason.FacetScope, "The facet scope is unavailable"),
+    OrbScope: define(Code.Unavailable, Reason.OrbScope, "The orb scope is unavailable"),
     NotReady: define(Code.Unavailable, Reason.NotReady, "The object is not ready"),
     Route: define(Code.Unavailable, Reason.Route, "The route is unavailable"),
   }),

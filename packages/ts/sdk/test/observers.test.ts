@@ -1,11 +1,11 @@
 import { KernelOp } from "../src/protocol.ts";
 import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
-import { facet } from "../src/facet.ts";
+import { orb } from "../src/orb.ts";
 import type { Reload, Snapshot } from "../src/kernel.ts";
 
 const counter = () =>
-  facet({
+  orb({
     name: "counter",
     apiVersion: 1,
     services: {
@@ -48,11 +48,11 @@ test("a consumer selector failure detaches that selector without rejecting owner
 });
 
 test("foreign state publication adopts the kernel snapshot despite a failing consumer selector", async () => {
-  let facetId = 0;
+  let orbId = 0;
   const values = new Map<number, { count: number }>();
   const host = createHost({
     native: {
-      hasFacet: (id) => id === facetId,
+      hasOrb: (id) => id === orbId,
       activate: async (object) => {
         const value = host.session.kernel.command<number>(KernelOp.Allocate);
         values.set(value, { count: 0 });
@@ -80,11 +80,11 @@ test("foreign state publication adopts the kernel snapshot despite a failing con
     },
   });
   const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
-    facets: [
+    orbs: [
       { name: "native", apiVersion: 1, services: [{ name: "native", methods: ["increment"] }] },
     ],
   });
-  facetId = prepared.facets[0]!.id;
+  orbId = prepared.orbs[0]!.id;
   host.session.kernel.command(KernelOp.Commit, { ticket: prepared.id });
   const reference = await host.get("native", "main");
   reference.state.select((value) => {

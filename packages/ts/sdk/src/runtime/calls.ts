@@ -79,12 +79,12 @@ export class Calls {
         const started = sampled ? session.now() : 0;
         let outcome: Outcome = Outcome.Ok;
         try {
-          if (session.options.native?.hasFacet(invocation.facet))
+          if (session.options.native?.hasOrb(invocation.orb))
             return await session.options.native.invoke(invocation, arguments_, entered);
           const object = session.objects.get(invocation.object);
-          const environment = object?.versions.get(invocation.facet);
+          const environment = object?.versions.get(invocation.orb);
           const handle =
-            environment?.facet.definition.services?.[reference.address.service]?.methods[method];
+            environment?.orb.definition.services?.[reference.address.service]?.methods[method];
           if (!environment || !handle) throw new TembraError(Errors.Gone.Implementation);
           return await handle(environment.value, entered, ...arguments_);
         } catch (error) {
@@ -119,7 +119,7 @@ export class Calls {
     const session = this.session;
     const execute = async (ctx: Context) => {
       const invocation = session.kernel.command<Invocation>(KernelOp.BeginOperation, {
-        facet: environment.facet.info.id,
+        orb: environment.orb.info.id,
         root: ctx.root,
         context: ctx.frame || undefined,
         operation,

@@ -7,8 +7,8 @@ pub(super) fn parse_code(code: &str) -> Code {
     Code::parse(code).unwrap_or(Code::Invalid)
 }
 
-/// Decode facet contracts without retaining language values.
-pub(super) fn parse_facet(f: &Value) -> Result<Facet> {
+/// Decode orb contracts without retaining language values.
+pub(super) fn parse_orb(f: &Value) -> Result<Orb> {
     let services = array(f, "services")?
         .iter()
         .map(|s| {
@@ -51,14 +51,14 @@ pub(super) fn parse_facet(f: &Value) -> Result<Facet> {
                 }
             }
             Ok(Requirement {
-                facet: text(r, "facet")?.into(),
+                orb: text(r, "orb")?.into(),
                 api_version: number(r, "apiVersion")?,
                 methods,
                 hooks: strings_optional(r, "hooks")?.into_iter().collect(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(Facet {
+    Ok(Orb {
         name: text(f, "name")?.into(),
         api_version: number(f, "apiVersion")?,
         services,
@@ -67,11 +67,11 @@ pub(super) fn parse_facet(f: &Value) -> Result<Facet> {
     })
 }
 
-/// Decode the host, facet or object that owns a declaration.
+/// Decode the host, orb or object that owns a declaration.
 pub(super) fn owner(v: &Value) -> Result<Owner> {
     match v["owner"]["kind"].as_str() {
         Some("host") => Ok(Owner::Host),
-        Some("facet") => Ok(Owner::Facet(identity(&v["owner"], "id")?)),
+        Some("orb") => Ok(Owner::Orb(identity(&v["owner"], "id")?)),
         Some("object") => Ok(Owner::Object(identity(&v["owner"], "id")?)),
         _ => Err(Error::invalid(Reason::Owner, "invalid owner")),
     }

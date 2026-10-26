@@ -27,23 +27,23 @@ impl Kernel {
                 "telemetry": cfg!(feature="telemetry"),
             })),
             KernelOp::Prepare => {
-                let facets = array(request, "facets")?
+                let orbs = array(request, "orbs")?
                     .iter()
-                    .map(parse_facet)
+                    .map(parse_orb)
                     .collect::<Result<Vec<_>>>()?;
                 let remove = strings_optional(request, "remove")?;
-                let reload = h.prepare(facets, remove)?;
+                let reload = h.prepare(orbs, remove)?;
                 Ok(json!({
                     "id": reload.id,
                     "codeVersion": reload.code_version,
-                    "facets": reload.facets.iter().map(facet_value).collect::<Vec<_>>(),
+                    "orbs": reload.orbs.iter().map(orb_value).collect::<Vec<_>>(),
                     "objects": reload.objects,
                     "providers": reload.providers,
                 }))
             }
             KernelOp::Gate => Ok(json!(h.gate(id("ticket")?, &numbers(request, "objects")?)?)),
-            KernelOp::GateFacets => Ok(json!(
-                h.gate_facets(id("ticket")?, &numbers(request, "owners")?)?
+            KernelOp::GateOrbs => Ok(json!(
+                h.gate_orbs(id("ticket")?, &numbers(request, "owners")?)?
             )),
             KernelOp::Commit => {
                 let migrations = request
@@ -66,20 +66,17 @@ impl Kernel {
                 h.abort(id("ticket")?)?;
                 unit()
             }
-            KernelOp::Facets => Ok(json!(
-                h.installed_facets()
-                    .iter()
-                    .map(facet_value)
-                    .collect::<Vec<_>>()
+            KernelOp::Orbs => Ok(json!(
+                h.installed_orbs().iter().map(orb_value).collect::<Vec<_>>()
             )),
-            KernelOp::Facet => Ok(facet_value(&h.facet(id("id")?)?)),
-            KernelOp::FacetNamed => {
+            KernelOp::Orb => Ok(orb_value(&h.orb(id("id")?)?)),
+            KernelOp::OrbNamed => {
                 let name = text(request, "name")?;
-                let facet = match optional_identity(request, "ticket")? {
-                    Some(ticket) => h.prepared_facet(ticket, name)?,
-                    None => h.facet_named(name)?,
+                let orb = match optional_identity(request, "ticket")? {
+                    Some(ticket) => h.prepared_orb(ticket, name)?,
+                    None => h.orb_named(name)?,
                 };
-                Ok(facet_value(&facet))
+                Ok(orb_value(&orb))
             }
             KernelOp::NextDeadline => Ok(json!(h.next_deadline())),
             KernelOp::Address => {
@@ -104,7 +101,7 @@ impl Kernel {
                 Ok(json!({
                     "reference": result.reference,
                     "object": result.object,
-                    "facet": result.facet,
+                    "orb": result.orb,
                     "codeVersion": result.code_version,
                     "activate": result.activate,
                 }))
@@ -169,7 +166,7 @@ impl Kernel {
                 optional_identity(request, "context")?.unwrap_or(0),
             )?)),
             KernelOp::BeginOperation => Ok(invocation_value(&h.begin_operation_with_context(
-                id("facet")?,
+                id("orb")?,
                 id("root")?,
                 id("operation")?,
                 optional_identity(request, "object")?,
@@ -253,7 +250,7 @@ impl Kernel {
                     "calls": d.calls,
                     "resources": d.resources,
                     "tasks": d.tasks,
-                    "facets": d.facets,
+                    "orbs": d.orbs,
                     "closing": d.closing,
                     "codeVersion": h.version(),
                 }))
@@ -272,7 +269,7 @@ impl Kernel {
             #[cfg(feature = "hooks")]
             KernelOp::Contribute => {
                 h.contribute(Contribution {
-                    facet: id("facet")?,
+                    orb: id("orb")?,
                     target: text(request, "target")?.into(),
                     hook: text(request, "hook")?.into(),
                     operation: id("operation")?,

@@ -4,15 +4,15 @@ use super::*;
 
 impl Host {
     /// Used by a foreign language adapter after the shared kernel reserves the object.
-    pub fn activate(&self, object: core::Id, facet: core::Id, service: &str) -> Result<core::Id> {
+    pub fn activate(&self, object: core::Id, orb: core::Id, service: &str) -> Result<core::Id> {
         if let Some(object) = self.0.objects.borrow().get(&object) {
             return Ok(object.scope);
         }
         let implementation = self
             .0
-            .facets
+            .orbs
             .borrow()
-            .get(&facet)
+            .get(&orb)
             .and_then(|services| services.get(service))
             .cloned()
             .ok_or_else(|| Error::invalid(Reason::NativeService, service))?;
@@ -27,7 +27,7 @@ impl Host {
         self.kernel().register_scope(core::Scope {
             id: scope,
             owner: core::Owner::Object(object),
-            facet,
+            orb,
             parents: Vec::new(),
             dependencies: Vec::new(),
             resources: resources.borrow().clone(),

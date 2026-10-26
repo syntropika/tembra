@@ -1,12 +1,12 @@
 import { Declaration } from "../authoring/declaration.ts";
 import type { Resource, ResourceOptions } from "../authoring/types.ts";
 import { Code, Reason, Status } from "../bridge/identifiers.ts";
-import type { Acquisition, KernelFacet, Owner } from "../bridge/kernel.ts";
+import type { Acquisition, KernelOrb, Owner } from "../bridge/kernel.ts";
 import { EnvironmentPhase, KernelOp, OwnerKind } from "../bridge/protocol.ts";
 import { refuse, TembraError } from "../error.ts";
 import { Errors } from "../errors.ts";
 import { StateBinding } from "../state.ts";
-import type { Environment, FacetRecord, ObjectRecord, ResourceRecord } from "./records.ts";
+import type { Environment, OrbRecord, ObjectRecord, ResourceRecord } from "./records.ts";
 import type { Session } from "./session.ts";
 
 /** Declare JS scopes and execute activation effects. */
@@ -19,11 +19,11 @@ export class Scopes {
   #hostActivation: Promise<void> | undefined;
 
   /** Allocate the JS callback storage for one declared scope. */
-  environment(owner: Owner, facet: FacetRecord, object?: ObjectRecord): Environment {
+  environment(owner: Owner, orb: OrbRecord, object?: ObjectRecord): Environment {
     const environment: Environment = {
       id: this.session.kernel.command<number>(KernelOp.Allocate),
       owner,
-      facet,
+      orb,
       ...(object ? { object } : {}),
       phase: EnvironmentPhase.Declaring,
       value: {},
@@ -39,10 +39,10 @@ export class Scopes {
   /** Declare native or JS object scopes and wait for readiness. */
   async activate(object: ObjectRecord, acquired: Acquisition): Promise<void> {
     const session = this.session;
-    if (session.options.native?.hasFacet(acquired.facet)) {
+    if (session.options.native?.hasOrb(acquired.orb)) {
       await session.options.native.activate(
         object.id,
-        acquired.facet,
+        acquired.orb,
         object.address.service,
         object.address.key,
         object.address.principal,
@@ -58,11 +58,11 @@ export class Scopes {
         /* State is optional. */
       }
     } else {
-      const facet = session.facets.records.get(acquired.facet);
-      if (!facet) refuse(Errors.Invalid.FacetGone);
-      await session.facets.ready(facet);
-      const environment = this.createEnvironment(object, facet);
-      object.versions.set(facet.info.id, environment);
+      const orb = session.orbs.records.get(acquired.orb);
+      if (!orb) refuse(Errors.Invalid.OrbGone);
+      await session.orbs.ready(orb);
+      const environment = this.createEnvironment(object, orb);
+      object.versions.set(orb.info.id, environment);
       await this.session.programs.activate(environment.id);
     }
     if (
@@ -75,10 +75,10 @@ export class Scopes {
   }
 
   /** Run a service factory synchronously and register its scope. */
-  createEnvironment(object: ObjectRecord, facet: FacetRecord): Environment {
-    const definition = facet.definition.services?.[object.address.service];
+  createEnvironment(object: ObjectRecord, orb: OrbRecord): Environment {
+    const definition = orb.definition.services?.[object.address.service];
     if (!definition) refuse(Errors.Invalid.ServiceGone);
-    const environment = this.environment({ kind: OwnerKind.Object, id: object.id }, facet, object);
+    const environment = this.environment({ kind: OwnerKind.Object, id: object.id }, orb, object);
     try {
       const value = definition.create?.(new Declaration(this.session, environment)) ?? {};
       if (value && typeof (value as { then?: unknown }).then === "function")
@@ -131,7 +131,7 @@ export class Scopes {
   private async redeclareHostScope(previous: Environment): Promise<Environment> {
     const session = this.session;
     await session.programs.cleanup([previous]);
-    const environment = this.environment({ kind: OwnerKind.Host }, previous.facet);
+    const environment = this.environment({ kind: OwnerKind.Host }, previous.orb);
     session.resources.redeclare(environment, previous);
     environment.phase = EnvironmentPhase.Prepared;
     session.programs.register(environment);
@@ -143,23 +143,17 @@ export class Scopes {
     environment: Environment,
     service: string,
   ): { service: string; apiVersion?: number; methods?: readonly string[] } {
-    const own = environment.facet.definition.services?.[service];
-    if (own) return { service, apiVersion: environment.facet.info.apiVersion };
-    for (const [alias, requirement] of Object.entries(
-      environment.facet.definition.requires ?? {},
-    )) {
-      let provider: KernelFacet;
+    const own = environment.orb.definition.services?.[service];
+    if (own) return { service, apiVersion: environment.orb.info.apiVersion };
+    for (const [alias, requirement] of Object.entries(environment.orb.definition.requires ?? {})) {
+      let provider: KernelOrb;
       try {
-        provider = this.session.kernel.command<KernelFacet>(KernelOp.FacetNamed, {
-          name: requirement.facet ?? alias,
-          ticket: environment.facet.ticket,
+        provider = this.session.kernel.command<KernelOrb>(KernelOp.OrbNamed, {
+          name: requirement.orb ?? alias,
+          ticket: environment.orb.ticket,
         });
       } catch (error) {
-        if (
-          error instanceof TembraError &&
-          error.code === Code.Gone &&
-          error.reason === Reason.Facet
-        )
+        if (error instanceof TembraError && error.code === Code.Gone && error.reason === Reason.Orb)
           continue;
         throw error;
       }
@@ -188,7 +182,7 @@ export class Scopes {
     const session = this.session;
     if (session.closing) throw new TembraError(Errors.Closed.Host);
     if (this.#hostResources.has(name)) refuse(Errors.Invalid.DuplicateResource);
-    const environment = this.environment({ kind: OwnerKind.Host }, session.hostScope.facet);
+    const environment = this.environment({ kind: OwnerKind.Host }, session.hostScope.orb);
     try {
       const resource = new Declaration(session, environment).resource(name, options);
       this.#hostResources.set(name, environment.resources.get(name)!);

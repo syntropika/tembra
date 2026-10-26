@@ -89,8 +89,8 @@ impl Host {
                             let _ = send.send(error.map_or(Ok(()), Err));
                         }
                     }
-                    core::Action::RetireFacet(id) => {
-                        self.0.facets.borrow_mut().remove(&id);
+                    core::Action::RetireOrb(id) => {
+                        self.0.orbs.borrow_mut().remove(&id);
                     }
                     core::Action::CancelEffects { effects, .. } => {
                         for effect in effects {

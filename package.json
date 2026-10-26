@@ -1,6 +1,6 @@
 {
   "name": "@tembra/sdk",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "files": [
     "packages/ts/sdk/src",
     "packages/ts/sdk/dist"
@@ -80,8 +80,8 @@
     "./embedded-runtime": "./packages/ts/sdk/dist/embedded.js"
   },
   "dependencies": {
-    "@tembra/engine-node": "0.2.0",
-    "@tembra/engine-wasm": "0.2.0",
+    "@tembra/engine-node": "0.1.0",
+    "@tembra/engine-wasm": "0.1.0",
     "enhanced-resolve": "5.26.0",
     "typescript": "5.9.3"
   },

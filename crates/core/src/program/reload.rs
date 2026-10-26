@@ -18,15 +18,12 @@ impl Host {
             .iter()
             .filter(|(name, id)| pending.current.get(*name) != Some(*id))
             .map(|(_, id)| *id);
-        for (facets, next) in [
+        for (orbs, next) in [
             (previous.collect::<Vec<_>>(), false),
-            (
-                pending.reload.facets.iter().map(|facet| facet.id).collect(),
-                true,
-            ),
+            (pending.reload.orbs.iter().map(|orb| orb.id).collect(), true),
         ] {
-            for facet in facets {
-                for id in inner.facet_scopes.members(&facet) {
+            for orb in orbs {
+                for id in inner.orb_scopes.members(&orb) {
                     let scope = &inner.scopes[&id];
                     if scope.closing {
                         continue;
@@ -102,8 +99,8 @@ impl Host {
                 program.retained.extend(&previous.resources);
             }
             if let Some(next) = next {
-                if !reload.facets.iter().any(|facet| facet.id == next.facet) {
-                    return Err(conflict(Reason::ScopeFacet));
+                if !reload.orbs.iter().any(|orb| orb.id == next.orb) {
+                    return Err(conflict(Reason::ScopeOrb));
                 }
                 if let (Owner::Object(object), Some(version)) = (next.owner, next.state_version) {
                     let snapshot = inner
@@ -141,7 +138,7 @@ impl Host {
                             program.exclusive.push(old.clone());
                             match next.owner {
                                 Owner::Object(id) => program.objects.push(id),
-                                Owner::Facet(id) => program.facets.push(id),
+                                Owner::Orb(id) => program.orbs.push(id),
                                 Owner::Host => return Err(conflict(Reason::HostResourceReload)),
                             }
                         }
@@ -174,7 +171,7 @@ impl Host {
             }
             match resource.owner {
                 Owner::Object(id) => program.objects.push(id),
-                Owner::Facet(id) => program.facets.push(id),
+                Owner::Orb(id) => program.orbs.push(id),
                 Owner::Host => return Err(conflict(Reason::HostResourceReload)),
             }
             for id in inner.dependents.members(&resource.id) {
@@ -188,8 +185,8 @@ impl Host {
         program.exclusive = closure.into_values().collect();
         program.objects.sort_unstable();
         program.objects.dedup();
-        program.facets.sort_unstable();
-        program.facets.dedup();
+        program.orbs.sort_unstable();
+        program.orbs.dedup();
         program.previous_scopes = replacements
             .iter()
             .filter_map(|pair| pair.next.map(|next| (next, pair.previous)))

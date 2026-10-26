@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHost } from "../src/node.ts";
-import { facet } from "../src/facet.ts";
+import { orb } from "../src/orb.ts";
 import { RemoteHost, serve } from "../src/rpc.ts";
 import type { Transport } from "../src/rpc.ts";
 import { messagePackCodec } from "../src/msgpack.ts";
@@ -40,7 +40,7 @@ for (const codec of [undefined, messagePackCodec])
   test(`remote calls, immutable state and disconnect using ${codec?.id ?? "json"}`, async () => {
     const host = createHost();
     await host.install(
-      facet({
+      orb({
         name: "counter",
         apiVersion: 1,
         services: {
@@ -109,7 +109,7 @@ for (const codec of [undefined, messagePackCodec])
 test("raw RPC calls expose only the reference's declared allowed methods", async () => {
   const host = createHost();
   await host.install(
-    facet({
+    orb({
       name: "private",
       apiVersion: 1,
       services: {

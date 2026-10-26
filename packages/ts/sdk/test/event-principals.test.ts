@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
-import { facet } from "../src/facet.ts";
+import { orb } from "../src/orb.ts";
 import { KernelOp } from "../src/protocol.ts";
 import { deferred } from "../src/runtime/records.ts";
 import type { Declaration } from "../src/runtime/declaration.ts";
@@ -51,7 +51,7 @@ for (const reload of [false, true])
       return {};
     };
     const consumer = (version: number) =>
-      facet({
+      orb({
         name: "consumer",
         apiVersion: 1,
         requires: { profile: { apiVersion: 1, methods: ["read"] } },
@@ -59,7 +59,7 @@ for (const reload of [false, true])
         services: { listener: { create: (self) => listen(self, version), methods: {} } },
       });
     await host.install([
-      facet({
+      orb({
         name: "profile",
         apiVersion: 1,
         services: {

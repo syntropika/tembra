@@ -34,7 +34,7 @@ impl Host {
     /// Wait for admitted owners before closing exclusive resources.
     pub(super) fn advance_gate(&self, program: &mut Program) -> Result<Option<Step>> {
         let ticket = program.ticket.expect("reload");
-        if !self.gate(ticket, &program.objects)? || !self.gate_facets(ticket, &program.facets)? {
+        if !self.gate(ticket, &program.objects)? || !self.gate_orbs(ticket, &program.orbs)? {
             program.waiting.extend(
                 program
                     .objects
@@ -43,9 +43,9 @@ impl Host {
             );
             program.waiting.extend(
                 program
-                    .facets
+                    .orbs
                     .iter()
-                    .map(|id| WaitKey::Owner(Owner::Facet(*id))),
+                    .map(|id| WaitKey::Owner(Owner::Orb(*id))),
             );
             return Ok(Some(Step::Wait {
                 deadline: program.deadline,

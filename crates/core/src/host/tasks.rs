@@ -9,8 +9,8 @@ impl Host {
         inner.owner(owner)?;
         let id = inner.id()?;
         let version = inner.version;
-        if let Some(facet) = inner.task_facet(owner) {
-            inner.facet_tasks.insert(facet, id);
+        if let Some(orb) = inner.task_orb(owner) {
+            inner.orb_tasks.insert(orb, id);
         }
         inner.owner_tasks.insert(owner, id);
         inner.owner_tasks.insert(Owner::Host, id);
@@ -66,16 +66,16 @@ impl Host {
             .tasks
             .remove(&task)
             .ok_or_else(|| gone(Reason::Task))?;
-        if let Some(facet) = inner.task_facet(task.owner) {
-            inner.facet_tasks.remove(&facet, task_id);
+        if let Some(orb) = inner.task_orb(task.owner) {
+            inner.orb_tasks.remove(&orb, task_id);
         }
         inner.owner_tasks.remove(&task.owner, task_id);
         inner.owner_tasks.remove(&Owner::Host, task_id);
         inner.settled_owner(task.owner);
         if let Owner::Object(object) = task.owner {
-            let facet = inner.objects[&object].facet;
-            let owner = inner.facets[&facet].owner;
-            inner.settled_owner(Owner::Facet(owner));
+            let orb = inner.objects[&object].orb;
+            let owner = inner.orbs[&orb].owner;
+            inner.settled_owner(Owner::Orb(owner));
             inner
                 .objects
                 .get_mut(&object)

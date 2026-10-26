@@ -3,7 +3,7 @@ import { createHost } from "../src/node.ts";
 import { Reason } from "../src/identifiers.ts";
 import { deferred } from "../src/runtime/records.ts";
 import type { Readable } from "../src/state.ts";
-import type { FacetDefinition, Resource } from "../src/types.ts";
+import type { OrbDefinition, Resource } from "../src/types.ts";
 
 function provider(
   name: string,
@@ -11,7 +11,7 @@ function provider(
   events: string[] = [],
   linked = false,
   stateVersion = 1,
-): FacetDefinition {
+): OrbDefinition {
   return {
     name,
     apiVersion: 1,
@@ -27,7 +27,7 @@ function provider(
           item: {
             create(self) {
               events.push(`factory:${name}`);
-              const parent = (self.facet as { connection?: Resource<string> }).connection;
+              const parent = (self.orb as { connection?: Resource<string> }).connection;
               return {
                 state: self.state(0, {
                   version: stateVersion,
@@ -62,7 +62,7 @@ function provider(
 
 for (const abort of [false, true]) {
   for (const linked of [false, true]) {
-    test(`service move ${abort ? "abort" : "commit"} preserves state with ${linked ? "facet-dependent" : "reused"} resources`, async () => {
+    test(`service move ${abort ? "abort" : "commit"} preserves state with ${linked ? "orb-dependent" : "reused"} resources`, async () => {
       const host = createHost();
       const events: string[] = [];
       let unrelatedFactories = 0;
@@ -117,12 +117,12 @@ for (const abort of [false, true]) {
 }
 
 for (const introduce of [false, true]) {
-  test(`candidate requirements resolve a ${introduce ? "new" : "previously empty"} destination facet`, async () => {
+  test(`candidate requirements resolve a ${introduce ? "new" : "previously empty"} destination orb`, async () => {
     const host = createHost();
-    const consumer = (facet: string): FacetDefinition => ({
+    const consumer = (orb: string): OrbDefinition => ({
       name: "consumer",
       apiVersion: 1,
-      requires: { source: { facet, apiVersion: 1, methods: ["read"] } },
+      requires: { source: { orb, apiVersion: 1, methods: ["read"] } },
       services: {
         client: {
           create: (self) => ({ source: self.get("source", "main") }),
@@ -150,7 +150,7 @@ for (const introduce of [false, true]) {
   });
 }
 
-test("an unchanged requirement pinned to the old facet refuses the move before adoption", async () => {
+test("an unchanged requirement pinned to the old orb refuses the move before adoption", async () => {
   const host = createHost();
   await host.install([
     provider("a", true),
@@ -158,7 +158,7 @@ test("an unchanged requirement pinned to the old facet refuses the move before a
     {
       name: "consumer",
       apiVersion: 1,
-      requires: { source: { facet: "a", apiVersion: 1, services: { item: ["read"] } } },
+      requires: { source: { orb: "a", apiVersion: 1, services: { item: ["read"] } } },
     },
   ]);
   const reference = await host.get("item", "main");
@@ -192,7 +192,7 @@ test("a moved service keeps an in-flight root on its previous implementation", a
   const host = createHost();
   const entered = deferred<void>();
   const finish = deferred<void>();
-  const definition = (name: string, serves: boolean): FacetDefinition => ({
+  const definition = (name: string, serves: boolean): OrbDefinition => ({
     name,
     apiVersion: 1,
     services: serves
@@ -251,7 +251,7 @@ for (const fail of [false, true]) {
     const host = createHost();
     let active = 0;
     let maximum = 0;
-    const definition = (name: string, serves: boolean, version: number): FacetDefinition => ({
+    const definition = (name: string, serves: boolean, version: number): OrbDefinition => ({
       name,
       apiVersion: 1,
       services: serves

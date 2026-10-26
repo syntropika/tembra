@@ -1452,7 +1452,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tembra"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "futures",
  "serde",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-bridge"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "serde_json",
  "tembra-core",
@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-browser-wasm"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "tembra-bridge",
  "wasm-bindgen",
@@ -1478,11 +1478,11 @@ dependencies = [
 
 [[package]]
 name = "tembra-core"
-version = "0.2.0"
+version = "0.1.0"
 
 [[package]]
 name = "tembra-executor-js"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "deno_core",
  "deno_error",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "tembra-node-binding"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "napi",
  "napi-build",

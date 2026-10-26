@@ -53,7 +53,7 @@ impl Code {
     }
 }
 
-/// Built-in failure reasons. Facets may still supply their own reason strings at an adapter seam.
+/// Built-in failure reasons. Orbs may still supply their own reason strings at an adapter seam.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Reason {
     ActivationBusy,
@@ -81,10 +81,10 @@ pub enum Reason {
     EffectsRunning,
     ExclusiveDependent,
     Executor,
-    Facet,
-    FacetInstalled,
+    Orb,
+    OrbInstalled,
     GateBusy,
-    GateFacet,
+    GateOrb,
     GateObject,
     Hook,
     HookDependency,
@@ -144,7 +144,7 @@ pub enum Reason {
     RustType,
     Scope,
     ScopeClosed,
-    ScopeFacet,
+    ScopeOrb,
     ScopeOwner,
     ScopeResource,
     Serialization,
@@ -195,10 +195,10 @@ impl Reason {
             Self::EffectsRunning => "effects_running",
             Self::ExclusiveDependent => "exclusive_dependent",
             Self::Executor => "executor",
-            Self::Facet => "facet",
-            Self::FacetInstalled => "facet_installed",
+            Self::Orb => "orb",
+            Self::OrbInstalled => "orb_installed",
             Self::GateBusy => "gate_busy",
-            Self::GateFacet => "gate_facet",
+            Self::GateOrb => "gate_orb",
             Self::GateObject => "gate_object",
             Self::Hook => "hook",
             Self::HookDependency => "hook_dependency",
@@ -258,7 +258,7 @@ impl Reason {
             Self::RustType => "rust_type",
             Self::Scope => "scope",
             Self::ScopeClosed => "scope_closed",
-            Self::ScopeFacet => "scope_facet",
+            Self::ScopeOrb => "scope_orb",
             Self::ScopeOwner => "scope_owner",
             Self::ScopeResource => "scope_resource",
             Self::Serialization => "serialization",

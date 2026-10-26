@@ -18,7 +18,7 @@ for (const failure of ["decode", "drop", "unprintable"] as const)
       const callbackError =
         failure === "unprintable" ? Object.create(null) : new Error("Native drop failed");
       const methodError = new TembraError(Errors.Forbidden.Method, "Native method rejected");
-      let facetId = 0;
+      let orbId = 0;
       let failingValue = 0;
       let reported = 0;
       const host = createHost({
@@ -27,7 +27,7 @@ for (const failure of ["decode", "drop", "unprintable"] as const)
           throw new Error("Error observer failed");
         },
         native: {
-          hasFacet: (id) => id === facetId,
+          hasOrb: (id) => id === orbId,
           activate: async (object) => {
             const value = host.session.kernel.command<number>(KernelOp.Allocate);
             values.set(value, { count: 0 });
@@ -61,11 +61,11 @@ for (const failure of ["decode", "drop", "unprintable"] as const)
         },
       });
       const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
-        facets: [
+        orbs: [
           { name: "native", apiVersion: 1, services: [{ name: "native", methods: ["update"] }] },
         ],
       });
-      facetId = prepared.facets[0]!.id;
+      orbId = prepared.orbs[0]!.id;
       host.session.kernel.command(KernelOp.Commit, { ticket: prepared.id });
       const reference = await host.get("native", "main");
       const object = host.session.handles.reference(reference).object;

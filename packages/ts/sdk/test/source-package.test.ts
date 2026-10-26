@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-test("a source-only SDK runs a native host and builds facets from an external project", async () => {
+test("a source-only SDK runs a native host and builds orbs from an external project", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "tembra-source-package-"));
   try {
     const sdk = fileURLToPath(new URL("../", import.meta.url));
@@ -15,16 +15,16 @@ test("a source-only SDK runs a native host and builds facets from an external pr
     await symlink(path.join(sdk, "node_modules"), path.join(installed, "node_modules"), "dir");
     await writeFile(path.join(root, "package.json"), '{"type":"module"}');
     await writeFile(
-      path.join(root, "facet.ts"),
-      `import { facet } from "@tembra/sdk";
-       export default facet({ name: "source", apiVersion: 1,
+      path.join(root, "orb.ts"),
+      `import { orb } from "@tembra/sdk";
+       export default orb({ name: "source", apiVersion: 1,
          services: { counter: { methods: { read() { return 42; } } } } });`,
     );
     await writeFile(
       path.join(root, "consumer.ts"),
       `import { createHost } from "@tembra/sdk/node";
        import { build, Platform } from "@tembra/sdk/tooling";
-       import declaration from "./facet.ts";
+       import declaration from "./orb.ts";
        const host = createHost();
        try {
          await host.install(declaration);
@@ -32,10 +32,10 @@ test("a source-only SDK runs a native host and builds facets from an external pr
          if (await reference.read() !== 42) throw new Error("Native source import failed");
          reference.release();
          const artifacts = await build({ builds: {
-           web: { entry: "facet.ts", platform: Platform.Browser, typecheck: false },
-           embedded: { entry: "facet.ts", platform: Platform.Embedded, typecheck: false }
+           web: { entry: "orb.ts", platform: Platform.Browser, typecheck: false },
+           embedded: { entry: "orb.ts", platform: Platform.Embedded, typecheck: false }
          } });
-         if (artifacts.length !== 2) throw new Error("Source facet build failed");
+         if (artifacts.length !== 2) throw new Error("Source orb build failed");
        } finally { await host.close(); }
        console.log("SOURCE_PACKAGE_PASS");`,
     );

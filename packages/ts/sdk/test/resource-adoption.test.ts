@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { createHost } from "../src/node.ts";
 import { deferred } from "../src/runtime/records.ts";
 import type { Declaration } from "../src/runtime/declaration.ts";
-import type { FacetDefinition } from "../src/types.ts";
+import type { OrbDefinition } from "../src/types.ts";
 
-for (const facetOwned of [false, true]) {
+for (const orbOwned of [false, true]) {
   for (const abort of [false, true]) {
-    test(`reused ${facetOwned ? "facet" : "object"} resource callbacks ${abort ? "remain unchanged on abort" : "adopt live dependencies on commit"}`, async () => {
+    test(`reused ${orbOwned ? "orb" : "object"} resource callbacks ${abort ? "remain unchanged on abort" : "adopt live dependencies on commit"}`, async () => {
       const host = createHost();
       const events: string[] = [];
       const connection = (self: Declaration, generation: number) => {
@@ -22,17 +22,17 @@ for (const facetOwned of [false, true]) {
           },
         });
       };
-      const definition = (generation: number): FacetDefinition => ({
+      const definition = (generation: number): OrbDefinition => ({
         name: "consumer",
         apiVersion: 1,
-        requires: { store: { facet: "storage", apiVersion: 1, methods: ["read"] } },
+        requires: { store: { orb: "storage", apiVersion: 1, methods: ["read"] } },
         create(self) {
-          return facetOwned ? { resource: connection(self, generation) } : {};
+          return orbOwned ? { resource: connection(self, generation) } : {};
         },
         services: {
           item: {
             create(self) {
-              return facetOwned ? self.facet : { resource: connection(self, generation) };
+              return orbOwned ? self.orb : { resource: connection(self, generation) };
             },
             methods: { read: ({ resource }) => resource.value },
           },
@@ -63,7 +63,7 @@ for (const facetOwned of [false, true]) {
 test("failed exclusive replacement restores the last committed resource callbacks", async () => {
   const host = createHost();
   const events: string[] = [];
-  const definition = (generation: number, version = 1, fail = false): FacetDefinition => ({
+  const definition = (generation: number, version = 1, fail = false): OrbDefinition => ({
     name: "exclusive",
     apiVersion: 1,
     services: {
@@ -108,10 +108,10 @@ test("compatible resource adoption preserves the dependencies of an in-flight ol
   const entered = deferred<void>();
   const finish = deferred<void>();
   const closed: number[] = [];
-  const definition = (generation: number): FacetDefinition => ({
+  const definition = (generation: number): OrbDefinition => ({
     name: "consumer",
     apiVersion: 1,
-    requires: { store: { facet: "storage", apiVersion: 1, methods: ["read"] } },
+    requires: { store: { orb: "storage", apiVersion: 1, methods: ["read"] } },
     services: {
       item: {
         create(self) {

@@ -1,18 +1,18 @@
 import { Declaration } from "../authoring/declaration.ts";
-import { facet } from "../authoring/facet.ts";
-import type { ContributionHandler, FacetDefinition, Participant } from "../authoring/types.ts";
+import { orb } from "../authoring/orb.ts";
+import type { ContributionHandler, OrbDefinition, Participant } from "../authoring/types.ts";
 import { Lifetime } from "../bridge/identifiers.ts";
-import type { KernelFacet, Reload } from "../bridge/kernel.ts";
+import type { KernelOrb, Reload } from "../bridge/kernel.ts";
 import { EnvironmentPhase, KernelOp, OwnerKind } from "../bridge/protocol.ts";
 import { refuse, TembraError } from "../error.ts";
 import { Errors } from "../errors.ts";
 import { Context, context as checkedContext } from "./context.ts";
-import type { Environment, FacetRecord } from "./records.ts";
+import type { Environment, OrbRecord } from "./records.ts";
 import type { Session } from "./session.ts";
 
-export class Facets {
-  readonly records = new Map<number, FacetRecord>();
-  readonly operations = new Map<number, { facet: FacetRecord; handler: ContributionHandler }>();
+export class Orbs {
+  readonly records = new Map<number, OrbRecord>();
+  readonly operations = new Map<number, { orb: OrbRecord; handler: ContributionHandler }>();
   #ready = new Map<number, Promise<void>>();
   #ordinals = new Map<string, number>();
   #nextOrdinal = 0;
@@ -21,12 +21,12 @@ export class Facets {
   constructor(readonly session: Session) {}
 
   /** Capture definitions and encode their kernel-owned contracts. */
-  declarations(definitions: readonly FacetDefinition[]): {
-    definitions: FacetDefinition[];
+  declarations(definitions: readonly OrbDefinition[]): {
+    definitions: OrbDefinition[];
     metadata: unknown[];
   } {
-    const captured = definitions.map((definition) => facet(definition));
-    const current = this.session.kernel.command<KernelFacet[]>(KernelOp.Facets);
+    const captured = definitions.map((definition) => orb(definition));
+    const current = this.session.kernel.command<KernelOrb[]>(KernelOp.Orbs);
     const lookup = (name: string) => captured.find((f) => f.name === name);
     const metadata = captured.map((definition) => {
       if (
@@ -35,7 +35,7 @@ export class Facets {
       )
         throw new TembraError(Errors.Unsupported.Views);
       const requires = Object.entries(definition.requires ?? {}).map(([alias, requirement]) => {
-        const name = requirement.facet ?? alias;
+        const name = requirement.orb ?? alias;
         const provider = lookup(name);
         const info = current.find((f) => f.name === name);
         const names = provider
@@ -45,7 +45,7 @@ export class Facets {
         if (requirement.methods && !service)
           refuse(Errors.Invalid.DependencyService, `Use explicit services for ${name}`);
         return {
-          facet: name,
+          orb: name,
           apiVersion: requirement.apiVersion,
           services:
             requirement.services ??
@@ -79,17 +79,17 @@ export class Facets {
     return { definitions: captured, metadata };
   }
 
-  /** Commit new facet metadata before opening its scopes. */
-  async install(definitions: readonly FacetDefinition[]): Promise<void> {
-    const current = this.session.kernel.command<KernelFacet[]>(KernelOp.Facets);
+  /** Commit new orb metadata before opening its scopes. */
+  async install(definitions: readonly OrbDefinition[]): Promise<void> {
+    const current = this.session.kernel.command<KernelOrb[]>(KernelOp.Orbs);
     if (definitions.some((f) => current.some((installed) => installed.name === f.name)))
-      refuse(Errors.Invalid.FacetInstalled, "Use reload to replace an installed facet");
+      refuse(Errors.Invalid.OrbInstalled, "Use reload to replace an installed orb");
     const prepared = this.declarations(definitions);
     const reload = this.session.kernel.command<Reload>(KernelOp.Prepare, {
-      facets: prepared.metadata,
+      orbs: prepared.metadata,
     });
     this.session.kernel.command(KernelOp.Commit, { ticket: reload.id });
-    const records = reload.facets.map((info) => ({
+    const records = reload.orbs.map((info) => ({
       info,
       definition: prepared.definitions.find((f) => f.name === info.name)!,
     }));
@@ -107,11 +107,11 @@ export class Facets {
     this.session.lifecycle.flush();
   }
 
-  /** Declare one shared scope for this facet version. */
-  scope(record: FacetRecord): Environment {
+  /** Declare one shared scope for this orb version. */
+  scope(record: OrbRecord): Environment {
     if (record.scope) return record.scope;
     const environment = this.session.scopes.environment(
-      { kind: OwnerKind.Facet, id: record.info.owner },
+      { kind: OwnerKind.Orb, id: record.info.owner },
       record,
     );
     record.scope = environment;
@@ -127,8 +127,8 @@ export class Facets {
     return environment;
   }
 
-  /** Share pending activation and clean up failed facet scopes. */
-  ready(record: FacetRecord): Promise<void> {
+  /** Share pending activation and clean up failed orb scopes. */
+  ready(record: OrbRecord): Promise<void> {
     if (record.scope?.phase === EnvironmentPhase.Live) return Promise.resolve();
     let ready = this.#ready.get(record.info.id);
     if (!ready) {
@@ -156,20 +156,20 @@ export class Facets {
   }
 
   /** Register callback identities with stable contribution order. */
-  registerContributions(record: FacetRecord): void {
+  registerContributions(record: OrbRecord): void {
     for (const [alias, hooks] of Object.entries(record.definition.contributes ?? {})) {
       const requirement = record.definition.requires![alias]!;
-      const target = requirement.facet ?? alias;
+      const target = requirement.orb ?? alias;
       for (const [hook, contribution] of Object.entries(hooks)) {
         const operation = this.session.kernel.command<number>(KernelOp.Allocate);
         const key = JSON.stringify([record.info.name, target, hook]);
         if (!this.#ordinals.has(key)) this.#ordinals.set(key, this.#nextOrdinal++);
         this.operations.set(operation, {
-          facet: record,
+          orb: record,
           handler: typeof contribution === "function" ? contribution : contribution.handle,
         });
         this.session.kernel.command(KernelOp.Contribute, {
-          facet: record.info.id,
+          orb: record.info.id,
           target,
           hook,
           operation,
@@ -188,18 +188,18 @@ export class Facets {
     input: unknown,
   ): Promise<unknown> {
     context = checkedContext(context, this.session);
-    const definition = environment.facet.definition.hooks?.[name];
+    const definition = environment.orb.definition.hooks?.[name];
     if (!definition) refuse(Errors.Invalid.Hook, name);
     const plan = this.session.kernel.command<number[]>(KernelOp.HookPlan, {
       root: context.root,
-      target: environment.facet.info.name,
+      target: environment.orb.info.name,
       hook: name,
     });
     const participants: Participant[] = plan.map((operation) => async (ctx, input, next) => {
       const contributor = this.operations.get(operation);
       if (!contributor) throw new TembraError(Errors.Gone.Contribution);
-      const scope = contributor.facet.scope;
-      if (!scope) throw new TembraError(Errors.Unavailable.FacetScope);
+      const scope = contributor.orb.scope;
+      if (!scope) throw new TembraError(Errors.Unavailable.OrbScope);
       return this.session.calls.owned(
         scope,
         operation,
@@ -212,12 +212,12 @@ export class Facets {
 
   /** Clean up a retired version before removing its callbacks. */
   retire(id: number): void {
-    const scopes = this.session.kernel.command<number[]>(KernelOp.ScopesForFacet, { facet: id });
+    const scopes = this.session.kernel.command<number[]>(KernelOp.ScopesForOrb, { orb: id });
     const cleanup = this.session.programs.cleanupScopes(scopes);
     this.session.track(
       cleanup.then(() => {
         for (const [operation, contribution] of this.operations)
-          if (contribution.facet.info.id === id) this.operations.delete(operation);
+          if (contribution.orb.info.id === id) this.operations.delete(operation);
         this.records.delete(id);
         this.#ready.delete(id);
       }),

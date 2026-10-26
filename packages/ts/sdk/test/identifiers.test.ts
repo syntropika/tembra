@@ -33,7 +33,7 @@ test("JavaScript and Rust use the same closed wire vocabulary", () => {
   expect(ReloadStatus.Prepared).toBe("prepared");
 });
 
-test("structured errors retain their fields, default message, cause and custom facet reasons", () => {
+test("structured errors retain their fields, default message, cause and custom orb reasons", () => {
   const descriptor = Errors.Invalid.StateValidation;
   const error = new TembraError(descriptor);
   expect(error).toBeInstanceOf(Error);
@@ -105,7 +105,7 @@ function rejectedNames(kernel: Kernel): void {
   kernel.command("scope-activte");
   // @ts-expect-error A lifetime is not an arbitrary string.
   const lifetime: Lifetime = "forever";
-  // @ts-expect-error Error categories are closed even when facet-defined reasons are extensible.
+  // @ts-expect-error Error categories are closed even when orb-defined reasons are extensible.
   const code: Code = "custom";
   // @ts-expect-error Effect names are closed.
   const effect: EffectType = "restart";

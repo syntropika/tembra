@@ -34,7 +34,7 @@ export class StateBinding<T = unknown> {
     return this.#value;
   }
 
-  /** Expose validated updates under the declaring facet's state contract. */
+  /** Expose validated updates under the declaring orb's state contract. */
   view(options: StateOptions<T>, check: () => void = () => this.check()): State<T> {
     const binding = this;
     return {
@@ -145,13 +145,13 @@ export class StateBinding<T = unknown> {
   }
 }
 
-/** Protect plain data and apply the facet's synchronous guard. */
+/** Protect plain data and apply the orb's synchronous guard. */
 export function validate<T>(candidate: T, options: StateOptions<T>): Readonly<T> {
   if (candidate && typeof (candidate as { then?: unknown }).then === "function")
     refuse(Errors.Invalid.AsyncState, "State updates and migrations must be synchronous");
   const protectedValue = protect(candidate);
   const result = options.validate?.(protectedValue);
   if (result !== undefined && result !== true)
-    refuse(Errors.Invalid.StateValidation, "Facet rejected the candidate state");
+    refuse(Errors.Invalid.StateValidation, "Orb rejected the candidate state");
   return protectedValue;
 }

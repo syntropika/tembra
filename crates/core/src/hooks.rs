@@ -5,10 +5,10 @@ use crate::{
 };
 use std::rc::Rc;
 
-/// An ordinary managed operation attached to a facet-owned extension point.
+/// An ordinary managed operation attached to an orb-owned extension point.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Contribution {
-    pub facet: Id,
+    pub orb: Id,
     pub target: String,
     pub hook: String,
     pub operation: Id,
@@ -17,7 +17,7 @@ pub struct Contribution {
 }
 
 impl Host {
-    /// Registers metadata once. Pipeline composition and all values belong to facet code.
+    /// Registers metadata once. Pipeline composition and all values belong to orb code.
     pub fn contribute(&self, contribution: Contribution) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         if contribution.operation == 0 {
@@ -26,17 +26,17 @@ impl Host {
                 "operation identity is required",
             ));
         }
-        let facet = inner
-            .facets
-            .get(&contribution.facet)
-            .ok_or_else(|| gone(Reason::Facet))?;
-        let own = facet.declaration.name == contribution.target;
+        let orb = inner
+            .orbs
+            .get(&contribution.orb)
+            .ok_or_else(|| gone(Reason::Orb))?;
+        let own = orb.declaration.name == contribution.target;
         if !own
-            && !facet
+            && !orb
                 .declaration
                 .requires
                 .iter()
-                .any(|r| r.facet == contribution.target && r.hooks.contains(&contribution.hook))
+                .any(|r| r.orb == contribution.target && r.hooks.contains(&contribution.hook))
         {
             return Err(Error::new(
                 Code::Forbidden,
@@ -47,15 +47,15 @@ impl Host {
         let target = inner
             .current()
             .get(&contribution.target)
-            .and_then(|id| inner.facets.get(id))
-            .ok_or_else(|| gone(Reason::Facet))?;
+            .and_then(|id| inner.orbs.get(id))
+            .ok_or_else(|| gone(Reason::Orb))?;
         if !target.declaration.hooks.contains(&contribution.hook) {
             return Err(gone(Reason::Hook));
         }
         if inner
             .contributions
             .iter()
-            .any(|c| c.facet == contribution.facet && c.operation == contribution.operation)
+            .any(|c| c.orb == contribution.orb && c.operation == contribution.operation)
         {
             return Err(conflict(Reason::DuplicateContribution));
         }
@@ -77,15 +77,15 @@ impl Host {
             .versions
             .get(&version)
             .ok_or_else(|| conflict(Reason::Superseded))?;
-        let target_id = snapshot.get(target).ok_or_else(|| gone(Reason::Facet))?;
-        if !inner.facets[target_id].declaration.hooks.contains(hook) {
+        let target_id = snapshot.get(target).ok_or_else(|| gone(Reason::Orb))?;
+        if !inner.orbs[target_id].declaration.hooks.contains(hook) {
             return Err(gone(Reason::Hook));
         }
         let plan: Rc<[Id]> = inner
             .contributions
             .iter()
             .filter(|c| {
-                c.target == target && c.hook == hook && snapshot.values().any(|id| *id == c.facet)
+                c.target == target && c.hook == hook && snapshot.values().any(|id| *id == c.orb)
             })
             .map(|c| c.operation)
             .collect::<Vec<_>>()

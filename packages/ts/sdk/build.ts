@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -16,6 +16,7 @@ const entrypoints = [
   "rpc",
   "telemetry",
 ];
+await rm(path.join(root, "dist"), { recursive: true, force: true });
 await mkdir(path.join(root, "dist"), { recursive: true });
 for (const entry of entrypoints) {
   const result = await Bun.build({

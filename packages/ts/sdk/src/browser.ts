@@ -1,4 +1,4 @@
-import { facet } from "./authoring/facet.ts";
+import { orb } from "./authoring/orb.ts";
 import type { HostOptions } from "./authoring/types.ts";
 import type { KernelPort } from "./bridge/kernel.ts";
 import { Host } from "./host.ts";
@@ -14,7 +14,7 @@ export type BrowserHostOptions = Omit<HostOptions, "kernel"> & {
   baseURL?: string | URL;
 };
 
-/** Runs facets in the browser or Worker's existing JS realm; WASM owns only kernel metadata. */
+/** Runs orbs in the browser or Worker's existing JS realm; WASM owns only kernel metadata. */
 export async function createHost(options: BrowserHostOptions = {}): Promise<Host> {
   let kernel = options.kernel;
   if (!kernel) {
@@ -35,14 +35,14 @@ export async function createHost(options: BrowserHostOptions = {}): Promise<Host
         const base = options.baseURL ?? globalThis.location?.href;
         const url =
           location instanceof URL ? location : base ? new URL(location, base) : new URL(location);
-        return facet(
-          (await import(url.href)).default as import("./authoring/types.ts").FacetDefinition,
+        return orb(
+          (await import(url.href)).default as import("./authoring/types.ts").OrbDefinition,
         );
       }),
   });
 }
 
-export { facet };
+export { orb };
 export type { Host };
 
 export {

@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createHost } from "../src/node.ts";
-import { facet } from "../src/facet.ts";
+import { orb } from "../src/orb.ts";
 import { waterfall } from "../src/hooks.ts";
 import { deferred } from "../src/runtime/records.ts";
 
 function counter(version = 1, release?: () => void) {
-  return facet({
+  return orb({
     name: "counter",
     apiVersion: 1,
     services: {
@@ -35,7 +35,7 @@ function counter(version = 1, release?: () => void) {
   });
 }
 
-describe("minimal facet runtime on the real Rust Node binding", () => {
+describe("minimal orb runtime on the real Rust Node binding", () => {
   test("state stays immutable and local reads retain identity", async () => {
     const host = createHost();
     await host.install(counter());
@@ -93,7 +93,7 @@ describe("minimal facet runtime on the real Rust Node binding", () => {
     let closed = false;
     const host = createHost();
     await host.install(
-      facet({
+      orb({
         name: "slow",
         apiVersion: 1,
         services: {
@@ -140,7 +140,7 @@ describe("minimal facet runtime on the real Rust Node binding", () => {
     const host = createHost();
     await host.install(counter(1, () => closed.push("counter")));
     await host.install(
-      facet({
+      orb({
         name: "client",
         apiVersion: 1,
         requires: { counter: { apiVersion: 1, methods: ["increment"] } },
@@ -172,10 +172,10 @@ describe("minimal facet runtime on the real Rust Node binding", () => {
     expect(closed).toEqual(["client", "counter"]);
   });
 
-  test("hook declarations belong to their facet version", async () => {
+  test("hook declarations belong to their orb version", async () => {
     const host = createHost();
     await host.install(
-      facet({
+      orb({
         name: "documents",
         apiVersion: 1,
         hooks: { beforeRename: waterfall() },
@@ -194,7 +194,7 @@ describe("minimal facet runtime on the real Rust Node binding", () => {
       }),
     );
     await host.install(
-      facet({
+      orb({
         name: "trim",
         apiVersion: 1,
         requires: { documents: { apiVersion: 1, hooks: ["beforeRename"] } },
@@ -222,7 +222,7 @@ test("engine delivers source events once and reuses unchanged source connections
   const seen: number[] = [];
   const delivered = deferred<void>();
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "events",
       apiVersion: 1,
       create(self) {
@@ -265,7 +265,7 @@ for (const commit of [false, true])
     const delivered = deferred<void>();
     const seen: number[] = [];
     const definition = (version: number) =>
-      facet({
+      orb({
         name: "source-replacement",
         apiVersion: 1,
         services: {

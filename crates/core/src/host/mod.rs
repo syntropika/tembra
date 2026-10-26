@@ -1,7 +1,7 @@
 use crate::Reason;
 mod contexts;
-mod facets;
 mod lifecycle;
+mod orbs;
 mod references;
 mod resources;
 mod tasks;
@@ -69,15 +69,15 @@ fn reserve(next: &mut Id) -> Result<Id> {
 }
 
 /// Reject invalid declarations before constructing a replacement graph.
-fn validate_facet(facet: &Facet) -> Result<()> {
-    if facet.name.is_empty() || facet.api_version == 0 {
+fn validate_orb(orb: &Orb) -> Result<()> {
+    if orb.name.is_empty() || orb.api_version == 0 {
         return Err(Error::invalid(
-            Reason::Facet,
-            "facet name and api version are required",
+            Reason::Orb,
+            "orb name and api version are required",
         ));
     }
     if !cfg!(feature = "hooks")
-        && (!facet.hooks.is_empty() || facet.requires.iter().any(|r| !r.hooks.is_empty()))
+        && (!orb.hooks.is_empty() || orb.requires.iter().any(|r| !r.hooks.is_empty()))
     {
         return Err(Error::new(
             Code::Unsupported,
@@ -86,7 +86,7 @@ fn validate_facet(facet: &Facet) -> Result<()> {
         ));
     }
     let mut services = BTreeSet::new();
-    for service in &facet.services {
+    for service in &orb.services {
         if service.name.is_empty()
             || !services.insert(&service.name)
             || service.methods.iter().any(|m| {

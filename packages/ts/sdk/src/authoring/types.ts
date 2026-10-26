@@ -1,5 +1,5 @@
 import { Lifetime, ReloadStatus, Status } from "../bridge/identifiers.ts";
-import type { Invocation, KernelFacet, KernelPort } from "../bridge/kernel.ts";
+import type { Invocation, KernelOrb, KernelPort } from "../bridge/kernel.ts";
 import type { Codec } from "../codecs/json.ts";
 import type { Context } from "../runtime/context.ts";
 import type { Readable } from "../state.ts";
@@ -21,7 +21,7 @@ export interface ServiceDefinition {
 }
 
 export interface Requirement {
-  facet?: string;
+  orb?: string;
   apiVersion: number;
   methods?: readonly string[];
   services?: Readonly<Record<string, readonly string[]>>;
@@ -46,7 +46,7 @@ export type ContributionHandler = (
 ) => unknown;
 export type Contribution = ContributionHandler | { handle: ContributionHandler; priority?: number };
 
-export interface FacetDefinition {
+export interface OrbDefinition {
   name: string;
   apiVersion: number;
   requires?: Readonly<Record<string, Requirement>>;
@@ -112,7 +112,7 @@ export interface ReloadOptions {
 }
 export interface ReloadReport {
   codeVersion: number;
-  facets: readonly string[];
+  orbs: readonly string[];
 }
 export interface PreparedReload {
   readonly report: ReloadReport;
@@ -126,13 +126,13 @@ export interface PreparedReload {
 }
 
 export interface NativeAdapter {
-  /** Check whether Rust owns this facet implementation. */
-  hasFacet(id: number): boolean;
+  /** Check whether Rust owns this orb implementation. */
+  hasOrb(id: number): boolean;
 
   /** Declare the native object's scopes before activation. */
   activate(
     object: number,
-    facet: number,
+    orb: number,
     service: string,
     key: readonly string[],
     principal: string,
@@ -166,7 +166,7 @@ export interface HostOptions {
   principal?: string;
   kernel: KernelPort;
   serialization?: Codec;
-  load?: (location: string | URL) => Promise<FacetDefinition>;
+  load?: (location: string | URL) => Promise<OrbDefinition>;
 
   /** Receives adapter and observer failures; throwing from this callback cannot interrupt dispatch. */
   onError?: (error: Error) => void;
@@ -178,7 +178,7 @@ export interface HostOptions {
   telemetry?: { capacity?: number; sampleEvery?: number };
 }
 
-export interface FacetDescription extends KernelFacet {
-  /** Read metadata without activating facet services. */
-  describe(): Readonly<KernelFacet>;
+export interface OrbDescription extends KernelOrb {
+  /** Read metadata without activating orb services. */
+  describe(): Readonly<KernelOrb>;
 }

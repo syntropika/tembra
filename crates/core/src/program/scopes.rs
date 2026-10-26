@@ -45,7 +45,7 @@ impl Host {
         for reference in &scope.dependencies {
             inner.reference_scopes.insert(*reference, scope.id);
         }
-        inner.facet_scopes.insert(scope.facet, scope.id);
+        inner.orb_scopes.insert(scope.orb, scope.id);
         for parent in &scope.parents {
             inner.scope_children.insert(*parent, scope.id);
         }
@@ -56,18 +56,15 @@ impl Host {
             }
         }
         if let Some(version) = inner
-            .facets
-            .get(&scope.facet)
+            .orbs
+            .get(&scope.orb)
             .or_else(|| {
-                inner.pending.as_ref().and_then(|pending| {
-                    pending
-                        .reload
-                        .facets
-                        .iter()
-                        .find(|facet| facet.id == scope.facet)
-                })
+                inner
+                    .pending
+                    .as_ref()
+                    .and_then(|pending| pending.reload.orbs.iter().find(|orb| orb.id == scope.orb))
             })
-            .map(|facet| facet.code_version)
+            .map(|orb| orb.code_version)
         {
             inner.scope_code_versions.insert(scope.id, version);
         }
@@ -106,9 +103,9 @@ impl Host {
         self.inner.borrow().owner_scopes.members(&owner).collect()
     }
 
-    /// Read only scopes indexed under this facet version.
-    pub fn scopes_for_facet(&self, facet: Id) -> Vec<Id> {
-        self.inner.borrow().facet_scopes.members(&facet).collect()
+    /// Read only scopes indexed under this orb version.
+    pub fn scopes_for_orb(&self, orb: Id) -> Vec<Id> {
+        self.inner.borrow().orb_scopes.members(&orb).collect()
     }
 
     /// Attach a same-owner resource and update version claims.

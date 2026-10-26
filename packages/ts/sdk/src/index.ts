@@ -1,5 +1,5 @@
 export type { Declaration } from "./authoring/declaration.ts";
-export { facet } from "./authoring/facet.ts";
+export { orb } from "./authoring/orb.ts";
 export { bail, middleware, parallel, series, waterfall } from "./authoring/hooks.ts";
 export type * from "./authoring/types.ts";
 export { jsonCodec } from "./codecs/json.ts";

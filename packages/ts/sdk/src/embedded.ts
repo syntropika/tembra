@@ -83,13 +83,11 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
       request: (metadata) => ops.op_tembra_kernel!(metadata),
     },
     native: {
-      /** Check whether this realm must delegate the facet to Rust. */
-      hasFacet: (id) => ops.op_tembra_has_facet!(id),
+      /** Check whether this realm must delegate the orb to Rust. */
+      hasOrb: (id) => ops.op_tembra_has_orb!(id),
       /** Declare native scopes before the shared kernel activates them. */
-      activate: async (object, facet, service) => {
-        answer(
-          await ops.op_tembra_native!("activate", codec.serialize({ object, facet, service })),
-        );
+      activate: async (object, orb, service) => {
+        answer(await ops.op_tembra_native!("activate", codec.serialize({ object, orb, service })));
       },
       /** Encode only the call arguments that cross into Rust. */
       invoke: async (invocation, arguments_) =>

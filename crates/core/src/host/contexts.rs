@@ -135,22 +135,22 @@ impl Host {
         {
             return Err(conflict(Reason::UpgradeConflict));
         }
-        let (facet, service) = inner.find_service(&record.address.service, version)?;
+        let (orb, service) = inner.find_service(&record.address.service, version)?;
         if !service.methods.contains(method) {
             return Err(Error::invalid(Reason::Method, "method is not declared"));
         }
-        let facet_owner = inner.check_facet(facet, root, version)?;
+        let orb_owner = inner.check_orb(orb, root, version)?;
         let id = inner.id()?;
         let call = Invocation {
             context: frame,
             id,
             root,
             object,
-            facet,
+            orb,
             code_version: version,
             method: method.into(),
         };
-        Ok(inner.retain_call(call, facet_owner))
+        Ok(inner.retain_call(call, orb_owner))
     }
 
     /// Marks actual callback settlement, independently from logical cancellation or caller release.
@@ -160,10 +160,10 @@ impl Host {
             .calls
             .remove(&call)
             .ok_or_else(|| gone(Reason::Call))?;
-        let facet_owner = inner.facets[&call.facet].owner;
+        let orb_owner = inner.orbs[&call.orb].owner;
         for owner in [
             Owner::Host,
-            Owner::Facet(facet_owner),
+            Owner::Orb(orb_owner),
             Owner::Object(call.object),
         ] {
             inner.owner_calls.remove(&owner, call.id);
@@ -199,21 +199,21 @@ impl Host {
             .ok_or_else(|| gone(Reason::Call))
     }
 
-    /// Enters a facet-owned operation such as a hook contribution without exposing a service.
+    /// Enters an orb-owned operation such as a hook contribution without exposing a service.
     pub fn begin_operation(
         &self,
-        facet: Id,
+        orb: Id,
         root: Id,
         operation: Id,
         object: Option<Id>,
     ) -> Result<Invocation> {
-        self.begin_operation_with_context(facet, root, operation, object, 0)
+        self.begin_operation_with_context(orb, root, operation, object, 0)
     }
 
-    /// Admit a facet operation with its caller's frame.
+    /// Admit an orb operation with its caller's frame.
     pub fn begin_operation_with_context(
         &self,
-        facet: Id,
+        orb: Id,
         root: Id,
         operation: Id,
         object: Option<Id>,
@@ -228,14 +228,14 @@ impl Host {
             .get(&version)
             .ok_or_else(|| conflict(Reason::Superseded))?;
         if inner
-            .facets
-            .get(&facet)
-            .is_none_or(|record| snapshot.get(&record.declaration.name) != Some(&facet))
+            .orbs
+            .get(&orb)
+            .is_none_or(|record| snapshot.get(&record.declaration.name) != Some(&orb))
             || operation == 0
         {
             return Err(gone(Reason::Operation));
         }
-        let facet_owner = inner.check_facet(facet, root, version)?;
+        let orb_owner = inner.check_orb(orb, root, version)?;
         if let Some(object) = object {
             let record = inner
                 .objects
@@ -253,7 +253,7 @@ impl Host {
                 return Err(conflict(Reason::UpgradeConflict));
             }
             let (expected, _) = inner.find_service(&record.address.service, version)?;
-            if expected != facet {
+            if expected != orb {
                 return Err(conflict(Reason::OperationOwner));
             }
         }
@@ -263,20 +263,20 @@ impl Host {
             id,
             root,
             object: object.unwrap_or(0),
-            facet,
+            orb,
             code_version: version,
             method: operation.to_string(),
         };
-        Ok(inner.retain_call(invocation, facet_owner))
+        Ok(inner.retain_call(invocation, orb_owner))
     }
 }
 
 impl Inner {
     /// Retain physical call ownership and its reverse indexes together.
-    fn retain_call(&mut self, call: Invocation, facet_owner: Id) -> Invocation {
-        self.facet_roots.insert(facet_owner, call.root);
+    fn retain_call(&mut self, call: Invocation, orb_owner: Id) -> Invocation {
+        self.orb_roots.insert(orb_owner, call.root);
         self.owner_calls.insert(Owner::Host, call.id);
-        self.owner_calls.insert(Owner::Facet(facet_owner), call.id);
+        self.owner_calls.insert(Owner::Orb(orb_owner), call.id);
         if call.object != 0 {
             self.owner_calls.insert(Owner::Object(call.object), call.id);
             self.object_roots.insert(call.object, call.root);
@@ -287,7 +287,7 @@ impl Inner {
         }
         let root = self.roots.get_mut(&call.root).expect("checked root");
         root.calls += 1;
-        root.facets.insert(facet_owner);
+        root.orbs.insert(orb_owner);
         if call.object != 0 {
             root.touched.insert(call.object);
         }

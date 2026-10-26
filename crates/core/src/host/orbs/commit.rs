@@ -7,7 +7,7 @@ impl Host {
     ///
     /// # Guarantees
     /// All refusal checks precede adoption. Failure preserves installed declarations and state.
-    /// Compatible services keep their object identities and state when their provider facet changes.
+    /// Compatible services keep their object identities and state when their provider orb changes.
     /// Adapter I/O, resource handoffs and other external effects are outside this guarantee.
     ///
     /// # Errors
@@ -21,9 +21,9 @@ impl Host {
             .filter(|p| p.reload.id == ticket)
             .ok_or_else(|| conflict(Reason::ReloadTicket))?;
         if pending
-            .gated_facets
+            .gated_orbs
             .keys()
-            .any(|owner| inner.facet_busy(*owner))
+            .any(|owner| inner.orb_busy(*owner))
         {
             return Err(conflict(Reason::GateBusy));
         }
@@ -62,14 +62,14 @@ impl Host {
             }
         }
         let pending = inner.pending.take().expect("pending exists");
-        for facet in &pending.reload.facets {
-            inner.facets.insert(facet.id, facet.clone());
+        for orb in &pending.reload.orbs {
+            inner.orbs.insert(orb.id, orb.clone());
         }
         let previous_version = inner.version;
         inner.version = pending.reload.code_version;
         let version = inner.version;
-        for owner in pending.gated_facets.keys() {
-            inner.facet_min.insert(*owner, version);
+        for owner in pending.gated_orbs.keys() {
+            inner.orb_min.insert(*owner, version);
         }
         for id in &pending.gated {
             inner.objects.get_mut(id).expect("gated object").min_version = version;
@@ -77,32 +77,32 @@ impl Host {
         let services = pending
             .services
             .into_iter()
-            .map(|(name, (facet, service, _))| (name, (facet, service)))
+            .map(|(name, (orb, service, _))| (name, (orb, service)))
             .collect();
         for id in pending.current.values() {
-            inner.facet_versions.insert(*id, version.into());
+            inner.orb_versions.insert(*id, version.into());
         }
         inner.services.insert(version, services);
         inner.current_owners = pending
             .current
             .values()
-            .map(|id| inner.facets[id].owner)
+            .map(|id| inner.orbs[id].owner)
             .collect();
         inner.versions.insert(version, pending.current);
         for id in &pending.reload.objects {
-            let old = inner.objects[id].facet;
+            let old = inner.objects[id].orb;
             let replacement = inner.services[&version]
                 .get(&inner.objects[id].address.service)
-                .map(|(facet, service)| (*facet, service.lifetime, service.linger_ms));
-            if let Some((facet, _, _)) = replacement {
-                inner.facet_objects.remove(&old, *id);
-                inner.facet_objects.insert(facet, *id);
+                .map(|(orb, service)| (*orb, service.lifetime, service.linger_ms));
+            if let Some((orb, _, _)) = replacement {
+                inner.orb_objects.remove(&old, *id);
+                inner.orb_objects.insert(orb, *id);
             }
             let object = inner.objects.get_mut(id).expect("object exists");
             object.gate = None;
             object.preparing = false;
-            if let Some((facet, lifetime, linger_ms)) = replacement {
-                object.facet = facet;
+            if let Some((orb, lifetime, linger_ms)) = replacement {
+                object.orb = orb;
                 object.pinned = lifetime == Lifetime::Host;
                 object.linger_ms = linger_ms;
             } else {

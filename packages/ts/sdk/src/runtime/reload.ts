@@ -1,5 +1,5 @@
 import type {
-  FacetDefinition,
+  OrbDefinition,
   PreparedReload,
   ReloadOptions,
   ReloadReport,
@@ -9,7 +9,7 @@ import type { Reload } from "../bridge/kernel.ts";
 import { KernelOp } from "../bridge/protocol.ts";
 import { TembraError } from "../error.ts";
 import { Errors } from "../errors.ts";
-import type { FacetRecord } from "./records.ts";
+import type { OrbRecord } from "./records.ts";
 import type { Session } from "./session.ts";
 
 /** Captures JS factories and exposes the engine's transaction handle. No reload policy lives here. */
@@ -23,7 +23,7 @@ export class Replacements {
 
   /** Prepare and commit a replacement in one operation. */
   async replace(
-    definitions: readonly FacetDefinition[],
+    definitions: readonly OrbDefinition[],
     options: ReloadOptions = {},
     remove: readonly string[] = [],
   ): Promise<ReloadReport> {
@@ -32,7 +32,7 @@ export class Replacements {
 
   /** Reject overlapping replacement attempts before capturing callbacks. */
   prepare(
-    definitions: readonly FacetDefinition[],
+    definitions: readonly OrbDefinition[],
     options: ReloadOptions = {},
     remove: readonly string[] = [],
   ): Promise<PreparedReload> {
@@ -60,20 +60,20 @@ export class Replacements {
 
   /** Bind candidate callbacks to the kernel's prepared replacement. */
   private async capture(
-    definitions: readonly FacetDefinition[],
+    definitions: readonly OrbDefinition[],
     options: ReloadOptions,
     remove: readonly string[],
   ): Promise<PreparedReload> {
     const session = this.session;
-    const declarations = session.facets.declarations(definitions);
+    const declarations = session.orbs.declarations(definitions);
     const reload = session.kernel.command<Reload>(KernelOp.Prepare, {
-      facets: declarations.metadata,
+      orbs: declarations.metadata,
       remove,
     });
     const definitionsByName = new Map(
       declarations.definitions.map((definition) => [definition.name, definition]),
     );
-    const records: FacetRecord[] = reload.facets.map((info) => ({
+    const records: OrbRecord[] = reload.orbs.map((info) => ({
       info,
       definition: definitionsByName.get(info.name)!,
       ticket: reload.id,
@@ -81,12 +81,12 @@ export class Replacements {
     const recordsById = new Map(records.map((record) => [record.info.id, record]));
     let program: number | undefined;
     try {
-      for (const record of records) session.facets.scope(record);
+      for (const record of records) session.orbs.scope(record);
       for (const id of reload.objects) {
         const object = session.objects.get(id);
         if (!object) continue;
-        const facet = reload.providers[object.address.service];
-        const record = facet === undefined ? undefined : recordsById.get(facet);
+        const orb = reload.providers[object.address.service];
+        const record = orb === undefined ? undefined : recordsById.get(orb);
         if (record) session.scopes.createEnvironment(object, record);
       }
       for (const record of records) record.ticket = undefined;
@@ -103,8 +103,8 @@ export class Replacements {
       this.#program = undefined;
       if (program === undefined) {
         session.kernel.command(KernelOp.Abort, { ticket: reload.id });
-        const scopes = reload.facets.flatMap((facet) =>
-          session.kernel.command<number[]>(KernelOp.ScopesForFacet, { facet: facet.id }),
+        const scopes = reload.orbs.flatMap((orb) =>
+          session.kernel.command<number[]>(KernelOp.ScopesForOrb, { orb: orb.id }),
         );
         await session.programs.cleanupScopes(scopes);
       }
@@ -114,7 +114,7 @@ export class Replacements {
     const id = program;
     const report = {
       codeVersion: reload.codeVersion,
-      facets: records.map((record) => record.info.name),
+      orbs: records.map((record) => record.info.name),
     };
     let status: PreparedReload["status"] = ReloadStatus.Prepared;
     return (this.#prepared = {

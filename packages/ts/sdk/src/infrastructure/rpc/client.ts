@@ -75,8 +75,8 @@ export class RemoteHost {
     }
   }
 
-  /** Request remote facet metadata without service activation. */
-  installedFacets(): Promise<unknown> {
+  /** Request remote orb metadata without service activation. */
+  installedOrbs(): Promise<unknown> {
     return this.request(RpcOp.Describe, null);
   }
 

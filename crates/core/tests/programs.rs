@@ -1,11 +1,11 @@
 use tembra_core::*;
 
-fn scope(host: &Host, owner: Owner, facet: Id, resources: Vec<Id>) -> Id {
+fn scope(host: &Host, owner: Owner, orb: Id, resources: Vec<Id>) -> Id {
     let id = host.allocate_handle().unwrap();
     host.register_scope(Scope {
         id,
         owner,
-        facet,
+        orb,
         resources,
         parents: vec![],
         dependencies: vec![],
@@ -116,22 +116,18 @@ fn kernel_orders_resource_opening_and_closing_without_an_adapter_planner() {
 #[test]
 fn a_reload_deadline_requests_cancellation_but_waits_for_physical_settlement() {
     let host = Host::new();
-    let installed = host
-        .prepare(vec![Facet::new("example", 1)], vec![])
-        .unwrap();
+    let installed = host.prepare(vec![Orb::new("example", 1)], vec![]).unwrap();
     host.commit(installed.id, vec![]).unwrap();
     let old = scope(
         &host,
-        Owner::Facet(installed.facets[0].owner),
-        installed.facets[0].id,
+        Owner::Orb(installed.orbs[0].owner),
+        installed.orbs[0].id,
         vec![],
     );
-    let reload = host
-        .prepare(vec![Facet::new("example", 1)], vec![])
-        .unwrap();
+    let reload = host.prepare(vec![Orb::new("example", 1)], vec![]).unwrap();
     let resource = host
         .resource(
-            Owner::Facet(reload.facets[0].owner),
+            Owner::Orb(reload.orbs[0].owner),
             "connection".into(),
             1,
             false,
@@ -140,8 +136,8 @@ fn a_reload_deadline_requests_cancellation_but_waits_for_physical_settlement() {
         .unwrap();
     let next = scope(
         &host,
-        Owner::Facet(reload.facets[0].owner),
-        reload.facets[0].id,
+        Owner::Orb(reload.orbs[0].owner),
+        reload.orbs[0].id,
         vec![resource.id],
     );
     let program = host
@@ -220,22 +216,18 @@ fn a_reload_deadline_requests_cancellation_but_waits_for_physical_settlement() {
 #[test]
 fn close_cancels_reload_before_cleaning_its_scopes() {
     let host = Host::new();
-    let installed = host
-        .prepare(vec![Facet::new("example", 1)], vec![])
-        .unwrap();
+    let installed = host.prepare(vec![Orb::new("example", 1)], vec![]).unwrap();
     host.commit(installed.id, vec![]).unwrap();
     let previous = scope(
         &host,
-        Owner::Facet(installed.facets[0].owner),
-        installed.facets[0].id,
+        Owner::Orb(installed.orbs[0].owner),
+        installed.orbs[0].id,
         vec![],
     );
-    let reload = host
-        .prepare(vec![Facet::new("example", 1)], vec![])
-        .unwrap();
+    let reload = host.prepare(vec![Orb::new("example", 1)], vec![]).unwrap();
     let resource = host
         .resource(
-            Owner::Facet(reload.facets[0].owner),
+            Owner::Orb(reload.orbs[0].owner),
             "connection".into(),
             1,
             false,
@@ -244,8 +236,8 @@ fn close_cancels_reload_before_cleaning_its_scopes() {
         .unwrap();
     let next = scope(
         &host,
-        Owner::Facet(reload.facets[0].owner),
-        reload.facets[0].id,
+        Owner::Orb(reload.orbs[0].owner),
+        reload.orbs[0].id,
         vec![resource.id],
     );
     let program = host
@@ -331,13 +323,11 @@ fn close_cancels_reload_before_cleaning_its_scopes() {
 #[test]
 fn close_finishes_committed_adoption_before_cleanup_without_starting_activities() {
     let host = Host::new();
-    let reload = host
-        .prepare(vec![Facet::new("example", 1)], vec![])
-        .unwrap();
+    let reload = host.prepare(vec![Orb::new("example", 1)], vec![]).unwrap();
     let next = scope(
         &host,
-        Owner::Facet(reload.facets[0].owner),
-        reload.facets[0].id,
+        Owner::Orb(reload.orbs[0].owner),
+        reload.orbs[0].id,
         vec![],
     );
     let program = host

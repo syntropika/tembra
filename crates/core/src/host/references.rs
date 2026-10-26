@@ -49,8 +49,8 @@ impl Host {
                 "service and key must be nonempty",
             ));
         }
-        let (facet, service) = inner.find_service(&address.service, inner.version)?;
-        let declaration = &inner.facets[&facet];
+        let (orb, service) = inner.find_service(&address.service, inner.version)?;
+        let declaration = &inner.orbs[&orb];
         if api_version != 0 && api_version != declaration.declaration.api_version {
             return Err(conflict(Reason::ApiVersion));
         }
@@ -71,7 +71,7 @@ impl Host {
         let existing = inner.addresses.get(&address).copied();
         if existing.is_none()
             && inner.pending.as_ref().is_some_and(|pending| {
-                pending.current.get(&inner.facets[&facet].declaration.name) != Some(&facet)
+                pending.current.get(&inner.orbs[&orb].declaration.name) != Some(&orb)
             })
         {
             return Err(conflict(Reason::ReloadPreparing));
@@ -92,13 +92,13 @@ impl Host {
             None => inner.id()?,
         };
         if existing.is_none() {
-            inner.facet_objects.insert(facet, object);
+            inner.orb_objects.insert(orb, object);
             inner.addresses.insert(address.clone(), object);
             inner.objects.insert(
                 object,
                 Object {
                     address,
-                    facet,
+                    orb,
                     phase: Status::Loading,
                     references: 0,
                     calls: 0,
@@ -142,7 +142,7 @@ impl Host {
         Ok(Acquisition {
             reference,
             object,
-            facet,
+            orb,
             code_version,
             activate: existing.is_none(),
         })

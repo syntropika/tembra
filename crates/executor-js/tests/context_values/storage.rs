@@ -5,7 +5,7 @@ use std::{
     rc::{Rc, Weak},
 };
 use tembra::{
-    Context, Error, Facet, Host, Service,
+    Context, Error, Host, Orb, Service,
     core::{ContextKey, OpaqueContextValue},
 };
 const SCOPE: ContextKey<OpaqueContextValue> = ContextKey::new("storage/pending", 1);
@@ -108,6 +108,6 @@ pub fn install(host: &Host) {
             let store = store.borrow();
             Ok(serde_json::json!({"rows":store.rows,"commits":store.commits,"backendTransactionsOpen":0,"delayed":store.delayed,"pendingScopes":store.scopes.len()}))
         });
-    host.install(vec![Facet::new("storage", 1).service(service)])
+    host.install(vec![Orb::new("storage", 1).service(service)])
         .unwrap();
 }

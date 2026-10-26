@@ -76,7 +76,7 @@ export function serve(
         const payload = message.payload;
         switch (message.op) {
           case RpcOp.Describe:
-            return host.installedFacets().map(({ describe, ...info }) => info);
+            return host.installedOrbs().map(({ describe, ...info }) => info);
           case RpcOp.Get: {
             if (
               typeof payload?.service !== "string" ||

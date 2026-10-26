@@ -1,6 +1,6 @@
 use futures::FutureExt;
 use serde_json::json;
-use tembra::{Facet, Host, Service};
+use tembra::{Host, Orb, Service};
 use tembra_executor_js::{Runtime, TokioExecutor};
 
 fn sdk_source() -> String {
@@ -31,8 +31,8 @@ fn javascript_provider_moves_preserve_state_and_candidate_dependencies() {
               increment: ({state}, ctx) => state.update(ctx, value => value + 1)
             }
           }} : {}});
-          const consumer = facet => ({name: 'consumer', apiVersion: 1,
-            requires: {source: {facet, apiVersion: 1, methods: ['read']}},
+          const consumer = orb => ({name: 'consumer', apiVersion: 1,
+            requires: {source: {orb, apiVersion: 1, methods: ['read']}},
             services: {client: {
               create(self) {
                 const source = self.get('source', 'main');
@@ -72,16 +72,16 @@ fn javascript_uses_native_provider_through_one_kernel() {
         .unwrap();
     tokio::task::LocalSet::new().block_on(&executor, async {
         let native = Host::new(TokioExecutor);
-        native.install(vec![Facet::new("storage", 1).service(Service::new("storage", |self_| self_.state(0_i32, 1, |_| Ok(()))).method("add", |state, context, (amount,): (i32,)| async move { Ok(*state.update(&context, |value| Ok(value + amount))?) }))]).unwrap();
+        native.install(vec![Orb::new("storage", 1).service(Service::new("storage", |self_| self_.state(0_i32, 1, |_| Ok(()))).method("add", |state, context, (amount,): (i32,)| async move { Ok(*state.update(&context, |value| Ok(value + amount))?) }))]).unwrap();
         let mut runtime = Runtime::new(native, source).unwrap();
-        let id = runtime.native().kernel().installed_facets()[0].id;
+        let id = runtime.native().kernel().installed_orbs()[0].id;
         let precision = runtime.evaluate(&format!(r#"(() => {{
-          const has = Deno.core.ops.op_tembra_has_facet;
+          const has = Deno.core.ops.op_tembra_has_orb;
           const invalid = [2 ** 53, -1, 1.5, NaN, Infinity].map(id => {{ try {{ has(id); return false; }} catch {{ return true; }} }});
           return [has({id}), has({wide}), has(Number.MAX_SAFE_INTEGER), ...invalid];
         }})()"#, wide = id + (1_u64 << 32))).await.unwrap();
         assert_eq!(precision, json!([true, false, false, true, true, true, true, true]));
-        runtime.install("client", r#"globalThis.__tembraFacet = { name: 'client', apiVersion: 1, requires: { storage: { apiVersion: 1, methods: ['add'] } }, services: { client: {
+        runtime.install("client", r#"globalThis.__tembraOrb = { name: 'client', apiVersion: 1, requires: { storage: { apiVersion: 1, methods: ['add'] } }, services: { client: {
           create(self) { return { storage: self.get('storage', 'main') }; },
           methods: { async run({storage}, ctx, value) { await new Promise(resolve => setTimeout(resolve, 1)); return storage.add(value, ctx); } }
         } } };"#.into()).await.unwrap();
@@ -105,7 +105,7 @@ fn native_state_decode_failure_does_not_replace_the_call_result_or_lose_disposal
         async {
             let native = Host::new(TokioExecutor);
             native
-                .install(vec![Facet::new("native", 1).service(
+                .install(vec![Orb::new("native", 1).service(
                     Service::new("native", |self_| self_.state(0_u64, 1, |_| Ok(()))).method(
                         "update",
                         |state, context, (power,): (u32,)| async move {
@@ -181,7 +181,7 @@ fn portable_results_copy_the_codec_view_without_iterating_bytes() {
         runtime
             .install(
                 "results",
-                r#"globalThis.__tembraFacet = {
+                r#"globalThis.__tembraOrb = {
           name: 'results', apiVersion: 1, services: { results: { methods: {
             numbers(_environment, _context, count) {
               return Array.from({ length: count }, (_, index) => index - 100);
@@ -245,7 +245,7 @@ fn codec_results_support_shared_views_and_refuse_detached_views() {
             runtime
                 .install(
                     "result",
-                    r#"globalThis.__tembraFacet = {
+                    r#"globalThis.__tembraOrb = {
               name: 'result', apiVersion: 1,
               services: { result: { methods: { read: () => 42 } } }
             };"#

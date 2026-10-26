@@ -6,16 +6,16 @@ use tembra_bridge::{Kernel, core::*};
 fn large_reload_uses_registered_scopes_instead_of_an_oversized_pair_request() {
     let kernel = Kernel::new();
     let host = &kernel.host;
-    let mut facet = Facet::new("large", 1);
-    facet.services.push(Service::new("large", ["read"]));
-    let initial = host.prepare(vec![facet.clone()], vec![]).unwrap();
+    let mut orb = Orb::new("large", 1);
+    orb.services.push(Service::new("large", ["read"]));
+    let initial = host.prepare(vec![orb.clone()], vec![]).unwrap();
     host.commit(initial.id, vec![]).unwrap();
-    let register = |object, facet| {
+    let register = |object, orb| {
         let id = host.allocate_handle().unwrap();
         host.register_scope(Scope {
             id,
             owner: Owner::Object(object),
-            facet,
+            orb,
             parents: vec![],
             dependencies: vec![],
             resources: vec![],
@@ -39,11 +39,11 @@ fn large_reload_uses_registered_scopes_instead_of_an_oversized_pair_request() {
             )
             .unwrap();
         host.ready(claim.object).unwrap();
-        register(claim.object, claim.facet);
+        register(claim.object, claim.orb);
     }
-    let reload = host.prepare(vec![facet], vec![]).unwrap();
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
     for object in &reload.objects {
-        register(*object, reload.facets[0].id);
+        register(*object, reload.orbs[0].id);
     }
     let request =
         json!({ "op": "scopes-reload-registered", "ticket": reload.id, "deadline": 1000 })

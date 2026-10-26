@@ -1,6 +1,6 @@
 use futures::FutureExt;
 use std::rc::Rc;
-use tembra::{Facet, Host, Service, core::ContextKey};
+use tembra::{Host, Orb, Service, core::ContextKey};
 use tembra_executor_js::{Runtime, TokioExecutor};
 
 #[path = "context_values/storage.rs"]
@@ -19,7 +19,7 @@ fn javascript_rust_contexts_preserve_branches_and_owner_revocation() {
         async {
             let native = Host::new(TokioExecutor);
             native
-                .install(vec![Facet::new("probe", 1).service(
+                .install(vec![Orb::new("probe", 1).service(
                     Service::new("probe", |_| Ok(())).method(
                         "trace",
                         |_, ctx, _: Vec<serde_json::Value>| async move {

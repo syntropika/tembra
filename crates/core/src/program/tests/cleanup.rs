@@ -65,22 +65,20 @@ fn overlapping_cleanup_has_one_physical_closer_and_waits_for_it() {
 #[test]
 fn successor_activity_does_not_block_old_resource_cleanup() {
     let host = Host::new();
-    let old = host
-        .prepare(vec![Facet::new("example", 1)], vec![])
-        .unwrap();
+    let old = host.prepare(vec![Orb::new("example", 1)], vec![]).unwrap();
     host.commit(old.id, vec![]).unwrap();
-    let owner = Owner::Facet(old.facets[0].owner);
+    let owner = Owner::Orb(old.orbs[0].owner);
     let resource = host
         .resource(owner, "connection".into(), 1, false, vec![])
         .unwrap();
     host.resource_opened(resource.id, host.allocate_handle().unwrap())
         .unwrap();
-    let register = |facet, resources| {
+    let register = |orb, resources| {
         let id = host.allocate_handle().unwrap();
         host.register_scope(Scope {
             id,
             owner,
-            facet,
+            orb,
             parents: vec![],
             dependencies: vec![],
             resources,
@@ -92,20 +90,13 @@ fn successor_activity_does_not_block_old_resource_cleanup() {
         .unwrap();
         id
     };
-    let previous = register(old.facets[0].id, vec![resource.id]);
-    let next = host
-        .prepare(vec![Facet::new("example", 1)], vec![])
-        .unwrap();
-    register(next.facets[0].id, vec![]);
+    let previous = register(old.orbs[0].id, vec![resource.id]);
+    let next = host.prepare(vec![Orb::new("example", 1)], vec![]).unwrap();
+    register(next.orbs[0].id, vec![]);
     host.commit(next.id, vec![]).unwrap();
     let root = host.begin_root("host").unwrap();
     let call = host
-        .begin_operation(
-            next.facets[0].id,
-            root,
-            host.allocate_handle().unwrap(),
-            None,
-        )
+        .begin_operation(next.orbs[0].id, root, host.allocate_handle().unwrap(), None)
         .unwrap();
     let cleanup = host.cleanup_scopes(vec![previous], None).unwrap();
     host.run_program(cleanup).unwrap();
@@ -126,9 +117,9 @@ fn successor_activity_does_not_block_old_resource_cleanup() {
 #[test]
 fn failed_activation_closes_its_resources_before_releasing_the_object() {
     let host = Host::new();
-    let mut facet = Facet::new("failed", 1);
-    facet.services.push(Service::new("failed", ["read"]));
-    let reload = host.prepare(vec![facet], vec![]).unwrap();
+    let mut orb = Orb::new("failed", 1);
+    orb.services.push(Service::new("failed", ["read"]));
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
     host.commit(reload.id, vec![]).unwrap();
     let address = Address {
         service: "failed".into(),
@@ -152,7 +143,7 @@ fn failed_activation_closes_its_resources_before_releasing_the_object() {
     host.register_scope(Scope {
         id: scope,
         owner: Owner::Object(claim.object),
-        facet: claim.facet,
+        orb: claim.orb,
         parents: vec![],
         dependencies: vec![],
         resources: vec![a.id, b.id],

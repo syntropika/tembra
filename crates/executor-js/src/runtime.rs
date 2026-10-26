@@ -59,7 +59,7 @@ impl Runtime {
     }
 
     /// Calls an installed JS or Rust service through the shared managed host. Conversion occurs
-    /// once at this language boundary; business logic and validation execute in the owning facet.
+    /// once at this language boundary; business logic and validation execute in the owning orb.
     pub async fn call(
         &mut self,
         service: &str,
@@ -156,26 +156,26 @@ impl Runtime {
             .map_err(js_error)
     }
 
-    /// Install an embedded facet bundle through the shared JS adapter.
+    /// Install an embedded orb bundle through the shared JS adapter.
     pub async fn install(&mut self, name: &str, bundle: String) -> Result<()> {
         self.bundle(name, bundle, false).await
     }
 
-    /// Replace facets through the shared adapter's lifecycle entrypoint.
+    /// Replace orbs through the shared adapter's lifecycle entrypoint.
     pub async fn reload(&mut self, name: &str, bundle: String) -> Result<()> {
         self.bundle(name, bundle, true).await
     }
 
     /// Load one prebuilt JS bundle without runtime package resolution.
     async fn bundle(&mut self, _name: &str, bundle: String, reload: bool) -> Result<()> {
-        // Executable bundles are scripts, so retired facets are not pinned in V8's ESM module map.
+        // Executable bundles are scripts, so retired orbs are not pinned in V8's ESM module map.
         self.js
-            .execute_script("tembra:facet", bundle)
+            .execute_script("tembra:orb", bundle)
             .map_err(js_error)?;
         let operation = if reload {
-            "host.reload([globalThis.__tembraFacet])"
+            "host.reload([globalThis.__tembraOrb])"
         } else {
-            "host.install(globalThis.__tembraFacet)"
+            "host.install(globalThis.__tembraOrb)"
         };
         self.evaluate(format!(
             r#"
@@ -184,7 +184,7 @@ impl Runtime {
                     await {operation};
                     return null;
                 }} finally {{
-                    delete globalThis.__tembraFacet;
+                    delete globalThis.__tembraOrb;
                 }}
             }})()
         "#

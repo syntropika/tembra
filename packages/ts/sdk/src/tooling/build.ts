@@ -30,7 +30,7 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
     if (!result.success) throw new AggregateError(result.logs, `Build ${name} failed`);
     if (result.outputs.length !== 1 || result.outputs[0]?.kind !== "entry-point")
       throw new Error(
-        `Build ${name} requires external assets; publish them explicitly instead of silently expanding the facet bundle`,
+        `Build ${name} requires external assets; publish them explicitly instead of silently expanding the orb bundle`,
       );
     const output = result.outputs[0]!;
     const source = await output.text();
@@ -50,7 +50,7 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
           statement.exportClause.elements.some((element) => element.name.text === "default")),
     );
     if (target.platform !== Platform.Embedded && !hasDefault)
-      throw new Error(`Build ${name} must export a default facet`);
+      throw new Error(`Build ${name} must export a default orb`);
     /** Reject imports that the selected runtime cannot resolve. */
     function verify(node: ts.Node): void {
       let specifier: ts.Expression | undefined;
@@ -66,7 +66,7 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
     const bytes = Buffer.from(source);
     const hash = createHash("sha256").update(bytes).digest("hex");
     const directory = path.join(outDir, name);
-    const destination = path.join(directory, `facet.${hash}.js`);
+    const destination = path.join(directory, `orb.${hash}.js`);
     await mkdir(directory, { recursive: true });
     const temporary = `${destination}.${process.pid}.tmp`;
     await writeFile(temporary, bytes);

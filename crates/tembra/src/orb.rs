@@ -105,22 +105,22 @@ pub(crate) fn type_error() -> Error {
     )
 }
 
-/// Native facets are compiled with their application. No schema or generated compatibility file.
-pub struct Facet {
-    pub(crate) metadata: core::Facet,
+/// Native orbs are compiled with their application. No schema or generated compatibility file.
+pub struct Orb {
+    pub(crate) metadata: core::Orb,
     pub(crate) services: BTreeMap<String, Implementation>,
 }
 
-impl Facet {
+impl Orb {
     /// Create a native declaration with explicit identity and default options.
     pub fn new(name: impl Into<String>, api_version: u32) -> Self {
         Self {
-            metadata: core::Facet::new(name, api_version),
+            metadata: core::Orb::new(name, api_version),
             services: BTreeMap::new(),
         }
     }
 
-    /// Add an explicit versioned facet dependency.
+    /// Add an explicit versioned orb dependency.
     pub fn requires(mut self, requirement: core::Requirement) -> Self {
         self.metadata.requires.push(requirement);
         self

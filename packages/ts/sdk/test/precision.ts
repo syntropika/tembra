@@ -48,7 +48,7 @@ export function verifyIdentifierPrecision(create: () => KernelPort): number {
         command(KernelOp.ScopeRegister, {
           scope,
           owner: { kind: OwnerKind.Host },
-          facet: 0,
+          orb: 0,
           parents,
           resources,
         });

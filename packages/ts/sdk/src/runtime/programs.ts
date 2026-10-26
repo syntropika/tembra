@@ -34,12 +34,12 @@ export class Programs {
       environment.owner.kind === OwnerKind.Host
         ? undefined
         : environment.object
-          ? environment.facet.scope
+          ? environment.orb.scope
           : this.session.hostScope;
     this.session.kernel.command(KernelOp.ScopeRegister, {
       scope: environment.id,
       owner: environment.owner,
-      facet: environment.facet.info.id,
+      orb: environment.orb.info.id,
       parents: parent ? [parent.id] : [],
       dependencies: [...environment.dependencies.values()].map(
         (reference) => this.session.handles.reference(reference).id,
@@ -208,27 +208,27 @@ export class Programs {
         );
       }
       case EffectType.Adopt: {
-        const facets = new Map<number, Environment["facet"]>();
+        const orbs = new Map<number, Environment["orb"]>();
         for (const pair of effect.replacements!) {
           if (!pair.next) continue;
           const next = this.scopes.get(pair.next)!;
           for (const [resource, declaration] of next.resourceDeclarations ?? [])
             resource.options = declaration;
           delete next.resourceDeclarations;
-          facets.set(next.facet.info.id, next.facet);
+          orbs.set(next.orb.info.id, next.orb);
           if (next.object) {
             if (next.state) next.object.binding = next.state.binding;
-            next.object.facet = next.facet.info.id;
-            next.object.versions.set(next.facet.info.id, next);
+            next.object.orb = next.orb.info.id;
+            next.object.versions.set(next.orb.info.id, next);
           }
         }
-        for (const record of facets.values()) {
-          this.session.facets.records.set(record.info.id, record);
-          this.session.facets.registerContributions(record);
+        for (const record of orbs.values()) {
+          this.session.orbs.records.set(record.info.id, record);
+          this.session.orbs.registerContributions(record);
         }
         for (const pair of effect.replacements!) {
           const next = pair.next ? this.scopes.get(pair.next) : undefined;
-          if (next?.object) this.session.handles.refreshReferences(next.object, next.facet);
+          if (next?.object) this.session.handles.refreshReferences(next.object, next.orb);
         }
         for (const pair of effect.replacements!)
           if (pair.next) this.scopes.get(pair.next)?.state?.publish?.();
@@ -248,7 +248,7 @@ export class Programs {
         for (const resource of environment.resources.values())
           this.session.resources.closedRecords.delete(resource.id);
         environment.phase = EnvironmentPhase.Closed;
-        if (environment.object) environment.object.versions.delete(environment.facet.info.id);
+        if (environment.object) environment.object.versions.delete(environment.orb.info.id);
         this.scopes.delete(environment.id);
         break;
       }

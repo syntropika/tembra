@@ -1,7 +1,7 @@
 import { EffectType, KernelOp, OwnerKind } from "../src/protocol.ts";
 import { expect, test } from "bun:test";
 import { createHost } from "../src/node.ts";
-import { facet } from "../src/facet.ts";
+import { orb } from "../src/orb.ts";
 import { deferred } from "../src/runtime/records.ts";
 import type { Reload } from "../src/kernel.ts";
 import { Reason } from "../src/identifiers.ts";
@@ -19,7 +19,7 @@ for (const mode of ["activation", "reload"] as const)
       let opens = 0;
       let baseCloses = 0;
       const definition = (dependent: boolean) =>
-        facet({
+        orb({
           name: "consumer",
           apiVersion: 1,
           services: {
@@ -114,7 +114,7 @@ for (const mode of ["activation", "reload"] as const)
       expect(host.diagnostics()).toMatchObject({ resources: 0, objects: 0, pendingJobs: 0 });
     });
 
-test("concurrent facets share physical host resource activation", async () => {
+test("concurrent orbs share physical host resource activation", async () => {
   const opened = deferred<void>();
   const finish = deferred<void>();
   let attempts = 0;
@@ -135,8 +135,8 @@ test("concurrent facets share physical host resource activation", async () => {
     },
   });
   const installing = host.install([
-    facet({ name: "first", apiVersion: 1 }),
-    facet({ name: "second", apiVersion: 1 }),
+    orb({ name: "first", apiVersion: 1 }),
+    orb({ name: "second", apiVersion: 1 }),
   ]);
   await opened.promise;
   expect(attempts).toBe(1);
@@ -146,18 +146,18 @@ test("concurrent facets share physical host resource activation", async () => {
   expect(closes).toBe(1);
 });
 
-test("a facet resource opener can fail once and recover on acquisition", async () => {
+test("an orb resource opener can fail once and recover on acquisition", async () => {
   let attempts = 0;
   let closes = 0;
   const host = createHost();
-  const definition = facet({
+  const definition = orb({
     name: "retry",
     apiVersion: 1,
     create(self) {
       return {
         resource: self.resource("connection", {
           open: () => {
-            if (++attempts === 1) throw new Error("Temporary facet failure");
+            if (++attempts === 1) throw new Error("Temporary orb failure");
             return 42;
           },
           close: () => {
@@ -167,11 +167,11 @@ test("a facet resource opener can fail once and recover on acquisition", async (
       };
     },
     services: {
-      retry: { create: (self) => self.facet, methods: { read: (value) => value.resource.value } },
+      retry: { create: (self) => self.orb, methods: { read: (value) => value.resource.value } },
     },
   });
   try {
-    await expect(host.install(definition)).rejects.toThrow("Temporary facet failure");
+    await expect(host.install(definition)).rejects.toThrow("Temporary orb failure");
     const reference = await host.get("retry", "main");
     expect(await reference.read()).toBe(42);
     reference.release();
@@ -182,12 +182,12 @@ test("a facet resource opener can fail once and recover on acquisition", async (
   expect(closes).toBe(1);
 });
 
-test("a throwing facet factory cleans its declarations and can retry", async () => {
+test("a throwing orb factory cleans its declarations and can retry", async () => {
   let attempts = 0;
   let opens = 0;
   let closes = 0;
   const host = createHost();
-  const definition = facet({
+  const definition = orb({
     name: "factory",
     apiVersion: 1,
     create(self) {
@@ -231,7 +231,7 @@ test("host resource retry preserves issued handles and dependent resource metada
     },
   });
   const original = host.session.scopes.hostResource<number>("connection");
-  const definition = facet({
+  const definition = orb({
     name: "consumer",
     apiVersion: 1,
     services: {
@@ -275,7 +275,7 @@ test("dynamic host resources open and remain available to object closers during 
     },
   });
   await host.install(
-    facet({
+    orb({
       name: "consumer",
       apiVersion: 1,
       services: {
@@ -318,10 +318,10 @@ test("retry refreshes a pending dynamic resource's dependency IDs after a failed
   const base = host.session.scopes.hostResource<number>("base");
   const dependent = host.resource("dependent", { deps: [base], open: () => base.value + 1 });
   try {
-    await expect(host.install(facet({ name: "first", apiVersion: 1 }))).rejects.toThrow(
+    await expect(host.install(orb({ name: "first", apiVersion: 1 }))).rejects.toThrow(
       "Temporary base failure",
     );
-    await host.install(facet({ name: "second", apiVersion: 1 }));
+    await host.install(orb({ name: "second", apiVersion: 1 }));
     expect(dependent.value).toBe(42);
     expect(attempts).toBe(2);
   } finally {
@@ -335,7 +335,7 @@ test("a failed dynamic resource leaves live host resources usable and retries it
   let closes = 0;
   const host = createHost({ resources: { base: { open: () => 41 } } });
   await host.install(
-    facet({ name: "live", apiVersion: 1, services: { live: { methods: { read: () => 7 } } } }),
+    orb({ name: "live", apiVersion: 1, services: { live: { methods: { read: () => 7 } } } }),
   );
   const reference = await host.get("live", "main");
   const base = host.session.scopes.hostResource<number>("base");
@@ -353,7 +353,7 @@ test("a failed dynamic resource leaves live host resources usable and retries it
     await Promise.allSettled([...host.session.jobs]);
     expect(await reference.read()).toBe(7);
     expect(base.value).toBe(41);
-    await host.install(facet({ name: "retry", apiVersion: 1 }));
+    await host.install(orb({ name: "retry", apiVersion: 1 }));
     expect(host.session.scopes.hostResource("dynamic")).toBe(dynamic);
     expect(dynamic.value).toBe(42);
     expect(attempts).toBe(2);
@@ -368,12 +368,12 @@ test("native opener cancellation signals the provider and retains its physical f
   const opened = deferred<void>();
   const cancelled = deferred<void>();
   const finish = deferred<void>();
-  let facetId = 0;
+  let orbId = 0;
   let cancellation = false;
   let settled = false;
   const host = createHost({
     native: {
-      hasFacet: (id) => id === facetId,
+      hasOrb: (id) => id === orbId,
       activate: async (object) => {
         const resource = host.session.kernel.command<{ id: number }>(KernelOp.Resource, {
           owner: { kind: OwnerKind.Object, id: object },
@@ -384,7 +384,7 @@ test("native opener cancellation signals the provider and retains its physical f
         host.session.kernel.command(KernelOp.ScopeRegister, {
           scope: host.session.kernel.command<number>(KernelOp.Allocate),
           owner: { kind: OwnerKind.Object, id: object },
-          facet: facetId,
+          orb: orbId,
           parents: [],
           dependencies: [],
           resources: [resource.id],
@@ -413,9 +413,9 @@ test("native opener cancellation signals the provider and retains its physical f
     },
   });
   const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
-    facets: [{ name: "native", apiVersion: 1, services: [{ name: "native", methods: [] }] }],
+    orbs: [{ name: "native", apiVersion: 1, services: [{ name: "native", methods: [] }] }],
   });
-  facetId = prepared.facets[0]!.id;
+  orbId = prepared.orbs[0]!.id;
   host.session.kernel.command(KernelOp.Commit, { ticket: prepared.id });
   const getting = host.get("native", "main");
   getting.catch(() => {});

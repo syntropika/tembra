@@ -29,11 +29,11 @@ fn child_completion_wakes_only_its_waiting_parent() {
 #[test]
 fn concurrent_expiry_visits_only_programs_with_work() {
     let host = Host::new();
-    let mut facet = Facet::new("expiry", 1);
+    let mut orb = Orb::new("expiry", 1);
     let mut service = Service::new("expiry.item", ["read"]);
     service.linger_ms = 1_000;
-    facet.services.push(service);
-    let reload = host.prepare(vec![facet], vec![]).unwrap();
+    orb.services.push(service);
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
     host.commit(reload.id, vec![]).unwrap();
     let count = 200;
     let mut resources = BTreeMap::new();
@@ -65,7 +65,7 @@ fn concurrent_expiry_visits_only_programs_with_work() {
         host.register_scope(Scope {
             id,
             owner: Owner::Object(claim.object),
-            facet: claim.facet,
+            orb: claim.orb,
             parents: vec![],
             dependencies: vec![],
             resources: vec![resource.id],

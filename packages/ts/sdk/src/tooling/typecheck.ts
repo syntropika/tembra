@@ -1,6 +1,6 @@
 import ts from "typescript";
 
-/** Check facet source types before bundling an artifact. */
+/** Check orb source types before bundling an artifact. */
 export function typecheck(entry: string, root: string): void {
   const configFile = ts.findConfigFile(root, ts.sys.fileExists);
   const loaded = configFile ? ts.readConfigFile(configFile, ts.sys.readFile) : { config: {} };

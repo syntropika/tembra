@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Managed Rust facets and native execution for Tembra"
+description = "Managed Rust orbs and native execution for Tembra"
+
+[[example]]
+name = "counter"
+path = "../../examples/rust/host.rs"
 
 [features]
 default = []

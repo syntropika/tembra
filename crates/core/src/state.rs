@@ -118,7 +118,7 @@ impl PreparedState {
     ///
     /// # Guarantees
     /// Failure does not change the snapshot or emit a notification. Validation belongs to the
-    /// facet; this method checks ownership, scope, execution version and optimistic revision.
+    /// orb; this method checks ownership, scope, execution version and optimistic revision.
     pub fn adopt(self) -> Result<Snapshot> {
         self.host.check_state_call(self.call, self.object)?;
         let mut inner = self.host.inner.borrow_mut();

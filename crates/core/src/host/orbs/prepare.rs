@@ -1,11 +1,11 @@
-//! Prepare isolated facet candidates.
+//! Prepare isolated orb candidates.
 
 use super::*;
 
 impl Host {
     /// Check a replacement without changing installed state.
     /// Reject concurrent preparation and incompatible declarations.
-    pub fn prepare(&self, declarations: Vec<Facet>, remove: Vec<String>) -> Result<Reload> {
+    pub fn prepare(&self, declarations: Vec<Orb>, remove: Vec<String>) -> Result<Reload> {
         let mut inner = self.inner.borrow_mut();
         inner.open()?;
         if inner.pending.is_some() {
@@ -23,10 +23,10 @@ impl Host {
             }
             current.remove(name);
         }
-        let mut facets = Vec::new();
+        let mut orbs = Vec::new();
         let mut next = inner.next;
         for declaration in declarations {
-            validate_facet(&declaration)?;
+            validate_orb(&declaration)?;
             if !names.insert(declaration.name.clone()) {
                 return Err(Error::invalid(Reason::Duplicate, &declaration.name));
             }
@@ -34,32 +34,31 @@ impl Host {
             let owner = inner
                 .current()
                 .get(&declaration.name)
-                .map(|id| inner.facets[id].owner)
+                .map(|id| inner.orbs[id].owner)
                 .unwrap_or(id);
             current.insert(declaration.name.clone(), id);
-            facets.push(InstalledFacet {
+            orbs.push(InstalledOrb {
                 id,
                 owner,
                 code_version: version,
                 declaration,
             });
         }
-        let facet_indices: BTreeMap<_, _> =
-            facets.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
+        let orb_indices: BTreeMap<_, _> = orbs.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
         let lookup = |id: &Id| {
-            facet_indices
+            orb_indices
                 .get(id)
-                .map(|index| &facets[*index])
-                .or_else(|| inner.facets.get(id))
+                .map(|index| &orbs[*index])
+                .or_else(|| inner.orbs.get(id))
         };
         let mut services = BTreeMap::new();
         for id in current.values() {
-            let facet = lookup(id).expect("prepared facet exists");
-            for service in &facet.declaration.services {
+            let orb = lookup(id).expect("prepared orb exists");
+            for service in &orb.declaration.services {
                 if services
                     .insert(
                         service.name.clone(),
-                        (facet.id, service.clone(), facet.declaration.api_version),
+                        (orb.id, service.clone(), orb.declaration.api_version),
                     )
                     .is_some()
                 {
@@ -68,13 +67,13 @@ impl Host {
             }
         }
         for id in current.values() {
-            let facet = lookup(id).expect("prepared facet exists");
-            for requirement in &facet.declaration.requires {
+            let orb = lookup(id).expect("prepared orb exists");
+            for requirement in &orb.declaration.requires {
                 let provider = current
-                    .get(&requirement.facet)
+                    .get(&requirement.orb)
                     .and_then(lookup)
                     .ok_or_else(|| {
-                        Error::new(Code::Unavailable, Reason::Dependency, &requirement.facet)
+                        Error::new(Code::Unavailable, Reason::Dependency, &requirement.orb)
                     })?;
                 if provider.declaration.api_version != requirement.api_version {
                     return Err(conflict(Reason::ApiVersion));
@@ -82,7 +81,7 @@ impl Host {
                 for (name, methods) in &requirement.methods {
                     let (_, service, _) = services
                         .get(name)
-                        .filter(|(facet, _, _)| *facet == provider.id)
+                        .filter(|(orb, _, _)| *orb == provider.id)
                         .ok_or_else(|| Error::invalid(Reason::DependencyService, name))?;
                     if !methods.is_subset(&service.methods) {
                         return Err(conflict(Reason::MissingMethod));
@@ -96,7 +95,7 @@ impl Host {
         let objects: Vec<Id> = names
             .iter()
             .filter_map(|name| inner.current().get(name))
-            .flat_map(|facet| inner.facet_objects.members(facet))
+            .flat_map(|orb| inner.orb_objects.members(orb))
             .filter(|id| !inner.objects[id].disposing && inner.objects[id].phase != Status::Gone)
             .collect();
         if let Some(reason) = inner.consumer_mismatch(&objects, &services) {
@@ -112,7 +111,7 @@ impl Host {
         let mut reload = Reload {
             id: ticket,
             code_version: version,
-            facets,
+            orbs,
             objects,
             providers: BTreeMap::new(),
         };
@@ -122,20 +121,20 @@ impl Host {
             object.preparing = true;
             let name = &object.address.service;
             if !reload.providers.contains_key(name)
-                && let Some((facet, _, _)) = services.get(name)
+                && let Some((orb, _, _)) = services.get(name)
             {
-                reload.providers.insert(name.clone(), *facet);
+                reload.providers.insert(name.clone(), *orb);
             }
         }
         inner.pending = Some(Pending {
             reload: reload.clone(),
             objects: reload.objects.iter().copied().collect(),
             current,
-            facet_indices,
+            orb_indices,
             services,
-            owners: reload.facets.iter().map(|facet| facet.owner).collect(),
+            owners: reload.orbs.iter().map(|orb| orb.owner).collect(),
             gated: BTreeSet::new(),
-            gated_facets: BTreeMap::new(),
+            gated_orbs: BTreeMap::new(),
         });
         Ok(reload)
     }

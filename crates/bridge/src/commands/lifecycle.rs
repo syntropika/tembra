@@ -13,7 +13,7 @@ impl Kernel {
                 h.register_scope(Scope {
                     id: id("scope")?,
                     owner: owner(request)?,
-                    facet: id("facet")?,
+                    orb: id("orb")?,
                     parents: numbers_optional(request, "parents")?,
                     dependencies: numbers_optional(request, "dependencies")?,
                     resources: numbers_optional(request, "resources")?,
@@ -26,7 +26,7 @@ impl Kernel {
             }
             KernelOp::ScopeExists => Ok(json!(h.scope_exists(id("scope")?))),
             KernelOp::ScopesForOwner => Ok(json!(h.scopes_for_owner(owner(request)?))),
-            KernelOp::ScopesForFacet => Ok(json!(h.scopes_for_facet(id("facet")?))),
+            KernelOp::ScopesForOrb => Ok(json!(h.scopes_for_orb(id("orb")?))),
             KernelOp::ScopeAddResource => {
                 h.add_scope_resource(id("scope")?, id("resource")?)?;
                 unit()

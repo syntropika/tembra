@@ -135,7 +135,7 @@ pub(super) fn action_value(action: Action) -> Value {
         Action::DropValue(id) => json!({ "type": ActionType::DropValue.as_str(), "id": id }),
         Action::CancelRoot(id) => json!({ "type": ActionType::CancelRoot.as_str(), "id": id }),
         Action::CancelTask(id) => json!({ "type": ActionType::CancelTask.as_str(), "id": id }),
-        Action::RetireFacet(id) => json!({ "type": ActionType::RetireFacet.as_str(), "id": id }),
+        Action::RetireOrb(id) => json!({ "type": ActionType::RetireOrb.as_str(), "id": id }),
         Action::StateChanged { object, revision } => {
             json!({
                 "type": ActionType::State.as_str(),
@@ -173,7 +173,7 @@ pub(super) fn invocation_value(i: &Invocation) -> Value {
         "id": i.id,
         "root": i.root,
         "object": i.object,
-        "facet": i.facet,
+        "orb": i.orb,
         "codeVersion": i.code_version,
         "method": i.method,
     })
@@ -188,8 +188,8 @@ pub(super) fn snapshot_value(s: Snapshot) -> Value {
     })
 }
 
-/// Describe a facet version without exposing its implementation.
-pub(super) fn facet_value(f: &InstalledFacet) -> Value {
+/// Describe an orb version without exposing its implementation.
+pub(super) fn orb_value(f: &InstalledOrb) -> Value {
     json!({
         "id": f.id,
         "owner": f.owner,
@@ -204,7 +204,7 @@ pub(super) fn facet_value(f: &InstalledFacet) -> Value {
         })).collect::<Vec<_>>(),
         "hooks": f.declaration.hooks,
         "requires": f.declaration.requires.iter().map(|requirement|json!({
-            "facet": requirement.facet,
+            "orb": requirement.orb,
             "apiVersion": requirement.api_version,
             "services": requirement.methods,
             "hooks": requirement.hooks,

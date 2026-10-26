@@ -6,9 +6,9 @@ const TRACE: ContextKey<Rc<str>> = ContextKey::new("test/trace", 1);
 #[test]
 fn frames_are_per_call_immutable_typed_and_retained_until_physical_settlement() {
     let host = Host::new();
-    let mut facet = Facet::new("test", 1);
-    facet.services.push(Service::new("test", ["echo"]));
-    let reload = host.prepare(vec![facet], vec![]).unwrap();
+    let mut orb = Orb::new("test", 1);
+    orb.services.push(Service::new("test", ["echo"]));
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
     host.commit(reload.id, vec![]).unwrap();
     let object = host
         .acquire(

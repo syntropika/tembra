@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
-import { facet } from "../src/facet.ts";
+import { orb } from "../src/orb.ts";
 import { deferred } from "../src/runtime/records.ts";
 import { ActionType, KernelOp } from "../src/protocol.ts";
 import type { Context } from "../src/runtime/context.ts";
@@ -25,8 +25,8 @@ function watchReloadWait(host: Host) {
   return { waiting: waiting.promise, restore: () => commands.mockRestore() };
 }
 
-for (const facetOwned of [false, true]) {
-  test(`exclusive ${facetOwned ? "facet" : "object"} replacement waits for complete roots and permits their reentry`, async () => {
+for (const orbOwned of [false, true]) {
+  test(`exclusive ${orbOwned ? "orb" : "object"} replacement waits for complete roots and permits their reentry`, async () => {
     const host = createHost();
     const events: string[] = [];
     const entered = deferred<void>();
@@ -36,7 +36,7 @@ for (const facetOwned of [false, true]) {
     const releaseLate = deferred<void>();
     const lateContext = deferred<Context>();
     const definition = (version: number) => {
-      let facetConnection: Resource<number>;
+      let orbConnection: Resource<number>;
       const options = {
         version,
         exclusive: true,
@@ -48,17 +48,17 @@ for (const facetOwned of [false, true]) {
           events.push(`close:${value}`);
         },
       };
-      return facet({
+      return orb({
         name: "root-gate",
         apiVersion: 1,
         create(self) {
-          if (facetOwned) facetConnection = self.resource("connection", options);
+          if (orbOwned) orbConnection = self.resource("connection", options);
         },
         services: {
           item: {
             create(self) {
               return {
-                connection: facetOwned ? facetConnection : self.resource("connection", options),
+                connection: orbOwned ? orbConnection : self.resource("connection", options),
               };
             },
             methods: { read: ({ connection }) => connection.value },
@@ -124,7 +124,7 @@ test("an exclusive replacement deadline preserves the connection of its blocking
   const host = createHost({ now: () => now });
   const events: string[] = [];
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "root-deadline",
       apiVersion: 1,
       services: {
@@ -175,12 +175,12 @@ test("an exclusive replacement deadline preserves the connection of its blocking
 
 test("closing refuses a new replacement before capturing its factory", async () => {
   const host = createHost();
-  await host.install(facet({ name: "closing", apiVersion: 1 }));
+  await host.install(orb({ name: "closing", apiVersion: 1 }));
   let captured = false;
   const closing = host.close();
   await expect(
     host.reload([
-      facet({
+      orb({
         name: "closing",
         apiVersion: 1,
         create() {
@@ -201,7 +201,7 @@ test("closing cancels a replacement but waits for its physical opener", async ()
   const closed: number[] = [];
   const started: number[] = [];
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "closing-reload",
       apiVersion: 1,
       create(self) {
@@ -249,7 +249,7 @@ test("closing cancels a replacement but waits for its physical opener", async ()
 test("closing aborts prepared replacements including an empty transaction", async () => {
   for (const empty of [false, true]) {
     const host = createHost();
-    const definitions = empty ? [] : [facet({ name: "prepared", apiVersion: 1 })];
+    const definitions = empty ? [] : [orb({ name: "prepared", apiVersion: 1 })];
     await host.install(definitions);
     const prepared = await host.prepare(definitions);
     await host.close();
@@ -262,7 +262,7 @@ test("closing aborts prepared replacements including an empty transaction", asyn
 
 test("closing between prepared delivery and ticket publication observes the abort", async () => {
   const host = createHost();
-  const definition = facet({ name: "prepared-race", apiVersion: 1 });
+  const definition = orb({ name: "prepared-race", apiVersion: 1 });
   await host.install(definition);
   const entered = deferred<void>();
   const dispatch = host.session.programs.dispatch.bind(host.session.programs);
@@ -292,7 +292,7 @@ test("closing releases calls blocking an exclusive replacement", async () => {
   const opened: number[] = [];
   const closed: number[] = [];
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "gated-close",
       apiVersion: 1,
       services: {
@@ -342,7 +342,7 @@ test("closing an exclusive handoff does not reopen the retired resource", async 
   const opened: number[] = [];
   const closed: number[] = [];
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "exclusive-close",
       apiVersion: 1,
       create(self) {
@@ -383,7 +383,7 @@ test("compatible replacement preserves old roots while new roots use new code", 
   const wait = deferred<void>();
   const entered = deferred<void>();
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "versioned",
       apiVersion: 1,
       services: {
@@ -416,7 +416,7 @@ test("exclusive handoff never overlaps and restores old resource after failure",
   let opened = 0;
   let maximum = 0;
   const definition = (version: number, fail = false) =>
-    facet({
+    orb({
       name: "exclusive",
       apiVersion: 1,
       services: {
@@ -457,11 +457,11 @@ test("exclusive handoff never overlaps and restores old resource after failure",
 test("a replacement can introduce state without exposing the candidate early", async () => {
   const host = createHost();
   await host.install(
-    facet({ name: "new-state", apiVersion: 1, services: { item: { methods: { read: () => 0 } } } }),
+    orb({ name: "new-state", apiVersion: 1, services: { item: { methods: { read: () => 0 } } } }),
   );
   const reference = await host.get("item", "main");
   await host.reload([
-    facet({
+    orb({
       name: "new-state",
       apiVersion: 1,
       services: {
@@ -487,7 +487,7 @@ test("task replacement waits for physical settlement after cancellation", async 
   const aborted = deferred<void>();
   const starts: number[] = [];
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "tasks",
       apiVersion: 1,
       create(self) {
@@ -515,7 +515,7 @@ test("task replacement waits for physical settlement after cancellation", async 
 test("engine deadlines cancel a physical resource open and restore admission", async () => {
   const host = createHost();
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "deadline",
       apiVersion: 1,
       create(self) {
@@ -547,14 +547,14 @@ test("replacement does not wait for an unrelated pending object activation", asy
   const opening = deferred<void>();
   const finish = deferred<void>();
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "ready",
       apiVersion: 1,
       services: { ready: { methods: { version: () => version } } },
     });
   await host.install([
     definition(1),
-    facet({
+    orb({
       name: "unrelated",
       apiVersion: 1,
       services: {
@@ -601,7 +601,7 @@ test("replacement refuses an affected pending object activation through the kern
   const opening = deferred<void>();
   const finish = deferred<void>();
   const definition = (version: number) =>
-    facet({
+    orb({
       name: "affected",
       apiVersion: 1,
       services: {
@@ -646,7 +646,7 @@ test("replacement refuses an affected pending object activation through the kern
 test("replacement reapplies access policies without widening required methods", async () => {
   const host = createHost();
   const definition = (guestMethods: readonly string[]) =>
-    facet({
+    orb({
       name: "views",
       apiVersion: 1,
       services: {
@@ -687,7 +687,7 @@ test("replacement updates only affected objects' live reference handles", async 
   let affectedChecks = 0;
   let unrelatedChecks = 0;
   const definition = (name: string, version: number) =>
-    facet({
+    orb({
       name,
       apiVersion: 1,
       services: {
@@ -725,7 +725,7 @@ test("replacement updates only affected objects' live reference handles", async 
 test("a failing replacement access callback revokes the affected reference view", async () => {
   const host = createHost();
   const definition = (fail: boolean) =>
-    facet({
+    orb({
       name: "views",
       apiVersion: 1,
       services: {
@@ -761,7 +761,7 @@ test("exclusive handoff closes and restores its nonexclusive resource dependents
   let watchers = 0;
   let maximumConnections = 0;
   const definition = (version: number, failWatch = false) =>
-    facet({
+    orb({
       name: "dependent-handoff",
       apiVersion: 1,
       services: {
@@ -853,7 +853,7 @@ for (const commit of [false, true])
     const host = createHost();
     let migrations = 0;
     const definition = (version: number) =>
-      facet({
+      orb({
         name: "late-selection",
         apiVersion: 1,
         services: {

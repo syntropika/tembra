@@ -78,9 +78,9 @@ export class Lifecycle {
         // Resource callbacks execute only in response to the engine's ordered program effect.
         break;
       }
-      case ActionType.RetireFacet:
+      case ActionType.RetireOrb:
         session.handles.retire(action.id);
-        session.facets.retire(action.id);
+        session.orbs.retire(action.id);
         break;
       case ActionType.State: {
         const object = session.objects.get(action.id);
@@ -113,8 +113,7 @@ export class Lifecycle {
         errors.push(error);
       }
       try {
-        if (session.options.native?.hasFacet(object.facet))
-          await session.options.native.dispose(id);
+        if (session.options.native?.hasOrb(object.orb)) await session.options.native.dispose(id);
       } catch (error) {
         errors.push(error);
       }
@@ -181,7 +180,7 @@ export class Lifecycle {
       session.kernel.command(KernelOp.FinishClose);
       session.values.clear();
       session.handles.clear();
-      session.facets.records.clear();
+      session.orbs.records.clear();
       session.scopes.clear();
       this.#finalDiagnostics = this.diagnostics();
       session.kernel.port.free?.();

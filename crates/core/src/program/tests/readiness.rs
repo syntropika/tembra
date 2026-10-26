@@ -131,9 +131,9 @@ fn retirement_wakes_a_consumer_even_when_another_dependency_is_still_pending() {
 #[test]
 fn releasing_a_pending_dependency_wakes_its_activation() {
     let host = Host::new();
-    let mut facet = Facet::new("dependency", 1);
-    facet.services.push(Service::new("dependency", ["read"]));
-    let reload = host.prepare(vec![facet], vec![]).unwrap();
+    let mut orb = Orb::new("dependency", 1);
+    orb.services.push(Service::new("dependency", ["read"]));
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
     host.commit(reload.id, vec![]).unwrap();
     let get = || {
         host.acquire(
@@ -153,7 +153,7 @@ fn releasing_a_pending_dependency_wakes_its_activation() {
     host.register_scope(Scope {
         id,
         owner: Owner::Host,
-        facet: 0,
+        orb: 0,
         parents: vec![],
         dependencies: vec![dependency.reference],
         resources: vec![],

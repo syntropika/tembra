@@ -3,7 +3,7 @@ import { createHost } from "../src/node.ts";
 import { Code, Reason } from "../src/identifiers.ts";
 import { KernelOp } from "../src/protocol.ts";
 import { deferred } from "../src/runtime/records.ts";
-import type { FacetDefinition } from "../src/types.ts";
+import type { OrbDefinition } from "../src/types.ts";
 
 for (const origin of [0, 1_700_000_000_000]) {
   test(`an idle host gives an asynchronous reload its full deadline from clock origin ${origin}`, async () => {
@@ -13,7 +13,7 @@ for (const origin of [0, 1_700_000_000_000]) {
     const closed: number[] = [];
     const retired = deferred<void>();
     let deadline: number | undefined;
-    const definition = (version: number): FacetDefinition => ({
+    const definition = (version: number): OrbDefinition => ({
       name: "idle-reload",
       apiVersion: 1,
       create(self) {
@@ -61,7 +61,7 @@ test("an idle host still expires a slow reload and waits for physical settlement
   const closed: number[] = [];
   let cancelled = false;
   let settled = false;
-  const definition = (version: number): FacetDefinition => ({
+  const definition = (version: number): OrbDefinition => ({
     name: "idle-deadline",
     apiVersion: 1,
     create(self) {

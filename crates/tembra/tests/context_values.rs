@@ -1,6 +1,6 @@
 use futures::{FutureExt, executor::LocalPool};
 use std::{cell::RefCell, rc::Rc};
-use tembra::{Context, Facet, Host, Service, core::ContextKey};
+use tembra::{Context, Host, Orb, Service, core::ContextKey};
 
 const TRACE: ContextKey<String> = ContextKey::new("test/trace", 1);
 
@@ -19,7 +19,7 @@ fn native_calls_keep_their_frame_and_end_its_invocation_authority() {
             ctx.value(&TRACE)
         },
     );
-    host.install(vec![Facet::new("context", 1).service(service)])
+    host.install(vec![Orb::new("context", 1).service(service)])
         .unwrap();
     let reference = Rc::new(host.get("echo", vec!["main".into()], "alice").unwrap());
     executor

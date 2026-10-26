@@ -19,14 +19,14 @@ fn op_tembra_kernel(state: &mut OpState, #[string] request: String) -> String {
 
 /// Check whether Rust owns the requested implementation.
 #[op2(fast)]
-fn op_tembra_has_facet(
+fn op_tembra_has_orb(
     state: &mut OpState,
     id: f64,
 ) -> std::result::Result<bool, deno_error::JsErrorBox> {
     Ok(state
         .borrow::<Rc<Bindings>>()
         .native
-        .has_facet(number_id(id)?))
+        .has_orb(number_id(id)?))
 }
 
 /// Encode a native value using the host codec.
@@ -130,7 +130,7 @@ async fn op_tembra_native(
             Some(NativeOp::Activate) => {
                 native.activate(
                     id("object")?,
-                    id("facet")?,
+                    id("orb")?,
                     value["service"]
                         .as_str()
                         .ok_or_else(|| Error::invalid(Reason::Service, "missing service"))?,
@@ -218,7 +218,7 @@ extension!(
     tembra_ops,
     ops = [
         op_tembra_kernel,
-        op_tembra_has_facet,
+        op_tembra_has_orb,
         op_tembra_codec,
         op_tembra_value,
         op_tembra_drop_value,

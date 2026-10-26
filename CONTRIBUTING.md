@@ -1,5 +1,7 @@
 # Code structure
 
+For environment setup, tools and verification commands, see [DEVELOP.md](DEVELOP.md).
+
 The core owns admission, versions, ownership and lifecycle order. Adapters execute callbacks and keep language values. Infrastructure owns transport and coordination. Build tooling runs outside the runtime.
 
 ## Modules

@@ -1,6 +1,6 @@
 use futures::{FutureExt, executor::LocalPool};
 use std::{cell::Cell, rc::Rc};
-use tembra::{Error, Facet, Host, Service};
+use tembra::{Error, Host, Orb, Service};
 
 #[test]
 fn native_typed_values_validation_and_cleanup() {
@@ -36,7 +36,7 @@ fn native_typed_values_validation_and_cleanup() {
     .method("set", |environment, context, (value,): (i32,)| async move {
         Ok(*environment.0.update(&context, |_| Ok(value))?)
     });
-    host.install(vec![Facet::new("counter", 1).service(service)])
+    host.install(vec![Orb::new("counter", 1).service(service)])
         .unwrap();
     let reference = Rc::new(host.get("counter", vec!["main".into()], "host").unwrap());
     executor
@@ -118,7 +118,7 @@ fn native_resources_open_through_the_engine_and_failed_activation_can_retry() {
     .method("read", |environment, _, (): ()| async move {
         Ok(*environment.value()?)
     });
-    host.install(vec![Facet::new("native.resources", 1).service(service)])
+    host.install(vec![Orb::new("native.resources", 1).service(service)])
         .unwrap();
     let first = host
         .get("native.resources", vec!["main".into()], "host")
@@ -161,7 +161,7 @@ fn native_shutdown_signals_openers_but_waits_for_physical_settlement() {
     let cancelled = Rc::new(Cell::new(false));
     let (send, receive) = oneshot::channel();
     let receive = Rc::new(RefCell::new(Some(receive)));
-    host.install(vec![Facet::new("pending", 1).service(Service::new(
+    host.install(vec![Orb::new("pending", 1).service(Service::new(
         "pending",
         {
             let cancelled = cancelled.clone();

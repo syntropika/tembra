@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHost } from "../dist/node.js";
-import { facet, Code, Reason, Errors, TembraError } from "../dist/index.js";
+import { orb, Code, Reason, Errors, TembraError } from "../dist/index.js";
 import { RemoteHost, serve } from "../dist/rpc.js";
 
 test("published JS entrypoints execute on Node with the actual Node-API addon", async () => {
   const host = createHost();
   await host.install(
-    facet({
+    orb({
       name: "counter",
       apiVersion: 1,
       services: {
@@ -59,7 +59,7 @@ test("published entrypoints preserve structured failures across RPC and engine e
   const remote = new RemoteHost(transports[1]);
   try {
     await host.install(
-      facet({
+      orb({
         name: "errors",
         apiVersion: 1,
         services: {
@@ -81,7 +81,7 @@ test("published entrypoints preserve structured failures across RPC and engine e
     await assert.rejects(ref.reject(), descriptor);
     await assert.rejects(
       host.install(
-        facet({
+        orb({
           name: "failed-effect",
           apiVersion: 1,
           create(self) {

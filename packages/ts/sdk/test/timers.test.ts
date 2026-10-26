@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
-import { facet } from "../src/facet.ts";
+import { orb } from "../src/orb.ts";
 import { KernelOp } from "../src/protocol.ts";
 import { Code, Reason } from "../src/identifiers.ts";
 import { deferred } from "../src/runtime/records.ts";
@@ -9,7 +9,7 @@ test("linger scheduling preserves unchanged deadlines and replaces earlier or la
   let now = 0;
   const host = createHost({ now: () => now });
   await host.install(
-    facet({
+    orb({
       name: "timers",
       apiVersion: 1,
       services: {
@@ -73,7 +73,7 @@ test("linger retains the same running task and expiry waits for its physical set
   const finish = deferred<void>();
   const host = createHost({ now: () => now });
   await host.install(
-    facet({
+    orb({
       name: "linger-task",
       apiVersion: 1,
       services: {

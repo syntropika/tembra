@@ -35,7 +35,7 @@ fn reload_deadlines_use_the_supplied_clock_without_a_separate_tick() {
         let kernel = Kernel::new();
         let reload = kernel
             .host
-            .prepare(vec![Facet::new("clock", 1)], vec![])
+            .prepare(vec![Orb::new("clock", 1)], vec![])
             .unwrap();
         let mut request = json!({
             "op":op.as_str(),"ticket":reload.id,"deadline":50,"now":10_000,
@@ -73,7 +73,7 @@ fn reloads_can_still_use_an_explicitly_ticked_clock() {
         let kernel = Kernel::new();
         let reload = kernel
             .host
-            .prepare(vec![Facet::new("clock", 1)], vec![])
+            .prepare(vec![Orb::new("clock", 1)], vec![])
             .unwrap();
         kernel.host.tick(10_000).unwrap();
         kernel
@@ -90,7 +90,7 @@ fn candidate_lookup_is_ticket_scoped_and_provider_metadata_is_per_service() {
     let kernel = Kernel::new();
     let execute = |request: serde_json::Value| kernel.execute(&request).unwrap();
     let initial = execute(
-        json!({"op":KernelOp::Prepare.as_str(),"facets":[{"name":"a","apiVersion":1,"services":[{"name":"item","methods":["read"]}]}]}),
+        json!({"op":KernelOp::Prepare.as_str(),"orbs":[{"name":"a","apiVersion":1,"services":[{"name":"item","methods":["read"]}]}]}),
     );
     execute(json!({"op":KernelOp::Commit.as_str(),"ticket":initial["id"]}));
     for key in ["first", "second"] {
@@ -100,24 +100,22 @@ fn candidate_lookup_is_ticket_scoped_and_provider_metadata_is_per_service() {
         execute(json!({"op":KernelOp::Ready.as_str(),"object":acquired["object"]}));
     }
     let candidate = execute(
-        json!({"op":KernelOp::Prepare.as_str(),"remove":["a"],"facets":[{"name":"b","apiVersion":1,"services":[{"name":"item","methods":["read"]}]}]}),
+        json!({"op":KernelOp::Prepare.as_str(),"remove":["a"],"orbs":[{"name":"b","apiVersion":1,"services":[{"name":"item","methods":["read"]}]}]}),
     );
     assert_eq!(candidate["objects"].as_array().unwrap().len(), 2);
     assert_eq!(candidate["providers"].as_object().unwrap().len(), 1);
     let destination =
-        execute(json!({"op":KernelOp::FacetNamed.as_str(),"name":"b","ticket":candidate["id"]}));
+        execute(json!({"op":KernelOp::OrbNamed.as_str(),"name":"b","ticket":candidate["id"]}));
     assert_eq!(candidate["providers"]["item"], destination["id"]);
     assert!(
         kernel
-            .execute(&json!({"op":KernelOp::FacetNamed.as_str(),"name":"b"}))
+            .execute(&json!({"op":KernelOp::OrbNamed.as_str(),"name":"b"}))
             .is_err()
     );
     execute(json!({"op":KernelOp::Abort.as_str(),"ticket":candidate["id"]}));
     assert!(
         kernel
-            .execute(
-                &json!({"op":KernelOp::FacetNamed.as_str(),"name":"b","ticket":candidate["id"]})
-            )
+            .execute(&json!({"op":KernelOp::OrbNamed.as_str(),"name":"b","ticket":candidate["id"]}))
             .is_err()
     );
 }

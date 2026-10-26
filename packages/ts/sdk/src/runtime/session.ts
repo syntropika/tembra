@@ -12,10 +12,10 @@ import { Values } from "../values.ts";
 import { Activities } from "./activities.ts";
 import { Calls } from "./calls.ts";
 import { context } from "./context.ts";
-import { Facets } from "./facets.ts";
+import { Orbs } from "./orbs.ts";
 import { Lifecycle } from "./lifecycle.ts";
 import { Programs } from "./programs.ts";
-import type { Environment, FacetRecord, ObjectRecord, ReferenceRecord } from "./records.ts";
+import type { Environment, OrbRecord, ObjectRecord, ReferenceRecord } from "./records.ts";
 import { References } from "./references.ts";
 import { Replacements } from "./reload.ts";
 import { Resources } from "./resources.ts";
@@ -32,7 +32,7 @@ export class Session implements StateBackend {
   readonly values: Values;
   readonly resources = new Resources(this);
   readonly activities = new Activities(this);
-  readonly facets = new Facets(this);
+  readonly orbs = new Orbs(this);
   readonly replacements = new Replacements(this);
   readonly programs = new Programs(this);
   readonly objects = new Map<number, ObjectRecord>();
@@ -69,7 +69,7 @@ export class Session implements StateBackend {
     const clock = options.now ?? (() => performance.now());
     const origin = clock();
     this.now = () => Math.floor(clock() - origin);
-    const hostFacet: FacetRecord = {
+    const hostOrb: OrbRecord = {
       info: {
         id: 0,
         owner: 0,
@@ -82,7 +82,7 @@ export class Session implements StateBackend {
       },
       definition: { name: "$host", apiVersion: 1 },
     };
-    this.hostScope = this.scopes.environment({ kind: OwnerKind.Host }, hostFacet);
+    this.hostScope = this.scopes.environment({ kind: OwnerKind.Host }, hostOrb);
     for (const [name, declaration] of Object.entries(options.resources ?? {})) {
       new Declaration(this, this.hostScope).resource(name, declaration);
     }

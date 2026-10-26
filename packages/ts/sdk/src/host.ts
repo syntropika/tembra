@@ -1,8 +1,8 @@
-import { facet } from "./authoring/facet.ts";
+import { orb } from "./authoring/orb.ts";
 import type {
   AcquisitionOptions,
   Completion,
-  FacetDefinition,
+  OrbDefinition,
   HostOptions,
   ReloadOptions,
   ResourceOptions,
@@ -30,30 +30,30 @@ export class Host {
     return this.session.kernel.features;
   }
 
-  /** Install new facets and activate their required scopes. */
-  install(definition: FacetDefinition | readonly FacetDefinition[]): Promise<void> {
-    return this.session.facets.install(
-      Array.isArray(definition) ? definition : [definition as FacetDefinition],
+  /** Install new orbs and activate their required scopes. */
+  install(definition: OrbDefinition | readonly OrbDefinition[]): Promise<void> {
+    return this.session.orbs.install(
+      Array.isArray(definition) ? definition : [definition as OrbDefinition],
     );
   }
 
-  /** Load a facet with the host's module loader, then install it. */
+  /** Load an orb with the host's module loader, then install it. */
   async load(location: string | URL): Promise<void> {
     if (!this.session.options.load) throw new Error("This host has no module loader");
     await this.install(await this.session.options.load(location));
   }
 
   /** Prepare and commit a replacement using the kernel's lifecycle order. */
-  reload(definitions: readonly FacetDefinition[], options?: ReloadOptions) {
+  reload(definitions: readonly OrbDefinition[], options?: ReloadOptions) {
     return this.session.replacements.replace(definitions, options);
   }
 
   /** Build a replacement candidate without adopting it. */
-  prepare(definitions: readonly FacetDefinition[], options?: ReloadOptions) {
+  prepare(definitions: readonly OrbDefinition[], options?: ReloadOptions) {
     return this.session.replacements.prepare(definitions, options);
   }
 
-  /** Remove named facets through the replacement lifecycle. */
+  /** Remove named orbs through the replacement lifecycle. */
   remove(names: readonly string[], options?: ReloadOptions) {
     return this.session.replacements.replace([], options, names);
   }
@@ -96,12 +96,12 @@ export class Host {
     return this.session.telemetry?.drain() ?? [];
   }
 
-  /** Describe installed facets without activating their services. */
-  installedFacets() {
+  /** Describe installed orbs without activating their services. */
+  installedOrbs() {
     return this.session.kernel
-      .command<import("./bridge/kernel.ts").KernelFacet[]>(KernelOp.Facets)
+      .command<import("./bridge/kernel.ts").KernelOrb[]>(KernelOp.Orbs)
       .map((info) => {
-        const definition = this.session.facets.records.get(info.id)?.definition;
+        const definition = this.session.orbs.records.get(info.id)?.definition;
         const description = Object.freeze({
           ...info,
           hookCapabilities: Object.fromEntries(
@@ -126,7 +126,7 @@ export class Host {
 export function createHost(options: HostOptions): Host {
   return new Host(options);
 }
-export { facet };
+export { orb };
 
 export {
   Code,

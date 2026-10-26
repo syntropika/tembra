@@ -15,15 +15,15 @@
     },
     "engine-node": {
       "name": "@tembra/engine-node",
-      "version": "0.2.0",
+      "version": "0.1.0",
     },
     "engine-wasm": {
       "name": "@tembra/engine-wasm",
-      "version": "0.2.0",
+      "version": "0.1.0",
     },
     "sdk": {
       "name": "@tembra/sdk",
-      "version": "0.2.0",
+      "version": "0.1.0",
       "dependencies": {
         "@tembra/engine-node": "workspace:^",
         "@tembra/engine-wasm": "workspace:^",

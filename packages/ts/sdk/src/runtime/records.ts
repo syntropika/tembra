@@ -2,20 +2,20 @@ import type {
   Completion,
   DynamicReference,
   EventSource,
-  FacetDefinition,
+  OrbDefinition,
   ListenerOptions,
   Resource,
   ResourceOptions,
   TaskScope,
 } from "../authoring/types.ts";
-import type { KernelFacet, Owner } from "../bridge/kernel.ts";
+import type { KernelOrb, Owner } from "../bridge/kernel.ts";
 import { EnvironmentPhase } from "../bridge/protocol.ts";
 import type { StateBinding, StateOptions } from "../state.ts";
 import type { Context } from "./context.ts";
 
-export interface FacetRecord {
-  info: KernelFacet;
-  definition: FacetDefinition;
+export interface OrbRecord {
+  info: KernelOrb;
+  definition: OrbDefinition;
   scope?: Environment;
   ticket?: number | undefined;
 }
@@ -27,7 +27,7 @@ export interface Address {
 export interface ObjectRecord {
   id: number;
   address: Address;
-  facet: number;
+  orb: number;
   versions: Map<number, Environment>;
   activation: Promise<void>;
   live?: boolean;
@@ -38,7 +38,7 @@ export interface ObjectRecord {
 export interface Environment {
   id: number;
   owner: Owner;
-  facet: FacetRecord;
+  orb: OrbRecord;
   object?: ObjectRecord;
   phase: EnvironmentPhase;
   value: any;

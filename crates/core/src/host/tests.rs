@@ -24,7 +24,7 @@ fn multi_identity_reservation_at_the_limit_leaves_preparation_unchanged() {
     host.inner.borrow_mut().next = MAX_ID;
     let before = host.diagnostics();
     let error = host
-        .prepare(vec![Facet::new("limit", 1)], vec![])
+        .prepare(vec![Orb::new("limit", 1)], vec![])
         .unwrap_err();
     assert_eq!(error.code, Code::Exhausted);
     assert_eq!(host.diagnostics(), before);
@@ -32,13 +32,11 @@ fn multi_identity_reservation_at_the_limit_leaves_preparation_unchanged() {
     assert_eq!(host.allocate_handle().unwrap(), MAX_ID);
 }
 
-fn install(host: &Host) -> InstalledFacet {
-    let reload = host
-        .prepare(vec![Facet::new("example", 1)], vec![])
-        .unwrap();
-    let facet = reload.facets[0].clone();
+fn install(host: &Host) -> InstalledOrb {
+    let reload = host.prepare(vec![Orb::new("example", 1)], vec![]).unwrap();
+    let orb = reload.orbs[0].clone();
     host.commit(reload.id, vec![]).unwrap();
-    facet
+    orb
 }
 
 #[test]
@@ -46,39 +44,39 @@ fn admitted_roots_retain_old_versions_but_new_task_roots_use_current_code() {
     let host = Host::new();
     let old = install(&host);
     let root = host.begin_root("host").unwrap();
-    let task = host.begin_task(Owner::Facet(old.owner)).unwrap();
+    let task = host.begin_task(Owner::Orb(old.owner)).unwrap();
     let current = install(&host);
     for _ in 0..100 {
         let root = host.begin_root("host").unwrap();
         host.end_root(root).unwrap();
     }
     assert_eq!(host.inner.borrow().versions.len(), 2);
-    assert!(host.facet(old.id).is_ok());
+    assert!(host.orb(old.id).is_ok());
     let retained = host.task_root(task, "host").unwrap();
     assert_eq!(
         host.inner.borrow().roots[&retained].version,
         current.code_version
     );
     host.end_root(root).unwrap();
-    assert!(host.facet(old.id).is_err());
+    assert!(host.orb(old.id).is_err());
     host.finish_task(task).unwrap();
     host.end_root(retained).unwrap();
     assert_eq!(host.inner.borrow().versions.len(), 1);
-    assert!(host.facet(old.id).is_err());
-    assert!(host.facet(current.id).is_ok());
+    assert!(host.orb(old.id).is_err());
+    assert!(host.orb(current.id).is_ok());
     assert!(host.inner.borrow().version_users.is_empty());
-    assert!(host.drain().contains(&Action::RetireFacet(old.id)));
+    assert!(host.drain().contains(&Action::RetireOrb(old.id)));
 }
 
 #[test]
 fn an_unrelated_task_does_not_exhaust_the_retained_version_limit() {
     let host = Host::new();
     let owner = install(&host).owner;
-    let task = host.begin_task(Owner::Facet(owner)).unwrap();
+    let task = host.begin_task(Owner::Orb(owner)).unwrap();
     for _ in 0..40 {
-        let facet = install(&host);
+        let orb = install(&host);
         let root = host.task_root(task, "host").unwrap();
-        assert_eq!(host.inner.borrow().roots[&root].version, facet.code_version);
+        assert_eq!(host.inner.borrow().roots[&root].version, orb.code_version);
         host.end_root(root).unwrap();
         assert_eq!(host.inner.borrow().versions.len(), 1);
     }
@@ -86,11 +84,11 @@ fn an_unrelated_task_does_not_exhaust_the_retained_version_limit() {
 }
 
 fn lingering_object(host: &Host, linger_ms: u32) -> Acquisition {
-    let mut facet = Facet::new("linger", 1);
+    let mut orb = Orb::new("linger", 1);
     let mut service = Service::new("linger", ["read"]);
     service.linger_ms = linger_ms;
-    facet.services.push(service);
-    let reload = host.prepare(vec![facet], vec![]).unwrap();
+    orb.services.push(service);
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
     host.commit(reload.id, vec![]).unwrap();
     let claim = host
         .acquire(
@@ -203,9 +201,9 @@ fn a_task_finishing_during_linger_preserves_the_original_deadline() {
 #[test]
 fn shutdown_releases_only_the_dependents_of_each_object() {
     let host = Host::new();
-    let mut facet = Facet::new("example", 1);
-    facet.services.push(Service::new("example", ["read"]));
-    let reload = host.prepare(vec![facet], vec![]).unwrap();
+    let mut orb = Orb::new("example", 1);
+    orb.services.push(Service::new("example", ["read"]));
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
     host.commit(reload.id, vec![]).unwrap();
     let get = |key: &str| {
         host.acquire(
@@ -236,11 +234,11 @@ fn shutdown_releases_only_the_dependents_of_each_object() {
 #[test]
 fn a_forgotten_dependency_cannot_block_provider_shutdown() {
     let host = Host::new();
-    let mut facet = Facet::new("example", 1);
+    let mut orb = Orb::new("example", 1);
     let mut service = Service::new("example", ["read"]);
     service.linger_ms = 100;
-    facet.services.push(service);
-    let reload = host.prepare(vec![facet], vec![]).unwrap();
+    orb.services.push(service);
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
     host.commit(reload.id, vec![]).unwrap();
     let get = |key: &str| {
         host.acquire(
@@ -264,7 +262,7 @@ fn a_forgotten_dependency_cannot_block_provider_shutdown() {
     host.register_scope(crate::Scope {
         id: scope,
         owner: Owner::Host,
-        facet: 0,
+        orb: 0,
         parents: vec![],
         dependencies: vec![provider.reference],
         resources: vec![],
