@@ -33,6 +33,7 @@ servers, browsers and Web Workers.
 
 ## Development
 
+See the [guide](docs/README.md) for concepts and Rust and TypeScript usage.
 See [DEVELOP.md](DEVELOP.md) for setup, tools, builds, tests and technical details.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for code structure and documentation conventions.
 
