@@ -83,8 +83,7 @@
     "build": "bun build.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun test test --timeout 15000",
-    "test:node": "node --test test/node.test.mjs",
-    "test:browser": "bun scripts/test-browser.ts"
+    "test:node": "node --test test/node.test.mjs"
   },
   "dependencies": {
     "@tembra/engine-node": "workspace:*",

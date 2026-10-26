@@ -196,7 +196,7 @@ just build-node
 just build-wasm
 just build-sdk
 just test
-bun run --cwd packages/ts/sdk test:browser
+bun run --cwd packages/ts test:browser
 just check
 ```
 

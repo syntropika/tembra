@@ -3,14 +3,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const precision = await Bun.build({
-  entrypoints: [new URL("../test/precision.ts", import.meta.url).pathname],
+  entrypoints: [new URL("../sdk/test/precision.ts", import.meta.url).pathname],
   target: "browser",
   format: "esm",
 });
 if (!precision.success) throw new AggregateError(precision.logs, "Precision fixture build failed");
 const precisionSource = await precision.outputs[0]!.text();
 const rootGate = await Bun.build({
-  entrypoints: [new URL("../test/root-gate.ts", import.meta.url).pathname],
+  entrypoints: [new URL("../sdk/test/root-gate.ts", import.meta.url).pathname],
   target: "browser",
   format: "esm",
 });
@@ -61,7 +61,7 @@ try {
 </script></body></html>`;
 
 const browserSDK = await Bun.build({
-  entrypoints: [new URL("../src/browser.ts", import.meta.url).pathname],
+  entrypoints: [new URL("../sdk/src/browser.ts", import.meta.url).pathname],
   target: "browser",
   format: "esm",
   plugins: [
@@ -78,7 +78,7 @@ const browserSDK = await Bun.build({
 });
 if (!browserSDK.success) throw new AggregateError(browserSDK.logs, "Browser SDK build failed");
 const browserSource = await browserSDK.outputs[0]!.text();
-const root = path.resolve(import.meta.dir, "../../../..");
+const root = path.resolve(import.meta.dir, "../../..");
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
