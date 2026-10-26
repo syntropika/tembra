@@ -23,6 +23,7 @@ import { Scopes } from "./scopes.ts";
 
 /** Shared JS values and callbacks. Rust owns lifecycle policy. */
 export class Session implements StateBackend {
+  readonly contextTokens = new WeakMap<object, { root: number; source: number }>();
   readonly calls = new Calls(this);
   readonly handles = new References(this);
   readonly scopes = new Scopes(this);

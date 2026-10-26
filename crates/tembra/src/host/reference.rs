@@ -62,10 +62,12 @@ impl Reference {
         context.check()?;
         self.ready().await?;
         context.check()?;
-        let call = self
-            .host
-            .kernel()
-            .begin_call(self.id, context.root, method)?;
+        let call = self.host.kernel().begin_call_with_context(
+            self.id,
+            context.root,
+            method,
+            context.frame(),
+        )?;
         let selected = {
             let objects = self.host.0.objects.borrow();
             objects.get(&call.object).and_then(|object| {

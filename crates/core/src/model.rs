@@ -126,6 +126,7 @@ pub struct Acquisition {
 /// An admitted physical invocation. Finishing its observer does not finish this invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Invocation {
+    pub context: Id,
     pub id: Id,
     pub root: Id,
     pub object: Id,
@@ -235,6 +236,7 @@ pub(crate) struct Reference {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Root {
+    pub contexts: BTreeSet<Id>,
     pub version: Version,
     pub principal: String,
     pub active: bool,

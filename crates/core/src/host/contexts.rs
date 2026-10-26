@@ -33,9 +33,13 @@ impl Host {
             .get_mut(&root)
             .ok_or_else(|| gone(Reason::Root))?;
         record.active = false;
-        if record.calls == 0 {
-            inner.remove_root(root);
-        }
+        let leases = if record.calls == 0 {
+            inner.remove_root(root)
+        } else {
+            Vec::new()
+        };
+        drop(inner);
+        drop(leases);
         Ok(())
     }
 
@@ -61,7 +65,19 @@ impl Host {
     /// Admits one physical call against its root's retained implementation version.
     /// Refuses roots older than the object's minimum version before retaining a call.
     pub fn begin_call(&self, reference: Id, root: Id, method: &str) -> Result<Invocation> {
+        self.begin_call_with_context(reference, root, method, 0)
+    }
+
+    /// Admit one call with its own immutable frame.
+    pub fn begin_call_with_context(
+        &self,
+        reference: Id,
+        root: Id,
+        method: &str,
+        frame: Id,
+    ) -> Result<Invocation> {
         let mut inner = self.inner.borrow_mut();
+        inner.check_frame(root, frame)?;
         let context = inner.check_root(root)?;
         if inner.closing && !context.cleanup {
             return Err(Error::new(Code::Closed, Reason::Host, "host is closing"));
@@ -126,6 +142,7 @@ impl Host {
         let facet_owner = inner.check_facet(facet, root, version)?;
         let id = inner.id()?;
         let call = Invocation {
+            context: frame,
             id,
             root,
             object,
@@ -154,9 +171,11 @@ impl Host {
         }
         let root = inner.roots.get_mut(&call.root).expect("call retains root");
         root.calls -= 1;
-        if root.calls == 0 && !root.active {
-            inner.remove_root(call.root);
-        }
+        let leases = if root.calls == 0 && !root.active {
+            inner.remove_root(call.root)
+        } else {
+            Vec::new()
+        };
         if call.object != 0 {
             inner
                 .objects
@@ -165,6 +184,8 @@ impl Host {
                 .calls -= 1;
             inner.maybe_dispose(call.object);
         }
+        drop(inner);
+        drop(leases);
         Ok(())
     }
 
@@ -186,7 +207,20 @@ impl Host {
         operation: Id,
         object: Option<Id>,
     ) -> Result<Invocation> {
+        self.begin_operation_with_context(facet, root, operation, object, 0)
+    }
+
+    /// Admit a facet operation with its caller's frame.
+    pub fn begin_operation_with_context(
+        &self,
+        facet: Id,
+        root: Id,
+        operation: Id,
+        object: Option<Id>,
+        frame: Id,
+    ) -> Result<Invocation> {
         let mut inner = self.inner.borrow_mut();
+        inner.check_frame(root, frame)?;
         let context = inner.check_root(root)?;
         let version = context.version;
         let snapshot = inner
@@ -225,6 +259,7 @@ impl Host {
         }
         let id = inner.id()?;
         let invocation = Invocation {
+            context: frame,
             id,
             root,
             object: object.unwrap_or(0),

@@ -119,6 +119,7 @@ impl Inner {
                 active: true,
                 cancelled: false,
                 calls: 0,
+                contexts: BTreeSet::new(),
                 touched: BTreeSet::new(),
                 facets: BTreeSet::new(),
                 cleanup,
@@ -277,8 +278,16 @@ impl Inner {
     }
 
     /// Remove root memberships and release its retained version.
-    pub fn remove_root(&mut self, id: Id) {
+    pub fn remove_root(&mut self, id: Id) -> Vec<crate::OpaqueContextValue> {
+        let mut leases = Vec::new();
         if let Some(root) = self.roots.remove(&id) {
+            for frame in root.contexts {
+                if let Some(frame) = self.context_frames.remove(&frame)
+                    && let crate::ContextValue::Opaque(lease) = frame.value
+                {
+                    leases.push(lease);
+                }
+            }
             for object in root.touched {
                 self.object_roots.remove(&object, id);
                 if self
@@ -301,6 +310,7 @@ impl Inner {
             }
             self.release_version(root.version);
         }
+        leases
     }
 
     /// Retire facet callbacks after all version and object claims end.

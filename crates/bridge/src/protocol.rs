@@ -18,6 +18,9 @@ macro_rules! names {
 names! {
     /// Stable wire names; unknown input is rejected before dispatch.
     KernelOp {
+        ContextDerive => "context-derive",
+        ContextValue => "context-value",
+        ContextStats => "context-stats",
         Allocate => "allocate",
         ScopeRegister => "scope-register",
         ScopeExists => "scope-exists",

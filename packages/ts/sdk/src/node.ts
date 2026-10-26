@@ -50,3 +50,5 @@ export {
 } from "./bridge/identifiers.ts";
 
 export { Errors, type ErrorDescriptor } from "./errors.ts";
+
+export { ContextKey, ContextKind, opaqueFrom, type OpaqueContextValue } from "./context-key.ts";

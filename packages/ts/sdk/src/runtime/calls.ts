@@ -69,9 +69,10 @@ export class Calls {
     const invocation = session.kernel.command<Invocation>(KernelOp.BeginCall, {
       reference: reference.id,
       root: ctx.root,
+      context: ctx.frame || undefined,
       method,
     });
-    const entered = new Context(session, ctx.root, invocation);
+    const entered = new Context(session, ctx.root, invocation, ctx.frame);
     const physical = session.track(
       (async () => {
         const sampled = session.telemetry?.sample();
@@ -113,18 +114,19 @@ export class Calls {
     environment: Environment,
     operation: number,
     handle: (ctx: Context) => Completion<T>,
-    root?: number,
+    root?: number | Context,
   ): Promise<T> {
     const session = this.session;
     const execute = async (ctx: Context) => {
       const invocation = session.kernel.command<Invocation>(KernelOp.BeginOperation, {
         facet: environment.facet.info.id,
         root: ctx.root,
+        context: ctx.frame || undefined,
         operation,
         ...(environment.object ? { object: environment.object.id } : {}),
       });
       try {
-        return await handle(new Context(session, ctx.root, invocation));
+        return await handle(new Context(session, ctx.root, invocation, ctx.frame));
       } finally {
         session.kernel.command(KernelOp.FinishCall, { call: invocation.id });
         session.lifecycle.flush();
@@ -132,7 +134,7 @@ export class Calls {
     };
     return root === undefined
       ? this.root(execute, false, undefined, session.principalFor(environment.object?.id ?? 0))
-      : execute(new Context(session, root));
+      : execute(typeof root === "number" ? new Context(session, root) : root);
   }
 
   /** Stop waiting on cancellation while physical work remains tracked. */

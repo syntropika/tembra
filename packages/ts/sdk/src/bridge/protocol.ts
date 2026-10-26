@@ -2,6 +2,9 @@
 type ValueOf<T> = T[keyof T];
 
 export const KernelOp = Object.freeze({
+  ContextDerive: "context-derive",
+  ContextValue: "context-value",
+  ContextStats: "context-stats",
   Allocate: "allocate",
   ScopeRegister: "scope-register",
   ScopeExists: "scope-exists",

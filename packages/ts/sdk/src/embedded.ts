@@ -9,6 +9,7 @@ import {
 } from "./bridge/identifiers.ts";
 import { jsonCodec } from "./codecs/json.ts";
 import { TembraError } from "./error.ts";
+import { ContextKey, ContextKind, opaqueFrom } from "./context-key.ts";
 import { Errors } from "./errors.ts";
 import { Host } from "./host.ts";
 
@@ -118,6 +119,9 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
 }
 
 globals.Tembra = Object.freeze({
+  ContextKey,
+  ContextKind,
+  opaqueFrom,
   createHost,
   jsonCodec,
   Code,

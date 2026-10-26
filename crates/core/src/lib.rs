@@ -3,6 +3,7 @@
 //! The kernel stores opaque value and callback identities. The adapter that issued an identity
 //! owns its value, performs validation, and executes user code outside kernel borrows.
 
+mod context_values;
 mod error;
 #[cfg(feature = "hooks")]
 mod hooks;
@@ -16,6 +17,7 @@ mod subscriptions;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 
+pub use context_values::*;
 pub use error::{Code, Error, Reason, Result};
 #[cfg(feature = "hooks")]
 pub use hooks::*;

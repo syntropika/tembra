@@ -4,6 +4,7 @@ use super::decode::*;
 use super::encode::*;
 use super::*;
 
+mod context;
 mod lifecycle;
 
 impl Kernel {
@@ -15,6 +16,9 @@ impl Kernel {
         let id = |key| identity(request, key);
         let unit = || Ok(Value::Null);
         match op {
+            KernelOp::ContextDerive | KernelOp::ContextValue | KernelOp::ContextStats => {
+                self.execute_context(request, op)
+            }
             KernelOp::Allocate => Ok(json!(h.allocate_handle()?)),
             KernelOp::Features => Ok(json!({
                 "hooks": cfg!(feature="hooks"),
@@ -158,16 +162,18 @@ impl Kernel {
                 h.cancel_root(id("root")?)?;
                 unit()
             }
-            KernelOp::BeginCall => Ok(invocation_value(&h.begin_call(
+            KernelOp::BeginCall => Ok(invocation_value(&h.begin_call_with_context(
                 id("reference")?,
                 id("root")?,
                 text(request, "method")?,
+                optional_identity(request, "context")?.unwrap_or(0),
             )?)),
-            KernelOp::BeginOperation => Ok(invocation_value(&h.begin_operation(
+            KernelOp::BeginOperation => Ok(invocation_value(&h.begin_operation_with_context(
                 id("facet")?,
                 id("root")?,
                 id("operation")?,
                 optional_identity(request, "object")?,
+                optional_identity(request, "context")?.unwrap_or(0),
             )?)),
             KernelOp::FinishCall => {
                 h.finish_call(id("call")?)?;

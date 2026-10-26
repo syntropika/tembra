@@ -105,6 +105,36 @@ Facets can also supply an error descriptor with a built-in `Code`, their own rea
 Service names, object keys, principals and custom hook capabilities remain application-defined.
 These named values require no schema, code generation or service argument/result declarations.
 
+## Context metadata
+
+Typed keys identify text, safe signed integers, booleans or owner-issued opaque references.
+Rust validates key identity, version and scalar kind without generated validators:
+
+```ts
+import { ContextKey } from "@tembra/sdk";
+
+const Trace = ContextKey.text("request/trace", 1);
+await host.root(async (ctx) => {
+  const tagged = ctx.with(Trace, "request-42");
+  await reference.read(tagged);
+  console.log(tagged.value(Trace));
+});
+```
+
+`with()` preserves principal, implementation version and invocation lifetime. Calls and hook
+contributions inherit their caller's frame. Concurrent branches remain isolated. Reusing a frame
+passes its identity with the existing admission request; it does not copy all values or add a
+propagation request. Reads walk at most 64 ancestors.
+
+Frames remain indexed by their root until it ends and every physical call settles. Cancellation
+does not release active work. Limits are 64 ancestors, 4096 frames per root, 1024 key contracts per
+host, 256 bytes per key name and 4096 bytes per text value. Reuse derivations within long operations.
+
+Storage owns opaque reference issuance, validation and revocation. Tembra retains the owner's
+lease and drops it outside kernel borrows after physical settlement. Closing a storage scope can
+revoke it earlier; an immutable context does not keep that scope open. `exportValues([Key])`
+exports only explicitly selected scalars. Opaque references remain local.
+
 ## Ownership and replacement
 
 Object identity is the service namespace, a tuple of string keys and a trusted principal. An

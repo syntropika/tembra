@@ -15,6 +15,7 @@ impl Host {
         Ok(Context {
             host: self.clone(),
             root,
+            frame: invocation.as_ref().map_or(0, |call| call.context),
             call: invocation,
         })
     }
@@ -53,12 +54,49 @@ impl Drop for RootGuard {
 /// Contexts are issued by a host, and become unusable when their root or invocation ends.
 #[derive(Clone)]
 pub struct Context {
+    frame: core::Id,
     pub(crate) host: Host,
     pub root: core::Id,
     call: Option<core::Invocation>,
 }
 
 impl Context {
+    /// Read the frame identity for local adapter calls.
+    pub fn frame(&self) -> core::Id {
+        self.frame
+    }
+
+    /// Derive values without extending identity or invocation lifetime.
+    pub fn with<T: core::ContextDatum>(&self, key: &core::ContextKey<T>, value: T) -> Result<Self> {
+        self.check()?;
+        let frame = self.host.kernel().derive_context(
+            self.root,
+            self.frame,
+            self.call.as_ref().map(|call| call.id),
+            key.contract(),
+            value.into_value(),
+        )?;
+        Ok(Self {
+            host: self.host.clone(),
+            root: self.root,
+            call: self.call.clone(),
+            frame,
+        })
+    }
+
+    /// Read typed metadata while this invocation remains valid.
+    pub fn value<T: core::ContextDatum>(&self, key: &core::ContextKey<T>) -> Result<Option<T>> {
+        self.check()?;
+        if self.frame == 0 {
+            return Ok(None);
+        }
+        self.host
+            .kernel()
+            .context_value(self.root, self.frame, &key.contract())?
+            .map(T::from_value)
+            .transpose()
+    }
+
     /// Reject an expired root or completed invocation.
     pub fn check(&self) -> Result<()> {
         self.host.kernel().check_root(self.root)?;

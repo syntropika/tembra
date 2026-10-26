@@ -204,7 +204,7 @@ export class Facets {
         scope,
         operation,
         (entered) => contributor.handler(entered, input, next),
-        ctx.root,
+        ctx,
       );
     });
     return definition.run(context, input, participants);

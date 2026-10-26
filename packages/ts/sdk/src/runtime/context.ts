@@ -1,3 +1,4 @@
+import { ContextKey, ContextKind, readContextValue } from "../context-key.ts";
 import { KernelOp } from "../bridge/protocol.ts";
 import { Errors } from "../errors.ts";
 
@@ -15,8 +16,39 @@ export class Context {
     readonly session: Session,
     readonly root: number,
     readonly invocation?: Invocation,
+    readonly frame: number = 0,
   ) {
     issued.set(this, this);
+  }
+
+  /** Derive one binding without changing identity or lifetime. */
+  with<T>(key: ContextKey<T>, value: T): Context {
+    const source = key.source(value, this);
+    const frame = this.session.kernel.command<number>(KernelOp.ContextDerive, {
+      root: this.root,
+      context: this.frame,
+      call: this.invocation?.id,
+      key,
+      ...(key.kind === ContextKind.Opaque ? { source } : { value }),
+    });
+    return new Context(this.session, this.root, this.invocation, frame);
+  }
+
+  /** Read the nearest binding of this typed key. */
+  value<T>(key: ContextKey<T>): T | undefined {
+    return readContextValue(this, key, this.frame);
+  }
+
+  /** Export only explicitly allowed scalar metadata. */
+  exportValues(keys: readonly ContextKey<unknown>[]): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (key.kind === ContextKind.Opaque)
+        throw new TypeError("Local opaque references cannot be exported");
+      const value = this.value(key);
+      if (value !== undefined) result[`${key.name}@${key.version}`] = value;
+    }
+    return result;
   }
 
   /** Read the root identity from the kernel. */
