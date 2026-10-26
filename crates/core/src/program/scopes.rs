@@ -184,6 +184,8 @@ impl crate::host::Inner {
             let Some(scope) = self.scopes.get(id).cloned() else {
                 continue;
             };
+            #[cfg(feature = "hooks")]
+            self.cancel_scope_observations(*id);
             if !scope.closing {
                 self.track_scope_version(&scope, false);
                 self.scopes.get_mut(id).expect("checked scope").closing = true;

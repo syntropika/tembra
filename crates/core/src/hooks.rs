@@ -1,3 +1,6 @@
+pub(crate) mod observation;
+pub use observation::HookObservation;
+
 use crate::Reason;
 use crate::{
     Code, Error, Host, Id, Result,

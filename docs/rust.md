@@ -92,23 +92,47 @@ list. Both methods bypass serialization when the selected callback is Rust.
 
 ## Typed hooks (`hooks`)
 
-Declare a shared `Hook<A, R>` descriptor with `Hook::series`, `Hook::waterfall` or
-`Hook::bail`. Attach it with `Orb::hook`, and bind its handle during an orb or service
-factory using `Declaration::hook(&descriptor)`. Only the declaring orb can bind that
-hook. Register participants with `Orb::contribute(target, &descriptor, priority, handle)`;
+Declare a shared `Hook<A, R>` descriptor with `Hook::series`, `Hook::waterfall`,
+`Hook::waterfall_until` or `Hook::bail`. Attach it with `Orb::hook`, and bind its handle
+during an orb or service factory using `Declaration::hook(&descriptor)`. Only the declaring orb
+can bind that hook. Register participants with `Orb::contribute(target, &descriptor, priority, handle)`;
 external targets must be declared in `requires`, including the hook name and API version.
 Native contracts with incompatible argument/result types are rejected before installation.
 
-| Composition                  | Participant result | Run result   | Empty plan     |
-| ---------------------------- | ------------------ | ------------ | -------------- |
-| `Hook::<A, ()>::series`      | `()`               | `()`         | `()`           |
-| `Hook::<A, A>::waterfall`    | `A`                | `A`          | Original input |
-| `Hook::<A, Option<R>>::bail` | `Option<R>`        | First `Some` | `None`         |
+| Composition                     | Participant result | Run result                     | Empty plan     |
+| ------------------------------- | ------------------ | ------------------------------ | -------------- |
+| `Hook::<A, ()>::series`         | `()`               | `()`                           | `()`           |
+| `Hook::<A, A>::waterfall`       | `A`                | `A`                            | Original input |
+| `Hook::<A, A>::waterfall_until` | `A`                | First terminal or final result | Original input |
+| `Hook::<A, Option<R>>::bail`    | `Option<R>`        | First `Some`                   | `None`         |
 
 Plans run in ascending priority, then shared registration order. Series supplies the
 same input to each participant; waterfall passes each result forward; bail stops at the
 first decision. Series and bail require `A: Clone`; choose `Rc`-backed application data
 when shared identity matters. Every composition stops on error.
+
+`waterfall_until(name, should_stop)` checks the initial input and each successful accumulated
+result. The first value accepted by the predicate returns unchanged, and later participants do
+not run. This lets one contributor transform arguments and a later contributor block the operation
+without requiring subsequent contributors to preserve that block:
+
+```rust
+use tembra::Hook;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum Decision {
+    Continue { arguments: String },
+    Block { reason: String },
+}
+
+let before_call = Hook::<Decision, Decision>::waterfall_until("before_call", |decision| {
+    matches!(decision, Decision::Block { .. })
+});
+```
+
+An empty plan returns the input, and terminal input invokes no contributor. Contributor errors
+propagate as errors; earlier external effects are not rolled back. Represent an ordinary terminal
+decision in the result type. The predicate does not alter cancellation or object ownership.
 
 An omitted JavaScript input is decoded as a Rust unit/null-compatible input.
 `None` in bail means JavaScript `undefined`, while `Some(Value::Null)` remains a defined
@@ -120,6 +144,46 @@ releasing a reference or requesting cancellation does not finish an active callb
 Keep the supplied executor running through shutdown.
 
 Run `cargo run --locked -p tembra --features hooks --example hooks` for a complete example.
+
+### Owner-bound observation
+
+A bound `HookHandle<A, ()>` can `observe(&source, payload)` once on behalf of its original physical
+invocation. This uses the same plan, ordering and native/JavaScript dispatch as ordinary hooks.
+The payload is application-defined; Tembra imposes no execution-outcome type. `run` remains the
+ordinary repeatable operation. `observe` provides a separate owner-bound admission that remains
+possible after the original operation was cancelled or its logical waiter ended.
+
+```rust,ignore
+let primary = execute(&ctx).await;
+let payload = describe(&primary);
+let observer_result = finished.observe(&ctx, payload).await;
+report_observer_result(observer_result);
+primary
+```
+
+The declaring orb must match the source invocation. An object-bound handle also requires its exact
+object; an orb-bound handle retains the actual source object. A bare root, settled source, foreign
+owner, observer or observer-dependent call cannot issue this admission. One successful admission
+consumes the source invocation's allowance across all its hook handles, even for an empty plan or
+participant failure. Validation refusal does not consume it. Original calls remain cancelled or
+expired. Keep the physical callback alive and await observation before returning; its logically
+cancelled caller need not wait for physical completion.
+
+Observation uses the original principal and exact version with an empty metadata frame. Carry
+correlation in the payload. Old frames and storage authority are not restored. Closing or retired
+owners and version gates can refuse observation; no newer plan is substituted. Consumer policy
+keeps observer errors separate from the primary result and never treats them as replay permission.
+
+Exact source-scope anchors retain the original owner through all still-owned physical descendants.
+Dependent calls temporarily retain their own scopes. Once a dependent call has finished, releasing
+its reference and cleaning its scope do not cancel the remaining observation. Cleanup of the actual
+source owner or an active dependent call cancels relevant observation and waits for settlement.
+Cancellation is cooperative, so an uncooperative observer can delay cleanup. Historical root visits
+remain version/gate bookkeeping and do not define observation ownership.
+
+Rust and the JavaScript bound hook's `observe(source, payload)` use the same kernel admission and
+ownership indexes. See [decisions](decisions.md) and [compatibility](compatibility.md). This interface
+adds no arbitrary callback operation on `Context` and no separate consumer lifecycle manager.
 
 ## Cancellation, tasks and events
 
@@ -200,7 +264,7 @@ cancellation and physical cleanup retain their kernel contracts.
 
 | Capability                                                                  | Native facade status                                                                                                                                                 |
 | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Typed series, waterfall and bail hooks; mixed Rust/JS participants          | Implemented behind `hooks`                                                                                                                                           |
+| Typed hooks, including `waterfall_until`; mixed Rust/JS participants        | Implemented behind `hooks`                                                                                                                                           |
 | Managed service dependencies and root-owned acquisitions                    | Implemented with kernel ownership and readiness edges                                                                                                                |
 | Root/task/resource cancellation and physical shutdown                       | Implemented, including shared V8 action dispatch                                                                                                                     |
 | Typed managed events and bounded queues                                     | Implemented behind `subscriptions`                                                                                                                                   |
@@ -210,10 +274,10 @@ cancellation and physical cleanup retain their kernel contracts.
 | Idle/linger and lifecycle deadlines                                         | Driven by the native clock/timer adapter                                                                                                                             |
 | Foreign service calls preserving an entered context                         | Explicit `call_portable`; local `call` keeps its original trait requirements                                                                                         |
 | Synchronous Rust views of JavaScript-owned state                            | Not exposed; foreign data can be returned through portable methods                                                                                                   |
-| Arbitrary JavaScript hook policies, including parallel and middleware       | Available in JavaScript; the native authoring surface supplies the three requested typed compositions                                                                |
+| Arbitrary JavaScript hook policies, including parallel and middleware       | Available in JavaScript; the native authoring surface supplies the four typed compositions above                                                                     |
 | Native hot replacement, state migration and exclusive replacement resources | Outside this facade; compiled native implementations remain nonreplaceable. An exclusivity boolean alone would not provide the missing replacement/restore lifecycle |
 | RPC, multi-host routing, bundling and loading                               | Separate infrastructure; unchanged by native authoring support                                                                                                       |
 
-Behavioral tests live in `crates/tembra/tests/{hooks,composition,events,reactive,clock}.rs`
-and `crates/executor-js/tests/{hooks,native_facade}.rs`. They exercise public interfaces
+Behavioral tests live in `crates/tembra/tests/{hooks,waterfall_until,composition,events,reactive,clock}.rs`
+and `crates/executor-js/tests/{hooks,waterfall_until,native_facade}.rs`. They exercise public interfaces
 against the actual kernel and V8 runtime, including active work during closure.

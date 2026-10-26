@@ -28,6 +28,8 @@ mod events;
 mod execution;
 #[cfg(feature = "hooks")]
 mod hooks;
+#[cfg(feature = "hooks")]
+mod observation;
 mod reference;
 mod resources;
 mod scopes;

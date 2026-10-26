@@ -172,6 +172,19 @@ impl Kernel {
                 optional_identity(request, "object")?,
                 optional_identity(request, "context")?.unwrap_or(0),
             )?)),
+            #[cfg(feature = "hooks")]
+            KernelOp::BeginHookObservation => {
+                let source = id("source")?;
+                let orb = id("orb")?;
+                let operation = id("operation")?;
+                let object = optional_identity(request, "object")?;
+                let hook = text(request, "hook")?;
+                let observation = h.begin_hook_observation(source, orb, operation, object, hook)?;
+                Ok(json!({
+                    "invocation": invocation_value(&observation.invocation),
+                    "plan": &*observation.plan,
+                }))
+            }
             KernelOp::FinishCall => {
                 h.finish_call(id("call")?)?;
                 unit()

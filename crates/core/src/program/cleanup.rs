@@ -118,6 +118,11 @@ impl Host {
         let mut effects = Vec::new();
         let mut dropped = BTreeSet::new();
         for scope in leaves {
+            #[cfg(feature = "hooks")]
+            if self.inner.borrow().scope_has_observations(scope) {
+                program.waiting.insert(WaitKey::Scope(scope));
+                continue;
+            }
             let mut ids = self.scope_resources(&[scope]);
             ids.retain(|id| !self.inner.borrow().resource_claims.contains(id));
             let Some(ready) = self.closers(&ids, &program.retained, None, &mut program.waiting)?

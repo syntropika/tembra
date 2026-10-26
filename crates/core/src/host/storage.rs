@@ -64,6 +64,8 @@ pub(crate) struct Inner {
     #[cfg(feature = "hooks")]
     pub contributions: Vec<crate::hooks::Contribution>,
     #[cfg(feature = "hooks")]
+    pub observations: crate::hooks::observation::Observations,
+    #[cfg(feature = "hooks")]
     pub contribution_ordinal: u32,
     #[cfg(feature = "hooks")]
     pub plans: BTreeMap<(Version, String, String), Rc<[Id]>>,

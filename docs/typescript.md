@@ -74,3 +74,34 @@ The root manifest defines the Bun workspaces. The lockfile and tool versions are
 
 See [SDK entrypoints](../packages/ts/sdk/package.json), [Node host](../packages/ts/sdk/src/node.ts)
 and [browser host](../packages/ts/sdk/src/browser.ts).
+
+## Owner-bound hook observation
+
+A hook bound by `self.hook(name)` exposes `observe(source, payload)` as well as ordinary `run`.
+Observation admits one selected hook plan for the original physical owner, including after caller
+cancellation. The payload remains application-defined. Keep the primary result separate:
+
+```ts
+const primary = await execute(ctx);
+let observerError;
+try {
+  await finished.observe(ctx, describe(primary));
+} catch (error) {
+  observerError = error;
+}
+reportObserverError(observerError);
+return primary;
+```
+
+A successful admission is single-use across that source invocation's bound hooks; an empty plan or
+observer failure still consumes it. Refused validation does not consume it. A bare root, settled
+source, foreign owner or observer-dependent call cannot admit observation. An object-bound hook
+requires its source object. An orb-bound hook preserves the actual source object's ownership.
+
+The shared Rust kernel preserves the original principal, exact versioned plan and physical owner.
+The observation context has an empty metadata frame; put correlation in the explicit payload.
+Original cancelled contexts and expired frames remain unusable, and storage validates closed tokens.
+Closing owners and version gates can refuse observation. Await it inside the still-owned physical
+callback before returning; a logically cancelled caller may already have returned. The existing
+runtime tracks physical work through cleanup. Releasing a completed temporary dependency does not
+cancel observation. Cancellation remains cooperative and cannot undo or authorize replay of effects.

@@ -100,7 +100,7 @@ impl Inner {
     }
 
     /// Pin a known implementation version for one operation scope.
-    pub(super) fn root(
+    pub(crate) fn root(
         &mut self,
         version: Version,
         principal: String,
@@ -277,6 +277,8 @@ impl Inner {
     pub fn remove_root(&mut self, id: Id) -> Vec<crate::OpaqueContextValue> {
         let mut leases = Vec::new();
         if let Some(root) = self.roots.remove(&id) {
+            #[cfg(feature = "hooks")]
+            self.remove_observation_root(id);
             for frame in root.contexts {
                 if let Some(frame) = self.context_frames.remove(&frame)
                     && let crate::ContextValue::Opaque(lease) = frame.value

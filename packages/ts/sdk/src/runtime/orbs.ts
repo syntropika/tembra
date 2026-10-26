@@ -1,12 +1,12 @@
 import { Declaration } from "../authoring/declaration.ts";
 import { orb } from "../authoring/orb.ts";
 import type { ContributionHandler, OrbDefinition, Participant } from "../authoring/types.ts";
-import { Lifetime } from "../bridge/identifiers.ts";
-import type { KernelOrb, Reload } from "../bridge/kernel.ts";
+import { Code, Lifetime, Reason } from "../bridge/identifiers.ts";
+import type { HookObservation, KernelOrb, Reload } from "../bridge/kernel.ts";
 import { EnvironmentPhase, KernelOp, OwnerKind } from "../bridge/protocol.ts";
 import { refuse, TembraError } from "../error.ts";
 import { Errors } from "../errors.ts";
-import { Context, context as checkedContext } from "./context.ts";
+import { Context, context as checkedContext, issuedContext } from "./context.ts";
 import type { Environment, OrbRecord } from "./records.ts";
 import type { Session } from "./session.ts";
 
@@ -202,6 +202,57 @@ export class Orbs {
       return this.runContribution(operation, ctx, input, next);
     });
     return definition.run(context, input, participants);
+  }
+
+  /** Await the kernel's single owner-bound hook observation, including after cancellation.
+   * The observation starts with an empty metadata frame. It does not revive the source context.
+   * Host/owner cleanup can cancel it; physical work remains tracked until it settles.
+   */
+  async observe(
+    environment: Environment,
+    name: string,
+    operation: number,
+    source: Context,
+    input: unknown,
+  ): Promise<void> {
+    source = issuedContext(source, this.session);
+    const definition = environment.orb.definition.hooks?.[name];
+    if (!definition) refuse(Errors.Invalid.Hook, name);
+    if (!source.invocation)
+      throw new TembraError({
+        code: Code.Forbidden,
+        reason: Reason.ObservationSource,
+        message: "Hook observation requires the original physical invocation",
+      });
+    const admitted = this.session.kernel.command<HookObservation>(KernelOp.BeginHookObservation, {
+      source: source.invocation.id,
+      orb: environment.orb.info.id,
+      operation,
+      ...(environment.object ? { object: environment.object.id } : {}),
+      hook: name,
+    });
+    await this.session.track(
+      this.session.calls.root(
+        async () => {
+          try {
+            const context = new Context(
+              this.session,
+              admitted.invocation.root,
+              admitted.invocation,
+            );
+            const participants: Participant[] = admitted.plan.map(
+              (operation) => async (ctx, input, next) =>
+                this.runContribution(operation, ctx, input, next),
+            );
+            await definition.run(context, input, participants);
+          } finally {
+            this.session.lifecycle.finishCall(admitted.invocation.id);
+          }
+        },
+        false,
+        admitted.invocation.root,
+      ),
+    );
   }
 
   /** Execute a participant from either adapter under its own managed orb invocation. */

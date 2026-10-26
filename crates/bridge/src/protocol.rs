@@ -65,6 +65,7 @@ names! {
         CancelRoot => "cancel-root",
         BeginCall => "begin-call",
         BeginOperation => "begin-operation",
+        BeginHookObservation => "begin-hook-observation",
         FinishCall => "finish-call",
         Invocation => "invocation",
         StateInit => "state-init",

@@ -150,13 +150,22 @@ export class Declaration {
   hook(name: string): {
     /** Execute this hook under an issued operation context. */
     run(context: Context, input?: unknown): Promise<unknown>;
+    /** Await one observation from this hook's original physical operation, even after cancellation.
+     * A successful admission is consumed across all hook handles for that source invocation.
+     * The scope retains principal/version, starts with empty metadata, and respects owner/host close.
+     * Observer errors reject this promise; the consumer retains its primary outcome separately.
+     */
+    observe(source: Context, input?: unknown): Promise<void>;
   } {
     this.check();
     if (!this.session.kernel.features.hooks) refuse(Errors.Invalid.HooksDisabled);
     if (!this.environment.orb.definition.hooks?.[name]) refuse(Errors.Invalid.Hook, name);
+    const operation = this.session.kernel.command<number>(KernelOp.Allocate);
     return {
       /** Require an issued context before entering the declared hook. */
       run: (context, input) => this.session.orbs.runHook(this.environment, name, context, input),
+      observe: (source, input) =>
+        this.session.orbs.observe(this.environment, name, operation, source, input),
     };
   }
 }

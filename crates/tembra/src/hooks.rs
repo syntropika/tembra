@@ -102,6 +102,86 @@ impl<A: Serialize + DeserializeOwned + 'static> Hook<A, A> {
             }),
         }
     }
+
+    /// Pass each result to the next participant until `should_stop` accepts the accumulated value.
+    ///
+    /// # Guarantees
+    ///
+    /// Participants run sequentially in the versioned plan's priority and registration order.
+    /// The predicate checks the initial input and each successful participant result. The first
+    /// accepted value is returned unchanged, without invoking later participants. An empty plan
+    /// returns the input. Native participants receive typed values without serialization;
+    /// participants in another language use the same encoding as [`Self::waterfall`].
+    ///
+    /// Participant errors propagate without invoking later participants or checking the predicate
+    /// again. Work already performed by earlier participants is not rolled back. Stopping is a
+    /// normal successful result and does not cancel the context or change object ownership.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use futures::{FutureExt, executor::LocalPool};
+    /// use tembra::{Hook, Host, Orb, Service, core::Requirement};
+    ///
+    /// let mut pool = LocalPool::new();
+    /// let host = Host::new(pool.spawner());
+    /// let hook = Hook::<i32, i32>::waterfall_until("limit", |value| *value >= 10);
+    /// let declared = hook.clone();
+    /// host.install(vec![
+    ///     Orb::new("provider", 1).hook(hook.clone()).service(
+    ///         Service::new("provider", move |self_| self_.hook(&declared))
+    ///             .method("run", |hook, ctx, input: i32| async move {
+    ///                 hook.run(&ctx, input).await
+    ///             }),
+    ///     ),
+    ///     Orb::new("contributor", 1)
+    ///         .requires(Requirement {
+    ///             orb: "provider".into(), api_version: 1,
+    ///             methods: Default::default(), hooks: ["limit".into()].into(),
+    ///         })
+    ///         .contribute("provider", &hook, 0, |_, value| async move { Ok(value + 10) })
+    ///         .contribute("provider", &hook, 1, |_, _| async { panic!("already stopped") }),
+    /// ]).unwrap();
+    /// pool.run_until_stalled();
+    /// let reference = host.get("provider", vec!["main".into()], "alice").unwrap();
+    /// let result: i32 = pool.run_until(host.root("alice", move |ctx| {
+    ///     async move { reference.call(&ctx, "run", 1).await }.boxed_local()
+    /// })).unwrap();
+    /// assert_eq!(result, 11);
+    /// pool.run_until(host.close()).unwrap();
+    /// ```
+    pub fn waterfall_until(
+        name: impl Into<String>,
+        should_stop: impl Fn(&A) -> bool + 'static,
+    ) -> Self {
+        let decode: Decode<A> = Rc::new(|value| from_value(value.unwrap_or(Value::Null)));
+        let participant = decode.clone();
+        let should_stop = Rc::new(should_stop);
+        Self {
+            name: name.into(),
+            encode: Rc::new(|value| to_value(value).map(Some)),
+            decode,
+            compose: Rc::new(move |host, ctx, plan, mut input| {
+                let decode = participant.clone();
+                let should_stop = should_stop.clone();
+                async move {
+                    if should_stop(&input) {
+                        return Ok(input);
+                    }
+                    for operation in plan.iter() {
+                        input = host
+                            .hook_participant(*operation, &ctx, input, &decode)
+                            .await?;
+                        if should_stop(&input) {
+                            break;
+                        }
+                    }
+                    Ok(input)
+                }
+                .boxed_local()
+            }),
+        }
+    }
 }
 
 impl<A, R> Hook<A, Option<R>>

@@ -150,7 +150,7 @@ impl Host {
             code_version: version,
             method: method.into(),
         };
-        Ok(inner.retain_call(call, orb_owner))
+        inner.retain_call(call, orb_owner)
     }
 
     /// Marks actual callback settlement, independently from logical cancellation or caller release.
@@ -160,6 +160,8 @@ impl Host {
             .calls
             .remove(&call)
             .ok_or_else(|| gone(Reason::Call))?;
+        #[cfg(feature = "hooks")]
+        inner.release_observation_call(call.id);
         let mut leases = Vec::new();
         for frame in inner.call_contexts.remove(&call.id).unwrap_or_default() {
             inner.release_frame(frame, &mut leases);
@@ -270,13 +272,15 @@ impl Host {
             code_version: version,
             method: operation.to_string(),
         };
-        Ok(inner.retain_call(invocation, orb_owner))
+        inner.retain_call(invocation, orb_owner)
     }
 }
 
 impl Inner {
     /// Retain physical call ownership and its reverse indexes together.
-    fn retain_call(&mut self, call: Invocation, orb_owner: Id) -> Invocation {
+    fn retain_call(&mut self, call: Invocation, orb_owner: Id) -> Result<Invocation> {
+        #[cfg(feature = "hooks")]
+        self.claim_observation_call(&call)?;
         self.orb_roots.insert(orb_owner, call.root);
         self.owner_calls.insert(Owner::Host, call.id);
         self.owner_calls.insert(Owner::Orb(orb_owner), call.id);
@@ -296,6 +300,6 @@ impl Inner {
         }
         self.retain_frame(call.context);
         self.calls.insert(call.id, call.clone());
-        call
+        Ok(call)
     }
 }

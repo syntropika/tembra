@@ -92,12 +92,17 @@ export class Context {
   }
 }
 
-/** Require a live context issued by the same host. */
-export function context(value: unknown, session: Session): Context {
+/** Require a context issued by the same host without checking cancellation or expiry. */
+export function issuedContext(value: unknown, session: Session): Context {
   if (typeof value !== "object" || value === null || issued.get(value)?.session !== session) {
     throw new TembraError(Errors.Forbidden.Context, "An issued context from this host is required");
   }
-  const result = issued.get(value)!;
+  return issued.get(value)!;
+}
+
+/** Require a live context issued by the same host. */
+export function context(value: unknown, session: Session): Context {
+  const result = issuedContext(value, session);
   result.check();
   return result;
 }

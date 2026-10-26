@@ -106,6 +106,8 @@ export const Reason = Object.freeze({
   NotReady: "not_ready",
   Object: "object",
   ObjectState: "object_state",
+  ObservationSource: "observation_source",
+  ObservationAdmitted: "observation_admitted",
   Opaque: "opaque",
   Operation: "operation",
   OperationOwner: "operation_owner",

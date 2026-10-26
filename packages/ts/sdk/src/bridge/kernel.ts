@@ -50,6 +50,10 @@ export interface Invocation {
   codeVersion: number;
   method: string;
 }
+export interface HookObservation {
+  invocation: Invocation;
+  plan: number[];
+}
 export interface Snapshot {
   value: number;
   revision: string;

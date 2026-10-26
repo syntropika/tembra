@@ -38,6 +38,14 @@ test: build-node build-wasm build-sdk
     bun run --cwd packages/ts/sdk test:node
     bun run --cwd packages/ts/react-native test
 
+# Execute documented Rust guarantees, including the optional native hooks facade.
+test-doc:
+    cargo test --locked --workspace --all-features --doc
+
+# Verify native hook lifecycle contracts and their actual embedded JavaScript bridge.
+test-hook-lifecycle: build-node build-wasm build-sdk
+    cargo test --locked -p tembra-core -p tembra -p tembra-executor-js --all-features
+
 check-wasm:
     cargo check --locked -p tembra-core -p tembra-browser-wasm --target wasm32-unknown-unknown --all-features
 
