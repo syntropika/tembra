@@ -13,6 +13,7 @@ The engine decides when those callbacks can run.
 | [tembra-bridge](../crates/bridge/src/lib.rs)               | Convert metadata commands and results to JSON envelopes.                                                            |
 | [tembra-node-binding](../crates/node-binding/src/lib.rs)   | Expose the bridge through Node-API as `NodeKernel`.                                                                 |
 | [tembra-browser-wasm](../crates/browser-wasm/src/lib.rs)   | Expose the bridge through WASM as `WasmKernel`.                                                                     |
+| [tembra-mobile](../crates/mobile/src/lib.rs)               | Expose the bridge to Swift and Kotlin as `NativeKernel` through UniFFI.                                             |
 | [tembra-executor-js](../crates/executor-js/src/runtime.rs) | Run bundled JavaScript in V8 beside native Rust services. Both use the same kernel.                                 |
 
 ## Lifecycle programs
@@ -31,17 +32,22 @@ An execution action contains the effects for one program step.
 
 ## TypeScript packages
 
-| Package                                                        | Responsibility                                                                                         |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| [@tembra/sdk](../packages/ts/sdk/src/index.ts)                 | Declare orbs, keep JS values and execute effects. Also expose optional infrastructure and build tools. |
-| [@tembra/engine-node](../packages/ts/engine-node/package.json) | Build and package the native Node binding.                                                             |
-| [@tembra/engine-wasm](../packages/ts/engine-wasm/package.json) | Build and package the WASM module, loader and types.                                                   |
+| Package                                                          | Responsibility                                                                                         |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| [@tembra/sdk](../packages/ts/sdk/src/index.ts)                   | Declare orbs, keep JS values and execute effects. Also expose optional infrastructure and build tools. |
+| [@tembra/engine-node](../packages/ts/engine-node/package.json)   | Build and package the native Node binding.                                                             |
+| [@tembra/engine-wasm](../packages/ts/engine-wasm/package.json)   | Build and package the WASM module, loader and types.                                                   |
+| [@tembra/react-native](../packages/ts/react-native/src/index.ts) | Connect the SDK to the mobile kernel through a TurboModule.                                            |
 
-Node and browsers run callbacks in their existing JavaScript runtime.
+Node, browsers and React Native run callbacks in their existing JavaScript runtime.
 WASM contains the kernel and bridge. It contains no JS interpreter, DOM or filesystem.
 The embedded Rust integration uses one V8 runtime per host.
 
+Each mobile host uses one worker thread. The kernel stays on that thread until shutdown.
+Swift and Kotlin can send metadata requests from different threads.
+
 Core features are optional: `hooks`, `subscriptions`, `views` and `telemetry`.
-Rust defaults enable none of them. Check `host.features` in the SDK.
+The `tembra` crate enables none by default. The mobile crate enables all four.
+Check `host.features` in the SDK.
 
 See [lifecycle programs](../crates/core/src/program/mod.rs) and [platform entrypoints](typescript.md).

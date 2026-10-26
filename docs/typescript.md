@@ -57,11 +57,20 @@ It loads `@tembra/engine-wasm` unless the application supplies a kernel or WASM 
 Serve the generated WASM asset with its loader, or set `wasmInput`.
 The same entrypoint works in a module Worker.
 
+## React Native
+
+Import `createHost` from `@tembra/react-native` for iOS and Android.
+It creates a host synchronously through the native TurboModule.
+See the [React Native guide](react-native.md) for installation and cleanup.
+
+## Packages
+
 Node uses `@tembra/engine-node` and its compiled native addon.
 Build the engines for a local checkout; SDK source imports do not compile Rust.
 Bun uses the SDK's TypeScript source exports. Node's default ESM exports use built JavaScript.
 The root Git package points to SDK sources and declares exact engine package versions.
 Git consumers resolve those engines separately; local development uses workspace links.
+The root manifest defines the Bun workspaces. The lockfile and tool versions are also at the root.
 
 See [SDK entrypoints](../packages/ts/sdk/package.json), [Node host](../packages/ts/sdk/src/node.ts)
 and [browser host](../packages/ts/sdk/src/browser.ts).

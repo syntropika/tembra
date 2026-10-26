@@ -38,5 +38,8 @@ Other targets emit ESM.
 Use services to expose environment capabilities, such as storage, to an embedded orb.
 Building browser code does not make DOM APIs available inside a Worker.
 
+React Native uses Metro to bundle statically imported orbs.
+See the [React Native guide](react-native.md) for the mobile entrypoint.
+
 For engine builds and tool versions, see [DEVELOP.md](../DEVELOP.md).
 See [build implementation](../packages/ts/sdk/src/tooling/build.ts) and [target resolution](../packages/ts/sdk/src/tooling/resolver.ts).
