@@ -139,3 +139,70 @@ fn runtime_polling_does_not_starve_other_local_tasks() {
         runtime.close().await.unwrap();
     });
 }
+
+#[test]
+fn legacy_executor_value_can_be_constructed_before_entering_a_local_set() {
+    let executor = tembra_executor_js::TokioExecutor;
+    let tokio = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    tokio::task::LocalSet::new().block_on(&tokio, async {
+        let native = Host::new(executor);
+        native
+            .install(vec![
+                Orb::new("legacy", 1).service(
+                    Service::new("legacy", |_| Ok(()))
+                        .method("read", |_, _, _: Vec<serde_json::Value>| async { Ok(42) }),
+                ),
+            ])
+            .unwrap();
+        let mut runtime = Runtime::new(
+            native,
+            include_str!("../../../packages/ts/sdk/dist/embedded.js"),
+        )
+        .unwrap();
+        assert_eq!(
+            runtime
+                .call("legacy", &["main".into()], "read", serde_json::json!([]))
+                .await
+                .unwrap(),
+            serde_json::json!(42)
+        );
+        runtime.close().await.unwrap();
+    });
+}
+
+#[test]
+fn a_panicking_spawned_future_does_not_discard_other_executor_work() {
+    for cooperative in [false, true] {
+        let tokio = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&tokio, async {
+            let executor: Box<dyn futures::task::LocalSpawn> = if cooperative {
+                Box::new(CooperativeExecutor::new())
+            } else {
+                Box::new(tembra_executor_js::TokioExecutor::new())
+            };
+            let (send, receive) = futures::channel::oneshot::channel();
+            executor
+                .spawn_local(async { panic!("unmanaged task panic") })
+                .unwrap();
+            executor
+                .spawn_local(async {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    send.send(42).unwrap();
+                })
+                .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), receive)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                42
+            );
+        });
+    }
+}

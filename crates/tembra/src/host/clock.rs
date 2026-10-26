@@ -5,7 +5,21 @@ use futures::future::{AbortHandle, Abortable};
 impl Host {
     /// Read the monotonic host clock used by both native and embedded adapters.
     pub fn now_ms(&self) -> u64 {
-        self.0.clock.now_ms()
+        let clock = self.0.clock.now_ms();
+        let sampled = clock.saturating_add(self.0.clock_offset.get());
+        let accepted = self.kernel().now();
+        if accepted > sampled {
+            self.0.clock_offset.set(accepted.saturating_sub(clock));
+            accepted
+        } else {
+            sampled
+        }
+    }
+
+    /// Preserve fractional timing while sharing the kernel's calibrated monotonic origin.
+    pub fn now(&self) -> f64 {
+        self.now_ms();
+        self.0.clock.now() + self.0.clock_offset.get() as f64
     }
 
     pub(super) fn tick(&self) {

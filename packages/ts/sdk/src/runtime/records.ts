@@ -103,6 +103,7 @@ export interface ReferenceRecord {
   methods: Set<string>;
   requiredMethods: ReadonlySet<string>;
   stateCleanups: Set<() => void>;
+  nativeOwned?: boolean;
   context?: Context;
   released: boolean;
 }

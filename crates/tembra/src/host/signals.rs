@@ -1,6 +1,13 @@
 //! Small adapter notifications consumed by the shared action driver.
 use super::*;
 
+/// Metadata notifications carry claim and root cleanup across an attached language adapter.
+#[derive(Clone, Copy)]
+pub enum ForeignNotification {
+    RootEnded(core::Id),
+    ReferenceReleased(core::Id),
+}
+
 impl Host {
     /// Deliver a kernel action owned by native callback storage.
     /// Returns true when the native adapter exclusively consumes the action.
@@ -19,7 +26,6 @@ impl Host {
             }
             core::Action::StateChanged { object, .. } => self.publish_state(*object),
             core::Action::DisposeObject(object) => {
-                self.0.foreign_objects.borrow_mut().remove(object);
                 self.0.observers.borrow_mut().remove(object);
             }
             core::Action::CancelRoot(root) => self.cancel_context(*root),
@@ -83,6 +89,18 @@ impl Host {
         *self.0.driver_wake.borrow_mut() = Some(Rc::new(wake));
     }
 
+    /// Attach metadata-only notifications for foreign root and reference cleanup.
+    pub fn set_foreign_notifier(&self, notify: impl Fn(ForeignNotification) + 'static) {
+        *self.0.foreign_notifier.borrow_mut() = Some(Rc::new(notify));
+    }
+
+    pub(super) fn notify_foreign(&self, notification: ForeignNotification) {
+        let notify = self.0.foreign_notifier.borrow().clone();
+        if let Some(notify) = notify {
+            notify(notification);
+        }
+    }
+
     /// Attach the codec-bound service callback path provided by a foreign execution adapter.
     pub fn set_foreign_dispatcher(
         &self,
@@ -99,6 +117,16 @@ impl Host {
             .clone()
             .ok_or_else(|| Error::invalid(Reason::Driver, "no foreign callback adapter"))?;
         dispatch(request).await
+    }
+
+    /// Wake an attached driver when native work settles without keeping idle infrastructure alive.
+    pub fn poll_settled(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        self.0.settled_waker.register(cx.waker());
+        if self.0.active.get() == 0 {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
     }
 
     /// Wait for native physical callbacks while the shared adapter continues driving kernel actions.

@@ -13,8 +13,19 @@ impl Host {
         let host = self.clone();
         self.0.active.set(self.0.active.get() + 1);
         if let Err(error) = self.0.executor.spawn_local(async move {
-            let _ = send.send(operation.await);
+            let result = std::panic::AssertUnwindSafe(operation)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    Err(Error::new(
+                        core::Code::Unavailable,
+                        "callback",
+                        "native callback panicked",
+                    ))
+                });
+            let _ = send.send(result);
             host.0.active.set(host.0.active.get() - 1);
+            host.0.settled_waker.wake();
             for waiter in host.0.settled.take() {
                 let _ = waiter.send(());
             }
@@ -203,7 +214,20 @@ impl Host {
     pub(super) fn execute_immediate(&self, effect: &core::Effect) -> Result<Option<core::Id>> {
         match effect {
             core::Effect::Drop { scope } => {
-                self.0.scopes.borrow_mut().remove(scope);
+                if let Some(record) = self.0.scopes.borrow_mut().remove(scope) {
+                    if record.owner == core::Owner::Host {
+                        let resources = record.draft.resources.borrow();
+                        self.0
+                            .host_resources
+                            .borrow_mut()
+                            .retain(|_, key| !resources.contains(&key.id));
+                    }
+                    if self.0.orb_scopes.borrow().get(&record.orb) == Some(scope) {
+                        self.0.orb_scopes.borrow_mut().remove(&record.orb);
+                        self.0.orb_values.borrow_mut().remove(&record.orb);
+                    }
+                }
+                self.0.scope_activations.borrow_mut().remove(scope);
                 if let Some(object) = self.0.scope_objects.borrow_mut().remove(scope) {
                     self.0.objects.borrow_mut().remove(&object);
                 }

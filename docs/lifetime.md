@@ -41,7 +41,8 @@ Reacquiring it during that period preserves its state and resources.
 
 The host supplies monotonic elapsed time for linger and deadlines.
 Clocks on different hosts do not need the same origin.
-The native wrapper requires the application to advance the kernel clock with `tick()`.
+The native wrapper drives deadlines with its host clock. Embeddings can supply a custom
+`Clock`; explicit kernel `tick()` advances remain supported and resynchronize the native origin.
 SDK hosts arrange their own timer updates.
 
 See the [lifetime example](../examples/rust/lifetime.rs), [core tasks](../crates/core/src/host/tasks.rs)

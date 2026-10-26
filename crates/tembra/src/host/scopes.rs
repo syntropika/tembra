@@ -86,14 +86,18 @@ impl Host {
         let declaration = self.declaration(core::Owner::Host, 0);
         let result = create(declaration.clone());
         let scope = self.register_declaration(&declaration, Vec::new())?;
-        self.0.host_scopes.borrow_mut().push(scope);
+        if result.is_ok() {
+            self.0.host_scopes.borrow_mut().push(scope);
+        }
         let program = if result.is_ok() {
             self.kernel().activate_scope(scope)?
         } else {
             self.kernel().cleanup_scopes(vec![scope], None)?
         };
         let ready = self.run(program)?;
-        self.0.scope_activations.borrow_mut().insert(scope, ready);
+        if result.is_ok() {
+            self.0.scope_activations.borrow_mut().insert(scope, ready);
+        }
         result
     }
 
@@ -113,6 +117,9 @@ impl Host {
     }
 
     pub(super) fn ensure_orb(&self, orb: core::Id) -> Result<()> {
+        if let Some(error) = self.0.orb_errors.borrow().get(&orb).cloned() {
+            return Err(error);
+        }
         if self.0.orb_scopes.borrow().contains_key(&orb) {
             return Ok(());
         }
@@ -137,7 +144,19 @@ impl Host {
             .ok_or_else(|| Error::invalid(Reason::Orb, "orb factory is unavailable"))?;
         let info = self.kernel().orb(orb)?;
         let declaration = self.declaration(core::Owner::Orb(info.owner), orb);
-        let result = factory(declaration.clone());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            factory(declaration.clone())
+        }))
+        .unwrap_or_else(|_| {
+            Err(Error::new(
+                core::Code::Unavailable,
+                "callback",
+                "orb factory panicked",
+            ))
+        });
+        if let Err(error) = &result {
+            self.0.orb_errors.borrow_mut().insert(orb, error.clone());
+        }
         let scope = self.register_declaration(&declaration, self.0.host_scopes.borrow().clone())?;
         self.0.orb_scopes.borrow_mut().insert(orb, scope);
         self.0.orb_values.borrow_mut().insert(
@@ -150,7 +169,9 @@ impl Host {
             self.kernel().cleanup_scopes(vec![scope], None)?
         };
         let ready = self.run(program)?;
-        self.0.scope_activations.borrow_mut().insert(scope, ready);
+        if result.is_ok() {
+            self.0.scope_activations.borrow_mut().insert(scope, ready);
+        }
         result.map(|_| ())
     }
 }
@@ -228,6 +249,9 @@ impl Declaration {
 impl Host {
     /// Wait for the currently declared host and orb scopes, including asynchronous openers.
     pub async fn ready(&self) -> Result<()> {
+        if let Some(error) = self.0.orb_errors.borrow().values().next().cloned() {
+            return Err(error);
+        }
         let activations = self
             .0
             .scope_activations
@@ -243,6 +267,9 @@ impl Host {
 
     #[cfg(feature = "hooks")]
     pub(crate) async fn ready_orb(&self, orb: core::Id) -> Result<()> {
+        if let Some(error) = self.0.orb_errors.borrow().get(&orb).cloned() {
+            return Err(error);
+        }
         let scope = self.0.orb_scopes.borrow().get(&orb).copied();
         let ready = scope.and_then(|scope| self.0.scope_activations.borrow().get(&scope).cloned());
         if let Some(ready) = ready {

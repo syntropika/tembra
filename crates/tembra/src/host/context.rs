@@ -48,6 +48,8 @@ impl Drop for RootGuard {
             self.host.0.errors.borrow_mut().push(error);
         }
         self.host.end_context(self.root);
+        self.host
+            .notify_foreign(super::signals::ForeignNotification::RootEnded(self.root));
         self.host.flush();
     }
 }

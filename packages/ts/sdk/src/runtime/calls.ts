@@ -30,6 +30,14 @@ export class Calls {
     return controller.signal;
   }
 
+  /** Revoke claims and cancellation mirrors when either language ends a root. */
+  releaseRoot(root: number): void {
+    for (const reference of this.session.rootReferences.get(root) ?? [])
+      this.session.handles.release(reference);
+    this.session.rootReferences.delete(root);
+    this.session.controllers.delete(root);
+  }
+
   /** Release root-owned references after the callback settles. */
   async root<T>(
     operation: (context: Context) => Completion<T>,
@@ -45,9 +53,7 @@ export class Calls {
     try {
       return await operation(ctx);
     } finally {
-      for (const reference of session.rootReferences.get(root) ?? [])
-        session.handles.release(reference);
-      session.rootReferences.delete(root);
+      this.releaseRoot(root);
       session.options.native?.rootEnded?.(root);
       if (!session.lifecycle.closedDiagnostics) session.kernel.command(KernelOp.EndRoot, { root });
       session.controllers.delete(root);

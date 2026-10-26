@@ -40,8 +40,10 @@ pub use context::Context;
 pub use declaration::Declaration;
 pub use reference::Reference;
 pub use resources::{Cancellation, Resource, ResourceKey, ResourceSignal};
+pub use signals::ForeignNotification;
 pub use tasks::TaskScope;
 
+type ForeignNotifier = Rc<dyn Fn(ForeignNotification)>;
 type ForeignDispatcher = Rc<dyn Fn(Value) -> LocalBoxFuture<'static, Result<Value>>>;
 type Encoder = Rc<dyn Fn() -> Result<Value>>;
 struct ValueRecord {
@@ -74,6 +76,8 @@ struct Inner {
     root_references: RefCell<BTreeMap<core::Id, Vec<Rc<Reference>>>>,
     task_signals: RefCell<BTreeMap<core::Id, Cancellation>>,
     clock: Rc<dyn crate::Clock>,
+    clock_offset: Cell<u64>,
+    orb_errors: RefCell<BTreeMap<core::Id, Error>>,
     deadline: RefCell<Option<(u64, futures::future::AbortHandle)>>,
     kernel: core::Host,
     executor: Rc<dyn LocalSpawn>,
@@ -90,9 +94,10 @@ struct Inner {
     external_actions: Cell<bool>,
     driver_wake: RefCell<Option<Rc<dyn Fn()>>>,
     foreign_dispatcher: RefCell<Option<ForeignDispatcher>>,
-    foreign_objects: RefCell<BTreeMap<core::Id, Shared<LocalBoxFuture<'static, Result<()>>>>>,
+    foreign_notifier: RefCell<Option<ForeignNotifier>>,
     flushing: Cell<bool>,
     active: Cell<usize>,
+    settled_waker: futures::task::AtomicWaker,
     settled: RefCell<Vec<oneshot::Sender<()>>>,
     programs: RefCell<BTreeMap<core::Id, oneshot::Sender<Result<()>>>>,
 }
@@ -135,6 +140,8 @@ impl Host {
             root_references: RefCell::new(BTreeMap::new()),
             task_signals: RefCell::new(BTreeMap::new()),
             clock: Rc::new(clock),
+            clock_offset: Cell::new(0),
+            orb_errors: RefCell::new(BTreeMap::new()),
             deadline: RefCell::new(None),
             kernel,
             executor: Rc::new(executor),
@@ -151,9 +158,10 @@ impl Host {
             external_actions: Cell::new(false),
             driver_wake: RefCell::new(None),
             foreign_dispatcher: RefCell::new(None),
-            foreign_objects: RefCell::new(BTreeMap::new()),
+            foreign_notifier: RefCell::new(None),
             flushing: Cell::new(false),
             active: Cell::new(0),
+            settled_waker: futures::task::AtomicWaker::new(),
             settled: RefCell::new(Vec::new()),
             programs: RefCell::new(BTreeMap::new()),
         }))
@@ -277,11 +285,12 @@ impl Host {
         self.0.values.borrow_mut().clear();
         self.0.orbs.borrow_mut().clear();
         self.0.orb_values.borrow_mut().clear();
+        self.0.orb_errors.borrow_mut().clear();
         self.0.orb_factories.borrow_mut().clear();
         self.0.orb_scopes.borrow_mut().clear();
         self.0.scope_activations.borrow_mut().clear();
         self.0.host_resources.borrow_mut().clear();
-        self.0.foreign_objects.borrow_mut().clear();
+        self.0.foreign_notifier.borrow_mut().take();
         #[cfg(feature = "hooks")]
         self.clear_hooks();
         self.0.scope_objects.borrow_mut().clear();

@@ -87,6 +87,11 @@ impl Host {
             .map(|(deadline, _)| deadline.saturating_sub(inner.now))
     }
 
+    /// Read the last accepted monotonic clock value for adapter synchronization.
+    pub fn now(&self) -> u64 {
+        self.inner.borrow().now
+    }
+
     /// Advances adapter-provided monotonic time and admits expired idle disposal.
     pub fn tick(&self, now: u64) -> Result<()> {
         let mut inner = self.inner.borrow_mut();

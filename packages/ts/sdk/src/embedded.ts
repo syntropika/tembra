@@ -16,7 +16,12 @@ import { Context } from "./runtime/context.ts";
 import { KernelOp } from "./bridge/protocol.ts";
 import type { Invocation } from "./bridge/kernel.ts";
 
-declare const Deno: { core: { ops: Record<string, (...args: any[]) => any> } };
+declare const Deno: {
+  core: {
+    ops: Record<string, (...args: any[]) => any>;
+    unrefOpPromise(promise: Promise<unknown>): void;
+  };
+};
 const ops = Deno.core.ops;
 const globals = globalThis as any;
 
@@ -190,10 +195,25 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
     // Receiving is idle infrastructure; each callback is separately tracked physical work.
     void (async () => {
       for (;;) {
-        const request = codec.deserialize(await ops.op_tembra_callback_next!()) as any;
-        if (request === null) return;
-        if (request.kind === "flush") {
+        const receiving = ops.op_tembra_callback_next!();
+        Deno.core.unrefOpPromise(receiving);
+        const packet = (await receiving) as Uint8Array;
+        if (!packet.length) return;
+        const header = new DataView(packet.buffer, packet.byteOffset, 9);
+        const kind = header.getUint8(0);
+        const id = header.getUint32(1, true) + header.getUint32(5, true) * 2 ** 32;
+        if (kind !== 0) {
+          if (kind === 2) host.session.calls.releaseRoot(id);
+          if (kind === 3) host.session.handles.revoke(id);
           host.session.lifecycle.flush();
+          continue;
+        }
+        let request: any;
+        try {
+          request = codec.deserialize(packet.subarray(9));
+        } catch (error) {
+          const { code, reason, message } = failure(error);
+          ops.op_tembra_callback_error!(id, JSON.stringify({ code, reason, message }), true);
           continue;
         }
         host.session.track(
@@ -202,7 +222,11 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
             try {
               let result: unknown;
               if (request.kind === "activate") {
-                await host.session.handles.activateAcquired(request.acquired, request.address);
+                await host.session.handles.activateAcquired(
+                  request.acquired,
+                  request.address,
+                  request.methods,
+                );
                 result = null;
               } else {
                 const call = request.call;
@@ -238,20 +262,12 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
                 },
               };
             }
-            let bytes: Uint8Array;
             try {
-              bytes = codec.serialize(envelope);
+              ops.op_tembra_callback_complete!(id, codec.serialize(envelope));
             } catch (error) {
-              const normalized = failure(error);
-              bytes = codec.serialize({
-                error: {
-                  code: normalized.code,
-                  reason: normalized.reason,
-                  message: normalized.message,
-                },
-              });
+              const { code, reason, message } = failure(error);
+              ops.op_tembra_callback_error!(id, JSON.stringify({ code, reason, message }), false);
             }
-            ops.op_tembra_callback_complete!(request.id, bytes);
           })(),
           true,
         );

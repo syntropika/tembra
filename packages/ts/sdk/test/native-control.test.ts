@@ -52,3 +52,22 @@ test("fused call completion uses the configured host clock", async () => {
     await host.close();
   }
 });
+
+test("late native activation rejects after the reserved object has retired", async () => {
+  const host = createHost();
+  await host.install(orb({ name: "late", apiVersion: 1, services: { late: { methods: {} } } }));
+  const address = { service: "late", key: ["main"], principal: "reader" };
+  const acquired = host.session.kernel.command<import("../src/kernel.ts").Acquisition>(
+    KernelOp.Acquire,
+    { ...address, apiVersion: 1, methods: [] },
+  );
+  host.session.kernel.command(KernelOp.Release, { reference: acquired.reference });
+  host.session.kernel.command(KernelOp.Forget, { reference: acquired.reference });
+  host.session.lifecycle.flush();
+  await Promise.allSettled([...host.session.jobs]);
+  try {
+    await expect(host.session.handles.activateAcquired(acquired, address)).rejects.toThrow();
+  } finally {
+    await host.close();
+  }
+});

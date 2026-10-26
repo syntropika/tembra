@@ -38,8 +38,9 @@ impl Host {
                 principal: principal.into(),
             },
             options.api_version,
-            options.methods,
+            options.methods.clone(),
         )?;
+        let mut foreign_ready = None;
         let result = (|| {
             if let Some(core::Owner::Object(object)) = owner {
                 self.kernel().dependency(object, acquired.reference)?;
@@ -59,39 +60,31 @@ impl Host {
                 }
             }
             if !self.has_orb(acquired.orb) {
-                if !self
-                    .0
-                    .foreign_objects
-                    .borrow()
-                    .contains_key(&acquired.object)
-                {
-                    let host = self.clone();
-                    let object = acquired.object;
-                    let address = self.kernel().object_address(object)?;
-                    let request = serde_json::json!({
-                        "kind":"activate", "acquired":{
-                            "reference":acquired.reference,"object":object,"orb":acquired.orb,
-                            "codeVersion":acquired.code_version,"activate":acquired.activate,
-                        },
-                        "address":{"service":address.service,"key":address.key,"principal":address.principal},
-                    });
-                    let receive = self.spawn(async move {
-                        let result = host.foreign(request).await.map(|_| ());
-                        if result.is_err() {
-                            host.kernel().fail(object)?;
-                        }
-                        host.flush();
-                        result
-                    })?;
-                    let ready = async move {
+                let host = self.clone();
+                let object = acquired.object;
+                let address = self.kernel().object_address(object)?;
+                let request = serde_json::json!({
+                    "kind":"activate", "acquired":{
+                        "reference":acquired.reference,"object":object,"orb":acquired.orb,
+                        "codeVersion":acquired.code_version,"activate":acquired.activate,
+                    },
+                    "methods":options.methods,
+                    "address":{"service":address.service,"key":address.key,"principal":address.principal},
+                });
+                let receive = self.spawn(async move {
+                    let result = host.foreign(request).await.map(|_| ());
+                    host.flush();
+                    result
+                })?;
+                foreign_ready = Some(
+                    async move {
                         receive.await.map_err(|_| {
                             Error::invalid(Reason::Executor, "foreign activation stopped")
                         })?
                     }
                     .boxed_local()
-                    .shared();
-                    self.0.foreign_objects.borrow_mut().insert(object, ready);
-                }
+                    .shared(),
+                );
             } else if acquired.activate {
                 self.ensure_orb(acquired.orb)?;
                 let scope = self.activate(acquired.object, acquired.orb, service)?;
@@ -123,12 +116,12 @@ impl Host {
             host: self.clone(),
             id: acquired.reference,
             object: acquired.object,
+            foreign_ready,
             released: Rc::new(crate::readable::ReadLifetime::default()),
         })
     }
 }
 
-#[cfg(feature = "views")]
 impl Host {
     /// Resolve an optional native service access policy for a shared adapter's acquisition.
     pub fn access(
@@ -137,6 +130,7 @@ impl Host {
         service: &str,
         principal: &str,
     ) -> Option<BTreeSet<String>> {
+        #[cfg(feature = "views")]
         let access = self
             .0
             .orbs
@@ -144,6 +138,14 @@ impl Host {
             .get(&orb)
             .and_then(|services| services.get(service))
             .and_then(|implementation| implementation.access.clone());
-        access.map(|access| access(principal))
+        #[cfg(feature = "views")]
+        {
+            access.map(|access| access(principal))
+        }
+        #[cfg(not(feature = "views"))]
+        {
+            let _ = (orb, service, principal);
+            None
+        }
     }
 }

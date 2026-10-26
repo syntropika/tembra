@@ -4,7 +4,7 @@ import type {
   DynamicReference,
   ServiceDefinition,
 } from "../authoring/types.ts";
-import { Status } from "../bridge/identifiers.ts";
+import { Code, Status } from "../bridge/identifiers.ts";
 import type { Acquisition, KernelOrb } from "../bridge/kernel.ts";
 import { KernelOp } from "../bridge/protocol.ts";
 import { refuse, TembraError } from "../error.ts";
@@ -31,7 +31,11 @@ export class References {
   #byObject = new Map<number, Set<ReferenceRecord>>();
 
   /** Activate an object reserved by the native facade in this shared kernel. */
-  activateAcquired(acquired: Acquisition, address: Address): Promise<void> {
+  activateAcquired(
+    acquired: Acquisition,
+    address: Address,
+    requiredMethods: string[] = [],
+  ): Promise<void> {
     const session = this.session;
     let object = session.objects.get(acquired.object);
     if (!object) {
@@ -48,12 +52,45 @@ export class References {
       session.track(
         session.scopes.activate(record, acquired).then(activation.resolve, (error) => {
           record.error = error;
-          session.kernel.command(KernelOp.Fail, { object: record.id });
+          try {
+            session.kernel.command(KernelOp.Fail, { object: record.id });
+          } catch {
+            // Concurrent shutdown can already have retired the reserved object.
+          }
           activation.reject(error);
           session.lifecycle.flush();
         }),
       );
     }
+    // Every native claim needs its own policy and reload index, including reused objects.
+    if (!this.claimExists(acquired.reference)) return object.activation;
+    const provider = this.orbMetadata(object.orb);
+    const methods =
+      provider.services.find((service) => service.name === address.service)?.methods ?? [];
+    const record: ReferenceRecord = {
+      id: acquired.reference,
+      object: acquired.object,
+      address,
+      methods: new Set(methods),
+      requiredMethods: new Set(requiredMethods),
+      stateCleanups: new Set(),
+      ready: object.activation,
+      released: false,
+      nativeOwned: true,
+    };
+    const access = session.orbs.records.get(object.orb)?.definition.services?.[address.service]
+      ?.access;
+    try {
+      this.referenceMethods(record, methods, access);
+    } catch (error) {
+      if (session.kernel.features.views && this.claimExists(record.id))
+        session.kernel.command(KernelOp.Restrict, { reference: record.id, methods: [] });
+      throw error;
+    }
+    session.references.set(record.id, record);
+    let owned = this.#byObject.get(record.object);
+    if (!owned) this.#byObject.set(record.object, (owned = new Set()));
+    owned.add(record);
     return object.activation;
   }
 
@@ -279,6 +316,10 @@ export class References {
     const methods = Object.keys(service.methods);
     for (const reference of this.#byObject.get(object.id) ?? []) {
       if (reference.released) continue;
+      if (reference.nativeOwned && !this.claimExists(reference.id)) {
+        this.revoke(reference.id);
+        continue;
+      }
       try {
         this.referenceMethods(reference, methods, service.access, true);
       } catch (error) {
@@ -287,6 +328,21 @@ export class References {
           session.kernel.command(KernelOp.Restrict, { reference: reference.id, methods: [] });
         session.report(error);
       }
+    }
+  }
+
+  /** Native claim release can precede its asynchronous metadata notification. */
+  private claimExists(reference: number): boolean {
+    try {
+      const status = this.session.kernel.command<Status>(KernelOp.Status, { reference });
+      return status !== Status.Released && status !== Status.Gone;
+    } catch (error) {
+      if (
+        error instanceof TembraError &&
+        (error.code === Code.Gone || error.code === Code.Released)
+      )
+        return false;
+      throw error;
     }
   }
 

@@ -231,11 +231,23 @@ impl Runtime {
         use futures::FutureExt;
         use std::task::Poll;
         let Some(driver) = self.driver.clone() else {
-            return self
-                .js
-                .with_event_loop_promise(resolved, Default::default())
-                .await
-                .map_err(js_error);
+            futures::pin_mut!(resolved);
+            return std::future::poll_fn(|cx| {
+                if let Poll::Ready(result) = resolved.poll_unpin(cx) {
+                    return Poll::Ready(result.map_err(js_error));
+                }
+                match self.js.poll_event_loop(cx, Default::default()) {
+                    Poll::Ready(Err(error)) => Poll::Ready(Err(js_error(error))),
+                    Poll::Ready(Ok(())) => {
+                        if let Poll::Ready(result) = resolved.poll_unpin(cx) {
+                            return Poll::Ready(result.map_err(js_error));
+                        }
+                        if self.native.poll_settled(cx).is_pending() { return Poll::Pending; }
+                        Poll::Ready(Err(js_error("Promise resolution is still pending but the event loop has already resolved")))
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            }).await;
         };
         futures::pin_mut!(resolved);
         std::future::poll_fn(|cx| {
@@ -255,7 +267,7 @@ impl Runtime {
                     return Poll::Ready(result.map_err(js_error));
                 }
                 if before + after == 0 {
-                    if matches!(event, Poll::Ready(Ok(()))) && !driver.has_pending() {
+                    if matches!(event, Poll::Ready(Ok(()))) && !driver.has_pending() && self.native.poll_settled(cx).is_ready() {
                         return Poll::Ready(Err(Error::invalid(
                             Reason::Javascript,
                             "Promise resolution is still pending but the event loop has already resolved",

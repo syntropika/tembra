@@ -78,16 +78,10 @@ fn op_tembra_access(
     #[string] principal: String,
 ) -> std::result::Result<String, deno_error::JsErrorBox> {
     let orb = number_id(orb)?;
-    #[cfg(feature = "views")]
     let access = state
         .borrow::<Rc<Bindings>>()
         .native
         .access(orb, &service, &principal);
-    #[cfg(not(feature = "views"))]
-    let access: Option<Vec<String>> = {
-        let _ = (state, orb, service, principal);
-        None
-    };
     serde_json::to_string(&access)
         .map_err(|error| deno_error::JsErrorBox::generic(error.to_string()))
 }
@@ -168,7 +162,7 @@ pub(super) fn number_id(id: f64) -> std::result::Result<tembra::core::Id, deno_e
 /// Read elapsed monotonic time from the runtime origin.
 #[op2(fast)]
 fn op_tembra_now(state: &mut OpState) -> f64 {
-    state.borrow::<Rc<Bindings>>().native.now_ms() as f64
+    state.borrow::<Rc<Bindings>>().native.now()
 }
 
 /// Cancel a scheduled adapter timer.

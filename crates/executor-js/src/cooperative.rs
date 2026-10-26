@@ -42,7 +42,10 @@ impl Future for Task {
             return Poll::Pending;
         }
         self.budget.set(remaining - 1);
-        Pin::new(&mut self.future).poll(cx)
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Pin::new(&mut self.future).poll(cx)
+        }))
+        .unwrap_or(Poll::Ready(()))
     }
 }
 

@@ -1,7 +1,7 @@
 //! Optional V8 adapter. Pass the SDK's prebuilt `embedded.js`; the kernel contains no JS engine.
 use deno_core::{JsBuffer, JsRuntime, OpState, RuntimeOptions, extension, op2, v8};
 use futures::{
-    StreamExt,
+    FutureExt, StreamExt,
     channel::mpsc,
     future::{AbortHandle, Abortable},
     stream::FuturesUnordered,
@@ -20,7 +20,13 @@ mod runtime;
 pub use runtime::Runtime;
 
 #[derive(Clone)]
-pub struct TokioExecutor(mpsc::UnboundedSender<LocalFutureObj<'static, ()>>);
+pub struct TokioExecutor {
+    send: Option<mpsc::UnboundedSender<LocalFutureObj<'static, ()>>>,
+}
+
+/// Retain the original current-LocalSet executor value syntax for existing embeddings.
+#[allow(non_upper_case_globals)]
+pub const TokioExecutor: TokioExecutor = TokioExecutor { send: None };
 
 impl TokioExecutor {
     /// Capture a running Tokio LocalSet. Requests remain local even when V8 polls an op elsewhere.
@@ -31,14 +37,14 @@ impl TokioExecutor {
             loop {
                 futures::select! {
                     future=receive.next()=>match future {
-                        Some(future)=>running.push(future),
+                        Some(future)=>running.push(std::panic::AssertUnwindSafe(future).catch_unwind().map(|_| ())),
                         None=>{while running.next().await.is_some(){}break;},
                     },
                     ()=running.select_next_some()=>{},
                 }
             }
         });
-        Self(send)
+        Self { send: Some(send) }
     }
 }
 impl Default for TokioExecutor {
@@ -52,9 +58,13 @@ impl LocalSpawn for TokioExecutor {
         &self,
         future: LocalFutureObj<'static, ()>,
     ) -> std::result::Result<(), SpawnError> {
-        self.0
-            .unbounded_send(future)
-            .map_err(|_| SpawnError::shutdown())
+        if let Some(send) = &self.send {
+            send.unbounded_send(future)
+                .map_err(|_| SpawnError::shutdown())
+        } else {
+            tokio::task::spawn_local(future);
+            Ok(())
+        }
     }
 }
 

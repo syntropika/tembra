@@ -34,6 +34,12 @@ Use `host.root()` to obtain a context.
 `reference.call(&ctx, method, arguments)` waits for activation and invokes the method.
 Calls check their argument and result types at native dispatch.
 Release the reference, then run `host.close()` to completion on the executor.
+Native asynchronous callback panics become structured `unavailable` callback errors;
+other queued work can continue and shutdown still waits for physical settlement.
+
+Failed host declarations release their scopes and resource names. Orb installation
+publishes metadata before running factories, as in JavaScript. A failed orb factory
+keeps its original error for later acquisitions; it never supplies a fallback environment.
 
 ## Examples
 
@@ -72,7 +78,11 @@ root-owned claim, revoked when the root ends even if its Rust handle is retained
 `Host::get_with_options` exposes independent acquisition with `AcquisitionOptions`.
 With `views`, `Service::access` applies principal-specific method restrictions to both
 Rust and embedded JavaScript acquisitions. References expose `status()` and retain
-normal deterministic `release` and `Drop` behavior.
+normal deterministic `release` and `Drop` behavior. Foreign claims also apply the provider's
+access policy before readiness and refresh it on JavaScript replacement. Policy errors
+reject acquisition or revoke methods on existing claims. Enable matching `hooks`,
+`subscriptions` and `views` features on the native facade and its executable adapter.
+A native access policy is rejected when the adapter cannot enforce views.
 
 `Reference::call` retains the existing Rust-only contract and does not require extra
 serialization traits. `call_portable` accepts serializable arguments and deserializable
@@ -149,6 +159,10 @@ and wait implementation. The default uses monotonic system time and `futures-tim
 it does not require Tokio. Embedded JavaScript takes over deadline driving while using
 the same clock origin. Construct `TokioExecutor::new()` inside the embedding's running
 `LocalSet`; its dispatcher retains that execution context across suspended V8 ops.
+The original `TokioExecutor` value syntax remains available for work spawned in the
+current `LocalSet`. Custom clocks can override `Clock::now` for fractional milliseconds;
+`Clock::now_ms` remains the integer deadline interface. Manual kernel ticks resynchronize
+the native clock origin, so subsequent native operations never move time backwards.
 
 Run `cargo run --locked -p tembra --example composition` for managed dependencies,
 shared orb data and reference-bound selected state.

@@ -12,6 +12,7 @@ pub struct Reference {
     pub(super) host: Host,
     pub(super) id: core::Id,
     pub(super) object: core::Id,
+    pub(super) foreign_ready: Option<Shared<LocalBoxFuture<'static, Result<()>>>>,
     pub(super) released: Rc<crate::readable::ReadLifetime>,
 }
 
@@ -30,6 +31,13 @@ impl Reference {
     pub fn release(&self) -> Result<()> {
         if !self.released.released.replace(true) {
             self.released.close();
+            if self.foreign_ready.is_some() {
+                self.host
+                    .notify_foreign(super::signals::ForeignNotification::ReferenceReleased(
+                        self.id,
+                    ));
+            }
+
             if !self.host.0.external_actions.get() {
                 self.host.tick();
             }
@@ -69,14 +77,7 @@ impl Reference {
             .borrow()
             .get(&self.object)
             .and_then(|object| object.activation.clone());
-        let ready = ready.or_else(|| {
-            self.host
-                .0
-                .foreign_objects
-                .borrow()
-                .get(&self.object)
-                .cloned()
-        });
+        let ready = ready.or_else(|| self.foreign_ready.clone());
         if let Some(ready) = ready {
             ready.await?;
         }
