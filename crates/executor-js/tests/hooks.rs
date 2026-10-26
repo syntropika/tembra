@@ -5,18 +5,21 @@ use tembra::{
     Hook, Host, Orb, Service,
     core::{ContextKey, Requirement},
 };
-use tembra_executor_js::{Runtime, TokioExecutor};
+mod support;
+use support::Execution;
 
 const TRACE: ContextKey<String> = ContextKey::new("hooks/trace", 1);
 
 #[test]
 fn mixed_plans_run_in_both_directions_and_preserve_context_and_undefined() {
-    let executor = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    tokio::task::LocalSet::new().block_on(&executor, async {
-        let native = Host::new(TokioExecutor::new());
+    for cooperative in [false, true] {
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&executor, async {
+let execution = Execution::new(cooperative);
+        let native = Host::new(execution.clone());
         let hook = Hook::<String, String>::waterfall("transform");
         let bail = Hook::<String, Option<Value>>::bail("decide");
         let declared = hook.clone();
@@ -33,7 +36,7 @@ fn mixed_plans_run_in_both_directions_and_preserve_context_and_undefined() {
                 .method("transform", |hooks, ctx, (input,): (String,)| async move { hooks.0.run(&ctx, input).await })
                 .method("decide", |hooks, ctx, (input,): (String,)| async move { hooks.1.run(&ctx, input).await }))
         ]).unwrap();
-        let mut runtime = Runtime::new(native.clone(), include_str!("../../../packages/ts/sdk/dist/embedded.js")).unwrap();
+        let mut runtime = execution.runtime(native.clone(), include_str!("../../../packages/ts/sdk/dist/embedded.js")).unwrap();
         runtime.evaluate(r#"(async () => {
           const trace = Tembra.ContextKey.text('hooks/trace');
           await host.install({name:'js',apiVersion:1,
@@ -68,22 +71,26 @@ fn mixed_plans_run_in_both_directions_and_preserve_context_and_undefined() {
         assert_eq!(native.kernel().context_stats().0,0);
         runtime.close().await.unwrap();
     }.boxed_local());
+    }
 }
 
 #[test]
 fn javascript_series_without_input_can_invoke_a_native_unit_contribution() {
-    use std::{cell::Cell, rc::Rc};
-    let executor = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    tokio::task::LocalSet::new().block_on(&executor,async{
-        let native=Host::new(TokioExecutor::new());let called=Rc::new(Cell::new(false));let observed=called.clone();
-        let mut runtime=Runtime::new(native.clone(),include_str!("../../../packages/ts/sdk/dist/embedded.js")).unwrap();
+    for cooperative in [false, true] {
+        use std::{cell::Cell, rc::Rc};
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&executor,async{
+let execution = Execution::new(cooperative);
+        let native=Host::new(execution.clone());let called=Rc::new(Cell::new(false));let observed=called.clone();
+        let mut runtime=execution.runtime(native.clone(),include_str!("../../../packages/ts/sdk/dist/embedded.js")).unwrap();
         runtime.evaluate(r#"host.install({name:'js',apiVersion:1,hooks:{observe:{async run(ctx,input,participants){for(const participant of participants)await participant(ctx,input);}}},services:{js:{create(self){return self.hook('observe');},methods:{run:(hook,ctx)=>hook.run(ctx)}}}})"#).await.unwrap();
         native.install(vec![Orb::new("native",1).requires(Requirement{orb:"js".into(),api_version:1,methods:Default::default(),hooks:["observe".into()].into()})
             .contribute("js",&Hook::<(),()>::series("observe"),0,move|_,()|{observed.set(true);async{Ok(())}})]).unwrap();
         runtime.evaluate("(async()=>{const reference=await host.get('js','main');try{await reference.run();return null;}finally{reference.release();}})()").await.unwrap();
         assert!(called.get());runtime.close().await.unwrap();
     }.boxed_local());
+    }
 }

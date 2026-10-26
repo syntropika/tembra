@@ -21,12 +21,13 @@ export class Lifecycle {
   #finalDiagnostics: ReturnType<Lifecycle["diagnostics"]> | undefined;
 
   /** Drain kernel actions without re-entering the dispatcher. */
-  flush(): void {
+  flush(initial?: Action[]): void {
     if (this.#flushing) return;
     this.#flushing = true;
     try {
       for (;;) {
-        const actions = this.session.kernel.command<Action[]>(KernelOp.Drain);
+        const actions = initial ?? this.session.kernel.command<Action[]>(KernelOp.Drain);
+        initial = undefined;
         if (!actions.length) break;
         for (const action of actions) {
           try {
@@ -40,6 +41,23 @@ export class Lifecycle {
       this.#flushing = false;
       this.scheduleLinger();
     }
+  }
+
+  /** Compose kernel finish bookkeeping through the embedded adapter when available. */
+  finishCall(call: number): void {
+    const session = this.session;
+    if (!this.#flushing && session.options.native?.finish) {
+      const batch = session.options.native.finish(call, session.now());
+      if (!batch.actions.length) {
+        this.scheduleLinger(batch.deadline);
+        return;
+      }
+      this.flush(batch.actions);
+      return;
+    }
+    session.kernel.command(KernelOp.Tick, { now: session.now() });
+    session.kernel.command(KernelOp.FinishCall, { call });
+    this.flush();
   }
 
   /** Execute one action using its owning JS module. */
@@ -139,10 +157,13 @@ export class Lifecycle {
   }
 
   /** Keep one timer for the kernel's earliest deadline. */
-  private scheduleLinger(): void {
+  private scheduleLinger(known?: number | null): void {
     const session = this.session;
     if (session.closing) return;
-    const deadline = session.kernel.command<number | null>(KernelOp.NextDeadline) ?? undefined;
+    const deadline =
+      (known === undefined
+        ? session.kernel.command<number | null>(KernelOp.NextDeadline)
+        : known) ?? undefined;
     if (deadline === this.#lingerDeadline) return;
     if (this.#linger !== undefined) clearTimeout(this.#linger);
     this.#linger = undefined;

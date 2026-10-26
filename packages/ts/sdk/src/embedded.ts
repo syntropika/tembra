@@ -79,6 +79,28 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
     if (envelope.error) throw new TembraError(envelope.error);
     return envelope.ok;
   }
+  const cooperative = ops.op_tembra_driver_enabled?.() ?? false;
+  const pending = new Map<
+    number,
+    { resolve(value: unknown): void; reject(error: unknown): void }
+  >();
+  globals.__tembraDeliver = (batch: [number, Uint8Array | string, boolean][]) => {
+    for (const [id, payload, success] of batch) {
+      const waiter = pending.get(id);
+      if (!waiter) throw new Error("unknown native completion");
+      pending.delete(id);
+      try {
+        if (!success) throw new Error(payload as string);
+        waiter.resolve(answer(payload as Uint8Array));
+      } catch (error) {
+        waiter.reject(error);
+      }
+    }
+  };
+  function submit(operation: string, payload: Uint8Array): Promise<any> {
+    const id = ops.op_tembra_submit!(operation, payload);
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  }
   const host = new Host({
     ...options,
     clockOrigin: 0,
@@ -87,6 +109,30 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
       request: (metadata) => ops.op_tembra_kernel!(metadata),
     },
     native: {
+      ...(cooperative
+        ? {
+            admit: (reference: number, method: string, ctx: Context) => {
+              const result = JSON.parse(
+                ops.op_tembra_admit!(
+                  JSON.stringify({
+                    reference,
+                    method,
+                    root: ctx.root,
+                    context: ctx.frame,
+                    parent: ctx.invocation?.id,
+                  }),
+                ),
+              ) as any;
+              if (result.error) throw new TembraError(result.error);
+              return result.ok;
+            },
+            finish: (call: number, now: number) => {
+              const result = JSON.parse(ops.op_tembra_finish!(call, String(now))) as any;
+              if (result.error) throw new TembraError(result.error);
+              return result.ok;
+            },
+          }
+        : {}),
       rootEnded: (root) => ops.op_tembra_end_context!(root),
       access: (orb, service, principal) =>
         JSON.parse(ops.op_tembra_access!(orb, service, principal)) ?? undefined,
@@ -115,12 +161,14 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
       },
       /** Encode only the call arguments that cross into Rust. */
       invoke: async (invocation, arguments_) =>
-        answer(
-          await ops.op_tembra_native!(
-            "invoke",
-            codec.serialize({ invocation, arguments: arguments_ }),
-          ),
-        ),
+        cooperative
+          ? submit("invoke", codec.serialize({ invocation, arguments: arguments_ }))
+          : answer(
+              await ops.op_tembra_native!(
+                "invoke",
+                codec.serialize({ invocation, arguments: arguments_ }),
+              ),
+            ),
       /** Release native object storage after shared scope cleanup. */
       dispose: async (object) => {
         answer(await ops.op_tembra_native!("dispose", codec.serialize({ object })));

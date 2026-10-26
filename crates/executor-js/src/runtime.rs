@@ -6,7 +6,10 @@ use super::*;
 /// One V8 environment per host. Only prebundled JavaScript is accepted; dependencies are resolved
 /// by SDK tooling before execution. This adapter provides neither Node nor DOM APIs.
 pub struct Runtime {
+    // Persistent V8 handles must be dropped before their isolate.
+    receiver: Option<v8::Global<v8::Function>>,
     js: JsRuntime,
+    driver: Option<super::CooperativeExecutor>,
     native: Host,
     codec: Rc<dyn tembra::codec::Codec>,
 }
@@ -22,16 +25,54 @@ impl Runtime {
         )
     }
 
-    /// Create one JS runtime using the supplied host-wide codec.
+    /// Create an embedded host using the supplied portable codec and the standard async adapter.
     pub fn with_codec(
         native: Host,
         sdk_source: impl Into<String>,
         codec: Rc<dyn tembra::codec::Codec>,
         js_codec: &str,
     ) -> Result<Self> {
+        Self::build(native, sdk_source.into(), codec, js_codec, None)
+    }
+
+    /// Share native scheduling and result delivery with a background-capable local executor.
+    /// Construct the native host with a clone of this executor.
+    pub fn with_driver(
+        native: Host,
+        sdk_source: impl Into<String>,
+        driver: super::CooperativeExecutor,
+    ) -> Result<Self> {
+        Self::with_codec_and_driver(
+            native,
+            sdk_source,
+            Rc::new(tembra::codec::Json),
+            "Tembra.jsonCodec",
+            driver,
+        )
+    }
+
+    /// Use cooperative completion delivery with the supplied host-wide portable codec.
+    pub fn with_codec_and_driver(
+        native: Host,
+        sdk_source: impl Into<String>,
+        codec: Rc<dyn tembra::codec::Codec>,
+        js_codec: &str,
+        driver: super::CooperativeExecutor,
+    ) -> Result<Self> {
+        Self::build(native, sdk_source.into(), codec, js_codec, Some(driver))
+    }
+
+    fn build(
+        native: Host,
+        sdk_source: String,
+        codec: Rc<dyn tembra::codec::Codec>,
+        js_codec: &str,
+        driver: Option<super::CooperativeExecutor>,
+    ) -> Result<Self> {
         native.delegate_actions();
         let extensions = vec![
             tembra_ops::init(),
+            super::driver::tembra_driver_ops::init(),
             super::bridge::tembra_callback_ops::init(),
         ];
         let mut js = JsRuntime::new(RuntimeOptions {
@@ -39,6 +80,8 @@ impl Runtime {
             ..Default::default()
         });
         js.op_state().borrow_mut().put(Rc::new(Bindings {
+            driver: driver.clone(),
+            completions: RefCell::new(Vec::new()),
             callbacks: super::bridge::CallbackBridge::attach(&native),
             kernel: tembra_bridge::Kernel {
                 host: native.kernel(),
@@ -47,14 +90,45 @@ impl Runtime {
             codec: codec.clone(),
             timers: RefCell::new(BTreeMap::new()),
         }));
-        js.execute_script("tembra:runtime", sdk_source.into())
+        js.execute_script("tembra:runtime", sdk_source)
             .map_err(js_error)?;
         js.execute_script(
             "tembra:host",
             format!("globalThis.host = Tembra.createHost({{ serialization: ({js_codec}) }});"),
         )
         .map_err(js_error)?;
-        Ok(Self { js, native, codec })
+        let receiver = super::completion::receiver(&mut js);
+        if driver.is_some() && receiver.is_none() {
+            return Err(Error::invalid(
+                Reason::Javascript,
+                "the SDK does not support cooperative completion delivery",
+            ));
+        }
+        Ok(Self {
+            receiver,
+            js,
+            driver,
+            native,
+            codec,
+        })
+    }
+
+    fn deliver_completions(&mut self) -> Result<usize> {
+        let completed = self
+            .js
+            .op_state()
+            .borrow()
+            .borrow::<Rc<Bindings>>()
+            .completions
+            .take();
+        if completed.is_empty() {
+            return Ok(0);
+        }
+        let receiver = self
+            .receiver
+            .as_ref()
+            .ok_or_else(|| Error::invalid(Reason::Javascript, "completion receiver is missing"))?;
+        super::completion::deliver(&mut self.js, receiver, completed)
     }
 
     /// Read the native host that shares this runtime's kernel.
@@ -154,10 +228,46 @@ impl Runtime {
             .execute_script("tembra:application", source.into())
             .map_err(js_error)?;
         let resolved = self.js.resolve(value);
-        self.js
-            .with_event_loop_promise(resolved, Default::default())
-            .await
-            .map_err(js_error)
+        use futures::FutureExt;
+        use std::task::Poll;
+        let Some(driver) = self.driver.clone() else {
+            return self
+                .js
+                .with_event_loop_promise(resolved, Default::default())
+                .await
+                .map_err(js_error);
+        };
+        futures::pin_mut!(resolved);
+        std::future::poll_fn(|cx| {
+            for _ in 0..32 {
+                driver.poll_ready(cx);
+                let before = self.deliver_completions()?;
+                if let Poll::Ready(result) = resolved.poll_unpin(cx) {
+                    return Poll::Ready(result.map_err(js_error));
+                }
+                let event = self.js.poll_event_loop(cx, Default::default());
+                if let Poll::Ready(Err(error)) = event {
+                    return Poll::Ready(Err(js_error(error)));
+                }
+                driver.poll_ready(cx);
+                let after = self.deliver_completions()?;
+                if let Poll::Ready(result) = resolved.poll_unpin(cx) {
+                    return Poll::Ready(result.map_err(js_error));
+                }
+                if before + after == 0 {
+                    if matches!(event, Poll::Ready(Ok(()))) && !driver.has_pending() {
+                        return Poll::Ready(Err(Error::invalid(
+                            Reason::Javascript,
+                            "Promise resolution is still pending but the event loop has already resolved",
+                        )));
+                    }
+                    return Poll::Pending;
+                }
+            }
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await
     }
 
     /// Install an embedded orb bundle through the shared JS adapter.

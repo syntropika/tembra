@@ -153,6 +153,35 @@ the same clock origin. Construct `TokioExecutor::new()` inside the embedding's r
 Run `cargo run --locked -p tembra --example composition` for managed dependencies,
 shared orb data and reference-bound selected state.
 
+## Cooperative embedded execution
+
+The default `Runtime::new` and `Runtime::with_codec` retain the standard async adapter.
+To share native polling and completion delivery with V8, construct the host and runtime
+with the same `CooperativeExecutor`:
+
+```rust,ignore
+use tembra::Host;
+use tembra_executor_js::{CooperativeExecutor, Runtime};
+
+// Construct inside a running Tokio LocalSet, after building the SDK bundle.
+let executor = CooperativeExecutor::new();
+let native = Host::new(executor.clone());
+let runtime = Runtime::with_driver(native, sdk_source, executor)?;
+```
+
+`Runtime::with_codec_and_driver` also accepts a custom portable codec. This mode batches
+completed native results and composes existing admission and finish commands. It keeps
+managed native tasks and their physical ownership; local Rust calls still avoid the codec.
+Native work and local child tasks continue on a background pump while V8 is idle or an
+`evaluate` wait has been dropped. Keep the embedding's outer `LocalSet` running through
+cleanup. JavaScript promises and callbacks still require an active runtime operation to
+drive V8.
+
+Each polling turn has a native task budget so self-waking work yields to other local tasks.
+Scheduling turns and the relative completion timing of independent calls can differ from
+the standard adapter. Hook plan order, awaited call order, context authority, code versions,
+cancellation and physical cleanup retain their kernel contracts.
+
 ## Capability boundary
 
 | Capability                                                                  | Native facade status                                                                                                                                                 |

@@ -3,6 +3,8 @@
 use super::*;
 
 pub(super) struct Bindings {
+    pub(super) driver: Option<super::CooperativeExecutor>,
+    pub(super) completions: RefCell<Vec<super::completion::Completion>>,
     pub(super) callbacks: super::bridge::CallbackBridge,
     pub(super) kernel: tembra_bridge::Kernel,
     pub(super) native: Host,
@@ -205,9 +207,19 @@ async fn op_tembra_native(
     #[buffer] payload: JsBuffer,
 ) -> std::result::Result<Vec<u8>, deno_error::JsErrorBox> {
     let bindings = state.borrow().borrow::<Rc<Bindings>>().clone();
+    let result = execute_native(&bindings, operation, &payload).await;
+    encode_answer(&bindings, result)
+}
+
+/// Reuse native dispatch independently of Deno's per-call async op driver.
+pub(super) async fn execute_native(
+    bindings: &Bindings,
+    operation: String,
+    payload: &[u8],
+) -> Result<Value> {
     let native = bindings.native.clone();
-    let result = async {
-        let value = bindings.codec.deserialize(&payload)?;
+    async {
+        let value = bindings.codec.deserialize(payload)?;
         let id = |name: &str| -> Result<tembra::core::Id> {
             value[name]
                 .as_u64()
@@ -292,8 +304,7 @@ async fn op_tembra_native(
             _ => Err(Error::invalid(Reason::Operation, operation)),
         }
     }
-    .await;
-    encode_answer(&bindings, result)
+    .await
 }
 
 /// Encode a native result or its structured error envelope.

@@ -1,7 +1,8 @@
 use futures::FutureExt;
 use serde_json::json;
 use tembra::{Host, Orb, Service};
-use tembra_executor_js::{Runtime, TokioExecutor};
+mod support;
+use support::Execution;
 
 fn sdk_source() -> String {
     std::fs::read_to_string(concat!(
@@ -13,17 +14,21 @@ fn sdk_source() -> String {
 
 #[test]
 fn javascript_provider_moves_preserve_state_and_candidate_dependencies() {
-    let executor = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    tokio::task::LocalSet::new().block_on(
-        &executor,
-        async {
-            let mut runtime = Runtime::new(Host::new(TokioExecutor::new()), sdk_source()).unwrap();
-            let result = runtime
-                .evaluate(
-                    r#"(async () => {
+    for cooperative in [false, true] {
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(
+            &executor,
+            async {
+                let execution = Execution::new(cooperative);
+                let mut runtime = execution
+                    .runtime(Host::new(execution.clone()), sdk_source())
+                    .unwrap();
+                let result = runtime
+                    .evaluate(
+                        r#"(async () => {
           const provider = (name, serves) => ({name, apiVersion: 1, services: serves ? {item: {
             create(self) { return {state: self.state(0)}; },
             methods: {
@@ -52,28 +57,31 @@ fn javascript_provider_moves_preserve_state_and_candidate_dependencies() {
           reference.release(); client.release();
           return result;
         })()"#,
-                )
-                .await
-                .unwrap();
-            assert_eq!(result, json!([1, "b"]));
-            runtime.close().await.unwrap();
-            assert_eq!(runtime.native().kernel().diagnostics().objects, 0);
-        }
-        .boxed_local(),
-    );
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result, json!([1, "b"]));
+                runtime.close().await.unwrap();
+                assert_eq!(runtime.native().kernel().diagnostics().objects, 0);
+            }
+            .boxed_local(),
+        );
+    }
 }
 
 #[test]
 fn javascript_uses_native_provider_through_one_kernel() {
-    let source = sdk_source();
-    let executor = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    tokio::task::LocalSet::new().block_on(&executor, async {
-        let native = Host::new(TokioExecutor::new());
+    for cooperative in [false, true] {
+        let source = sdk_source();
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&executor, async {
+let execution = Execution::new(cooperative);
+        let native = Host::new(execution.clone());
         native.install(vec![Orb::new("storage", 1).service(Service::new("storage", |self_| self_.state(0_i32, 1, |_| Ok(()))).method("add", |state, context, (amount,): (i32,)| async move { Ok(*state.update(&context, |value| Ok(value + amount))?) }))]).unwrap();
-        let mut runtime = Runtime::new(native, source).unwrap();
+        let mut runtime = execution.runtime(native, source).unwrap();
         let id = runtime.native().kernel().installed_orbs()[0].id;
         let precision = runtime.evaluate(&format!(r#"(() => {{
           const has = Deno.core.ops.op_tembra_has_orb;
@@ -92,34 +100,37 @@ fn javascript_uses_native_provider_through_one_kernel() {
         runtime.close().await.unwrap();
         assert_eq!(runtime.native().kernel().diagnostics().objects, 0);
     }.boxed_local());
+    }
 }
 
 #[test]
 fn native_state_decode_failure_does_not_replace_the_call_result_or_lose_disposal() {
-    let executor = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    tokio::task::LocalSet::new().block_on(
-        &executor,
-        async {
-            let native = Host::new(TokioExecutor::new());
-            native
-                .install(vec![Orb::new("native", 1).service(
-                    Service::new("native", |self_| self_.state(0_u64, 1, |_| Ok(()))).method(
-                        "update",
-                        |state, context, (power,): (u32,)| async move {
-                            tokio::task::yield_now().await;
-                            state.update(&context, |_| Ok(1_u64 << power))?;
-                            Ok(())
-                        },
-                    ),
-                )])
-                .unwrap();
-            let mut runtime = Runtime::new(native, sdk_source()).unwrap();
-            let result = runtime
-                .evaluate(
-                    r#"(async () => {
+    for cooperative in [false, true] {
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(
+            &executor,
+            async {
+                let execution = Execution::new(cooperative);
+                let native = Host::new(execution.clone());
+                native
+                    .install(vec![Orb::new("native", 1).service(
+                        Service::new("native", |self_| self_.state(0_u64, 1, |_| Ok(()))).method(
+                            "update",
+                            |state, context, (power,): (u32,)| async move {
+                                tokio::task::yield_now().await;
+                                state.update(&context, |_| Ok(1_u64 << power))?;
+                                Ok(())
+                            },
+                        ),
+                    )])
+                    .unwrap();
+                let mut runtime = execution.runtime(native, sdk_source()).unwrap();
+                let result = runtime
+                    .evaluate(
+                        r#"(async () => {
           const reference = await host.get('native', 'main');
           const calling = reference.update(60);
           for (let turn = 0; turn < 8 && !host.diagnostics().calls; turn++) await Promise.resolve();
@@ -134,35 +145,39 @@ fn native_state_decode_failure_does_not_replace_the_call_result_or_lose_disposal
             values: host.diagnostics().values
           };
         })()"#,
-                )
-                .await;
-            let closing = runtime.close().await;
-            assert_eq!(
-                result.unwrap(),
-                json!({
-                    "value": null, "errors": [{"code": "invalid", "reason": "json_number"}],
-                    "objects": 0, "values": 0,
-                })
-            );
-            closing.unwrap();
-            assert_eq!(runtime.native().kernel().diagnostics().objects, 0);
-        }
-        .boxed_local(),
-    );
+                    )
+                    .await;
+                let closing = runtime.close().await;
+                assert_eq!(
+                    result.unwrap(),
+                    json!({
+                        "value": null, "errors": [{"code": "invalid", "reason": "json_number"}],
+                        "objects": 0, "values": 0,
+                    })
+                );
+                closing.unwrap();
+                assert_eq!(runtime.native().kernel().diagnostics().objects, 0);
+            }
+            .boxed_local(),
+        );
+    }
 }
 
 #[test]
 fn portable_results_copy_the_codec_view_without_iterating_bytes() {
-    let executor = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    tokio::task::LocalSet::new().block_on(&executor, async {
-        let mut runtime = Runtime::with_codec(
-            Host::new(TokioExecutor::new()),
-            sdk_source(),
-            std::rc::Rc::new(tembra::codec::Json),
-            r#"({
+    for cooperative in [false, true] {
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&executor, async {
+            let execution = Execution::new(cooperative);
+            let mut runtime = execution
+                .with_codec(
+                    Host::new(execution.clone()),
+                    sdk_source(),
+                    std::rc::Rc::new(tembra::codec::Json),
+                    r#"({
               id: Tembra.jsonCodec.id,
               deserialize: value => Tembra.jsonCodec.deserialize(value),
               serialize(value) {
@@ -176,12 +191,12 @@ fn portable_results_copy_the_codec_view_without_iterating_bytes() {
                 return view;
               }
             })"#,
-        )
-        .unwrap();
-        runtime
-            .install(
-                "results",
-                r#"globalThis.__tembraOrb = {
+                )
+                .unwrap();
+            runtime
+                .install(
+                    "results",
+                    r#"globalThis.__tembraOrb = {
           name: 'results', apiVersion: 1, services: { results: { methods: {
             numbers(_environment, _context, count) {
               return Array.from({ length: count }, (_, index) => index - 100);
@@ -191,36 +206,39 @@ fn portable_results_copy_the_codec_view_without_iterating_bytes() {
             }
           } } }
         };"#
-                .into(),
-            )
-            .await
-            .unwrap();
-        let key = vec!["main".into()];
-        let numbers = runtime
-            .call("results", &key, "numbers", json!([16_384]))
-            .await
-            .unwrap();
-        assert_eq!(numbers, json!((-100..16_284).collect::<Vec<_>>()));
-        let bytes = runtime
-            .call("results", &key, "binary", json!([32_768]))
-            .await
-            .unwrap();
-        let expected: Vec<_> = (0..32_768).map(|index| (index % 251) as u8).collect();
-        assert_eq!(bytes, tembra::codec::bytes(&expected));
-        runtime.close().await.unwrap();
-    });
+                    .into(),
+                )
+                .await
+                .unwrap();
+            let key = vec!["main".into()];
+            let numbers = runtime
+                .call("results", &key, "numbers", json!([16_384]))
+                .await
+                .unwrap();
+            assert_eq!(numbers, json!((-100..16_284).collect::<Vec<_>>()));
+            let bytes = runtime
+                .call("results", &key, "binary", json!([32_768]))
+                .await
+                .unwrap();
+            let expected: Vec<_> = (0..32_768).map(|index| (index % 251) as u8).collect();
+            assert_eq!(bytes, tembra::codec::bytes(&expected));
+            runtime.close().await.unwrap();
+        });
+    }
 }
 
 #[test]
 fn codec_results_support_shared_views_and_refuse_detached_views() {
-    let executor = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    tokio::task::LocalSet::new().block_on(&executor, async {
-        for shared in [true, false] {
-            let codec = format!(
-                r#"({{
+    for cooperative in [false, true] {
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&executor, async {
+            let execution = Execution::new(cooperative);
+            for shared in [true, false] {
+                let codec = format!(
+                    r#"({{
               id: Tembra.jsonCodec.id,
               deserialize: value => Tembra.jsonCodec.deserialize(value),
               serialize(value) {{
@@ -234,34 +252,36 @@ fn codec_results_support_shared_views_and_refuse_detached_views() {
                 return encoded;
               }}
             }})"#
-            );
-            let mut runtime = Runtime::with_codec(
-                Host::new(TokioExecutor::new()),
-                sdk_source(),
-                std::rc::Rc::new(tembra::codec::Json),
-                &codec,
-            )
-            .unwrap();
-            runtime
-                .install(
-                    "result",
-                    r#"globalThis.__tembraOrb = {
+                );
+                let mut runtime = execution
+                    .with_codec(
+                        Host::new(execution.clone()),
+                        sdk_source(),
+                        std::rc::Rc::new(tembra::codec::Json),
+                        &codec,
+                    )
+                    .unwrap();
+                runtime
+                    .install(
+                        "result",
+                        r#"globalThis.__tembraOrb = {
               name: 'result', apiVersion: 1,
               services: { result: { methods: { read: () => 42 } } }
             };"#
-                    .into(),
-                )
-                .await
-                .unwrap();
-            let result = runtime
-                .call("result", &["main".into()], "read", json!([]))
-                .await;
-            if shared {
-                assert_eq!(result.unwrap(), json!(42));
-            } else {
-                assert_eq!(result.unwrap_err().reason, "byte_result");
+                        .into(),
+                    )
+                    .await
+                    .unwrap();
+                let result = runtime
+                    .call("result", &["main".into()], "read", json!([]))
+                    .await;
+                if shared {
+                    assert_eq!(result.unwrap(), json!(42));
+                } else {
+                    assert_eq!(result.unwrap_err().reason, "byte_result");
+                }
+                runtime.close().await.unwrap();
             }
-            runtime.close().await.unwrap();
-        }
-    });
+        });
+    }
 }

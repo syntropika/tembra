@@ -66,13 +66,18 @@ export class Calls {
     context(ctx, session);
     if (reference.released) throw new TembraError(Errors.Released.Reference);
     await reference.ready;
-    ctx.check();
-    const invocation = session.kernel.command<Invocation>(KernelOp.BeginCall, {
-      reference: reference.id,
-      root: ctx.root,
-      context: ctx.frame || undefined,
-      method,
-    });
+    const admission = session.options.native?.admit?.(reference.id, method, ctx);
+    let invocation: Invocation;
+    if (admission) invocation = admission.call;
+    else {
+      ctx.check();
+      invocation = session.kernel.command<Invocation>(KernelOp.BeginCall, {
+        reference: reference.id,
+        root: ctx.root,
+        context: ctx.frame || undefined,
+        method,
+      });
+    }
     const entered = new Context(session, ctx.root, invocation, ctx.frame);
     const physical = session.track(
       (async () => {
@@ -80,8 +85,9 @@ export class Calls {
         const started = sampled ? session.now() : 0;
         let outcome: Outcome = Outcome.Ok;
         try {
-          if (session.options.native?.hasOrb(invocation.orb))
-            return await session.options.native.invoke(invocation, arguments_, entered);
+          const native = session.options.native;
+          if (native && (admission?.native ?? native.hasOrb(invocation.orb)))
+            return await native.invoke(invocation, arguments_, entered);
           const object = session.objects.get(invocation.object);
           const environment = object?.versions.get(invocation.orb);
           const handle =
@@ -101,9 +107,7 @@ export class Calls {
               duration: session.now() - started,
               outcome,
             });
-          session.kernel.command(KernelOp.Tick, { now: session.now() });
-          session.kernel.command(KernelOp.FinishCall, { call: invocation.id });
-          session.lifecycle.flush();
+          session.lifecycle.finishCall(invocation.id);
         }
       })(),
     );

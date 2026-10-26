@@ -126,6 +126,17 @@ export interface PreparedReload {
 }
 
 export interface NativeAdapter {
+  /** Recheck context authority and admit one call using the kernel command rules. */
+  admit?(
+    reference: number,
+    method: string,
+    context: Context,
+  ): { call: Invocation; native: boolean };
+  /** Tick the supplied host clock, finish a call, then drain actions and read the deadline. */
+  finish?(
+    call: number,
+    now: number,
+  ): { actions: import("../bridge/kernel.ts").Action[]; deadline: number | null };
   /** Revoke native reference claims issued inside a JS-owned root. */
   rootEnded?(root: number): void;
   /** Return a native service's principal-specific method policy when configured. */
