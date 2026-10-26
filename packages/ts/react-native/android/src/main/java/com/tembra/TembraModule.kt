@@ -1,12 +1,11 @@
 package com.tembra
 
 import com.facebook.react.bridge.ReactApplicationContext
-import com.tembra.ffi.NativeKernel
 import java.util.UUID
 
 /** Own kernels for one React Native module, including reload cleanup. */
 class TembraModule(context: ReactApplicationContext) : NativeTembraSpec(context) {
-    private val kernels = mutableMapOf<String, NativeKernel>()
+    private val kernels = mutableMapOf<String, TembraKernel>()
     private var invalidated = false
 
     /** Return the name used by the generated JavaScript specification. */
@@ -17,7 +16,7 @@ class TembraModule(context: ReactApplicationContext) : NativeTembraSpec(context)
     override fun createKernel(): String {
         check(!invalidated) { "The native module has been invalidated" }
         val handle = UUID.randomUUID().toString()
-        kernels[handle] = NativeKernel()
+        kernels[handle] = TembraKernel()
         return handle
     }
 
@@ -32,7 +31,6 @@ class TembraModule(context: ReactApplicationContext) : NativeTembraSpec(context)
     @Synchronized
     override fun releaseKernel(handle: String): Boolean {
         val kernel = kernels.remove(handle) ?: return false
-        kernel.shutdown()
         kernel.close()
         return true
     }
@@ -42,7 +40,6 @@ class TembraModule(context: ReactApplicationContext) : NativeTembraSpec(context)
     override fun invalidate() {
         invalidated = true
         kernels.values.forEach { kernel ->
-            kernel.shutdown()
             kernel.close()
         }
         kernels.clear()

@@ -3,16 +3,20 @@ import Foundation
 /** Own native kernels independently of the React Native calling thread. */
 @objc(Tembra) public final class Tembra: NSObject {
     private let lock = NSLock()
-    private var kernels: [String: NativeKernel] = [:]
+    private var kernels: [String: TembraKernel] = [:]
     private var invalidated = false
 
     /** Allocate an isolated native kernel for one JavaScript host. */
     @objc public func createKernel() throws -> String {
         lock.lock()
         defer { lock.unlock() }
-        guard !invalidated else { throw MobileError.Closed }
+        guard !invalidated else {
+            throw NSError(domain: "NativeTembra", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "The native module has been invalidated"
+            ])
+        }
         let handle = UUID().uuidString
-        kernels[handle] = try NativeKernel()
+        kernels[handle] = try TembraKernel()
         return handle
     }
 
@@ -20,8 +24,12 @@ import Foundation
     @objc public func request(_ handle: String, metadata: String) throws -> String {
         lock.lock()
         defer { lock.unlock() }
-        guard let kernel = kernels[handle] else { throw MobileError.Closed }
-        return try kernel.request(metadata: metadata)
+        guard let kernel = kernels[handle] else {
+            throw NSError(domain: "NativeTembra", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "The native kernel has been released"
+            ])
+        }
+        return try kernel.request(metadata)
     }
 
     /** Release one kernel after the host has drained its lifecycle. */
@@ -29,7 +37,7 @@ import Foundation
         lock.lock()
         defer { lock.unlock() }
         guard let kernel = kernels.removeValue(forKey: handle) else { return false }
-        kernel.shutdown()
+        kernel.close()
         return true
     }
 
@@ -38,7 +46,7 @@ import Foundation
         lock.lock()
         defer { lock.unlock() }
         invalidated = true
-        for kernel in kernels.values { kernel.shutdown() }
+        for kernel in kernels.values { kernel.close() }
         kernels.removeAll()
     }
 

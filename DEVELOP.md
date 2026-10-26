@@ -57,40 +57,66 @@ Rust. The engine scripts package its output, and wasm-bindgen generates the brow
 The SDK build emits JavaScript, declarations and the bundled embedded adapter. Bun can import
 SDK TypeScript sources directly. Engine artifacts live in their owning package's `dist` directory.
 
-## Mobile builds
+## Native builds
 
-The mobile package uses UniFFI to generate Swift and Kotlin bindings from the same Rust library.
-The build script runs with Bun:
+The Swift and Kotlin packages use UniFFI to generate bindings from the same Rust library.
+Their TypeScript build scripts run with Bun. Neither package depends on React Native.
 
 ```sh
 just build-mobile-bindings
 ```
 
-For iOS, use macOS with Xcode installed:
+For Swift, use macOS with Xcode installed:
 
 ```sh
-bun run --cwd packages/ts/react-native build:ios
+just build-swift
+just test-swift
 ```
 
-This command creates `native/TembraFFI.xcframework` in the mobile package.
-It contains the arm64 device library and the arm64/x86_64 simulator libraries.
-The minimum iOS version is 15.1.
-CocoaPods compiles the Swift adapter during the application build.
+The build creates `packages/swift/native/TembraFFI.xcframework` for iOS and macOS.
+It contains arm64 device libraries and arm64/x86_64 libraries for the simulator and macOS.
+The minimum versions are iOS 15.1 and macOS 11.
+Swift Package Manager and CocoaPods compile the shared Swift sources.
 
-For Android, install the Android NDK and set `ANDROID_NDK_HOME` to its directory:
+For Kotlin/JVM, install Java 17 and Gradle 8.11.1:
+
+```sh
+just build-kotlin
+just test-kotlin
+```
+
+This build does not require the Android SDK.
+The JVM JAR includes the Rust library for the current host as a JNA resource.
+Use `just build-kotlin --targets x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu` to select other targets.
+Each target needs its Rust target and a compatible linker.
+The build supports target libraries for Linux, macOS and Windows.
+
+For Android, also install the Android SDK and NDK.
+Set `ANDROID_HOME` and `ANDROID_NDK_HOME` to their installation directories.
 
 ```sh
 cargo install cargo-ndk --locked
-bun run --cwd packages/ts/react-native build:android
+just build-kotlin-android
 ```
 
 The default ABIs are `arm64-v8a` and `x86_64`. The minimum Android API is 24.
-Use `--abis arm64-v8a,armeabi-v7a,x86,x86_64` to build all supported ABIs.
-The libraries go in `android/src/main/jniLibs` in the mobile package.
-Gradle compiles the Kotlin adapter and includes JNA.
+Use `just build-kotlin-android --abis arm64-v8a,armeabi-v7a,x86,x86_64` to build all supported ABIs.
+Both builds write Maven packages and dependency metadata to `packages/kotlin/build/repository`.
+The JVM artifact is `tembra-kotlin-jvm`. The Android artifact is `tembra-kotlin`.
 
-Build both platforms before you create a package archive.
-The archive includes the generated bindings and native libraries. Git excludes these files.
+## React Native builds
+
+The adapter builds and packages the same native code:
+
+```sh
+bun run --cwd packages/ts/react-native build:ios
+bun run --cwd packages/ts/react-native build:android
+```
+
+The iOS build copies the Swift package sources and XCFramework into the adapter archive.
+CocoaPods compiles those sources with the React Native adapter.
+The Android build copies the Kotlin Maven package. Gradle resolves it as a library dependency.
+Build both platforms before you create a package archive. Git excludes generated sources and binaries.
 Applications that install the archive do not need Rust or UniFFI.
 See the [React Native guide](docs/react-native.md) for application setup.
 

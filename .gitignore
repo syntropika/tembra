@@ -10,3 +10,15 @@ __pycache__/
 /packages/ts/react-native/android/src/main/jniLibs/
 /packages/ts/react-native/android/build/
 /packages/ts/react-native/android/.gradle/
+/packages/swift/native/
+/packages/swift/Sources/TembraNative/Generated/
+/packages/swift/.build/
+/packages/swift/.swiftpm/
+/packages/kotlin/src/generated/
+/packages/kotlin/src/main/jniLibs/
+/packages/kotlin/build/
+/packages/kotlin/.gradle/
+/packages/kotlin/local.properties
+/packages/kotlin/android/build/
+/packages/kotlin/jvm/build/
+/packages/kotlin/.kotlin/

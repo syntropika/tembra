@@ -29,6 +29,8 @@ servers, browsers, Web Workers and React Native.
 | [packages/ts/sdk/](packages/ts/sdk/)                   | TypeScript SDK and orb tooling                                    |
 | [packages/ts/engine-node/](packages/ts/engine-node/)   | Native engine packaging and builds                                |
 | [packages/ts/engine-wasm/](packages/ts/engine-wasm/)   | WASM engine packaging and builds                                  |
+| [packages/swift/](packages/swift/)                     | Swift bindings for iOS and macOS                                  |
+| [packages/kotlin/](packages/kotlin/)                   | Kotlin bindings for the JVM and Android                           |
 | [packages/ts/react-native/](packages/ts/react-native/) | React Native TurboModule, native packaging and mobile builds      |
 | [packages/ts/test/](packages/ts/test/)                 | Browser integration tests                                         |
 | [examples/rust/](examples/rust/)                       | Native orbs, identity, execution and resource lifetime            |

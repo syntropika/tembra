@@ -12,6 +12,15 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["sdk/src/**/*.ts", "sdk/test/**/*.ts", "*/build.ts", "*.config.ts", "test/**/*.ts"],
+  "include": [
+    "sdk/src/**/*.ts",
+    "sdk/test/**/*.ts",
+    "*/build.ts",
+    "*.config.ts",
+    "test/**/*.ts",
+    "../swift/build.ts",
+    "../kotlin/build.ts",
+    "../../scripts/**/*.ts"
+  ],
   "exclude": ["**/dist", "**/node_modules"]
 }

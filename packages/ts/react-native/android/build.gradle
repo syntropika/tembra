@@ -26,7 +26,6 @@ android {
         minSdkVersion 24
         targetSdkVersion 36
     }
-    sourceSets.main.java.srcDirs += ["../native/generated/kotlin"]
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -35,11 +34,12 @@ android {
 }
 
 repositories {
+    maven { url = uri("../native/maven") }
     google()
     mavenCentral()
 }
 
 dependencies {
     implementation("com.facebook.react:react-android")
-    implementation("net.java.dev.jna:jna:5.17.0@aar")
+    implementation("dev.tembra:tembra-kotlin:0.1.0")
 }

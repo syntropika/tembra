@@ -13,7 +13,7 @@ React Native Codegen generates the native interfaces during that build.
 Expo applications need a development build with native modules.
 Use a JavaScript runtime on the device, such as Hermes.
 
-For a source checkout, first build the native libraries in [DEVELOP.md](../DEVELOP.md#mobile-builds).
+For a source checkout, first build the native libraries in [DEVELOP.md](../DEVELOP.md#native-builds).
 
 ## Run an orb
 

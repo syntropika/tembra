@@ -11,9 +11,9 @@ Pod::Spec.new do |s|
   s.source = { :git => 'https://github.com/syntropika/tembra.git', :tag => s.version.to_s }
   s.platforms = { :ios => '15.1' }
   s.swift_version = '5.9'
-  s.source_files = 'ios/**/*.{h,mm,swift}', 'native/generated/swift/*.swift'
+  s.source_files = 'ios/**/*.{h,mm,swift}', 'native/swift/Sources/**/*.swift'
   s.public_header_files = 'ios/RCTTembra.h'
-  s.vendored_frameworks = 'native/TembraFFI.xcframework'
+  s.vendored_frameworks = 'native/swift/TembraFFI.xcframework'
   s.frameworks = 'Security', 'SystemConfiguration'
   s.libraries = 'c++', 'resolv'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }

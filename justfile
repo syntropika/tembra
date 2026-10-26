@@ -63,4 +63,21 @@ check-all: check
 
 # Generate matching Swift and Kotlin bindings from the shared engine.
 build-mobile-bindings:
-    bun run --cwd packages/ts/react-native build:bindings
+    bun packages/swift/build.ts bindings
+    bun packages/kotlin/build.ts bindings
+
+# Build reusable native packages without React Native.
+build-swift:
+    bun packages/swift/build.ts build
+
+build-kotlin *args:
+    bun packages/kotlin/build.ts jvm {{args}}
+
+build-kotlin-android *args:
+    bun packages/kotlin/build.ts android {{args}}
+
+test-swift:
+    swift test --package-path packages/swift
+
+test-kotlin: build-kotlin
+    gradle -p packages/kotlin :jvm:test
