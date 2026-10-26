@@ -1,4 +1,4 @@
-//! Immutable frames indexed by their physical root lifetime.
+//! Immutable frames retained by their creating operation and live consumers.
 
 use super::{ContextContract, ContextValue, invalid};
 use crate::{Code, Error, Host, Id, Reason, Result};
@@ -7,11 +7,47 @@ pub(crate) struct ContextFrame {
     pub root: Id,
     pub parent: Id,
     pub depth: usize,
+    references: usize,
     pub key: ContextContract,
     pub value: ContextValue,
 }
 
 impl crate::host::Inner {
+    /// Retain a nonempty frame for a call or child frame.
+    pub(crate) fn retain_frame(&mut self, frame: Id) {
+        if frame != 0 {
+            self.context_frames
+                .get_mut(&frame)
+                .expect("validated frame")
+                .references += 1;
+        }
+    }
+
+    /// Return opaque leases for destruction after the kernel borrow is released.
+    pub(crate) fn release_frame(
+        &mut self,
+        mut id: Id,
+        leases: &mut Vec<crate::OpaqueContextValue>,
+    ) {
+        while id != 0 {
+            let frame = self.context_frames.get_mut(&id).expect("retained frame");
+            frame.references -= 1;
+            if frame.references != 0 {
+                break;
+            }
+            let frame = self.context_frames.remove(&id).expect("unreferenced frame");
+            self.roots
+                .get_mut(&frame.root)
+                .expect("frame retains root")
+                .contexts
+                .remove(&id);
+            if let ContextValue::Opaque(lease) = frame.value {
+                leases.push(lease);
+            }
+            id = frame.parent;
+        }
+    }
+
     /// Require a frame owned by this root, or the empty frame.
     pub(crate) fn check_frame(&self, root: Id, frame: Id) -> Result<()> {
         if frame != 0
@@ -29,7 +65,7 @@ impl crate::host::Inner {
 }
 
 impl Host {
-    /// Derive a bounded frame without extending root or invocation lifetime.
+    /// Derive a frame retained by its creator and admitted consumers.
     pub fn derive_context(
         &self,
         root: Id,
@@ -82,6 +118,10 @@ impl Host {
             ));
         }
         let id = inner.id()?;
+        inner.retain_frame(parent);
+        if let Some(call) = call {
+            inner.call_contexts.entry(call).or_default().push(id);
+        }
         inner.context_contracts.insert(identity, key.kind);
         inner.context_frames.insert(
             id,
@@ -89,6 +129,7 @@ impl Host {
                 root,
                 parent,
                 depth,
+                references: 1,
                 key,
                 value,
             },

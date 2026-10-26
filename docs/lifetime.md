@@ -30,6 +30,7 @@ Cancellation requests a stop. It does not prove that work has stopped.
 A callback, task or resource opener keeps its ownership until it finishes.
 `host.close()` waits for that physical completion and cleanup.
 An uncooperative callback can therefore delay shutdown.
+Context frames follow their creating call and physical consumers; see [context lifetime](context.md).
 
 ## Object lifetime and time
 

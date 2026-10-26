@@ -160,6 +160,11 @@ impl Host {
             .calls
             .remove(&call)
             .ok_or_else(|| gone(Reason::Call))?;
+        let mut leases = Vec::new();
+        for frame in inner.call_contexts.remove(&call.id).unwrap_or_default() {
+            inner.release_frame(frame, &mut leases);
+        }
+        inner.release_frame(call.context, &mut leases);
         let orb_owner = inner.orbs[&call.orb].owner;
         for owner in [
             Owner::Host,
@@ -171,11 +176,9 @@ impl Host {
         }
         let root = inner.roots.get_mut(&call.root).expect("call retains root");
         root.calls -= 1;
-        let leases = if root.calls == 0 && !root.active {
-            inner.remove_root(call.root)
-        } else {
-            Vec::new()
-        };
+        if root.calls == 0 && !root.active {
+            leases.extend(inner.remove_root(call.root));
+        }
         if call.object != 0 {
             inner
                 .objects
@@ -291,6 +294,7 @@ impl Inner {
         if call.object != 0 {
             root.touched.insert(call.object);
         }
+        self.retain_frame(call.context);
         self.calls.insert(call.id, call.clone());
         call
     }

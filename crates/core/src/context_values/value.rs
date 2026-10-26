@@ -66,7 +66,7 @@ impl ContextDatum for String {
 datum!(i64, Integer, Integer);
 datum!(bool, Boolean, Boolean);
 
-/// Retain an owner-issued lease until physical root settlement.
+/// Retain an owner-issued lease until its frame and physical consumers settle.
 #[derive(Clone)]
 pub struct OpaqueContextValue {
     pub id: Id,

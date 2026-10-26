@@ -44,6 +44,8 @@ Factories finish synchronously. Methods and resource callbacks can be asynchrono
 `host.get()` waits until the object is ready.
 A method call without an explicit context starts its own root.
 Pass an existing context as the first argument to join that operation.
+Returning a context or copying an opaque token does not keep its issuing call alive.
+See [context lifetime](context.md) before sharing a binding beyond a method return.
 
 `get()` returns a dynamic reference. A service name does not infer its argument and result types.
 Keep runtime validation in the orb even when application code supplies TypeScript types.

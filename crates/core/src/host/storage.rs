@@ -19,6 +19,7 @@ pub(crate) struct Inner {
     pub context_frames: BTreeMap<Id, crate::context_values::ContextFrame>,
     pub context_contracts: BTreeMap<(String, u32), crate::ContextKind>,
     pub context_peak: usize,
+    pub call_contexts: BTreeMap<Id, Vec<Id>>,
     pub calls: BTreeMap<Id, Invocation>,
     pub resources: BTreeMap<Id, Resource>,
     pub tasks: BTreeMap<Id, Task>,

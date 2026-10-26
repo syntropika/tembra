@@ -1,5 +1,6 @@
-import { ContextKey } from "../src/index.ts";
+import { ContextKey, type Context } from "../src/index.ts";
 import type { Host } from "../src/host.ts";
+import { KernelOp } from "../src/protocol.ts";
 
 const Trace = ContextKey.text("browser/trace");
 const Count = ContextKey.integer("browser/count");
@@ -15,6 +16,9 @@ export async function verifyContextValues(host: Host): Promise<void> {
         methods: {
           read(_, ctx) {
             return [ctx.value(Trace), ctx.value(Count), ctx.value(Flag)];
+          },
+          temporary(_value: unknown, ctx: Context) {
+            return ctx.with(Trace, "temporary").value(Trace);
           },
         },
       },
@@ -42,6 +46,15 @@ export async function verifyContextValues(host: Host): Promise<void> {
         portable["browser/count@1"] !== Number.MAX_SAFE_INTEGER
       )
         throw new Error("Browser metadata export changed the scalar contract");
+    });
+    // Reuse the live-frame budget while the same root remains open.
+    await host.root(async (root) => {
+      for (let index = 0; index < 4200; index++) {
+        if ((await reference.temporary(root)) !== "temporary")
+          throw new Error("Browser invocation lost its derived value");
+      }
+      const stats = host.session.kernel.command<{ live: number }>(KernelOp.ContextStats);
+      if (stats.live !== 0) throw new Error("Browser retained completed invocation frames");
     });
   } finally {
     reference.release();

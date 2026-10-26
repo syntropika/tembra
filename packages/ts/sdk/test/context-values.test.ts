@@ -156,3 +156,85 @@ test("propagating a reused frame adds no per-call bridge requests", async () => 
     await host.close();
   }
 });
+
+test("six thousand sequential managed calls reclaim frames within one root", async () => {
+  const host = createHost();
+  await host.install({
+    name: "serial",
+    apiVersion: 1,
+    services: {
+      step: {
+        methods: {
+          run(_value: unknown, ctx: import("../src/runtime/context.ts").Context) {
+            const derived = ctx.with(Trace, "temporary");
+            return derived.value(Trace);
+          },
+        },
+      },
+    },
+  });
+  const reference = await host.get("step", "main");
+  try {
+    await host.root(async (ctx) => {
+      const base = ctx.with(Trace, "root");
+      for (let index = 0; index < 6000; index++) {
+        expect(await reference.run(base)).toBe("temporary");
+        expect(stats(host).live).toBe(1);
+      }
+      expect(base.value(Trace)).toBe("root");
+      expect(stats(host).peak).toBe(2);
+    });
+    expect(stats(host).live).toBe(0);
+  } finally {
+    reference.release();
+    await host.close();
+  }
+});
+
+test("a pending child keeps inherited values after its producer physically returns", async () => {
+  const host = createHost();
+  const entered = deferred<void>();
+  const finish = deferred<void>();
+  let pending: Promise<unknown> | undefined;
+  await host.install({
+    name: "descendants",
+    apiVersion: 1,
+    services: {
+      reader: {
+        methods: {
+          async read(_value: unknown, ctx: import("../src/runtime/context.ts").Context) {
+            entered.resolve();
+            await finish.promise;
+            return ctx.value(Trace);
+          },
+        },
+      },
+      producer: {
+        create(self) {
+          return self.get("reader", "main");
+        },
+        methods: {
+          async launch(reader, ctx: import("../src/runtime/context.ts").Context) {
+            pending = reader.read(ctx.with(Trace, "inherited"));
+            await entered.promise;
+            return "returned";
+          },
+        },
+      },
+    },
+  });
+  const producer = await host.get("producer", "main");
+  try {
+    await host.root(async (ctx) => {
+      expect(await producer.launch(ctx)).toBe("returned");
+      expect(stats(host).live).toBe(1);
+      finish.resolve();
+      expect(await pending).toBe("inherited");
+      expect(stats(host).live).toBe(0);
+    });
+  } finally {
+    finish.resolve();
+    producer.release();
+    await host.close();
+  }
+});

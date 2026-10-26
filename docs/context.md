@@ -33,16 +33,24 @@ Kinds are text, safe signed integer, boolean and owner-issued opaque reference.
 Storage can issue an opaque reference to pending writes.
 Storage validates and closes that reference; Tembra carries it.
 A closed reference stays invalid even if its context is still alive.
+Copying a JS opaque token does not retain its source frame.
+Create a receiving binding while that source lives, or have its owner issue a root-owned source.
+A source returned from a completed call has expired unless another owner still retains its frame.
+In Rust, an owner can use `host.context(ctx.root, None)` to issue a separate root-owned binding.
+The method context still expires when its invocation finishes.
 
 ## Cost and release
 
 Each derivation adds one parent-linked frame in Rust.
 Propagation sends its ID in the existing call request; it does not copy every value.
 A lookup visits at most 64 frames.
-Frames are released after the root ends and its physical calls finish.
+Call-created frames are released after their creator and admitted consumers physically finish.
+Child frames retain their ancestors until they are released.
+Root-created frames stay until the root ends and its physical calls finish.
 
-Limits are 4096 frames per root and 1024 key contracts per host.
+Limits are 4096 live frames per root and 1024 key contracts per host.
 Key names can use 256 bytes; text values can use 4096 bytes.
+Sequential calls can reuse the live-frame budget. Root-created derivations still accumulate.
 Reuse a derivation when many calls need the same metadata.
 
 Across hosts, `exportValues([Key])` selects scalar metadata explicitly.

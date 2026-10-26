@@ -64,8 +64,11 @@ fn check<'a>(store: &'a mut Store, ctx: &Context) -> tembra::Result<&'a mut Pend
 /// Install a storage fixture without adding storage policy to Tembra.
 pub fn install(host: &Host) {
     let store = Rc::new(RefCell::new(Store::default()));
+    let issuer = host.clone();
     let service = Service::new("storage", move |_| Ok(store.clone()))
-        .method("open", |store, ctx, _args: Vec<serde_json::Value>| async move {
+        .method("open", move |store, ctx, _args: Vec<serde_json::Value>| {
+            let issuer = issuer.clone();
+            async move {
             let id = ctx.invocation()?.id;
             let pending = Pending {
                 root: ctx.root,
@@ -75,8 +78,11 @@ pub fn install(host: &Host) {
             };
             store.borrow_mut().scopes.insert(id, pending);
             let lease = ScopeLease { store: Rc::downgrade(&store), id };
-            let scoped = ctx.with(&SCOPE, OpaqueContextValue::new(id, lease))?;
+            // Keep the exported source alive after this issuing call returns.
+            let root = issuer.context(ctx.root, None)?;
+            let scoped = root.with(&SCOPE, OpaqueContextValue::new(id, lease))?;
             Ok(scoped.frame())
+            }
         })
         .method("append", |store, ctx, (value,): (i64,)| async move {
             check(&mut store.borrow_mut(), &ctx)?.writes.push(value);

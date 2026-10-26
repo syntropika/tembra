@@ -9,6 +9,7 @@ export const ContextKind = Object.freeze({
   Opaque: "opaque",
 } as const);
 export type ContextKind = (typeof ContextKind)[keyof typeof ContextKind];
+/** An owner-issued reference. Its token does not retain the source frame. */
 export interface OpaqueContextValue {
   readonly opaque: true;
 }
@@ -81,7 +82,7 @@ export function readContextValue<T>(
   return token as T;
 }
 
-/** Resolve an existing owner binding without minting a reference. */
+/** Read an owner-issued reference from a live source frame. */
 export function opaqueFrom(
   ctx: Context,
   key: ContextKey<OpaqueContextValue>,
