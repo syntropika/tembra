@@ -6,25 +6,34 @@ For module layout and code style, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Tools
 
-Use the pinned tool versions:
+Use [mise](https://mise.jdx.dev/) to install and select the pinned development tools:
 
-| Tool                           | Configuration                                | Purpose                                    |
-| ------------------------------ | -------------------------------------------- | ------------------------------------------ |
-| Rust                           | [rust-toolchain.toml](rust-toolchain.toml)   | Cargo, rustfmt, Clippy and the WASM target |
-| Bun                            | [.bun-version](.bun-version)                 | TypeScript dependencies, builds and tests  |
-| Node.js                        | [.node-version](.node-version)               | SDK compatibility tests for Node           |
-| Just                           | [CI workflow](.github/workflows/quality.yml) | Repository commands                        |
-| wasm-bindgen and cargo-machete | [justfile](justfile)                         | WASM bindings and dependency checks        |
-| Chrome or Chromium             | `TEMBRA_BROWSER`                             | Browser and module Worker acceptance       |
+| Tool                           | Configuration                                                           | Purpose                                    |
+| ------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------ |
+| Rust                           | [rust-toolchain.toml](rust-toolchain.toml)                              | Cargo, rustfmt, Clippy and the WASM target |
+| Bun                            | [mise.toml](mise.toml) and [.bun-version](.bun-version)                 | TypeScript dependencies, builds and tests  |
+| Node.js                        | [mise.toml](mise.toml) and [.node-version](.node-version)               | SDK compatibility tests for Node           |
+| Just                           | [mise.toml](mise.toml) and [CI workflow](.github/workflows/quality.yml) | Repository commands                        |
+| wasm-bindgen and cargo-machete | [justfile](justfile)                                                    | WASM bindings and dependency checks        |
+| Chrome or Chromium             | `TEMBRA_BROWSER`                                                        | Browser and module Worker acceptance       |
 
 Rustup reads the pinned Rust toolchain and installs its configured components and target.
-Install Just, then install the build tools and TypeScript dependencies:
+From the repository root, install the mise tools, build tools and TypeScript dependencies:
 
 ```sh
-cargo install just --version 1.21.0 --locked
-just install-tools
-just install
+mise trust
+mise install
+mise exec -- just install-tools
+mise exec -- just install
+mise exec -- just check-all
 ```
+
+`mise exec` selects the repository's versions for the command and all child processes.
+With [mise shell activation](https://mise.jdx.dev/getting-started.html#activate-mise)
+enabled, the `bun`, `node` and `just` commands below use those versions automatically.
+Keep the mise versions aligned with `.bun-version`, `.node-version`, `package.json`
+and the CI workflow when updating tools. Older Bun versions can fail in the formatter's
+Markdown worker path even when Node can format the same files.
 
 Run these commands from the repository root.
 The root manifest defines the Bun workspaces, development tools and lockfile.
