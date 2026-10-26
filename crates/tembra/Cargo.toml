@@ -10,6 +10,18 @@ description = "Managed Rust orbs and native execution for Tembra"
 name = "counter"
 path = "../../examples/rust/host.rs"
 
+[[example]]
+name = "addresses"
+path = "../../examples/rust/addresses.rs"
+
+[[example]]
+name = "lifetime"
+path = "../../examples/rust/lifetime.rs"
+
+[[example]]
+name = "executor"
+path = "../../examples/rust/executor.rs"
+
 [features]
 default = []
 hooks = ["tembra-core/hooks"]

@@ -53,7 +53,7 @@ Rust. The engine scripts package its output, and wasm-bindgen generates the brow
 The SDK build emits JavaScript, declarations and the bundled embedded adapter. Bun can import
 SDK TypeScript sources directly. Engine artifacts live in their owning package's `dist` directory.
 
-## Rust example
+## Examples
 
 Run the native counter from the repository root:
 
@@ -64,6 +64,16 @@ cargo run --locked -p tembra --example counter
 [`examples/rust/orb.rs`](examples/rust/orb.rs) declares the service, state and validation.
 [`examples/rust/host.rs`](examples/rust/host.rs) installs the orb, calls its methods and awaits
 host cleanup. The example prints `Count: 42`.
+
+Each example uses short numbered comments to explain its steps.
+
+| Example                                 | Command                                            | What it shows                                           |
+| --------------------------------------- | -------------------------------------------------- | ------------------------------------------------------- |
+| [Addresses](examples/rust/addresses.rs) | `cargo run --locked -p tembra --example addresses` | Shared addresses, separate keys and principal isolation |
+| [Lifetime](examples/rust/lifetime.rs)   | `cargo run --locked -p tembra --example lifetime`  | Resource activation, idle reuse, expiry and cleanup     |
+| [Executor](examples/rust/executor.rs)   | `cargo run --locked -p tembra --example executor`  | Application tasks and native callbacks on one executor  |
+
+Run every example with `just examples`. `just check` also runs this group.
 
 ## Checks
 

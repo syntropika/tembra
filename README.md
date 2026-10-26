@@ -29,7 +29,7 @@ servers, browsers and Web Workers.
 | [packages/ts/engine-node/](packages/ts/engine-node/) | Native engine packaging and builds                                |
 | [packages/ts/engine-wasm/](packages/ts/engine-wasm/) | WASM engine packaging and builds                                  |
 | [packages/ts/test/](packages/ts/test/)               | Browser integration tests                                         |
-| [examples/rust/](examples/rust/)                     | Native counter orb and host                                       |
+| [examples/rust/](examples/rust/)                     | Native orbs, identity, execution and resource lifetime            |
 
 ## Development
 
