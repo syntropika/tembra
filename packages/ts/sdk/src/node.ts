@@ -13,7 +13,7 @@ export function createHost(options: NodeHostOptions = {}): Host {
   const require = createRequire(import.meta.url);
   const binding = options.kernel
     ? undefined
-    : (require(new URL("../dist/native/tembra.node", import.meta.url).pathname) as {
+    : (require("@tembra/engine-node") as {
         NodeKernel: new () => KernelPort;
       });
   return new Host({

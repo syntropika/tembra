@@ -1,0 +1,22 @@
+{
+  "name": "@tembra/engine-node",
+  "version": "0.2.0",
+  "files": [
+    "dist",
+    "index.cjs",
+    "index.d.ts"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "node build.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

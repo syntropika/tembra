@@ -1,28 +1,95 @@
 {
-  "name": "tembra-workspace",
-  "private": true,
-  "workspaces": [
-    "packages/*"
+  "name": "@tembra/sdk",
+  "version": "0.2.0",
+  "files": [
+    "packages/ts/sdk/src",
+    "packages/ts/sdk/dist"
   ],
   "type": "module",
-  "scripts": {
-    "test": "bun test packages/sdk/test --timeout 15000",
-    "typecheck": "tsc -p tsconfig.json",
-    "lint": "bun --bun x --no-install oxlint --disable-nested-config --deny-warnings --report-unused-disable-directives",
-    "lint:fix": "bun --bun x --no-install oxlint --disable-nested-config --fix --deny-warnings",
-    "format": "node node_modules/oxfmt/bin/oxfmt .",
-    "format:check": "node node_modules/oxfmt/bin/oxfmt --check ."
+  "exports": {
+    ".": {
+      "types": "./packages/ts/sdk/src/index.ts",
+      "bun": "./packages/ts/sdk/src/index.ts",
+      "browser": "./packages/ts/sdk/src/index.ts",
+      "source": "./packages/ts/sdk/src/index.ts",
+      "import": "./packages/ts/sdk/dist/index.js"
+    },
+    "./node": {
+      "types": "./packages/ts/sdk/src/node.ts",
+      "bun": "./packages/ts/sdk/src/node.ts",
+      "browser": "./packages/ts/sdk/src/node.ts",
+      "source": "./packages/ts/sdk/src/node.ts",
+      "import": "./packages/ts/sdk/dist/node.js"
+    },
+    "./browser": {
+      "types": "./packages/ts/sdk/src/browser.ts",
+      "bun": "./packages/ts/sdk/src/browser.ts",
+      "browser": "./packages/ts/sdk/src/browser.ts",
+      "source": "./packages/ts/sdk/src/browser.ts",
+      "import": "./packages/ts/sdk/dist/browser.js"
+    },
+    "./runtime": {
+      "types": "./packages/ts/sdk/src/host.ts",
+      "bun": "./packages/ts/sdk/src/host.ts",
+      "browser": "./packages/ts/sdk/src/host.ts",
+      "source": "./packages/ts/sdk/src/host.ts",
+      "import": "./packages/ts/sdk/dist/host.js"
+    },
+    "./tooling": {
+      "types": "./packages/ts/sdk/src/tooling/index.ts",
+      "bun": "./packages/ts/sdk/src/tooling/index.ts",
+      "browser": "./packages/ts/sdk/src/tooling/index.ts",
+      "source": "./packages/ts/sdk/src/tooling/index.ts",
+      "import": "./packages/ts/sdk/dist/tooling/index.js"
+    },
+    "./msgpack": {
+      "types": "./packages/ts/sdk/src/msgpack.ts",
+      "bun": "./packages/ts/sdk/src/msgpack.ts",
+      "browser": "./packages/ts/sdk/src/msgpack.ts",
+      "source": "./packages/ts/sdk/src/msgpack.ts",
+      "import": "./packages/ts/sdk/dist/msgpack.js"
+    },
+    "./coordinator": {
+      "types": "./packages/ts/sdk/src/coordinator.ts",
+      "bun": "./packages/ts/sdk/src/coordinator.ts",
+      "browser": "./packages/ts/sdk/src/coordinator.ts",
+      "source": "./packages/ts/sdk/src/coordinator.ts",
+      "import": "./packages/ts/sdk/dist/coordinator.js"
+    },
+    "./manager": {
+      "types": "./packages/ts/sdk/src/manager.ts",
+      "bun": "./packages/ts/sdk/src/manager.ts",
+      "browser": "./packages/ts/sdk/src/manager.ts",
+      "source": "./packages/ts/sdk/src/manager.ts",
+      "import": "./packages/ts/sdk/dist/manager.js"
+    },
+    "./rpc": {
+      "types": "./packages/ts/sdk/src/rpc.ts",
+      "bun": "./packages/ts/sdk/src/rpc.ts",
+      "browser": "./packages/ts/sdk/src/rpc.ts",
+      "source": "./packages/ts/sdk/src/rpc.ts",
+      "import": "./packages/ts/sdk/dist/rpc.js"
+    },
+    "./telemetry": {
+      "types": "./packages/ts/sdk/src/telemetry.ts",
+      "bun": "./packages/ts/sdk/src/telemetry.ts",
+      "browser": "./packages/ts/sdk/src/telemetry.ts",
+      "source": "./packages/ts/sdk/src/telemetry.ts",
+      "import": "./packages/ts/sdk/dist/telemetry.js"
+    },
+    "./embedded-runtime": "./packages/ts/sdk/dist/embedded.js"
   },
-  "devDependencies": {
-    "@types/bun": "1.4.3",
-    "@types/node": "26.6.5",
-    "oxfmt": "0.70.0",
-    "oxlint": "1.85.0",
-    "oxlint-tsgolint": "7.0.2002",
+  "dependencies": {
+    "@tembra/engine-node": "0.2.0",
+    "@tembra/engine-wasm": "0.2.0",
+    "enhanced-resolve": "5.26.0",
     "typescript": "5.9.3"
   },
-  "engines": {
-    "bun": ">=1.4.3"
+  "optionalDependencies": {
+    "@msgpack/msgpack": "3.1.3"
   },
-  "packageManager": "bun@1.4.3"
+  "engines": {
+    "bun": ">=1.4.3",
+    "node": ">=22"
+  }
 }

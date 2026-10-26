@@ -24,6 +24,7 @@ export function resolver(root: string, target: BuildTarget): Bun.BunPlugin {
   const resolveModule = resolve.create.sync({
     fileSystem: fs,
     conditionNames: [
+      "source",
       ...(web
         ? ["browser"]
         : target.platform === Platform.Node

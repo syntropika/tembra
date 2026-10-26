@@ -6,7 +6,7 @@ use tembra_executor_js::{Runtime, TokioExecutor};
 fn sdk_source() -> String {
     std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../packages/sdk/dist/embedded.js"
+        "/../../packages/ts/sdk/dist/embedded.js"
     ))
     .expect("build the SDK before running embedded integration tests")
 }

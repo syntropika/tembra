@@ -18,15 +18,17 @@ JavaScript values and callbacks stay in their JavaScript realm. The engine recei
 and metadata. Native Rust calls use native values. Serialization applies when values actually cross
 a language or transport boundary.
 
-| Component             | Responsibility                                                                         |
-| --------------------- | -------------------------------------------------------------------------------------- |
-| `crates/core`         | Language-neutral ownership and lifecycle engine; no third-party dependencies           |
-| `crates/bridge`       | Metadata command and execution-request envelopes                                       |
-| `crates/tembra`       | Typed Rust declarations, values and native callback execution                          |
-| `crates/browser-wasm` | The engine compiled to WASM; no interpreter, filesystem or DOM                         |
-| `crates/node-binding` | Node-API access to the same engine                                                     |
-| `crates/executor-js`  | One embedded V8 runtime per Rust host                                                  |
-| `packages/sdk`        | JS declarations, callback/value handles, platform bindings and optional infrastructure |
+| Component                 | Responsibility                                                               |
+| ------------------------- | ---------------------------------------------------------------------------- |
+| `crates/core`             | Language-neutral ownership and lifecycle engine; no third-party dependencies |
+| `crates/bridge`           | Metadata command and execution-request envelopes                             |
+| `crates/tembra`           | Typed Rust declarations, values and native callback execution                |
+| `crates/browser-wasm`     | The engine compiled to WASM; no interpreter, filesystem or DOM               |
+| `crates/node-binding`     | Node-API access to the same engine                                           |
+| `crates/executor-js`      | One embedded V8 runtime per Rust host                                        |
+| `packages/ts/sdk`         | JS declarations, callback/value handles and optional infrastructure          |
+| `packages/ts/engine-node` | Native engine package and its Cargo build                                    |
+| `packages/ts/engine-wasm` | Browser engine package and its Cargo/wasm-bindgen build                      |
 
 Node and browser hosts execute JavaScript in their existing realm. Embedded Rust hosts use V8.
 A WASM build does not run native Rust plugins or include a JavaScript interpreter.
@@ -164,6 +166,20 @@ await build({
 
 Install `@tembra/sdk` once. Build tooling is available through `@tembra/sdk/tooling`.
 
+Bun resolves the SDK directly from TypeScript sources. Browser bundlers can use the `browser`
+export condition; other bundlers can select `source`. Node's default ESM entrypoints use the
+compiled JavaScript output. These entrypoints share the same implementation.
+
+The SDK depends on separate `@tembra/engine-node` and `@tembra/engine-wasm` packages. Each engine
+owns its build and generated artifacts. The browser package contains a precompiled WASM module,
+its generated JavaScript loader and types. Applications must serve the WASM asset alongside the
+loader or supply its location through `wasmInput`.
+
+The root `package.json` is an installation facade for Git dependencies. Development manifests,
+the lockfile and TypeScript tools live under `packages/ts`. Installing the SDK from Git requires
+the exact engine versions declared in that facade to be published separately. No installation
+hook compiles Rust or downloads unpublished binaries.
+
 Targets are `browser`, `worker`, `node` and `embedded`. Browser builds select browser package
 conditions. Node builtins and explicitly declared `nativeExternals` require a Node host. Embedded
 builds expose neither Node nor DOM APIs; provide environment capabilities through declared services
@@ -176,13 +192,25 @@ Use the versions pinned in the repository tool configuration, including Bun, Rus
 
 ```sh
 just install
-just build-sdk
 just build-node
-just test
 just build-wasm
-bun packages/sdk/scripts/test-browser.ts
+just build-sdk
+just test
+bun run --cwd packages/ts/sdk test:browser
 just check
 ```
+
+Each package also has its own build command:
+
+```sh
+bun run --cwd packages/ts/engine-node build --features=hooks,subscriptions,views,telemetry
+bun run --cwd packages/ts/engine-wasm build --features=hooks,subscriptions,views
+bun run --cwd packages/ts/sdk build
+```
+
+Engine builds default to release mode. Pass `--debug` for a development build. The SDK build emits
+JavaScript, declarations and the bundled embedded adapter; importing its TypeScript sources on Bun
+does not require that build. Building a native or WASM engine remains a separate development step.
 
 Native integration tests use the actual Node addon. Browser acceptance launches Chrome to exercise
 both the browser and module Worker. Embedded integration uses V8 with a native Rust provider through

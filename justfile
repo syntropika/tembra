@@ -5,42 +5,42 @@ default:
     @just --list
 
 install:
-    bun install --frozen-lockfile
+    bun install --cwd packages/ts --frozen-lockfile
 
 build-sdk:
-    bun packages/sdk/scripts/build-sdk.ts
+    bun run --cwd packages/ts/sdk build
 
 build-node:
-    node packages/sdk/scripts/build-bindings.ts native --debug --features=hooks,subscriptions,views,telemetry
+    bun run --cwd packages/ts/engine-node build --debug --features=hooks,subscriptions,views,telemetry
 
 build-wasm:
-    node packages/sdk/scripts/build-bindings.ts wasm --features=hooks,subscriptions,views
+    bun run --cwd packages/ts/engine-wasm build --features=hooks,subscriptions,views
 
 fmt:
     cargo fmt --all
-    bun run format
+    bun run --cwd packages/ts format
 
 fmt-check:
     cargo fmt --all --check
-    bun run format:check
+    bun run --cwd packages/ts format:check
 
 lint:
     cargo clippy --locked --workspace --all-features --all-targets -- -D warnings
-    bun run lint
+    bun run --cwd packages/ts lint
 
 deps:
     cargo machete
 
-test: build-sdk build-node
+test: build-node build-wasm build-sdk
     cargo test --locked --workspace --all-features
-    bun test packages/sdk/test --timeout 15000
-    node --test packages/sdk/test/node.test.mjs
+    bun run --cwd packages/ts/sdk test
+    bun run --cwd packages/ts/sdk test:node
 
 check-wasm:
     cargo check --locked -p tembra-core -p tembra-browser-wasm --target wasm32-unknown-unknown --all-features
 
-check: fmt-check build-sdk build-node
-    bun run typecheck
+check: fmt-check build-node build-wasm build-sdk
+    bun run --cwd packages/ts typecheck
     just lint
     just deps
     just test

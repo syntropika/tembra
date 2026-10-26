@@ -12,5 +12,12 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
+  "include": [
+    "sdk/src/**/*.ts",
+    "sdk/test/**/*.ts",
+    "sdk/scripts/**/*.ts",
+    "*/build.ts",
+    "*.config.ts"
+  ],
+  "exclude": ["**/dist", "**/node_modules"]
 }

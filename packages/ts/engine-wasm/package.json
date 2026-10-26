@@ -1,0 +1,21 @@
+{
+  "name": "@tembra/engine-wasm",
+  "version": "0.2.0",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/tembra.d.ts",
+      "default": "./dist/tembra.js"
+    },
+    "./tembra_bg.wasm": "./dist/tembra_bg.wasm"
+  },
+  "scripts": {
+    "build": "node build.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

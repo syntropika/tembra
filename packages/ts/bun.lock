@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "tembra-workspace",
+      "name": "tembra-typescript",
       "devDependencies": {
         "@types/bun": "1.4.3",
         "@types/node": "26.6.5",
@@ -13,16 +13,21 @@
         "typescript": "5.9.3",
       },
     },
-    "packages/sdk": {
+    "engine-node": {
+      "name": "@tembra/engine-node",
+      "version": "0.2.0",
+    },
+    "engine-wasm": {
+      "name": "@tembra/engine-wasm",
+      "version": "0.2.0",
+    },
+    "sdk": {
       "name": "@tembra/sdk",
       "version": "0.2.0",
       "dependencies": {
+        "@tembra/engine-node": "workspace:^",
+        "@tembra/engine-wasm": "workspace:^",
         "enhanced-resolve": "5.26.0",
-        "typescript": "5.9.3",
-      },
-      "devDependencies": {
-        "@types/bun": "1.4.3",
-        "@types/node": "26.6.5",
         "typescript": "5.9.3",
       },
       "optionalDependencies": {
@@ -121,7 +126,11 @@
 
     "@oxlint/binding-win32-x64-msvc": ["@oxlint/binding-win32-x64-msvc@1.85.0", "", { "os": "win32", "cpu": "x64" }, "sha512-pBebIPUpKKhWrhSMWhy8TdAZBewiXnfxmaAGxhzxM1068GagqFaTwgKlU6e+UyJ2sPR+VoHouhXuGJkQjsrDvA=="],
 
-    "@tembra/sdk": ["@tembra/sdk@workspace:packages/sdk"],
+    "@tembra/engine-node": ["@tembra/engine-node@workspace:engine-node"],
+
+    "@tembra/engine-wasm": ["@tembra/engine-wasm@workspace:engine-wasm"],
+
+    "@tembra/sdk": ["@tembra/sdk@workspace:sdk"],
 
     "@types/bun": ["@types/bun@1.4.3", "", { "dependencies": { "bun-types": "1.4.3" } }, "sha512-N67Pqy8JXbAY/j0tNraS3V5mubGvc6rrrNDmDCtZLlFzccbUJPDb0tvgUBC5q4m8ybkP93Jcn1QB+RYQ6PvBhw=="],
 

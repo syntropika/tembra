@@ -1,0 +1,103 @@
+{
+  "name": "@tembra/sdk",
+  "version": "0.2.0",
+  "files": [
+    "src",
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "browser": "./src/index.ts",
+      "source": "./src/index.ts",
+      "import": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./src/node.ts",
+      "bun": "./src/node.ts",
+      "browser": "./src/node.ts",
+      "source": "./src/node.ts",
+      "import": "./dist/node.js"
+    },
+    "./browser": {
+      "types": "./src/browser.ts",
+      "bun": "./src/browser.ts",
+      "browser": "./src/browser.ts",
+      "source": "./src/browser.ts",
+      "import": "./dist/browser.js"
+    },
+    "./runtime": {
+      "types": "./src/host.ts",
+      "bun": "./src/host.ts",
+      "browser": "./src/host.ts",
+      "source": "./src/host.ts",
+      "import": "./dist/host.js"
+    },
+    "./tooling": {
+      "types": "./src/tooling/index.ts",
+      "bun": "./src/tooling/index.ts",
+      "browser": "./src/tooling/index.ts",
+      "source": "./src/tooling/index.ts",
+      "import": "./dist/tooling/index.js"
+    },
+    "./msgpack": {
+      "types": "./src/msgpack.ts",
+      "bun": "./src/msgpack.ts",
+      "browser": "./src/msgpack.ts",
+      "source": "./src/msgpack.ts",
+      "import": "./dist/msgpack.js"
+    },
+    "./coordinator": {
+      "types": "./src/coordinator.ts",
+      "bun": "./src/coordinator.ts",
+      "browser": "./src/coordinator.ts",
+      "source": "./src/coordinator.ts",
+      "import": "./dist/coordinator.js"
+    },
+    "./manager": {
+      "types": "./src/manager.ts",
+      "bun": "./src/manager.ts",
+      "browser": "./src/manager.ts",
+      "source": "./src/manager.ts",
+      "import": "./dist/manager.js"
+    },
+    "./rpc": {
+      "types": "./src/rpc.ts",
+      "bun": "./src/rpc.ts",
+      "browser": "./src/rpc.ts",
+      "source": "./src/rpc.ts",
+      "import": "./dist/rpc.js"
+    },
+    "./telemetry": {
+      "types": "./src/telemetry.ts",
+      "bun": "./src/telemetry.ts",
+      "browser": "./src/telemetry.ts",
+      "source": "./src/telemetry.ts",
+      "import": "./dist/telemetry.js"
+    },
+    "./embedded-runtime": "./dist/embedded.js"
+  },
+  "scripts": {
+    "build": "bun build.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test test --timeout 15000",
+    "test:node": "node --test test/node.test.mjs",
+    "test:browser": "bun scripts/test-browser.ts"
+  },
+  "dependencies": {
+    "@tembra/engine-node": "workspace:*",
+    "@tembra/engine-wasm": "workspace:*",
+    "enhanced-resolve": "5.26.0",
+    "typescript": "5.9.3"
+  },
+  "optionalDependencies": {
+    "@msgpack/msgpack": "3.1.3"
+  },
+  "engines": {
+    "bun": ">=1.4.3",
+    "node": ">=22"
+  },
+  "packageManager": "bun@1.4.3"
+}

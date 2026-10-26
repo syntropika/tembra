@@ -10,7 +10,7 @@ import type { Kernel } from "../src/kernel.ts";
 
 test("JavaScript and Rust use the same closed wire vocabulary", () => {
   const source = readFileSync(
-    new URL("../../../crates/bridge/src/protocol.rs", import.meta.url),
+    new URL("../../../../crates/bridge/src/protocol.rs", import.meta.url),
     "utf8",
   );
   for (const [name, values] of Object.entries({

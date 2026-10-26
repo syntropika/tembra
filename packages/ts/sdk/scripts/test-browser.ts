@@ -17,8 +17,8 @@ const rootGate = await Bun.build({
 if (!rootGate.success) throw new AggregateError(rootGate.logs, "Root gate fixture build failed");
 const rootGateSource = await rootGate.outputs[0]!.text();
 
-const worker = `import {createHost} from '/packages/sdk/dist/browser.js';
-import {WasmKernel} from '/packages/sdk/dist/wasm/tembra.js';
+const worker = `import {createHost} from '/browser.js';
+import {WasmKernel} from '/packages/ts/engine-wasm/dist/tembra.js';
 import {verifyIdentifierPrecision} from '/precision.js';
 import {verifyExclusiveRootGate} from '/root-gate.js';
 onmessage = async () => {
@@ -34,8 +34,8 @@ onmessage = async () => {
   } catch(error) { postMessage({error:String(error.stack ?? error)}); }
 };`;
 const html = `<!doctype html><html><body>running<script type="module">
-import {createHost} from '/packages/sdk/dist/browser.js';
-import {WasmKernel} from '/packages/sdk/dist/wasm/tembra.js';
+import {createHost} from '/browser.js';
+import {WasmKernel} from '/packages/ts/engine-wasm/dist/tembra.js';
 import {verifyIdentifierPrecision} from '/precision.js';
 import {verifyExclusiveRootGate} from '/root-gate.js';
 try {
@@ -60,7 +60,25 @@ try {
 } catch(error) { document.body.textContent='TEMBRA_BROWSER_FAIL '+(error.stack ?? error); }
 </script></body></html>`;
 
-const root = path.resolve(import.meta.dir, "../../..");
+const browserSDK = await Bun.build({
+  entrypoints: [new URL("../src/browser.ts", import.meta.url).pathname],
+  target: "browser",
+  format: "esm",
+  plugins: [
+    {
+      name: "browser-engine-asset",
+      setup(builder) {
+        builder.onResolve({ filter: /^@tembra\/engine-wasm$/ }, () => ({
+          path: "/packages/ts/engine-wasm/dist/tembra.js",
+          external: true,
+        }));
+      },
+    },
+  ],
+});
+if (!browserSDK.success) throw new AggregateError(browserSDK.logs, "Browser SDK build failed");
+const browserSource = await browserSDK.outputs[0]!.text();
+const root = path.resolve(import.meta.dir, "../../../..");
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -71,12 +89,14 @@ const server = Bun.serve({
       return new Response(rootGateSource, { headers: { "content-type": "text/javascript" } });
     if (pathname === "/precision.js")
       return new Response(precisionSource, { headers: { "content-type": "text/javascript" } });
+    if (pathname === "/browser.js")
+      return new Response(browserSource, { headers: { "content-type": "text/javascript" } });
     if (pathname === "/worker.js")
       return new Response(worker, { headers: { "content-type": "text/javascript" } });
-    if (!pathname.startsWith("/packages/sdk/dist/"))
+    if (!pathname.startsWith("/packages/ts/engine-wasm/dist/"))
       return new Response("Not found", { status: 404 });
     const filePath = path.resolve(root, `.${pathname}`);
-    if (!filePath.startsWith(path.join(root, "packages/sdk/dist/")))
+    if (!filePath.startsWith(path.join(root, "packages/ts/engine-wasm/dist/")))
       return new Response("Not found", { status: 404 });
     const file = Bun.file(filePath);
     return (await file.exists()) ? new Response(file) : new Response("Not found", { status: 404 });
