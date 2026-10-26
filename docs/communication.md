@@ -2,16 +2,31 @@
 
 Tembra separates engine metadata from application data.
 
-| Boundary                        | Data path                                                     |
-| ------------------------------- | ------------------------------------------------------------- |
-| Rust to Rust                    | Typed local values. No codec conversion for the call.         |
-| JS to JS in one runtime         | Local values and callbacks. No codec conversion for the call. |
-| JS to Rust in the embedded host | The host codec encodes arguments and results.                 |
-| Host to host                    | RPC sends encoded frames through an application transport.    |
+| Boundary                           | Data path                                                     |
+| ---------------------------------- | ------------------------------------------------------------- |
+| Rust to Rust                       | Typed local values. No codec conversion for the call.         |
+| JS to JS in one runtime            | Local values and callbacks. No codec conversion for the call. |
+| JS to Rust in the embedded host    | The host codec encodes arguments and results.                 |
+| Swift or Kotlin to the Rust kernel | JSON metadata commands and result envelopes.                  |
+| React Native JS to the Rust kernel | A TurboModule sends metadata through Swift or Kotlin.         |
+| Host to host                       | RPC sends encoded frames through an application transport.    |
 
 The internal bridge uses JSON commands for declarations, identities and control.
 It also carries scalar context metadata.
 Regular state values and method arguments stay outside this metadata protocol.
+
+## Native bindings
+
+`TembraKernel.request()` exchanges JSON strings with the Rust metadata bridge.
+UniFFI generates the bindings. Swift uses the C interface; Kotlin uses JNA on the JVM and Android.
+Each request waits for the kernel result.
+Kernel errors stay in the JSON result envelope. Binding failures throw native errors or exceptions.
+
+React Native sends these requests through its TurboModule and the shared native bindings.
+Orb callbacks, state values and method arguments stay in the JavaScript runtime.
+The native packages expose metadata commands. They do not provide Swift or Kotlin orb execution or RPC clients.
+
+See [Swift](swift.md), [Kotlin](kotlin.md) and [React Native](react-native.md) for platform use.
 
 ## Codecs
 
