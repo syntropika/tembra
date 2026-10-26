@@ -53,6 +53,11 @@ claims its own exact scopes; settlement releases those claims. Completed depende
 retain or cancel the remaining observation. Historical root memberships remain solely the existing
 version/gate history and are not queried for observation cleanup.
 
+Admitting a dependent call requires its exact registered owner scopes and their registered
+ancestors to exist and remain open. Missing or closing scopes refuse that call before retaining it,
+even when the corresponding ordinary call would otherwise be admitted. Ordinary calls retain their
+existing admission rules.
+
 An index from exact scope to observation roots supports cancellation and cleanup waiting. An empty
 index makes ordinary cleanup independent of ordinary root population. Scope cancellation targets
 only live observation claims. Closing a source scope or a scope with an active dependent call

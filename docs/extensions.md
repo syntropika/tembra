@@ -24,6 +24,26 @@ Capabilities describe the hook's behavior; they do not replace call or state own
 | `parallel()`           | Await all participants, including remaining work after a failure. |
 | `middleware(terminal)` | Let each participant wrap a single-use continuation.              |
 
+The native Rust facade also provides `Hook::waterfall_until(name, should_stop)` to combine
+accumulated transformations with first-terminal-value stopping. It checks the initial input and
+each successful result. See [typed Rust hooks](rust.md#typed-hooks-hooks) for its contract and
+mixed Rust/JavaScript contributions.
+
+### Owner-bound observation
+
+A bound hook can `observe(source, payload)` once on behalf of its original physical invocation,
+including after logical cancellation. The source must belong to the declaring orb and any bound
+object. The payload is application-defined. Successful admission is single-use across that source's
+hook handles, including an empty plan or a participant failure; validation refusal does not consume
+it. An observation or its dependent calls cannot open another observation.
+
+Observation preserves the original principal and versioned plan, starts with empty metadata, and
+keeps original cancellation effective. Await it inside the physical callback before returning.
+Scope cleanup and host shutdown still apply; cancellation is cooperative. Ordinary `run` remains
+repeatable under a live context. See the [Rust](rust.md#owner-bound-observation) and
+[TypeScript](typescript.md#owner-bound-hook-observation) guides for admission errors, dependent-call
+scope checks and physical ownership guarantees.
+
 ## Event sources
 
 A source supplies `subscribe(callback)` and returns a detach function.
@@ -42,7 +62,8 @@ Neither mechanism is a persistent event log.
 
 Enable `hooks` for managed hooks and `subscriptions` for managed source delivery.
 Local state selectors and observers do not need the `subscriptions` feature.
-The native Rust wrapper exposes neither SDK declaration helper; the core provides the lower-level contracts.
+The native Rust facade provides typed hooks and managed events through its own declaration API;
+see the [Rust guide](rust.md). The core provides the lower-level contracts.
 
 See [core hooks](../crates/core/src/hooks.rs), [core subscriptions](../crates/core/src/subscriptions/mod.rs)
 and [SDK composition helpers](../packages/ts/sdk/src/authoring/hooks.ts).

@@ -148,16 +148,31 @@ It runs Clippy, oxlint, Rust tests, SDK tests and React Native adapter tests.
 It also runs Node compatibility tests, the WASM target check and the Rust examples.
 Browser acceptance runs separately against the built WASM engine.
 
-| Command                | Purpose                                         |
-| ---------------------- | ----------------------------------------------- |
-| `just fmt`             | Format Rust, TypeScript and project documents   |
-| `just fmt-check`       | Check formatting without changing files         |
-| `just lint`            | Run Clippy and oxlint                           |
-| `just deps`            | Check for unused Rust dependencies              |
-| `just test`            | Build packages and run Rust, SDK and Node tests |
-| `just check-wasm`      | Check the WASM target with all features         |
-| `bun run typecheck`    | Check TypeScript across the workspace           |
-| `bun run test:browser` | Exercise Chrome and a module Worker             |
+| Command                    | Purpose                                                             |
+| -------------------------- | ------------------------------------------------------------------- |
+| `just fmt`                 | Format Rust, TypeScript and project documents                       |
+| `just fmt-check`           | Check formatting without changing files                             |
+| `just lint`                | Run Clippy and oxlint                                               |
+| `just deps`                | Check for unused Rust dependencies                                  |
+| `just test`                | Build packages and run Rust, SDK and Node tests                     |
+| `just test-doc`            | Run Rustdoc examples with all features                              |
+| `just test-hook-lifecycle` | Build adapters and test Rust and embedded JavaScript hook lifecycle |
+| `just test-no-hooks`       | Test the core and bridge without optional features                  |
+| `just check-wasm`          | Check the WASM target with all features                             |
+| `bun run typecheck`        | Check TypeScript across the workspace                               |
+| `bun run test:browser`     | Exercise Chrome and a module Worker                                 |
+
+`just test` runs Rust tests and doctests across the workspace with all features enabled.
+It also runs `just test-no-hooks` in a separate Cargo invocation, so adapter features cannot
+enable hooks through feature unification. This recurring check exercises the core and bridge
+with optional features disabled, including the bridge's explicit refusal of hook observation.
+It is included in `just check`, `just check-all` and CI through `just test`.
+
+Use `just test-doc` when changing public Rust guarantees or executable examples. It runs the
+all-feature doctests alone; the full check already executes them through `just test`.
+Use `just test-hook-lifecycle` for focused Rust and embedded JavaScript hook lifecycle checks.
+It builds the Node and WASM engines and SDK before testing the core, native facade and V8 adapter.
+Use `just test-no-hooks` directly when changing feature gates or shared bridge operations.
 
 The browser runner uses `google-chrome` by default. Select another compatible executable with
 `TEMBRA_BROWSER`, for example:

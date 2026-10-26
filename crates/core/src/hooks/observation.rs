@@ -45,6 +45,10 @@ impl Host {
     /// active calls; closing an already completed dependency does not cancel the observation.
     /// Closing an anchored or actively used scope cancels the root and waits for its claims.
     ///
+    /// Dependent calls additionally require their exact registered owner scopes and ancestors
+    /// to exist and remain open. They return `gone/scope` for missing scopes and
+    /// `conflict/scope_closed` for closing scopes. Ordinary calls keep their existing rules.
+    ///
     /// The adapter must finish the invocation and end its root after physical settlement.
     /// Cancellation is cooperative; this method does not reverse external effects.
     ///

@@ -34,6 +34,9 @@ impl<A: 'static> crate::HookHandle<A, ()> {
     /// Missing/closing scopes, host shutdown and ordinary version/gate admission can also refuse
     /// observation. Refusal enters no participant and retains no new root or invocation.
     /// Once admitted, participant and executor errors propagate and admission remains consumed.
+    /// Dependent calls additionally require their exact registered scopes and ancestors to be
+    /// open: missing scopes return `gone/scope`, closing scopes return `conflict/scope_closed`.
+    /// Ordinary calls retain their existing admission rules.
     ///
     /// # Examples
     ///

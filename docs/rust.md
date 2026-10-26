@@ -185,6 +185,11 @@ Rust and the JavaScript bound hook's `observe(source, payload)` use the same ker
 ownership indexes. See [decisions](decisions.md) and [compatibility](compatibility.md). This interface
 adds no arbitrary callback operation on `Context` and no separate consumer lifecycle manager.
 
+Dependent calls inside observation additionally require exact registered orb/object scopes and
+their registered ancestors to exist and remain open. A missing scope returns `gone/scope`; a
+closing scope or ancestor returns `conflict/scope_closed`. Ordinary calls keep their existing
+admission rules. This allows cleanup to account for every admitted observation call.
+
 ## Cancellation, tasks and events
 
 `Context::signal()` exposes cooperative root cancellation, including shared-adapter
@@ -278,6 +283,8 @@ cancellation and physical cleanup retain their kernel contracts.
 | Native hot replacement, state migration and exclusive replacement resources | Outside this facade; compiled native implementations remain nonreplaceable. An exclusivity boolean alone would not provide the missing replacement/restore lifecycle |
 | RPC, multi-host routing, bundling and loading                               | Separate infrastructure; unchanged by native authoring support                                                                                                       |
 
-Behavioral tests live in `crates/tembra/tests/{hooks,waterfall_until,composition,events,reactive,clock}.rs`
-and `crates/executor-js/tests/{hooks,waterfall_until,native_facade}.rs`. They exercise public interfaces
-against the actual kernel and V8 runtime, including active work during closure.
+Hook behavior tests live in `crates/tembra/tests/` (`hooks.rs`, `waterfall_until.rs`,
+`hook_observation.rs` and `hook_observation_regression.rs`) and `crates/executor-js/tests/`
+(`hooks.rs`, `waterfall_until.rs` and `hook_observation.rs`). Other facade tests cover composition,
+events, reactive state, clocks and native/V8 execution. They exercise public interfaces against
+the actual kernel and V8 runtime, including active work during closure.

@@ -33,10 +33,15 @@ deps:
 
 test: build-node build-wasm build-sdk
     cargo test --locked --workspace --all-features
+    just test-no-hooks
     bun test scripts/release.test.ts
     bun run --cwd packages/ts/sdk test
     bun run --cwd packages/ts/sdk test:node
     bun run --cwd packages/ts/react-native test
+
+# Verify the core and bridge with optional hook APIs disabled.
+test-no-hooks:
+    cargo test --locked -p tembra-core -p tembra-bridge --no-default-features
 
 # Execute documented Rust guarantees, including the optional native hooks facade.
 test-doc:

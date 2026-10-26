@@ -98,6 +98,10 @@ observer failure still consumes it. Refused validation does not consume it. A ba
 source, foreign owner or observer-dependent call cannot admit observation. An object-bound hook
 requires its source object. An orb-bound hook preserves the actual source object's ownership.
 
+JavaScript rejects a root-only source with `forbidden/observation_source`, described by
+`Errors.Forbidden.ObservationSource`; Rust reports `invalid/context` for the same invalid source.
+Both refuse before creating an observation or consuming admission.
+
 The shared Rust kernel preserves the original principal, exact versioned plan and physical owner.
 The observation context has an empty metadata frame; put correlation in the explicit payload.
 Original cancelled contexts and expired frames remain unusable, and storage validates closed tokens.
@@ -105,3 +109,8 @@ Closing owners and version gates can refuse observation. Await it inside the sti
 callback before returning; a logically cancelled caller may already have returned. The existing
 runtime tracks physical work through cleanup. Releasing a completed temporary dependency does not
 cancel observation. Cancellation remains cooperative and cannot undo or authorize replay of effects.
+
+Calls made inside observation additionally require exact registered orb/object scopes and their
+registered ancestors to exist and remain open. A missing scope returns `gone/scope`; a closing
+scope or ancestor returns `conflict/scope_closed`. These checks apply to every dependent call;
+ordinary calls retain their existing admission rules.

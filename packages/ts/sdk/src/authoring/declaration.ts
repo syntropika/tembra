@@ -154,6 +154,9 @@ export class Declaration {
      * A successful admission is consumed across all hook handles for that source invocation.
      * The scope retains principal/version, starts with empty metadata, and respects owner/host close.
      * Observer errors reject this promise; the consumer retains its primary outcome separately.
+     * A root-only source rejects with forbidden/observation_source without consuming admission.
+     * Dependent calls require exact open scopes and registered ancestors; missing scopes reject
+     * with gone/scope and closing scopes with conflict/scope_closed. Ordinary calls are unchanged.
      */
     observe(source: Context, input?: unknown): Promise<void>;
   } {

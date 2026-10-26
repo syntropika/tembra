@@ -1,7 +1,7 @@
 import { Declaration } from "../authoring/declaration.ts";
 import { orb } from "../authoring/orb.ts";
 import type { ContributionHandler, OrbDefinition, Participant } from "../authoring/types.ts";
-import { Code, Lifetime, Reason } from "../bridge/identifiers.ts";
+import { Lifetime } from "../bridge/identifiers.ts";
 import type { HookObservation, KernelOrb, Reload } from "../bridge/kernel.ts";
 import { EnvironmentPhase, KernelOp, OwnerKind } from "../bridge/protocol.ts";
 import { refuse, TembraError } from "../error.ts";
@@ -218,12 +218,7 @@ export class Orbs {
     source = issuedContext(source, this.session);
     const definition = environment.orb.definition.hooks?.[name];
     if (!definition) refuse(Errors.Invalid.Hook, name);
-    if (!source.invocation)
-      throw new TembraError({
-        code: Code.Forbidden,
-        reason: Reason.ObservationSource,
-        message: "Hook observation requires the original physical invocation",
-      });
+    if (!source.invocation) throw new TembraError(Errors.Forbidden.ObservationSource);
     const admitted = this.session.kernel.command<HookObservation>(KernelOp.BeginHookObservation, {
       source: source.invocation.id,
       orb: environment.orb.info.id,

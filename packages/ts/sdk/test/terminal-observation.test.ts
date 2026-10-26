@@ -167,7 +167,9 @@ test("terminal observation rejects foreign contexts and bound object mismatches 
   try {
     await host.root(async (root) => {
       await expect(owner.observe(root, null)).rejects.toMatchObject({
+        code: "forbidden",
         reason: "observation_source",
+        message: "Hook observation requires the original physical invocation",
       });
     });
     await right.run();

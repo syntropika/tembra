@@ -73,6 +73,11 @@ export const Errors = Object.freeze({
     Context: define(Code.Forbidden, Reason.Context, "An issued context from this host is required"),
     HostResource: define(Code.Forbidden, Reason.HostResource, "The host resource was not declared"),
     Method: define(Code.Forbidden, Reason.Method, "The method is not allowed by this reference"),
+    ObservationSource: define(
+      Code.Forbidden,
+      Reason.ObservationSource,
+      "Hook observation requires the original physical invocation",
+    ),
     Opaque: define(
       Code.Forbidden,
       Reason.Opaque,
