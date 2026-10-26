@@ -5,7 +5,7 @@ services, manages shared state and resources, and coordinates updates while work
 
 Orbs own their behavior and validation. Tembra manages how they work together throughout their
 lifetime through a shared Rust engine. Applications can combine Rust and TypeScript across
-servers, browsers and Web Workers.
+servers, browsers, Web Workers and React Native.
 
 ## What it provides
 
@@ -17,19 +17,21 @@ servers, browsers and Web Workers.
 
 ## Repository
 
-| Directory                                            | Contents                                                          |
-| ---------------------------------------------------- | ----------------------------------------------------------------- |
-| [crates/core/](crates/core/)                         | Shared Rust engine for ownership, state revisions and orb updates |
-| [crates/tembra/](crates/tembra/)                     | Rust interface for declaring and running orbs                     |
-| [crates/bridge/](crates/bridge/)                     | Communication between the engine and its platform integrations    |
-| [crates/executor-js/](crates/executor-js/)           | Embedded JavaScript execution through V8 for Rust applications    |
-| [crates/node-binding/](crates/node-binding/)         | Connects Node.js to the Rust engine                               |
-| [crates/browser-wasm/](crates/browser-wasm/)         | Makes the Rust engine available in browsers and Workers           |
-| [packages/ts/sdk/](packages/ts/sdk/)                 | TypeScript SDK and orb tooling                                    |
-| [packages/ts/engine-node/](packages/ts/engine-node/) | Native engine packaging and builds                                |
-| [packages/ts/engine-wasm/](packages/ts/engine-wasm/) | WASM engine packaging and builds                                  |
-| [packages/ts/test/](packages/ts/test/)               | Browser integration tests                                         |
-| [examples/rust/](examples/rust/)                     | Native orbs, identity, execution and resource lifetime            |
+| Directory                                              | Contents                                                          |
+| ------------------------------------------------------ | ----------------------------------------------------------------- |
+| [crates/core/](crates/core/)                           | Shared Rust engine for ownership, state revisions and orb updates |
+| [crates/tembra/](crates/tembra/)                       | Rust interface for declaring and running orbs                     |
+| [crates/bridge/](crates/bridge/)                       | Communication between the engine and its platform integrations    |
+| [crates/executor-js/](crates/executor-js/)             | Embedded JavaScript execution through V8 for Rust applications    |
+| [crates/node-binding/](crates/node-binding/)           | Connects Node.js to the Rust engine                               |
+| [crates/mobile/](crates/mobile/)                       | Shared Rust kernel bindings for Swift and Kotlin                  |
+| [crates/browser-wasm/](crates/browser-wasm/)           | Makes the Rust engine available in browsers and Workers           |
+| [packages/ts/sdk/](packages/ts/sdk/)                   | TypeScript SDK and orb tooling                                    |
+| [packages/ts/engine-node/](packages/ts/engine-node/)   | Native engine packaging and builds                                |
+| [packages/ts/engine-wasm/](packages/ts/engine-wasm/)   | WASM engine packaging and builds                                  |
+| [packages/ts/react-native/](packages/ts/react-native/) | React Native TurboModule, native packaging and mobile builds      |
+| [packages/ts/test/](packages/ts/test/)                 | Browser integration tests                                         |
+| [examples/rust/](examples/rust/)                       | Native orbs, identity, execution and resource lifetime            |
 
 ## Development
 

@@ -1,0 +1,56 @@
+{
+  "name": "@tembra/react-native",
+  "version": "0.1.0",
+  "description": "Tembra for React Native with Swift and Kotlin bindings to the Rust engine",
+  "license": "MIT",
+  "files": [
+    "src",
+    "ios",
+    "android",
+    "native",
+    "Tembra.podspec",
+    "react-native.config.js",
+    "README.md"
+  ],
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "react-native": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "react-native": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build:bindings": "bun build.ts bindings",
+    "build:ios": "bun build.ts ios",
+    "build:android": "bun build.ts android",
+    "typecheck": "bun --bun x --no-install tsc -p tsconfig.json",
+    "test": "bun test test"
+  },
+  "devDependencies": {
+    "@tembra/sdk": "workspace:*",
+    "@types/react": "^19.0.0",
+    "react": "19.1.1",
+    "react-native": "0.82.1"
+  },
+  "peerDependencies": {
+    "@tembra/sdk": "0.1.0",
+    "react": ">=19",
+    "react-native": ">=0.82 <1"
+  },
+  "codegenConfig": {
+    "name": "TembraSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.tembra"
+    },
+    "ios": {
+      "modulesProvider": {
+        "NativeTembra": "RCTTembra"
+      }
+    }
+  }
+}

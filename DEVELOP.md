@@ -11,8 +11,8 @@ Use the pinned tool versions:
 | Tool                           | Configuration                                          | Purpose                                    |
 | ------------------------------ | ------------------------------------------------------ | ------------------------------------------ |
 | Rust                           | [rust-toolchain.toml](rust-toolchain.toml)             | Cargo, rustfmt, Clippy and the WASM target |
-| Bun                            | [packages/ts/.bun-version](packages/ts/.bun-version)   | TypeScript dependencies, builds and tests  |
-| Node.js                        | [packages/ts/.node-version](packages/ts/.node-version) | Engine build scripts and Node acceptance   |
+| Bun                            | [.bun-version](.bun-version)   | TypeScript dependencies, builds and tests  |
+| Node.js                        | [.node-version](.node-version) | SDK compatibility tests for Node   |
 | Just                           | [CI workflow](.github/workflows/quality.yml)           | Repository commands                        |
 | wasm-bindgen and cargo-machete | [justfile](justfile)                                   | WASM bindings and dependency checks        |
 | Chrome or Chromium             | `TEMBRA_BROWSER`                                       | Browser and module Worker acceptance       |
@@ -26,8 +26,9 @@ just install-tools
 just install
 ```
 
-Run these commands from the repository root. TypeScript tools and their lockfile are scoped to
-`packages/ts`; the root Just commands select that workspace for you.
+Run these commands from the repository root.
+The root manifest defines the Bun workspaces, development tools and lockfile.
+TypeScript packages are in `packages/ts`.
 
 ## Build
 
@@ -63,7 +64,7 @@ See the [Rust guide](docs/rust.md) for their source and individual commands.
 
 ```sh
 just check
-bun run --cwd packages/ts test:browser
+bun run test:browser
 ```
 
 `just check` builds the engines and SDK, then runs formatting, strict TypeScript, lint, Clippy,
@@ -78,14 +79,14 @@ Browser acceptance runs separately against the built WASM engine.
 | `just deps`                              | Check for unused Rust dependencies              |
 | `just test`                              | Build packages and run Rust, SDK and Node tests |
 | `just check-wasm`                        | Check the WASM target with all features         |
-| `bun run --cwd packages/ts typecheck`    | Check TypeScript across the workspace           |
-| `bun run --cwd packages/ts test:browser` | Exercise Chrome and a module Worker             |
+| `bun run typecheck`    | Check TypeScript across the workspace           |
+| `bun run test:browser` | Exercise Chrome and a module Worker             |
 
 The browser runner uses `google-chrome` by default. Select another compatible executable with
 `TEMBRA_BROWSER`, for example:
 
 ```sh
-TEMBRA_BROWSER=chromium bun run --cwd packages/ts test:browser
+TEMBRA_BROWSER=chromium bun run test:browser
 ```
 
 Native acceptance uses the actual Node addon. Embedded acceptance uses V8 with a native Rust

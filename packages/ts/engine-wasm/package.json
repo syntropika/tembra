@@ -13,7 +13,7 @@
     "./tembra_bg.wasm": "./dist/tembra_bg.wasm"
   },
   "scripts": {
-    "build": "node build.ts"
+    "build": "bun build.ts"
   },
   "engines": {
     "node": ">=22"

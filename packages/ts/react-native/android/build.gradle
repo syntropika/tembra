@@ -1,0 +1,45 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.9.2")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.20")
+    }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.facebook.react"
+
+react {
+    jsRootDir = file("../src")
+    libraryName = "TembraSpec"
+    codegenJavaPackageName = "com.tembra"
+}
+
+android {
+    namespace "com.tembra"
+    compileSdkVersion rootProject.ext.has("compileSdkVersion") ? rootProject.ext.compileSdkVersion : 36
+    defaultConfig {
+        minSdkVersion 24
+        targetSdkVersion 36
+    }
+    sourceSets.main.java.srcDirs += ["../native/generated/kotlin"]
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = "17" }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation("com.facebook.react:react-android")
+    implementation("net.java.dev.jna:jna:5.17.0@aar")
+}

@@ -1,0 +1,8 @@
+[bindings.swift]
+module_name = "TembraMobile"
+ffi_module_name = "TembraFFI"
+
+[bindings.kotlin]
+package_name = "com.tembra.ffi"
+cdylib_name = "tembra_mobile"
+android = true

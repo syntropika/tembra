@@ -138,3 +138,5 @@ export {
 } from "./bridge/identifiers.ts";
 
 export { Errors, type ErrorDescriptor } from "./errors.ts";
+
+export type { KernelPort } from "./bridge/kernel.ts";

@@ -81,7 +81,7 @@
   },
   "scripts": {
     "build": "bun build.ts",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "bun --bun x --no-install tsc -p tsconfig.json",
     "test": "bun test test --timeout 15000",
     "test:node": "node --test test/node.test.mjs"
   },

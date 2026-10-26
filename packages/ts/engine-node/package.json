@@ -14,7 +14,7 @@
     }
   },
   "scripts": {
-    "build": "node build.ts"
+    "build": "bun build.ts"
   },
   "engines": {
     "node": ">=22"

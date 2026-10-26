@@ -6,6 +6,7 @@ members = [
   "crates/browser-wasm",
   "crates/node-binding",
   "crates/executor-js",
+  "crates/mobile",
 ]
 resolver = "2"
 

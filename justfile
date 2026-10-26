@@ -5,7 +5,7 @@ default:
     @just --list
 
 install:
-    bun install --cwd packages/ts --frozen-lockfile
+    bun install --frozen-lockfile
 
 build-sdk:
     bun run --cwd packages/ts/sdk build
@@ -18,15 +18,15 @@ build-wasm:
 
 fmt:
     cargo fmt --all
-    bun run --cwd packages/ts format
+    bun run format
 
 fmt-check:
     cargo fmt --all --check
-    bun run --cwd packages/ts format:check
+    bun run format:check
 
 lint:
     cargo clippy --locked --workspace --all-features --all-targets -- -D warnings
-    bun run --cwd packages/ts lint
+    bun run lint
 
 deps:
     cargo machete
@@ -35,6 +35,7 @@ test: build-node build-wasm build-sdk
     cargo test --locked --workspace --all-features
     bun run --cwd packages/ts/sdk test
     bun run --cwd packages/ts/sdk test:node
+    bun run --cwd packages/ts/react-native test
 
 check-wasm:
     cargo check --locked -p tembra-core -p tembra-browser-wasm --target wasm32-unknown-unknown --all-features
@@ -46,7 +47,7 @@ examples:
     cargo run --locked -p tembra --example executor
 
 check: fmt-check build-node build-wasm build-sdk
-    bun run --cwd packages/ts typecheck
+    bun run typecheck
     just lint
     just deps
     just test
@@ -59,3 +60,7 @@ install-tools:
 
 install-ts: install
 check-all: check
+
+# Generate matching Swift and Kotlin bindings from the shared engine.
+build-mobile-bindings:
+    bun run --cwd packages/ts/react-native build:bindings

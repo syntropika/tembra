@@ -6,3 +6,7 @@
 *.log
 .DS_Store
 __pycache__/
+/packages/ts/react-native/native/
+/packages/ts/react-native/android/src/main/jniLibs/
+/packages/ts/react-native/android/build/
+/packages/ts/react-native/android/.gradle/
