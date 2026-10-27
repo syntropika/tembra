@@ -7,32 +7,38 @@ Application values stay in the JS runtime until a language or transport boundary
 ## Run an orb in Node
 
 ```ts
-import { orb, type Context, type State } from "@syntropika/tembra-sdk";
+import {
+  orb,
+  type Context,
+  type Declaration,
+  type ServiceDefinition,
+  type State,
+} from "@syntropika/tembra-sdk";
 import { createHost } from "@syntropika/tembra-sdk/node";
 
 type Counter = { count: State<number> };
 
+const counterService = {
+  create(self: Declaration) {
+    return { count: self.state(0, { validate: Number.isSafeInteger }) };
+  },
+  methods: {
+    increment({ count }: Counter, ctx: Context) {
+      return count.update(ctx, (value) => value + 1);
+    },
+  },
+} satisfies ServiceDefinition;
+
 const counter = orb({
   name: "counter",
   apiVersion: 1,
-  services: {
-    counter: {
-      create(self) {
-        return { count: self.state(0, { validate: Number.isSafeInteger }) };
-      },
-      methods: {
-        increment({ count }: Counter, ctx: Context) {
-          return count.update(ctx, (value) => value + 1);
-        },
-      },
-    },
-  },
+  services: { counter: counterService },
 });
 
 const host = createHost();
 try {
   await host.install(counter);
-  const reference = await host.get("counter", "main");
+  const reference = await host.get(counterService, "main");
   console.log(await reference.increment()); // 1
   reference.release();
 } finally {
@@ -43,11 +49,30 @@ try {
 Factories finish synchronously. Methods and resource callbacks can be asynchronous.
 `host.get()` waits until the object is ready.
 A method call without an explicit context starts its own root.
-Pass an existing context as the first argument to join that operation.
+Pass an existing context as the last argument to join that operation.
 Returning a context or copying an opaque token does not keep its issuing call alive.
 See [context lifetime](context.md) before sharing a binding beyond a method return.
 
-`get()` returns a dynamic reference. A service name does not infer its argument and result types.
+Passing a service definition infers the reference's methods, business arguments and asynchronous
+results. The implementation's environment and Context parameters are removed from public calls.
+The returned `count` State handle also makes `reference.state.value` a number. A factory may return
+the State handle directly or as a property of its environment. If its State is declared only as a
+side effect, its type remains unknown; handler environments and opaque resources are not inferred.
+
+`host.hold(service, key)`, `ctx.get(service, key)` and `self.get(service, key)` accept the same
+definitions. Held references expose `ready`; Context references end with their root; declared
+dependencies still require the owner's existing `requires` and method permissions.
+
+`orb()` associates original service objects and its frozen copies with their registered names and
+API versions. Declare the Orb before acquiring a service. One service object must not be reused
+under a different orb, name or API version; create a fresh definition for that identity. Compatible
+reloads continue to dispatch through current managed references rather than captured handlers.
+
+Passing a service name string still returns a dynamic reference. This supports discovered services,
+native implementations and explicit RPC boundaries without importing executable definitions.
+SDK entrypoints and independently compiled Orb bundles share the identity WeakMap within the same
+JavaScript realm. This also supports typed dependencies declared inside loaded standalone bundles.
+The association is not serialized or shared across workers and processes.
 Keep runtime validation in the orb even when application code supplies TypeScript types.
 
 ## Browser and Worker

@@ -7,6 +7,7 @@ import type { Environment } from "../runtime/records.ts";
 import type { Session } from "../runtime/session.ts";
 import type { Readable, State, StateOptions } from "../state.ts";
 import { StateBinding, validate } from "../state.ts";
+import { serviceAcquisition } from "./services.ts";
 import type {
   AcquisitionOptions,
   Completion,
@@ -16,6 +17,8 @@ import type {
   Resource,
   ResourceOptions,
   TaskScope,
+  ServiceDefinition,
+  ServiceReference,
 } from "./types.ts";
 
 /** Available only during its synchronous factory pass. Issued handles remain usable afterwards. */
@@ -76,25 +79,39 @@ export class Declaration {
   }
 
   /** Orb factories cannot depend on their own services; object factories may use sibling services. */
+  get<const Service extends ServiceDefinition>(
+    service: Service,
+    key: string | readonly string[],
+    options?: AcquisitionOptions,
+  ): ServiceReference<Service>;
   get(
     service: string,
+    key: string | readonly string[],
+    options?: AcquisitionOptions,
+  ): DynamicReference;
+  get(
+    service: string | ServiceDefinition,
     key: string | readonly string[],
     options: AcquisitionOptions = {},
   ): DynamicReference {
     this.check();
-    const requirement = this.session.scopes.requirement(this.environment, service);
+    const acquisition = serviceAcquisition(service, options);
+    const requirement = this.session.scopes.requirement(this.environment, acquisition.name);
     const resolved = requirement.service;
+    if (typeof service !== "string" && resolved !== acquisition.name)
+      refuse(Errors.Invalid.Service, "A typed dependency must resolve its declared service name");
     if (!this.environment.object && this.environment.orb.definition.services?.[resolved])
       refuse(Errors.Invalid.DependencyCycle);
-    const identity = JSON.stringify([resolved, key, options.principal ?? this.principal]);
-    const existing = this.environment.dependencies.get(identity);
-    if (existing) return existing;
-    const reference = this.session.handles.hold(resolved, key, {
+    const admitted = serviceAcquisition(service, {
       ...options,
       ...(requirement.apiVersion ? { apiVersion: requirement.apiVersion } : {}),
       ...(requirement.methods ? { methods: requirement.methods } : {}),
       principal: options.principal ?? this.principal,
     });
+    const identity = JSON.stringify([resolved, key, options.principal ?? this.principal]);
+    const existing = this.environment.dependencies.get(identity);
+    if (existing) return existing;
+    const reference = this.session.handles.hold(resolved, key, admitted.options);
     if (this.environment.object) {
       try {
         this.session.kernel.command(KernelOp.Dependency, {

@@ -36,8 +36,9 @@ onmessage = async () => {
     if(verifyIdentifierPrecision(()=>new WasmKernel())!==9) throw new Error('Worker identity precision failed');
     await verifyExclusiveRootGate(host);
     await verifyContextValues(host);
-    await host.install({name:'worker',apiVersion:1,services:{worker:{create(self){return {state:self.state(0n)}},methods:{add({state},ctx,value){return state.update(ctx,current=>current+value)}}}}});
-    const ref = await host.get('worker','main');
+    const service = {create(self){return {state:self.state(0n)}},methods:{add({state},ctx,value){return state.update(ctx,current=>current+value)}}};
+    await host.install({name:'worker',apiVersion:1,services:{worker:service}});
+    const ref = await host.get(service,'main');
     const value = await ref.add(1n << 100n);
     ref.release(); await host.close();
     postMessage({value:value.toString(),objects:host.diagnostics().objects});
@@ -54,8 +55,9 @@ try {
   if(verifyIdentifierPrecision(()=>new WasmKernel())!==9) throw new Error('Browser identity precision failed');
   await verifyExclusiveRootGate(host);
     await verifyContextValues(host);
-  await host.install({name:'browser',apiVersion:1,services:{counter:{create(self){return {state:self.state({value:0,items:[]})}},methods:{add({state},ctx){state.update(ctx,current=>({...current,value:current.value+1,items:[...current.items,1]}))}}}}});
-  const ref = await host.get('counter','main');
+  const service = {create(self){return {state:self.state({value:0,items:[]})}},methods:{add({state},ctx){state.update(ctx,current=>({...current,value:current.value+1,items:[...current.items,1]}))}}};
+  await host.install({name:'browser',apiVersion:1,services:{counter:service}});
+  const ref = await host.get(service,'main');
   let updates = 0;
   const detach = ref.state.select(state=>state.items.length).subscribe(()=>updates++);
   const before = ref.state.value;
@@ -181,7 +183,7 @@ try {
     output = response.result.value ?? "";
     if (output === "TEMBRA_BROWSER_PASS") {
       console.log(
-        "Browser and Worker acceptance passed, including context values, root gates and 9 identifier precision boundaries each",
+        "Browser and Worker acceptance passed, including typed service acquisition, context values, root gates and 9 identifier precision boundaries each",
       );
       break;
     }

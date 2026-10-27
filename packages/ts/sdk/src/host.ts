@@ -6,6 +6,9 @@ import type {
   HostOptions,
   ReloadOptions,
   ResourceOptions,
+  DynamicReference,
+  ServiceDefinition,
+  ServiceReference,
 } from "./authoring/types.ts";
 import { KernelOp } from "./bridge/protocol.ts";
 import { Context } from "./runtime/context.ts";
@@ -59,12 +62,40 @@ export class Host {
   }
 
   /** Acquire a reference before its asynchronous activation completes. */
-  hold(service: string, key: string | readonly string[], options?: AcquisitionOptions) {
+  hold<const Service extends ServiceDefinition>(
+    service: Service,
+    key: string | readonly string[],
+    options?: AcquisitionOptions,
+  ): ServiceReference<Service>;
+  hold(
+    service: string,
+    key: string | readonly string[],
+    options?: AcquisitionOptions,
+  ): DynamicReference;
+  hold(
+    service: string | ServiceDefinition,
+    key: string | readonly string[],
+    options?: AcquisitionOptions,
+  ) {
     return this.session.handles.hold(service, key, options);
   }
 
   /** Acquire a reference and wait for activation. */
-  get(service: string, key: string | readonly string[], options?: AcquisitionOptions) {
+  get<const Service extends ServiceDefinition>(
+    service: Service,
+    key: string | readonly string[],
+    options?: AcquisitionOptions,
+  ): Promise<ServiceReference<Service>>;
+  get(
+    service: string,
+    key: string | readonly string[],
+    options?: AcquisitionOptions,
+  ): Promise<DynamicReference>;
+  get(
+    service: string | ServiceDefinition,
+    key: string | readonly string[],
+    options?: AcquisitionOptions,
+  ) {
     return this.session.handles.get(service, key, options);
   }
 

@@ -2,7 +2,12 @@ import { ContextKey, ContextKind, readContextValue } from "../context-key.ts";
 import { KernelOp } from "../bridge/protocol.ts";
 import { Errors } from "../errors.ts";
 
-import type { AcquisitionOptions, DynamicReference } from "../authoring/types.ts";
+import type {
+  AcquisitionOptions,
+  DynamicReference,
+  ServiceDefinition,
+  ServiceReference,
+} from "../authoring/types.ts";
 import type { Invocation } from "../bridge/kernel.ts";
 import { TembraError } from "../error.ts";
 import type { Session } from "./session.ts";
@@ -76,8 +81,18 @@ export class Context {
   }
 
   /** Acquire a reference whose claim ends with this root. */
+  get<const Service extends ServiceDefinition>(
+    service: Service,
+    key: string | readonly string[],
+    options?: AcquisitionOptions,
+  ): Promise<ServiceReference<Service>>;
   get(
     service: string,
+    key: string | readonly string[],
+    options?: AcquisitionOptions,
+  ): Promise<DynamicReference>;
+  get(
+    service: string | ServiceDefinition,
     key: string | readonly string[],
     options: AcquisitionOptions = {},
   ): Promise<DynamicReference> {

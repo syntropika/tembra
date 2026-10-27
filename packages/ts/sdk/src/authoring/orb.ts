@@ -1,6 +1,7 @@
 import { Errors } from "../errors.ts";
 
 import { refuse } from "../error.ts";
+import { associateServices } from "./services.ts";
 import type { OrbDefinition, ServiceDefinition } from "./types.ts";
 
 /** Captures executable declarations. No structural schemas or generated contracts are required. */
@@ -67,11 +68,21 @@ export function orb<const F extends OrbDefinition>(definition: F): Readonly<F> {
       ),
     ]),
   );
-  return Object.freeze({
+  const captured = Object.freeze({
     ...definition,
     services: Object.freeze(services),
     requires: Object.freeze(requires),
     hooks: Object.freeze(hooks),
     contributes: Object.freeze(contributes),
-  }) as Readonly<F>;
+  });
+  associateServices(
+    definition.name,
+    definition.apiVersion,
+    Object.entries(definition.services ?? {}).map(([name, original]) => [
+      name,
+      original,
+      services[name]!,
+    ]),
+  );
+  return captured as Readonly<F>;
 }

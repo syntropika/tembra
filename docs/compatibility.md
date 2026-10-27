@@ -1,5 +1,34 @@
 # Compatibility
 
+## Typed service acquisition
+
+Service-object acquisition adds a TypeScript binding convenience over the existing named kernel
+acquisition. Orb declarations, string acquisition, RPC messages and native service registration
+retain their current form. The convenience is available on local Host, Context and Declaration
+entrypoints; RemoteHost remains a dynamic service-name client.
+
+Original and captured service objects resolve identically, including after repeated capture during
+installation. A compatible replacement using fresh service definitions preserves existing reference
+and State behavior through the normal kernel reload path. No stale implementation is called through
+the service object. The object supplies identity and types, not direct handler access.
+
+Typed references describe the declared interface, not a grant of every method. Principal access
+views and declared dependency method restrictions remain runtime checks. Root-owned references
+are still released at root settlement, and explicit release and host cleanup remain unchanged.
+Unassociated definitions fail with `invalid/service` before acquisition. Orb declaration now refuses
+reuse of the same service object under a different orb, service name or API version with
+`invalid/service`, even when consumers acquire only by string. Use fresh service definitions for
+those distinct identities. A typed dependency also refuses an alias that resolves to a different
+service name; string dependencies retain their existing alias behavior. Reference-owned members
+and `then` are excluded from the inferred business methods because the proxy reserves them.
+
+The WeakMap is shared by SDK entrypoints and standalone orb bundles in the same JavaScript realm,
+using a non-enumerable symbol-keyed metadata slot. Independently bundled copies can therefore use
+original service objects through ordinary Host, Context and Declaration acquisition. Serialized
+definitions and other workers or processes do not preserve those object identities; use the dynamic
+service-name interface at those boundaries. No extra cross-process contract validation or
+compatibility layer is introduced.
+
 ## Accumulated waterfall stopping
 
 `Hook::waterfall_until` is an additive constructor behind the native facade's `hooks` feature.

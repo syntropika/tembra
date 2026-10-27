@@ -1,4 +1,5 @@
 import { consumerState } from "../authoring/declaration.ts";
+import { serviceAcquisition } from "../authoring/services.ts";
 import type {
   AcquisitionOptions,
   DynamicReference,
@@ -96,11 +97,18 @@ export class References {
 
   /** Acquire ownership and create a local service handle. */
   hold(
-    service: string,
+    definition: string | ServiceDefinition,
     key: string | readonly string[],
     options: AcquisitionOptions = {},
     ctx?: Context,
   ): DynamicReference {
+    let service: string;
+    if (typeof definition === "string") service = definition;
+    else {
+      const acquisition = serviceAcquisition(definition, options);
+      service = acquisition.name;
+      options = acquisition.options;
+    }
     const session = this.session;
     if (ctx) context(ctx, session);
     session.kernel.command(KernelOp.Tick, { now: session.now() });
@@ -248,7 +256,7 @@ export class References {
 
   /** Release the acquired claim if activation fails. */
   async get(
-    service: string,
+    service: string | ServiceDefinition,
     key: string | readonly string[],
     options: AcquisitionOptions = {},
     ctx?: Context,

@@ -1,5 +1,37 @@
 # Implementation decisions
 
+## Declaration-inferred service acquisition
+
+TypeScript callers may pass an existing service definition to `Host.get`, `Host.hold`,
+`Context.get` and `Declaration.get`. Orb authoring remains unchanged: an exported plain service
+object is registered under a key in `services`. No separate contract, service constructor,
+public name field or kernel operation is introduced.
+
+After validating the whole declaration, `orb()` associates the original service object and its
+frozen captured copy with the orb name, registered service name and API version in a private
+WeakMap. Repeated capture of the same identity is permitted. Reusing a service object with a
+different orb, name or API version is ambiguous and is refused before committing associations.
+Failed declarations do not associate any of their previously unassociated service objects.
+
+Acquisition resolves this metadata into the existing service-name and key path. Typed acquisition
+requires the declared API version; an explicitly conflicting option is refused. Dependency
+acquisition still resolves the owner's requirements and method restrictions. String acquisition
+remains the dynamic interface for runtime-discovered and native services.
+
+References project implementation method arguments and asynchronous results without exposing the
+environment and invocation Context parameters. Explicit call Context remains an optional trailing
+argument. Returned State handles, including handles in a returned environment, provide observable
+State types. A State declared only through side effects has no inferable type and remains unknown.
+This does not add contextual typing to handler environments or infer opaque resource types.
+
+SDK entrypoints and independently compiled orb bundles share one WeakMap within a JavaScript realm
+through a non-enumerable, symbol-keyed metadata slot. This keeps the existing standalone build format
+and permits factories in a loaded bundle to acquire original service objects, including imported
+dependencies. The slot contains only identity metadata, not objects, references or lifecycle policy.
+Weak keys do not keep service definitions alive. Worker and process boundaries retain their own maps;
+serialized definitions do not carry the association. The slot is not an authority boundary: normal
+kernel admission, dependency permissions and version checks still govern every acquisition.
+
 ## Accumulated terminal decisions
 
 `Hook::waterfall_until` combines accumulated transformations with early stopping behind the

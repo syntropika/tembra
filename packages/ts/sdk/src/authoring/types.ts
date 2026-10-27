@@ -2,7 +2,7 @@ import { Lifetime, ReloadStatus, Status } from "../bridge/identifiers.ts";
 import type { Invocation, KernelOrb, KernelPort } from "../bridge/kernel.ts";
 import type { Codec } from "../codecs/json.ts";
 import type { Context } from "../runtime/context.ts";
-import type { Readable } from "../state.ts";
+import type { Readable, State } from "../state.ts";
 import type { Declaration } from "./declaration.ts";
 
 export type Completion<T> = T | PromiseLike<T>;
@@ -101,6 +101,50 @@ export interface ReferenceBase<T = unknown> {
   opaque<R = unknown>(name: string): R;
 }
 export type DynamicReference = ReferenceBase<any> & Record<string, any>;
+
+type EnvironmentState<Environment> = 0 extends 1 & Environment
+  ? unknown
+  : Environment extends State<infer Value>
+    ? Value
+    : Environment extends object
+      ? {
+          [Member in keyof Environment]-?: Environment[Member] extends State<infer Value>
+            ? Value
+            : never;
+        }[keyof Environment]
+      : never;
+
+type ServiceState<Service> = Service extends { create: (...args: never[]) => infer Environment }
+  ? [EnvironmentState<Environment>] extends [never]
+    ? unknown
+    : EnvironmentState<Environment>
+  : unknown;
+
+type ArgumentTail<Arguments extends unknown[]> = Arguments extends []
+  ? []
+  : Arguments extends [unknown?, ...infer Rest]
+    ? Rest
+    : [];
+
+type BusinessArguments<Arguments extends unknown[]> = ArgumentTail<ArgumentTail<Arguments>>;
+
+// An optional tuple suffix after a rest parameter would also admit Context in the middle.
+type CallArguments<Arguments extends unknown[]> = number extends Arguments["length"]
+  ? Arguments | [...Arguments, Context]
+  : [...Arguments, context?: Context];
+
+type ConsumerMethod<Method> = Method extends (...args: infer Arguments) => infer Result
+  ? (...args: CallArguments<BusinessArguments<Arguments>>) => Promise<Awaited<Result>>
+  : never;
+
+/** A managed reference inferred from one service's methods and explicitly returned State handles. */
+export type ServiceReference<Service extends ServiceDefinition> = ReferenceBase<
+  ServiceState<Service>
+> & {
+  [Method in Exclude<keyof Service["methods"], keyof ReferenceBase | "then">]: ConsumerMethod<
+    Service["methods"][Method]
+  >;
+};
 
 export interface AcquisitionOptions {
   apiVersion?: number;

@@ -92,7 +92,7 @@
     "build": "bun build.ts",
     "typecheck": "bun --bun x --no-install tsc -p tsconfig.json",
     "test": "bun test test --timeout 15000",
-    "test:node": "node --test test/node.test.mjs"
+    "test:node": "node --test test/node.test.mjs test/typed-services.node.test.mjs"
   },
   "dependencies": {
     "@syntropika/tembra-engine-node": "workspace:*",
