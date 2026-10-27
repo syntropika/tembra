@@ -32,8 +32,14 @@ required-features = ["hooks"]
 name = "composition"
 path = "../../examples/rust/composition.rs"
 
+[[example]]
+name = "rpc"
+path = "../../examples/rust/rpc.rs"
+required-features = ["rpc", "views"]
+
 [features]
 default = []
+rpc = []
 hooks = ["tembra-core/hooks"]
 subscriptions = ["tembra-core/subscriptions"]
 views = ["tembra-core/views"]

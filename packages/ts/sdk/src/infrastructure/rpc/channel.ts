@@ -11,8 +11,11 @@ export interface Transport {
   send(frame: Uint8Array): void | Promise<void>;
   /** Register frame and connection callbacks until detached. */
   listen(receive: (frame: Uint8Array) => void, closed: (error?: unknown) => void): () => void;
-  /** Close the underlying connection. */
-  close(): void;
+  /**
+   * Close after channel listeners detach, handling or ignoring the supplied terminal cause.
+   * Wrap platform methods; do not forward this cause to WebSocket.close(code), destroy(error), or end.
+   */
+  close(cause?: unknown): void;
 }
 export interface Limits {
   codec?: Codec;
@@ -61,12 +64,19 @@ export class Channel {
             throw new TembraError(Errors.Invalid.RpcFrame);
           receive(message);
         } catch (error) {
-          options.onError?.(error);
+          this.#report(error);
           this.close(error);
         }
       },
       (error) => this.close(error),
     );
+  }
+
+  /** Report adapter failures without letting a reporter prevent connection cleanup. */
+  #report(error: unknown): void {
+    try {
+      this.options.onError?.(error);
+    } catch {}
   }
 
   /** Encode and size-check a message before transport delivery. */
@@ -81,8 +91,17 @@ export class Channel {
   close(error: unknown = new TembraError(Errors.Gone.Connection)): void {
     if (this.closed) return;
     this.closed = true;
-    this.#detach?.();
-    this.transport.close();
-    this.ended(error);
+    try {
+      this.#detach?.();
+    } catch (detachError) {
+      this.#report(detachError);
+    }
+    try {
+      this.transport.close(error);
+    } catch (closeError) {
+      this.#report(closeError);
+    } finally {
+      this.ended(error);
+    }
   }
 }

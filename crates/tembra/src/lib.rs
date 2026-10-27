@@ -10,6 +10,8 @@ pub use clock::Clock;
 #[cfg(feature = "subscriptions")]
 mod events;
 mod readable;
+#[cfg(feature = "rpc")]
+pub mod rpc;
 #[cfg(feature = "subscriptions")]
 pub use events::{Detach, EventHandler, EventOptions, EventSource};
 pub use readable::{Observation, Readable};

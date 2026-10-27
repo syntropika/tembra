@@ -11,6 +11,16 @@ type Check = Rc<dyn Fn() -> Result<()>>;
 pub(crate) struct Observer {
     pub active: Cell<bool>,
     pub invoke: Box<dyn Fn() -> Result<()>>,
+    host: Host,
+    object: core::Id,
+}
+
+impl Observer {
+    fn detach(&self) {
+        if self.active.replace(false) {
+            self.host.prune_observers(self.object);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -27,7 +37,7 @@ impl ReadLifetime {
             .into_iter()
             .filter_map(|observer| observer.upgrade())
         {
-            observer.active.set(false);
+            observer.detach();
         }
     }
 }
@@ -37,7 +47,7 @@ pub struct Observation(Rc<Observer>);
 impl Observation {
     /// Stop receiving notifications; repeated detachment has no effect.
     pub fn detach(&self) {
-        self.0.active.set(false);
+        self.0.detach();
     }
 }
 impl Drop for Observation {
@@ -136,6 +146,8 @@ impl<T: 'static> Readable<T> {
         let source = self.clone();
         let observer = Rc::new(Observer {
             active: Cell::new(true),
+            host: self.host.clone(),
+            object: self.object,
             invoke: Box::new(move || {
                 let value = source.value()?;
                 if Rc::ptr_eq(&previous.borrow(), &value) {
@@ -153,5 +165,41 @@ impl<T: 'static> Readable<T> {
                 .push(Rc::downgrade(&observer));
         }
         Ok(Observation(observer))
+    }
+}
+
+#[cfg(feature = "rpc")]
+impl Readable<serde_json::Value> {
+    pub(crate) fn portable(host: Host, object: core::Id, lifetime: Rc<ReadLifetime>) -> Self {
+        let reader = host.clone();
+        let checked = host.clone();
+        let claim = lifetime.clone();
+        let cache = RefCell::new(None::<(core::Id, Rc<serde_json::Value>)>);
+        Self {
+            host,
+            object,
+            lifetime: Some(lifetime),
+            read: Rc::new(move || {
+                let identity = reader.kernel().snapshot(object)?.value;
+                if let Some((previous, value)) = &*cache.borrow()
+                    && *previous == identity
+                {
+                    return Ok(value.clone());
+                }
+                let value = Rc::new(reader.portable_value(identity)?);
+                *cache.borrow_mut() = Some((identity, value.clone()));
+                Ok(value)
+            }),
+            check: Rc::new(move || {
+                if claim.released.get() {
+                    return Err(Error::new(
+                        core::Code::Released,
+                        core::Reason::Reference,
+                        "reference is released",
+                    ));
+                }
+                checked.kernel().snapshot(object).map(|_| ())
+            }),
+        }
     }
 }

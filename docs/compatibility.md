@@ -1,4 +1,4 @@
-# Hook compatibility
+# Compatibility
 
 ## Accumulated waterfall stopping
 
@@ -40,3 +40,35 @@ ensures every admitted observation call has physical scope claims that cleanup c
 The pinned Chord reference is `e17e2e10556cea6b674bb627726bef8ceed90065`. Its waiter cancellation and
 physical promise lifetime were inspected; this owner-bound hook operation is a Tembra extension.
 No general structured task tree, cross-host finalization or forced callback termination is claimed.
+
+## Native RPC byte adapter
+
+The `rpc` feature adds `tembra::rpc::{serve, Options, Connection}` without changing the existing
+SDK JSON `describe`, `get`, `call`, `release`, `cancel` or State envelopes. Native serde methods use
+tuple arguments and `()` for no arguments. Existing tagged BigInt/byte values retain their portable
+JSON representation. A newly acquired claim advertises the kernel's effective method intersection;
+forged requests remain subject to normal core invocation checks.
+
+The server has separate frame, pending-request and reference limits. An initial oversized State or
+method result is a structured request refusal if that refusal fits. An oversized live State closes
+with `exhausted/frame_size`; applications can inspect the cause and stop reacquiring that view.
+A tiny frame budget that cannot encode the error also closes. Sender refusal is terminal and is
+never retried. Reference release and logical close do not prove physical callback settlement.
+
+Every SDK channel close supplies its terminal cause after listener detachment. Transports must
+handle or ignore that argument. Wrap platform close methods: forwarding the cause directly to
+`WebSocket.close(code)`, `destroy(error)` or `end` can throw or change their behavior. A zero-argument
+implementation remains suitable only when it ignores extra arguments. Detachment, close and error
+reporter failures cannot skip the channel's terminal cleanup. Observer reporting remains
+nonterminal. Acquired State mirrors attach during response routing so same-turn State frames are
+retained before the acquisition promise resumes. Native observation detachment also removes stale
+weak entries from the host observer index immediately, so quiet live owners do not retain released
+reference subscriptions. Per-reference observation records remain until that reference is released.
+Aborted acquisitions retain bounded pending tombstones until a late response or connection close.
+A late successful acquisition is released; a reply that cannot create a usable proxy is also released
+when it carries a valid reference. Tombstones and cleanup requests share the pending-request limit.
+No reconnect behavior or new error hierarchy is introduced.
+
+Native acceptance is in `crates/tembra/tests/rpc.rs`; actual SDK/native byte conformance is run by
+`just test-native-rpc`. These tests qualify this JSON adapter, not the pinned reference product's
+separate versioned wire protocol, browser transport authentication or an arbitrary custom codec.

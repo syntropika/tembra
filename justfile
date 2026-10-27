@@ -34,6 +34,7 @@ deps:
 test: build-node build-wasm build-sdk
     cargo test --locked --workspace --all-features
     just test-no-hooks
+    just test-native-rpc
     bun test scripts/release.test.ts
     bun run --cwd packages/ts/sdk test
     bun run --cwd packages/ts/sdk test:node
@@ -50,6 +51,11 @@ test-doc:
 # Verify native hook lifecycle contracts and their actual embedded JavaScript bridge.
 test-hook-lifecycle: build-node build-wasm build-sdk
     cargo test --locked -p tembra-core -p tembra -p tembra-executor-js --all-features
+
+# Exchange actual SDK RPC frames with a native Rust provider over application-owned bytes.
+test-native-rpc:
+    cargo build --locked -p tembra --features rpc,views --example rpc
+    TEMBRA_NATIVE_RPC="$(realpath "${CARGO_TARGET_DIR:-target}")/debug/examples/rpc" bun test packages/ts/sdk/test/rpc-native.test.ts
 
 check-wasm:
     cargo check --locked -p tembra-core -p tembra-browser-wasm --target wasm32-unknown-unknown --all-features

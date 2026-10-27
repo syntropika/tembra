@@ -32,6 +32,8 @@ mod hooks;
 mod observation;
 mod reference;
 mod resources;
+#[cfg(feature = "rpc")]
+mod rpc;
 mod scopes;
 mod signals;
 mod tasks;

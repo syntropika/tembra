@@ -56,6 +56,21 @@ impl Host {
             .push(observer);
     }
 
+    /// Remove detached observations while their state object can remain live and quiet.
+    pub(crate) fn prune_observers(&self, object: core::Id) {
+        let mut indexed = self.0.observers.borrow_mut();
+        if let Some(observers) = indexed.get_mut(&object) {
+            observers.retain(|observer| {
+                observer
+                    .upgrade()
+                    .is_some_and(|observer| observer.active.get())
+            });
+            if observers.is_empty() {
+                indexed.remove(&object);
+            }
+        }
+    }
+
     /// Publish a shared kernel state-change notification to native observers.
     pub fn publish_state(&self, object: core::Id) {
         let observers = {
@@ -136,5 +151,46 @@ impl Host {
             self.0.settled.borrow_mut().push(send);
             let _ = receive.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::LocalPool;
+
+    #[test]
+    fn released_and_detached_observations_leave_no_index_on_a_quiet_live_object() {
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        host.install(vec![
+            Orb::new("state", 1).service(
+                crate::Service::new("state", |declaration| {
+                    declaration.state(0_u32, 1, |_| Ok(()))
+                })
+                .lifetime(core::Lifetime::Host, 0),
+            ),
+        ])
+        .unwrap();
+        for explicit_detach in [false, true] {
+            for _ in 0..100 {
+                let reference = host.get("state", vec!["main".into()], "host").unwrap();
+                pool.run_until(reference.ready()).unwrap();
+                let observation = reference
+                    .state::<u32>()
+                    .unwrap()
+                    .subscribe(|_| Ok(()))
+                    .unwrap();
+                assert_eq!(host.0.observers.borrow()[&reference.object()].len(), 1);
+                if explicit_detach {
+                    observation.detach();
+                }
+                reference.release().unwrap();
+                assert!(host.0.observers.borrow().is_empty());
+                assert_eq!(host.kernel().diagnostics().objects, 1);
+                drop(observation);
+            }
+        }
+        pool.run_until(host.close()).unwrap();
     }
 }

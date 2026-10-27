@@ -1,4 +1,4 @@
-# Hook decisions
+# Implementation decisions
 
 ## Accumulated terminal decisions
 
@@ -66,3 +66,54 @@ Host close rejects new admissions and cancels all ordinary roots using its exist
 Cancellation remains cooperative and cannot prove termination or undo an external effect.
 
 `waterfall_until` is an independent composition and is not required by observation.
+
+## Native byte RPC server
+
+The optional `tembra/rpc` feature exposes the existing SDK JSON operations over an injected
+synchronous byte sender. The embedding owns authentication, the fixed principal, transport I/O,
+queue byte limits and actual transport closure. Tembra adds no socket dependency, retry loop,
+identity scheme or lifecycle driver.
+
+`Options::new(principal, allow)` distinguishes catalog visibility (`None`) from acquisition of an
+explicit key (`Some(key)`). Neither implies the other. Catalog methods reflect the declared native
+access policy; acquisition advertises the actual kernel claim's declared, required and view-allowed
+methods through `tembra_core::Host::reference_methods`. Invocation still performs the normal core checks.
+Views remain optional: applications relying on service access policies must enable `views`.
+
+Each connection owns its references, observations, request admission and call contexts. Observations
+attach before the acquisition reply; updates during reply delivery are retained until that reply is
+accepted by the sender. Release detaches observation. Cancellation and closure signal existing roots;
+physical callbacks retain their existing managed pins until settlement. There is no effect rollback.
+
+Frame encoding stops at the configured byte limit. Oversized acquisitions are refused before
+retaining a remote claim; oversized results return `exhausted/frame_size` when that error fits.
+Already performed callback effects remain performed. A live oversized State or sender failure closes
+only its connection with a cause. The sender must bound queued and in-flight bytes. These limits do
+not bound application value construction, total allocations or buffers owned by another library.
+
+Logical close must wake an idle transport pump. `Connection::closed()` supports one embedding waiter;
+`close_cause()` exposes the first terminal cause. The embedding selects closure alongside its I/O and
+closes its real channel. Explicit close has no error cause; the first close wins.
+
+A sender must not block the host executor. The stdio example reserves queued and in-flight output
+bytes, uses a nonblocking bounded queue, and moves blocking writes onto a separate writer. Writer
+failure wakes the pump without new peer traffic; terminal closure is returned after host cleanup.
+
+The SDK's optional `Transport.close(cause?: unknown)` receives `Channel.close`'s terminal cause after
+receive/socket listeners detach. An embedding's ownership notification must therefore live in its
+close implementation as well as its listener. Nonfatal State observer errors still use `onError`
+and do not signal terminal connection loss. Platform close methods require a wrapper that handles
+or ignores the cause; transport detachment/close errors cannot prevent terminal request cleanup.
+Reconnect and view reacquisition belong to consumers. Aborted acquisitions retain pending-budget
+entries until their late reply or closure; late successful claims are released instead of discarded.
+
+The SDK installs an acquired State mirror synchronously while routing the get response, before
+resolving its caller. A transport may deliver the reply and subsequent State frames in the same
+JavaScript turn. Waiting for the acquisition promise before registering the mirror loses those
+updates. This internal attachment correction changes no wire fields or public methods and retains
+release, cancellation and connection checks. Portable native observations cache the exact kernel
+snapshot value identity so repeated publication of the same snapshot does not duplicate events.
+Detaching an observation or releasing its reference immediately removes inactive weak observer
+records and empty indexes from the host observer index, including when the State owner remains live
+without publishing again. Per-reference observation records remain until that reference is released.
+This keeps repeated acquisition/closure bookkeeping bounded while preserving physical call pins.

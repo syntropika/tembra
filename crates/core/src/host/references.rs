@@ -259,6 +259,50 @@ impl Host {
             .map_or(Status::Gone, |o| o.phase))
     }
 
+    /// Read declared methods admitted by this claim's requirements and current view restrictions.
+    /// This metadata is not call admission: lifecycle, version and context checks still run per call.
+    ///
+    /// # Errors
+    /// Returns a reference or object error if the claim has been released or its owner is gone.
+    pub fn reference_methods(&self, reference: Id) -> Result<BTreeSet<String>> {
+        let inner = self.inner.borrow();
+        let claim = inner
+            .references
+            .get(&reference)
+            .ok_or_else(|| gone(Reason::Reference))?;
+        if claim.released {
+            return Err(Error::new(
+                Code::Released,
+                Reason::Reference,
+                "reference is released",
+            ));
+        }
+        let object = inner
+            .objects
+            .get(&claim.object)
+            .ok_or_else(|| gone(Reason::Object))?;
+        let (_, service) = inner.find_service(&object.address.service, inner.version)?;
+        Ok(service
+            .methods
+            .iter()
+            .filter(|method| {
+                if !claim.methods.is_empty() && !claim.methods.contains(*method) {
+                    return false;
+                }
+                #[cfg(feature = "views")]
+                if claim
+                    .allowed
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(*method))
+                {
+                    return false;
+                }
+                true
+            })
+            .cloned()
+            .collect())
+    }
+
     /// Release one claim and reconsider object retirement.
     pub fn release(&self, reference: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();

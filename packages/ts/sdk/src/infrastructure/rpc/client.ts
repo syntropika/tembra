@@ -48,7 +48,17 @@ export class RemoteHost {
   }
 
   /** Correlate one bounded remote request with optional cancellation. */
-  async request(op: RpcOp, payload: unknown, signal?: AbortSignal): Promise<any> {
+  request(op: RpcOp, payload: unknown, signal?: AbortSignal): Promise<any> {
+    return this.#request(op, payload, signal);
+  }
+
+  /** Apply a response before resolving its caller so following frames see acquired state. */
+  async #request(
+    op: RpcOp,
+    payload: unknown,
+    signal?: AbortSignal,
+    received?: (value: any) => void,
+  ): Promise<any> {
     signal?.throwIfAborted();
     if (this.#pending.size >= this.channel.maxPending)
       throw new TembraError(Errors.Exhausted.PendingRequests);
@@ -56,14 +66,35 @@ export class RemoteHost {
     if (!Number.isSafeInteger(id)) throw new TembraError(Errors.Exhausted.RequestIds);
     let abort: (() => void) | undefined;
     const result = new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      const pending = {
+        resolve: (value: any) => {
+          try {
+            received?.(value);
+            resolve(value);
+          } catch (error) {
+            if (op === RpcOp.Get) this.#release(value?.reference);
+            reject(error);
+          }
+        },
+        reject,
+      };
+      this.#pending.set(id, pending);
       abort = () => {
-        this.#pending.delete(id);
+        if (this.#pending.get(id) !== pending) return;
+        if (op === RpcOp.Get) {
+          this.#pending.set(id, {
+            resolve: (value) => this.#release(value?.reference),
+            reject: () => {},
+          });
+        } else {
+          this.#pending.delete(id);
+        }
         reject(signal?.reason ?? new TembraError(Errors.Cancelled.Request));
         void this.channel.send({ op: RpcOp.Cancel, payload: { id } }).catch(() => {});
       };
       signal?.addEventListener("abort", abort, { once: true });
       void this.channel.send({ id, op, payload }).catch((error) => {
+        if (this.#pending.get(id) !== pending) return;
         this.#pending.delete(id);
         reject(error);
       });
@@ -73,6 +104,17 @@ export class RemoteHost {
     } finally {
       if (abort) signal?.removeEventListener("abort", abort);
     }
+  }
+
+  /** Release a late or unusable acquisition within the normal pending-request budget. */
+  #release(reference: unknown): void {
+    if (!Number.isSafeInteger(reference) || (reference as number) <= 0 || this.channel.closed)
+      return;
+    void this.request(RpcOp.Release, { reference }).catch((error) => {
+      try {
+        this.channel.options.onError?.(error);
+      } catch {}
+    });
   }
 
   /** Request remote orb metadata without service activation. */
@@ -86,21 +128,34 @@ export class RemoteHost {
     key: string | readonly string[],
     options: { signal?: AbortSignal } = {},
   ): Promise<DynamicReference> {
-    const acquired = await this.request(
-      RpcOp.Get,
-      { service, key: typeof key === "string" ? [key] : key },
-      options.signal,
-    );
-    const id = acquired.reference as number;
     let released = false;
     const check = () => {
       if (released) throw new TembraError(Errors.Released.Reference);
       if (this.channel.closed) throw new TembraError(Errors.Gone.Connection);
     };
-    const state = Object.hasOwn(acquired, "state")
-      ? new RemoteState(acquired.state, check, (error) => this.channel.options.onError?.(error))
-      : undefined;
-    if (state) this.#states.set(id, state);
+    let state: RemoteState | undefined;
+    const acquired = await this.#request(
+      RpcOp.Get,
+      { service, key: typeof key === "string" ? [key] : key },
+      options.signal,
+      (value) => {
+        if (
+          !value ||
+          !Number.isSafeInteger(value.reference) ||
+          value.reference <= 0 ||
+          !Array.isArray(value.methods) ||
+          !value.methods.every((method: unknown) => typeof method === "string")
+        )
+          throw new TembraError(Errors.Invalid.RpcFrame);
+        if (Object.hasOwn(value, "state")) {
+          state = new RemoteState(value.state, check, (error) =>
+            this.channel.options.onError?.(error),
+          );
+          this.#states.set(value.reference, state);
+        }
+      },
+    );
+    const id = acquired.reference as number;
     const target = {
       ready: Promise.resolve(),
       /** Read connection-aware status without sending a request. */
