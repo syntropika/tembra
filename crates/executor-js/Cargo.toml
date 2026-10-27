@@ -14,7 +14,7 @@ subscriptions = ["tembra/subscriptions", "tembra-bridge/subscriptions"]
 views = ["tembra/views", "tembra-bridge/views"]
 
 [dependencies]
-tembra = { path = "../tembra", version = "=0.1.0" }
+tembra = { path = "../tembra", version = "=0.2.0" }
 tembra-bridge.workspace = true
 serde_json.workspace = true
 futures.workspace = true

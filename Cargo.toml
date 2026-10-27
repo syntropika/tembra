@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
@@ -21,8 +21,8 @@ repository = "https://github.com/syntropika/tembra"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
-tembra-core = { path = "crates/core", version = "=0.1.0", default-features = false }
-tembra-bridge = { path = "crates/bridge", version = "=0.1.0", default-features = false }
+tembra-core = { path = "crates/core", version = "=0.2.0", default-features = false }
+tembra-bridge = { path = "crates/bridge", version = "=0.2.0", default-features = false }
 
 [workspace.lints.rust]
 unused_must_use = "deny"
