@@ -6,7 +6,9 @@ use deno_core::v8;
 pub struct InterruptHandle(pub(crate) v8::IsolateHandle);
 
 impl InterruptHandle {
-    /// Request termination of current JavaScript execution, including synchronous loops.
+    /// Request termination of this V8 realm, including synchronous loops.
+    /// An idle request can terminate its next execution. Synchronize watchdog requests
+    /// with the guarded work, and do not reuse a terminated realm.
     /// Returns false after the isolate is destroyed. True confirms a request only.
     /// The owner must observe the execution result and reconcile uncertain effects.
     pub fn terminate(&self) -> bool {

@@ -267,6 +267,8 @@ An executor-local timeout cannot interrupt code that blocks that executor thread
 The return value confirms only that the isolate still exists and accepted the request.
 Observe the runtime operation's result separately. A control retained after runtime
 destruction returns false and does not keep the isolate alive.
+An idle request can terminate the next execution. Synchronize watchdog requests with
+the guarded work. Do not reuse a terminated realm, including for a JavaScript close.
 
 Interruption affects every Orb in the realm. It does not undo native effects, settle
 resources or prove that the Tembra host has closed. Do not automatically replay an

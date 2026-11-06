@@ -50,19 +50,25 @@ jobs:
           for (const name of ['engine-node', 'engine-wasm', 'sdk', 'react-native']) {
             const pkg = `@syntropika/tembra-${name}`;
             const escaped = pkg.replace('/', '%2f');
-            const result = await fetch(`https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${escaped}`, {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${value}` },
-              signal: AbortSignal.timeout(30_000),
-            });
-            const body = await result.json();
-            if (result.ok && typeof body.token === 'string' && body.token) {
-              console.log(`::add-mask::${body.token}`);
-              console.log(`${pkg}: OIDC exchange accepted`);
-            } else {
-              const message = String(body.message ?? body.error ?? 'Token exchange rejected')
-                .replaceAll(value, '<REDACTED>').replaceAll(/[\r\n]/g, ' ').slice(0, 500);
-              console.error(`${pkg}: HTTP ${result.status}: ${message}`);
+            try {
+              const result = await fetch(`https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${escaped}`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${value}` },
+                signal: AbortSignal.timeout(30_000),
+              });
+              let body;
+              try { body = JSON.parse(await result.text()); } catch { /* Report status without untrusted response bytes. */ }
+              if (result.ok && typeof body?.token === 'string' && body.token) {
+                console.log(`::add-mask::${body.token}`);
+                console.log(`${pkg}: OIDC exchange accepted`);
+              } else {
+                const message = String(body?.message ?? 'Token exchange rejected')
+                  .replaceAll(value, '<REDACTED>').replaceAll(/[\r\n]/g, ' ').slice(0, 500);
+                console.error(`${pkg}: HTTP ${result.status}: ${message}`);
+                process.exitCode = 1;
+              }
+            } catch {
+              console.error(`${pkg}: token exchange request failed`);
               process.exitCode = 1;
             }
           }
