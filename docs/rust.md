@@ -267,8 +267,13 @@ An executor-local timeout cannot interrupt code that blocks that executor thread
 The return value confirms only that the isolate still exists and accepted the request.
 Observe the runtime operation's result separately. A control retained after runtime
 destruction returns false and does not keep the isolate alive.
-An idle request can terminate the next execution. Synchronize watchdog requests with
-the guarded work. Do not reuse a terminated realm, including for a JavaScript close.
+An idle request closes admission for subsequent execution. Synchronize watchdog requests
+with the guarded work. `evaluate`, `call`, `install` and `reload` refuse further work
+after interruption. `close` stops kernel admissions before it permits V8 to run cleanup.
+The matching embedded SDK settles interrupted JavaScript call frames. Native calls keep
+their physical ownership until completion. Cleanup does not retry interrupted work.
+Keep the watchdog active during cleanup. A cleanup callback can also block JavaScript.
+A close error does not confirm that resources have settled.
 
 Interruption affects every Orb in the realm. It does not undo native effects, settle
 resources or prove that the Tembra host has closed. Do not automatically replay an

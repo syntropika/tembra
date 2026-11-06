@@ -12,6 +12,8 @@ pub struct Runtime {
     driver: Option<super::CooperativeExecutor>,
     native: Host,
     codec: Rc<dyn tembra::codec::Codec>,
+    closing: bool,
+    interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Runtime {
@@ -110,6 +112,8 @@ impl Runtime {
             driver,
             native,
             codec,
+            closing: false,
+            interrupted: Default::default(),
         })
     }
 
@@ -140,7 +144,10 @@ impl Runtime {
     /// A watchdog must run outside this runtime's executor thread. Interruption affects
     /// all Orbs in this realm and does not prove that physical cleanup has completed.
     pub fn interrupt_handle(&mut self) -> super::InterruptHandle {
-        super::InterruptHandle(self.js.v8_isolate().thread_safe_handle())
+        super::InterruptHandle {
+            isolate: self.js.v8_isolate().thread_safe_handle(),
+            requested: self.interrupted.clone(),
+        }
     }
 
     /// Calls an installed JS or Rust service through the shared managed host. Conversion occurs
@@ -152,6 +159,7 @@ impl Runtime {
         method: &str,
         arguments: Value,
     ) -> Result<Value> {
+        self.check_open()?;
         let request = json!({
             "service": service,
             "key": key,
@@ -222,6 +230,11 @@ impl Runtime {
 
     /// Waits for a JavaScript result while driving V8's asynchronous operations.
     pub async fn evaluate(&mut self, source: impl Into<String>) -> Result<Value> {
+        self.check_open()?;
+        self.evaluate_internal(source).await
+    }
+
+    async fn evaluate_internal(&mut self, source: impl Into<String>) -> Result<Value> {
         let value = self.resolve_script(source).await?;
         deno_core::scope!(scope, self.js);
         let local = v8::Local::new(scope, value);
@@ -301,6 +314,7 @@ impl Runtime {
 
     /// Load one prebuilt JS bundle without runtime package resolution.
     async fn bundle(&mut self, _name: &str, bundle: String, reload: bool) -> Result<()> {
+        self.check_open()?;
         // Executable bundles are scripts, so retired orbs are not pinned in V8's ESM module map.
         self.js
             .execute_script("tembra:orb", bundle)
@@ -326,12 +340,33 @@ impl Runtime {
         Ok(())
     }
 
-    /// Wait for JS cleanup and native physical callbacks to settle.
+    /// Stop admissions and wait for JS cleanup and native physical callbacks to settle.
+    /// After interruption, only cleanup can reenter V8. Work is not retried.
+    /// A cleanup error does not confirm physical settlement.
     pub async fn close(&mut self) -> Result<()> {
-        let result = self.evaluate("host.close().then(() => null)").await;
+        self.closing = true;
+        self.native.kernel().close();
+        self.js.v8_isolate().cancel_terminate_execution();
+        let script = if self.interrupted.load(std::sync::atomic::Ordering::Acquire) {
+            "Tembra.closeInterrupted(host).then(() => null)"
+        } else {
+            "host.close().then(() => null)"
+        };
+        let result = self.evaluate_internal(script).await;
         let native = self.native.finish_close();
         result?;
         native
+    }
+
+    fn check_open(&mut self) -> Result<()> {
+        if self.closing || self.interrupted.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(Error::new(
+                tembra::Code::Closed,
+                Reason::Javascript,
+                "JavaScript execution is closed",
+            ));
+        }
+        Ok(())
     }
 }
 

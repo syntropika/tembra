@@ -242,7 +242,9 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
                       invocation.method
                     ];
                   if (!handle || !environment) throw new TembraError(Errors.Gone.Implementation);
-                  result = await handle(environment.value, ctx, ...request.input);
+                  result = await host.session.calls.execute(() =>
+                    handle(environment.value, ctx, ...request.input),
+                  );
                 } else {
                   result = await host.session.orbs.runContribution(
                     request.operation,
@@ -278,6 +280,12 @@ function createHost(options: Omit<HostOptions, "kernel" | "native"> = {}): Host 
 }
 
 globals.Tembra = Object.freeze({
+  /** Drain terminal cleanup after the embedding has interrupted and unwound JavaScript. */
+  closeInterrupted: (host: Host) => {
+    host.session.kernel.command(KernelOp.Close);
+    host.session.calls.interrupt();
+    return host.close();
+  },
   ContextKey,
   ContextKind,
   opaqueFrom,

@@ -10,8 +10,45 @@ import type { Session } from "./session.ts";
 
 /** Execute JS calls. Rust controls admission and physical lifetime. */
 export class Calls {
+  readonly #interrupted = new Set<(error: unknown) => void>();
+
   /** Connect JS callback execution to the session kernel. */
   constructor(readonly session: Session) {}
+
+  /** Settle JavaScript frames after the embedding has unwound a terminated V8 turn. */
+  interrupt(): void {
+    const error = new TembraError({
+      code: Code.Closed,
+      reason: "javascript",
+      message: "JavaScript execution was interrupted",
+    });
+    for (const reject of this.#interrupted) reject(error);
+    this.#interrupted.clear();
+  }
+
+  /** Keep the callback frame separate from its physical completion bookkeeping. */
+  async execute<T>(operation: () => Completion<T>): Promise<T> {
+    let reject!: (error: unknown) => void;
+    let failure: unknown;
+    const interrupted = new Promise<never>((_, fail) => {
+      reject = (error) => {
+        failure = error;
+        fail(error);
+      };
+    });
+    this.#interrupted.add(reject);
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => {
+          if (failure) throw failure;
+          return operation();
+        }),
+        interrupted,
+      ]);
+    } finally {
+      this.#interrupted.delete(reject);
+    }
+  }
 
   /** Lazily mirror root cancellation into an AbortSignal. */
   signal(root: number): AbortSignal {
@@ -99,7 +136,7 @@ export class Calls {
           const handle =
             environment?.orb.definition.services?.[reference.address.service]?.methods[method];
           if (!environment || !handle) throw new TembraError(Errors.Gone.Implementation);
-          return await handle(environment.value, entered, ...arguments_);
+          return await this.execute(() => handle(environment.value, entered, ...arguments_));
         } catch (error) {
           outcome = Outcome.Error;
           throw error;
@@ -137,7 +174,9 @@ export class Calls {
         ...(environment.object ? { object: environment.object.id } : {}),
       });
       try {
-        return await handle(new Context(session, ctx.root, invocation, ctx.frame));
+        return await this.execute(() =>
+          handle(new Context(session, ctx.root, invocation, ctx.frame)),
+        );
       } finally {
         session.kernel.command(KernelOp.FinishCall, { call: invocation.id });
         session.lifecycle.flush();

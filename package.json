@@ -1,6 +1,6 @@
 {
   "name": "@syntropika/tembra-sdk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "license": "Apache-2.0",
   "workspaces": [
@@ -90,14 +90,14 @@
   "scripts": {
     "lint": "bun --bun x --no-install oxlint --config packages/ts/oxlint.config.ts --disable-nested-config --deny-warnings --report-unused-disable-directives",
     "lint:fix": "bun --bun x --no-install oxlint --config packages/ts/oxlint.config.ts --disable-nested-config --fix --deny-warnings",
-    "format": "bun --bun x --no-install oxfmt --config packages/ts/oxfmt.config.ts .",
-    "format:check": "bun --bun x --no-install oxfmt --config packages/ts/oxfmt.config.ts --check .",
+    "format": "node node_modules/oxfmt/bin/oxfmt --config packages/ts/oxfmt.config.ts .",
+    "format:check": "node node_modules/oxfmt/bin/oxfmt --config packages/ts/oxfmt.config.ts --check .",
     "typecheck": "bun --bun x --no-install tsc -p packages/ts/tsconfig.json && bun run --cwd packages/ts/react-native typecheck",
     "test:browser": "bun packages/ts/test/browser.ts"
   },
   "dependencies": {
-    "@syntropika/tembra-engine-node": "0.2.1",
-    "@syntropika/tembra-engine-wasm": "0.2.1",
+    "@syntropika/tembra-engine-node": "0.2.2",
+    "@syntropika/tembra-engine-wasm": "0.2.2",
     "enhanced-resolve": "5.26.0",
     "typescript": "5.9.3"
   },
