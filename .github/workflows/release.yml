@@ -44,9 +44,13 @@ jobs:
           const { value } = await identity.json();
           if (typeof value !== 'string' || !value) throw new Error('GitHub identity token is missing');
           console.log(`::add-mask::${value}`);
+          const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+          console.log(JSON.stringify({ repository: claims.repository, workflow: claims.workflow_ref,
+            audience: claims.aud, environment: claims.environment ?? null }));
           for (const name of ['engine-node', 'engine-wasm', 'sdk', 'react-native']) {
             const pkg = `@syntropika/tembra-${name}`;
-            const result = await fetch(`https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${encodeURIComponent(pkg)}`, {
+            const escaped = pkg.replace('/', '%2f');
+            const result = await fetch(`https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${escaped}`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${value}` },
               signal: AbortSignal.timeout(30_000),
