@@ -62,7 +62,7 @@ jobs:
                 console.log(`::add-mask::${body.token}`);
                 console.log(`${pkg}: OIDC exchange accepted`);
               } else {
-                const message = String(body?.message ?? 'Token exchange rejected')
+                const message = String(body?.message ?? body?.error ?? 'Token exchange rejected')
                   .replaceAll(value, '<REDACTED>').replaceAll(/[\r\n]/g, ' ').slice(0, 500);
                 console.error(`${pkg}: HTTP ${result.status}: ${message}`);
                 process.exitCode = 1;
