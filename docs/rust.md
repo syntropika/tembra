@@ -260,6 +260,18 @@ Native work and local child tasks continue on a background pump while V8 is idle
 cleanup. JavaScript promises and callbacks still require an active runtime operation to
 drive V8.
 
+`Runtime::interrupt_handle` returns a cloneable, thread-safe control for the entire
+V8 realm. A host can pass this control to a watchdog on another thread and call
+`terminate` to interrupt synchronous JavaScript, including an infinite loop.
+An executor-local timeout cannot interrupt code that blocks that executor thread.
+The return value confirms only that the isolate still exists and accepted the request.
+Observe the runtime operation's result separately. A control retained after runtime
+destruction returns false and does not keep the isolate alive.
+
+Interruption affects every Orb in the realm. It does not undo native effects, settle
+resources or prove that the Tembra host has closed. Do not automatically replay an
+operation with an unknown outcome. The embedding owns watchdog policy and recovery.
+
 Each polling turn has a native task budget so self-waking work yields to other local tasks.
 Scheduling turns and the relative completion timing of independent calls can differ from
 the standard adapter. Hook plan order, awaited call order, context authority, code versions,

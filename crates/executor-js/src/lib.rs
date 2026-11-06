@@ -15,8 +15,10 @@ use tembra_bridge::protocol::{EffectType, NativeOp};
 
 mod bindings;
 mod bridge;
+mod interruption;
 mod runtime;
 
+pub use interruption::InterruptHandle;
 pub use runtime::Runtime;
 
 #[derive(Clone)]

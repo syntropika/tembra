@@ -136,6 +136,13 @@ impl Runtime {
         &self.native
     }
 
+    /// Create a thread-safe interruption control without transferring isolate ownership.
+    /// A watchdog must run outside this runtime's executor thread. Interruption affects
+    /// all Orbs in this realm and does not prove that physical cleanup has completed.
+    pub fn interrupt_handle(&mut self) -> super::InterruptHandle {
+        super::InterruptHandle(self.js.v8_isolate().thread_safe_handle())
+    }
+
     /// Calls an installed JS or Rust service through the shared managed host. Conversion occurs
     /// once at this language boundary; business logic and validation execute in the owning orb.
     pub async fn call(
