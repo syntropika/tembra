@@ -5,8 +5,8 @@
     "": {
       "name": "tembra-typescript",
       "dependencies": {
-        "@syntropika/tembra-engine-node": "0.2.0",
-        "@syntropika/tembra-engine-wasm": "0.2.0",
+        "@syntropika/tembra-engine-node": "0.2.1",
+        "@syntropika/tembra-engine-wasm": "0.2.1",
         "enhanced-resolve": "5.26.0",
         "typescript": "5.9.3",
       },
@@ -23,15 +23,15 @@
     },
     "packages/ts/engine-node": {
       "name": "@syntropika/tembra-engine-node",
-      "version": "0.2.0",
+      "version": "0.2.1",
     },
     "packages/ts/engine-wasm": {
       "name": "@syntropika/tembra-engine-wasm",
-      "version": "0.2.0",
+      "version": "0.2.1",
     },
     "packages/ts/react-native": {
       "name": "@syntropika/tembra-react-native",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "devDependencies": {
         "@syntropika/tembra-sdk": "workspace:*",
         "@types/react": "^19.0.0",
@@ -46,7 +46,7 @@
     },
     "packages/ts/sdk": {
       "name": "@syntropika/tembra-sdk",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
         "@syntropika/tembra-engine-node": "workspace:*",
         "@syntropika/tembra-engine-wasm": "workspace:*",
