@@ -29,8 +29,10 @@ installed in an empty project and exercised with both Node and Bun, using native
 WASM hosts. Publication starts only after every build and packaging check passes.
 
 Select **Actions → Release → Run workflow** for a build rehearsal on the chosen ref.
-Manual runs use the checked-in version and upload artifacts. They never publish or
-request registry credentials. The workflow must first exist on the default branch
+Manual build runs use the checked-in version and upload artifacts. They do not publish or
+request registry credentials. Select `check_npm_auth` to check each npm trusted publisher
+instead of building. This check requests short-lived registry credentials and discards
+them. It does not publish packages or print credentials. The workflow must first exist on the default branch
 to appear in the Actions interface.
 
 ## Registry setup

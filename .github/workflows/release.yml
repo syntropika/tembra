@@ -3,6 +3,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      check_npm_auth:
+        description: Check npm trusted publishers without publishing packages
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -12,7 +17,55 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  npm-authentication:
+    if: github.event_name == 'workflow_dispatch' && inputs.check_npm_auth
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Check npm OIDC exchange for each package
+        run: |
+          node --input-type=module <<'NODE'
+          const endpoint = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
+          endpoint.searchParams.set('audience', 'npm:registry.npmjs.org');
+          const identity = await fetch(endpoint, {
+            headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+            signal: AbortSignal.timeout(30_000),
+          });
+          if (!identity.ok) throw new Error(`GitHub identity request failed: ${identity.status}`);
+          const { value } = await identity.json();
+          if (typeof value !== 'string' || !value) throw new Error('GitHub identity token is missing');
+          console.log(`::add-mask::${value}`);
+          for (const name of ['engine-node', 'engine-wasm', 'sdk', 'react-native']) {
+            const pkg = `@syntropika/tembra-${name}`;
+            const result = await fetch(`https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${encodeURIComponent(pkg)}`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${value}` },
+              signal: AbortSignal.timeout(30_000),
+            });
+            const body = await result.json();
+            if (result.ok && typeof body.token === 'string' && body.token) {
+              console.log(`::add-mask::${body.token}`);
+              console.log(`${pkg}: OIDC exchange accepted`);
+            } else {
+              const message = String(body.message ?? body.error ?? 'Token exchange rejected')
+                .replaceAll(value, '<REDACTED>').replaceAll(/[\r\n]/g, ' ').slice(0, 500);
+              console.error(`${pkg}: HTTP ${result.status}: ${message}`);
+              process.exitCode = 1;
+            }
+          }
+          NODE
+
   validate:
+    if: github.event_name != 'workflow_dispatch' || !inputs.check_npm_auth
     runs-on: ubuntu-22.04
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
