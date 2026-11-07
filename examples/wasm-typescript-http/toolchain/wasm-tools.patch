@@ -1,0 +1,96 @@
+diff --git a/crates/wit-dylib/Cargo.toml b/crates/wit-dylib/Cargo.toml
+index 6304e59da..e13f5305a 100644
+--- a/crates/wit-dylib/Cargo.toml
++++ b/crates/wit-dylib/Cargo.toml
+@@ -14,8 +14,8 @@ rust-version.workspace = true
+ workspace = true
+ 
+ [dependencies]
+-wit-parser = { workspace = true }
+-wasm-encoder = { workspace = true }
++wit-parser = { version = "0.262.0" }
++wasm-encoder = { version = "0.262.0", default-features = false }
+ indexmap = { workspace = true, features = ["std"] }
+ clap = { workspace = true, optional = true }
+ anyhow = { workspace = true }
+diff --git a/crates/wit-dylib/ffi/src/lib.rs b/crates/wit-dylib/ffi/src/lib.rs
+index c46817346..22572b77a 100644
+--- a/crates/wit-dylib/ffi/src/lib.rs
++++ b/crates/wit-dylib/ffi/src/lib.rs
+@@ -54,6 +54,11 @@ macro_rules! export {
+             unsafe { <$name as $crate::RawInterpreter>::raw_export_call(cx, which) }
+         }
+ 
++        #[unsafe(no_mangle)]
++        pub extern "C" fn wit_dylib_export_return_v1(cx: *mut u8, which: usize) {
++            unsafe { <$name as $crate::RawInterpreter>::raw_export_return(cx, which) }
++        }
++
+         #[unsafe(no_mangle)]
+         pub extern "C" fn wit_dylib_export_async_call(cx: *mut u8, which: usize) -> u32 {
+             unsafe { <$name as $crate::RawInterpreter>::raw_export_async_call(cx, which) }
+@@ -400,6 +405,10 @@ pub trait Interpreter: 'static {
+ 
+     fn export_call(wit: Wit, func: ExportFunction, cx: &mut Self::CallCx<'_>);
+ 
++    /// Synchronous results are lowered; release call-scoped borrows without
++    /// consuming the context or post-return allocations.
++    fn export_return(_wit: Wit, _func: ExportFunction, _cx: &mut Self::CallCx<'_>) {}
++
+     #[cfg(feature = "async-runtime")]
+     fn export_call_async(
+         wit: Wit,
+@@ -558,6 +567,14 @@ pub trait RawInterpreter: Interpreter {
+         }
+     }
+ 
++    unsafe fn raw_export_return(cx: *mut u8, which: usize) {
++        unsafe {
++            let wit = Wit::from_raw(WIT_T);
++            let func = wit.export_func(which);
++            Self::export_return(wit, func, Self::cx_mut(cx))
++        }
++    }
++
+     unsafe fn raw_export_async_call(cx: *mut u8, which: usize) -> u32 {
+         debug_println!("export_async_call({cx:?}, {which})");
+         unsafe {
+diff --git a/crates/wit-dylib/src/bindgen.rs b/crates/wit-dylib/src/bindgen.rs
+index 3135fe905..b20e34ae0 100644
+--- a/crates/wit-dylib/src/bindgen.rs
++++ b/crates/wit-dylib/src/bindgen.rs
+@@ -38,6 +38,7 @@ intrinsics! {
+ 
+     export_start : [ValType::I32] -> [ValType::I32] = "wit_dylib_export_start",
+     export_call : [ValType::I32; 2] -> [] = "wit_dylib_export_call",
++    export_return : [ValType::I32; 2] -> [] = "wit_dylib_export_return_v1",
+     export_async_call : [ValType::I32; 2] -> [ValType::I32] = "wit_dylib_export_async_call",
+     export_async_callback : [ValType::I32; 4] -> [ValType::I32] = "wit_dylib_export_async_callback",
+     export_finish : [ValType::I32; 2] -> [] = "wit_dylib_export_finish",
+@@ -320,6 +321,12 @@ pub fn export(
+ 
+         c.lower_export_results(func, &sig, &frame);
+ 
++        // Incoming borrow guards expire after conversion, before canonical return.
++        let export_return = c.adapter.intrinsics().export_return;
++        c.local_get_ctx();
++        c.ins().i32_const(func_metadata_index.try_into().unwrap());
++        c.ins().call(export_return);
++
+         // Note that this function intentionally does not deallocate the stack space
+         // allocated above in `allocate_stack_frame`. That is the responsibility of
+         // the post-return function to ensure that the owned value on the stack, the
+diff --git a/crates/wit-dylib/wit_dylib.h b/crates/wit-dylib/wit_dylib.h
+index dafde54c7..d83a6111f 100644
+--- a/crates/wit-dylib/wit_dylib.h
++++ b/crates/wit-dylib/wit_dylib.h
+@@ -349,6 +349,9 @@ void wit_dylib_dealloc_bytes(void *cx, void *ptr, size_t byte_size, size_t align
+ // any allocations or such.
+ void *wit_dylib_export_start(size_t which);
+ void wit_dylib_export_call(void *cx, size_t which);
++// Sync results have been lowered; cx and result buffers remain owned by finish.
++// Release incoming borrows here before returning to the canonical caller.
++void wit_dylib_export_return_v1(void *cx, size_t which);
+ void wit_dylib_export_finish(void *cx, size_t which);
+ 
+ // Entrypoint for WIT resource destructors.

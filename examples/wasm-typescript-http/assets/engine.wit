@@ -1,0 +1,94 @@
+package jco:script-engine@0.1.0;
+
+/// Loads JavaScript into a Jco script engine component at runtime.
+///
+/// A script engine is a JavaScript engine (StarlingMonkey or QuickJS) componentized
+/// against the union of the worlds its scripts target. Its world exports forward to
+/// whichever script is currently loaded, so one engine instance can run scripts one
+/// after the other. Scripts loaded into the same engine instance share a JavaScript
+/// realm, so this is not a multi-tenancy boundary.
+interface script-loader {
+  /// Evaluate `source` and make its exports the implementation behind the engine's
+  /// world exports, replacing any previously loaded script.
+  ///
+  /// `source` is an ES module as packaged by `jco componentize --script-only`: imports
+  /// hoisted to the top, one export list at the end, and no top-level await. It may import
+  /// any import of the engine world by its WIT specifier.
+  load: func(name: string, source: string) -> result<_, string>;
+
+  /// Drop the loaded script. World exports fail until another script is loaded.
+  unload: func();
+
+  /// Name of the loaded script, if any.
+  loaded: func() -> option<string>;
+}
+
+/// The world every script engine exports, in addition to the merged script worlds.
+world engine {
+  import tembra:runtime/context@0.1.0;
+  import example:readings/capabilities;
+
+  export script-loader;
+  export example:readings/analysis;
+}
+package tembra:runtime@0.1.0 {
+  interface context {
+    resource invocation;
+
+    check: func(context: borrow<invocation>) -> bool;
+  }
+}
+
+
+package example:readings {
+  interface capabilities {
+    use tembra:runtime/context@0.1.0.{invocation};
+
+    enum failure {
+      forbidden,
+      unavailable,
+      cancelled,
+    }
+
+    record response {
+      status: u16,
+      body: string,
+    }
+
+    record progress {
+      stage: string,
+      message: string,
+    }
+
+    get: func(context: borrow<invocation>, path: string) -> result<response, failure>;
+
+    publish: func(context: borrow<invocation>, event: progress) -> result<_, failure>;
+  }
+  interface analysis {
+    use tembra:runtime/context@0.1.0.{invocation};
+
+    record request {
+      path: string,
+      threshold: f64,
+    }
+
+    record report {
+      station: string,
+      count: u32,
+      mean: f64,
+      median: f64,
+      minimum: f64,
+      maximum: f64,
+      alert: bool,
+      calibration: f64,
+    }
+
+    run: func(context: borrow<invocation>, input: request) -> result<report, string>;
+  }
+  world orb {
+    import tembra:runtime/context@0.1.0;
+    import capabilities;
+
+    export analysis;
+  }
+}

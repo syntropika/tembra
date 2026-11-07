@@ -37,6 +37,9 @@ servers, browsers, Web Workers and React Native.
 
 ## Development
 
+The [experimental Wasm example](examples/wasm-typescript-http/README.md) runs a TypeScript orb with
+HTTP, calculations and live script replacement through QuickJS and Wasmtime.
+
 See the [guide](docs/README.md) for concepts and Rust and TypeScript usage.
 See [DEVELOP.md](DEVELOP.md) for setup, tools, builds, tests and technical details.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for code structure and documentation conventions.

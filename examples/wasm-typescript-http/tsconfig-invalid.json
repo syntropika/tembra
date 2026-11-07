@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "files": ["fixtures/dependency-env.d.ts", "build/types/orb.d.ts", "fixtures/invalid.ts"]
+}
