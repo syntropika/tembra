@@ -3,11 +3,22 @@ import {
   admitFactory,
   disposeDefinitions,
   prepareDefinitions,
+  isolate,
+  isolatedRevision,
+  signature,
+  signatures,
+  type AdaptedHostOptions,
+  type AdaptedService,
   type AdaptedOrb,
-} from "@syntropika/tembra-sdk/internal/adapters";
+} from "#tembra-adapters";
 import { Declaration } from "../authoring/declaration.ts";
 import { orb } from "../authoring/orb.ts";
-import type { ContributionHandler, OrbDefinition, Participant } from "../authoring/types.ts";
+import type {
+  ContributionHandler,
+  OrbDefinition,
+  OrbInput,
+  Participant,
+} from "../authoring/types.ts";
 import { Lifetime } from "../bridge/identifiers.ts";
 import type { HookObservation, KernelOrb, Reload } from "../bridge/kernel.ts";
 import { EnvironmentPhase, KernelOp, OwnerKind } from "../bridge/protocol.ts";
@@ -56,6 +67,10 @@ export class Orbs {
           services:
             requirement.services ??
             (requirement.methods ? { [service!]: requirement.methods } : {}),
+          signatures:
+            (requirement as typeof requirement & { [signatures]?: Record<string, string> })[
+              signatures
+            ] ?? {},
           hooks: requirement.hooks ?? [],
         };
       });
@@ -74,9 +89,11 @@ export class Orbs {
         apiVersion: definition.apiVersion,
         requires,
         hooks: Object.keys(definition.hooks ?? {}),
+        isolated: (definition as AdaptedOrb)[isolatedRevision] === true,
         services: Object.entries(definition.services ?? {}).map(([name, service]) => ({
           name,
           methods: Object.keys(service.methods),
+          signature: (service as AdaptedService)[signature],
           lifetime: service.lifetime ?? Lifetime.Referenced,
           linger: service.linger ?? 0,
         })),
@@ -86,11 +103,16 @@ export class Orbs {
   }
 
   /** Commit new orb metadata before opening its scopes. */
-  async install(definitions: readonly OrbDefinition[]): Promise<void> {
+  async install(definitions: readonly OrbInput[]): Promise<void> {
     const current = this.session.kernel.command<KernelOrb[]>(KernelOp.Orbs);
-    if (definitions.some((f) => current.some((installed) => installed.name === f.name)))
+    if (
+      definitions.some((f) => "name" in f && current.some((installed) => installed.name === f.name))
+    )
       refuse(Errors.Invalid.OrbInstalled, "Use reload to replace an installed orb");
-    const candidates = prepareDefinitions(definitions);
+    const candidates = prepareDefinitions(
+      definitions,
+      (this.session.options as AdaptedHostOptions)[isolate],
+    );
     const materialized = Array.isArray(candidates) ? candidates : await candidates;
     let prepared: ReturnType<Orbs["declarations"]>;
     let reload: Reload;

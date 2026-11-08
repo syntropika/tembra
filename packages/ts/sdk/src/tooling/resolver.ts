@@ -5,42 +5,17 @@ import { builtinModules } from "node:module";
 import path from "node:path";
 import ts from "typescript";
 
-import { Platform, type BuildTarget } from "./types.ts";
-
-/** Check whether the selected target permits this external dependency. */
-export function external(specifier: string, target: BuildTarget): boolean {
-  return (
-    target.platform === Platform.Node &&
-    (builtinModules.includes(specifier.replace(/^node:/, "")) ||
-      (target.nativeExternals ?? []).some(
-        (name) => specifier === name || specifier.startsWith(`${name}/`),
-      ))
-  );
-}
+import type { BuildTarget } from "./types.ts";
 
 /** Resolve and bundle dependencies under the selected runtime rules. */
-export function resolver(
-  root: string,
-  target: BuildTarget,
-  embeddedCondition = "tembra-embedded",
-): Bun.BunPlugin {
-  const web = target.platform === Platform.Browser || target.platform === Platform.Worker;
+export function resolver(root: string, target: BuildTarget): Bun.BunPlugin {
   const resolveModule = resolve.create.sync({
     fileSystem: fs,
-    conditionNames: [
-      "source",
-      ...(web
-        ? ["browser"]
-        : target.platform === Platform.Node
-          ? ["node", "node-addons"]
-          : [embeddedCondition]),
-      "import",
-      "default",
-    ],
+    conditionNames: ["tembra-wasm", "source", "import", "default"],
     extensions: [".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs", ".cjs", ".json"],
     extensionAlias: { ".js": [".ts", ".tsx", ".js"], ".mjs": [".mts", ".mjs"] },
-    mainFields: web ? ["browser", "module", "main"] : ["module", "main"],
-    aliasFields: web ? ["browser"] : [],
+    mainFields: ["module", "main"],
+    aliasFields: [],
   });
   return {
     name: "tembra-platform",
@@ -55,7 +30,6 @@ export function resolver(
         loader: "js",
       }));
       builder.onResolve({ filter: /.*/ }, (request) => {
-        if (external(request.path, target)) return { path: request.path, external: true };
         if (
           request.path.startsWith("node:") ||
           request.path.startsWith("bun:") ||
@@ -70,7 +44,7 @@ export function resolver(
         if (!resolved)
           throw new Error(`${request.importer}: no compatible implementation for ${request.path}`);
         if (resolved.endsWith(".node"))
-          throw new Error("Declare native Node packages as nativeExternals in a node build");
+          throw new Error("Native Node packages cannot run inside an Orb");
         return { path: resolved };
       });
       builder.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (request) => {

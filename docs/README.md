@@ -8,6 +8,7 @@ This guide explains the concepts and the code that implements them.
 1. Read [Architecture](architecture.md) for the crate and package map.
 2. Read [Orbs and objects](orbs.md) for names, services and references.
 3. Run the [Rust example](rust.md) or the [TypeScript example](typescript.md).
+4. Build an isolated orb with the [Wasm orb example](../examples/wasm-orb/README.md).
 
 ## Concepts
 
@@ -30,7 +31,7 @@ This guide explains the concepts and the code that implements them.
 | [Swift](swift.md)               | Use native kernel bindings on iOS and macOS.      |
 | [Kotlin](kotlin.md)             | Use native kernel bindings on the JVM or Android. |
 | [React Native](react-native.md) | Use the SDK on iOS and Android.                   |
-| [Build tools](tooling.md)       | Bundle JavaScript orbs for a target runtime.      |
+| [Build tools](tooling.md)       | Build isolated orbs into `.wasm` artifacts.       |
 
 For setup and repository checks, see [DEVELOP.md](../DEVELOP.md).
 For code style, see [CONTRIBUTING.md](../CONTRIBUTING.md).

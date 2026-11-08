@@ -13,6 +13,14 @@ pub(super) fn parse_orb(f: &Value) -> Result<Orb> {
         .iter()
         .map(|s| {
             Ok(Service {
+                signature: s
+                    .get("signature")
+                    .map(|value| {
+                        serde_json::from_value(value.clone())
+                            .map_err(|_| Error::invalid(Reason::Metadata, "signature must be text"))
+                    })
+                    .transpose()?
+                    .flatten(),
                 name: text(s, "name")?.into(),
                 methods: strings(s, "methods")?.into_iter().collect(),
                 lifetime: match s["lifetime"].as_str().unwrap_or("referenced") {
@@ -51,6 +59,15 @@ pub(super) fn parse_orb(f: &Value) -> Result<Orb> {
                 }
             }
             Ok(Requirement {
+                signatures: r
+                    .get("signatures")
+                    .map(|value| {
+                        serde_json::from_value(value.clone()).map_err(|_| {
+                            Error::invalid(Reason::Requires, "signatures must map services to text")
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
                 orb: text(r, "orb")?.into(),
                 api_version: number(r, "apiVersion")?,
                 methods,
@@ -64,6 +81,12 @@ pub(super) fn parse_orb(f: &Value) -> Result<Orb> {
         services,
         requires,
         hooks: strings_optional(f, "hooks")?.into_iter().collect(),
+        isolated: match f.get("isolated") {
+            None | Some(Value::Null) => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| Error::invalid(Reason::Metadata, "isolated must be a boolean"))?,
+        },
     })
 }
 

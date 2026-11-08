@@ -1,0 +1,33 @@
+package example:integrated@1.0.0;
+
+interface arithmetic {
+    double: func(value: s32) -> s32;
+}
+
+interface calculation {
+    record input { values: list<s32> }
+    sum: async func(input: input) -> s32;
+    read: func() -> s32;
+    resource-value: func() -> s32;
+    fail: func() -> s32;
+    recover: func() -> s32;
+    checked: func(value: s32) -> result<s32, string>;
+    forbidden: func() -> s32;
+    malformed: func() -> s32;
+    race: async func() -> s32;
+    fanout: async func() -> s32;
+    pending: async func() -> s32;
+    fetch-and-sum: async func(url: string) -> s32;
+}
+
+world arithmetic-provider { export arithmetic; }
+world calculator {
+    import arithmetic;
+    export calculation;
+}
+
+world online-calculator {
+    import arithmetic;
+    import wasi:sockets/types@0.3.0;
+    export calculation;
+}

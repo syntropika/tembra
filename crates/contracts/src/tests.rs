@@ -19,7 +19,6 @@ fn bindings() -> BTreeMap<String, Binding> {
         Binding::Orb {
             name: "calculator".into(),
             api_version: 7,
-            world: "provider".into(),
         },
     )])
 }
@@ -63,18 +62,62 @@ fn identity_and_orb_version_are_not_wit_versions() {
 fn provider_selection_is_explicit_and_checked() {
     let contract = Contract::from_source("example.wit", SOURCE, Some("consumer")).unwrap();
     assert!(contract.plan("consumer", 1, &BTreeMap::new()).is_err());
-    let mut bindings = bindings();
-    let Binding::Orb { world, .. } = bindings.values_mut().next().unwrap() else {
-        unreachable!()
-    };
-    *world = "consumer".into();
-    assert!(
-        contract
-            .plan("consumer", 1, &bindings)
+    let plan = contract.plan("consumer", 1, &bindings()).unwrap();
+    let changed = SOURCE.replace("left: s32", "left: string");
+    let provider = Contract::from_source("changed.wit", &changed, Some("provider"))
+        .unwrap()
+        .plan("calculator", 7, &BTreeMap::new())
+        .unwrap();
+    let error = Host::new()
+        .prepare(vec![provider.orb, plan.orb], vec![])
+        .unwrap_err();
+    assert!(error.message.contains("signature differs"));
+}
+
+#[test]
+fn a_live_reference_prevents_replacement_with_a_different_wit_abi() {
+    let contract = Contract::from_source("example.wit", SOURCE, Some("provider")).unwrap();
+    let host = Host::new();
+    let installed = host
+        .prepare(
+            vec![
+                contract
+                    .plan("calculator", 7, &BTreeMap::new())
+                    .unwrap()
+                    .orb,
+            ],
+            vec![],
+        )
+        .unwrap();
+    host.commit(installed.id, vec![]).unwrap();
+    let claim = host
+        .acquire(
+            tembra_core::Address {
+                service: "calculator::example:calculation/arithmetic@1.2.0".into(),
+                key: vec!["main".into()],
+                principal: "host".into(),
+            },
+            7,
+            std::collections::BTreeSet::from(["add".into()]),
+        )
+        .unwrap();
+    host.ready(claim.object).unwrap();
+    let changed = Contract::from_source(
+        "changed.wit",
+        &SOURCE.replace("left: s32", "left: string"),
+        Some("provider"),
+    )
+    .unwrap();
+    let replacement = changed.plan("calculator", 7, &BTreeMap::new()).unwrap().orb;
+    assert_eq!(
+        host.prepare(vec![replacement.clone()], vec![])
             .unwrap_err()
-            .0
-            .contains("does not export")
+            .reason,
+        "dependency_service"
     );
+    assert_eq!(host.version(), installed.code_version);
+    host.release(claim.reference).unwrap();
+    assert!(host.prepare(vec![replacement], vec![]).is_ok());
 }
 
 #[test]

@@ -1,12 +1,11 @@
+import { NodePort } from "./node-port.ts";
 import { componentDefinition } from "./component.ts";
-import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import type { NodeContract, NodeInterpreter } from "@syntropika/tembra-engine-node";
-import type { OrbDefinition } from "../authoring/types.ts";
-import { materialize, type AdaptedOrb } from "@syntropika/tembra-sdk/internal/adapters";
+import type { NodeArtifact, NodeInterpreter } from "@syntropika/tembra-engine-node";
+import type { OrbDefinition, OrbArtifact, LoadOptions } from "../authoring/types.ts";
 import { Revision } from "./revision.ts";
-import type { InterpreterOrbOptions } from "./types.ts";
-export type { Grants, InterpreterOrbOptions, PreparedSource, ProviderBinding } from "./types.ts";
+import { materialize, type AdaptedOrb } from "#tembra-adapters";
+import { query, type ProviderBinding } from "./types.ts";
 
 export interface DirectoryFilesystem {
   readonly kind: "directory";
@@ -18,7 +17,7 @@ export function directoryFilesystem(path: string): DirectoryFilesystem {
 }
 
 export interface InterpreterOptions {
-  engine: Uint8Array;
+  engine?: Uint8Array;
   providers?: {
     filesystem?: Readonly<Record<string, string | DirectoryFilesystem>>;
     network?: readonly string[];
@@ -27,24 +26,42 @@ export interface InterpreterOptions {
   onLog?: (record: { orb: string; level: string; message: string }) => void;
 }
 
-/** A reusable backend; every installation materializes its own isolated heap and grant set. */
-export class Interpreter {
-  readonly #backend: NodeInterpreter;
-  readonly #Contract: typeof NodeContract;
+/** Platform transport owns Stores; the common host still owns every lifecycle decision. */
+export class NodeExecution {
+  #backend: NodeInterpreter | undefined;
+  #interpreter = false;
+  readonly #binding = createRequire(import.meta.url)(
+    "@syntropika/tembra-engine-node",
+  ) as typeof import("@syntropika/tembra-engine-node");
 
-  /** Register providers independently of per-Orb permission decisions. */
-  constructor(readonly options: InterpreterOptions) {
-    const binding = createRequire(import.meta.url)(
-      "@syntropika/tembra-engine-node",
-    ) as typeof import("@syntropika/tembra-engine-node");
-    this.#Contract = binding.NodeContract;
-    this.#backend = new binding.NodeInterpreter(
-      options.engine,
+  /** Register host configuration without compiling an interpreter for metadata-only hosts. */
+  constructor(readonly options: InterpreterOptions) {}
+
+  /** Decode immutable artifact data once; every installation still receives a fresh guest. */
+  decode(bytes: Uint8Array, options: LoadOptions = {}): OrbDefinition {
+    const artifact = new this.#binding.NodeArtifact(bytes);
+    const identity = JSON.parse(artifact.description()) as { name: string; apiVersion: number };
+    const captured = structuredClone(options);
+    return Object.freeze({
+      ...identity,
+      [materialize]: () => this.open(artifact, captured),
+    } as AdaptedOrb);
+  }
+
+  /** Materialize source bytes supplied directly through an Orb declaration. */
+  async materialize(definition: OrbArtifact): Promise<OrbDefinition> {
+    return this.open(new this.#binding.NodeArtifact(definition.artifact), definition);
+  }
+
+  /** Lazily share compiled engine code while keeping provider tables local to this host. */
+  private backend(): NodeInterpreter {
+    if (this.#backend) return this.#backend;
+    this.#backend = new this.#binding.NodeInterpreter(
       JSON.stringify({
-        limits: options.limits ?? {},
-        network: options.providers?.network ?? [],
+        limits: this.options.limits ?? {},
+        network: this.options.providers?.network ?? [],
         filesystem: Object.fromEntries(
-          Object.entries(options.providers?.filesystem ?? {}).map(([name, provider]) => [
+          Object.entries(this.options.providers?.filesystem ?? {}).map(([name, provider]) => [
             name,
             typeof provider === "string" ? provider : provider.path,
           ]),
@@ -52,74 +69,82 @@ export class Interpreter {
       }),
       (packet) => {
         try {
-          options.onLog?.(JSON.parse(packet));
+          this.options.onLog?.(JSON.parse(packet));
         } catch {
           /* Observers cannot interrupt physical guest work. */
         }
       },
     );
+    return this.#backend;
   }
 
-  /** Capture a closed source artifact; installation never downloads dependencies or executes host JS. */
-  orb(options: InterpreterOrbOptions): OrbDefinition {
-    const captured = JSON.parse(JSON.stringify(options)) as InterpreterOrbOptions;
-    return Object.freeze({
-      name: captured.name,
-      apiVersion: captured.apiVersion,
-      [materialize]: async () => {
-        if (captured.source.format === "tembra-component-v1") {
-          const source = captured.source;
-          const bytes = Uint8Array.from(source.bytes);
-          if (createHash("sha256").update(bytes).digest("hex") !== source.sha256)
-            throw new Error("Prepared component digest differs");
-          const port = this.#backend.openComponent(
-            bytes,
-            Uint8Array.from(source.contract),
-            JSON.stringify({
-              name: captured.name,
-              apiVersion: captured.apiVersion,
-              world: source.world,
-              bindings: captured.bindings ?? {},
-              grants: captured.grants ?? {},
-            }),
-          );
-          try {
-            return componentDefinition(port, captured.name, captured.apiVersion);
-          } catch (error) {
-            port.close();
-            throw error;
-          }
-        }
-        const port = this.#backend.open(
-          captured.name,
-          captured.apiVersion,
-          JSON.stringify(captured.source),
-          JSON.stringify(captured.bindings ?? {}),
-          JSON.stringify(captured.grants ?? {}),
-        );
-        try {
-          const contract = new this.#Contract(
-            Uint8Array.from(captured.source.contract),
-            captured.source.world,
-          );
-          return new Revision(port, contract, this.options.limits?.timeoutMs ?? 10000).definition(
-            captured,
-          );
-        } catch (error) {
-          port.close();
-          throw error;
-        }
-      },
-    } as AdaptedOrb);
-  }
-
-  /** Count actual Wasmtime Stores so tests can verify physical revision disposal. */
-  instances(): number {
-    return this.#backend.instances();
+  /** Resolve grants once, then adapt the opaque artifact through the common lifecycle. */
+  private async open(artifact: NodeArtifact, options: LoadOptions): Promise<OrbDefinition> {
+    const identity = JSON.parse(artifact.description()) as {
+      name: string;
+      apiVersion: number;
+      kind: "source" | "component";
+    };
+    const bindings = query<Record<string, ProviderBinding>>(artifact, {
+      kind: "bindings",
+      requires: options.requires ?? {},
+      grants: options.grants ?? {},
+    });
+    const plan = query<{ hostImports: unknown[] }>(artifact, {
+      kind: "plan",
+      name: identity.name,
+      apiVersion: identity.apiVersion,
+      bindings,
+    });
+    query(artifact, {
+      kind: "grants",
+      imports: plan.hostImports,
+      grants: options.grants ?? {},
+      filesystem: Object.keys(this.options.providers?.filesystem ?? {}),
+      network: this.options.providers?.network ?? [],
+    });
+    if (identity.kind === "component") {
+      const port = this.backend().openComponent(
+        artifact,
+        JSON.stringify({ bindings, grants: options.grants ?? {} }),
+      );
+      try {
+        return componentDefinition(port, identity.name, identity.apiVersion);
+      } catch (error) {
+        port.close();
+        throw error;
+      }
+    }
+    const backend = this.backend();
+    if (!this.#interpreter) {
+      backend.interpreter(this.options.engine ?? requireEngine());
+      this.#interpreter = true;
+    }
+    const port = backend.open(
+      artifact,
+      JSON.stringify(bindings),
+      JSON.stringify(options.grants ?? {}),
+    );
+    try {
+      return new Revision(
+        new NodePort(port),
+        artifact,
+        this.options.limits?.timeoutMs ?? 10000,
+      ).definition({
+        ...identity,
+        bindings,
+      });
+    } catch (error) {
+      port.close();
+      throw error;
+    }
   }
 }
 
-/** Supply Tembra's isolated execution backend without exposing Wasmtime configuration to consumers. */
-export function createInterpreter(options: InterpreterOptions): Interpreter {
-  return new Interpreter(options);
+/** Read packaged engine bytes only when an isolated Orb first needs them. */
+function requireEngine(): Uint8Array {
+  const require = createRequire(import.meta.url);
+  return require("node:fs").readFileSync(
+    require.resolve("@syntropika/tembra-engine-node/interpreter.wasm"),
+  );
 }

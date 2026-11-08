@@ -11,6 +11,8 @@ pub struct ComponentPort {
     session: worker::Session,
     contract: Contract,
     description: Value,
+    metadata: tembra::core::Orb,
+    _component: Arc<wasmtime::component::Component>,
 }
 impl ComponentPort {
     /// Read the WIT-derived plan after executable signatures and grants have been checked.
@@ -36,15 +38,20 @@ impl ComponentPort {
 
 impl Engine {
     /// Materialize a compiled endpoint for an existing platform-owned lifecycle adapter.
+    #[doc(hidden)]
     pub fn open_component(
         &self,
-        contract: &Contract,
-        name: &str,
-        api_version: u32,
-        bytes: &[u8],
+        artifact: &tembra_contracts::Artifact,
         bindings: &BTreeMap<String, Binding>,
         grants: &Grants,
     ) -> Result<ComponentPort> {
+        let contract = &artifact.contract;
+        let name = &artifact.identity.name;
+        let api_version = artifact.identity.api_version;
+        let tembra_contracts::ArtifactImplementation::Component(bytes) = &artifact.implementation
+        else {
+            return Err(failure("compiled endpoint requires a component artifact"));
+        };
         let plan = contract
             .plan(name, api_version, bindings)
             .map_err(failure)?;
@@ -54,42 +61,38 @@ impl Engine {
             ));
         }
         contract.check_value_profile().map_err(failure)?;
-        contract.check_component_exports(bytes).map_err(failure)?;
         let wasi = self.providers.context(&plan.host_imports, grants)?;
-        let component =
-            wasmtime::component::Component::new(&self.engine, bytes).map_err(failure)?;
+        let component = self.compiled(bytes)?;
         Ok(ComponentPort {
-            session: worker::Session::start(self.clone(), component, wasi)?,
+            session: worker::Session::start(self.clone(), component.as_ref().clone(), wasi)?,
             contract: contract.clone(),
             description: plan.describe(),
+            metadata: plan.orb,
+            _component: component,
         })
     }
 
     /// Register plain WIT interface exports from a compiled component under the same Orb model.
-    pub fn prepare_component(
+    pub(crate) fn component_orb(
         &self,
-        contract: &Contract,
-        name: &str,
-        api_version: u32,
-        bytes: &[u8],
+        artifact: &tembra_contracts::Artifact,
         bindings: &BTreeMap<String, Binding>,
         grants: &Grants,
     ) -> Result<Orb> {
-        let plan = contract
-            .plan(name, api_version, bindings)
-            .map_err(failure)?;
-        let port =
-            Arc::new(self.open_component(contract, name, api_version, bytes, bindings, grants)?);
-        let mut orb = Orb::new(name, api_version);
-        for metadata in plan.orb.services {
+        let name = &artifact.identity.name;
+        let api_version = artifact.identity.api_version;
+        let port = Arc::new(self.open_component(artifact, bindings, grants)?);
+        let mut orb = Orb::new(name, api_version).isolated();
+        for metadata in &port.metadata.services {
             let interface = metadata
                 .name
                 .strip_prefix(&format!("{name}::"))
                 .ok_or_else(|| failure("invalid prepared component service"))?
                 .to_owned();
             let create = port.clone();
-            let mut service = Service::new(metadata.name, move |_| Ok(create.clone()));
-            for method in metadata.methods {
+            let mut service = Service::new(&metadata.name, move |_| Ok(create.clone()))
+                .signature(metadata.signature.clone());
+            for method in &metadata.methods {
                 let interface = interface.clone();
                 let called = method.clone();
                 service =

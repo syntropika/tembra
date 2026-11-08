@@ -12,13 +12,13 @@ The workflow publishes these npm packages in dependency order:
 - `@syntropika/tembra-engine-node`: native binaries for Linux, macOS and Windows, on x64 and arm64.
   Linux binaries target glibc and are built on Ubuntu 22.04; musl is not included.
 - `@syntropika/tembra-engine-wasm`: the JavaScript loader, declarations and WASM binary.
-- `@syntropika/tembra-sdk`: source entrypoints, built JavaScript, declarations and the embedded runtime.
+- `@syntropika/tembra-sdk`: source entrypoints, built JavaScript, declarations and build tooling.
 - `@syntropika/tembra-react-native`: Swift sources and an XCFramework for iOS, simulators and macOS;
   an Android Maven package containing arm64-v8a, armeabi-v7a, x86 and x86_64 libraries.
 
 The publishable Rust workspace crates are `tembra-core`, `tembra-bridge`, `tembra`,
-`tembra-browser-wasm`, `tembra-executor-js` and `tembra-mobile`. `tembra-node-binding`
-is private implementation code distributed through npm. All local Rust dependencies
+`tembra-browser-wasm`, `tembra-contracts` and `tembra-mobile`. `tembra-node-binding` is private implementation
+code distributed through npm. `tembra-executor-wasm` and `tembra-contracts-wasm` are not published. All local Rust dependencies
 have exact registry versions as well as local paths.
 
 Every platform builds its Node addon and loads it with Node. The workflow also runs

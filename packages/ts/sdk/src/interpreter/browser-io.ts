@@ -35,9 +35,9 @@ export class BrowserIO {
             ),
           );
           if (key === "openAt")
-            return this.track(
-              Promise.resolve(result).then((descriptor) => this.descriptor(descriptor)),
-            );
+            return result instanceof Promise
+              ? this.track(result.then((descriptor) => this.descriptor(descriptor)))
+              : this.descriptor(result);
           if (result instanceof Promise) return this.track(result);
           if (key === "readViaStream" && Array.isArray(result) && result[1] instanceof Promise)
             this.track(result[1]);

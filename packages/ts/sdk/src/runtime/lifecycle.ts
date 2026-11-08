@@ -1,4 +1,4 @@
-import { disposeDefinitions } from "@syntropika/tembra-sdk/internal/adapters";
+import { disposeDefinitions } from "#tembra-adapters";
 import type { Action, Diagnostics } from "../bridge/kernel.ts";
 import { ActionType, KernelOp, OwnerKind } from "../bridge/protocol.ts";
 import { TembraError } from "../error.ts";

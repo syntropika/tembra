@@ -16,6 +16,7 @@ fn main() -> tembra::Result<()> {
     );
     let contributor = Orb::new("uppercase", 1)
         .requires(Requirement {
+            signatures: Default::default(),
             orb: "text".into(),
             api_version: 1,
             methods: Default::default(),

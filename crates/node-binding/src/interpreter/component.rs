@@ -1,21 +1,15 @@
 //! Compiled components share the same facade; libuv waits while the existing Wasmtime worker executes.
 use super::{NodeInterpreter, envelope, js_error};
-use napi::{
-    Env, Task,
-    bindgen_prelude::{AsyncTask, Uint8Array},
-};
+use napi::{Env, Task, bindgen_prelude::AsyncTask};
 use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
-use tembra_executor_wasm::{Binding, ComponentPort, Contract, Grants};
+use tembra_executor_wasm::{Binding, ComponentPort, Grants};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Registration {
-    name: String,
-    api_version: u32,
-    world: Option<String>,
     #[serde(default)]
     bindings: BTreeMap<String, Binding>,
     #[serde(default)]
@@ -28,23 +22,13 @@ impl NodeInterpreter {
     #[napi]
     pub fn open_component(
         &self,
-        bytes: Uint8Array,
-        contract: Uint8Array,
+        artifact: &crate::NodeArtifact,
         configuration: String,
     ) -> napi::Result<NodeComponentPort> {
         let config: Registration = serde_json::from_str(&configuration).map_err(js_error)?;
-        let contract =
-            Contract::from_bytes(&contract, config.world.as_deref()).map_err(js_error)?;
         let port = self
             .engine
-            .open_component(
-                &contract,
-                &config.name,
-                config.api_version,
-                &bytes,
-                &config.bindings,
-                &config.grants,
-            )
+            .open_component(&artifact.artifact, &config.bindings, &config.grants)
             .map_err(js_error)?;
         Ok(NodeComponentPort {
             port: Some(Arc::new(port)),

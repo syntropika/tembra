@@ -1,7 +1,11 @@
 //! Resolved WIT contracts and explicit provider selection for Orb registration.
+mod artifact;
 mod describe;
+mod implementation;
 mod lower;
+mod permissions;
 mod port;
+mod selection;
 mod signatures;
 mod standard;
 mod validate;
@@ -9,7 +13,11 @@ mod validate;
 use std::{collections::BTreeMap, path::Path};
 use wit_parser::{Resolve, WorldId};
 
+pub use artifact::{Artifact, Identity, Implementation as ArtifactImplementation};
+pub use implementation::{Implementation, Lifetime, ServiceBinding, ServiceImplementation};
 pub use lower::{Binding, HostImport, Plan};
+pub use permissions::{FilesystemGrant, Grants, NetworkGrant};
+pub use selection::OrbProvider;
 pub use validate::javascript_name;
 
 /// A diagnostic produced before an Orb enters the kernel.
@@ -79,7 +87,16 @@ impl Contract {
         else {
             return Err(Error("expected an executable WebAssembly component".into()));
         };
-        self.check_exports(&Self { resolve, world })
+        let other = Self { resolve, world };
+        self.check_exports(&other)?;
+        if signatures::imports(&self.resolve, self.world)?
+            != signatures::imports(&other.resolve, other.world)?
+        {
+            return Err(Error(
+                "component import signatures differ from the selected WIT world".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Compare complete exported signatures independently of resolver-local type indexes.
@@ -181,5 +198,9 @@ pub fn service_name(provider: &str, contract: &str) -> String {
     format!("{provider}::{contract}")
 }
 
+#[cfg(test)]
+mod artifact_tests;
+#[cfg(test)]
+mod permission_tests;
 #[cfg(test)]
 mod tests;

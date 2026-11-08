@@ -1,4 +1,5 @@
 //! Stable registered natives can be reconstructed without persisting Rust closures or host authority.
+use crate::protocol::{LogLevel, Request};
 use rquickjs::{Ctx, Function, snapshot::SnapshotHost};
 use std::io::{Read, Write};
 
@@ -6,22 +7,28 @@ use std::io::{Read, Write};
 fn active() -> bool {
     super::instance_vm().is_some_and(|vm| vm.accepting.get())
 }
+/// Forward a bootstrap-encoded request; the host decodes and authorizes it.
 fn sync(packet: String) -> rquickjs::Result<String> {
     if !active() {
         return Err(super::error("callback scope is closed".into()));
     }
     super::host_sync(&packet).map_err(super::error)
 }
-fn capability(operation: &str) -> rquickjs::Result<()> {
+/// Confirm the admitted callback is still live; WASI itself enforces the I/O grants.
+fn io_check() -> rquickjs::Result<()> {
     if !active() {
         return Err(super::error("callback scope is closed".into()));
     }
-    super::host_sync(&serde_json::json!({"operation":operation}).to_string())
+    super::host_sync(&Request::IoCheck {}.encode())
         .map(|_| ())
         .map_err(super::error)
 }
+/// Emit one attributed diagnostic record; usable outside callback admission.
+pub(super) fn log(level: LogLevel, message: String) -> Result<String, String> {
+    super::host_sync(&Request::Console { level, message }.encode())
+}
 fn read_text(path: String) -> rquickjs::Result<String> {
-    capability("filesystem")?;
+    io_check()?;
     let file = std::fs::File::open(path).map_err(|e| super::error(e.to_string()))?;
     let mut value = String::new();
     file.take((1 << 20) + 1)
@@ -33,21 +40,19 @@ fn read_text(path: String) -> rquickjs::Result<String> {
     Ok(value)
 }
 fn write_text(path: String, value: String) -> rquickjs::Result<()> {
-    capability("filesystem")?;
+    io_check()?;
     if value.len() > 1 << 20 {
         return Err(super::error("file exceeds the text write limit".into()));
     }
     std::fs::write(path, value).map_err(|e| super::error(e.to_string()))
 }
 fn write_log(level: String, message: String) -> rquickjs::Result<()> {
-    super::host_sync(
-        &serde_json::json!({"operation":"console","level":level,"message":message}).to_string(),
-    )
-    .map(|_| ())
-    .map_err(super::error)
+    let level = serde_json::from_value(serde_json::Value::String(level))
+        .map_err(|_| super::error("invalid console level".into()))?;
+    log(level, message).map(|_| ()).map_err(super::error)
 }
 fn exchange(ip: String, port: u16, request: String) -> rquickjs::Result<String> {
-    capability("network")?;
+    io_check()?;
     if request.len() > 1 << 20 {
         return Err(super::error("transport request exceeds its limit".into()));
     }
@@ -72,7 +77,7 @@ fn exchange(ip: String, port: u16, request: String) -> rquickjs::Result<String> 
     if response.len() > 1 << 20 {
         return Err(super::error("transport response exceeds its limit".into()));
     }
-    capability("network")?;
+    io_check()?;
     Ok(response)
 }
 

@@ -16,6 +16,7 @@ const STORAGE: ContextKey<OpaqueContextValue> = ContextKey::new("test/storage", 
 
 fn requirement() -> Requirement {
     Requirement {
+        signatures: Default::default(),
         orb: "provider".into(),
         api_version: 1,
         methods: Default::default(),

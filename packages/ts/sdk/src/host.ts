@@ -2,8 +2,9 @@ import { orb } from "./authoring/orb.ts";
 import type {
   AcquisitionOptions,
   Completion,
-  OrbDefinition,
+  OrbInput,
   HostOptions,
+  LoadOptions,
   ReloadOptions,
   ResourceOptions,
   DynamicReference,
@@ -34,27 +35,25 @@ export class Host {
   }
 
   /** Install new orbs and activate their required scopes. */
-  install(definition: OrbDefinition | readonly OrbDefinition[]): Promise<void> {
+  install(definition: OrbInput | readonly OrbInput[]): Promise<void> {
     return this.session.track(
-      this.session.orbs.install(
-        Array.isArray(definition) ? definition : [definition as OrbDefinition],
-      ),
+      this.session.orbs.install(Array.isArray(definition) ? definition : [definition as OrbInput]),
     );
   }
 
   /** Load an orb with the host's module loader, then install it. */
-  async load(location: string | URL): Promise<void> {
+  async load(location: string | URL, options?: LoadOptions): Promise<void> {
     if (!this.session.options.load) throw new Error("This host has no module loader");
-    await this.install(await this.session.options.load(location));
+    await this.install(await this.session.options.load(location, options));
   }
 
   /** Prepare and commit a replacement using the kernel's lifecycle order. */
-  reload(definitions: readonly OrbDefinition[], options?: ReloadOptions) {
+  reload(definitions: readonly OrbInput[], options?: ReloadOptions) {
     return this.session.replacements.replace(definitions, options);
   }
 
   /** Build a replacement candidate without adopting it. */
-  prepare(definitions: readonly OrbDefinition[], options?: ReloadOptions) {
+  prepare(definitions: readonly OrbInput[], options?: ReloadOptions) {
     return this.session.replacements.prepare(definitions, options);
   }
 

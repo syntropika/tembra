@@ -199,6 +199,7 @@ pub(super) fn orb_value(f: &InstalledOrb) -> Value {
         "services": f.declaration.services.iter().map(|s|json!({
             "name": s.name,
             "methods": s.methods,
+            "signature": s.signature,
             "lifetime": s.lifetime.as_str(),
             "linger": s.linger_ms,
         })).collect::<Vec<_>>(),
@@ -207,7 +208,9 @@ pub(super) fn orb_value(f: &InstalledOrb) -> Value {
             "orb": requirement.orb,
             "apiVersion": requirement.api_version,
             "services": requirement.methods,
+            "signatures": requirement.signatures,
             "hooks": requirement.hooks,
         })).collect::<Vec<_>>(),
+        "isolated": f.declaration.isolated,
     })
 }

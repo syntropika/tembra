@@ -2,34 +2,46 @@
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-/// A resolved WIT package with the same planning and validation implementation on every host.
+/// Immutable artifact data shares one resolved contract across isolated installations.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
-pub struct WasmContract {
-    contract: tembra_contracts::Contract,
+pub struct WasmArtifact {
+    artifact: tembra_contracts::Artifact,
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-impl WasmContract {
-    /// Decode a closed preparation artifact without acquiring files or dependencies.
+impl WasmArtifact {
+    /// Parse Wasm data before a browser creates any guest authority.
     #[wasm_bindgen(constructor)]
-    pub fn new(bytes: &[u8], world: Option<String>) -> Result<Self, JsValue> {
+    pub fn new(bytes: &[u8]) -> Result<WasmArtifact, JsValue> {
         Ok(Self {
-            contract: tembra_contracts::Contract::from_bytes(bytes, world.as_deref())
+            artifact: tembra_contracts::Artifact::decode(bytes)
                 .map_err(|error| JsValue::from_str(&error.to_string()))?,
         })
     }
-
-    /// Execute the shared data-only contract query protocol.
+    /// Read identity without copying the implementation through JSON.
+    pub fn description(&self) -> String {
+        self.artifact.describe().to_string()
+    }
+    /// Reuse the same contract queries as native installations.
     pub fn request(&self, packet: &str) -> String {
-        self.contract.request(packet)
+        self.artifact.contract.request(packet)
+    }
+    /// Copy source once when creating a fresh interpreter heap.
+    pub fn source(&self) -> Result<String, JsValue> {
+        match &self.artifact.implementation {
+            tembra_contracts::ArtifactImplementation::Source(source) => Ok(source.clone()),
+            _ => Err(JsValue::from_str(
+                "compiled Orb execution is unavailable in this browser backend",
+            )),
+        }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl WasmContract {
-    /// Keep native build checks useful without exporting a second platform API.
-    pub fn request(&self, packet: &str) -> String {
-        self.contract.request(packet)
+impl WasmArtifact {
+    /// Keep native checks connected to the actual artifact implementation.
+    pub fn description(&self) -> String {
+        self.artifact.describe().to_string()
     }
 }

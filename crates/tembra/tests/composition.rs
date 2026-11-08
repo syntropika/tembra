@@ -52,6 +52,7 @@ fn managed_dependencies_wait_share_orb_data_and_release_after_the_consumer() {
     let observed = closed.clone();
     let client = Orb::new("client", 1)
         .requires(Requirement {
+            signatures: Default::default(),
             orb: "provider".into(),
             api_version: 1,
             methods: [("provider".into(), ["read".into()].into())].into(),

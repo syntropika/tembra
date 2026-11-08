@@ -87,6 +87,19 @@ impl Host {
                         return Err(conflict(Reason::MissingMethod));
                     }
                 }
+                for (name, signature) in &requirement.signatures {
+                    let (_, service, _) = services
+                        .get(name)
+                        .filter(|(orb, _, _)| *orb == provider.id)
+                        .ok_or_else(|| Error::invalid(Reason::DependencyService, name))?;
+                    if service.signature.as_ref() != Some(signature) {
+                        return Err(Error::new(
+                            Code::Conflict,
+                            Reason::DependencyService,
+                            format!("contract signature differs for {name}"),
+                        ));
+                    }
+                }
                 if !requirement.hooks.is_subset(&provider.declaration.hooks) {
                     return Err(conflict(Reason::MissingHook));
                 }

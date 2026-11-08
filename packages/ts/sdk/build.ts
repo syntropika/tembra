@@ -6,6 +6,7 @@ import ts from "typescript";
 const root = fileURLToPath(new URL("./", import.meta.url));
 const entrypoints = [
   "index",
+  "guest",
   "host",
   "http",
   "runtime/adapters",
@@ -27,20 +28,13 @@ for (const entry of entrypoints) {
     naming: `${path.basename(entry)}.js`,
     target: entry === "node" || entry.startsWith("tooling") ? "node" : "browser",
     packages: "external",
+    external: ["#tembra-adapters"],
+    splitting: entry === "browser",
     minify: false,
     format: "esm",
   });
   if (!result.success) throw new AggregateError(result.logs, `Failed to build ${entry}`);
 }
-const embedded = await Bun.build({
-  entrypoints: [path.join(root, "src/embedded.ts")],
-  outdir: path.join(root, "dist"),
-  naming: "embedded.js",
-  format: "iife",
-  minify: true,
-  target: "browser",
-});
-if (!embedded.success) throw new AggregateError(embedded.logs, "Failed to build embedded runtime");
 const config = ts.readConfigFile(path.join(root, "tsconfig.json"), ts.sys.readFile);
 const parsed = ts.parseJsonConfigFileContent(
   { ...config.config, include: ["src/**/*.ts"] },

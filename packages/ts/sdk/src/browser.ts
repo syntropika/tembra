@@ -1,3 +1,5 @@
+import { isolate, type AdaptedHostOptions } from "#tembra-adapters";
+import type { BrowserExecution, BrowserInterpreterOptions } from "./interpreter/browser.ts";
 import { orb } from "./authoring/orb.ts";
 import type { HostOptions } from "./authoring/types.ts";
 import type { KernelPort } from "./bridge/kernel.ts";
@@ -9,12 +11,13 @@ export interface WasmModule {
 }
 export type BrowserHostOptions = Omit<HostOptions, "kernel"> & {
   kernel?: KernelPort;
+  isolated?: BrowserInterpreterOptions;
   wasm?: WasmModule | (() => Promise<WasmModule>);
   wasmInput?: unknown;
   baseURL?: string | URL;
 };
 
-/** Runs orbs in the browser or Worker's existing JS realm; WASM owns only kernel metadata. */
+/** Configure a browser host with lazily loaded isolated execution for Wasm Orbs. */
 export async function createHost(options: BrowserHostOptions = {}): Promise<Host> {
   let kernel = options.kernel;
   if (!kernel) {
@@ -26,20 +29,30 @@ export async function createHost(options: BrowserHostOptions = {}): Promise<Host
     await module.default?.(options.wasmInput);
     kernel = new module.WasmKernel();
   }
+  let execution: Promise<BrowserExecution> | undefined;
+  const backend = () =>
+    (execution ??= import("./interpreter/browser.ts").then((module) =>
+      module.createExecution(options.isolated ?? {}),
+    ));
   return new Host({
+    [isolate]: async (definition) => (await backend()).materialize(definition),
     ...options,
     kernel,
     load:
       options.load ??
-      (async (location) => {
+      (async (location, registration) => {
         const base = options.baseURL ?? globalThis.location?.href;
         const url =
           location instanceof URL ? location : base ? new URL(location, base) : new URL(location);
-        return orb(
-          (await import(url.href)).default as import("./authoring/types.ts").OrbDefinition,
-        );
+        if (url.pathname.endsWith(".wasm")) {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`Orb request failed: ${response.status}`);
+          const source = new Uint8Array(await response.arrayBuffer());
+          return (await backend()).decode(source, registration);
+        }
+        throw new Error("Orb loading requires a built .wasm artifact");
       }),
-  });
+  } as AdaptedHostOptions);
 }
 
 export { orb };
@@ -59,19 +72,9 @@ export { Errors, type ErrorDescriptor } from "./errors.ts";
 export { ContextKey, ContextKind, opaqueFrom, type OpaqueContextValue } from "./context-key.ts";
 
 export {
-  createInterpreter,
-  BrowserInterpreter,
-  type BrowserInterpreterOptions,
-} from "./interpreter/browser.ts";
-export {
   memoryFilesystem,
   opfsFilesystem,
   type FilesystemProvider,
 } from "./interpreter/filesystem.ts";
-export type {
-  Grants,
-  InterpreterOrbOptions,
-  PreparedComponent,
-  PreparedSource,
-  ProviderBinding,
-} from "./interpreter/types.ts";
+export type { BrowserInterpreterOptions as IsolatedOptions } from "./interpreter/browser.ts";
+export type { Grants } from "./interpreter/types.ts";

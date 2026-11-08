@@ -1,5 +1,9 @@
 //! Console observation is independent of callback authority and attributed by the host.
-use crate::{LogRecord, engine::LogSink, failure};
+use crate::{
+    LogRecord,
+    engine::LogSink,
+    protocol::{LogLevel, Request},
+};
 use serde_json::Value;
 
 #[derive(Clone)]
@@ -8,28 +12,22 @@ pub(super) struct Diagnostics {
     pub sink: Option<LogSink>,
 }
 impl Diagnostics {
-    /// Consume only diagnostic packets; ordinary operations still require an issued scope.
+    /// Consume only well-formed diagnostic packets; every other packet, including a malformed
+    /// console record, falls through to scope routing, which rejects it explicitly.
     pub fn accept(&self, packet: &str) -> Option<tembra::Result<Value>> {
-        let packet: Value = serde_json::from_str(packet).ok()?;
-        if packet["operation"] != "console" {
+        let Ok(Request::Console { level, message }) = Request::decode(packet) else {
             return None;
-        }
-        Some(self.emit(&packet))
+        };
+        Some(self.emit(level, message))
     }
 
-    fn emit(&self, packet: &Value) -> tembra::Result<Value> {
-        let level = packet["level"]
-            .as_str()
-            .filter(|level| ["log", "debug", "info", "warn", "error"].contains(level))
-            .ok_or_else(|| failure("invalid console level"))?;
-        let message = packet["message"]
-            .as_str()
-            .ok_or_else(|| failure("invalid console message"))?;
+    /// Deliver one record without allowing observer panics to interrupt execution.
+    fn emit(&self, level: LogLevel, message: String) -> tembra::Result<Value> {
         if let Some(sink) = &self.sink {
             let record = LogRecord {
                 orb: self.orb.clone(),
-                level: level.to_owned(),
-                message: message.to_owned(),
+                level: level.as_str().to_owned(),
+                message,
             };
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(&record)));
         }

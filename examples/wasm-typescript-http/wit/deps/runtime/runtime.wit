@@ -1,6 +1,0 @@
-package tembra:runtime@0.1.0;
-
-interface context {
-    resource invocation;
-    check: func(context: borrow<invocation>) -> bool;
-}

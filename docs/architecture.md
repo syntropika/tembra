@@ -6,15 +6,17 @@ The engine decides when those callbacks can run.
 
 ## Rust crates
 
-| Crate                                                      | Responsibility                                                                                                      |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| [tembra-core](../crates/core/src/lib.rs)                   | Own identities, references, call versions, state revisions and lifecycle order. It has no third-party dependencies. |
-| [tembra](../crates/tembra/src/lib.rs)                      | Declare native Rust services. Keep typed values and run callbacks on an application executor.                       |
-| [tembra-bridge](../crates/bridge/src/lib.rs)               | Convert metadata commands and results to JSON envelopes.                                                            |
-| [tembra-node-binding](../crates/node-binding/src/lib.rs)   | Expose the bridge through Node-API as `NodeKernel`.                                                                 |
-| [tembra-browser-wasm](../crates/browser-wasm/src/lib.rs)   | Expose the bridge through WASM as `WasmKernel`.                                                                     |
-| [tembra-mobile](../crates/mobile/src/lib.rs)               | Expose the bridge to Swift and Kotlin as `NativeKernel` through UniFFI.                                             |
-| [tembra-executor-js](../crates/executor-js/src/runtime.rs) | Run bundled JavaScript in V8 beside native Rust services. Both use the same kernel.                                 |
+| Crate                                                        | Responsibility                                                                                                      |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| [tembra-core](../crates/core/src/lib.rs)                     | Own identities, references, call versions, state revisions and lifecycle order. It has no third-party dependencies. |
+| [tembra](../crates/tembra/src/lib.rs)                        | Declare native Rust services. Keep typed values and run callbacks on an application executor.                       |
+| [tembra-bridge](../crates/bridge/src/lib.rs)                 | Convert metadata commands and results to JSON envelopes.                                                            |
+| [tembra-node-binding](../crates/node-binding/src/lib.rs)     | Expose the bridge through Node-API as `NodeKernel`.                                                                 |
+| [tembra-browser-wasm](../crates/browser-wasm/src/lib.rs)     | Expose the bridge through WASM as `WasmKernel`.                                                                     |
+| [tembra-mobile](../crates/mobile/src/lib.rs)                 | Expose the bridge to Swift and Kotlin as `NativeKernel` through UniFFI.                                             |
+| [tembra-contracts](../crates/contracts/src/lib.rs)           | Resolve WIT contracts, encode and decode orb artifacts, select providers and check grants.                          |
+| [tembra-contracts-wasm](../crates/contracts-wasm/src/lib.rs) | Expose artifact and contract queries to browsers, separately from the small kernel module.                          |
+| [tembra-executor-wasm](../crates/executor-wasm/src/lib.rs)   | Load orb artifacts as ordinary `tembra::Orb` values and run them in Wasmtime.                                       |
 
 ## Lifecycle programs
 
@@ -35,15 +37,32 @@ An execution action contains the effects for one program step.
 | Package                                                                     | Responsibility                                                                                         |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | [@syntropika/tembra-sdk](../packages/ts/sdk/src/index.ts)                   | Declare orbs, keep JS values and execute effects. Also expose optional infrastructure and build tools. |
-| [@syntropika/tembra-engine-node](../packages/ts/engine-node/package.json)   | Build and package the native Node binding.                                                             |
-| [@syntropika/tembra-engine-wasm](../packages/ts/engine-wasm/package.json)   | Build and package the WASM module, loader and types.                                                   |
+| [@syntropika/tembra-engine-node](../packages/ts/engine-node/package.json)   | Build and package the native Node binding and the interpreter component.                               |
+| [@syntropika/tembra-engine-wasm](../packages/ts/engine-wasm/package.json)   | Build and package the WASM kernel, contract module and browser interpreter modules.                    |
 | [TembraNative](../packages/swift/Package.swift)                             | Package Swift bindings and the Rust libraries for iOS and macOS.                                       |
 | [tembra-kotlin](../packages/kotlin/build.gradle.kts)                        | Package the same Kotlin bindings for the JVM and Android.                                              |
 | [@syntropika/tembra-react-native](../packages/ts/react-native/src/index.ts) | Connect the SDK to the mobile kernel through a TurboModule.                                            |
 
-Node, browsers and React Native run callbacks in their existing JavaScript runtime.
-WASM contains the kernel and bridge. It contains no JS interpreter, DOM or filesystem.
-The embedded Rust integration uses one V8 runtime per host.
+Node, browsers and React Native run trusted orb callbacks in their existing JavaScript runtime.
+The WASM kernel module contains the kernel and bridge. It contains no JS interpreter, DOM or filesystem.
+
+## Isolated orbs
+
+An orb artifact is one immutable `.wasm` file. It carries a WIT contract, an orb name and API
+version, and either a TypeScript bundle or a compiled component. Build tooling produces it;
+installation chooses its providers and grants. The artifact carries no authority.
+
+| Host    | Source orbs                     | Compiled components |
+| ------- | ------------------------------- | ------------------- |
+| Rust    | Wasmtime and dquickts           | Wasmtime            |
+| Node    | Wasmtime and dquickts           | Wasmtime            |
+| Browser | dquickts through Jco, with JSPI | Not yet supported   |
+
+The interpreter is loaded lazily when the first source orb is installed. Each installed orb has
+its own Wasm instance and heap. Isolated and trusted orbs share one host and one kernel lifecycle.
+Trusted orbs are not sandboxed.
+
+See [Wasm orb execution](../crates/executor-wasm/README.md).
 
 The React Native adapter uses the shared Swift sources and Kotlin library.
 Neither native package depends on React Native.

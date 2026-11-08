@@ -7,9 +7,15 @@ Orbs own their behavior and validation. Tembra manages how they work together th
 lifetime through a shared Rust engine. Applications can combine Rust and TypeScript across
 servers, browsers, Web Workers and React Native.
 
+An orb is either trusted application code (Rust, or TypeScript in the host runtime) or a built
+`.wasm` artifact that runs isolated in WebAssembly. Both kinds install into the same host and use
+the same lifecycle.
+
 ## What it provides
 
 - **Composable orbs.** Declare the services an orb provides and the dependencies it consumes.
+- **Isolated orbs.** Build TypeScript or a compiled component against a WIT contract, then grant
+  filesystem and network access per orb at installation.
 - **Consistent state.** Validate changes before publishing them and observe the values that matter.
 - **Controlled updates.** Replace implementations and migrate state while respecting active work.
 - **Shared resources.** Tie resources and tasks to the host, orb or object that owns them.
@@ -22,7 +28,8 @@ servers, browsers, Web Workers and React Native.
 | [crates/core/](crates/core/)                           | Shared Rust engine for ownership, state revisions and orb updates |
 | [crates/tembra/](crates/tembra/)                       | Rust interface for declaring and running orbs                     |
 | [crates/bridge/](crates/bridge/)                       | Communication between the engine and its platform integrations    |
-| [crates/executor-js/](crates/executor-js/)             | Embedded JavaScript execution through V8 for Rust applications    |
+| [crates/contracts/](crates/contracts/)                 | WIT contracts, orb artifacts and installation grants              |
+| [crates/executor-wasm/](crates/executor-wasm/)         | Runs orb artifacts in Wasmtime for Rust hosts                     |
 | [crates/node-binding/](crates/node-binding/)           | Connects Node.js to the Rust engine                               |
 | [crates/mobile/](crates/mobile/)                       | Shared Rust kernel bindings for Swift and Kotlin                  |
 | [crates/browser-wasm/](crates/browser-wasm/)           | Makes the Rust engine available in browsers and Workers           |
@@ -34,11 +41,12 @@ servers, browsers, Web Workers and React Native.
 | [packages/ts/react-native/](packages/ts/react-native/) | React Native TurboModule, native packaging and mobile builds      |
 | [packages/ts/test/](packages/ts/test/)                 | Browser integration tests                                         |
 | [examples/rust/](examples/rust/)                       | Native orbs, identity, execution and resource lifetime            |
+| [examples/wasm-orb/](examples/wasm-orb/)               | A TypeScript orb and a compiled Rust orb built from one WIT file  |
 
 ## Development
 
-The [experimental Wasm example](examples/wasm-typescript-http/README.md) runs a TypeScript orb with
-HTTP, calculations and live script replacement through QuickJS and Wasmtime.
+The [Wasm orb example](examples/wasm-orb/README.md) builds a TypeScript orb with an npm dependency
+and a compiled Rust provider, then installs both artifacts in a Node host.
 
 See the [guide](docs/README.md) for concepts and Rust and TypeScript usage.
 See [DEVELOP.md](DEVELOP.md) for setup, tools, builds, tests and technical details.

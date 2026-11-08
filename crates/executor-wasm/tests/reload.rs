@@ -1,9 +1,10 @@
 //! Replace isolated heaps while the existing kernel retains old roots and compatible state.
+mod support;
 use futures::{FutureExt, channel::oneshot, executor::LocalPool, task::LocalSpawnExt};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, rc::Rc};
-use tembra::{Host, Orb, Service};
-use tembra_executor_wasm::{Binding, Contract, Engine, Limits, PreparedSource};
+use std::rc::Rc;
+use tembra::Host;
+use tembra_executor_wasm::{Engine, Install, Limits};
 
 /// Run real TypeScript revisions, an aborted opener and per-realm resource cleanup.
 #[test]
@@ -11,33 +12,29 @@ use tembra_executor_wasm::{Binding, Contract, Engine, Limits, PreparedSource};
 fn replace_and_abort_real_interpreted_orbs() {
     let component =
         std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
-    let prepared: PreparedSource = serde_json::from_slice(
-        &std::fs::read(std::env::var_os("TEMBRA_WASM_ORB").expect("TEMBRA_WASM_ORB")).unwrap(),
-    )
-    .unwrap();
-    let source = prepared.source;
-    let engine = Engine::new(&component, Limits::default()).unwrap();
-    let contract = Contract::from_bytes(&prepared.contract, Some("calculator")).unwrap();
-    let bindings = BTreeMap::from([(
-        "example:integrated/arithmetic@1.0.0".into(),
-        Binding::Orb {
-            name: "native.math".into(),
-            api_version: 1,
-            world: "arithmetic-provider".into(),
-        },
-    )]);
-    let prepared = engine
-        .prepare(&contract, "calculator", 1, &source, &bindings)
+    let bytes =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ORB").expect("TEMBRA_WASM_ORB")).unwrap();
+    let prepared = tembra_contracts::Artifact::decode(&bytes).unwrap();
+    let tembra_contracts::ArtifactImplementation::Source(source) = &prepared.implementation else {
+        panic!("expected source");
+    };
+    let source = source.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .interpreter(&component)
         .unwrap();
-    let native = Orb::new("native.math", 1).service(
-        Service::new("native.math::example:integrated/arithmetic@1.0.0", |_| {
-            Ok(())
-        })
-        .method(
-            "double",
-            |_, _, (value,): (i32,)| async move { Ok(value * 2) },
-        ),
-    );
+    let contract = prepared.contract.clone();
+    let install =
+        || Install::default().requires("example:integrated/arithmetic@1.0.0", "native.math", 1);
+    let prepared = engine
+        .load(
+            &contract
+                .artifact(Some(&source), None, "calculator", 1)
+                .unwrap(),
+            install(),
+        )
+        .unwrap();
+    let native = support::native_math(&contract, "native.math");
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![native, prepared]).unwrap();
@@ -96,7 +93,12 @@ fn replace_and_abort_real_interpreted_orbs() {
     let changed = source.replace("return 42;", "return 84;");
     assert_ne!(source, changed);
     let replacement = engine
-        .prepare(&contract, "calculator", 1, &changed, &bindings)
+        .load(
+            &contract
+                .artifact(Some(&changed), None, "calculator", 1)
+                .unwrap(),
+            install(),
+        )
         .unwrap();
     pool.run_until(host.reload(vec![replacement], 5000))
         .unwrap();
@@ -141,7 +143,12 @@ globalThis.__tembraOrb.services.calculation.create = self => originalCreate(new 
 "#
     );
     let candidate = engine
-        .prepare(&contract, "calculator", 1, &validating, &bindings)
+        .load(
+            &contract
+                .artifact(Some(&validating), None, "calculator", 1)
+                .unwrap(),
+            install(),
+        )
         .unwrap();
     let changing_host = host.clone();
     let changing_reference = reference.clone();
@@ -170,7 +177,12 @@ globalThis.__tembraOrb.services.calculation.create = self => originalCreate(new 
         "{changed}\nglobalThis.__tembraOrb.services.calculation.create = (self) => {{ const total=self.state(0); const resource=self.resource('number',{{open(){{throw new Error('opener refused')}}}}); return {{total,resource}}; }};"
     );
     let candidate = engine
-        .prepare(&contract, "calculator", 1, &failing, &bindings)
+        .load(
+            &contract
+                .artifact(Some(&failing), None, "calculator", 1)
+                .unwrap(),
+            install(),
+        )
         .unwrap();
     assert!(pool.run_until(host.reload(vec![candidate], 5000)).is_err());
     assert_eq!(engine.instances(), 1);

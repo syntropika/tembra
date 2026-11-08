@@ -1,12 +1,26 @@
 import { BrowserIO } from "./browser-io.ts";
-import type { InterpreterPort } from "./types.ts";
+import { decodeAsyncHostRequest, decodeHostRequest, type HostRequest } from "./host-protocol.ts";
+import type { ExecutionScope, InterpreterPort } from "./types.ts";
 
+type Result = { tag: "ok" | "err"; val: string };
+interface Outcome {
+  value: Result;
+  interrupted: boolean;
+}
+interface Completion {
+  id: bigint;
+  value: Result;
+}
+interface Progress {
+  outcome?: Outcome;
+  effects: { id: bigint; packet: string }[];
+}
 export interface BrowserGuest {
-  load(packet: string): Promise<string>;
-  declare(packet: string): Promise<string>;
-  dispatch(packet: string): Promise<string>;
-  interrupt(): Promise<void>;
-  hasInterrupted(): Promise<boolean>;
+  load(packet: string): Outcome | Promise<Outcome>;
+  declare(packet: string): Outcome | Promise<Outcome>;
+  start(packet: string): Progress | Promise<Progress>;
+  resume(completed: Completion[]): Progress | Promise<Progress>;
+  cancel(): Outcome | Promise<Outcome>;
 }
 export interface BrowserGuestModule {
   instantiate(
@@ -15,213 +29,192 @@ export interface BrowserGuestModule {
   ): BrowserGuest | Promise<BrowserGuest>;
 }
 
-/** Expose the same private transport as Node while retaining the browser component's actual task. */
+/** A serialized Wasm heap yields data; host promises never enter its execution stack. */
 export class BrowserPort implements InterpreterPort {
   guest: BrowserGuest | undefined;
   readonly io = new BrowserIO();
   #description = "";
-  #callback: ((packet: string) => string) | undefined;
-  #event: ((packet: string) => void) | undefined;
-  #replies = new Map<number, { resolve(value: string): void; reject(error: unknown): void }>();
-  #next = 0;
+  #scope: ExecutionScope | undefined;
   #running = false;
-  #done = false;
   #closed = false;
   #poisoned = false;
-  #epoch = 0;
-  #ticket = 0;
-  #values = new Map<number, { value?: string; error?: unknown }>();
-  /** Keep callback response data separate from canonical ABI allocation. */
+  /** Retain per-installation I/O and logging independently of callback authority. */
   constructor(
     readonly timeout: number,
     readonly dispose: () => Promise<void>,
-    readonly log: (packet: string) => void,
+    readonly log: (record: Extract<HostRequest, { operation: "console" }>) => void,
     readonly packetBytes = 8 << 20,
   ) {}
 
-  /** Scalar ticket results avoid allocating strings or abandoned resources during async return. */
-  /** Bound UTF-8 payloads before parsing or copying them back into linear memory. */
+  /** UTF-8 uses at most three bytes per UTF-16 code unit; only large packets need encoding. */
   private bounded(packet: string): string {
     if (
       packet.length > this.packetBytes ||
-      new TextEncoder().encode(packet).byteLength > this.packetBytes
+      (packet.length > Math.floor(this.packetBytes / 3) &&
+        new TextEncoder().encode(packet).byteLength > this.packetBytes)
     )
       throw new Error("Interpreter packet exceeds its configured bound");
     return packet;
   }
-  take(ticket: number): string {
-    const value = this.#values.get(ticket);
-    this.#values.delete(ticket);
-    if (!value) throw "unknown or expired response ticket";
-    if (value.error !== undefined) throw value.error;
-    this.bounded(value.value!);
-    return value.value!;
-  }
-  /** Resolve synchronous requests only through the currently installed host scope. */
+
+  /** Decode once and invoke the current host-owned scope without an event envelope. */
   sync(packet: string): string {
-    this.bounded(packet);
-    if (JSON.parse(packet).operation === "console") {
-      this.log(packet);
-      return "null";
-    }
-    if (this.#callback) {
-      const result = JSON.parse(this.bounded(this.#callback(packet)));
-      if (Object.hasOwn(result, "ok")) return JSON.stringify(result.ok);
-      throw result.error;
-    }
-    if (!this.#event) throw new Error("No active host scope");
-    // Synchronous WASI/JS calls cannot suspend to a later browser turn.
-    let reply: string | undefined;
-    let failure: unknown;
-    const id = ++this.#next;
-    this.#replies.set(id, {
-      resolve(value) {
-        reply = value;
-      },
-      reject(error) {
-        failure = error;
-      },
-    });
-    this.#event(JSON.stringify({ event: "host", id, asynchronous: false, packet }));
-    if (failure !== undefined) throw failure;
-    if (reply === undefined) {
-      this.#replies.delete(id);
-      throw new Error("Synchronous host operation did not settle");
-    }
-    return reply;
-  }
-  /** Late results are discarded by epoch before they can allocate retained reply data. */
-  async async(packet: string): Promise<number> {
-    const epoch = this.#epoch;
-    let result: { value?: string; error?: unknown };
     try {
-      this.bounded(packet);
-      if (!this.#event) throw new Error("No active host scope");
-      if (this.#replies.size >= 128) throw new Error("Interpreter host operation queue is full");
-      const value = await new Promise<string>((resolve, reject) => {
-        const id = ++this.#next;
-        this.#replies.set(id, { resolve, reject });
-        this.#event!(JSON.stringify({ event: "host", id, asynchronous: true, packet }));
-      });
-      result = { value };
+      const request = decodeHostRequest(this.bounded(packet));
+      if (request.operation === "console") {
+        this.log(request);
+        return "null";
+      }
+      if (!this.#scope) throw new Error("No active host scope");
+      return this.bounded(JSON.stringify(this.#scope.sync(request) ?? null));
     } catch (error) {
-      result = { error: error instanceof Error ? error.message : String(error) };
+      throw error instanceof Error ? error.message : String(error);
     }
-    if (epoch !== this.#epoch || !this.#event) return 0;
-    if (this.#ticket === 0xffffffff) throw new Error("Response ticket space exhausted");
-    const ticket = ++this.#ticket;
-    this.#values.set(ticket, result);
-    return ticket;
   }
-  /** Load one source revision before exposing it to a lifecycle kernel. */
-  async load(packet: string): Promise<void> {
-    this.#description = this.bounded(await this.guest!.load(this.bounded(packet)));
+
+  /** Observe cleanup and interruption in the same export result as the callback. */
+  private value(outcome: Outcome): unknown {
+    this.#poisoned ||= outcome.interrupted;
+    this.bounded(outcome.value.val);
+    if (outcome.value.tag === "err") throw new Error(outcome.value.val);
+    return JSON.parse(this.bounded(outcome.value.val));
   }
-  /** Guest-map cleanup needs no renewed authority after the kernel drops an environment. */
-  async release(environment: number): Promise<void> {
-    if (this.#closed || this.#poisoned) return;
-    if (this.#running) throw new Error("Interpreter is busy");
+
+  /** Refuse reuse until the previous stack and its I/O have physically returned. */
+  private enter(scope?: ExecutionScope): void {
+    if (this.#closed || this.#poisoned || this.#running)
+      throw new Error("Interpreter is closed or busy");
     this.#running = true;
+    this.#scope = scope;
+  }
+
+  /** Initialize one revision before issuing any guest execution scope. */
+  async load(packet: string): Promise<void> {
+    this.enter();
     try {
-      await this.guest!.dispatch(JSON.stringify({ kind: "release", environment }));
-      await this.io.settled();
+      const outcome = await this.guest!.load(this.bounded(packet));
+      this.#description = this.bounded(outcome.value.val);
+      this.value(outcome);
     } finally {
       this.#running = false;
     }
   }
-  /** Read validated callback metadata. */
+
+  /** Read the validated source callback metadata once. */
   description(): string {
     return this.#description;
   }
-  /** Preserve factory synchrony without giving guest code access to ambient host globals. */
-  async declare(packet: string, callback: (packet: string) => string): Promise<string> {
-    if (this.#closed || this.#poisoned || this.#running)
-      throw new Error("Interpreter is closed or busy");
-    this.#running = true;
-    this.#callback = callback;
+
+  /** Factories receive only the declaration scope, even if WASI suspends a native stack. */
+  async declare(packet: string, scope: ExecutionScope): Promise<unknown> {
+    this.enter(scope);
     try {
-      return JSON.stringify({
-        ok: JSON.parse(this.bounded(await this.guest!.declare(this.bounded(packet)))),
-      });
+      return this.value(await this.guest!.declare(this.bounded(packet)));
     } catch (error) {
-      return JSON.stringify({ error: String(error) });
+      if (error instanceof WebAssembly.RuntimeError) this.#poisoned = true;
+      throw error;
     } finally {
-      this.#callback = undefined;
-      try {
-        this.#poisoned ||= await this.guest!.hasInterrupted();
-      } catch {
-        this.#poisoned = true;
-      }
+      this.#scope = undefined;
+      await this.io.settled();
       this.#running = false;
     }
   }
-  /** Physical completion, rather than Promise.race, determines when this instance can be reused. */
-  dispatch(packet: string, callback: (packet: string) => void): void {
-    if (this.#closed || this.#poisoned || this.#running)
-      throw new Error("Interpreter is closed or busy");
-    this.#running = true;
-    this.#epoch++;
-    this.#done = false;
-    this.#event = callback;
+
+  /** Wait between steps in the host, preserving Promise.race and concurrent effect completion. */
+  async execute(packet: string, scope: ExecutionScope): Promise<unknown> {
+    this.enter(scope);
+    const pending = new Map<bigint, Promise<Completion>>();
+    const ready: Completion[] = [];
+    let wake: (() => void) | undefined;
+    let finished = false;
+    let rejectDeadline!: (error: Error) => void;
+    const deadline = new Promise<never>((_, reject) => {
+      rejectDeadline = reject;
+    });
+    deadline.catch(() => {});
     const timer = setTimeout(() => {
       this.#poisoned = true;
-      this.guest!.interrupt().catch(() => {
-        /* The original exported task remains the settlement authority. */
-      });
+      scope.cancel();
+      rejectDeadline(new Error("Interpreter callback exceeded its wall time limit"));
     }, this.timeout);
-    Promise.resolve()
-      .then(() => this.guest!.dispatch(this.bounded(packet)))
-      .then(
-        (value) => {
-          try {
-            return { ok: JSON.parse(this.bounded(value)) };
-          } catch (error) {
-            return { error: String(error) };
-          }
-        },
-        (error) => {
-          if (error instanceof WebAssembly.RuntimeError) this.#poisoned = true;
-          return { error: String(error) };
-        },
-      )
-      .then(async (result) => {
-        clearTimeout(timer);
-        if (!this.#poisoned) {
-          try {
-            this.#poisoned = await this.guest!.hasInterrupted();
-          } catch {
-            this.#poisoned = true;
-          }
-        }
-        await this.io.settled();
-        this.#done = true;
-        this.#event = undefined;
-        for (const reply of this.#replies.values()) reply.reject(new Error("Callback scope ended"));
-        this.#replies.clear();
-        this.#values.clear();
-        callback(JSON.stringify({ event: "complete", result }));
-      });
-  }
-  /** Late replies cannot resolve a request in a later exchange. */
-  reply(id: number, packet: string): boolean {
-    const pending = this.#replies.get(id);
-    if (!pending) return false;
-    this.#replies.delete(id);
     try {
-      const value = JSON.parse(this.bounded(packet));
-      if (Object.hasOwn(value, "ok")) pending.resolve(JSON.stringify(value.ok));
-      else pending.reject(value.error);
-    } catch (error) {
-      pending.reject(error instanceof Error ? error.message : String(error));
+      let progress = await this.guest!.start(this.bounded(packet));
+      while (!progress.outcome) {
+        if (this.#poisoned) throw new Error("Interpreter callback exceeded its wall time limit");
+        for (const effect of progress.effects) {
+          if (pending.size >= 128 || pending.has(effect.id))
+            throw new Error("Invalid interpreter effect queue");
+          const operation = Promise.resolve().then(() =>
+            scope.async(decodeAsyncHostRequest(this.bounded(effect.packet))),
+          );
+          const completed = operation
+            .then(
+              (value) =>
+                ({
+                  id: effect.id,
+                  value: { tag: "ok", val: this.bounded(JSON.stringify(value ?? null)) },
+                }) as Completion,
+            )
+            .catch(
+              (error) =>
+                ({ id: effect.id, value: { tag: "err", val: String(error) } }) as Completion,
+            )
+            .then((response) => {
+              ready.push(response);
+              wake?.();
+              return response;
+            });
+          pending.set(effect.id, completed);
+        }
+        if (!ready.length)
+          await Promise.race([
+            new Promise<void>((resolve) => {
+              wake = resolve;
+            }),
+            deadline,
+          ]);
+        wake = undefined;
+        const completed = ready.splice(0);
+        for (const response of completed) pending.delete(response.id);
+        progress = await this.guest!.resume(completed);
+      }
+      finished = true;
+      if (this.#poisoned) throw new Error("Interpreter callback exceeded its wall time limit");
+      return this.value(progress.outcome);
+    } finally {
+      clearTimeout(timer);
+      scope.cancel();
+      if (!finished) {
+        this.#poisoned = true;
+        try {
+          await this.guest!.cancel();
+        } catch {
+          /* A trapped instance is never reused. */
+        }
+      }
+      this.#scope = undefined;
+      await Promise.allSettled(pending.values());
+      await this.io.settled();
+      this.#running = false;
     }
-    return true;
   }
-  /** Reopen the local ticket only after the component's exported task returned. */
-  finish(): void {
-    if (!this.#done) throw new Error("Guest has not physically completed");
-    this.#running = false;
+
+  /** Pure guest cleanup needs no execution capability after the environment ends. */
+  async release(environment: number): Promise<void> {
+    if (this.#closed || this.#poisoned) return;
+    await this.execute(JSON.stringify({ kind: "release", environment }), {
+      check() {},
+      cancel() {},
+      sync() {
+        throw new Error("Release has no host scope");
+      },
+      async() {
+        return Promise.reject(new Error("Release has no host scope"));
+      },
+    });
   }
-  /** Disposal is awaited separately by the revision's lifecycle hook. */
+
+  /** Dispose mounted providers only after their last physical operation has settled. */
   async close(): Promise<void> {
     if (this.#running) throw new Error("Guest still owns physical work");
     if (this.#closed) return;

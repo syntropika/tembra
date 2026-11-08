@@ -22,9 +22,6 @@ pub(super) struct State {
     pub(super) events: Option<Sender<Event>>,
     packet_bytes: usize,
     deadline: Option<std::time::Instant>,
-    pub(super) responses: std::collections::BTreeMap<u32, std::result::Result<String, String>>,
-    pub(super) next_response: u32,
-    response_epoch: u64,
 }
 
 struct InstanceCount(Arc<AtomicUsize>);
@@ -45,7 +42,7 @@ impl WasiView for State {
 }
 
 /// Dispatch a request through the current invocation's channel, never a guest-selected scope.
-fn request(
+pub(super) fn request(
     state: &State,
     packet: String,
     asynchronous: bool,
@@ -74,13 +71,12 @@ pub(super) async fn run(
     mut wasi: WasiCtxBuilder,
     poison: Arc<Mutex<Option<String>>>,
     diagnostics: super::diagnostics::Diagnostics,
-) {
+) -> Vec<(Sender<Event>, String)> {
     engine.active_instances.fetch_add(1, Ordering::Release);
     let _instance = InstanceCount(engine.active_instances.clone());
     let outcome = async {
         let mut linker = Linker::<State>::new(&engine.engine);
-        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-        super::replies::add_to_linker(&mut linker)?;
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         linker.root().func_wrap(
             "host-sync",
             |store: StoreContextMut<State>, (packet,): (String,)| {
@@ -118,32 +114,6 @@ pub(super) async fn run(
                 Ok((reply,))
             },
         )?;
-        linker
-            .root()
-            .func_wrap_concurrent("host-async", |accessor, (packet,): (String,)| {
-                Box::pin(async move {
-                    let (epoch, receive) = accessor.with(|mut store| {
-                        (
-                            store.data_mut().response_epoch,
-                            request(store.data_mut(), packet, true),
-                        )
-                    });
-                    let reply = match receive {
-                        Ok(reply) => reply
-                            .await
-                            .unwrap_or_else(|_| Err("host callback scope ended".into())),
-                        Err(error) => Err(error),
-                    };
-                    let reply = accessor.with(|mut store| {
-                        if store.data_mut().response_epoch == epoch {
-                            super::replies::create(store.data_mut(), reply)
-                        } else {
-                            Ok(0)
-                        }
-                    })?;
-                    Ok((reply,))
-                })
-            })?;
         let mut store = Store::new(
             &engine.engine,
             State {
@@ -156,39 +126,30 @@ pub(super) async fn run(
                 events: None,
                 packet_bytes: engine.limits.packet_bytes,
                 deadline: None,
-                responses: Default::default(),
-                next_response: 0,
-                response_epoch: 0,
             },
         );
         store.limiter(|state| &mut state.limits);
         store.set_fuel(engine.limits.fuel)?;
         store.fuel_async_yield_interval(Some(10_000))?;
         let instance = linker
-            .instantiate_async(&mut store, &engine.component)
+            .instantiate_async(
+                &mut store,
+                engine.component.as_ref().ok_or_else(|| {
+                    wasmtime::Error::msg("source Orbs require a configured interpreter")
+                })?,
+            )
             .await?;
+        let driver = super::steps::Driver::new(&instance, &mut store)?;
         while let Ok(command) = commands.recv() {
-            store.data_mut().response_epoch = store
-                .data()
-                .response_epoch
-                .checked_add(1)
-                .ok_or_else(|| wasmtime::Error::msg("callback epoch space exhausted"))?;
             store.data_mut().events = Some(command.events.clone());
             store.data_mut().deadline = Some(
                 std::time::Instant::now()
                     + std::time::Duration::from_millis(engine.limits.timeout_ms),
             );
             store.set_fuel(engine.limits.fuel)?;
-            let function = instance
-                .get_typed_func::<(String,), (std::result::Result<String, String>,)>(
-                    &mut store,
-                    command.export,
-                )?;
             let result = tokio::time::timeout(
                 std::time::Duration::from_millis(engine.limits.timeout_ms),
-                store.run_concurrent(async |accessor| {
-                    function.call_concurrent(accessor, (command.packet,)).await
-                }),
+                driver.call(command.export, command.packet, &mut store),
             )
             .await
             .map_err(|_| {
@@ -197,26 +158,10 @@ pub(super) async fn run(
                 )
             })
             .and_then(|result| result);
-            store.data_mut().responses.clear();
             store.data_mut().events = None;
-            let mut trapped = result.is_err() || result.as_ref().is_ok_and(|value| value.is_err());
-            // Guest instruction exhaustion and failed cleanup are returned errors, not Wasm traps.
-            // Query the engine's flag rather than inferring quarantine from exception text.
-            if !trapped {
-                let interrupted =
-                    instance.get_typed_func::<(), (bool,)>(&mut store, "has-interrupted")?;
-                trapped = !matches!(
-                    store
-                        .run_concurrent(async |accessor| interrupted
-                            .call_concurrent(accessor, ())
-                            .await)
-                        .await,
-                    Ok(Ok((false,)))
-                );
-            }
+            let trapped = result.as_ref().map_or(true, |outcome| outcome.interrupted);
             let result = result
-                .and_then(|value| value)
-                .map(|(result,)| result)
+                .map(|outcome| outcome.value)
                 .unwrap_or_else(|error| Err(format!("interpreter trap: {error:#}")))
                 .and_then(|value| {
                     if value.len() <= engine.limits.packet_bytes {
@@ -231,22 +176,23 @@ pub(super) async fn run(
                     .unwrap_or_else(|| "interpreter interrupted; Store quarantined".into());
                 *poison.lock().expect("poison state") = Some(error.clone());
                 drop(store);
-                let _ = command.events.send(Event::Done(Err(error))).await;
-                return Ok(());
+                return Ok(vec![(command.events, error)]);
             }
             let _ = command.events.send(Event::Done(result)).await;
         }
-        Ok::<_, wasmtime::Error>(())
+        Ok::<_, wasmtime::Error>(Vec::new())
     }
     .await;
-    if let Err(error) = outcome {
-        for command in commands.try_iter() {
-            let _ = command
-                .events
-                .send(Event::Done(Err(format!(
-                    "interpreter initialization failed: {error:#}"
-                ))))
-                .await;
-        }
+    match outcome {
+        Ok(terminal) => terminal,
+        Err(error) => commands
+            .try_iter()
+            .map(|command| {
+                (
+                    command.events,
+                    format!("interpreter initialization failed: {error:#}"),
+                )
+            })
+            .collect(),
     }
 }

@@ -12,12 +12,7 @@ pub struct Declaration {
 }
 
 impl Declaration {
-    /// Reserve a host-issued identity for values confined to an adapter's execution realm.
-    pub fn resource_realm(&self) -> Result<core::Id> {
-        self.check_declaration()?;
-        self.host.kernel().allocate_handle()
-    }
-
+    /// Reject declaration calls after the factory has returned.
     pub(super) fn check_declaration(&self) -> Result<()> {
         if self.draft.sealed.get() {
             Err(Error::invalid(Reason::ScopeClosed, "declaration has ended"))
@@ -103,19 +98,6 @@ impl Declaration {
         open: impl FnOnce(ResourceSignal) -> LocalBoxFuture<'static, Result<T>> + 'static,
         close: impl FnOnce(Rc<T>, Context) -> LocalBoxFuture<'static, Result<()>> + 'static,
     ) -> Result<Resource<T>> {
-        self.resource_async_in_realm(name, version, dependencies, 0, open, close)
-    }
-
-    /// Declare callbacks whose values can be shared only inside one interpreter instance.
-    pub fn resource_async_in_realm<T: 'static>(
-        &self,
-        name: &str,
-        version: u32,
-        dependencies: &[ResourceKey],
-        realm: core::Id,
-        open: impl FnOnce(ResourceSignal) -> LocalBoxFuture<'static, Result<T>> + 'static,
-        close: impl FnOnce(Rc<T>, Context) -> LocalBoxFuture<'static, Result<()>> + 'static,
-    ) -> Result<Resource<T>> {
         self.check_declaration()?;
         if self.draft.resource_names.borrow().contains(name) {
             return Err(Error::invalid(
@@ -139,7 +121,7 @@ impl Declaration {
                 "resource dependencies belong to another host",
             ));
         }
-        let record = self.host.kernel().resource_in_realm(
+        let record = self.host.kernel().resource(
             self.owner,
             name.into(),
             version,
@@ -148,7 +130,6 @@ impl Declaration {
                 .iter()
                 .map(|dependency| dependency.id)
                 .collect(),
-            realm,
         )?;
         self.draft.resource_names.borrow_mut().insert(name.into());
         self.draft.resources.borrow_mut().push(record.id);

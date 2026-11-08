@@ -15,8 +15,24 @@
     "packages/ts/sdk/dist"
   ],
   "type": "module",
+  "imports": {
+    "#tembra-adapters": {
+      "types": "./packages/ts/sdk/src/runtime/adapters.ts",
+      "bun": "./packages/ts/sdk/src/runtime/adapters.ts",
+      "browser": "./packages/ts/sdk/src/runtime/adapters.ts",
+      "source": "./packages/ts/sdk/src/runtime/adapters.ts",
+      "default": "./packages/ts/sdk/dist/runtime/adapters.js"
+    }
+  },
   "exports": {
     ".": {
+      "tembra-wasm": {
+        "types": "./packages/ts/sdk/src/guest.ts",
+        "bun": "./packages/ts/sdk/src/guest.ts",
+        "browser": "./packages/ts/sdk/src/guest.ts",
+        "source": "./packages/ts/sdk/src/guest.ts",
+        "default": "./packages/ts/sdk/dist/guest.js"
+      },
       "types": "./packages/ts/sdk/src/index.ts",
       "bun": "./packages/ts/sdk/src/index.ts",
       "browser": "./packages/ts/sdk/src/index.ts",
@@ -86,20 +102,12 @@
       "source": "./packages/ts/sdk/src/telemetry.ts",
       "import": "./packages/ts/sdk/dist/telemetry.js"
     },
-    "./embedded-runtime": "./packages/ts/sdk/dist/embedded.js",
     "./http": {
       "types": "./packages/ts/sdk/src/http.ts",
       "bun": "./packages/ts/sdk/src/http.ts",
       "browser": "./packages/ts/sdk/src/http.ts",
       "source": "./packages/ts/sdk/src/http.ts",
       "import": "./packages/ts/sdk/dist/http.js"
-    },
-    "./internal/adapters": {
-      "types": "./packages/ts/sdk/src/runtime/adapters.ts",
-      "bun": "./packages/ts/sdk/src/runtime/adapters.ts",
-      "browser": "./packages/ts/sdk/src/runtime/adapters.ts",
-      "source": "./packages/ts/sdk/src/runtime/adapters.ts",
-      "import": "./packages/ts/sdk/dist/runtime/adapters.js"
     }
   },
   "scripts": {

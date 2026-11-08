@@ -1,8 +1,4 @@
-import {
-  captureEnvironment,
-  admitFactory,
-  type AdaptedService,
-} from "@syntropika/tembra-sdk/internal/adapters";
+import { captureEnvironment, admitFactory, type AdaptedService } from "#tembra-adapters";
 import { Declaration } from "../authoring/declaration.ts";
 import type { Resource, ResourceOptions } from "../authoring/types.ts";
 import { Code, Reason, Status } from "../bridge/identifiers.ts";

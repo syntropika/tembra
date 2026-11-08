@@ -1,185 +1,154 @@
-# Interpreted Wasm Orbs
+# Wasm Orb execution
 
-This experimental adapter runs a closed TypeScript/JavaScript Orb in a reusable
-dquickts WebAssembly component, hosted by Wasmtime. The existing Tembra kernel
-owns admission, principals, versions, state identities, resources and physical
-settlement. Each prepared Orb revision owns a separate Store and interpreter heap.
-This crate is not published and does not replace the existing JavaScript executor.
+`tembra-executor-wasm` turns a built Orb artifact into an ordinary `tembra::Orb`.
+The existing Tembra host and kernel own admission, principals, versions, state,
+resources, replacement and physical settlement. This crate only executes
+callbacks, in Wasmtime. It is not published.
+
+An artifact is one immutable `.wasm` file with a WIT contract and an Orb identity.
+It contains either:
+
+- **source**: a closed TypeScript/JavaScript bundle, run by a reusable dquickts
+  interpreter component; or
+- **component**: a compiled WebAssembly component, run directly.
+
+Each loaded Orb owns a separate Store. Engines share compiled code, not heaps or
+authority. Native Rust Orbs installed in the same host run as trusted code outside
+the Wasm sandbox.
 
 ```mermaid
 flowchart LR
-    A[WIT + TypeScript + installed npm closure] --> B[Tembra preparation]
-    B --> C[Prepared source artifact]
-    C --> D[Tembra host]
-    D --> E[Wasmtime + reusable dquickts Wasm]
-    D --> F[Selected Orb providers]
-    D --> G[WASI providers with per-Orb grants]
+    A[WIT + orb.ts + npm closure] --> B[SDK build]
+    C[WIT + compiled component] --> B
+    B --> D[Orb artifact .wasm]
+    D --> E[Engine::load + Install]
+    E --> F[tembra::Orb]
+    F --> G[Host: install / reload]
 ```
 
-Preparation resolves WIT, obtains TypeScript declarations from the official Jco
-generator in memory, typechecks direct type-only `.wit` imports and bundles
-installed dependencies. It does not acquire npm packages. The prepared artifact
-contains the closed source, an encoded WIT package, the selected world and content
-identities. Installation verifies the source digest and derives service metadata
-and requirements from WIT plus explicit provider bindings. No generated author
-files or original project directory are needed by the native consumer.
+## Load artifacts
 
-WIT imports identify required contracts. The installer selects providers and
-grants authority separately. An import never grants filesystem or network access.
-The standard WASI 0.3 filesystem, clocks and sockets definitions are bundled by
-`tembra-contracts`; Orb authors do not need to copy those definitions. The runtime
-uses Wasmtime 50.0.1 and wasmtime-wasi 50.0.0; their WASIp3 support remains an
-experimental dependency of this adapter.
+```rust,ignore
+use tembra::Host;
+use tembra_executor_wasm::{Engine, Install, Limits};
 
-## Run the complete native example
+let engine = Engine::new(Limits::default())?
+    // Needed only for source Orbs. Compiled components run without it.
+    .interpreter(&std::fs::read(interpreter_file)?)?
+    // Register providers; no Orb can use them until its installation grants them.
+    .filesystem("data", data_directory)?
+    .network("outbound")?;
 
-Install the workspace's pinned dependencies and build its Node tooling adapter:
+let arithmetic = engine.load(&std::fs::read(arithmetic_file)?, Install::default())?;
+let calculator = engine.load(
+    &std::fs::read(calculator_file)?,
+    Install::default().requires("example:integrated/arithmetic@1.0.0", "arithmetic", 1),
+)?;
+
+let host = Host::new(pool.spawner());
+host.install(vec![arithmetic, calculator])?;
+```
+
+`Engine::load` returns the same `Orb` type as a native declaration. Install it
+with other Orbs, replace it with `Host::reload`, and call it through ordinary
+references. `Engine::instances()` reports live Stores; it returns to zero after
+the host closes. `Engine::on_log` receives guest console output attributed by the
+host, not by the guest.
+
+A complete example is [examples/rust/wasm.rs](../../examples/rust/wasm.rs):
 
 ```sh
-mise exec -- bun install --frozen-lockfile
-mise exec -- just build-node
+cargo run --locked -p tembra-executor-wasm --example wasm -- \
+  <interpreter.wasm> <calculator.wasm> <arithmetic.wasm>
 ```
 
-Set `WASI_SDK` to a WASI SDK 34 installation and `TEMBRA_ARTIFACTS` to an output
-directory outside the source checkout. The guest requires a Rust nightly with
-the `wasm32-wasip3` target. The build records the actual compiler and SDK identities.
+## Contracts and installation
+
+WIT exports become services named `<orb>::<package>/<interface>@<version>`.
+WIT imports name required contracts only. `Install::requires` selects which
+installed Orb provides an import and its API version. A native Rust Orb can
+provide an import when it registers the matching service name and signature.
+
+`Install::grants` holds per-Orb authority. A WIT import never grants access:
+
+- **Filesystem.** `FilesystemGrant { provider, mount, writable }` mounts a
+  registered directory at a normalized virtual path. Guests can read and write
+  bounded UTF-8 text.
+- **Network.** `NetworkGrant { provider, connect }` permits outbound TCP to exact
+  literal socket addresses. There is no DNS, listening socket or UDP.
+
+Installation fails when an Orb imports WASI sockets or filesystem without a
+matching grant, or when a grant names an unregistered provider. The standard
+WASI 0.3 definitions are bundled by `tembra-contracts`; authors do not copy them.
+
+Wasmtime 50.0.1 and wasmtime-wasi 50.0.0 provide WASIp3 support. That support is
+still experimental upstream.
+
+## Limits and failure
+
+`Limits` bounds memory, fuel, packet size and callback wall time for each Store.
+Exceeding fuel or wall time terminates the callback. A trapped instance is
+quarantined and reports `unavailable`; this does not change kernel object health.
+Factory admission waits at most half the callback timeout.
+
+## Value profile
+
+Source Orbs exchange domain values as WIT-validated, bounded JSON. Supported
+values: finite numbers, integers up to 32 bits, strings, characters, lists,
+records, tuples, simple options, flags, enums, variants and results. Negative
+zero, nested options, 64-bit integers, resource handles, streams and futures are
+rejected.
+
+Compiled components are checked against their full exported signatures and called
+through the Canonical ABI. They support plain interface functions and the WASI
+providers above. Imports from a compiled component to another Orb are not yet
+supported.
+
+## Current scope
+
+Guests can use state reads, updates and selections, selected dependency
+references, resource dependencies, internal cooperative waits, console output,
+the granted filesystem and the granted TCP transport.
+
+Not yet available:
+
+- full WASI filesystem, HTTP, sockets, clocks and random as guest capabilities;
+- guest tasks, listeners, hooks, state subscriptions and migration;
+- service access policies and exclusive or opaque resources;
+- causal reentry into the same interpreter;
+- durable checkpoint and restore;
+- compiled-component execution in the browser;
+- mobile hosts.
+
+Replacement refuses a provider whose initial activation is still pending, and an
+active native one-shot task blocks replacement.
+
+## Build the interpreter
+
+Building the interpreter requires a Rust nightly with the `wasm32-wasip2` target
+and WASI SDK 34. It pins and verifies a dquickts source revision.
 
 ```sh
-python3 crates/executor-wasm/guest/build.py \
-  --sdk "$WASI_SDK" --cache "$TEMBRA_ARTIFACTS/engine"
-mise exec -- bun scripts/prepare-orb.ts \
-  --entry examples/wasm-orb/orb.ts \
-  --wit examples/wasm-orb/contract.wit --world calculator \
-  --out "$TEMBRA_ARTIFACTS/calculator.json"
-CARGO_TARGET_DIR="$TEMBRA_ARTIFACTS/rust-provider/target" cargo +nightly build \
-  --locked --release --target wasm32-wasip3 \
-  --manifest-path crates/executor-wasm/rust-provider/Cargo.toml
-export TEMBRA_WASM_PROVIDER="$TEMBRA_ARTIFACTS/rust-provider/target/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm"
-cargo run --locked -p tembra-executor-wasm --example calculator -- \
-  "$TEMBRA_ARTIFACTS/engine/engine.wasm" "$TEMBRA_ARTIFACTS/calculator.json" \
-  "$TEMBRA_WASM_PROVIDER"
-mise exec -- just test-wasm-orb \
-  "$TEMBRA_ARTIFACTS/engine/engine.wasm" \
-  "$TEMBRA_ARTIFACTS/calculator.json" "$TEMBRA_WASM_PROVIDER" "$TEMBRA_ARTIFACTS"
+just build-interpreter <wasi-sdk> <cache-directory> <dquickts-checkout>
 ```
 
-The consumer prints `24`: TypeScript sums `[3, 4, 5]` with the installed
-`simple-statistics` package, calls a Rust arithmetic Orb compiled to a separate Wasm component and updates
-managed state. Both implementations use the same canonical WIT file. Rust uses
-the official `wit-bindgen` macro through a managed build output; its bindings are
-not hand-written or checked into the author project. A separate test also covers
-interoperation with trusted Rust host code.
-The HTTP test additionally serves JSON on a local fixture, frames and parses HTTP
-inside TypeScript in Wasm, and grants only its exact TCP destination. Rust guest
-code implements the raw WASI transport. The host does not implement the HTTP client.
+With `--package`, the recipe copies `interpreter.wasm` into
+`@syntropika/tembra-engine-node` and the browser modules into
+`@syntropika/tembra-engine-wasm`. Orb changes do not require rebuilding it.
 
-Change `orb.ts` and run preparation again to install different source. The reusable
-engine binary does not need rebuilding. A new revision receives a new heap and
-fresh grants. Existing roots retain their previous implementation and authority
-until the kernel releases their version pins. The native `Host::reload` operation
-uses the kernel's replacement program, retains compatible state, and restores the
-installed version if candidate preparation or resource activation fails.
+## Qualification
 
-## TypeScript host facade
+Runtime tests need built artifacts and are ignored by ordinary workspace tests.
+`scripts/test-wasm-fixtures.ts --out <directory> [--provider <component.wasm>]`
+builds the fixture Orbs; `just test-wasm-orb` runs the ignored Rust tests against
+supplied artifacts.
 
-The Node host uses the same `createHost`, `install`, `get`, `prepare`, `reload`
-and `close` lifecycle as other SDK consumers. The optional `createInterpreter`
-backend hides Wasmtime and owns separate Stores for installed revisions. Its
-`orb` method accepts either a prepared source artifact or a prepared compiled
-component artifact; consumers do not select separate native/dynamic Orb models.
+The private interpreter transport is `tembra:runtime/interpreter@0.4.0`.
+The interpreter returns typed progress and pending effects. The host waits outside
+the Wasm stack and resumes the same heap with the completed effects. Completion
+identities never select kernel roots, declarations or contexts.
 
-Prepare the compiled provider once, then run the Node consumer with closed
-artifacts. The running consumer needs no WIT source or generated author files:
-
-```sh
-mise exec -- bun scripts/prepare-orb.ts \
-  --component "$TEMBRA_WASM_PROVIDER" \
-  --wit examples/wasm-orb/contract.wit --world arithmetic-provider \
-  --out "$TEMBRA_ARTIFACTS/arithmetic.json"
-mise exec -- just build-sdk
-mise exec -- node examples/wasm-orb/consumer.mjs \
-  "$TEMBRA_ARTIFACTS/engine/engine.wasm" \
-  "$TEMBRA_ARTIFACTS/calculator.json" "$TEMBRA_ARTIFACTS/arithmetic.json"
-```
-
-`directoryFilesystem(path)` registers a Node/system directory provider. The
-installer separately selects its WIT imports and grants a normalized virtual
-mount, with explicit write access. Directory providers never grant ambient
-access to another Orb.
-
-The browser entrypoint also exposes `createInterpreter`, `memoryFilesystem`
-and `opfsFilesystem`. Tembra prepares the reusable engine's browser modules with
-`prepareBrowserEngine`; Jco configuration stays inside the tooling. Every Orb
-receives isolated WASI namespaces over explicitly selected providers, including
-read-only mounts. The optional Rust WIT parser loads separately from the small
-metadata kernel. Browser source execution requires JSPI. Browser raw TCP and
-compiled-component execution are not yet implemented.
-
-Actual facade acceptance tests use prepared artifacts rather than mock engines:
-
-```sh
-TEMBRA_WASM_ENGINE="$TEMBRA_ARTIFACTS/engine/engine.wasm" \
-TEMBRA_WASM_ORB="$TEMBRA_ARTIFACTS/calculator.json" \
-TEMBRA_WASM_PROVIDER="$TEMBRA_WASM_PROVIDER" \
-  mise exec -- node --test packages/ts/sdk/test/interpreter.node.test.mjs
-TEMBRA_WASM_BROWSER_ENGINE="$TEMBRA_ARTIFACTS/browser-engine" \
-TEMBRA_WASM_ORB="$TEMBRA_ARTIFACTS/calculator.json" \
-  mise exec -- bun scripts/test-wasm-browser.ts
-```
-
-The browser test includes physical filesystem-write completion, memory/OPFS
-storage, denied writes and traversal, replacement, cancellation, instruction
-interruption, unresolved Promises and abandoned asynchronous work. The Node test
-also runs a real compiled Rust provider, HTTP in TypeScript, system filesystem
-access, isolated installations across host entrypoints and queued calls.
-
-## Qualified profile and remaining scope
-
-Real integration tests cover prepared artifact installation, npm calculation,
-TypeScript-to-Rust calls, typed numeric lists, state updates, dependent resource
-activation, errors and recovery, forbidden operations, concurrent admission,
-creation during an outstanding call, cancellation cleanup, wall-time/fuel
-termination, source replacement and rollback, filesystem reads/writes and denied
-access, TCP destination grants, HTTP in TypeScript, and Store release on shutdown.
-The runtime tests are explicitly ignored by ordinary workspace tests because they
-require built engine and prepared source artifacts; use `test-wasm-orb` above.
-
-The interpreter's domain methods use a WIT-validated, bounded JSON value profile.
-The fixed interpreter transport uses the Component Model ABI, but domain methods
-are not independent native Component Model exports. Supported values include
-finite numbers, bounded integers through 32 bits, strings, characters, lists,
-records, tuples, simple options, flags, enums, variants and tagged results. Negative
-zero, nested options, 64-bit integers, resource handles, streams, futures and other
-unsupported containers require additional codecs and are explicitly rejected.
-Compiled components are additionally checked against full exported signatures,
-including nested types, and execute through the real Canonical ABI. Their current
-profile supports plain interface functions and standard WASI providers. Linking
-Orb imports into compiled components still needs an additional adapter.
-
-The guest currently exposes state reads/updates/selections, selected dependency
-references, resource dependencies, cooperative waits, attributed console output,
-bounded text filesystem operations and raw TCP transport. The HTTP helper is a
-bounded UTF-8 HTTP/1 GET client for literal-IP `http:` URLs, not WHATWG Fetch; TLS,
-DNS, redirects, encoded bodies and streaming need a further client profile.
-
-The following integration work remains: browser compiled-component execution,
-native in-memory filesystem providers, compiled-component Orb imports, durable
-capture/restore, guest tasks/listeners/hooks, state subscriptions and migration,
-service access policies, exclusive/opaque resource adapters and same-interpreter
-causal reentry. Active one-shot native tasks prevent native replacement until a
-restartable task adapter is available. Replacement also refuses a provider with
-an object whose initial activation is still pending; await readiness before
-retrying. Factory admission waits at most half the configured callback timeout,
-so a causal request for a new object can fail without quarantining the healthy
-interpreter. Trap quarantine reports unavailability;
-it does not synthesize a kernel object-health transition. Ambient WASI clocks and
-randomness have not been replaced with deterministic providers. Mobile remains
-deferred. Passing native tests does not qualify these unfinished paths.
-
-The private interpreter transport is `tembra:runtime/interpreter@0.3.0`.
-Asynchronous host operations return scalar response tickets; a separate
-synchronous import takes the payload once. Tickets are confined to one callback
-and are discarded at its end. This avoids allocating response strings in an
-asynchronous result path and avoids retaining abandoned owned reply resources
-in the browser Component Model adapter. Ticket numbers never select kernel
-roots, declarations or contexts.
+The serialized interpreter uses the WASIp2 toolchain to keep its stack inside Wasm.
+This is an internal engine choice. Orb contracts and the compiled-component host
+retain their WASI interfaces. Browser JSPI suspends actual WASI I/O; ordinary
+inter-Orb waits do not create component asynchronous tasks.

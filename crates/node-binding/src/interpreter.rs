@@ -5,15 +5,15 @@ use napi::{
     threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
 use napi_derive::napi;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     cell::RefCell,
     collections::BTreeMap,
     sync::{Arc, Mutex, atomic::AtomicU32},
 };
 use tembra_executor_wasm::{
-    Binding, Engine, Grants, InterpreterPort, Limits, PortReply, PortTicket, PreparedSource,
+    Binding, Engine, Grants, InterpreterPort, Limits, PortReply, PortTicket,
 };
 
 mod component;
@@ -39,17 +39,16 @@ pub struct NodeInterpreter {
 impl NodeInterpreter {
     /// Compile the supplied reusable engine and register host-selected providers without any grants.
     #[napi(constructor)]
-    pub fn new(bytes: Uint8Array, configuration: String, log: LogCallback) -> napi::Result<Self> {
+    pub fn new(configuration: String, log: LogCallback) -> napi::Result<Self> {
         let configuration: Configuration =
             serde_json::from_str(&configuration).map_err(js_error)?;
-        let mut engine = Engine::new(&bytes, configuration.limits)
-            .map_err(js_error)?
-            .on_log(move |record| {
-                let packet =
-                    json!({"orb":record.orb,"level":record.level,"message":record.message})
-                        .to_string();
-                let _ = log.call(packet, ThreadsafeFunctionCallMode::NonBlocking);
-            });
+        let mut engine =
+            Engine::new(configuration.limits)
+                .map_err(js_error)?
+                .on_log(move |record| {
+                    let packet = serde_json::to_string(record).expect("serializable log record");
+                    let _ = log.call(packet, ThreadsafeFunctionCallMode::NonBlocking);
+                });
         for (name, path) in configuration.filesystem {
             engine = engine.filesystem(name, path).map_err(js_error)?;
         }
@@ -59,23 +58,27 @@ impl NodeInterpreter {
         Ok(Self { engine })
     }
 
+    /// Configure interpreter code lazily; compiled-component-only hosts do not load it.
+    #[napi]
+    pub fn interpreter(&mut self, bytes: Uint8Array) -> napi::Result<()> {
+        self.engine = self.engine.clone().interpreter(&bytes).map_err(js_error)?;
+        Ok(())
+    }
+
     /// Materialize a fresh isolated revision from a closed source artifact and installation grants.
     #[napi]
     pub fn open(
         &self,
-        name: String,
-        api_version: u32,
-        prepared: String,
+        artifact: &crate::NodeArtifact,
         bindings: String,
         grants: String,
     ) -> napi::Result<NodeInterpreterPort> {
-        let prepared: PreparedSource = serde_json::from_str(&prepared).map_err(js_error)?;
         let bindings: BTreeMap<String, Binding> =
             serde_json::from_str(&bindings).map_err(js_error)?;
         let grants: Grants = serde_json::from_str(&grants).map_err(js_error)?;
         let port = self
             .engine
-            .open_port(&name, api_version, &prepared, &bindings, &grants)
+            .open_port(&artifact.artifact, &bindings, &grants)
             .map_err(js_error)?;
         Ok(NodeInterpreterPort {
             port: Some(port),
@@ -233,26 +236,38 @@ impl NodeInterpreterPort {
 
 /// Preserve typed native errors across the platform transport without serializing executable data.
 pub(super) fn envelope(result: tembra::Result<Value>) -> Value {
-    match result {
-        Ok(value) => json!({"ok":value}),
-        Err(error) => {
-            json!({"error":{"code":error.code.as_str(),"reason":error.reason,"message":error.message}})
-        }
-    }
+    let reply = match result {
+        Ok(value) => Reply::Ok(value),
+        Err(error) => Reply::Error(ReplyError {
+            code: error.code.as_str(),
+            reason: error.reason,
+            message: error.message,
+        }),
+    };
+    serde_json::to_value(reply).expect("serializable platform reply")
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Reply<T, E> {
+    Ok(T),
+    Error(E),
+}
+#[derive(Serialize)]
+struct ReplyError {
+    code: &'static str,
+    reason: String,
+    message: String,
+}
+
 /// Decode one response supplied by the trusted platform scope adapter.
 fn decode(packet: &str) -> tembra::Result<Value> {
-    let value: Value = serde_json::from_str(packet)
+    let value: Reply<Value, String> = serde_json::from_str(packet)
         .map_err(|error| tembra::Error::invalid("platform_reply", error.to_string()))?;
-    if let Some(value) = value.get("ok") {
-        return Ok(value.clone());
+    match value {
+        Reply::Ok(value) => Ok(value),
+        Reply::Error(message) => Err(tembra::Error::invalid("platform_reply", message)),
     }
-    Err(tembra::Error::invalid(
-        "platform_reply",
-        value["error"]
-            .as_str()
-            .unwrap_or("platform operation failed"),
-    ))
 }
 /// Convert infrastructure diagnostics to the Node binding's ordinary error type.
 pub(super) fn js_error(error: impl ToString) -> napi::Error {

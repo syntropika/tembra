@@ -1,82 +1,75 @@
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { createRequire } from "node:module";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHost as createGenericHost } from "../dist/host.js";
-import { NodeKernel, compileContract } from "@syntropika/tembra-engine-node";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { readFile, mkdtemp, writeFile, rm } from "node:fs/promises";
-import { createHash } from "node:crypto";
-import { prepareComponent } from "../dist/tooling/index.js";
-import { createHost, createInterpreter, directoryFilesystem } from "../dist/node.js";
+import { createHost, directoryFilesystem } from "../dist/node.js";
 
-const enabled = Boolean(
-  process.env.TEMBRA_WASM_ENGINE && process.env.TEMBRA_WASM_ORB && process.env.TEMBRA_WASM_PROVIDER,
-);
+const fixtures = process.env.TEMBRA_WASM_FIXTURES;
 
 test(
-  "the published Node facade executes TypeScript and Rust Wasm Orbs, reloads and physically disposes them",
-  { skip: !enabled, timeout: 120000 },
+  "published Node host installs real TS and Rust Wasm artifacts with grants, reload and physical disposal",
+  {
+    skip: !fixtures,
+    timeout: 180000,
+  },
   async () => {
     const directory = await mkdtemp(
       path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-node-orb-"),
     );
-    await writeFile(path.join(directory, "input.txt"), "initial");
+    const bytes = async (name) =>
+      new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
+    const requirements = {
+      "example:integrated/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 },
+    };
     const logs = [];
-    const engine = createInterpreter({
-      onLog(record) {
-        logs.push(record);
-        throw new Error("Observer failure must not interrupt guest work");
-      },
-      providers: { network: ["outbound"], filesystem: { data: directoryFilesystem(directory) } },
-      engine: new Uint8Array(await readFile(process.env.TEMBRA_WASM_ENGINE)),
-    });
-    const source = JSON.parse(await readFile(process.env.TEMBRA_WASM_ORB, "utf8"));
-    source.source += `
-      console.log("module log");
-      const originalFactory = globalThis.__tembraOrb.services.calculation.create;
-      globalThis.__tembraOrb.services.calculation.create = self => {
-        console.info("factory log"); return originalFactory(self);
-      };
-      globalThis.__tembraOrb.services.calculation.methods.recover = () => {
-        console.warn("method log"); return 42;
-      };`;
-    source.sha256 = createHash("sha256").update(source.source).digest("hex");
+    // Observe real native Store counts without adding a testing factory to the public SDK.
+    const binding = createRequire(import.meta.url)("@syntropika/tembra-engine-node");
+    const Original = binding.NodeInterpreter;
+    const engines = [];
+    binding.NodeInterpreter = class extends Original {
+      constructor(...args) {
+        super(...args);
+        engines.push(this);
+      }
+    };
     const options = {
-      name: "calculator",
-      apiVersion: 1,
-      source,
-      bindings: {
-        "example:integrated/arithmetic@1.0.0": {
-          kind: "orb",
-          name: "arithmetic",
-          api_version: 1,
-          world: "arithmetic-provider",
+      isolated: {
+        providers: { network: ["outbound"], filesystem: { data: directoryFilesystem(directory) } },
+        onLog(record) {
+          logs.push(record);
+          throw new Error("Observer failure");
         },
       },
     };
-    const definition = engine.orb(options);
-    const host = createHost();
-    const provider = engine.orb({
-      name: "arithmetic",
-      apiVersion: 1,
-      source: await prepareComponent({
-        component: process.env.TEMBRA_WASM_PROVIDER,
-        wit: new URL("../../../../examples/wasm-orb/contract.wit", import.meta.url).pathname,
-        world: "arithmetic-provider",
-      }),
-    });
+    const host = createHost(options);
     try {
-      await host.install([provider, definition]);
-      assert.equal(engine.instances(), 2);
+      await writeFile(path.join(directory, "input.txt"), "initial");
+      const provider = { artifact: await bytes("arithmetic") };
+      const calculator = { artifact: await bytes("calculator"), requires: requirements };
+      await host.install([provider, calculator]);
+      assert.equal(engines[0].instances(), 2);
       const reference = await host.get("calculator::example:integrated/calculation@1.0.0", "main");
       assert.equal(await reference.sum({ values: [2, 4, 6] }), 24);
-      assert.equal(await reference.read(), 24);
       assert.equal(reference.state.value, 24);
-      const other = createGenericHost({ kernel: new NodeKernel() });
+      assert.equal(await reference["resource-value"](), 42);
+      await assert.rejects(reference.fail(), /Expected guest failure/);
+      await assert.rejects(reference.forbidden());
+      await assert.rejects(reference.malformed());
+      assert.equal(await reference.fanout(), 24);
+      await assert.rejects(reference.sum({ values: [0.5] }));
+      assert.equal(await reference.recover(), 42);
+      assert.deepEqual(await reference.checked(7), { tag: "ok", val: 7 });
+      assert.deepEqual(await reference.checked(-1), { tag: "err", val: "negative" });
+      await new Promise(setImmediate);
+      for (const message of ["module log", "factory log", "method log"])
+        assert(logs.some((record) => record.orb === "calculator" && record.message === message));
+      const other = createHost(options);
       try {
-        await other.install([provider, definition]);
+        await other.install([provider, calculator]);
         const separate = await other.get(
           "calculator::example:integrated/calculation@1.0.0",
           "main",
@@ -88,37 +81,13 @@ test(
       } finally {
         await other.close();
       }
-      assert.equal(engine.instances(), 2);
-      assert.equal(await reference["resource-value"](), 42);
-      await assert.rejects(reference.fail(), /Expected guest failure/);
-      await assert.rejects(reference.forbidden());
-      await assert.rejects(reference.sum({ values: [0.5] }));
-      assert.equal(await reference.recover(), 42);
-      await new Promise(setImmediate);
-      for (const message of ["module log", "factory log", "method log"])
-        assert(logs.some((record) => record.orb === "calculator" && record.message === message));
+      assert.equal(engines[1].instances(), 0);
       assert.deepEqual(await Promise.all([reference.read(), reference.recover()]), [24, 42]);
-      assert.deepEqual(
-        await Promise.all(Array.from({ length: 4 }, () => reference.pending())),
-        [1, 1, 1, 1],
-      );
-      const changed = source.source.replace(
-        "Expected guest failure",
-        "Expected revised guest failure",
-      );
-      assert.notEqual(changed, source.source);
-      const replacement = engine.orb({
-        ...options,
-        source: {
-          ...source,
-          source: changed,
-          sha256: createHash("sha256").update(changed).digest("hex"),
-        },
-      });
+      const replacement = { artifact: await bytes("revised"), requires: requirements };
       const candidate = await host.prepare([replacement]);
-      assert.equal(engine.instances(), 3);
+      assert.equal(engines[0].instances(), 3);
       await candidate.abort();
-      assert.equal(engine.instances(), 2);
+      assert.equal(engines[0].instances(), 2);
       await host.reload([replacement]);
       assert.equal(await reference.read(), 24);
       await assert.rejects(reference.fail(), /Expected revised guest failure/);
@@ -132,25 +101,26 @@ test(
       );
       assert.equal(await reference.recover(), 42);
       const server = createServer((_request, response) => {
-        response.writeHead(200, { "Content-Type": "application/json", "Content-Length": "18" });
-        response.end('{"values":[1,2,3]}');
+        const body = '{"values":[1,2,3]}';
+        response.writeHead(200, {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        });
+        response.end(body);
       });
       server.listen(0, "127.0.0.1");
       await once(server, "listening");
       try {
         const { port } = server.address();
-        const sourceOnline = { ...source, world: "online-calculator" };
-        const online = engine.orb({
-          ...options,
-          name: "online",
-          source: sourceOnline,
-          bindings: {
-            ...options.bindings,
-            "wasi:sockets/types@0.3.0": { kind: "host", provider: "outbound" },
-          },
+        const online = { artifact: await bytes("online"), requires: requirements };
+        await assert.rejects(
+          host.install(online),
+          (error) => error.code === "forbidden" && error.reason === "orb_grant",
+        );
+        await host.install({
+          ...online,
           grants: { network: [{ provider: "outbound", connect: [`127.0.0.1:${port}`] }] },
         });
-        await host.install(online);
         const network = await host.get("online::example:integrated/calculation@1.0.0", "main");
         assert.equal(await network["fetch-and-sum"](`http://127.0.0.1:${port}/values`), 12);
         network.release();
@@ -159,49 +129,39 @@ test(
           server.close((error) => (error ? reject(error) : resolve())),
         );
       }
-      const filesSource =
-        "globalThis.__tembraOrb={services:{files:{methods:{read:async(_e,_c,path)=>tembra.filesystem.readText(path),write:async(_e,_c,path,value)=>tembra.filesystem.writeText(path,value)}}}};";
-      const files = {
-        format: "tembra-interpreter-source-v1",
-        source: filesSource,
-        sha256: createHash("sha256").update(filesSource).digest("hex"),
-        typesSha256: "",
-        contract: Array.from(
-          compileContract(
-            new URL("../../../../crates/executor-wasm/tests/wit/storage", import.meta.url).pathname,
-            "storage",
-          ),
-        ),
-        world: "storage",
-      };
-      await host.install(
-        engine.orb({
-          name: "files",
-          apiVersion: 1,
-          source: files,
-          bindings: {
-            "wasi:filesystem/types@0.3.0": { kind: "host", provider: "data" },
-            "wasi:filesystem/preopens@0.3.0": { kind: "host", provider: "data" },
-            "wasi:clocks/system-clock@0.3.0": { kind: "host", provider: "system-clock" },
-          },
+      await host.install([
+        {
+          artifact: await bytes("writer"),
           grants: { filesystem: [{ provider: "data", mount: "/data", writable: true }] },
-        }),
-      );
-      const storage = await host.get("files::example:storage/files@1.0.0", "main");
-      assert.equal(await storage.read("/data/input.txt"), "initial");
-      await storage.write("/data/output.txt", "persisted");
+        },
+        {
+          artifact: await bytes("reader"),
+          grants: { filesystem: [{ provider: "data", mount: "/data", writable: false }] },
+        },
+      ]);
+      const writer = await host.get("writer::example:storage/files@1.0.0", "main");
+      const reader = await host.get("reader::example:storage/files@1.0.0", "main");
+      assert.equal(await reader.read("/data/input.txt"), "initial");
+      await writer.write("/data/output.txt", "persisted");
       assert.equal(await readFile(path.join(directory, "output.txt"), "utf8"), "persisted");
-      await assert.rejects(storage.read("/data/../outside.txt"));
-      storage.release();
+      await assert.rejects(reader.write("/data/output.txt", "forbidden"));
+      await assert.rejects(reader.read("/data/../outside.txt"));
+      const malicious = path.join(directory, "untrusted.mjs");
+      await writeFile(malicious, "globalThis.__tembraUnsafeLoad = true; export default {};");
+      await assert.rejects(host.load(malicious), /\.wasm artifact/);
+      assert.equal(globalThis.__tembraUnsafeLoad, undefined);
+      reader.release();
+      writer.release();
       reference.release();
     } finally {
       try {
         await host.close();
       } finally {
+        binding.NodeInterpreter = Original;
         await rm(directory, { recursive: true, force: true });
       }
     }
-    assert.equal(engine.instances(), 0);
+    for (const engine of engines) assert.equal(engine.instances(), 0);
     assert.equal(host.diagnostics().values, 0);
     assert.equal(host.diagnostics().pendingJobs, 0);
   },

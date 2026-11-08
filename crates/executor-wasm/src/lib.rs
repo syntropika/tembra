@@ -3,16 +3,20 @@ mod adapter;
 mod bindings;
 mod component;
 mod engine;
+mod install;
 mod port;
-mod prepared;
+mod protocol;
 mod providers;
 mod worker;
 
+#[doc(hidden)]
 pub use component::ComponentPort;
 pub use engine::{Engine, Limits, LogRecord};
+pub use install::Install;
+#[doc(hidden)]
 pub use port::{InterpreterPort, PortEvent, PortEvents, PortReply, PortTicket};
-pub use prepared::PreparedSource;
 pub use providers::{FilesystemGrant, Grants, NetworkGrant};
+#[doc(hidden)]
 pub use tembra_contracts::{Binding, Contract};
 
 use tembra::{Error, core::Code};

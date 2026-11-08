@@ -136,6 +136,7 @@ impl<A: Serialize + DeserializeOwned + 'static> Hook<A, A> {
     ///     ),
     ///     Orb::new("contributor", 1)
     ///         .requires(Requirement {
+    ///             signatures: Default::default(),
     ///             orb: "provider".into(), api_version: 1,
     ///             methods: Default::default(), hooks: ["limit".into()].into(),
     ///         })

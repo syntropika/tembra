@@ -1,19 +1,17 @@
 //! Share compiled machine code without sharing Orb heaps or capabilities.
-use crate::providers::{Grants, Providers};
-use crate::{adapter, failure, worker};
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+use crate::providers::Providers;
+use crate::{adapter, failure};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::sync::{
+    Arc, Mutex, Weak,
+    atomic::{AtomicUsize, Ordering},
 };
 use tembra::{Orb, Result};
-use tembra_contracts::{Binding, Contract};
 use wasmtime::component::Component;
 
 /// Console output is attributed by the host, never by a guest-provided Orb name.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct LogRecord {
     pub orb: String,
     pub level: String,
@@ -48,7 +46,8 @@ impl Default for Limits {
 #[derive(Clone)]
 pub struct Engine {
     pub(crate) engine: wasmtime::Engine,
-    pub(crate) component: Arc<Component>,
+    pub(crate) component: Option<Arc<Component>>,
+    compiled: Arc<Mutex<BTreeMap<[u8; 32], Weak<Component>>>>,
     pub(crate) limits: Limits,
     pub(crate) providers: Providers,
     pub(crate) active_instances: Arc<AtomicUsize>,
@@ -56,8 +55,8 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Compile an explicitly supplied reusable interpreter component once.
-    pub fn new(component: &[u8], limits: Limits) -> Result<Self> {
+    /// Configure Wasmtime limits without loading an interpreter for compiled-only hosts.
+    pub fn new(limits: Limits) -> Result<Self> {
         if limits.memory_bytes < 2 << 20
             || limits.memory_bytes > u32::MAX as usize
             || limits.fuel == 0
@@ -71,10 +70,10 @@ impl Engine {
         let mut config = wasmtime::Config::new();
         config.wasm_component_model_async(true).consume_fuel(true);
         let engine = wasmtime::Engine::new(&config).map_err(failure)?;
-        let component = Arc::new(Component::new(&engine, component).map_err(failure)?);
         Ok(Self {
             engine,
-            component,
+            component: None,
+            compiled: Arc::default(),
             limits,
             providers: Providers::default(),
             active_instances: Arc::default(),
@@ -120,49 +119,77 @@ impl Engine {
         Ok(self)
     }
 
-    /// Prepare an isolated TypeScript revision against its WIT contract and provider bindings.
-    pub fn prepare(
-        &self,
-        contract: &Contract,
-        name: &str,
-        api_version: u32,
-        source: &str,
-        bindings: &BTreeMap<String, Binding>,
-    ) -> Result<Orb> {
-        self.prepare_with_grants(
-            contract,
-            name,
-            api_version,
-            source,
-            bindings,
-            &Grants::default(),
-        )
+    /// Compile reusable interpreter code for source Orbs without changing earlier engine clones.
+    pub fn interpreter(mut self, component: &[u8]) -> Result<Self> {
+        if self.component.is_some() {
+            return Err(failure("interpreter is already configured"));
+        }
+        let component = Arc::new(Component::new(&self.engine, component).map_err(failure)?);
+        self.component = Some(component);
+        Ok(self)
     }
 
-    /// Resolve standard WASI providers using this installation's separately supplied Orb grants.
-    pub fn prepare_with_grants(
+    /// Reuse live compiled code while fresh Stores retain all mutable state and permissions.
+    pub(crate) fn compiled(&self, bytes: &[u8]) -> Result<Arc<Component>> {
+        let key: [u8; 32] = Sha256::digest(bytes).into();
+        let mut cache = self.compiled.lock().map_err(failure)?;
+        if let Some(component) = cache.get(&key).and_then(Weak::upgrade) {
+            return Ok(component);
+        }
+        cache.retain(|_, component| component.strong_count() != 0);
+        let component = Arc::new(Component::new(&self.engine, bytes).map_err(failure)?);
+        cache.insert(key, Arc::downgrade(&component));
+        Ok(component)
+    }
+
+    /// Materialize one closed artifact through the common native Orb installation model.
+    pub fn load(&self, bytes: &[u8], install: crate::Install) -> Result<Orb> {
+        let artifact = tembra_contracts::Artifact::decode(bytes).map_err(failure)?;
+        self.load_artifact(&artifact, &install)
+    }
+
+    /// Reuse an already resolved artifact without reparsing its contract or copying its payload.
+    pub(crate) fn load_artifact(
         &self,
-        contract: &Contract,
-        name: &str,
-        api_version: u32,
-        source: &str,
-        bindings: &BTreeMap<String, Binding>,
-        grants: &Grants,
+        artifact: &tembra_contracts::Artifact,
+        install: &crate::Install,
     ) -> Result<Orb> {
-        let plan = contract
-            .plan(name, api_version, bindings)
-            .map_err(failure)?;
-        contract.check_value_profile().map_err(failure)?;
-        for (binding, provider) in bindings {
-            if matches!(provider, Binding::Orb { .. }) {
-                contract
-                    .check_import_value_profile(binding)
-                    .map_err(failure)?;
+        let bindings = artifact
+            .contract
+            .providers(&install.requires, &install.grants)?;
+        match &artifact.implementation {
+            tembra_contracts::ArtifactImplementation::Source(_) => {
+                let port = self.open_port(artifact, &bindings, &install.grants)?;
+                adapter::orb(
+                    port.metadata,
+                    port.session,
+                    port.services,
+                    artifact.contract.clone(),
+                    &bindings,
+                )
+            }
+            tembra_contracts::ArtifactImplementation::Component(_) => {
+                self.component_orb(artifact, &bindings, &install.grants)
             }
         }
-        let context = self.providers.context(&plan.host_imports, grants)?;
-        let session = worker::Session::start(self.clone(), context, name.to_owned())?;
-        let description = session.load(source, contract.describe())?;
-        adapter::orb(plan.orb, session, description, contract.clone(), bindings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloned_engines_reuse_live_code_without_mutating_each_others_configuration() {
+        let engine = Engine::new(Limits::default()).unwrap();
+        let bytes = b"\0asm\x0d\0\x01\0";
+        let first = engine.compiled(bytes).unwrap();
+        let clone = engine.clone();
+        let second = clone.compiled(bytes).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        let configured = clone.interpreter(bytes).unwrap();
+        assert!(configured.component.is_some());
+        assert!(engine.component.is_none());
+        assert_eq!(engine.instances(), 0);
     }
 }

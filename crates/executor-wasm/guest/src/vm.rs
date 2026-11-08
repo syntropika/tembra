@@ -1,16 +1,12 @@
 //! Synchronous VM access keeps Rust futures out of the serializable JavaScript heap.
-use futures::future::AbortHandle;
 use rquickjs::{
-    Context, Function, Promise, Runtime,
+    Array, Context, Function, Object, Promise, Runtime,
     context::EvalOptions,
     promise::PromiseState,
     snapshot::{SnapshotHost, SnapshotKind},
 };
-use serde_json::{Value, json};
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use serde_json::Value;
+use std::{cell::Cell, rc::Rc};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,7 +20,6 @@ pub(super) struct Load {
 fn default_ticks() -> u32 {
     10000
 }
-#[derive(serde::Deserialize)]
 pub(super) struct Effect {
     pub id: u64,
     pub packet: String,
@@ -35,7 +30,6 @@ pub(super) struct Vm {
     pub runtime: Runtime,
     pub accepting: Cell<bool>,
     pub interrupted: Rc<Cell<bool>>,
-    pub interrupt: RefCell<Option<AbortHandle>>,
     ticks: Rc<Cell<u32>>,
     tick_limit: u32,
     host: SnapshotHost,
@@ -73,10 +67,22 @@ impl Vm {
                     "__tembraContract",
                     ctx.json_parse(configuration.contract.to_string())?,
                 )?;
-                ctx.eval::<(), _>(include_str!("bridge.js"))?;
-                ctx.eval::<(), _>(include_str!("state.js"))?;
-                ctx.eval::<(), _>(include_str!("values.js"))?;
-                ctx.eval::<(), _>(include_str!("runtime.js"))?;
+                ctx.eval::<(), _>(include_str!(concat!(
+                    env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
+                    "/bridge.js"
+                )))?;
+                ctx.eval::<(), _>(include_str!(concat!(
+                    env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
+                    "/state.js"
+                )))?;
+                ctx.eval::<(), _>(include_str!(concat!(
+                    env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
+                    "/values.js"
+                )))?;
+                ctx.eval::<(), _>(include_str!(concat!(
+                    env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
+                    "/runtime.js"
+                )))?;
                 let mut options = EvalOptions::default();
                 options.typescript = true;
                 ctx.eval_with_options::<(), _>(configuration.source.clone(), options)
@@ -88,7 +94,6 @@ impl Vm {
             runtime,
             accepting: Cell::new(false),
             interrupted,
-            interrupt: RefCell::new(None),
             ticks,
             tick_limit: configuration.instruction_ticks,
             host,
@@ -164,18 +169,52 @@ impl Vm {
     }
     /// Drain data-only effect requests for the outer host to admit under the current scope.
     pub fn effects(&self) -> Result<Vec<Effect>, String> {
-        serde_json::from_str(&self.helper("__tembraTakeEffects", None)?).map_err(|e| e.to_string())
+        self.context.with(|ctx| {
+            let result = (|| -> rquickjs::Result<Vec<Effect>> {
+                let function: Function = ctx.globals().get("__tembraTakeEffects")?;
+                let array: Array = function.call(())?;
+                if array.len() > 128 {
+                    return Err(rquickjs::Error::new_from_js_message(
+                        "effects",
+                        "queue",
+                        "host operation queue is full",
+                    ));
+                }
+                (0..array.len())
+                    .map(|index| {
+                        let entry: Object = array.get(index)?;
+                        let id: f64 = entry.get("id")?;
+                        if !id.is_finite()
+                            || id.fract() != 0.0
+                            || !(1.0..=9_007_199_254_740_991.0).contains(&id)
+                        {
+                            return Err(rquickjs::Error::new_from_js_message(
+                                "effect",
+                                "identity",
+                                "invalid effect identity",
+                            ));
+                        }
+                        Ok(Effect {
+                            id: id as u64,
+                            packet: entry.get("packet")?,
+                        })
+                    })
+                    .collect()
+            })();
+            result.map_err(|error| format!("{error:?}: {:?}", ctx.catch()))
+        })
     }
-    /// Deliver one outcome to its original Promise; unknown and duplicate effects are refused.
+    /// Deliver typed data to the original Promise without a second JSON envelope.
     pub fn complete(&self, id: u64, result: Result<String, String>) -> Result<(), String> {
-        let packet = match result {
-            Ok(value) => json!({"id":id,"ok":true,"value":value}),
-            Err(error) => json!({"id":id,"ok":false,"value":error}),
-        };
+        if id == 0 || id > 9_007_199_254_740_991 {
+            return Err("invalid effect identity".into());
+        }
+        let ok = result.is_ok();
+        let value = result.unwrap_or_else(|error| error);
         self.context.with(|ctx| {
             let result = (|| -> rquickjs::Result<()> {
                 let function: Function = ctx.globals().get("__tembraCompleteEffect")?;
-                function.call((packet.to_string(),))
+                function.call((id as f64, ok, value))
             })();
             result.map_err(|error| format!("{error:?}: {:?}", ctx.catch()))
         })

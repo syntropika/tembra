@@ -68,6 +68,12 @@ impl<E: 'static> Service<E> {
         self
     }
 
+    /// Declare the canonical ABI signature used by typed dependency admission.
+    pub fn signature(mut self, signature: Option<String>) -> Self {
+        self.metadata.signature = signature;
+        self
+    }
+
     /// Set the ownership policy and optional idle retention period.
     pub fn lifetime(mut self, lifetime: core::Lifetime, linger_ms: u32) -> Self {
         self.metadata.lifetime = lifetime;
@@ -159,6 +165,12 @@ impl Orb {
     /// Add an explicit versioned orb dependency.
     pub fn requires(mut self, requirement: core::Requirement) -> Self {
         self.metadata.requires.push(requirement);
+        self
+    }
+
+    /// Mark an executor-backed orb whose every revision owns a private resource realm.
+    pub fn isolated(mut self) -> Self {
+        self.metadata.isolated = true;
         self
     }
 

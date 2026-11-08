@@ -7,7 +7,6 @@ members = [
   "crates/tembra",
   "crates/browser-wasm",
   "crates/node-binding",
-  "crates/executor-js",
   "crates/executor-wasm",
   "crates/mobile",
 ]

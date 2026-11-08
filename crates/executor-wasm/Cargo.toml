@@ -8,6 +8,10 @@ repository.workspace = true
 description = "Isolated WebAssembly execution over the Tembra host"
 publish = false
 
+[[example]]
+name = "wasm"
+path = "../../examples/rust/wasm.rs"
+
 [dependencies]
 tembra = { path = "../tembra", version = "=0.2.2" }
 tembra-contracts.workspace = true
@@ -27,7 +31,7 @@ wasmtime = { version = "=50.0.1", default-features = false, features = [
   "runtime",
   "std",
 ] }
-wasmtime-wasi = { version = "=50.0.0", default-features = false, features = ["p3"] }
+wasmtime-wasi = { version = "=50.0.0", default-features = false, features = ["p2", "p3"] }
 
 [lints]
 workspace = true

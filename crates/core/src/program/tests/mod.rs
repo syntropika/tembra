@@ -89,5 +89,6 @@ fn settle_failed_consumer(host: &Host, consumer: Id) {
 mod cleanup;
 mod migration;
 mod readiness;
+mod realms;
 mod recovery;
 mod scheduler;

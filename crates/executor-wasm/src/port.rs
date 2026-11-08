@@ -1,6 +1,6 @@
 //! Platform adapters route scoped host callbacks without embedding another lifecycle engine.
 use crate::{
-    Binding, Engine, Grants, PreparedSource, adapter, failure,
+    Binding, Engine, Grants, failure,
     worker::{Event, Session},
 };
 use serde_json::Value;
@@ -15,8 +15,11 @@ use tembra::Result;
 
 /// A thread-affine interpreter endpoint for an existing platform-owned Tembra kernel.
 pub struct InterpreterPort {
-    session: Session,
-    description: Value,
+    pub(crate) session: Session,
+    pub(crate) description: Value,
+    /// Checked once here so the native facade installs callbacks without revalidating the guest.
+    pub(crate) services: Vec<tembra_contracts::ServiceBinding>,
+    pub(crate) metadata: tembra::core::Orb,
     packet_bytes: usize,
 }
 
@@ -24,13 +27,17 @@ impl Engine {
     /// Validate source, imports and grants before creating a platform-owned interpreter endpoint.
     pub fn open_port(
         &self,
-        name: &str,
-        api_version: u32,
-        prepared: &PreparedSource,
+        artifact: &tembra_contracts::Artifact,
         bindings: &BTreeMap<String, Binding>,
         grants: &Grants,
     ) -> Result<InterpreterPort> {
-        let contract = prepared.resolve()?;
+        let contract = &artifact.contract;
+        let name = &artifact.identity.name;
+        let api_version = artifact.identity.api_version;
+        let tembra_contracts::ArtifactImplementation::Source(source) = &artifact.implementation
+        else {
+            return Err(failure("source interpreter requires a source artifact"));
+        };
         let plan = contract
             .plan(name, api_version, bindings)
             .map_err(failure)?;
@@ -42,18 +49,19 @@ impl Engine {
         }
         let context = self.providers.context(&plan.host_imports, grants)?;
         let session = Session::start(self.clone(), context, name.into())?;
-        let description = session.load(&prepared.source, contract.describe())?;
-        // Reuse callback-shape validation; no native scope is declared by constructing this Orb.
-        let _ = adapter::orb(
-            plan.orb.clone(),
-            session.clone(),
-            description.clone(),
-            contract,
-            bindings,
-        )?;
+        let description = session.load(source, contract.describe())?;
+        let services = contract
+            .check_implementation(
+                name,
+                api_version,
+                serde_json::from_value(description.clone()).map_err(failure)?,
+            )
+            .map_err(failure)?;
         Ok(InterpreterPort {
             session,
             description,
+            services,
+            metadata: plan.orb,
             packet_bytes: self.limits.packet_bytes,
         })
     }

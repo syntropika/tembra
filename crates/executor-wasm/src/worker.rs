@@ -15,8 +15,8 @@ use tokio::sync::oneshot;
 use wasmtime_wasi::WasiCtxBuilder;
 
 mod diagnostics;
-mod replies;
 mod runtime;
+mod steps;
 
 pub(crate) enum Event {
     Host {
@@ -87,13 +87,14 @@ impl Session {
                     .enable_all()
                     .build();
                 if let Ok(runtime) = runtime {
-                    runtime.block_on(runtime::run(
+                    let terminal = runtime.block_on(runtime::run(
                         engine,
                         receive,
                         wasi,
                         worker_poison,
                         worker_diagnostics,
                     ));
+                    publish_after_shutdown(runtime, terminal);
                 }
             })
             .map_err(failure)?;
@@ -133,11 +134,21 @@ impl Session {
     }
 
     /// Load source without issuing any host authority to module initialization.
-    pub(crate) fn load(&self, source: &str, contract: Value) -> Result<Value> {
+    pub(crate) fn load(&self, source: &str, contract: impl serde::Serialize) -> Result<Value> {
+        #[derive(serde::Serialize)]
+        struct Load<'a, T> {
+            source: &'a str,
+            heap_bytes: usize,
+            contract: T,
+        }
         self.blocking(
             "load",
-            serde_json::json!({"source":source,"heap_bytes":self.0.heap_bytes,"contract":contract})
-                .to_string(),
+            serde_json::to_string(&Load {
+                source,
+                heap_bytes: self.0.heap_bytes,
+                contract,
+            })
+            .map_err(failure)?,
             |packet, _| self.log(packet),
         )
     }
@@ -156,7 +167,8 @@ impl Session {
         drop(receive);
         let command = Command {
             export: "dispatch",
-            packet: serde_json::json!({"kind":"release","environment":environment}).to_string(),
+            packet: serde_json::to_string(&crate::protocol::GuestCommand::Release { environment })
+                .expect("serializable release"),
             events,
         };
         if let Some(sender) = &self.0.commands {
@@ -261,11 +273,11 @@ impl Session {
     /// Keep the callback physically owned until guest completion and requested host work settle.
     pub(crate) async fn dispatch(
         &self,
-        packet: Value,
+        packet: impl serde::Serialize,
         host: impl AsyncFn(&str, bool) -> Result<Value>,
     ) -> Result<Value> {
         let _admission = self.0.admission.lock().await;
-        let events = self.begin("dispatch", packet.to_string())?;
+        let events = self.begin("dispatch", serde_json::to_string(&packet).map_err(failure)?)?;
         let mut guard = Busy {
             owner: &self.0,
             events: &events,
@@ -343,6 +355,17 @@ impl Drop for Busy<'_> {
     }
 }
 
+/// Runtime destruction joins WASI blocking work before a quarantine becomes observable.
+fn publish_after_shutdown(
+    runtime: tokio::runtime::Runtime,
+    terminal: Vec<(Sender<Event>, String)>,
+) {
+    drop(runtime);
+    for (events, error) in terminal {
+        let _ = events.send_blocking(Event::Done(Err(error)));
+    }
+}
+
 /// Parse guest output only after preserving boundary diagnostics.
 fn decode(result: std::result::Result<String, String>) -> Result<Value> {
     serde_json::from_str(&result.map_err(failure)?).map_err(failure)
@@ -363,6 +386,41 @@ mod tests {
     use crate::{Contract, Limits};
     use std::time::{Duration, Instant};
 
+    /// A detached WASI blocking operation must finish before quarantine is published.
+    #[test]
+    fn quarantine_waits_for_blocking_runtime_work() {
+        let (started, ready) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let (events, receive) = async_channel::bounded(1);
+        let thread = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.spawn_blocking(move || {
+                let _ = started.send(());
+                let _ = blocked.recv();
+            });
+            publish_after_shutdown(runtime, vec![(events, "quarantined".into())]);
+        });
+        ready.recv().unwrap();
+        let (published, observed) = mpsc::channel();
+        let observer = thread::spawn(move || {
+            let _ = published.send(receive.recv_blocking());
+        });
+        let premature = observed.recv_timeout(Duration::from_millis(50));
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        assert!(
+            premature.is_err(),
+            "quarantine preceded physical completion"
+        );
+        assert!(
+            matches!(observed.recv().unwrap(), Ok(Event::Done(Err(error))) if error == "quarantined")
+        );
+        observer.join().unwrap();
+    }
+
     /// Abandon an actual buffered synchronous import and prove Store destruction cannot hang.
     #[test]
     #[ignore = "requires TEMBRA_WASM_ENGINE"]
@@ -370,13 +428,12 @@ mod tests {
         let bytes =
             std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE"))
                 .unwrap();
-        let engine = Engine::new(
-            &bytes,
-            Limits {
-                timeout_ms: 500,
-                ..Limits::default()
-            },
-        )
+        let engine = Engine::new(Limits {
+            timeout_ms: 500,
+            ..Limits::default()
+        })
+        .unwrap()
+        .interpreter(&bytes)
         .unwrap();
         let session =
             Session::start(engine.clone(), WasiCtxBuilder::new(), "abandoned".into()).unwrap();
@@ -416,14 +473,13 @@ mod tests {
         let bytes =
             std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE"))
                 .unwrap();
-        let engine = Engine::new(
-            &bytes,
-            Limits {
-                fuel: 10_000_000_000,
-                timeout_ms: 5000,
-                ..Limits::default()
-            },
-        )
+        let engine = Engine::new(Limits {
+            fuel: 10_000_000_000,
+            timeout_ms: 5000,
+            ..Limits::default()
+        })
+        .unwrap()
+        .interpreter(&bytes)
         .unwrap();
         let session =
             Session::start(engine.clone(), WasiCtxBuilder::new(), "exhausted".into()).unwrap();

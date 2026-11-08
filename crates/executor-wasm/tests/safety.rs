@@ -2,12 +2,11 @@
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
     rc::Rc,
     time::{Duration, Instant},
 };
 use tembra::Host;
-use tembra_executor_wasm::{Contract, Engine, Limits};
+use tembra_executor_wasm::{Contract, Engine, Install, Limits};
 
 const WIT: &str = "package example:safety; interface checks { run: async func(mode: string) -> u32; } world test { export checks; }";
 const SOURCE: &str = r#"
@@ -72,20 +71,22 @@ globalThis.__tembraOrb = {services:{checks:{
 fn scope_cleanup_and_termination() {
     let component =
         std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
-    let engine = Engine::new(
-        &component,
-        Limits {
-            timeout_ms: 500,
-            ..Limits::default()
-        },
-    )
+    let engine = Engine::new(Limits {
+        timeout_ms: 500,
+        ..Limits::default()
+    })
+    .unwrap()
+    .interpreter(&component)
     .unwrap();
     let contract = Contract::from_source("safety.wit", WIT, None).unwrap();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![
         engine
-            .prepare(&contract, "safe", 1, SOURCE, &BTreeMap::new())
+            .load(
+                &contract.artifact(Some(SOURCE), None, "safe", 1).unwrap(),
+                Install::default(),
+            )
             .unwrap(),
     ])
     .unwrap();
@@ -194,7 +195,10 @@ fn scope_cleanup_and_termination() {
         let host = Host::new(pool.spawner());
         host.install(vec![
             engine
-                .prepare(&contract, "limited", 1, SOURCE, &BTreeMap::new())
+                .load(
+                    &contract.artifact(Some(SOURCE), None, "limited", 1).unwrap(),
+                    Install::default(),
+                )
                 .unwrap(),
         ])
         .unwrap();
@@ -237,13 +241,12 @@ fn scope_cleanup_and_termination() {
 fn causal_factory_wait_is_bounded_and_recoverable() {
     let component =
         std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
-    let engine = Engine::new(
-        &component,
-        Limits {
-            timeout_ms: 1000,
-            ..Limits::default()
-        },
-    )
+    let engine = Engine::new(Limits {
+        timeout_ms: 1000,
+        ..Limits::default()
+    })
+    .unwrap()
+    .interpreter(&component)
     .unwrap();
     let wit = "package example:safety; interface bridge { bounce: async func() -> u32; } interface checks { run: async func(mode:string) -> u32; } world provider {export bridge;} world test {import bridge;export checks;}";
     let contract = Contract::from_source("checks.wit", wit, Some("test")).unwrap();
@@ -255,21 +258,22 @@ globalThis.__tembraOrb.services.checks.create=self => ({{...create(self),bridge:
 globalThis.__tembraOrb.services.checks.methods.run=(e,c,mode) => mode === "reentry" ? e.bridge.bounce(c) : run(e,c,mode);
 "#
     );
-    let bindings = BTreeMap::from([(
-        "example:safety/bridge".into(),
-        tembra_executor_wasm::Binding::Orb {
-            name: "bridge".into(),
-            api_version: 1,
-            world: "provider".into(),
-        },
-    )]);
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     let creating = host.clone();
     let bridge = tembra::Orb::new("bridge", 1).service(
-        tembra::Service::new("bridge::example:safety/bridge", |_| Ok(())).method(
-            "bounce",
-            move |_, _, _: Vec<Value>| {
+        tembra::Service::new("bridge::example:safety/bridge", |_| Ok(()))
+            .signature(
+                Contract::from_bytes(&contract.encode().unwrap(), Some("provider"))
+                    .unwrap()
+                    .plan("bridge", 1, &Default::default())
+                    .unwrap()
+                    .orb
+                    .services
+                    .remove(0)
+                    .signature,
+            )
+            .method("bounce", move |_, _, _: Vec<Value>| {
                 let host = creating.clone();
                 async move {
                     let next = host.get(
@@ -280,13 +284,15 @@ globalThis.__tembraOrb.services.checks.methods.run=(e,c,mode) => mode === "reent
                     next.ready().await?;
                     Ok(0_u32)
                 }
-            },
-        ),
+            }),
     );
     host.install(vec![
         bridge,
         engine
-            .prepare(&contract, "safe", 1, &source, &bindings)
+            .load(
+                &contract.artifact(Some(&source), None, "safe", 1).unwrap(),
+                Install::default().requires("example:safety/bridge", "bridge", 1),
+            )
             .unwrap(),
     ])
     .unwrap();

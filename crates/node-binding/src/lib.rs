@@ -2,6 +2,36 @@
 use napi_derive::napi;
 mod interpreter;
 
+/// Immutable Orb bytes and their resolved WIT graph, shared by every installation of this artifact.
+#[napi]
+pub struct NodeArtifact {
+    pub(crate) artifact: tembra_contracts::Artifact,
+}
+
+#[napi]
+impl NodeArtifact {
+    /// Parse Wasm data without creating a guest or evaluating implementation code.
+    #[napi(constructor)]
+    pub fn new(bytes: napi::bindgen_prelude::Uint8Array) -> napi::Result<Self> {
+        Ok(Self {
+            artifact: tembra_contracts::Artifact::decode(&bytes)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        })
+    }
+
+    /// Read the one identity carried by the artifact.
+    #[napi]
+    pub fn description(&self) -> String {
+        self.artifact.describe().to_string()
+    }
+
+    /// Reuse this artifact's resolved contract for metadata and boundary validation.
+    #[napi]
+    pub fn request(&self, packet: String) -> String {
+        self.artifact.contract.request(&packet)
+    }
+}
+
 /// Resolve canonical WIT dependencies for build tooling without evaluating Orb implementations.
 #[napi]
 pub fn compile_contract(
@@ -53,6 +83,20 @@ pub struct NodeContract {
 
 #[napi]
 impl NodeContract {
+    /// Package checked source or component bytes for the ordinary build pipeline.
+    #[napi]
+    pub fn artifact(
+        &self,
+        source: Option<String>,
+        component: Option<napi::bindgen_prelude::Uint8Array>,
+        name: String,
+        api_version: u32,
+    ) -> napi::Result<napi::bindgen_prelude::Buffer> {
+        self.contract
+            .artifact(source.as_deref(), component.as_deref(), &name, api_version)
+            .map(Into::into)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
     /// Decode a prepared package without reading project files at runtime.
     #[napi(constructor)]
     pub fn new(

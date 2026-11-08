@@ -22,3 +22,7 @@ __pycache__/
 /packages/kotlin/android/build/
 /packages/kotlin/jvm/build/
 /packages/kotlin/.kotlin/
+
+# Managed WIT editor declarations.
+**/.tembra/
+**/*.d.wit.ts

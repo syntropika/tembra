@@ -21,13 +21,17 @@
       "types": "./dist/contracts.d.ts",
       "default": "./dist/contracts.js"
     },
-    "./contracts_bg.wasm": "./dist/contracts_bg.wasm"
+    "./contracts_bg.wasm": "./dist/contracts_bg.wasm",
+    "./interpreter": "./dist/interpreter/interpreter.js"
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "build": "bun build.ts"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco-transpile": "0.23.0"
   },
   "engines": {
     "node": ">=22"

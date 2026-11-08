@@ -1,125 +1,144 @@
-import { createHost, createInterpreter, memoryFilesystem, opfsFilesystem } from "../src/browser.ts";
-import type { InterpreterOrbOptions, PreparedSource } from "../src/interpreter/types.ts";
+import {
+  createHost,
+  memoryFilesystem,
+  opfsFilesystem,
+  type FilesystemProvider,
+} from "../src/browser.ts";
+import type { OrbArtifact } from "../src/authoring/types.ts";
 
-/** Exercise actual managed callbacks in a browser, including descriptor isolation and OPFS flushing. */
+/** Qualify actual Wasm callbacks, isolated descriptors, OPFS persistence and bounded termination. */
 export async function verifyBrowserInterpreter(): Promise<void> {
-  const source = (await fetch("/orb.json").then((response) => response.json())) as PreparedSource;
-  const files = (await fetch("/files.json").then((response) => response.json())) as PreparedSource;
+  const source = async (name: string) => {
+    const response = await fetch(`/${name}.wasm`);
+    if (!response.ok) throw new Error(`Missing fixture ${name}`);
+    return new Uint8Array(await response.arrayBuffer());
+  };
   const memory = memoryFilesystem({ "input.txt": "initial" });
   const root = await navigator.storage.getDirectory();
   const directoryName = `tembra-${crypto.randomUUID()}`;
   const directory = await root.getDirectoryHandle(directoryName, { create: true });
+  const nested = await directory.getDirectoryHandle("nested", { create: true });
+  const seeded = await (await nested.getFileHandle("input.txt", { create: true })).createWritable();
+  await seeded.write("seeded");
+  await seeded.close();
   const durable = await opfsFilesystem(directory);
-  const engine = await createInterpreter({
-    engine: new URL("/engine/interpreter.js", location.href),
-    providers: { filesystem: { memory, durable } },
-    limits: { timeoutMs: 1000 },
+  const messages: string[] = [];
+  let mounts = 0;
+  const tracked = (provider: FilesystemProvider): FilesystemProvider => ({
+    open(mount, writable) {
+      const instance = provider.open(mount, writable);
+      mounts++;
+      return {
+        ...instance,
+        async dispose() {
+          await instance.dispose();
+          mounts--;
+        },
+      };
+    },
   });
-  const host = await createHost();
-  const sourceOptions: InterpreterOrbOptions = {
-    name: "calculator",
-    apiVersion: 1,
-    source,
-    bindings: {
-      "example:integrated/arithmetic@1.0.0": {
-        kind: "orb",
-        name: "arithmetic",
-        api_version: 1,
-        world: "arithmetic-provider",
+  const host = await createHost({
+    isolated: {
+      engine: new URL("/engine/interpreter.js", location.href),
+      providers: { filesystem: { memory: tracked(memory), durable: tracked(durable) } },
+      limits: { timeoutMs: 1000 },
+      onLog: (record) => {
+        messages.push(record.message);
       },
     },
-  };
-  const storage = (name: string, provider: string, writable: boolean): InterpreterOrbOptions => ({
-    name,
-    apiVersion: 1,
-    source: files,
-    bindings: {
-      "wasi:filesystem/types@0.3.0": { kind: "host", provider },
-      "wasi:filesystem/preopens@0.3.0": { kind: "host", provider },
-      "wasi:clocks/system-clock@0.3.0": { kind: "host", provider: "system-clock" },
-    },
+  });
+  const requires = { "example:integrated/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 } };
+  const calculator: OrbArtifact = { artifact: await source("calculator"), requires };
+  const storage = async (
+    name: string,
+    provider: string,
+    writable: boolean,
+  ): Promise<OrbArtifact> => ({
+    artifact: await source(name),
     grants: { filesystem: [{ provider, mount: "/data", writable }] },
   });
   const equal = (actual: unknown, expected: unknown) => {
     if (actual !== expected) throw new Error(`Expected ${expected}, received ${actual}`);
   };
-  const rejects = async (operation: Promise<unknown>) => {
-    let refused = false;
+  const rejects = async (operation: Promise<unknown>): Promise<string> => {
     try {
       await operation;
     } catch (error) {
-      refused = true;
       return String(error);
     }
-    if (!refused) throw new Error("Forbidden operation succeeded");
+    throw new Error("Forbidden operation succeeded");
   };
   let primary: unknown;
   let stage = "install";
   let wrote = false;
   try {
     await host.install([
-      {
-        name: "arithmetic",
-        apiVersion: 1,
-        services: {
-          "arithmetic::example:integrated/arithmetic@1.0.0": {
-            methods: { double: (_e, _c, value: number) => value * 2 },
-          },
-        },
-      },
-      engine.orb(sourceOptions),
-      engine.orb(storage("writer", "memory", true)),
-      engine.orb(storage("reader", "memory", false)),
-      engine.orb(storage("persistent", "durable", true)),
+      { artifact: await source("arithmetic-source") },
+      calculator,
+      await storage("writer", "memory", true),
+      await storage("reader", "memory", false),
+      await storage("persistent", "durable", true),
+      await storage("persistent-reader", "durable", false),
     ]);
     stage = "calculator";
-    const calculator = await host.get("calculator::example:integrated/calculation@1.0.0", "main");
-    equal(await calculator.sum({ values: [2, 4, 6] }), 24);
-    equal(calculator.state.value, 24);
-    equal(await calculator["resource-value"](), 42);
-    await rejects(calculator.fail());
-    equal(await calculator.recover(), 42);
-    await rejects(calculator.forbidden());
+    const calculation = await host.get("calculator::example:integrated/calculation@1.0.0", "main");
+    equal(await calculation.sum({ values: [2, 4, 6] }), 24);
+    equal(calculation.state.value, 24);
+    equal(await calculation["resource-value"](), 42);
+    await rejects(calculation.fail());
+    await rejects(calculation.forbidden());
+    await rejects(calculation.malformed());
+    equal(await calculation.recover(), 42);
+    equal(await calculation.fanout(), 24);
+    equal(JSON.stringify(await calculation.checked(7)), JSON.stringify({ tag: "ok", val: 7 }));
+    equal(
+      JSON.stringify(await calculation.checked(-1)),
+      JSON.stringify({ tag: "err", val: "negative" }),
+    );
     stage = "filesystem";
     const writer = await host.get("writer::example:storage/files@1.0.0", "main");
     const reader = await host.get("reader::example:storage/files@1.0.0", "main");
     const persistent = await host.get("persistent::example:storage/files@1.0.0", "main");
     equal(await reader.read("/data/input.txt"), "initial");
     await writer.write("/data/input.txt", "changed");
-    stage = "read-after-write";
     equal(await reader.read("/data/input.txt"), "changed");
     await rejects(reader.write("/data/input.txt", "forbidden"));
     await rejects(reader.read("/data/../outside.txt"));
-    stage = "read-after-denial";
     equal(await writer.read("/data/input.txt"), "changed");
     stage = "opfs";
     await persistent.write("/data/output.txt", "persisted");
     wrote = true;
+    equal(await persistent.read("/data/output.txt"), "persisted");
+    const durableReader = await host.get("persistent-reader::example:storage/files@1.0.0", "main");
+    equal(await durableReader.read("/data/nested/input.txt"), "seeded");
+    await rejects(durableReader.write("/data/nested/input.txt", "forbidden"));
+    equal(await persistent.read("/data/nested/input.txt"), "seeded");
+    durableReader.release();
+    stage = "concurrent effects";
+    equal(await calculation.race(), -1);
+    equal(messages.includes("slow-finished"), false);
+    equal(await calculation.recover(), 42);
     stage = "reload";
-    const candidate = await host.prepare([engine.orb(sourceOptions)]);
+    const candidate = await host.prepare([calculator]);
     await candidate.abort();
-    await host.reload([engine.orb(sourceOptions)]);
-    equal(await calculator.read(), 24);
-    equal(await calculator["resource-value"](), 42);
-    // Cancelling a managed wait retains the task until its imported operation physically settles.
+    await host.reload([calculator]);
+    equal(await calculation.read(), 24);
+    equal(await calculation["resource-value"](), 42);
     stage = "cancellation";
     await rejects(
-      host.root(async (ctx) => {
-        const pending = calculator.pending(ctx);
-        setTimeout(() => ctx.cancel(), 5);
+      host.root(async (context) => {
+        const pending = calculation.pending(context);
+        setTimeout(() => context.cancel(), 5);
         await pending;
       }),
     );
-    equal(await calculator.recover(), 42);
-    stage = "guest-termination";
-    const guard = (await fetch("/guard.json").then((response) =>
-      response.json(),
-    )) as PreparedSource;
+    equal(await calculation.recover(), 42);
+    stage = "termination";
     for (const [name, input] of [
       ["cpu", 1],
       ["suspended", 2],
     ] as const) {
-      await host.install(engine.orb({ name, apiVersion: 1, source: guard }));
+      await host.install({ artifact: await source(`${name}-source`) });
       await rejects(host.get(`${name}::example:integrated/arithmetic@1.0.0`, "broken"));
       const reference = await host.get(`${name}::example:integrated/arithmetic@1.0.0`, "main");
       equal(await reference.double(3), 6);
@@ -127,10 +146,10 @@ export async function verifyBrowserInterpreter(): Promise<void> {
       equal(await reference.double(3), 6);
       equal(await reference.double(4), 42);
       equal(await reference.double(3), 6);
-      console.log("Guest termination", name, await rejects(reference.double(input)));
+      await rejects(reference.double(input));
       reference.release();
     }
-    calculator.release();
+    calculation.release();
     writer.release();
     reader.release();
     persistent.release();
@@ -140,18 +159,12 @@ export async function verifyBrowserInterpreter(): Promise<void> {
     try {
       await host.close();
     } catch (error) {
-      const describe = (error: unknown): string =>
-        error instanceof AggregateError ? error.errors.map(describe).join("; ") : String(error);
-      primary = `${primary ?? ""}; cleanup: ${describe(error)}`;
+      primary = `${primary ?? ""}; cleanup: ${String(error)}`;
     } finally {
       try {
         if (wrote)
           equal(
-            await (
-              await directory.getFileHandle("output.txt")
-            )
-              .getFile()
-              .then((file) => file.text()),
+            await (await (await directory.getFileHandle("output.txt")).getFile()).text(),
             "persisted",
           );
       } finally {
@@ -160,6 +173,7 @@ export async function verifyBrowserInterpreter(): Promise<void> {
     }
   }
   if (primary) throw new Error(String(primary));
-  equal(engine.instances(), 0);
+  equal(messages.includes("slow-finished"), true);
+  equal(mounts, 0);
   equal(host.diagnostics().values, 0);
 }

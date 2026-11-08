@@ -6,7 +6,7 @@ Tembra separates engine metadata from application data.
 | ---------------------------------- | ------------------------------------------------------------- |
 | Rust to Rust                       | Typed local values. No codec conversion for the call.         |
 | JS to JS in one runtime            | Local values and callbacks. No codec conversion for the call. |
-| JS to Rust in the embedded host    | The host codec encodes arguments and results.                 |
+| Isolated Wasm orb to its host      | WIT-validated values cross the Wasm boundary.                 |
 | Swift or Kotlin to the Rust kernel | JSON metadata commands and result envelopes.                  |
 | React Native JS to the Rust kernel | A TurboModule sends metadata through Swift or Kotlin.         |
 | Host to host                       | RPC sends encoded frames through an application transport.    |

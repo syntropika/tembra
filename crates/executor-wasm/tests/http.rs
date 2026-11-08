@@ -1,8 +1,8 @@
 //! The fixture server runs natively; the TypeScript client frames HTTP inside Wasm.
+mod support;
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
     io::{Read, Write},
     net::{SocketAddr, TcpListener},
     rc::Rc,
@@ -13,10 +13,8 @@ use std::{
     thread,
     time::Duration,
 };
-use tembra::{Host, Orb, Service};
-use tembra_executor_wasm::{
-    Binding, Contract, Engine, Grants, Limits, NetworkGrant, PreparedSource,
-};
+use tembra::Host;
+use tembra_executor_wasm::{Contract, Engine, Grants, Install, Limits, NetworkGrant};
 
 struct Server {
     stop: Arc<AtomicBool>,
@@ -96,35 +94,34 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
     let server = Server::start();
     let component =
         std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
-    let prepared: PreparedSource = serde_json::from_slice(
-        &std::fs::read(std::env::var_os("TEMBRA_WASM_ORB").expect("TEMBRA_WASM_ORB")).unwrap(),
-    )
-    .unwrap();
-    let source = prepared.source;
-    let engine = Engine::new(&component, Limits::default())
+    let bytes =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ORB").expect("TEMBRA_WASM_ORB")).unwrap();
+    let prepared = tembra_contracts::Artifact::decode(&bytes).unwrap();
+    let tembra_contracts::ArtifactImplementation::Source(source) = &prepared.implementation else {
+        panic!("expected source");
+    };
+    let source = format!(
+        "{source}\nglobalThis.__tembraOrb = {{...globalThis.__tembraOrb, name: 'online'}};"
+    );
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .interpreter(&component)
         .unwrap()
         .network("tcp")
         .unwrap();
-    let contract = Contract::from_bytes(&prepared.contract, Some("online-calculator")).unwrap();
-    let bindings = BTreeMap::from([
-        (
-            "example:integrated/arithmetic@1.0.0".into(),
-            Binding::Orb {
-                name: "native.math".into(),
-                api_version: 1,
-                world: "arithmetic-provider".into(),
-            },
-        ),
-        (
-            "wasi:sockets/types@0.3.0".into(),
-            Binding::Host {
-                provider: "tcp".into(),
-            },
-        ),
-    ]);
+    let contract = Contract::from_bytes(
+        &prepared.contract.encode().unwrap(),
+        Some("online-calculator"),
+    )
+    .unwrap();
+    let install =
+        || Install::default().requires("example:integrated/arithmetic@1.0.0", "native.math", 1);
     assert!(
         engine
-            .prepare(&contract, "online", 1, &source, &bindings)
+            .load(
+                &contract.artifact(Some(&source), None, "online", 1).unwrap(),
+                install()
+            )
             .is_err()
     );
     let grants = Grants {
@@ -134,18 +131,15 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
         }],
         ..Grants::default()
     };
+    let mut allowed = install();
+    allowed.grants = grants;
     let orb = engine
-        .prepare_with_grants(&contract, "online", 1, &source, &bindings, &grants)
+        .load(
+            &contract.artifact(Some(&source), None, "online", 1).unwrap(),
+            allowed,
+        )
         .unwrap();
-    let native = Orb::new("native.math", 1).service(
-        Service::new("native.math::example:integrated/arithmetic@1.0.0", |_| {
-            Ok(())
-        })
-        .method(
-            "double",
-            |_, _, (value,): (i32,)| async move { Ok(value * 2) },
-        ),
-    );
+    let native = support::native_math(&prepared.contract, "native.math");
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![native, orb]).unwrap();

@@ -7,12 +7,15 @@ import { manifest, nodePlatforms, npmPackages } from "./metadata.ts";
 export function checkArtifacts(root: string, version: string): void {
   const required = [
     ...nodePlatforms.map((platform) => `engine-node/dist/tembra-${platform}.node`),
+    "engine-node/dist/interpreter.wasm",
+    "engine-wasm/dist/interpreter/interpreter.js",
+    "engine-wasm/dist/contracts.js",
+    "engine-wasm/dist/contracts_bg.wasm",
     "engine-wasm/dist/tembra.js",
     "engine-wasm/dist/tembra_bg.wasm",
     "sdk/dist/index.js",
     "sdk/dist/node.js",
     "sdk/dist/browser.js",
-    "sdk/dist/embedded.js",
     "react-native/native/swift/TembraFFI.xcframework/Info.plist",
     "react-native/native/swift/Sources/TembraNative/Generated/TembraNative.swift",
     `react-native/native/maven/dev/tembra/tembra-kotlin/${version}/tembra-kotlin-${version}.aar`,

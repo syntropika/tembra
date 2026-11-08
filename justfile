@@ -48,13 +48,17 @@ test-no-hooks:
 test-doc:
     cargo test --locked --workspace --all-features --doc
 
-# Qualify the actual interpreter and prepared source; regular workspace tests do not supply them.
+# Build the reusable dquickts interpreter and package it into the engine packages; Orb edits reuse it.
+build-interpreter sdk cache source:
+    bun crates/executor-wasm/guest/build.ts --sdk "{{sdk}}" --cache "{{cache}}" --source "{{source}}" --package
+
+# Run the ignored executor tests against a built interpreter and Orb artifacts; regular tests do not supply them.
 test-wasm-orb engine orb provider scratch:
     TEMBRA_WASM_ENGINE="{{engine}}" TEMBRA_WASM_ORB="{{orb}}" TEMBRA_WASM_PROVIDER="{{provider}}" TEMBRA_WASM_SCRATCH="{{scratch}}" cargo test --locked -p tembra-executor-wasm --tests -- --ignored --nocapture
 
-# Verify native hook lifecycle contracts and their actual embedded JavaScript bridge.
+# Verify native hook lifecycle contracts across the core, facade and Wasm executor.
 test-hook-lifecycle: build-node build-wasm build-sdk
-    cargo test --locked -p tembra-core -p tembra -p tembra-executor-js --all-features
+    cargo test --locked -p tembra-core -p tembra -p tembra-executor-wasm --all-features
 
 # Exchange actual SDK RPC frames with a native Rust provider over application-owned bytes.
 test-native-rpc:

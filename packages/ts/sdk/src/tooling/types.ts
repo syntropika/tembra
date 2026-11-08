@@ -1,16 +1,10 @@
-export const Platform = Object.freeze({
-  Browser: "browser",
-  Worker: "worker",
-  Node: "node",
-  Embedded: "embedded",
-} as const);
-export type Platform = (typeof Platform)[keyof typeof Platform];
 export interface BuildTarget {
   entry: string;
-  platform: Platform;
+  wit: string;
+  world?: string;
+  /** Compiled components receive their identity from this target's name and API version. */
+  apiVersion?: number;
   minify?: boolean;
-  typecheck?: boolean;
-  nativeExternals?: readonly string[];
   define?: Readonly<Record<string, string>>;
 }
 export interface BuildConfig {
@@ -19,14 +13,14 @@ export interface BuildConfig {
   builds: Readonly<Record<string, BuildTarget>>;
 }
 export interface Artifact {
+  /** Build target key; the source Orb's installation identity belongs to its literal declaration. */
   name: string;
-  platform: Platform;
   path: string;
   sha256: string;
   bytes: number;
 }
 
-/** Preserve build target types in a tooling configuration. */
+/** Preserve literal build configuration types. */
 export function defineConfig<const C extends BuildConfig>(config: C): C {
   return config;
 }

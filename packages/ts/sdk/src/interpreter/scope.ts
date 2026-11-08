@@ -1,11 +1,18 @@
 import type { Declaration } from "../authoring/declaration.ts";
 import type { DynamicReference, Resource } from "../authoring/types.ts";
 import type { Context } from "../runtime/context.ts";
-import { resourceRealm } from "@syntropika/tembra-sdk/internal/adapters";
 import type { State } from "../state.ts";
-import type { Scope as ExchangeScope } from "./exchange.ts";
+import type { ExecutionScope } from "./types.ts";
+import {
+  type AsyncHostRequest,
+  type HostRequest,
+  WAIT_LIMIT_MILLISECONDS,
+  survivesCancellation,
+} from "./host-protocol.ts";
 import type { Revision } from "./revision.ts";
-import { kebab, query } from "./types.ts";
+import { query } from "./types.ts";
+
+const scopeEnded = Object.freeze(new Error("Interpreter callback scope ended"));
 
 type Authority =
   | { declaration: Declaration }
@@ -16,7 +23,6 @@ type Authority =
 /** Host-owned tables restrict guest numbers to one environment and its explicit Orb parent. */
 export class Scope {
   readonly id: number;
-  readonly realm: number;
   readonly parent: Scope | undefined;
   readonly validators: number[] = [];
   readonly states = new Map<number, State<unknown>>();
@@ -32,14 +38,18 @@ export class Scope {
   ) {
     this.id = declaration.environment.id;
     this.parent = service === null ? undefined : (declaration.orb as Scope);
-    this.realm = this.parent?.realm ?? this.id;
   }
 
   /** Adapt an issued host authority to the interpreter transport without serializing it. */
-  exchange(authority: Authority): ExchangeScope {
-    const ended = new AbortController();
+  exchange(authority: Authority): ExecutionScope {
+    let ended: AbortController | undefined;
+    let cancelled = false;
     return {
-      cancel: () => ended.abort(),
+      cancel: () => {
+        if (cancelled) return;
+        cancelled = true;
+        ended?.abort(scopeEnded);
+      },
       ...("context" in authority
         ? { signal: authority.context.signal }
         : "signal" in authority
@@ -49,8 +59,12 @@ export class Scope {
         if ("context" in authority) authority.context.check();
         if ("signal" in authority) authority.signal.throwIfAborted();
       },
-      sync: (packet) => this.sync(JSON.parse(packet), authority),
-      async: (packet) => this.async(JSON.parse(packet), authority, ended.signal),
+      sync: (request) => this.sync(request, authority),
+      async: (request) => {
+        if (cancelled) return Promise.reject(scopeEnded);
+        ended ??= new AbortController();
+        return this.async(request, authority, ended.signal);
+      },
     };
   }
 
@@ -67,17 +81,17 @@ export class Scope {
     return authority.declaration;
   }
 
-  /** Prevent a guessed scope identifier from selecting another object's handles. */
-  private selected(request: any): Scope {
-    if (request.scope === undefined || request.scope === this.id) return this;
-    if (request.scope === this.parent?.id) return this.parent!;
+  /** Select this table or the issued parent's; a scope is a table selector, never an authority. */
+  private selected(scope: number | undefined): Scope {
+    if (scope === undefined || scope === this.id) return this;
+    if (this.parent !== undefined && scope === this.parent.id) return this.parent;
     throw new Error("Foreign environment handle");
   }
 
   /** Resolve only handles issued from the selected host table. */
-  private handle<T>(table: Map<number, T>, id: unknown): T {
-    const value = typeof id === "number" ? table.get(id) : undefined;
-    if (value === undefined) throw new Error("Unknown scope handle");
+  private handle<T>(table: Map<number, T>, id: number, kind: string): T {
+    const value = table.get(id);
+    if (value === undefined) throw new Error(`Unknown ${kind} handle`);
     return value;
   }
 
@@ -88,25 +102,16 @@ export class Scope {
   }
 
   /** Service synchronous requests against one immutable authority selected by the host callback. */
-  private sync(request: any, authority: Authority): unknown {
-    const selected = this.selected(request);
-    const operation = request.operation;
-    if ("validation" in authority && operation !== "state.read")
+  private sync(request: HostRequest, authority: Authority): unknown {
+    if (request.operation === "console")
+      throw new Error("Console records are consumed by the interpreter port");
+    if ("validation" in authority && request.operation !== "state.read")
       throw new Error("Validators may only read retained state");
-    if (
-      ![
-        "signal.cancelled",
-        "state.read",
-        "resource.read",
-        "reference.state",
-        "reference.status",
-        "reference.release",
-      ].includes(operation)
-    ) {
+    if (!survivesCancellation(request)) {
       if ("context" in authority) authority.context.check();
       if ("signal" in authority) authority.signal.throwIfAborted();
     }
-    switch (operation) {
+    switch (request.operation) {
       case "address": {
         const declaration = this.factory(authority);
         return {
@@ -116,6 +121,7 @@ export class Scope {
       }
       case "orb":
         this.factory(authority);
+        // The root Orb environment has no parent; the guest observes `undefined`.
         return this.parent?.id ?? null;
       case "state.declare": {
         const declaration = this.factory(authority);
@@ -125,13 +131,16 @@ export class Scope {
         if (request.validate !== null) this.validators.push(request.validate);
         return id;
       }
-      case "state.read":
+      case "state.read": {
+        const selected = this.selected(request.scope);
         return selected.snapshot(
-          this.handle(selected.states, request.id).value,
+          this.handle(selected.states, request.id, "state").value,
           selected.declaration.environment.object!.id,
         );
+      }
       case "state.update": {
-        const state = this.handle(selected.states, request.id);
+        const selected = this.selected(request.scope);
+        const state = this.handle(selected.states, request.id, "state");
         const value = state.update(this.context(authority), () => request.value);
         return selected.snapshot(value, selected.declaration.environment.object!.id);
       }
@@ -144,35 +153,36 @@ export class Scope {
         return id;
       }
       case "reference.release":
-        this.handle(selected.references, request.id).reference.release();
+        this.reference(request).reference.release();
         return null;
       case "reference.status":
-        return this.handle(selected.references, request.id).reference.status;
+        return this.reference(request).reference.status;
       case "reference.state": {
-        const reference = this.handle(selected.references, request.id).reference;
+        const reference = this.reference(request).reference;
         const record = this.declaration.session.handles.reference(reference);
         return this.snapshot(reference.state.value, record.object);
       }
       case "resource.declare": {
         const declaration = this.factory(authority);
-        const dependencies = request.dependencies.map(
-          (dependency: { scope: number; id: number }) => {
-            const owner = this.selected(dependency);
-            return this.handle(owner.resources, dependency.id);
-          },
+        const dependencies = request.dependencies.map((dependency) =>
+          this.handle(
+            this.selected(dependency.scope).resources,
+            dependency.id,
+            "resource dependency",
+          ),
         );
+        const { open, close } = request;
         const options = {
           version: request.version,
           deps: dependencies,
-          [resourceRealm]: this.realm,
           open: (signal: AbortSignal) =>
             this.revision.execute(
-              { kind: "callback", callback: request.open, value: null },
+              { kind: "callback", callback: open, value: null },
               this.exchange({ signal }),
             ) as Promise<number>,
           close: (value: number, context: Context) =>
             this.revision.execute(
-              { kind: "callback", callback: request.close, value },
+              { kind: "callback", callback: close, value },
               this.exchange({ context }),
             ),
         };
@@ -182,7 +192,7 @@ export class Scope {
         return id;
       }
       case "resource.read":
-        return this.handle(selected.resources, request.id).value;
+        return this.handle(this.selected(request.scope).resources, request.id, "resource").value;
       case "context.check":
         this.context(authority);
         return null;
@@ -191,10 +201,10 @@ export class Scope {
         return null;
       case "context.principal":
         return this.context(authority).principal;
-      case "filesystem":
-      case "network":
+      case "io.check":
+        // Liveness only: WASI enforces grants, this keeps I/O inside an admitted callback.
         if (!("context" in authority || "signal" in authority))
-          throw new Error("I/O requires an active callback");
+          throw new Error("I/O must run in a resource opener or an admitted call");
         return null;
       case "signal.cancelled":
         return "context" in authority
@@ -202,51 +212,73 @@ export class Scope {
           : "signal" in authority
             ? authority.signal.aborted
             : false;
-      default:
-        throw new Error(`Unknown or forbidden host operation ${operation}`);
     }
   }
 
+  /** Resolve a reference handle and its WIT binding from this table or the issued parent's. */
+  private reference(request: { scope?: number; id: number }) {
+    return this.handle(this.selected(request.scope).references, request.id, "reference");
+  }
+
   /** Await only issued references and bounded cooperative timers. */
-  private async async(request: any, authority: Authority, ended: AbortSignal): Promise<unknown> {
-    const selected = this.selected(request);
+  private async async(
+    request: AsyncHostRequest,
+    authority: Authority,
+    ended: AbortSignal,
+  ): Promise<unknown> {
+    ended.throwIfAborted();
     switch (request.operation) {
-      case "reference.ready":
-        await this.handle(selected.references, request.id).reference.ready;
+      case "reference.ready": {
+        const owner =
+          "context" in authority
+            ? authority.context.signal
+            : "signal" in authority
+              ? authority.signal
+              : undefined;
+        await this.declaration.session.calls.observe(
+          this.reference(request).reference.ready,
+          owner ? AbortSignal.any([owner, ended]) : ended,
+        );
         return null;
+      }
       case "reference.call": {
         const context = this.context(authority);
-        const { reference, binding } = this.handle(selected.references, request.id);
-        const method = kebab(request.method);
+        const { reference, binding } = this.reference(request);
+        const method = query<string>(this.revision.contract, {
+          kind: "import-method",
+          binding,
+          method: request.method,
+        });
         query(this.revision.contract, {
           kind: "import-arguments",
           binding,
           method,
           value: request.args,
         });
+        // The WIT check above already rejects non-list arguments; this narrows the payload.
+        if (!Array.isArray(request.args)) throw new Error("Import arguments must be a list");
         const record = this.declaration.session.handles.reference(reference);
         if (!record.methods.has(method)) throw new Error("Reference does not expose this method");
         const result =
-          (await this.declaration.session.calls.invoke(record, method, request.args, context)) ??
-          null;
+          (await this.declaration.session.calls.observe(
+            this.declaration.session.calls.invoke(record, method, request.args, context),
+            ended,
+          )) ?? null;
         query(this.revision.contract, { kind: "import-result", binding, method, value: result });
         return result;
       }
       case "wait": {
+        const { milliseconds } = request;
+        if (milliseconds > WAIT_LIMIT_MILLISECONDS)
+          throw new Error("Timer exceeds the callback wait limit");
         const ownerSignal =
           "context" in authority
             ? this.context(authority).signal
             : "signal" in authority
               ? authority.signal
               : undefined;
-        const signal = ownerSignal ? AbortSignal.any([ownerSignal, ended]) : undefined;
-        if (
-          !signal ||
-          !Number.isInteger(request.milliseconds) ||
-          request.milliseconds < 0 ||
-          request.milliseconds > 5000
-        )
-          throw new Error("Timer requires an active callback and at most 5000 milliseconds");
+        if (!ownerSignal) throw new Error("Timer requires an active callback");
+        const signal = AbortSignal.any([ownerSignal, ended]);
         signal.throwIfAborted();
         await new Promise<void>((resolve, reject) => {
           const cancel = () => {
@@ -257,13 +289,11 @@ export class Scope {
           const timer = setTimeout(() => {
             signal.removeEventListener("abort", cancel);
             resolve();
-          }, request.milliseconds);
+          }, milliseconds);
           signal.addEventListener("abort", cancel, { once: true });
         });
         return null;
       }
-      default:
-        throw new Error("Unknown or forbidden asynchronous host operation");
     }
   }
 }

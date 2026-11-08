@@ -71,6 +71,7 @@ export class Session implements StateBackend {
     this.now = () => Math.floor(clock() - origin);
     const hostOrb: OrbRecord = {
       info: {
+        isolated: false,
         id: 0,
         owner: 0,
         name: "$host",

@@ -216,6 +216,13 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: cargo install wasm-bindgen-cli --locked --version 0.2.129
       - run: bun run --cwd packages/ts/engine-wasm build --features=hooks,subscriptions,views,telemetry
+      - name: Build the reusable interpreter assets
+        run: |
+          rustup toolchain install nightly-2026-10-15 --profile minimal --target wasm32-wasip2
+          curl --fail --location --retry 3 https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz --output "$RUNNER_TEMP/wasi-sdk.tar.gz"
+          printf '%s  %s\n' b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4 "$RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$RUNNER_TEMP"
+          bun crates/executor-wasm/guest/build.ts --sdk "$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux" --cache "$RUNNER_TEMP/interpreter" --toolchain nightly-2026-10-15 --package
       - run: bun run --cwd packages/ts/sdk build
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

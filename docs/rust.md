@@ -53,10 +53,29 @@ Run these from the repository root:
 | `cargo run --locked -p tembra --example executor`  | [Application executor](../examples/rust/executor.rs)                      |
 
 `just examples` runs these and the hook/composition examples below.
-For embedded JavaScript, use `tembra-executor-js::Runtime` with the built SDK adapter.
-That runtime supports calls between JS and installed native services through the shared kernel.
 
-See [native declarations](../crates/tembra/src/orb.rs) and [V8 execution](../crates/executor-js/src/runtime.rs).
+See [native declarations](../crates/tembra/src/orb.rs).
+
+## Isolated orbs
+
+Native Rust orbs are trusted application code. To run TypeScript or a compiled component in
+WebAssembly, build it into a `.wasm` artifact and load it with `tembra-executor-wasm`:
+
+```rust,ignore
+use tembra_executor_wasm::{Engine, Install, Limits};
+
+let engine = Engine::new(Limits::default())?
+    .interpreter(&interpreter_bytes)? // only for TypeScript source orbs
+    .filesystem("data", data_directory)?
+    .network("outbound")?;
+let orb = engine.load(&artifact_bytes, Install::default().requires(import, "provider", 1))?;
+host.install(vec![orb])?;
+```
+
+`Engine::load` returns an ordinary `Orb`. It installs, reloads and closes like a native orb and can
+call or provide services through the same kernel. Each loaded orb runs in its own Wasm Store.
+See [Wasm orb execution](../crates/executor-wasm/README.md) and
+[the Wasm consumer example](../examples/rust/wasm.rs).
 
 ## Native composition and ownership
 
@@ -76,19 +95,15 @@ Scope cleanup releases the claim after resource closers finish; dependency calls
 cleanup context remain subject to kernel admission. `Context::get` instead returns a
 root-owned claim, revoked when the root ends even if its Rust handle is retained.
 `Host::get_with_options` exposes independent acquisition with `AcquisitionOptions`.
-With `views`, `Service::access` applies principal-specific method restrictions to both
-Rust and embedded JavaScript acquisitions. References expose `status()` and retain
-normal deterministic `release` and `Drop` behavior. Foreign claims also apply the provider's
-access policy before readiness and refresh it on JavaScript replacement. Policy errors
-reject acquisition or revoke methods on existing claims. Enable matching `hooks`,
-`subscriptions` and `views` features on the native facade and its executable adapter.
-A native access policy is rejected when the adapter cannot enforce views.
+With `views`, `Service::access` applies principal-specific method restrictions to
+acquisitions. References expose `status()` and retain normal deterministic `release` and
+`Drop` behavior. Policy errors reject acquisition or revoke methods on existing claims.
+Enable matching `hooks`, `subscriptions` and `views` features on the native facade.
 
 `Reference::call` retains the existing Rust-only contract and does not require extra
 serialization traits. `call_portable` accepts serializable arguments and deserializable
-results and can reach JavaScript through the attached executor, preserving the original
-root, frame, principal and code version. Use a tuple or vector for a JavaScript argument
-list. Both methods bypass serialization when the selected callback is Rust.
+results and converts values only when the selected callback belongs to another adapter.
+It preserves the original root, frame, principal and code version.
 
 ## Typed hooks (`hooks`)
 
@@ -134,11 +149,7 @@ An empty plan returns the input, and terminal input invokes no contributor. Cont
 propagate as errors; earlier external effects are not rolled back. Represent an ordinary terminal
 decision in the result type. The predicate does not alter cancellation or object ownership.
 
-An omitted JavaScript input is decoded as a Rust unit/null-compatible input.
-`None` in bail means JavaScript `undefined`, while `Some(Value::Null)` remains a defined
-`null` decision. The existing host codec transports values only at language crossings.
-Local Rust participants receive native values, and a plan can contain both languages.
-The kernel selects a plan from the caller's pinned version and admits every contribution
+Local Rust participants receive native values. The kernel selects a plan from the caller's pinned version and admits every contribution
 under its own orb. The whole run also retains the declaring scope. Dropping the wait,
 releasing a reference or requesting cancellation does not finish an active callback.
 Keep the supplied executor running through shutdown.
@@ -148,7 +159,7 @@ Run `cargo run --locked -p tembra --features hooks --example hooks` for a comple
 ### Owner-bound observation
 
 A bound `HookHandle<A, ()>` can `observe(&source, payload)` once on behalf of its original physical
-invocation. This uses the same plan, ordering and native/JavaScript dispatch as ordinary hooks.
+invocation. This uses the same plan, ordering and dispatch as ordinary hooks.
 The payload is application-defined; Tembra imposes no execution-outcome type. `run` remains the
 ordinary repeatable operation. `observe` provides a separate owner-bound admission that remains
 possible after the original operation was cancelled or its logical waiter ended.
@@ -225,85 +236,33 @@ The observer handle must be retained for as long as observation is desired.
 The native host drives kernel clock ticks and keeps one timer for the next deadline,
 including idle/linger expiry. `Host::with_clock` permits a supplied monotonic `Clock`
 and wait implementation. The default uses monotonic system time and `futures-timer`;
-it does not require Tokio. Embedded JavaScript takes over deadline driving while using
-the same clock origin. Construct `TokioExecutor::new()` inside the embedding's running
-`LocalSet`; its dispatcher retains that execution context across suspended V8 ops.
-The original `TokioExecutor` value syntax remains available for work spawned in the
-current `LocalSet`. Custom clocks can override `Clock::now` for fractional milliseconds;
+it does not require Tokio. Custom clocks can override `Clock::now` for fractional milliseconds;
 `Clock::now_ms` remains the integer deadline interface. Manual kernel ticks resynchronize
 the native clock origin, so subsequent native operations never move time backwards.
 
 Run `cargo run --locked -p tembra --example composition` for managed dependencies,
 shared orb data and reference-bound selected state.
 
-## Cooperative embedded execution
-
-The default `Runtime::new` and `Runtime::with_codec` retain the standard async adapter.
-To share native polling and completion delivery with V8, construct the host and runtime
-with the same `CooperativeExecutor`:
-
-```rust,ignore
-use tembra::Host;
-use tembra_executor_js::{CooperativeExecutor, Runtime};
-
-// Construct inside a running Tokio LocalSet, after building the SDK bundle.
-let executor = CooperativeExecutor::new();
-let native = Host::new(executor.clone());
-let runtime = Runtime::with_driver(native, sdk_source, executor)?;
-```
-
-`Runtime::with_codec_and_driver` also accepts a custom portable codec. This mode batches
-completed native results and composes existing admission and finish commands. It keeps
-managed native tasks and their physical ownership; local Rust calls still avoid the codec.
-Native work and local child tasks continue on a background pump while V8 is idle or an
-`evaluate` wait has been dropped. Keep the embedding's outer `LocalSet` running through
-cleanup. JavaScript promises and callbacks still require an active runtime operation to
-drive V8.
-
-`Runtime::interrupt_handle` returns a cloneable, thread-safe control for the entire
-V8 realm. A host can pass this control to a watchdog on another thread and call
-`terminate` to interrupt synchronous JavaScript, including an infinite loop.
-An executor-local timeout cannot interrupt code that blocks that executor thread.
-The return value confirms only that the isolate still exists and accepted the request.
-Observe the runtime operation's result separately. A control retained after runtime
-destruction returns false and does not keep the isolate alive.
-An idle request closes admission for subsequent execution. Synchronize watchdog requests
-with the guarded work. `evaluate`, `call`, `install` and `reload` refuse further work
-after interruption. `close` stops kernel admissions before it permits V8 to run cleanup.
-The matching embedded SDK settles interrupted JavaScript call frames. Native calls keep
-their physical ownership until completion. Cleanup does not retry interrupted work.
-Keep the watchdog active during cleanup. A cleanup callback can also block JavaScript.
-A close error does not confirm that resources have settled.
-
-Interruption affects every Orb in the realm. It does not undo native effects, settle
-resources or prove that the Tembra host has closed. Do not automatically replay an
-operation with an unknown outcome. The embedding owns watchdog policy and recovery.
-
-Each polling turn has a native task budget so self-waking work yields to other local tasks.
-Scheduling turns and the relative completion timing of independent calls can differ from
-the standard adapter. Hook plan order, awaited call order, context authority, code versions,
-cancellation and physical cleanup retain their kernel contracts.
-
 ## Capability boundary
 
-| Capability                                                                  | Native facade status                                                                                                                                                 |
-| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Typed hooks, including `waterfall_until`; mixed Rust/JS participants        | Implemented behind `hooks`                                                                                                                                           |
-| Managed service dependencies and root-owned acquisitions                    | Implemented with kernel ownership and readiness edges                                                                                                                |
-| Root/task/resource cancellation and physical shutdown                       | Implemented, including shared V8 action dispatch                                                                                                                     |
-| Typed managed events and bounded queues                                     | Implemented behind `subscriptions`                                                                                                                                   |
-| Native state reads, cached selections and reference-bound observers         | Implemented; Rust `PartialEq` replaces JavaScript `Object.is`                                                                                                        |
-| Scope-owned tasks and host/orb/object resources                             | Implemented; typed resource handles provide native injection                                                                                                         |
-| Acquisition version/method requirements and access policy                   | Implemented; access policy requires `views`                                                                                                                          |
-| Idle/linger and lifecycle deadlines                                         | Driven by the native clock/timer adapter                                                                                                                             |
-| Foreign service calls preserving an entered context                         | Explicit `call_portable`; local `call` keeps its original trait requirements                                                                                         |
-| Synchronous Rust views of JavaScript-owned state                            | Not exposed; foreign data can be returned through portable methods                                                                                                   |
-| Arbitrary JavaScript hook policies, including parallel and middleware       | Available in JavaScript; the native authoring surface supplies the four typed compositions above                                                                     |
-| Native hot replacement, state migration and exclusive replacement resources | Outside this facade; compiled native implementations remain nonreplaceable. An exclusivity boolean alone would not provide the missing replacement/restore lifecycle |
-| RPC, multi-host routing, bundling and loading                               | Separate infrastructure; unchanged by native authoring support                                                                                                       |
+| Capability                                                          | Native facade status                                                                                                                          |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Typed hooks, including `waterfall_until`                            | Implemented behind `hooks`                                                                                                                    |
+| Managed service dependencies and root-owned acquisitions            | Implemented with kernel ownership and readiness edges                                                                                         |
+| Root/task/resource cancellation and physical shutdown               | Implemented                                                                                                                                   |
+| Typed managed events and bounded queues                             | Implemented behind `subscriptions`                                                                                                            |
+| Native state reads, cached selections and reference-bound observers | Implemented; Rust `PartialEq` replaces JavaScript `Object.is`                                                                                 |
+| Scope-owned tasks and host/orb/object resources                     | Implemented; typed resource handles provide native injection                                                                                  |
+| Acquisition version/method requirements and access policy           | Implemented; access policy requires `views`                                                                                                   |
+| Idle/linger and lifecycle deadlines                                 | Driven by the native clock/timer adapter                                                                                                      |
+| Foreign service calls preserving an entered context                 | Explicit `call_portable`; local `call` keeps its original trait requirements                                                                  |
+| Synchronous Rust views of Wasm-owned state                          | Not exposed; foreign data can be returned through portable methods                                                                            |
+| Arbitrary hook policies, including parallel and middleware          | Available to trusted TypeScript orbs; the native authoring surface supplies the four typed compositions above                                 |
+| TypeScript and compiled Wasm orbs                                   | Loaded through `tembra-executor-wasm` as ordinary `Orb` values                                                                                |
+| Native replacement                                                  | `Host::reload` accepts new native or loaded Wasm declarations; state migration and exclusive replacement resources remain outside this facade |
+| RPC, multi-host routing, bundling and loading                       | Separate infrastructure; unchanged by native authoring support                                                                                |
 
 Hook behavior tests live in `crates/tembra/tests/` (`hooks.rs`, `waterfall_until.rs`,
-`hook_observation.rs` and `hook_observation_regression.rs`) and `crates/executor-js/tests/`
-(`hooks.rs`, `waterfall_until.rs` and `hook_observation.rs`). Other facade tests cover composition,
-events, reactive state, clocks and native/V8 execution. They exercise public interfaces against
-the actual kernel and V8 runtime, including active work during closure.
+`hook_observation.rs` and `hook_observation_regression.rs`). Other facade tests cover composition,
+events, reactive state and clocks. They exercise public interfaces against the actual kernel,
+including active work during closure.

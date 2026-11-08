@@ -1,10 +1,10 @@
-import { disposeDefinitions, prepareDefinitions } from "@syntropika/tembra-sdk/internal/adapters";
-import type {
-  OrbDefinition,
-  PreparedReload,
-  ReloadOptions,
-  ReloadReport,
-} from "../authoring/types.ts";
+import {
+  disposeDefinitions,
+  prepareDefinitions,
+  isolate,
+  type AdaptedHostOptions,
+} from "#tembra-adapters";
+import type { OrbInput, PreparedReload, ReloadOptions, ReloadReport } from "../authoring/types.ts";
 import { Reason, ReloadStatus } from "../bridge/identifiers.ts";
 import type { Reload } from "../bridge/kernel.ts";
 import { KernelOp } from "../bridge/protocol.ts";
@@ -24,7 +24,7 @@ export class Replacements {
 
   /** Prepare and commit a replacement in one operation. */
   async replace(
-    definitions: readonly OrbDefinition[],
+    definitions: readonly OrbInput[],
     options: ReloadOptions = {},
     remove: readonly string[] = [],
   ): Promise<ReloadReport> {
@@ -33,7 +33,7 @@ export class Replacements {
 
   /** Reject overlapping replacement attempts before capturing callbacks. */
   prepare(
-    definitions: readonly OrbDefinition[],
+    definitions: readonly OrbInput[],
     options: ReloadOptions = {},
     remove: readonly string[] = [],
   ): Promise<PreparedReload> {
@@ -61,12 +61,15 @@ export class Replacements {
 
   /** Bind candidate callbacks to the kernel's prepared replacement. */
   private async capture(
-    definitions: readonly OrbDefinition[],
+    definitions: readonly OrbInput[],
     options: ReloadOptions,
     remove: readonly string[],
   ): Promise<PreparedReload> {
     const session = this.session;
-    const candidates = prepareDefinitions(definitions);
+    const candidates = prepareDefinitions(
+      definitions,
+      (session.options as AdaptedHostOptions)[isolate],
+    );
     const materialized = Array.isArray(candidates) ? candidates : await candidates;
     let declarations: ReturnType<Session["orbs"]["declarations"]>;
     let reload: Reload;

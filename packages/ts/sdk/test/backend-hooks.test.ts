@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { createHost } from "../src/node.ts";
-import { disposeOrb, materialize, type AdaptedOrb } from "@syntropika/tembra-sdk/internal/adapters";
+import { disposeOrb, materialize, type AdaptedOrb } from "#tembra-adapters";
 import type { OrbDefinition } from "../src/authoring/types.ts";
 
 // Knowing an internal hook's description must not bypass normal JavaScript factory rules.

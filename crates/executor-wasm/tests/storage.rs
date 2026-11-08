@@ -1,9 +1,9 @@
 //! Standard WASI filesystem enforcement through separately configured Orb grants.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::PathBuf, rc::Rc};
+use std::{path::PathBuf, rc::Rc};
 use tembra::Host;
-use tembra_executor_wasm::{Binding, Contract, Engine, FilesystemGrant, Grants, Limits};
+use tembra_executor_wasm::{Contract, Engine, FilesystemGrant, Grants, Install, Limits};
 
 const SOURCE: &str = r#"globalThis.__tembraOrb = {services:{files:{methods:{
     read: async (_e,_c,path) => tembra.filesystem.readText(path),
@@ -21,7 +21,9 @@ fn wasi_filesystem_grants_are_per_orb() {
     std::fs::create_dir_all(root.parent().unwrap()).unwrap();
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("input.txt"), "initial").unwrap();
-    let engine = Engine::new(&component, Limits::default())
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .interpreter(&component)
         .unwrap()
         .filesystem("data", &root)
         .unwrap();
@@ -30,29 +32,12 @@ fn wasi_filesystem_grants_are_per_orb() {
         Some("storage"),
     )
     .unwrap();
-    let bindings = BTreeMap::from([
-        (
-            "wasi:filesystem/types@0.3.0".into(),
-            Binding::Host {
-                provider: "data".into(),
-            },
-        ),
-        (
-            "wasi:filesystem/preopens@0.3.0".into(),
-            Binding::Host {
-                provider: "data".into(),
-            },
-        ),
-        (
-            "wasi:clocks/system-clock@0.3.0".into(),
-            Binding::Host {
-                provider: "system-clock".into(),
-            },
-        ),
-    ]);
     assert!(
         engine
-            .prepare(&contract, "denied", 1, SOURCE, &bindings)
+            .load(
+                &contract.artifact(Some(SOURCE), None, "denied", 1).unwrap(),
+                Install::default()
+            )
             .is_err()
     );
     let writable = Grants {
@@ -72,10 +57,24 @@ fn wasi_filesystem_grants_are_per_orb() {
         ..Grants::default()
     };
     let writer = engine
-        .prepare_with_grants(&contract, "writer", 1, SOURCE, &bindings, &writable)
+        .load(
+            &contract.artifact(Some(SOURCE), None, "writer", 1).unwrap(),
+            {
+                let mut install = Install::default();
+                install.grants = writable;
+                install
+            },
+        )
         .unwrap();
     let reader = engine
-        .prepare_with_grants(&contract, "reader", 1, SOURCE, &bindings, &readonly)
+        .load(
+            &contract.artifact(Some(SOURCE), None, "reader", 1).unwrap(),
+            {
+                let mut install = Install::default();
+                install.grants = readonly;
+                install
+            },
+        )
         .unwrap();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());

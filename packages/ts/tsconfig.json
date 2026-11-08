@@ -20,7 +20,8 @@
     "test/**/*.ts",
     "../swift/build.ts",
     "../kotlin/build.ts",
-    "../../scripts/**/*.ts"
+    "../../scripts/**/*.ts",
+    "../../crates/executor-wasm/guest/build.ts"
   ],
-  "exclude": ["**/dist", "**/node_modules"]
+  "exclude": ["**/dist", "**/node_modules", "**/test/fixtures/**"]
 }

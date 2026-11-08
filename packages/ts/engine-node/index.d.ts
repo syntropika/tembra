@@ -4,25 +4,33 @@ export class NodeKernel {
 }
 
 /** Resolve WIT and its bundled standard contracts for build-time type generation. */
+export class NodeArtifact {
+  constructor(bytes: Uint8Array);
+  description(): string;
+  request(packet: string): string;
+}
+
 export function compileContract(directory: string, world?: string): Uint8Array;
 
 /** Resolved WIT used by optional sandbox platform adapters. */
 export class NodeContract {
   constructor(bytes: Uint8Array, world?: string);
   request(packet: string): string;
+  artifact(
+    source: string | undefined,
+    component: Uint8Array | undefined,
+    name: string,
+    apiVersion: number,
+  ): Uint8Array;
+  free?(): void;
 }
 
 /** Isolated Wasmtime backend used by Tembra's optional interpreter facade. */
 export class NodeInterpreter {
-  constructor(bytes: Uint8Array, configuration: string, log: (packet: string) => void);
-  open(
-    name: string,
-    apiVersion: number,
-    prepared: string,
-    bindings: string,
-    grants: string,
-  ): NodeInterpreterPort;
-  openComponent(bytes: Uint8Array, contract: Uint8Array, configuration: string): NodeComponentPort;
+  constructor(configuration: string, log: (packet: string) => void);
+  interpreter(bytes: Uint8Array): void;
+  open(artifact: NodeArtifact, bindings: string, grants: string): NodeInterpreterPort;
+  openComponent(artifact: NodeArtifact, configuration: string): NodeComponentPort;
   instances(): number;
 }
 

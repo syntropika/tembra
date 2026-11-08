@@ -22,11 +22,11 @@ those distinct identities. A typed dependency also refuses an alias that resolve
 service name; string dependencies retain their existing alias behavior. Reference-owned members
 and `then` are excluded from the inferred business methods because the proxy reserves them.
 
-The WeakMap is shared by SDK entrypoints and standalone orb bundles in the same JavaScript realm,
-using a non-enumerable symbol-keyed metadata slot. Independently bundled copies can therefore use
-original service objects through ordinary Host, Context and Declaration acquisition. Serialized
-definitions and other workers or processes do not preserve those object identities; use the dynamic
-service-name interface at those boundaries. No extra cross-process contract validation or
+The WeakMap is shared by SDK entrypoints and independently bundled SDK copies in the same JavaScript
+realm, using a non-enumerable symbol-keyed metadata slot. Independently bundled copies can therefore
+use original service objects through ordinary Host, Context and Declaration acquisition. Serialized
+definitions, isolated Wasm orbs and other workers or processes do not preserve those object
+identities; use the dynamic service-name interface at those boundaries. No extra cross-process contract validation or
 compatibility layer is introduced.
 
 ## Accumulated waterfall stopping
@@ -34,16 +34,13 @@ compatibility layer is introduced.
 `Hook::waterfall_until` is an additive constructor behind the native facade's `hooks` feature.
 Existing `series`, `waterfall`, `bail` and ordinary hook execution keep their behavior.
 
-The declaring Rust orb owns the stopping predicate. A mixed plan dispatches JavaScript contributors
-through the existing portable adapter, so they require no new SDK dispatcher, registry or result
-encoding. A TypeScript-declared hook continues to use its own declared composition.
+The declaring Rust orb owns the stopping predicate. A TypeScript-declared hook continues to use its
+own declared composition.
 
 Native tests cover accumulated values, initial terminal input, empty plans, ordering, participant
-errors, typed identity and context. Embedded V8 acceptance runs the same mixed asynchronous case
-through standard and cooperative execution, including result/input decoding errors and ordinary
-waterfall behavior. These tests do not establish browser, mobile or cross-host compatibility for the
-new native composition. Operational evidence and bounded measurements remain outside the source
-repository.
+errors, typed identity and context. These tests do not establish browser, mobile or cross-host
+compatibility for the new native composition. Operational evidence and bounded measurements remain
+outside the source repository.
 
 ## Owner-bound observation
 

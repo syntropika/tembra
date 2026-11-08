@@ -12,8 +12,24 @@
     "dist"
   ],
   "type": "module",
+  "imports": {
+    "#tembra-adapters": {
+      "types": "./src/runtime/adapters.ts",
+      "bun": "./src/runtime/adapters.ts",
+      "browser": "./src/runtime/adapters.ts",
+      "source": "./src/runtime/adapters.ts",
+      "default": "./dist/runtime/adapters.js"
+    }
+  },
   "exports": {
     ".": {
+      "tembra-wasm": {
+        "types": "./src/guest.ts",
+        "bun": "./src/guest.ts",
+        "browser": "./src/guest.ts",
+        "source": "./src/guest.ts",
+        "default": "./dist/guest.js"
+      },
       "types": "./src/index.ts",
       "bun": "./src/index.ts",
       "browser": "./src/index.ts",
@@ -83,20 +99,12 @@
       "source": "./src/telemetry.ts",
       "import": "./dist/telemetry.js"
     },
-    "./embedded-runtime": "./dist/embedded.js",
     "./http": {
       "types": "./src/http.ts",
       "bun": "./src/http.ts",
       "browser": "./src/http.ts",
       "source": "./src/http.ts",
       "import": "./dist/http.js"
-    },
-    "./internal/adapters": {
-      "types": "./src/runtime/adapters.ts",
-      "bun": "./src/runtime/adapters.ts",
-      "browser": "./src/runtime/adapters.ts",
-      "source": "./src/runtime/adapters.ts",
-      "import": "./dist/runtime/adapters.js"
     }
   },
   "publishConfig": {
@@ -110,7 +118,7 @@
   },
   "dependencies": {
     "@bytecodealliance/jco-transpile": "0.23.0",
-    "@bytecodealliance/preview3-shim": "0.13.0",
+    "@bytecodealliance/preview2-shim": "0.31.0",
     "@syntropika/tembra-engine-node": "workspace:*",
     "@syntropika/tembra-engine-wasm": "workspace:*",
     "enhanced-resolve": "5.26.0",

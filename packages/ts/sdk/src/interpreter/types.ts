@@ -1,38 +1,44 @@
-import type { PreparedSource } from "../tooling/prepare.ts";
+import { Lifetime } from "../bridge/identifiers.ts";
 
-export type { PreparedSource };
+export interface Description {
+  name?: string;
+  apiVersion?: number;
+  services: Record<
+    string,
+    { methods: string[]; lifetime?: Lifetime; linger?: number; access?: boolean }
+  >;
+}
+
+import { failure } from "../error.ts";
 export type ProviderBinding =
-  | { kind: "orb"; name: string; api_version: number; world: string }
+  | { kind: "orb"; name: string; api_version: number }
   | { kind: "host"; provider: string };
 export interface Grants {
   filesystem?: readonly { provider: string; mount: string; writable: boolean }[];
   network?: readonly { provider: string; connect: readonly string[] }[];
 }
-export interface PreparedComponent {
-  readonly format: "tembra-component-v1";
-  readonly bytes: readonly number[];
-  readonly sha256: string;
-  readonly contract: readonly number[];
-  readonly world?: string;
-}
-export interface InterpreterOrbOptions {
+export interface Registration {
   name: string;
   apiVersion: number;
-  source: PreparedSource | PreparedComponent;
   bindings?: Readonly<Record<string, ProviderBinding>>;
-  grants?: Grants;
 }
 export interface ContractPort {
   request(packet: string): string;
   free?(): void;
 }
+/** Host-issued authority stays local while only data crosses the Wasm boundary. */
+export interface ExecutionScope {
+  readonly signal?: AbortSignal;
+  check(): void;
+  cancel(): void;
+  sync(request: import("./host-protocol.ts").HostRequest): unknown;
+  async(request: import("./host-protocol.ts").AsyncHostRequest): Promise<unknown>;
+}
 export interface InterpreterPort {
   release(environment: number): void | Promise<void>;
   description(): string;
-  declare(packet: string, callback: (packet: string) => string): string | Promise<string>;
-  dispatch(packet: string, callback: (packet: string) => void): void;
-  reply(id: number, packet: string): boolean;
-  finish(): void;
+  declare(packet: string, scope: ExecutionScope): unknown | Promise<unknown>;
+  execute(packet: string, scope: ExecutionScope): Promise<unknown>;
   close(): void | Promise<void>;
 }
 
@@ -40,16 +46,10 @@ export interface InterpreterPort {
 export function answer<T>(packet: string): T {
   const value = JSON.parse(packet);
   if (Object.hasOwn(value, "ok")) return value.ok as T;
-  throw new Error(
-    typeof value.error === "string"
-      ? value.error
-      : (value.error?.message ?? "Interpreter operation failed"),
-  );
+  throw failure(value.error ?? "Interpreter operation failed");
 }
 /** Reuse the Rust contract implementation for planning and both boundary validations. */
 export function query<T>(contract: ContractPort, value: unknown): T {
   return answer<T>(contract.request(JSON.stringify(value)));
 }
-export const camel = (name: string): string =>
-  name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
 export const kebab = (name: string): string => name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);

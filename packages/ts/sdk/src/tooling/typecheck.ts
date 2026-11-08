@@ -6,7 +6,8 @@ export function typecheck(
   entry: string,
   root: string,
   virtual: ReadonlyMap<string, string> = new Map(),
-): void {
+  conditions: readonly string[] = [],
+): ts.Program {
   const configFile = ts.findConfigFile(root, ts.sys.fileExists);
   const loaded = configFile ? ts.readConfigFile(configFile, ts.sys.readFile) : { config: {} };
   if (loaded.error)
@@ -22,6 +23,7 @@ export function typecheck(
     strict: true,
     skipLibCheck: true,
     allowArbitraryExtensions: true,
+    customConditions: [...conditions],
   };
   const host = ts.createCompilerHost(options);
   const readFile = host.readFile;
@@ -66,4 +68,5 @@ export function typecheck(
         getNewLine: () => "\n",
       }),
     );
+  return program;
 }

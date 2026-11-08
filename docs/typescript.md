@@ -69,11 +69,65 @@ under a different orb, name or API version; create a fresh definition for that i
 reloads continue to dispatch through current managed references rather than captured handlers.
 
 Passing a service name string still returns a dynamic reference. This supports discovered services,
-native implementations and explicit RPC boundaries without importing executable definitions.
-SDK entrypoints and independently compiled Orb bundles share the identity WeakMap within the same
-JavaScript realm. This also supports typed dependencies declared inside loaded standalone bundles.
-The association is not serialized or shared across workers and processes.
-Keep runtime validation in the orb even when application code supplies TypeScript types.
+isolated orbs, native implementations and explicit RPC boundaries without importing executable
+definitions. The identity association is not serialized or shared across workers, processes or
+isolated orbs. Keep runtime validation in the orb even when application code supplies TypeScript types.
+
+## Isolated orbs
+
+Orbs declared with `orb()` in application code are trusted. Their callbacks run in the host's
+JavaScript runtime. To run an orb isolated in WebAssembly, [build](tooling.md) it into a `.wasm`
+artifact and install that artifact:
+
+```ts
+import { readFile } from "node:fs/promises";
+import { createHost, directoryFilesystem } from "@syntropika/tembra-sdk/node";
+
+const host = createHost({
+  isolated: {
+    providers: { filesystem: { data: directoryFilesystem("./data") }, network: ["outbound"] },
+  },
+});
+const requires = { "example:integrated/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 } };
+
+await host.load("dist/tembra/arithmetic/orb.<sha256>.wasm");
+await host.load("dist/tembra/calculator/orb.<sha256>.wasm", { requires });
+
+// Install, prepare and reload also accept artifact bytes directly.
+const artifact = new Uint8Array(await readFile("revised.wasm"));
+await host.reload([{ artifact, requires }]);
+```
+
+The default `host.load(location, { requires, grants })` loader accepts only `.wasm` artifacts.
+It reads `file:` locations and fetches other URLs. The artifact supplies
+the orb name, API version and WIT contract. The installer supplies the rest:
+
+- `requires` maps each WIT import to an installed orb and API version.
+- `grants` gives this orb access to registered providers. Providers alone grant nothing.
+
+```ts
+grants: {
+  filesystem: [{ provider: "data", mount: "/data", writable: false }],
+  network: [{ provider: "outbound", connect: ["127.0.0.1:8080"] }],
+}
+```
+
+Installation is refused when the orb imports a WASI interface without a matching grant.
+Filesystem grants permit bounded UTF-8 text reads and writes under the mount. Network grants permit
+outbound TCP to exact literal IP addresses. The guest helper in `@syntropika/tembra-sdk/http` is a
+bounded HTTP/1 `GET` client for literal-IP `http:` URLs built on that TCP transport.
+
+WIT exports become services named `<orb>::<package>/<interface>@<version>`. Acquire them with the
+string form of `host.get`. Kebab-case WIT names stay kebab-case on the reference, for example
+`reference["resource-value"]()`.
+
+The interpreter is loaded from `@syntropika/tembra-engine-node` when the first source orb is
+installed. Hosts that install only compiled components never load it. `isolated.limits` bounds
+memory, fuel, packet size and callback time; `isolated.onLog` receives guest console output.
+
+Inside an isolated orb, import `orb` from `@syntropika/tembra-sdk` as usual. The build selects the
+guest implementation. Guests can use state, selected dependencies, resources and granted I/O.
+Tasks, listeners, hooks and state subscriptions are not yet available inside isolated orbs.
 
 ## Browser and Worker
 
@@ -81,6 +135,10 @@ Import `createHost` from `@syntropika/tembra-sdk/browser` and await it.
 It loads `@syntropika/tembra-engine-wasm` unless the application supplies a kernel or WASM module.
 Serve the generated WASM asset with its loader, or set `wasmInput`.
 The same entrypoint works in a module Worker.
+
+Browser hosts install isolated source orbs. They require JSPI. Register filesystem providers with
+`memoryFilesystem()` or `opfsFilesystem()`. Raw TCP and compiled components are not yet supported in
+the browser. Relative `host.load()` locations resolve against `baseURL` or the page location.
 
 ## React Native
 

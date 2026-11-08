@@ -36,6 +36,9 @@
     "packages/ts/engine-wasm": {
       "name": "@syntropika/tembra-engine-wasm",
       "version": "0.2.2",
+      "devDependencies": {
+        "@bytecodealliance/jco-transpile": "0.23.0",
+      },
     },
     "packages/ts/react-native": {
       "name": "@syntropika/tembra-react-native",
@@ -57,7 +60,7 @@
       "version": "0.2.2",
       "dependencies": {
         "@bytecodealliance/jco-transpile": "0.23.0",
-        "@bytecodealliance/preview3-shim": "0.13.0",
+        "@bytecodealliance/preview2-shim": "0.31.0",
         "@syntropika/tembra-engine-node": "workspace:*",
         "@syntropika/tembra-engine-wasm": "workspace:*",
         "enhanced-resolve": "5.26.0",

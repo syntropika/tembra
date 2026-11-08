@@ -1,45 +1,12 @@
-import { createHash } from "node:crypto";
 import path from "node:path";
-import { compileContract } from "@syntropika/tembra-engine-node";
 import { headless } from "../packages/ts/test/headless.ts";
 
-const engine = process.env.TEMBRA_WASM_BROWSER_ENGINE;
-const orb = process.env.TEMBRA_WASM_ORB;
-if (!engine || !orb)
-  throw new Error("Set TEMBRA_WASM_BROWSER_ENGINE and TEMBRA_WASM_ORB to prepared artifacts");
+const fixtures = process.env.TEMBRA_WASM_FIXTURES;
+if (!fixtures) throw new Error("Set TEMBRA_WASM_FIXTURES to the built qualification artifacts");
 const root = path.resolve(import.meta.dir, "..");
-const filesSource =
-  "globalThis.__tembraOrb={services:{files:{methods:{read:async(_e,_c,path)=>tembra.filesystem.readText(path),write:async(_e,_c,path,value)=>tembra.filesystem.writeText(path,value)}}}};";
-const files = {
-  format: "tembra-interpreter-source-v1",
-  source: filesSource,
-  sha256: createHash("sha256").update(filesSource).digest("hex"),
-  typesSha256: "",
-  contract: Array.from(
-    compileContract(path.join(root, "crates/executor-wasm/tests/wit/storage"), "storage"),
-  ),
-  world: "storage",
-};
-const guardSource = `globalThis.__tembraOrb={services:{arithmetic:{
-  create(self){if(self.key[0]==="broken")throw new Error("factory refused");return {};},
-  methods:{double:async(_e,_c,value)=>{
-    if(value===1){while(true){}}
-    if(value===2)return new Promise(()=>{});
-    if(value===4){tembra.wait(50);return 42;}
-    if(value===5)throw new Error("upload interrupted");
-    return value*2;
-  }}
-}}};`;
-const guard = {
-  format: "tembra-interpreter-source-v1",
-  source: guardSource,
-  sha256: createHash("sha256").update(guardSource).digest("hex"),
-  typesSha256: "",
-  contract: Array.from(
-    compileContract(path.join(root, "examples/wasm-orb"), "arithmetic-provider"),
-  ),
-  world: "arithmetic-provider",
-};
+const engine =
+  process.env.TEMBRA_WASM_BROWSER_ENGINE ??
+  path.join(root, "packages/ts/engine-wasm/dist/interpreter");
 const sdk = await Bun.build({
   entrypoints: [path.join(root, "packages/ts/sdk/src/browser.ts")],
   target: "browser",
@@ -95,9 +62,8 @@ const server = Bun.serve({
       return new Response(sources.get(pathname), {
         headers: { "Content-Type": "application/javascript" },
       });
-    if (pathname === "/orb.json") return new Response(Bun.file(orb));
-    if (pathname === "/guard.json") return Response.json(guard);
-    if (pathname === "/files.json") return Response.json(files);
+    if (/^\/[\w-]+\.wasm$/.test(pathname))
+      return new Response(Bun.file(path.join(fixtures, pathname.slice(1))));
     const base = pathname.startsWith("/engine/")
       ? path.resolve(engine)
       : path.join(root, "packages/ts/engine-wasm/dist");

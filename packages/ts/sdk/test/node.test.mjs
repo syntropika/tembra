@@ -106,7 +106,9 @@ test("published entrypoints preserve structured failures across RPC and engine e
 test("published SDK tooling exports its build interface", async () => {
   const tooling = await import("../dist/tooling/index.js");
   assert.equal(typeof tooling.build, "function");
-  assert.equal(tooling.Platform.Embedded, "embedded");
+  if (typeof Bun === "undefined")
+    await assert.rejects(tooling.build({ builds: {} }), /Tembra build requires Bun/);
+  assert.equal("Platform" in tooling, false);
   const config = { builds: {} };
   assert.equal(tooling.defineConfig(config), config);
 });

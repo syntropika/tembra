@@ -2,7 +2,7 @@ import { TembraError } from "../error.ts";
 import { Code, Lifetime } from "./identifiers.ts";
 import { ActionType, EffectType, KernelOp, OwnerKind } from "./protocol.ts";
 
-/** Implemented by Node-API, browser WASM, and embedded V8's native binding. */
+/** Implemented by Node-API and browser Wasm bindings. */
 export interface KernelPort {
   /** Exchange one JSON metadata request with the Rust kernel. */
   request(metadata: string): string;
@@ -21,6 +21,7 @@ export type Owner =
   | { kind: typeof OwnerKind.Host }
   | { kind: typeof OwnerKind.Orb | typeof OwnerKind.Object; id: number };
 export interface KernelOrb {
+  isolated: boolean;
   id: number;
   owner: number;
   codeVersion: number;

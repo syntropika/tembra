@@ -34,6 +34,8 @@ impl Lifetime {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Service {
+    /// Canonical contract identity when this service participates in typed ABI matching.
+    pub signature: Option<String>,
     pub name: String,
     pub methods: BTreeSet<String>,
     pub lifetime: Lifetime,
@@ -48,6 +50,7 @@ impl Service {
         methods: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self {
+            signature: None,
             name: name.into(),
             methods: methods.into_iter().map(Into::into).collect(),
             lifetime: Lifetime::Referenced,
@@ -58,6 +61,7 @@ impl Service {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Requirement {
+    pub signatures: BTreeMap<String, String>,
     pub orb: String,
     pub api_version: Version,
     pub methods: BTreeMap<String, BTreeSet<String>>,
@@ -71,6 +75,8 @@ pub struct Orb {
     pub services: Vec<Service>,
     pub requires: Vec<Requirement>,
     pub hooks: BTreeSet<String>,
+    /// Executor-backed revisions own a private resource realm instead of sharing native values.
+    pub isolated: bool,
 }
 
 impl Orb {
@@ -82,6 +88,7 @@ impl Orb {
             services: Vec::new(),
             requires: Vec::new(),
             hooks: BTreeSet::new(),
+            isolated: false,
         }
     }
 }
@@ -148,7 +155,8 @@ pub struct Resource {
     pub owner: Owner,
     pub name: String,
     pub version: Version,
-    /// Values can be reused only inside the same execution realm; zero preserves native sharing.
+    /// Kernel-derived execution realm: zero for host and native revisions, otherwise the
+    /// isolated orb revision identity. Values are reused only inside the same realm.
     pub realm: Id,
     pub code_version: Version,
     pub exclusive: bool,

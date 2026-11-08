@@ -17,7 +17,8 @@
     ".": {
       "types": "./index.d.ts",
       "default": "./index.cjs"
-    }
+    },
+    "./interpreter.wasm": "./dist/interpreter.wasm"
   },
   "publishConfig": {
     "access": "public"

@@ -94,19 +94,7 @@ impl Host {
             }) {
                 continue;
             }
-            let restored = self.resource(
-                old.owner,
-                old.name.clone(),
-                old.version,
-                old.exclusive,
-                dependencies,
-            )?;
-            self.inner
-                .borrow_mut()
-                .resources
-                .get_mut(&restored.id)
-                .expect("restored")
-                .code_version = old.code_version;
+            let restored = self.restore_resource(old, dependencies)?;
             self.replace_resource(old.id, restored.id);
             program.restored.insert(old.id, restored.id);
             effects.push(Effect::Restore {

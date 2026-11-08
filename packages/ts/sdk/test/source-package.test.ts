@@ -21,9 +21,13 @@ test("a source-only SDK runs a native host and builds orbs from an external proj
          services: { counter: { methods: { read() { return 42; } } } } });`,
     );
     await writeFile(
+      path.join(root, "contract.wit"),
+      "package example:source; interface counter { read: func() -> u32; } world run { export counter; }",
+    );
+    await writeFile(
       path.join(root, "consumer.ts"),
       `import { createHost } from "@syntropika/tembra-sdk/node";
-       import { build, Platform } from "@syntropika/tembra-sdk/tooling";
+       import { build } from "@syntropika/tembra-sdk/tooling";
        import declaration from "./orb.ts";
        const host = createHost();
        try {
@@ -32,10 +36,9 @@ test("a source-only SDK runs a native host and builds orbs from an external proj
          if (await reference.read() !== 42) throw new Error("Native source import failed");
          reference.release();
          const artifacts = await build({ builds: {
-           web: { entry: "orb.ts", platform: Platform.Browser, typecheck: false },
-           embedded: { entry: "orb.ts", platform: Platform.Embedded, typecheck: false }
+           source: { entry: "orb.ts", wit: "contract.wit" }
          } });
-         if (artifacts.length !== 2) throw new Error("Source orb build failed");
+         if (artifacts.length !== 1) throw new Error("Source orb build failed");
        } finally { await host.close(); }
        console.log("SOURCE_PACKAGE_PASS");`,
     );

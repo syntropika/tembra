@@ -90,6 +90,14 @@ impl Inner {
             if !reference.methods.is_subset(&service.methods) {
                 return Some(Reason::MissingMethod);
             }
+            let previous = self.orbs[&object.orb]
+                .declaration
+                .services
+                .iter()
+                .find(|service| service.name == object.address.service)?;
+            if previous.signature != service.signature {
+                return Some(Reason::DependencyService);
+            }
         }
         None
     }

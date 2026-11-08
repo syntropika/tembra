@@ -1,19 +1,32 @@
-package tembra:runtime@0.3.0;
+package tembra:runtime@0.4.0;
 
-interface replies {
-    /// Tickets belong to one callback and are consumed once; they grant no kernel authority.
-    take: func(ticket: u32) -> result<string, string>;
+interface execution {
+    record outcome {
+        value: result<string, string>,
+        interrupted: bool,
+    }
+    record effect {
+        id: u64,
+        packet: string,
+    }
+    record completion {
+        id: u64,
+        value: result<string, string>,
+    }
+    record progress {
+        outcome: option<outcome>,
+        effects: list<effect>,
+    }
 }
 
-/// Only the host-issued invocation scope supplies authority to these operations.
+/// The host owns waits; the interpreter retains continuations in its isolated heap.
 world interpreter {
-    import replies;
+    use execution.{outcome, completion, progress};
     import host-sync: func(packet: string) -> result<string, string>;
-    import host-async: async func(packet: string) -> u32;
+    export load: func(source: string) -> outcome;
+    export declare: func(packet: string) -> outcome;
+    export start: func(packet: string) -> progress;
+    export resume: func(completed: list<completion>) -> progress;
+    export cancel: func() -> outcome;
     export capture: func() -> result<list<u8>, string>;
-    export load: async func(source: string) -> result<string, string>;
-    export declare: func(packet: string) -> result<string, string>;
-    export has-interrupted: func() -> bool;
-    export interrupt: func();
-    export dispatch: async func(packet: string) -> result<string, string>;
 }

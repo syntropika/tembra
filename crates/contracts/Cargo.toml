@@ -8,11 +8,18 @@ repository.workspace = true
 description = "WIT contracts and prepared Orb declarations for Tembra"
 
 [dependencies]
+heck = "0.5"
 tembra-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 wit-parser = "=0.261.0"
 wit-component = "=0.261.0"
+wasmparser = "=0.261.0"
+wasm-encoder = "=0.261.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+wit-component = { version = "=0.261.0", features = ["dummy-module"] }
 
 [lints]
 workspace = true

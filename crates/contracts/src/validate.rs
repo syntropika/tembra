@@ -188,16 +188,7 @@ pub(crate) fn result(
 
 /// Use the default JavaScript field spelling emitted by the official WIT bindings.
 pub fn javascript_name(name: &str) -> String {
-    let mut parts = name.split('-');
-    let mut name = parts.next().unwrap_or_default().to_owned();
-    for part in parts {
-        let mut chars = part.chars();
-        if let Some(first) = chars.next() {
-            name.extend(first.to_uppercase());
-        }
-        name.extend(chars);
-    }
-    name
+    heck::ToLowerCamelCase::to_lower_camel_case(name)
 }
 
 /// Check values recursively without silently truncating fields or numeric widths.

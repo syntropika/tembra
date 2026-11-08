@@ -24,13 +24,13 @@ argument. Returned State handles, including handles in a returned environment, p
 State types. A State declared only through side effects has no inferable type and remains unknown.
 This does not add contextual typing to handler environments or infer opaque resource types.
 
-SDK entrypoints and independently compiled orb bundles share one WeakMap within a JavaScript realm
-through a non-enumerable, symbol-keyed metadata slot. This keeps the existing standalone build format
-and permits factories in a loaded bundle to acquire original service objects, including imported
-dependencies. The slot contains only identity metadata, not objects, references or lifecycle policy.
-Weak keys do not keep service definitions alive. Worker and process boundaries retain their own maps;
-serialized definitions do not carry the association. The slot is not an authority boundary: normal
-kernel admission, dependency permissions and version checks still govern every acquisition.
+SDK entrypoints and independently bundled SDK copies share one WeakMap within a JavaScript realm
+through a non-enumerable, symbol-keyed metadata slot. This permits trusted application bundles to
+acquire original service objects, including imported dependencies. The slot contains only identity
+metadata, not objects, references or lifecycle policy. Weak keys do not keep service definitions
+alive. Worker and process boundaries and isolated Wasm orbs retain their own maps; serialized
+definitions do not carry the association. The slot is not an authority boundary: normal kernel
+admission, dependency permissions and version checks still govern every acquisition.
 
 ## Accumulated terminal decisions
 

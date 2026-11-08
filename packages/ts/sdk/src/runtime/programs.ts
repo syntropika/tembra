@@ -1,8 +1,4 @@
-import {
-  validateEnvironment,
-  releaseEnvironment,
-  type AdaptedOrb,
-} from "@syntropika/tembra-sdk/internal/adapters";
+import { validateEnvironment, releaseEnvironment, type AdaptedOrb } from "#tembra-adapters";
 import { Code } from "../bridge/identifiers.ts";
 import {
   ActionType,

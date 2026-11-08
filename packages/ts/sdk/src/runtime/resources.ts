@@ -1,4 +1,3 @@
-import { resourceRealm } from "@syntropika/tembra-sdk/internal/adapters";
 import { EnvironmentPhase, KernelOp } from "../bridge/protocol.ts";
 import { Errors } from "../errors.ts";
 
@@ -45,7 +44,6 @@ export class Resources {
       name,
       version: options.version ?? 1,
       exclusive: options.exclusive ?? false,
-      realm: (options as ResourceOptions<any> & { [resourceRealm]?: number })[resourceRealm] ?? 0,
       dependencies: this.dependencyIds(options),
     }).id;
   }

@@ -9,10 +9,6 @@ interface calculation {
     sum: async func(input: input) -> s32;
     read: func() -> s32;
     resource-value: func() -> s32;
-    fail: func() -> s32;
-    recover: func() -> s32;
-    forbidden: func() -> s32;
-    pending: async func() -> s32;
     fetch-and-sum: async func(url: string) -> s32;
 }
 

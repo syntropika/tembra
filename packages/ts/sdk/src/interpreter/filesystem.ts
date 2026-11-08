@@ -1,4 +1,4 @@
-import * as filesystem from "@bytecodealliance/preview3-shim/filesystem";
+import * as filesystem from "@bytecodealliance/preview2-shim/filesystem";
 
 interface Adapter {
   getRoot(capability: unknown): any;
@@ -46,7 +46,7 @@ const mutations = new Set([
   "removeDirectoryAt",
 ]);
 /** Restrict every descriptor, including descendants, before the standard shim can wrap it. */
-function readonly(descriptor: any): any {
+export function readonlyDescriptor(descriptor: any): any {
   return new Proxy(descriptor, {
     get(target, key) {
       if (typeof key === "string" && mutations.has(key))
@@ -54,12 +54,19 @@ function readonly(descriptor: any): any {
           throw "access";
         };
       if (key === "getFlags")
-        return () => ({ ...target.getFlags(), write: false, mutateDirectory: false });
+        return () => {
+          const flags = target.getFlags();
+          const restrict = (flags: any) => ({ ...flags, write: false, mutateDirectory: false });
+          return flags instanceof Promise ? flags.then(restrict) : restrict(flags);
+        };
       if (key === "openAt")
         return (pathFlags: unknown, path: string, openFlags: any, flags: any) => {
           if (openFlags.create || openFlags.truncate || flags.write || flags.mutateDirectory)
             throw "access";
-          return readonly(target.openAt(pathFlags, path, openFlags, flags));
+          const child = target.openAt(pathFlags, path, openFlags, flags);
+          return child instanceof Promise
+            ? child.then(readonlyDescriptor)
+            : readonlyDescriptor(child);
         };
       const value = Reflect.get(target, key, target);
       return typeof value === "function" ? value.bind(target) : value;
@@ -75,7 +82,7 @@ function provider(create: () => Adapter, capability: unknown): FilesystemProvide
         adapter: {
           getRoot: (capability) => {
             const descriptor = adapter.getRoot(capability);
-            return writable ? descriptor : readonly(descriptor);
+            return writable ? descriptor : readonlyDescriptor(descriptor);
           },
           dispose: () => adapter.dispose?.(),
         },

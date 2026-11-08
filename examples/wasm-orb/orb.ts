@@ -1,14 +1,13 @@
-import type { calculation } from "./contract.wit";
+import { orb } from "@syntropika/tembra-sdk";
+import type { calculation, ExampleIntegratedArithmetic100 as Arithmetic } from "./contract.wit";
 import type { Context, Declaration, WitMethods } from "@syntropika/tembra-sdk";
 import { sum } from "simple-statistics";
 import { fetch } from "@syntropika/tembra-sdk/http";
 
-declare const tembra: { wait(milliseconds: number): Promise<void> };
-
 /** Create a managed environment; executable callbacks stay in the isolated guest. */
 function create(self: Declaration) {
   const total = self.state(0, { version: 1 });
-  const arithmetic = self.get("example:integrated/arithmetic@1.0.0", ["main"]);
+  const arithmetic = self.get<typeof Arithmetic>("example:integrated/arithmetic@1.0.0", ["main"]);
   const resource = self.resource("number", {
     open: () => 21,
     close: () => {},
@@ -23,7 +22,9 @@ function create(self: Declaration) {
 
 type Environment = ReturnType<typeof create>;
 
-export default {
+export default orb({
+  name: "calculator",
+  apiVersion: 1,
   services: {
     calculation: {
       create,
@@ -41,21 +42,6 @@ export default {
         resourceValue(environment: Environment) {
           return environment.resource.value;
         },
-        fail() {
-          throw new Error("Expected guest failure");
-        },
-        recover() {
-          return 42;
-        },
-        forbidden() {
-          return (globalThis as unknown as { __hostSync(packet: string): number }).__hostSync(
-            JSON.stringify({ operation: "state.declare", initial: 999, version: 1 }),
-          );
-        },
-        async pending() {
-          await tembra.wait(5000);
-          return 1;
-        },
         async fetchAndSum(environment: Environment, context: Context, url: string) {
           const response = await fetch(url);
           if (!response.ok) throw new Error(`HTTP request failed: ${response.status}`);
@@ -67,4 +53,4 @@ export default {
       } satisfies WitMethods<typeof calculation, Environment>,
     },
   },
-};
+});

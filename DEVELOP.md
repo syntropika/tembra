@@ -65,8 +65,35 @@ Engine package builds default to release mode. Pass `--debug` for a development 
 `just build-node` selects debug mode; `just build-wasm` selects release mode. Cargo compiles
 Rust. The engine scripts package its output, and wasm-bindgen generates the browser loader.
 
-The SDK build emits JavaScript, declarations and the bundled embedded adapter. Bun can import
-SDK TypeScript sources directly. Engine artifacts live in their owning package's `dist` directory.
+The SDK build emits JavaScript and declarations. Bun can import SDK TypeScript sources directly.
+Engine artifacts live in their owning package's `dist` directory.
+
+## Isolated orbs
+
+Source orbs run in a reusable dquickts interpreter component. Build it once; orb changes do not
+require rebuilding it. Compiled-only hosts do not need it.
+
+The interpreter build requires a Rust nightly with the `wasm32-wasip2` target, WASI SDK 34 and a
+dquickts Git checkout. The build pins and verifies the dquickts revision.
+
+```sh
+just build-interpreter <wasi-sdk> <cache-directory> <dquickts-checkout>
+```
+
+The recipe packages `interpreter.wasm` into `packages/ts/engine-node/dist` and the browser modules
+into `packages/ts/engine-wasm/dist/interpreter`. Keep the cache directory outside the checkout.
+
+Runtime acceptance uses real artifacts. Build the fixture orbs into a directory outside the checkout.
+`--provider` adds the compiled Rust provider from `crates/executor-wasm/rust-provider`:
+
+```sh
+bun scripts/test-wasm-fixtures.ts --out <fixtures> --provider <tembra_wasm_arithmetic.wasm>
+TEMBRA_WASM_FIXTURES=<fixtures> bun run --cwd packages/ts/sdk test:node
+TEMBRA_WASM_FIXTURES=<fixtures> bun scripts/test-wasm-browser.ts
+```
+
+`just test-wasm-orb` runs the ignored Rust executor tests against supplied artifacts.
+See the [Wasm orb example](examples/wasm-orb/README.md) for an end-to-end build.
 
 ## Native builds
 
@@ -148,19 +175,19 @@ It runs Clippy, oxlint, Rust tests, SDK tests and React Native adapter tests.
 It also runs Node compatibility tests, the WASM target check and the Rust examples.
 Browser acceptance runs separately against the built WASM engine.
 
-| Command                    | Purpose                                                             |
-| -------------------------- | ------------------------------------------------------------------- |
-| `just fmt`                 | Format Rust, TypeScript and project documents                       |
-| `just fmt-check`           | Check formatting without changing files                             |
-| `just lint`                | Run Clippy and oxlint                                               |
-| `just deps`                | Check for unused Rust dependencies                                  |
-| `just test`                | Build packages and run Rust, SDK and Node tests                     |
-| `just test-doc`            | Run Rustdoc examples with all features                              |
-| `just test-hook-lifecycle` | Build adapters and test Rust and embedded JavaScript hook lifecycle |
-| `just test-no-hooks`       | Test the core and bridge without optional features                  |
-| `just check-wasm`          | Check the WASM target with all features                             |
-| `bun run typecheck`        | Check TypeScript across the workspace                               |
-| `bun run test:browser`     | Exercise Chrome and a module Worker                                 |
+| Command                    | Purpose                                            |
+| -------------------------- | -------------------------------------------------- |
+| `just fmt`                 | Format Rust, TypeScript and project documents      |
+| `just fmt-check`           | Check formatting without changing files            |
+| `just lint`                | Run Clippy and oxlint                              |
+| `just deps`                | Check for unused Rust dependencies                 |
+| `just test`                | Build packages and run Rust, SDK and Node tests    |
+| `just test-doc`            | Run Rustdoc examples with all features             |
+| `just test-hook-lifecycle` | Build adapters and test the native hook lifecycle  |
+| `just test-no-hooks`       | Test the core and bridge without optional features |
+| `just check-wasm`          | Check the WASM target with all features            |
+| `bun run typecheck`        | Check TypeScript across the workspace              |
+| `bun run test:browser`     | Exercise Chrome and a module Worker                |
 
 `just test` runs Rust tests and doctests across the workspace with all features enabled.
 It also runs `just test-no-hooks` in a separate Cargo invocation, so adapter features cannot
@@ -170,8 +197,8 @@ It is included in `just check`, `just check-all` and CI through `just test`.
 
 Use `just test-doc` when changing public Rust guarantees or executable examples. It runs the
 all-feature doctests alone; the full check already executes them through `just test`.
-Use `just test-hook-lifecycle` for focused Rust and embedded JavaScript hook lifecycle checks.
-It builds the Node and WASM engines and SDK before testing the core, native facade and V8 adapter.
+Use `just test-hook-lifecycle` for focused hook lifecycle checks.
+It builds the Node and WASM engines and SDK before testing the core, native facade and Wasm executor.
 Use `just test-no-hooks` directly when changing feature gates or shared bridge operations.
 
 The browser runner uses `google-chrome` by default. Select another compatible executable with
@@ -181,8 +208,8 @@ The browser runner uses `google-chrome` by default. Select another compatible ex
 TEMBRA_BROWSER=chromium bun run test:browser
 ```
 
-Native acceptance uses the actual Node addon. Embedded acceptance uses V8 with a native Rust
-provider through the same kernel. Build the SDK before running embedded tests directly.
+Native acceptance uses the actual Node addon. Isolated orb acceptance uses built artifacts; see
+[Isolated orbs](#isolated-orbs).
 
 React Native adapter tests use the Rust Node binding as a test transport.
 For mobile acceptance, build an application and test it on each target platform.

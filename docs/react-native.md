@@ -48,6 +48,7 @@ try {
 Use static imports so Metro can bundle the orb definitions.
 `host.load()` requires an application-supplied `load` callback.
 The package does not include a JavaScript interpreter or a loader for downloaded source.
+Isolated `.wasm` orbs are not yet supported on mobile.
 Swift and Kotlin expose the metadata kernel. Declare application orbs in TypeScript.
 
 ## Close the host

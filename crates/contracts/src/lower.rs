@@ -9,14 +9,8 @@ use wit_parser::{FunctionKind, Resolve, WorldId, WorldItem};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Binding {
-    Orb {
-        name: String,
-        api_version: u32,
-        world: String,
-    },
-    Host {
-        provider: String,
-    },
+    Orb { name: String, api_version: u32 },
+    Host { provider: String },
 }
 
 /// A host capability to resolve against separately configured providers and grants.
@@ -34,19 +28,86 @@ pub struct Plan {
     pub host_imports: Vec<HostImport>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanDescription<'a> {
+    orb: OrbDescription<'a>,
+    host_imports: &'a [HostImport],
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrbDescription<'a> {
+    name: &'a str,
+    api_version: u32,
+    services: Vec<ServiceDescription<'a>>,
+    requires: Vec<RequirementDescription<'a>>,
+    hooks: &'a std::collections::BTreeSet<String>,
+}
+#[derive(Serialize)]
+struct ServiceDescription<'a> {
+    name: &'a str,
+    methods: &'a std::collections::BTreeSet<String>,
+    lifetime: &'static str,
+    linger: u32,
+    signature: &'a Option<String>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RequirementDescription<'a> {
+    orb: &'a str,
+    api_version: u32,
+    services: &'a BTreeMap<String, std::collections::BTreeSet<String>>,
+    signatures: &'a BTreeMap<String, String>,
+    hooks: &'a std::collections::BTreeSet<String>,
+}
+
 impl Plan {
-    /// Encode prepared metadata for platform facades without serializing executable callbacks.
+    /// Serialize typed metadata without retaining executable callback values.
     pub fn describe(&self) -> serde_json::Value {
-        serde_json::json!({"orb":{
-            "name":self.orb.name,"apiVersion":self.orb.api_version,
-            "services":self.orb.services.iter().map(|service| serde_json::json!({"name":service.name,"methods":service.methods,"lifetime":service.lifetime.as_str(),"linger":service.linger_ms})).collect::<Vec<_>>(),
-            "requires":self.orb.requires.iter().map(|requirement| serde_json::json!({"orb":requirement.orb,"apiVersion":requirement.api_version,"services":requirement.methods,"hooks":requirement.hooks})).collect::<Vec<_>>(),"hooks":self.orb.hooks},"hostImports":self.host_imports})
+        serde_json::to_value(PlanDescription {
+            host_imports: &self.host_imports,
+            orb: OrbDescription {
+                name: &self.orb.name,
+                api_version: self.orb.api_version,
+                hooks: &self.orb.hooks,
+                services: self
+                    .orb
+                    .services
+                    .iter()
+                    .map(|service| ServiceDescription {
+                        name: &service.name,
+                        methods: &service.methods,
+                        lifetime: service.lifetime.as_str(),
+                        linger: service.linger_ms,
+                        signature: &service.signature,
+                    })
+                    .collect(),
+                requires: self
+                    .orb
+                    .requires
+                    .iter()
+                    .map(|requirement| RequirementDescription {
+                        orb: &requirement.orb,
+                        api_version: requirement.api_version,
+                        services: &requirement.methods,
+                        signatures: &requirement.signatures,
+                        hooks: &requirement.hooks,
+                    })
+                    .collect(),
+            },
+        })
+        .expect("serializable Orb plan")
     }
 }
 
 /// Lower supported exported interfaces without inventing resource lifecycle semantics.
-fn services(resolve: &Resolve, world: WorldId, provider: &str) -> Result<Vec<Service>, Error> {
+pub(crate) fn services(
+    resolve: &Resolve,
+    world: WorldId,
+    provider: &str,
+) -> Result<Vec<Service>, Error> {
     let mut services = Vec::new();
+    let mut aliases = BTreeMap::new();
     for (key, item) in &resolve.worlds[world].exports {
         match item {
             WorldItem::Interface { id, .. } => {
@@ -54,6 +115,21 @@ fn services(resolve: &Resolve, world: WorldId, provider: &str) -> Result<Vec<Ser
                     Error("anonymous export needs an explicit service mapping".into())
                 })?;
                 let interface = &resolve.interfaces[*id];
+                let alias = crate::javascript_name(interface.name.as_deref().unwrap_or_default());
+                if let Some(previous) = aliases.insert(alias.clone(), contract.clone()) {
+                    return Err(Error(format!(
+                        "ambiguous JavaScript service {alias}: {previous} and {contract}"
+                    )));
+                }
+                let mut methods = BTreeMap::new();
+                for method in interface.functions.keys() {
+                    let spelling = crate::javascript_name(method);
+                    if let Some(previous) = methods.insert(spelling.clone(), method) {
+                        return Err(Error(format!(
+                            "{contract}: ambiguous JavaScript method {spelling}: {previous} and {method}"
+                        )));
+                    }
+                }
                 if resolve.name_world_key(key) != contract {
                     return Err(Error(
                         "export aliases require an explicit service mapping".into(),
@@ -72,10 +148,12 @@ fn services(resolve: &Resolve, world: WorldId, provider: &str) -> Result<Vec<Ser
                     )));
                 }
                 if !interface.functions.is_empty() {
-                    services.push(Service::new(
+                    let mut service = Service::new(
                         service_name(provider, &contract),
                         interface.functions.keys().cloned(),
-                    ));
+                    );
+                    service.signature = Some(crate::signatures::digest(resolve, *id)?);
+                    services.push(service);
                 }
             }
             WorldItem::Type { .. } => {}
@@ -139,34 +217,15 @@ pub(crate) fn plan(
                     provider: provider.clone(),
                 });
             }
-            Binding::Orb {
-                name,
-                api_version,
-                world: provider_world,
-            } => {
+            Binding::Orb { name, api_version } => {
                 if name.trim().is_empty() || *api_version == 0 {
                     return Err(Error(format!("invalid Orb provider for {binding}")));
                 }
-                let packages = resolve.worlds[world]
-                    .package
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                let provider_world = resolve
-                    .select_world(&packages, Some(provider_world))
-                    .map_err(|error| Error(format!("{error:#}")))?;
-                let available = services(resolve, provider_world, name)?;
                 let service = service_name(name, &contract);
-                let offered = available
-                    .iter()
-                    .find(|item| item.name == service)
-                    .ok_or_else(|| {
-                        Error(format!(
-                            "selected provider {name} does not export {contract}"
-                        ))
-                    })?;
                 let requirement = requirements
                     .entry(name.clone())
                     .or_insert_with(|| Requirement {
+                        signatures: Default::default(),
                         orb: name.clone(),
                         api_version: *api_version,
                         methods: BTreeMap::new(),
@@ -177,7 +236,12 @@ pub(crate) fn plan(
                         "inconsistent API version for provider {name}"
                     )));
                 }
-                requirement.methods.insert(service, offered.methods.clone());
+                requirement
+                    .signatures
+                    .insert(service.clone(), crate::signatures::digest(resolve, *id)?);
+                requirement
+                    .methods
+                    .insert(service, interface.functions.keys().cloned().collect());
             }
         }
     }

@@ -1,8 +1,64 @@
 use super::*;
 use crate::Reason;
 
+impl Inner {
+    /// Resolve the orb revision whose code declares resources for this owner.
+    ///
+    /// While a replacement is pending, owners and objects under replacement resolve to the
+    /// candidate revision, matching the candidate code version assigned to new resources.
+    fn declaring_revision(&self, owner: Owner) -> Result<Option<&InstalledOrb>> {
+        let pending = self.pending.as_ref();
+        let candidate = |id: Id| {
+            pending.and_then(|pending| {
+                pending
+                    .orb_indices
+                    .get(&id)
+                    .map(|index| &pending.reload.orbs[*index])
+            })
+        };
+        match owner {
+            Owner::Host => Ok(None),
+            Owner::Orb(owner) => {
+                let revision = match pending.filter(|pending| pending.owners.contains(&owner)) {
+                    Some(pending) => pending.reload.orbs.iter().find(|orb| orb.owner == owner),
+                    None => self
+                        .current()
+                        .values()
+                        .map(|id| &self.orbs[id])
+                        .find(|orb| orb.owner == owner),
+                };
+                revision.map(Some).ok_or_else(|| gone(Reason::Orb))
+            }
+            Owner::Object(id) => {
+                let object = self.objects.get(&id).ok_or_else(|| gone(Reason::Object))?;
+                let revision = match pending.filter(|pending| pending.objects.contains(&id)) {
+                    Some(pending) => pending
+                        .services
+                        .get(&object.address.service)
+                        .map(|(orb, _, _)| *orb)
+                        .ok_or_else(|| gone(Reason::Orb))?,
+                    None => object.orb,
+                };
+                candidate(revision)
+                    .or_else(|| self.orbs.get(&revision))
+                    .map(Some)
+                    .ok_or_else(|| gone(Reason::Orb))
+            }
+        }
+    }
+
+    /// Derive the execution realm: zero for host and native code, otherwise the isolated
+    /// revision identity, so reloaded executor revisions never share values across heaps.
+    fn resource_realm(&self, owner: Owner) -> Result<Id> {
+        Ok(self
+            .declaring_revision(owner)?
+            .filter(|revision| revision.declaration.isolated)
+            .map_or(0, |revision| revision.id))
+    }
+}
+
 impl Host {
-    /// Resolve a named resource under its declaration owner.
+    /// Resolve a named resource under its declaration owner in the kernel-derived realm.
     pub fn resource(
         &self,
         owner: Owner,
@@ -11,11 +67,39 @@ impl Host {
         exclusive: bool,
         dependencies: Vec<Id>,
     ) -> Result<Resource> {
-        self.resource_in_realm(owner, name, version, exclusive, dependencies, 0)
+        let realm = {
+            let inner = self.inner.borrow();
+            inner.owner(owner)?;
+            inner.resource_realm(owner)?
+        };
+        self.declare_resource(owner, name, version, exclusive, dependencies, realm)
     }
 
-    /// Preserve logical compatibility while preventing values from crossing isolated heaps.
-    pub fn resource_in_realm(
+    /// Reinstate an aborted replacement's previous resource in its original realm and version.
+    pub(crate) fn restore_resource(
+        &self,
+        previous: &Resource,
+        dependencies: Vec<Id>,
+    ) -> Result<Resource> {
+        let restored = self.declare_resource(
+            previous.owner,
+            previous.name.clone(),
+            previous.version,
+            previous.exclusive,
+            dependencies,
+            previous.realm,
+        )?;
+        let mut inner = self.inner.borrow_mut();
+        let record = inner
+            .resources
+            .get_mut(&restored.id)
+            .expect("restored resource");
+        record.code_version = previous.code_version;
+        Ok(record.clone())
+    }
+
+    /// Reuse a compatible record in the given realm or register a new one.
+    fn declare_resource(
         &self,
         owner: Owner,
         name: String,

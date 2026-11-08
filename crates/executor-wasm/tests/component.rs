@@ -1,9 +1,9 @@
 //! Cross two actual Wasm Stores: TypeScript/dquickts and a compiled Rust WIT provider.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, rc::Rc};
+use std::rc::Rc;
 use tembra::Host;
-use tembra_executor_wasm::{Binding, Contract, Engine, Grants, Limits, PreparedSource};
+use tembra_executor_wasm::{Contract, Engine, Install, Limits};
 
 /// Qualify real Canonical ABI calls and reject a component with a different declared signature.
 #[test]
@@ -14,47 +14,31 @@ fn typescript_calls_a_compiled_rust_orb() {
     let component =
         std::fs::read(std::env::var_os("TEMBRA_WASM_PROVIDER").expect("TEMBRA_WASM_PROVIDER"))
             .unwrap();
-    let prepared: PreparedSource = serde_json::from_slice(
-        &std::fs::read(std::env::var_os("TEMBRA_WASM_ORB").expect("TEMBRA_WASM_ORB")).unwrap(),
+    let bytes =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ORB").expect("TEMBRA_WASM_ORB")).unwrap();
+    let prepared = tembra_contracts::Artifact::decode(&bytes).unwrap();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .interpreter(&interpreter)
+        .unwrap();
+    let wrong = Contract::from_source("wrong.wit","package example:integrated@1.0.0; interface arithmetic { double: func(value:string)->s32; } world provider { export arithmetic; }",None).unwrap();
+    assert!(wrong.artifact(None, Some(&component), "math", 1).is_err());
+    assert_eq!(engine.instances(), 0);
+    let provider = Contract::from_bytes(
+        &prepared.contract.encode().unwrap(),
+        Some("arithmetic-provider"),
     )
     .unwrap();
-    let engine = Engine::new(&interpreter, Limits::default()).unwrap();
-    let wrong = Contract::from_source("wrong.wit","package example:integrated@1.0.0; interface arithmetic { double: func(value:string)->s32; } world provider { export arithmetic; }",None).unwrap();
-    assert!(
-        engine
-            .prepare_component(
-                &wrong,
-                "math",
-                1,
-                &component,
-                &BTreeMap::new(),
-                &Grants::default()
-            )
-            .is_err()
-    );
-    assert_eq!(engine.instances(), 0);
-    let provider = Contract::from_bytes(&prepared.contract, Some("arithmetic-provider")).unwrap();
     let math = engine
-        .prepare_component(
-            &provider,
-            "math",
-            1,
-            &component,
-            &BTreeMap::new(),
-            &Grants::default(),
+        .load(
+            &provider
+                .artifact(None, Some(&component), "math", 1)
+                .unwrap(),
+            Install::default(),
         )
         .unwrap();
-    let bindings = BTreeMap::from([(
-        "example:integrated/arithmetic@1.0.0".into(),
-        Binding::Orb {
-            name: "math".into(),
-            api_version: 1,
-            world: "arithmetic-provider".into(),
-        },
-    )]);
-    let calculator = engine
-        .prepare_source("calculator", 1, &prepared, &bindings, &Grants::default())
-        .unwrap();
+    let install = || Install::default().requires("example:integrated/arithmetic@1.0.0", "math", 1);
+    let calculator = engine.load(&bytes, install()).unwrap();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![math, calculator]).unwrap();

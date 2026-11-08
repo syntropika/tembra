@@ -1,6 +1,10 @@
 //! Bind guest operations to issued declarations and contexts on the native host thread.
-use crate::{failure, worker::Session};
-use serde_json::{Value, json};
+use crate::{
+    failure,
+    protocol::{GuestCommand, ScopeId},
+    worker::Session,
+};
+use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -21,7 +25,6 @@ pub(crate) enum Scope {
 struct Handles {
     session: Session,
     environment: u64,
-    realm: tembra::core::Id,
     next: Cell<u32>,
     states: RefCell<BTreeMap<u32, State<Value>>>,
     references: RefCell<BTreeMap<u32, (Rc<Reference>, String)>>,
@@ -62,14 +65,9 @@ impl Environment {
         } else {
             None
         };
-        let realm = match &parent {
-            Some(parent) => parent.realm,
-            None => declaration.resource_realm()?,
-        };
         let handles = Rc::new(Handles {
             session: session.clone(),
             environment: id,
-            realm,
             next: Cell::new(0),
             states: RefCell::default(),
             references: RefCell::default(),
@@ -87,7 +85,11 @@ impl Environment {
         let scope = Scope::Declaration(declaration);
         environment.session.blocking(
             "declare",
-            json!({"kind":"create","environment":id,"service":environment.service}).to_string(),
+            serde_json::to_string(&GuestCommand::Create {
+                environment: id,
+                service: environment.service.as_deref(),
+            })
+            .map_err(failure)?,
             |packet, _| environment.sync(&scope, packet),
         )?;
         Ok(environment)
@@ -111,12 +113,17 @@ impl Environment {
             ));
         }
         let context = context.with(&STACK, format!("{stack},{current}"))?;
-        let packet = json!({"kind":"invoke","environment":self.id,"service":self.service,"method":method,"args":args});
+        let packet = GuestCommand::Invoke {
+            environment: self.id,
+            service: self.service.as_deref(),
+            method,
+            args: &args,
+        };
         self.execute(Scope::Call(context), packet).await
     }
 
     /// Run a callback while routing operations through this environment's owned handle table.
-    async fn execute(&self, scope: Scope, packet: Value) -> Result<Value> {
+    async fn execute(&self, scope: Scope, packet: GuestCommand<'_>) -> Result<Value> {
         self.session
             .dispatch(packet, async |packet, asynchronous| {
                 if asynchronous {
@@ -158,16 +165,9 @@ impl Environment {
     }
 
     /// Permit only this environment and its explicitly shared Orb environment.
-    fn selected_handles(&self, request: &Value) -> Result<&Rc<Handles>> {
-        let owner = request
-            .get("scope")
-            .map(|value| {
-                value
-                    .as_u64()
-                    .ok_or_else(|| failure("invalid scope handle"))
-            })
-            .transpose()?
-            .unwrap_or(self.id);
+    /// The scope is a table selector, never a host context or authority token.
+    fn selected_handles(&self, scope: Option<ScopeId>) -> Result<&Rc<Handles>> {
+        let owner = scope.unwrap_or(self.id);
         if owner == self.id {
             return Ok(&self.handles);
         }

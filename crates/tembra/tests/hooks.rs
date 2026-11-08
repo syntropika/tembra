@@ -11,6 +11,7 @@ use tembra::{
 
 fn requirement(hooks: &[&str]) -> Requirement {
     Requirement {
+        signatures: Default::default(),
         orb: "provider".into(),
         api_version: 1,
         methods: Default::default(),
