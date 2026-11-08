@@ -9,6 +9,7 @@ impl Host {
             let objects = self.0.objects.borrow();
             let object = objects
                 .get(&call.object)
+                .and_then(|object| object.versions.get(&call.orb))
                 .ok_or_else(|| Error::invalid(Reason::NativeObject, "object is not activated"))?;
             (
                 object.environment.clone(),

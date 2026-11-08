@@ -1,3 +1,4 @@
+import { disposeDefinitions } from "@syntropika/tembra-sdk/internal/adapters";
 import type { Action, Diagnostics } from "../bridge/kernel.ts";
 import { ActionType, KernelOp, OwnerKind } from "../bridge/protocol.ts";
 import { TembraError } from "../error.ts";
@@ -215,6 +216,13 @@ export class Lifecycle {
       session.kernel.command(KernelOp.FinishClose);
       session.values.clear();
       session.handles.clear();
+      try {
+        await disposeDefinitions(
+          [...session.orbs.records.values()].map((record) => record.definition),
+        );
+      } catch (error) {
+        session.cleanupErrors.push(error);
+      }
       session.orbs.records.clear();
       session.scopes.clear();
       this.#finalDiagnostics = this.diagnostics();

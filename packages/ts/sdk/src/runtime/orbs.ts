@@ -1,3 +1,10 @@
+import {
+  captureEnvironment,
+  admitFactory,
+  disposeDefinitions,
+  prepareDefinitions,
+  type AdaptedOrb,
+} from "@syntropika/tembra-sdk/internal/adapters";
 import { Declaration } from "../authoring/declaration.ts";
 import { orb } from "../authoring/orb.ts";
 import type { ContributionHandler, OrbDefinition, Participant } from "../authoring/types.ts";
@@ -83,11 +90,19 @@ export class Orbs {
     const current = this.session.kernel.command<KernelOrb[]>(KernelOp.Orbs);
     if (definitions.some((f) => current.some((installed) => installed.name === f.name)))
       refuse(Errors.Invalid.OrbInstalled, "Use reload to replace an installed orb");
-    const prepared = this.declarations(definitions);
-    const reload = this.session.kernel.command<Reload>(KernelOp.Prepare, {
-      orbs: prepared.metadata,
-    });
-    this.session.kernel.command(KernelOp.Commit, { ticket: reload.id });
+    const candidates = prepareDefinitions(definitions);
+    const materialized = Array.isArray(candidates) ? candidates : await candidates;
+    let prepared: ReturnType<Orbs["declarations"]>;
+    let reload: Reload;
+    try {
+      if (this.session.closing) throw new TembraError(Errors.Closed.Host);
+      prepared = this.declarations(materialized);
+      reload = this.session.kernel.command<Reload>(KernelOp.Prepare, { orbs: prepared.metadata });
+      this.session.kernel.command(KernelOp.Commit, { ticket: reload.id });
+    } catch (error) {
+      await disposeDefinitions(materialized);
+      throw error;
+    }
     const records = reload.orbs.map((info) => ({
       info,
       definition: prepared.definitions.find((f) => f.name === info.name)!,
@@ -107,23 +122,14 @@ export class Orbs {
   }
 
   /** Declare one shared scope for this orb version. */
-  scope(record: OrbRecord): Environment {
+  scope(record: OrbRecord): Environment | Promise<Environment> {
     if (record.scope) return record.scope;
     const environment = this.session.scopes.environment(
       { kind: OwnerKind.Orb, id: record.info.owner },
       record,
     );
     record.scope = environment;
-    try {
-      const value = record.definition.create?.(new Declaration(this.session, environment)) ?? {};
-      if (value && typeof (value as { then?: unknown }).then === "function")
-        refuse(Errors.Invalid.AsyncFactory);
-      environment.value = value;
-    } finally {
-      environment.phase = EnvironmentPhase.Prepared;
-      this.session.programs.register(environment);
-    }
-    return environment;
+    return captureEnvironment(record.definition, new Declaration(this.session, environment));
   }
 
   /** Share pending activation and clean up failed orb scopes. */
@@ -135,7 +141,14 @@ export class Orbs {
         try {
           await this.session.scopes.readyHostScope();
           if (record.scope?.phase === EnvironmentPhase.Closed) delete record.scope;
-          const scope = this.scope(record);
+          const release = await (record.definition as AdaptedOrb)[admitFactory]?.();
+          let scope: Environment;
+          try {
+            const prepared = this.scope(record);
+            scope = prepared instanceof Promise ? await prepared : prepared;
+          } finally {
+            release?.();
+          }
           await this.session.programs.activate(scope.id);
         } catch (error) {
           if (record.scope) {
@@ -280,11 +293,16 @@ export class Orbs {
     const scopes = this.session.kernel.command<number[]>(KernelOp.ScopesForOrb, { orb: id });
     const cleanup = this.session.programs.cleanupScopes(scopes);
     this.session.track(
-      cleanup.then(() => {
-        for (const [operation, contribution] of this.operations)
-          if (contribution.orb.info.id === id) this.operations.delete(operation);
-        this.records.delete(id);
-        this.#ready.delete(id);
+      cleanup.finally(async () => {
+        try {
+          const record = this.records.get(id);
+          if (record) await disposeDefinitions([record.definition]);
+        } finally {
+          for (const [operation, contribution] of this.operations)
+            if (contribution.orb.info.id === id) this.operations.delete(operation);
+          this.records.delete(id);
+          this.#ready.delete(id);
+        }
       }),
       true,
     );

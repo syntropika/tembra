@@ -35,8 +35,10 @@ export class Host {
 
   /** Install new orbs and activate their required scopes. */
   install(definition: OrbDefinition | readonly OrbDefinition[]): Promise<void> {
-    return this.session.orbs.install(
-      Array.isArray(definition) ? definition : [definition as OrbDefinition],
+    return this.session.track(
+      this.session.orbs.install(
+        Array.isArray(definition) ? definition : [definition as OrbDefinition],
+      ),
     );
   }
 

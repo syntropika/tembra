@@ -1,0 +1,33 @@
+[package]
+name = "tembra-executor-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Isolated WebAssembly execution over the Tembra host"
+publish = false
+
+[dependencies]
+tembra = { path = "../tembra", version = "=0.2.2" }
+tembra-contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+futures.workspace = true
+futures-timer = "3"
+async-channel = "2"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+wasmtime = { version = "=50.0.1", default-features = false, features = [
+  "anyhow",
+  "component-model",
+  "component-model-async",
+  "async",
+  "cranelift",
+  "runtime",
+  "std",
+] }
+wasmtime-wasi = { version = "=50.0.0", default-features = false, features = ["p3"] }
+
+[lints]
+workspace = true

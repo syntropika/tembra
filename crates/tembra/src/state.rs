@@ -32,10 +32,20 @@ impl<T: Serialize + 'static> State<T> {
         validate: impl Fn(&T) -> Result<()> + 'static,
     ) -> Result<Self> {
         validate(&initial)?;
-        let value = host.store(initial, true)?;
-        if let Err(error) = host.kernel().initialize_state(object, value, version) {
-            host.drop_value(value);
-            return Err(error);
+        if let Ok(snapshot) = host.kernel().snapshot(object) {
+            if snapshot.version != version {
+                return Err(Error::invalid(
+                    core::Reason::StateVersion,
+                    "native state version changes require a migration adapter",
+                ));
+            }
+            validate(host.value::<T>(snapshot.value)?.as_ref())?;
+        } else {
+            let value = host.store(initial, true)?;
+            if let Err(error) = host.kernel().initialize_state(object, value, version) {
+                host.drop_value(value);
+                return Err(error);
+            }
         }
         Ok(Self {
             host,
@@ -49,6 +59,16 @@ impl<T: Serialize + 'static> State<T> {
     pub fn value(&self) -> Result<Rc<T>> {
         self.host
             .value(self.host.kernel().snapshot(self.object)?.value)
+    }
+
+    /// Read the immutable kernel revision and schema version without exposing a mutable value.
+    pub fn snapshot(&self) -> Result<core::Snapshot> {
+        self.host.kernel().snapshot(self.object)
+    }
+
+    /// Revalidate the current retained snapshot when the kernel prepares a replacement.
+    pub(crate) fn validate_current(&self) -> Result<()> {
+        (self.validate)(self.value()?.as_ref())
     }
 
     /// Failure leaves the snapshot unchanged. A candidate based on an obsolete revision is refused.

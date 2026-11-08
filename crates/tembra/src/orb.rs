@@ -13,6 +13,7 @@ pub(crate) type LocalMethod =
     Rc<dyn Fn(Data, Context, Box<dyn Any>) -> LocalBoxFuture<'static, Result<Box<dyn Any>>>>;
 pub(crate) type PortableMethod =
     Rc<dyn Fn(Data, Context, Value) -> LocalBoxFuture<'static, Result<Value>>>;
+pub(crate) type BeforeCreate = Rc<dyn Fn() -> LocalBoxFuture<'static, Result<Data>>>;
 #[cfg(feature = "views")]
 type Access = Rc<dyn Fn(&str) -> BTreeSet<String>>;
 
@@ -21,6 +22,7 @@ pub(crate) struct Implementation {
     pub factory: Factory,
     pub local: BTreeMap<String, LocalMethod>,
     pub portable: BTreeMap<String, PortableMethod>,
+    pub before_create: Option<BeforeCreate>,
     #[cfg(feature = "views")]
     pub access: Option<Access>,
 }
@@ -44,11 +46,26 @@ impl<E: 'static> Service<E> {
                 factory: Rc::new(move |declaration| Ok(Rc::new(create(declaration)?) as Data)),
                 local: BTreeMap::new(),
                 portable: BTreeMap::new(),
+                before_create: None,
                 #[cfg(feature = "views")]
                 access: None,
             },
             marker: std::marker::PhantomData,
         }
+    }
+
+    /// Wait for an adapter's executor before running the synchronous declaration factory.
+    pub fn before_create<P, F, Fut>(mut self, prepare: F) -> Self
+    where
+        P: 'static,
+        F: Fn() -> Fut + 'static,
+        Fut: Future<Output = Result<P>> + 'static,
+    {
+        self.implementation.before_create = Some(Rc::new(move || {
+            let ready = prepare();
+            async move { Ok(Rc::new(ready.await?) as Data) }.boxed_local()
+        }));
+        self
     }
 
     /// Set the ownership policy and optional idle retention period.

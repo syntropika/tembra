@@ -8,8 +8,8 @@ type Dispatcher =
 
 #[derive(Default)]
 pub(super) struct Hooks {
-    declarations: RefCell<BTreeMap<core::Id, BTreeMap<String, TypeId>>>,
-    contributions: RefCell<BTreeMap<core::Id, (core::Id, Contribution)>>,
+    pub(super) declarations: RefCell<BTreeMap<core::Id, BTreeMap<String, TypeId>>>,
+    pub(super) contributions: RefCell<BTreeMap<core::Id, (core::Id, Contribution)>>,
     dispatcher: RefCell<Option<Dispatcher>>,
 }
 

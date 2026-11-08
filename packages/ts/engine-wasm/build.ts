@@ -40,3 +40,24 @@ run("wasm-bindgen", [
     "tembra_browser_wasm.wasm",
   ),
 ]);
+
+// Build the optional contract parser separately so metadata-only hosts keep their existing payload.
+const contracts = [...args];
+contracts[contracts.indexOf("tembra-browser-wasm")] = "tembra-contracts-wasm";
+const featureIndex = contracts.indexOf("--features");
+if (featureIndex >= 0) contracts.splice(featureIndex, 2);
+run("cargo", contracts);
+run("wasm-bindgen", [
+  "--target",
+  "web",
+  "--out-dir",
+  destination,
+  "--out-name",
+  "contracts",
+  path.join(
+    target,
+    "wasm32-unknown-unknown",
+    debug ? "debug" : "release",
+    "tembra_contracts_wasm.wasm",
+  ),
+]);

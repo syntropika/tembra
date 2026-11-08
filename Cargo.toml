@@ -1,14 +1,18 @@
 [workspace]
 members = [
   "crates/core",
+  "crates/contracts",
+  "crates/contracts-wasm",
   "crates/bridge",
   "crates/tembra",
   "crates/browser-wasm",
   "crates/node-binding",
   "crates/executor-js",
+  "crates/executor-wasm",
   "crates/mobile",
 ]
 resolver = "2"
+exclude = ["crates/executor-wasm/guest", "crates/executor-wasm/rust-provider"]
 
 [workspace.package]
 version = "0.2.2"
@@ -22,6 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
 tembra-core = { path = "crates/core", version = "=0.2.2", default-features = false }
+tembra-contracts = { path = "crates/contracts", version = "=0.2.2" }
 tembra-bridge = { path = "crates/bridge", version = "=0.2.2", default-features = false }
 
 [workspace.lints.rust]

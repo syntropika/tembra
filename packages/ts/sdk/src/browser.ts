@@ -57,3 +57,21 @@ export {
 export { Errors, type ErrorDescriptor } from "./errors.ts";
 
 export { ContextKey, ContextKind, opaqueFrom, type OpaqueContextValue } from "./context-key.ts";
+
+export {
+  createInterpreter,
+  BrowserInterpreter,
+  type BrowserInterpreterOptions,
+} from "./interpreter/browser.ts";
+export {
+  memoryFilesystem,
+  opfsFilesystem,
+  type FilesystemProvider,
+} from "./interpreter/filesystem.ts";
+export type {
+  Grants,
+  InterpreterOrbOptions,
+  PreparedComponent,
+  PreparedSource,
+  ProviderBinding,
+} from "./interpreter/types.ts";

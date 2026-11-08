@@ -1,0 +1,10 @@
+{
+  "name": "tembra-wasm-orb-example",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@syntropika/tembra-sdk": "workspace:*",
+    "simple-statistics": "7.9.0"
+  }
+}

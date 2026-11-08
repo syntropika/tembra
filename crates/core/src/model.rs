@@ -148,6 +148,8 @@ pub struct Resource {
     pub owner: Owner,
     pub name: String,
     pub version: Version,
+    /// Values can be reused only inside the same execution realm; zero preserves native sharing.
+    pub realm: Id,
     pub code_version: Version,
     pub exclusive: bool,
     pub dependencies: Vec<Id>,

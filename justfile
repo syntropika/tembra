@@ -48,6 +48,10 @@ test-no-hooks:
 test-doc:
     cargo test --locked --workspace --all-features --doc
 
+# Qualify the actual interpreter and prepared source; regular workspace tests do not supply them.
+test-wasm-orb engine orb provider scratch:
+    TEMBRA_WASM_ENGINE="{{engine}}" TEMBRA_WASM_ORB="{{orb}}" TEMBRA_WASM_PROVIDER="{{provider}}" TEMBRA_WASM_SCRATCH="{{scratch}}" cargo test --locked -p tembra-executor-wasm --tests -- --ignored --nocapture
+
 # Verify native hook lifecycle contracts and their actual embedded JavaScript bridge.
 test-hook-lifecycle: build-node build-wasm build-sdk
     cargo test --locked -p tembra-core -p tembra -p tembra-executor-js --all-features

@@ -12,6 +12,12 @@ pub struct Declaration {
 }
 
 impl Declaration {
+    /// Reserve a host-issued identity for values confined to an adapter's execution realm.
+    pub fn resource_realm(&self) -> Result<core::Id> {
+        self.check_declaration()?;
+        self.host.kernel().allocate_handle()
+    }
+
     pub(super) fn check_declaration(&self) -> Result<()> {
         if self.draft.sealed.get() {
             Err(Error::invalid(Reason::ScopeClosed, "declaration has ended"))
@@ -33,7 +39,42 @@ impl Declaration {
         validate: impl Fn(&T) -> Result<()> + 'static,
     ) -> Result<State<T>> {
         self.check_declaration()?;
-        State::new(self.host.clone(), self.object, initial, version, validate)
+        if self.draft.state_version.get().is_some() {
+            return Err(Error::invalid(
+                Reason::State,
+                "an object declares exactly one state",
+            ));
+        }
+        if self.host.0.pending_orbs.borrow().contains_key(&self.orb)
+            && self.host.kernel().snapshot(self.object).is_err()
+        {
+            return Err(Error::new(
+                core::Code::Unsupported,
+                "state_migration",
+                "adding state during replacement requires a transactional migration adapter",
+            ));
+        }
+        let state = State::new(self.host.clone(), self.object, initial, version, validate)?;
+        self.draft.state_version.set(Some(version));
+        let check = state.clone();
+        self.draft
+            .state_checks
+            .borrow_mut()
+            .push(Rc::new(move || check.validate_current()));
+        Ok(state)
+    }
+
+    /// Add an adapter-owned check of retained state during the kernel's replacement program.
+    pub fn validate_on_reload(&self, check: impl Fn() -> Result<()> + 'static) -> Result<()> {
+        self.check_declaration()?;
+        if self.draft.state_version.get().is_none() {
+            return Err(Error::invalid(
+                Reason::State,
+                "declare state before adding its reload validator",
+            ));
+        }
+        self.draft.state_checks.borrow_mut().push(Rc::new(check));
+        Ok(())
     }
 
     /// Declares a synchronous opener. The kernel runs it after the factory returns.
@@ -62,6 +103,19 @@ impl Declaration {
         open: impl FnOnce(ResourceSignal) -> LocalBoxFuture<'static, Result<T>> + 'static,
         close: impl FnOnce(Rc<T>, Context) -> LocalBoxFuture<'static, Result<()>> + 'static,
     ) -> Result<Resource<T>> {
+        self.resource_async_in_realm(name, version, dependencies, 0, open, close)
+    }
+
+    /// Declare callbacks whose values can be shared only inside one interpreter instance.
+    pub fn resource_async_in_realm<T: 'static>(
+        &self,
+        name: &str,
+        version: u32,
+        dependencies: &[ResourceKey],
+        realm: core::Id,
+        open: impl FnOnce(ResourceSignal) -> LocalBoxFuture<'static, Result<T>> + 'static,
+        close: impl FnOnce(Rc<T>, Context) -> LocalBoxFuture<'static, Result<()>> + 'static,
+    ) -> Result<Resource<T>> {
         self.check_declaration()?;
         if self.draft.resource_names.borrow().contains(name) {
             return Err(Error::invalid(
@@ -85,7 +139,7 @@ impl Declaration {
                 "resource dependencies belong to another host",
             ));
         }
-        let record = self.host.kernel().resource(
+        let record = self.host.kernel().resource_in_realm(
             self.owner,
             name.into(),
             version,
@@ -94,9 +148,20 @@ impl Declaration {
                 .iter()
                 .map(|dependency| dependency.id)
                 .collect(),
+            realm,
         )?;
         self.draft.resource_names.borrow_mut().insert(name.into());
         self.draft.resources.borrow_mut().push(record.id);
+        if record.value.is_some() || self.host.0.openers.borrow().contains_key(&record.id) {
+            return Ok(Resource {
+                key: ResourceKey {
+                    host: self.host.clone(),
+                    id: record.id,
+                    version,
+                },
+                marker: std::marker::PhantomData,
+            });
+        }
         if self.owner == core::Owner::Host {
             self.host.0.host_resources.borrow_mut().insert(
                 name.into(),

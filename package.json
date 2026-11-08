@@ -7,7 +7,8 @@
     "packages/ts/sdk",
     "packages/ts/engine-node",
     "packages/ts/engine-wasm",
-    "packages/ts/react-native"
+    "packages/ts/react-native",
+    "examples/wasm-orb"
   ],
   "files": [
     "packages/ts/sdk/src",
@@ -85,7 +86,21 @@
       "source": "./packages/ts/sdk/src/telemetry.ts",
       "import": "./packages/ts/sdk/dist/telemetry.js"
     },
-    "./embedded-runtime": "./packages/ts/sdk/dist/embedded.js"
+    "./embedded-runtime": "./packages/ts/sdk/dist/embedded.js",
+    "./http": {
+      "types": "./packages/ts/sdk/src/http.ts",
+      "bun": "./packages/ts/sdk/src/http.ts",
+      "browser": "./packages/ts/sdk/src/http.ts",
+      "source": "./packages/ts/sdk/src/http.ts",
+      "import": "./packages/ts/sdk/dist/http.js"
+    },
+    "./internal/adapters": {
+      "types": "./packages/ts/sdk/src/runtime/adapters.ts",
+      "bun": "./packages/ts/sdk/src/runtime/adapters.ts",
+      "browser": "./packages/ts/sdk/src/runtime/adapters.ts",
+      "source": "./packages/ts/sdk/src/runtime/adapters.ts",
+      "import": "./packages/ts/sdk/dist/runtime/adapters.js"
+    }
   },
   "scripts": {
     "lint": "bun --bun x --no-install oxlint --config packages/ts/oxlint.config.ts --disable-nested-config --deny-warnings --report-unused-disable-directives",

@@ -87,6 +87,17 @@ impl Host {
                 );
             } else if acquired.activate {
                 self.ensure_orb(acquired.orb)?;
+                let before = self
+                    .0
+                    .orbs
+                    .borrow()
+                    .get(&acquired.orb)
+                    .and_then(|services| services.get(service))
+                    .and_then(|implementation| implementation.before_create.clone());
+                if let Some(before) = before {
+                    self.activate_deferred(&acquired, service.to_owned(), before)?;
+                    return Ok(());
+                }
                 let scope = self.activate(acquired.object, acquired.orb, service)?;
                 let program = self.kernel().activate_scope(scope)?;
                 let activation = self.run(program)?;

@@ -16,7 +16,12 @@
       "types": "./dist/tembra.d.ts",
       "default": "./dist/tembra.js"
     },
-    "./tembra_bg.wasm": "./dist/tembra_bg.wasm"
+    "./tembra_bg.wasm": "./dist/tembra_bg.wasm",
+    "./contracts": {
+      "types": "./dist/contracts.d.ts",
+      "default": "./dist/contracts.js"
+    },
+    "./contracts_bg.wasm": "./dist/contracts_bg.wasm"
   },
   "publishConfig": {
     "access": "public"

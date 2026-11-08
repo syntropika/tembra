@@ -19,7 +19,11 @@ export function external(specifier: string, target: BuildTarget): boolean {
 }
 
 /** Resolve and bundle dependencies under the selected runtime rules. */
-export function resolver(root: string, target: BuildTarget): Bun.BunPlugin {
+export function resolver(
+  root: string,
+  target: BuildTarget,
+  embeddedCondition = "tembra-embedded",
+): Bun.BunPlugin {
   const web = target.platform === Platform.Browser || target.platform === Platform.Worker;
   const resolveModule = resolve.create.sync({
     fileSystem: fs,
@@ -29,7 +33,7 @@ export function resolver(root: string, target: BuildTarget): Bun.BunPlugin {
         ? ["browser"]
         : target.platform === Platform.Node
           ? ["node", "node-addons"]
-          : ["tembra-embedded"]),
+          : [embeddedCondition]),
       "import",
       "default",
     ],

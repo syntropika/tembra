@@ -21,6 +21,12 @@ telemetry = ["tembra-bridge/telemetry"]
 napi = { version = "=3.14.2", default-features = false, features = ["napi8", "dyn-symbols"] }
 napi-derive = "=3.6.12"
 tembra-bridge.workspace = true
+tembra-contracts.workspace = true
+tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2" }
+tembra = { path = "../tembra", version = "=0.2.2" }
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
 
 [build-dependencies]
 napi-build = "=2.6.0"

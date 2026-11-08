@@ -1,3 +1,8 @@
+import {
+  validateEnvironment,
+  releaseEnvironment,
+  type AdaptedOrb,
+} from "@syntropika/tembra-sdk/internal/adapters";
 import { Code } from "../bridge/identifiers.ts";
 import {
   ActionType,
@@ -202,6 +207,10 @@ export class Programs {
       }
       case EffectType.Validate:
         validate(this.session.value(effect.value!), environment!.state!.options);
+        await (environment!.orb.definition as AdaptedOrb)[validateEnvironment]?.(
+          environment!,
+          this.session.value(effect.value!),
+        );
         break;
       case EffectType.Initialize:
         return this.candidate(environment!, environment!.state!.initial);
@@ -255,6 +264,7 @@ export class Programs {
         environment.phase = EnvironmentPhase.Closed;
         if (environment.object) environment.object.versions.delete(environment.orb.info.id);
         this.scopes.delete(environment.id);
+        await (environment.orb.definition as AdaptedOrb)[releaseEnvironment]?.(environment);
         break;
       }
       default:

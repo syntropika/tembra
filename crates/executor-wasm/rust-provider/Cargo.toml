@@ -1,0 +1,25 @@
+[package]
+name = "tembra-wasm-arithmetic"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "=0.63.0"
+
+[build-dependencies]
+tembra-contracts = { path = "../../contracts" }
+
+# The official macro invocation is generated into OUT_DIR by the build script.
+[package.metadata.cargo-machete]
+ignored = ["wit-bindgen"]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = "symbols"

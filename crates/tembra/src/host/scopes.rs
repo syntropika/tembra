@@ -2,10 +2,13 @@
 use super::*;
 
 type TaskStart = Box<dyn FnOnce(crate::TaskScope) -> LocalBoxFuture<'static, Result<()>>>;
+type StateCheck = Rc<dyn Fn() -> Result<()>>;
 
 #[derive(Default)]
 pub(super) struct Draft {
     pub sealed: Cell<bool>,
+    pub state_version: Cell<Option<u32>>,
+    pub state_checks: RefCell<Vec<StateCheck>>,
     #[cfg(feature = "subscriptions")]
     pub listeners: RefCell<Vec<super::events::ListenerDefinition>>,
     #[cfg(feature = "subscriptions")]
@@ -56,7 +59,7 @@ impl Host {
                 .map(|reference| reference.id())
                 .collect(),
             resources: declaration.draft.resources.borrow().clone(),
-            state_version: None,
+            state_version: declaration.draft.state_version.get(),
             migrate: false,
             active: false,
             closing: false,
@@ -142,7 +145,7 @@ impl Host {
             .get(&orb)
             .cloned()
             .ok_or_else(|| Error::invalid(Reason::Orb, "orb factory is unavailable"))?;
-        let info = self.kernel().orb(orb)?;
+        let info = self.orb_info(orb)?;
         let declaration = self.declaration(core::Owner::Orb(info.owner), orb);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             factory(declaration.clone())
@@ -163,6 +166,9 @@ impl Host {
             orb,
             result.as_ref().cloned().unwrap_or_else(|_| Rc::new(())),
         );
+        if self.0.pending_orbs.borrow().contains_key(&orb) {
+            return result.map(|_| ());
+        }
         let program = if result.is_ok() {
             self.kernel().activate_scope(scope)?
         } else {
@@ -205,7 +211,7 @@ impl Declaration {
                 "host declarations have no orb requirements",
             ));
         }
-        let info = self.host.kernel().orb(self.orb)?;
+        let info = self.host.orb_info(self.orb)?;
         let options = if info
             .declaration
             .services

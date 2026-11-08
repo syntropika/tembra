@@ -1,3 +1,4 @@
+import { disposeDefinitions, prepareDefinitions } from "@syntropika/tembra-sdk/internal/adapters";
 import type {
   OrbDefinition,
   PreparedReload,
@@ -65,11 +66,21 @@ export class Replacements {
     remove: readonly string[],
   ): Promise<PreparedReload> {
     const session = this.session;
-    const declarations = session.orbs.declarations(definitions);
-    const reload = session.kernel.command<Reload>(KernelOp.Prepare, {
-      orbs: declarations.metadata,
-      remove,
-    });
+    const candidates = prepareDefinitions(definitions);
+    const materialized = Array.isArray(candidates) ? candidates : await candidates;
+    let declarations: ReturnType<Session["orbs"]["declarations"]>;
+    let reload: Reload;
+    try {
+      if (session.closing) throw new TembraError(Errors.Closed.Host);
+      declarations = session.orbs.declarations(materialized);
+      reload = session.kernel.command<Reload>(KernelOp.Prepare, {
+        orbs: declarations.metadata,
+        remove,
+      });
+    } catch (error) {
+      await disposeDefinitions(materialized);
+      throw error;
+    }
     const definitionsByName = new Map(
       declarations.definitions.map((definition) => [definition.name, definition]),
     );
@@ -81,13 +92,19 @@ export class Replacements {
     const recordsById = new Map(records.map((record) => [record.info.id, record]));
     let program: number | undefined;
     try {
-      for (const record of records) session.orbs.scope(record);
+      for (const record of records) {
+        const prepared = session.orbs.scope(record);
+        if (prepared instanceof Promise) await prepared;
+      }
       for (const id of reload.objects) {
         const object = session.objects.get(id);
         if (!object) continue;
         const orb = reload.providers[object.address.service];
         const record = orb === undefined ? undefined : recordsById.get(orb);
-        if (record) session.scopes.createEnvironment(object, record);
+        if (record) {
+          const prepared = session.scopes.createEnvironment(object, record);
+          if (prepared instanceof Promise) await prepared;
+        }
       }
       for (const record of records) record.ticket = undefined;
       program = session.kernel.command<number>(KernelOp.ScopesReloadRegistered, {
@@ -101,13 +118,18 @@ export class Replacements {
       if (session.closing) await session.programs.run(program);
     } catch (error) {
       this.#program = undefined;
-      if (program === undefined) {
-        session.kernel.command(KernelOp.Abort, { ticket: reload.id });
-        const scopes = reload.orbs.flatMap((orb) =>
-          session.kernel.command<number[]>(KernelOp.ScopesForOrb, { orb: orb.id }),
-        );
-        await session.programs.cleanupScopes(scopes);
+      try {
+        if (program === undefined) {
+          session.kernel.command(KernelOp.Abort, { ticket: reload.id });
+          const scopes = reload.orbs.flatMap((orb) =>
+            session.kernel.command<number[]>(KernelOp.ScopesForOrb, { orb: orb.id }),
+          );
+          await session.programs.cleanupScopes(scopes);
+        }
+      } finally {
+        await disposeDefinitions(materialized);
       }
+
       throw error;
     }
     this.#program = undefined;
@@ -130,8 +152,13 @@ export class Replacements {
         try {
           session.kernel.command(KernelOp.ProgramCommit, { program: id });
         } catch (error) {
-          session.kernel.command(KernelOp.ProgramAbort, { program: id });
-          await session.programs.run(id).catch(() => {});
+          try {
+            session.kernel.command(KernelOp.ProgramAbort, { program: id });
+            await session.programs.run(id).catch(() => {});
+          } finally {
+            await disposeDefinitions(materialized);
+          }
+
           status = ReloadStatus.Aborted;
           this.#pending = undefined;
           throw error;
@@ -154,6 +181,8 @@ export class Replacements {
           await session.programs.run(id);
         } catch (error) {
           if (!(error instanceof TembraError) || error.reason !== Reason.ReloadAborted) throw error;
+        } finally {
+          await disposeDefinitions(materialized);
         }
       },
     });

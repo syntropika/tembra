@@ -1,0 +1,6 @@
+The bundled WASI 0.3 WIT definitions are taken from the WASIp3 dependency
+bundle in wasmtime-wasi 50.0.0, distributed by the Bytecode Alliance.
+Upstream: https://github.com/bytecodealliance/wasmtime/tree/v50.0.0/crates/wasi
+These files use Apache-2.0 WITH LLVM-exception; see LICENSE in this directory.
+The supported package versions are pinned by this library. They are not
+redefinitions of standard capabilities under a Tembra namespace.

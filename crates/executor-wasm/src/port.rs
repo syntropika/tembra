@@ -1,0 +1,206 @@
+//! Platform adapters route scoped host callbacks without embedding another lifecycle engine.
+use crate::{
+    Binding, Engine, Grants, PreparedSource, adapter, failure,
+    worker::{Event, Session},
+};
+use serde_json::Value;
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+use tembra::Result;
+
+/// A thread-affine interpreter endpoint for an existing platform-owned Tembra kernel.
+pub struct InterpreterPort {
+    session: Session,
+    description: Value,
+    packet_bytes: usize,
+}
+
+impl Engine {
+    /// Validate source, imports and grants before creating a platform-owned interpreter endpoint.
+    pub fn open_port(
+        &self,
+        name: &str,
+        api_version: u32,
+        prepared: &PreparedSource,
+        bindings: &BTreeMap<String, Binding>,
+        grants: &Grants,
+    ) -> Result<InterpreterPort> {
+        let contract = prepared.resolve()?;
+        let plan = contract
+            .plan(name, api_version, bindings)
+            .map_err(failure)?;
+        contract.check_value_profile().map_err(failure)?;
+        for (name, binding) in bindings {
+            if matches!(binding, Binding::Orb { .. }) {
+                contract.check_import_value_profile(name).map_err(failure)?;
+            }
+        }
+        let context = self.providers.context(&plan.host_imports, grants)?;
+        let session = Session::start(self.clone(), context, name.into())?;
+        let description = session.load(&prepared.source, contract.describe())?;
+        // Reuse callback-shape validation; no native scope is declared by constructing this Orb.
+        let _ = adapter::orb(
+            plan.orb.clone(),
+            session.clone(),
+            description.clone(),
+            contract,
+            bindings,
+        )?;
+        Ok(InterpreterPort {
+            session,
+            description,
+            packet_bytes: self.limits.packet_bytes,
+        })
+    }
+}
+
+impl InterpreterPort {
+    /// Queue pure guest-map cleanup after the kernel releases the environment's physical owners.
+    pub fn release(&self, environment: u64) {
+        self.session.release_environment(environment);
+    }
+
+    /// Describe the already validated executable callbacks without publishing any kernel metadata.
+    pub fn description(&self) -> &Value {
+        &self.description
+    }
+
+    /// Enter one synchronous declaration pass under the embedding adapter's real scope.
+    pub fn declare(
+        &self,
+        packet: Value,
+        host: impl FnMut(&str, bool) -> Result<Value>,
+    ) -> Result<Value> {
+        self.session.blocking("declare", packet.to_string(), host)
+    }
+
+    /// Split a platform exchange into a local owner ticket and a Send event receiver.
+    pub fn begin(&self, packet: Value) -> Result<(PortTicket, PortEvents)> {
+        let events = self.session.begin("dispatch", packet.to_string())?;
+        let done = Arc::new(AtomicBool::new(false));
+        Ok((
+            PortTicket {
+                session: self.session.clone(),
+                events: events.clone(),
+                done: done.clone(),
+                finished: false,
+            },
+            PortEvents {
+                events,
+                done,
+                packet_bytes: self.packet_bytes,
+            },
+        ))
+    }
+}
+
+/// The embedding thread retains this ticket until its receiver observes actual guest completion.
+pub struct PortTicket {
+    session: Session,
+    events: async_channel::Receiver<Event>,
+    done: Arc<AtomicBool>,
+    finished: bool,
+}
+impl PortTicket {
+    /// Admit the next exchange only after the worker's completion event was received.
+    pub fn finish(mut self) -> Result<()> {
+        if !self.done.load(Ordering::Acquire) {
+            return Err(failure("platform exchange has not physically completed"));
+        }
+        self.finished = true;
+        self.session.finish_exchange();
+        Ok(())
+    }
+}
+impl Drop for PortTicket {
+    /// Never let a dropped driver reuse a Store that could still be executing.
+    fn drop(&mut self) {
+        if !self.finished {
+            self.session.abandon_exchange(&self.events);
+        }
+    }
+}
+
+/// This receiver contains no thread-affine kernel, callback or interpreter owner.
+pub struct PortEvents {
+    events: async_channel::Receiver<Event>,
+    done: Arc<AtomicBool>,
+    packet_bytes: usize,
+}
+impl PortEvents {
+    /// Forward an actual host request or physical completion to the embedding event loop.
+    pub fn receive(&self) -> Result<PortEvent> {
+        match self.events.recv_blocking().map_err(failure)? {
+            Event::Host {
+                packet,
+                asynchronous,
+                reply,
+            } => Ok(PortEvent::Host {
+                packet,
+                asynchronous,
+                reply: PortReply {
+                    reply,
+                    limit: self.packet_bytes,
+                },
+            }),
+            Event::Done(result) => {
+                self.done.store(true, Ordering::Release);
+                let result = result
+                    .map_err(failure)
+                    .and_then(|value| serde_json::from_str(&value).map_err(failure));
+                Ok(PortEvent::Complete(result))
+            }
+        }
+    }
+}
+
+impl Drop for PortEvents {
+    /// Release buffered response senders if the embedding event loop stops consuming requests.
+    fn drop(&mut self) {
+        if !self.done.load(Ordering::Acquire) {
+            self.events.close();
+            while let Ok(event) = self.events.try_recv() {
+                drop(event);
+            }
+        }
+    }
+}
+
+/// A response can settle only its original request, including after the guest stops observing it.
+pub struct PortReply {
+    reply: tokio::sync::oneshot::Sender<std::result::Result<String, String>>,
+    limit: usize,
+}
+impl PortReply {
+    /// Resolve one host request without exposing native kernel handles or executable callbacks.
+    pub fn complete(self, result: Result<Value>) {
+        let result = result.map_err(|error| error.to_string()).and_then(|value| {
+            let value = value.to_string();
+            if value.len() > self.limit {
+                Err("host result exceeds the configured packet limit".into())
+            } else {
+                Ok(value)
+            }
+        });
+        let _ = self.reply.send(result);
+    }
+    /// Detect a revoked observer without treating cancellation as physical callback settlement.
+    pub fn is_closed(&self) -> bool {
+        self.reply.is_closed()
+    }
+}
+
+/// Platform code receives authority-bound requests, never a raw Tembra kernel capability.
+pub enum PortEvent {
+    Host {
+        packet: String,
+        asynchronous: bool,
+        reply: PortReply,
+    },
+    Complete(Result<Value>),
+}

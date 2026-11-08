@@ -11,6 +11,19 @@ impl Host {
         exclusive: bool,
         dependencies: Vec<Id>,
     ) -> Result<Resource> {
+        self.resource_in_realm(owner, name, version, exclusive, dependencies, 0)
+    }
+
+    /// Preserve logical compatibility while preventing values from crossing isolated heaps.
+    pub fn resource_in_realm(
+        &self,
+        owner: Owner,
+        name: String,
+        version: Version,
+        exclusive: bool,
+        dependencies: Vec<Id>,
+        realm: Id,
+    ) -> Result<Resource> {
         let mut inner = self.inner.borrow_mut();
         inner.owner(owner)?;
         if name.is_empty() || version == 0 {
@@ -34,6 +47,7 @@ impl Host {
             .map(|id| &inner.resources[&id])
             .find(|r| {
                 r.version == version
+                    && r.realm == realm
                     && r.exclusive == exclusive
                     && r.dependencies == dependencies
                     && !r.closing
@@ -50,6 +64,7 @@ impl Host {
             owner,
             name,
             version,
+            realm,
             code_version: inner
                 .pending
                 .as_ref()

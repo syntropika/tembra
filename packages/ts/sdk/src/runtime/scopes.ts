@@ -1,3 +1,8 @@
+import {
+  captureEnvironment,
+  admitFactory,
+  type AdaptedService,
+} from "@syntropika/tembra-sdk/internal/adapters";
 import { Declaration } from "../authoring/declaration.ts";
 import type { Resource, ResourceOptions } from "../authoring/types.ts";
 import { Code, Reason, Status } from "../bridge/identifiers.ts";
@@ -61,7 +66,16 @@ export class Scopes {
       const orb = session.orbs.records.get(acquired.orb);
       if (!orb) refuse(Errors.Invalid.OrbGone);
       await session.orbs.ready(orb);
-      const environment = this.createEnvironment(object, orb);
+      const release = await (
+        orb.definition.services?.[object.address.service] as AdaptedService | undefined
+      )?.[admitFactory]?.();
+      let environment: Environment;
+      try {
+        const prepared = this.createEnvironment(object, orb);
+        environment = prepared instanceof Promise ? await prepared : prepared;
+      } finally {
+        release?.();
+      }
       object.versions.set(orb.info.id, environment);
       await this.session.programs.activate(environment.id);
     }
@@ -75,20 +89,11 @@ export class Scopes {
   }
 
   /** Run a service factory synchronously and register its scope. */
-  createEnvironment(object: ObjectRecord, orb: OrbRecord): Environment {
+  createEnvironment(object: ObjectRecord, orb: OrbRecord): Environment | Promise<Environment> {
     const definition = orb.definition.services?.[object.address.service];
     if (!definition) refuse(Errors.Invalid.ServiceGone);
     const environment = this.environment({ kind: OwnerKind.Object, id: object.id }, orb, object);
-    try {
-      const value = definition.create?.(new Declaration(this.session, environment)) ?? {};
-      if (value && typeof (value as { then?: unknown }).then === "function")
-        refuse(Errors.Invalid.AsyncFactory, "Factories must be synchronous");
-      environment.value = value;
-      return environment;
-    } finally {
-      environment.phase = EnvironmentPhase.Prepared;
-      this.session.programs.register(environment);
-    }
+    return captureEnvironment(definition, new Declaration(this.session, environment));
   }
 
   /** Share host activation and reopen retired resource scopes. */

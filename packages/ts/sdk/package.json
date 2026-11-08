@@ -83,7 +83,21 @@
       "source": "./src/telemetry.ts",
       "import": "./dist/telemetry.js"
     },
-    "./embedded-runtime": "./dist/embedded.js"
+    "./embedded-runtime": "./dist/embedded.js",
+    "./http": {
+      "types": "./src/http.ts",
+      "bun": "./src/http.ts",
+      "browser": "./src/http.ts",
+      "source": "./src/http.ts",
+      "import": "./dist/http.js"
+    },
+    "./internal/adapters": {
+      "types": "./src/runtime/adapters.ts",
+      "bun": "./src/runtime/adapters.ts",
+      "browser": "./src/runtime/adapters.ts",
+      "source": "./src/runtime/adapters.ts",
+      "import": "./dist/runtime/adapters.js"
+    }
   },
   "publishConfig": {
     "access": "public"
@@ -92,9 +106,11 @@
     "build": "bun build.ts",
     "typecheck": "bun --bun x --no-install tsc -p tsconfig.json",
     "test": "bun test test --timeout 15000",
-    "test:node": "node --test test/node.test.mjs test/typed-services.node.test.mjs"
+    "test:node": "node --test test/node.test.mjs test/typed-services.node.test.mjs test/interpreter.node.test.mjs"
   },
   "dependencies": {
+    "@bytecodealliance/jco-transpile": "0.23.0",
+    "@bytecodealliance/preview3-shim": "0.13.0",
     "@syntropika/tembra-engine-node": "workspace:*",
     "@syntropika/tembra-engine-wasm": "workspace:*",
     "enhanced-resolve": "5.26.0",

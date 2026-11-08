@@ -129,12 +129,33 @@ impl Host {
                         }
                     }
                     core::Action::ProgramComplete { program, error } => {
+                        if let Some(send) = self.0.prepared_programs.borrow_mut().remove(&program) {
+                            let _ = send.send(Err(error.clone().unwrap_or_else(|| {
+                                Error::invalid(
+                                    Reason::Program,
+                                    "replacement completed before preparation",
+                                )
+                            })));
+                        }
                         if let Some(send) = self.0.programs.borrow_mut().remove(&program) {
                             let _ = send.send(error.map_or(Ok(()), Err));
                         }
                     }
+                    core::Action::ProgramPrepared(program) => {
+                        if let Some(send) = self.0.prepared_programs.borrow_mut().remove(&program) {
+                            let _ = send.send(Ok(()));
+                        }
+                    }
                     core::Action::RetireOrb(id) => {
-                        self.0.orbs.borrow_mut().remove(&id);
+                        let host = self.clone();
+                        if let Err(error) = self.spawn(async move {
+                            if let Err(error) = host.retire_orb(id).await {
+                                host.0.errors.borrow_mut().push(error);
+                            }
+                            Ok(())
+                        }) {
+                            self.0.errors.borrow_mut().push(error);
+                        }
                     }
                     core::Action::CancelEffects { effects, .. } => {
                         for effect in effects {
@@ -184,7 +205,16 @@ impl Host {
         if let core::Effect::Open { resource } = effect {
             let open = self.0.openers.borrow_mut().remove(resource);
             if let Some(open) = open {
-                open().await?;
+                std::panic::AssertUnwindSafe(async move { open().await })
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(Error::new(
+                            core::Code::Unavailable,
+                            "callback",
+                            "resource opener panicked",
+                        ))
+                    })?;
             } else {
                 self.kernel().resource_value(*resource)?;
             }
@@ -198,7 +228,17 @@ impl Host {
                     host: self.clone(),
                     root,
                 };
-                close(self.context(root, None)?).await
+                let context = self.context(root, None)?;
+                std::panic::AssertUnwindSafe(async move { close(context).await })
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(Error::new(
+                            core::Code::Unavailable,
+                            "callback",
+                            "resource closer panicked",
+                        ))
+                    })
             } else {
                 Ok(())
             };
@@ -212,7 +252,37 @@ impl Host {
 
     /// Apply native bookkeeping effects without spawning a user future.
     pub(super) fn execute_immediate(&self, effect: &core::Effect) -> Result<Option<core::Id>> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.immediate(effect)))
+            .unwrap_or_else(|_| {
+                Err(Error::new(
+                    core::Code::Unavailable,
+                    "callback",
+                    "scope callback panicked",
+                ))
+            })
+    }
+
+    /// Apply one bookkeeping effect while its caller retains the panic boundary.
+    fn immediate(&self, effect: &core::Effect) -> Result<Option<core::Id>> {
         match effect {
+            core::Effect::Adopt { .. } => {}
+            core::Effect::Validate { scope, .. } => {
+                let checks = self
+                    .0
+                    .scopes
+                    .borrow()
+                    .get(scope)
+                    .ok_or_else(|| {
+                        Error::invalid(Reason::Scope, "state validation scope is unavailable")
+                    })?
+                    .draft
+                    .state_checks
+                    .borrow()
+                    .clone();
+                for check in checks {
+                    check()?;
+                }
+            }
             core::Effect::Drop { scope } => {
                 if let Some(record) = self.0.scopes.borrow_mut().remove(scope) {
                     if record.owner == core::Owner::Host {
@@ -228,8 +298,14 @@ impl Host {
                     }
                 }
                 self.0.scope_activations.borrow_mut().remove(scope);
-                if let Some(object) = self.0.scope_objects.borrow_mut().remove(scope) {
-                    self.0.objects.borrow_mut().remove(&object);
+                if let Some((object, orb)) = self.0.scope_objects.borrow_mut().remove(scope) {
+                    let mut objects = self.0.objects.borrow_mut();
+                    if let Some(record) = objects.get_mut(&object) {
+                        record.versions.remove(&orb);
+                        if record.versions.is_empty() {
+                            objects.remove(&object);
+                        }
+                    }
                 }
             }
             core::Effect::Stop { scope, .. } => self.stop_scope(*scope)?,

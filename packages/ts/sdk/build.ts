@@ -7,6 +7,8 @@ const root = fileURLToPath(new URL("./", import.meta.url));
 const entrypoints = [
   "index",
   "host",
+  "http",
+  "runtime/adapters",
   "node",
   "browser",
   "tooling/index",

@@ -1,0 +1,19 @@
+package tembra:runtime@0.3.0;
+
+interface replies {
+    /// Tickets belong to one callback and are consumed once; they grant no kernel authority.
+    take: func(ticket: u32) -> result<string, string>;
+}
+
+/// Only the host-issued invocation scope supplies authority to these operations.
+world interpreter {
+    import replies;
+    import host-sync: func(packet: string) -> result<string, string>;
+    import host-async: async func(packet: string) -> u32;
+    export capture: func() -> result<list<u8>, string>;
+    export load: async func(source: string) -> result<string, string>;
+    export declare: func(packet: string) -> result<string, string>;
+    export has-interrupted: func() -> bool;
+    export interrupt: func();
+    export dispatch: async func(packet: string) -> result<string, string>;
+}

@@ -31,6 +31,7 @@ mod hooks;
 #[cfg(feature = "hooks")]
 mod observation;
 mod reference;
+mod reload;
 mod resources;
 #[cfg(feature = "rpc")]
 mod rpc;
@@ -55,10 +56,14 @@ struct ValueRecord {
     portable: Option<Encoder>,
 }
 
-struct Object {
+struct Environment {
     environment: Data,
     implementation: Implementation,
     scope: core::Id,
+}
+
+struct Object {
+    versions: BTreeMap<core::Id, Environment>,
     activation: Option<Shared<LocalBoxFuture<'static, Result<()>>>>,
 }
 type Opener = Box<dyn FnOnce() -> LocalBoxFuture<'static, Result<()>>>;
@@ -74,6 +79,7 @@ struct Inner {
     scope_activations: RefCell<BTreeMap<core::Id, Shared<LocalBoxFuture<'static, Result<()>>>>>,
     orb_scopes: RefCell<BTreeMap<core::Id, core::Id>>,
     orb_factories: RefCell<BTreeMap<core::Id, crate::orb::Factory>>,
+    pending_orbs: RefCell<BTreeMap<core::Id, core::InstalledOrb>>,
     orb_declaring: RefCell<BTreeSet<core::Id>>,
     orb_values: RefCell<BTreeMap<core::Id, Data>>,
     host_resources: RefCell<BTreeMap<String, ResourceKey>>,
@@ -87,7 +93,7 @@ struct Inner {
     executor: Rc<dyn LocalSpawn>,
     orbs: RefCell<BTreeMap<core::Id, BTreeMap<String, Implementation>>>,
     objects: RefCell<BTreeMap<core::Id, Object>>,
-    scope_objects: RefCell<BTreeMap<core::Id, core::Id>>,
+    scope_objects: RefCell<BTreeMap<core::Id, (core::Id, core::Id)>>,
     observers: RefCell<BTreeMap<core::Id, Vec<std::rc::Weak<crate::readable::Observer>>>>,
     values: RefCell<BTreeMap<core::Id, ValueRecord>>,
     closers: RefCell<BTreeMap<core::Id, Closer>>,
@@ -104,6 +110,7 @@ struct Inner {
     settled_waker: futures::task::AtomicWaker,
     settled: RefCell<Vec<oneshot::Sender<()>>>,
     programs: RefCell<BTreeMap<core::Id, oneshot::Sender<Result<()>>>>,
+    prepared_programs: RefCell<BTreeMap<core::Id, oneshot::Sender<Result<()>>>>,
 }
 
 /// Runs native callbacks on the supplied executor.
@@ -138,6 +145,7 @@ impl Host {
             scope_activations: RefCell::new(BTreeMap::new()),
             orb_scopes: RefCell::new(BTreeMap::new()),
             orb_factories: RefCell::new(BTreeMap::new()),
+            pending_orbs: RefCell::new(BTreeMap::new()),
             orb_declaring: RefCell::new(BTreeSet::new()),
             orb_values: RefCell::new(BTreeMap::new()),
             host_resources: RefCell::new(BTreeMap::new()),
@@ -168,6 +176,7 @@ impl Host {
             settled_waker: futures::task::AtomicWaker::new(),
             settled: RefCell::new(Vec::new()),
             programs: RefCell::new(BTreeMap::new()),
+            prepared_programs: RefCell::new(BTreeMap::new()),
         }))
     }
 
@@ -291,6 +300,8 @@ impl Host {
         self.0.orb_values.borrow_mut().clear();
         self.0.orb_errors.borrow_mut().clear();
         self.0.orb_factories.borrow_mut().clear();
+        self.0.pending_orbs.borrow_mut().clear();
+        self.0.prepared_programs.borrow_mut().clear();
         self.0.orb_scopes.borrow_mut().clear();
         self.0.scope_activations.borrow_mut().clear();
         self.0.host_resources.borrow_mut().clear();

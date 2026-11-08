@@ -215,12 +215,17 @@ impl Kernel {
                 unit()
             }
             KernelOp::Resource => {
-                let r = h.resource(
+                let r = h.resource_in_realm(
                     owner(request)?,
                     text(request, "name")?.into(),
                     number(request, "version")?,
                     request["exclusive"].as_bool().unwrap_or(false),
                     numbers_optional(request, "dependencies")?,
+                    if request.get("realm").is_some() {
+                        id("realm")?
+                    } else {
+                        0
+                    },
                 )?;
                 Ok(json!({ "id": r.id, "value": r.value }))
             }

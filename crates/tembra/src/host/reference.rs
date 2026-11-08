@@ -17,6 +17,15 @@ pub struct Reference {
 }
 
 impl Reference {
+    /// Encode the provider's current state through its portable boundary while this claim is live.
+    pub fn state_snapshot(&self) -> Result<(core::Snapshot, Value)> {
+        if self.status()? != core::Status::Live {
+            return Err(Error::invalid(Reason::NotReady, "reference is not live"));
+        }
+        let snapshot = self.host.kernel().snapshot(self.object)?;
+        Ok((snapshot, self.host.portable_value(snapshot.value)?))
+    }
+
     /// Read this reference's kernel identity.
     pub fn id(&self) -> core::Id {
         self.id
@@ -91,7 +100,7 @@ impl Reference {
         method: &str,
         arguments: A,
     ) -> Result<R> {
-        self.invoke(context, method, arguments, None).await
+        self.invoke(context, method, arguments, None, false).await
     }
 
     /// Execute a local or foreign call, converting values only when crossing languages.
@@ -112,8 +121,25 @@ impl Reference {
                     .map_err(|error| Error::invalid(Reason::Result, error.to_string()))
             }),
         );
-        self.invoke(context, method, arguments, Some(boundary))
+        self.invoke(context, method, arguments, Some(boundary), false)
             .await
+    }
+
+    /// Dispatch an already encoded foreign value through the provider's portable entrypoint.
+    pub async fn call_value(
+        &self,
+        context: &Context,
+        method: &str,
+        arguments: Value,
+    ) -> Result<Value> {
+        self.invoke(
+            context,
+            method,
+            arguments,
+            Some((Box::new(|value| Ok(value.clone())), Box::new(Ok))),
+            true,
+        )
+        .await
     }
 
     async fn invoke<A: 'static, R: 'static>(
@@ -122,6 +148,7 @@ impl Reference {
         method: &str,
         arguments: A,
         boundary: Option<Boundary<A, R>>,
+        portable_input: bool,
     ) -> Result<R> {
         if !self.host.same(&context.host) {
             return Err(Error::invalid(Reason::Context, "foreign host context"));
@@ -137,13 +164,31 @@ impl Reference {
         )?;
         let selected = {
             let objects = self.host.0.objects.borrow();
-            objects.get(&call.object).and_then(|object| {
-                object
-                    .implementation
-                    .local
-                    .get(method)
-                    .map(|handle| (object.environment.clone(), handle.clone()))
-            })
+            objects
+                .get(&call.object)
+                .and_then(|object| object.versions.get(&call.orb))
+                .and_then(|object| {
+                    if portable_input {
+                        let portable = object.implementation.portable.get(method)?.clone();
+                        let handle: crate::orb::LocalMethod =
+                            Rc::new(move |environment, context, arguments| {
+                                let portable = portable.clone();
+                                async move {
+                                    let arguments =
+                                        arguments.downcast::<Value>().map_err(|_| type_error())?;
+                                    Ok(Box::new(portable(environment, context, *arguments).await?)
+                                        as Box<dyn std::any::Any>)
+                                }
+                                .boxed_local()
+                            });
+                        return Some((object.environment.clone(), handle));
+                    }
+                    object
+                        .implementation
+                        .local
+                        .get(method)
+                        .map(|handle| (object.environment.clone(), handle.clone()))
+                })
         };
         let method_name = method.to_owned();
         let host = self.host.clone();
