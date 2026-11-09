@@ -21,6 +21,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 futures.workspace = true
 futures-timer = "3"
+rayon = "1"
 async-channel = "2"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 wasmtime = { version = "=51.0.0-rc.1", default-features = false, features = [
@@ -29,6 +30,7 @@ wasmtime = { version = "=51.0.0-rc.1", default-features = false, features = [
   "component-model-async",
   "async",
   "cranelift",
+  "parallel-compilation",
   "pulley",
   "runtime",
   "std",

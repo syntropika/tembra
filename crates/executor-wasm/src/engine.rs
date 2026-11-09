@@ -4,7 +4,7 @@ use crate::{adapter, failure};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::{
-    Arc, Mutex, Weak,
+    Arc, LazyLock, Mutex, Weak,
     atomic::{AtomicUsize, Ordering},
 };
 use tembra::{Orb, Result};
@@ -19,6 +19,24 @@ pub struct LogRecord {
 }
 
 pub(crate) type LogSink = Arc<dyn Fn(&LogRecord) + Send + Sync>;
+
+/// Route every Wasmtime compilation through bounded workers without starting the host's global pool.
+fn compile<T: Send>(work: impl FnOnce() -> wasmtime::Result<T> + Send) -> Result<T> {
+    static COMPILER: LazyLock<std::result::Result<rayon::ThreadPool, rayon::ThreadPoolBuildError>> =
+        LazyLock::new(|| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(
+                    std::thread::available_parallelism().map_or(1, |count| count.get().min(4)),
+                )
+                .thread_name(|index| format!("tembra-compile-{index}"))
+                .build()
+        });
+    COMPILER
+        .as_ref()
+        .map_err(failure)?
+        .install(work)
+        .map_err(failure)
+}
 
 /// Bounds apply to each interpreter instance and each exported callback.
 #[derive(Clone, Copy, Debug, serde::Deserialize)]
@@ -145,7 +163,7 @@ impl Engine {
         if self.interpreter.is_some() {
             return Err(failure("interpreter is already configured"));
         }
-        let module = Module::new(&self.engine, module).map_err(failure)?;
+        let module = compile(|| Module::new(&self.engine, module))?;
         crate::worker::check(&module).map_err(failure)?;
         self.interpreter = Some(Arc::new(module));
         Ok(self)
@@ -159,7 +177,7 @@ impl Engine {
             return Ok(component);
         }
         cache.retain(|_, component| component.strong_count() != 0);
-        let component = Arc::new(Component::new(&self.engine, bytes).map_err(failure)?);
+        let component = Arc::new(compile(|| Component::new(&self.engine, bytes))?);
         cache.insert(key, Arc::downgrade(&component));
         Ok(component)
     }

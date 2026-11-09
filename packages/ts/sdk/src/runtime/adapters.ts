@@ -96,7 +96,9 @@ export function prepareDefinitions(
                 grants: {
                   ...definition.grants,
                   ...(definition.grants.filesystem
-                    ? { filesystem: definition.grants.filesystem.map((mount) => ({ ...mount })) }
+                    ? {
+                        filesystem: definition.grants.filesystem.map((mount) => ({ ...mount })),
+                      }
                     : {}),
                   ...(definition.grants.network
                     ? {
@@ -116,23 +118,41 @@ export function prepareDefinitions(
   return prepareBackends(captured, isolated);
 }
 
-/** Prepare only definitions that actually need asynchronous backend materialization. */
+/** Overlap independent native preparations while bounding transient Stores and draining failures. */
 async function prepareBackends(
   definitions: readonly OrbInput[],
   isolated?: (definition: OrbArtifact) => Promise<OrbDefinition>,
 ): Promise<OrbDefinition[]> {
-  const prepared: OrbDefinition[] = [];
-  try {
-    for (const definition of definitions) {
-      if ("artifact" in definition) {
-        if (!isolated) throw new Error("This host has no isolated execution backend");
-        prepared.push(await isolated(definition));
-      } else prepared.push(definition);
+  const prepared: (OrbDefinition | undefined)[] = new Array(definitions.length);
+  let next = 0;
+  const failures: { index: number; reason: unknown }[] = [];
+  async function prepare(): Promise<void> {
+    while (failures.length === 0 && next < definitions.length) {
+      const index = next++;
+      const definition = definitions[index]!;
+      try {
+        if ("artifact" in definition) {
+          if (!isolated) throw new Error("This host has no isolated execution backend");
+          const materialized = await isolated(definition);
+          if (!materialized) throw new Error("Execution backend returned no Orb definition");
+          prepared[index] = materialized;
+        } else prepared[index] = definition;
+      } catch (error) {
+        failures.push({ index, reason: error });
+      }
     }
-    return prepared;
-  } catch (error) {
-    return discardDefinitions(prepared, error);
   }
+  // Workers consume their errors so every in-flight Store settles before disposal begins.
+  await Promise.all(Array.from({ length: Math.min(4, definitions.length) }, prepare));
+  const completed = prepared.filter((definition) => definition !== undefined);
+  if (failures.length) {
+    const errors = failures.sort((a, b) => a.index - b.index).map((failure) => failure.reason);
+    return discardDefinitions(
+      completed,
+      errors.length === 1 ? errors[0] : new AggregateError(errors, "Orb preparation failed"),
+    );
+  }
+  return completed;
 }
 
 /** Dispose failed candidates while retaining both the operation and cleanup causes. */

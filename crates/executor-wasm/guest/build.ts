@@ -68,7 +68,7 @@ const bundled = await Bun.build({
   outdir: bootstrap,
   format: "iife",
   target: "browser",
-  minify: false,
+  minify: { whitespace: true, syntax: true, identifiers: true },
 });
 if (!bundled.success) throw new AggregateError(bundled.logs, "Guest bootstrap build failed");
 // The interpreter is a WASI preview 1 reactor core module. Its linear memory is imported so each
@@ -120,6 +120,7 @@ const manifest = {
   sourceArchiveSha256: createHash("sha256").update(archive).digest("hex"),
   wasmSha256: createHash("sha256").update(bytes).digest("hex"),
   bytes: bytes.length,
+  bun: Bun.version,
   rust: execFileSync("rustc", [`+${values.toolchain}`, "-Vv"], { encoding: "utf8" }),
   sdk: execFileSync(path.join(sdk, "bin/clang"), ["--version"], { encoding: "utf8" }),
 };

@@ -47,3 +47,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# Optimize the bytecode dispatch loop without increasing optimization across the host.
+[profile.release.package.pulley-interpreter]
+opt-level = 3
