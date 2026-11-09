@@ -22,11 +22,18 @@ code distributed through npm. `tembra-executor-wasm` and `tembra-contracts-wasm`
 have exact registry versions as well as local paths.
 
 Every platform builds its Node addon and loads it with Node. The workflow also runs
-the repository quality checks, Swift tests and Android unit tests. Packaging requires
-all six Node binaries, the Swift distribution and every Android ABI. Each standalone
-crate archive is compiled with all features. The packed SDK and engine archives are
-installed in an empty project and exercised with both Node and Bun, using native and
-WASM hosts. Publication starts only after every build and packaging check passes.
+the repository quality checks, isolated orb acceptance, Swift tests and Android unit
+tests. Packaging requires all six Node binaries, the Swift distribution and every
+Android ABI. Each standalone crate archive is compiled with all features. Staging
+replaces each package's previous staged copy, so removed build outputs cannot ship.
+
+The packed SDK and engine archives are installed in an empty project with the
+workspace's TypeScript and Node type versions. A consumer compiled with `NodeNext`
+must typecheck against every published SDK entry. It then runs with Node and Bun on
+native and WASM hosts, including error class identity across entrypoints. The
+installed build tooling, run with Bun, builds a source orb and packages the compiled
+Rust provider. The Node host executes both through the packaged interpreter.
+Publication starts only after every build and packaging check passes.
 
 Select **Actions → Release → Run workflow** for a build rehearsal on the chosen ref.
 Manual build runs use the checked-in version and upload artifacts. They do not publish or

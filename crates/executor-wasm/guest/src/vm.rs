@@ -1,25 +1,13 @@
 //! Synchronous VM access keeps Rust futures out of the serializable JavaScript heap.
+use super::{abi, protocol::Load};
 use rquickjs::{
     Array, Context, Function, Object, Promise, Runtime,
     context::EvalOptions,
     promise::PromiseState,
     snapshot::{SnapshotHost, SnapshotKind},
 };
-use serde_json::Value;
 use std::{cell::Cell, rc::Rc};
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Load {
-    source: String,
-    heap_bytes: usize,
-    contract: Value,
-    #[serde(default = "default_ticks")]
-    instruction_ticks: u32,
-}
-fn default_ticks() -> u32 {
-    10000
-}
 pub(super) struct Effect {
     pub id: u64,
     pub packet: String,
@@ -36,7 +24,9 @@ pub(super) struct Vm {
 }
 impl Vm {
     /// Configure runtime-only bounds again rather than serializing interrupt handlers or host cells.
-    fn runtime(configuration: &Load) -> Result<(Runtime, Rc<Cell<u32>>, Rc<Cell<bool>>), String> {
+    fn runtime(
+        configuration: &Load<'_>,
+    ) -> Result<(Runtime, Rc<Cell<u32>>, Rc<Cell<bool>>), String> {
         let runtime = Runtime::new().map_err(|e| e.to_string())?;
         runtime.set_memory_limit(configuration.heap_bytes);
         runtime.set_max_stack_size(64 << 10);
@@ -56,7 +46,7 @@ impl Vm {
     }
     /// Load TypeScript and npm's closed bundle without evaluating it in the outer host.
     pub fn load(packet: &str) -> Result<Self, String> {
-        let configuration: Load = serde_json::from_str(packet).map_err(|e| e.to_string())?;
+        let configuration: Load<'_> = serde_json::from_str(packet).map_err(|e| e.to_string())?;
         let (runtime, ticks, interrupted) = Self::runtime(&configuration)?;
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;
         let host = super::io::host();
@@ -85,7 +75,7 @@ impl Vm {
                 )))?;
                 let mut options = EvalOptions::default();
                 options.typescript = true;
-                ctx.eval_with_options::<(), _>(configuration.source.clone(), options)
+                ctx.eval_with_options::<(), _>(configuration.source.as_bytes(), options)
             })();
             result.map_err(|error| format!("{error:?}: {:?}", ctx.catch()))
         })?;
@@ -173,7 +163,8 @@ impl Vm {
             let result = (|| -> rquickjs::Result<Vec<Effect>> {
                 let function: Function = ctx.globals().get("__tembraTakeEffects")?;
                 let array: Array = function.call(())?;
-                if array.len() > 128 {
+                // Bound the untrusted queue before reading any entry.
+                if array.len() > abi::EFFECT_LIMIT as usize {
                     return Err(rquickjs::Error::new_from_js_message(
                         "effects",
                         "queue",
@@ -184,9 +175,10 @@ impl Vm {
                     .map(|index| {
                         let entry: Object = array.get(index)?;
                         let id: f64 = entry.get("id")?;
+                        // JavaScript numbers are untrusted; only exact safe integers convert.
                         if !id.is_finite()
                             || id.fract() != 0.0
-                            || !(1.0..=9_007_199_254_740_991.0).contains(&id)
+                            || !(1.0..=abi::IDENTITY_LIMIT as f64).contains(&id)
                         {
                             return Err(rquickjs::Error::new_from_js_message(
                                 "effect",
@@ -205,10 +197,9 @@ impl Vm {
         })
     }
     /// Deliver typed data to the original Promise without a second JSON envelope.
+    ///
+    /// `id` comes from `abi::Completion::decode_batch`, which has already checked its range.
     pub fn complete(&self, id: u64, result: Result<String, String>) -> Result<(), String> {
-        if id == 0 || id > 9_007_199_254_740_991 {
-            return Err("invalid effect identity".into());
-        }
         let ok = result.is_ok();
         let value = result.unwrap_or_else(|error| error);
         self.context.with(|ctx| {
@@ -222,8 +213,9 @@ impl Vm {
     /// Revoke native authority before settling unobserved Promise continuations.
     pub fn stop(&self) -> Result<(), String> {
         self.accepting.set(false);
-        // Revoked callbacks may run rejection handlers, but never receive an unbounded drain.
-        self.ticks.set(default_ticks());
+        // Revoked callbacks may run rejection handlers under a fresh configured budget, never an
+        // unbounded drain.
+        self.ticks.set(self.tick_limit);
         let result = self
             .context
             .with(|ctx| {

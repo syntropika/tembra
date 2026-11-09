@@ -1,9 +1,17 @@
-//! Own immutable Orb data and its resolved contract before creating any executable guest.
-use crate::{Contract, Error};
+//! Own immutable Orb data and its prepared contract before creating any executable guest.
+//!
+//! An artifact is a WebAssembly component container. Source Orbs are an empty component carrying
+//! only `tembra:orb` (identity and compact contract) and `tembra:source`. Compiled Orbs append
+//! `tembra:orb` to the real component, whose actual WIT types are verified against the contract
+//! by the native `authoring` verifier before any linking.
+use crate::{Error, PreparedContract, codec::Reader, model::MAX_NAME};
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::BTreeMap};
-use wasm_encoder::{CustomSection, Encode, Section};
-use wasmparser::{Parser, Payload};
+use std::collections::BTreeMap;
+
+/// Header of an empty WebAssembly component: magic, version 0x0d, layer 1.
+pub(crate) const COMPONENT_HEADER: [u8; 8] = *b"\0asm\x0d\0\x01\0";
+const ORB: &str = "tembra:orb";
+const SOURCE: &str = "tembra:source";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -19,72 +27,21 @@ pub enum Implementation {
     Component(Vec<u8>),
 }
 
-/// The parsed contract and payload stay together; platform bindings expose an opaque handle.
+/// The prepared contract and payload stay together; platform bindings expose an opaque handle.
 pub struct Artifact {
     pub identity: Identity,
-    pub contract: Contract,
+    pub contract: PreparedContract,
     pub implementation: Implementation,
-}
-
-impl Contract {
-    /// Package checked source or component bytes without evaluating the author's implementation.
-    pub fn artifact(
-        &self,
-        source: Option<&str>,
-        component: Option<&[u8]>,
-        name: &str,
-        api_version: u32,
-    ) -> Result<Vec<u8>, Error> {
-        let identity = Identity {
-            name: name.into(),
-            api_version,
-            world: self.resolve.worlds[self.world].name.clone(),
-        };
-        identity.validate()?;
-        if source.is_some() == component.is_some() {
-            return Err(Error(
-                "an artifact requires exactly one source bundle or component".into(),
-            ));
-        }
-        let contract = self.encode()?;
-        let mut bytes = if let Some(component) = component {
-            if !sections(component)?.is_empty() {
-                return Err(Error(
-                    "component already contains Orb artifact metadata".into(),
-                ));
-            }
-            self.check_component_exports(component)?;
-            component.to_vec()
-        } else {
-            self.check_value_profile()?;
-            contract.clone()
-        };
-        let mut append = |name: &'static str, data: &[u8]| {
-            let section = CustomSection {
-                name: Cow::Borrowed(name),
-                data: Cow::Borrowed(data),
-            };
-            bytes.push(section.id());
-            section.encode(&mut bytes);
-        };
-        if component.is_some() {
-            append("tembra:contract", &contract);
-        }
-        append(
-            "tembra:orb",
-            &serde_json::to_vec(&identity).map_err(|error| Error(error.to_string()))?,
-        );
-        if let Some(source) = source {
-            append("tembra:source", source.as_bytes());
-        }
-        Ok(bytes)
-    }
 }
 
 impl Identity {
     /// Refuse malformed registration metadata on both packaging and loading paths.
-    fn validate(&self) -> Result<(), Error> {
-        if self.name.trim().is_empty() || self.api_version == 0 || self.world.trim().is_empty() {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        if self.name.trim().is_empty()
+            || self.name.len() > MAX_NAME
+            || self.api_version == 0
+            || self.world.trim().is_empty()
+        {
             return Err(Error(
                 "artifact identity requires a name, world and positive API version".into(),
             ));
@@ -94,37 +51,51 @@ impl Identity {
 }
 
 impl Artifact {
-    /// Decode immutable data once and check the real component imports and exports before linking.
-    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let mut sections = sections(bytes)?;
-        let identity: Identity = serde_json::from_slice(
-            &sections
-                .remove("tembra:orb")
-                .ok_or_else(|| Error("missing artifact identity".into()))?,
-        )
-        .map_err(|error| Error(error.to_string()))?;
-        identity.validate()?;
-        let source = sections
-            .remove("tembra:source")
-            .map(String::from_utf8)
-            .transpose()
-            .map_err(|error| Error(error.to_string()))?;
-        let (contract, implementation) = if let Some(source) = source {
-            // The WIT package is the source artifact's body, so no second copy is embedded.
-            let contract = Contract::from_bytes(bytes, Some(&identity.world))?;
-            contract.check_value_profile()?;
-            (contract, Implementation::Source(source))
-        } else {
-            let encoded = sections
-                .remove("tembra:contract")
-                .ok_or_else(|| Error("missing component artifact contract".into()))?;
-            let contract = Contract::from_bytes(&encoded, Some(&identity.world))?;
-            contract.check_component_exports(bytes)?;
-            (contract, Implementation::Component(bytes.to_vec()))
+    /// Package a source Orb for an already prepared contract; no WIT parser is involved.
+    pub fn package_source(
+        name: &str,
+        api_version: u32,
+        contract: &PreparedContract,
+        source: &str,
+    ) -> Result<Vec<u8>, Error> {
+        let identity = Identity {
+            name: name.into(),
+            api_version,
+            world: contract.world().to_owned(),
         };
-        if !sections.is_empty() {
+        identity.validate()?;
+        contract.check_value_profile()?;
+        let mut bytes = COMPONENT_HEADER.to_vec();
+        append_section(&mut bytes, ORB, &encode_orb(&identity, contract));
+        append_section(&mut bytes, SOURCE, source.as_bytes());
+        Ok(bytes)
+    }
+
+    /// Decode immutable data once; compiled components are checked against their real types.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let mut container = Container::parse(bytes)?;
+        let orb = container
+            .take(ORB)
+            .ok_or_else(|| Error("missing artifact identity".into()))?;
+        let source = container.take(SOURCE);
+        if !container.tembra.is_empty() {
             return Err(Error("unsupported artifact metadata section".into()));
         }
+        let (identity, contract) = decode_orb(orb)?;
+        let implementation = if let Some(source) = source {
+            if bytes[..8] != COMPONENT_HEADER || container.other {
+                return Err(Error(
+                    "source artifacts may only contain Orb metadata and source".into(),
+                ));
+            }
+            contract.check_value_profile()?;
+            Implementation::Source(
+                String::from_utf8(source.to_vec()).map_err(|error| Error(error.to_string()))?,
+            )
+        } else {
+            verify_component(&contract, bytes)?;
+            Implementation::Component(bytes.to_vec())
+        };
         Ok(Self {
             identity,
             contract,
@@ -151,27 +122,105 @@ impl Artifact {
     }
 }
 
-/// Read only the containing component's metadata and reject duplicate descriptions.
-fn sections(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, Error> {
-    let mut sections = BTreeMap::new();
-    let mut depth = 0;
-    for payload in Parser::new(0).parse_all(bytes) {
-        match payload.map_err(|error| Error(error.to_string()))? {
-            Payload::Version { .. } => depth += 1,
-            Payload::End(_) => depth -= 1,
-            Payload::CustomSection(section)
-                if depth == 1 && section.name().starts_with("tembra:") =>
-            {
-                let previous = sections.insert(section.name().to_owned(), section.data().to_vec());
-                if previous.is_some() {
-                    return Err(Error(format!(
-                        "duplicate artifact section {}",
-                        section.name()
-                    )));
-                }
-            }
-            _ => {}
+/// Check a compiled component's actual imports and exports against the prepared contract.
+#[cfg(feature = "authoring")]
+fn verify_component(contract: &PreparedContract, bytes: &[u8]) -> Result<(), Error> {
+    crate::authoring::verify_component(contract, bytes)
+}
+
+/// Runtimes without the component verifier refuse compiled Orbs instead of trusting metadata.
+#[cfg(not(feature = "authoring"))]
+fn verify_component(_: &PreparedContract, _: &[u8]) -> Result<(), Error> {
+    Err(Error(
+        "compiled Orb artifacts require the native component verifier; this runtime accepts source Orbs only"
+            .into(),
+    ))
+}
+
+/// Encode identity and contract into one compact `tembra:orb` payload.
+pub(crate) fn encode_orb(identity: &Identity, contract: &PreparedContract) -> Vec<u8> {
+    let mut writer = crate::codec::Writer::default();
+    writer.str(&identity.name);
+    writer.u32(identity.api_version);
+    writer.bytes(&contract.encode());
+    writer.finish()
+}
+
+/// Decode and validate identity and contract from untrusted bytes.
+fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract), Error> {
+    let mut reader = Reader::new(bytes);
+    let name = reader.str()?;
+    let api_version = reader.u32()?;
+    let length = reader.u32()? as usize;
+    let contract = PreparedContract::decode(reader.take(length)?)?;
+    reader.finish()?;
+    let identity = Identity {
+        name,
+        api_version,
+        world: contract.world().to_owned(),
+    };
+    identity.validate()?;
+    Ok((identity, contract))
+}
+
+/// Append a custom section to a WebAssembly binary.
+pub(crate) fn append_section(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
+    use crate::codec::Writer;
+    let mut payload = Writer::default();
+    payload.str(name);
+    let mut payload = payload.finish();
+    payload.extend_from_slice(data);
+    let mut header = Writer::default();
+    header.byte(0);
+    header.len(payload.len());
+    bytes.extend_from_slice(&header.finish());
+    bytes.extend_from_slice(&payload);
+}
+
+/// Top-level sections of a module or component; nested payloads are skipped unread.
+pub(crate) struct Container<'a> {
+    pub tembra: BTreeMap<&'a str, &'a [u8]>,
+    /// Whether any non-Tembra section exists.
+    pub other: bool,
+}
+
+impl<'a> Container<'a> {
+    pub(crate) fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
+        let invalid = || Error("artifact is not a WebAssembly binary".into());
+        let header = bytes.get(..8).ok_or_else(invalid)?;
+        if header != COMPONENT_HEADER && header != b"\0asm\x01\0\0\0" {
+            return Err(invalid());
         }
+        let mut reader = Reader::new(&bytes[8..]);
+        let mut container = Self {
+            tembra: BTreeMap::new(),
+            other: false,
+        };
+        while !reader.is_empty() {
+            let id = reader.byte()?;
+            let size = reader.wasm_u32()? as usize;
+            let payload = reader.take(size).map_err(|_| invalid())?;
+            if id != 0 {
+                container.other = true;
+                continue;
+            }
+            let mut section = Reader::new(payload);
+            let length = section.wasm_u32()? as usize;
+            let name = std::str::from_utf8(section.take(length).map_err(|_| invalid())?)
+                .map_err(|_| invalid())?;
+            if !name.starts_with("tembra:") {
+                container.other = true;
+                continue;
+            }
+            let data = section.take(payload.len() - section.position())?;
+            if container.tembra.insert(name, data).is_some() {
+                return Err(Error(format!("duplicate artifact section {name}")));
+            }
+        }
+        Ok(container)
     }
-    Ok(sections)
+
+    fn take(&mut self, name: &str) -> Option<&'a [u8]> {
+        self.tembra.remove(name)
+    }
 }

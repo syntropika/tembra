@@ -4,7 +4,6 @@ import type { Codec } from "../codecs/json.ts";
 import type { Context } from "../runtime/context.ts";
 import type { Readable, State } from "../state.ts";
 import type { Declaration } from "./declaration.ts";
-import type { Grants } from "../interpreter/types.ts";
 
 export type Completion<T> = T | PromiseLike<T>;
 
@@ -60,6 +59,12 @@ export interface OrbDefinition {
 export interface OrbProvider {
   orb: string;
   apiVersion: number;
+}
+
+/** Per-Orb access to providers registered by the host. An import alone grants nothing. */
+export interface Grants {
+  filesystem?: readonly { provider: string; mount: string; writable: boolean }[];
+  network?: readonly { provider: string; connect: readonly string[] }[];
 }
 
 export interface LoadOptions {
@@ -253,7 +258,7 @@ export interface HostOptions {
   principal?: string;
   kernel: KernelPort;
   serialization?: Codec;
-  load?: (location: string | URL, options?: LoadOptions) => Promise<OrbDefinition>;
+  load?: (location: string | URL, options?: LoadOptions) => Promise<OrbInput>;
 
   /** Receives adapter and observer failures; throwing from this callback cannot interrupt dispatch. */
   onError?: (error: Error) => void;

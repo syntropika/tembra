@@ -73,9 +73,11 @@ test("published entrypoints preserve structured failures across RPC and engine e
         },
       }),
     );
-    await assert.rejects(remote.get("missing", "main"), {
-      code: Code.Unavailable,
-      reason: Reason.UnknownService,
+    await assert.rejects(remote.get("missing", "main"), (error) => {
+      assert.ok(error instanceof TembraError);
+      assert.equal(error.code, Code.Unavailable);
+      assert.equal(error.reason, Reason.UnknownService);
+      return true;
     });
     const ref = await remote.get("errors", "main");
     await assert.rejects(ref.reject(), descriptor);
@@ -111,4 +113,16 @@ test("published SDK tooling exports its build interface", async () => {
   assert.equal("Platform" in tooling, false);
   const config = { builds: {} };
   assert.equal(tooling.defineConfig(config), config);
+});
+
+test("published host failures retain the exported error constructor identity", async () => {
+  const host = createHost();
+  try {
+    await assert.rejects(
+      host.get("missing-service", "main"),
+      (error) => error instanceof TembraError && error.reason === Reason.UnknownService,
+    );
+  } finally {
+    await host.close();
+  }
 });

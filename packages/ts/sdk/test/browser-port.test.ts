@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { BrowserPort, type BrowserGuest } from "../src/interpreter/browser-port.ts";
+import { BrowserPort } from "../src/interpreter/browser-port.ts";
+import type { Guest } from "../src/interpreter/core.ts";
 import type { ExecutionScope } from "../src/interpreter/types.ts";
 
 /** Control physical completion independently of the caller's observation. */
@@ -13,18 +14,18 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 /** Supply unrelated exports while each test controls the actual dispatch boundary. */
-function guest(exports: Partial<BrowserGuest>): BrowserGuest {
+function guest(exports: Partial<Guest>): Guest {
   return {
-    load: () => ({ value: { tag: "ok", val: "{}" }, interrupted: false }),
-    declare: () => ({ value: { tag: "ok", val: "null" }, interrupted: false }),
+    load: () => ({ ok: true, value: "{}", interrupted: false }),
+    declare: () => ({ ok: true, value: "null", interrupted: false }),
     start: () => ({
-      outcome: { value: { tag: "ok", val: "42" }, interrupted: false },
+      outcome: { ok: true, value: "42", interrupted: false },
       effects: [],
     }),
     resume: () => {
       throw new Error("Unexpected continuation");
     },
-    cancel: () => ({ value: { tag: "err", val: "cancelled" }, interrupted: true }),
+    cancel: () => ({ ok: false, value: "cancelled", interrupted: true }),
     ...exports,
   };
 }
@@ -62,14 +63,14 @@ test("a completed Promise.race retains physical ownership of its losing host ope
   port.guest = guest({
     start: () => ({
       effects: [
-        { id: 1n, packet: JSON.stringify({ operation: "wait", milliseconds: 1 }) },
-        { id: 2n, packet: JSON.stringify({ operation: "wait", milliseconds: 2 }) },
+        { id: 1, packet: JSON.stringify({ operation: "wait", milliseconds: 1 }) },
+        { id: 2, packet: JSON.stringify({ operation: "wait", milliseconds: 2 }) },
       ],
     }),
     resume: (completed) => {
       resumes++;
-      expect(completed[0]?.id).toBe(1n);
-      return { outcome: { value: { tag: "ok", val: "42" }, interrupted: false }, effects: [] };
+      expect(completed[0]?.id).toBe(1);
+      return { outcome: { ok: true, value: "42", interrupted: false }, effects: [] };
     },
   });
   const operation = port
@@ -95,55 +96,69 @@ test("a completed Promise.race retains physical ownership of its losing host ope
   expect(returned).toBe(false);
   await expect(port.close()).rejects.toThrow("physical work");
   losing.resolve(0);
-  expect(await operation).toBe(42);
+  expect(await operation).toBe("42");
   expect(resumes).toBe(1);
   await port.close();
   expect(disposed).toBe(1);
 });
 
-test("a hard deadline waits for the Wasm frame and I/O before cancellation and disposal", async () => {
-  const frame = deferred<Awaited<ReturnType<BrowserGuest["start"]>>>(),
-    physical = deferred<void>(),
+test("a hard deadline waits for admitted host I/O before disposal", async () => {
+  const physical = deferred<void>(),
+    entered = deferred<void>(),
     ended = deferred<void>();
-  let inWasm = true,
-    cancelled = 0,
+  let cancelled = 0,
     observed = false;
   const port = new BrowserPort(
-    5,
+    10,
     async () => {},
     () => {},
   );
-  port.io.track(physical.promise);
   port.guest = guest({
-    start: () =>
-      frame.promise.then((value) => {
-        inWasm = false;
-        return value;
-      }),
+    start: () => ({
+      effects: [
+        {
+          id: 1,
+          packet: JSON.stringify({
+            operation: "filesystem.write-text",
+            path: "/data/file",
+            value: "x",
+          }),
+        },
+      ],
+    }),
     cancel: () => {
-      expect(inWasm).toBe(false);
       cancelled++;
-      return { value: { tag: "err", val: "cancelled" }, interrupted: true };
+      return { ok: false, value: "cancelled", interrupted: true };
     },
   });
-  const operation = port.execute("{}", scope({ cancel: () => ended.resolve() })).then(
-    (value) => {
-      observed = true;
-      return { value, error: undefined };
-    },
-    (error) => {
-      observed = true;
-      return { value: undefined, error };
-    },
-  );
+  const operation = port
+    .execute(
+      "{}",
+      scope({
+        cancel: () => ended.resolve(),
+        async: async () => {
+          entered.resolve();
+          await physical.promise;
+          return null;
+        },
+      }),
+    )
+    .then(
+      () => {
+        observed = true;
+        return undefined;
+      },
+      (error) => {
+        observed = true;
+        return error;
+      },
+    );
+  await entered.promise;
   await ended.promise;
-  expect(cancelled).toBe(0);
   await expect(port.close()).rejects.toThrow("physical work");
-  frame.resolve({ effects: [] });
-  await new Promise((resolve) => setTimeout(resolve, 0));
   expect(observed).toBe(false);
   physical.resolve();
-  expect((await operation).error.message).toContain("wall time limit");
+  expect(String(await operation)).toContain("wall time limit");
   expect(cancelled).toBe(1);
   await expect(port.execute("{}", scope())).rejects.toThrow("closed or busy");
   await port.close();
@@ -160,29 +175,29 @@ test("a rejected cooperative effect settles in the same heap and permits a later
   port.guest = guest({
     start: () =>
       ++calls === 1
-        ? { effects: [{ id: 1n, packet: JSON.stringify({ operation: "wait", milliseconds: 1 }) }] }
-        : { outcome: { value: { tag: "ok", val: "42" }, interrupted: false }, effects: [] },
+        ? { effects: [{ id: 1, packet: JSON.stringify({ operation: "wait", milliseconds: 1 }) }] }
+        : { outcome: { ok: true, value: "42", interrupted: false }, effects: [] },
     resume: (completed) => {
-      expect(completed[0]?.value.tag).toBe("err");
+      expect(completed[0]?.ok).toBe(false);
       return {
-        outcome: { value: { tag: "err", val: "operation cancelled" }, interrupted: false },
+        outcome: { ok: false, value: "operation cancelled", interrupted: false },
         effects: [],
       };
     },
     cancel: () => {
       cancelled++;
-      return { value: { tag: "err", val: "hard cancellation" }, interrupted: true };
+      return { ok: false, value: "hard cancellation", interrupted: true };
     },
   });
   await expect(
     port.execute("{}", scope({ async: () => Promise.reject(new Error("operation cancelled")) })),
   ).rejects.toThrow("operation cancelled");
-  expect(await port.execute("{}", scope())).toBe(42);
+  expect(await port.execute("{}", scope())).toBe("42");
   expect(cancelled).toBe(0);
   await port.close();
 });
 
-test("host-sync normalizes malformed and oversized packets to WIT string errors", () => {
+test("host sync normalizes malformed and oversized packets to string errors", () => {
   const port = new BrowserPort(
     1000,
     async () => {},
@@ -209,18 +224,18 @@ test("already completed effects resume together", async () => {
   let resumes = 0;
   port.guest = guest({
     start: () => ({
-      effects: [1n, 2n].map((id) => ({
+      effects: [1, 2].map((id) => ({
         id,
         packet: JSON.stringify({ operation: "wait", milliseconds: 1 }),
       })),
     }),
     resume: (completed) => {
       resumes++;
-      expect(completed.map((value) => value.id)).toEqual([1n, 2n]);
-      return { outcome: { value: { tag: "ok", val: "42" }, interrupted: false }, effects: [] };
+      expect(completed.map((value) => value.id)).toEqual([1, 2]);
+      return { outcome: { ok: true, value: "42", interrupted: false }, effects: [] };
     },
   });
-  expect(await port.execute("{}", scope({ async: async () => null }))).toBe(42);
+  expect(await port.execute("{}", scope({ async: async () => null }))).toBe("42");
   expect(resumes).toBe(1);
   await port.close();
 });

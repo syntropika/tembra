@@ -17,96 +17,96 @@
   "type": "module",
   "imports": {
     "#tembra-adapters": {
-      "types": "./packages/ts/sdk/src/runtime/adapters.ts",
-      "bun": "./packages/ts/sdk/src/runtime/adapters.ts",
-      "browser": "./packages/ts/sdk/src/runtime/adapters.ts",
       "source": "./packages/ts/sdk/src/runtime/adapters.ts",
+      "bun": "./packages/ts/sdk/src/runtime/adapters.ts",
+      "types": "./packages/ts/sdk/dist/runtime/adapters.d.ts",
+      "browser": "./packages/ts/sdk/src/runtime/adapters.ts",
       "default": "./packages/ts/sdk/dist/runtime/adapters.js"
     }
   },
   "exports": {
     ".": {
       "tembra-wasm": {
-        "types": "./packages/ts/sdk/src/guest.ts",
-        "bun": "./packages/ts/sdk/src/guest.ts",
-        "browser": "./packages/ts/sdk/src/guest.ts",
         "source": "./packages/ts/sdk/src/guest.ts",
+        "bun": "./packages/ts/sdk/src/guest.ts",
+        "types": "./packages/ts/sdk/dist/guest.d.ts",
+        "browser": "./packages/ts/sdk/dist/guest.js",
         "default": "./packages/ts/sdk/dist/guest.js"
       },
-      "types": "./packages/ts/sdk/src/index.ts",
-      "bun": "./packages/ts/sdk/src/index.ts",
-      "browser": "./packages/ts/sdk/src/index.ts",
       "source": "./packages/ts/sdk/src/index.ts",
+      "bun": "./packages/ts/sdk/src/index.ts",
+      "types": "./packages/ts/sdk/dist/index.d.ts",
+      "browser": "./packages/ts/sdk/dist/index.js",
       "import": "./packages/ts/sdk/dist/index.js"
     },
     "./node": {
-      "types": "./packages/ts/sdk/src/node.ts",
-      "bun": "./packages/ts/sdk/src/node.ts",
-      "browser": "./packages/ts/sdk/src/node.ts",
       "source": "./packages/ts/sdk/src/node.ts",
+      "bun": "./packages/ts/sdk/src/node.ts",
+      "types": "./packages/ts/sdk/dist/node.d.ts",
+      "browser": "./packages/ts/sdk/dist/node.js",
       "import": "./packages/ts/sdk/dist/node.js"
     },
     "./browser": {
-      "types": "./packages/ts/sdk/src/browser.ts",
-      "bun": "./packages/ts/sdk/src/browser.ts",
-      "browser": "./packages/ts/sdk/src/browser.ts",
       "source": "./packages/ts/sdk/src/browser.ts",
+      "bun": "./packages/ts/sdk/src/browser.ts",
+      "types": "./packages/ts/sdk/dist/browser.d.ts",
+      "browser": "./packages/ts/sdk/dist/browser.js",
       "import": "./packages/ts/sdk/dist/browser.js"
     },
     "./runtime": {
-      "types": "./packages/ts/sdk/src/host.ts",
-      "bun": "./packages/ts/sdk/src/host.ts",
-      "browser": "./packages/ts/sdk/src/host.ts",
       "source": "./packages/ts/sdk/src/host.ts",
+      "bun": "./packages/ts/sdk/src/host.ts",
+      "types": "./packages/ts/sdk/dist/host.d.ts",
+      "browser": "./packages/ts/sdk/dist/host.js",
       "import": "./packages/ts/sdk/dist/host.js"
     },
     "./tooling": {
-      "types": "./packages/ts/sdk/src/tooling/index.ts",
-      "bun": "./packages/ts/sdk/src/tooling/index.ts",
-      "browser": "./packages/ts/sdk/src/tooling/index.ts",
       "source": "./packages/ts/sdk/src/tooling/index.ts",
+      "bun": "./packages/ts/sdk/src/tooling/index.ts",
+      "types": "./packages/ts/sdk/dist/tooling/index.d.ts",
+      "browser": "./packages/ts/sdk/dist/tooling/index.js",
       "import": "./packages/ts/sdk/dist/tooling/index.js"
     },
     "./msgpack": {
-      "types": "./packages/ts/sdk/src/msgpack.ts",
-      "bun": "./packages/ts/sdk/src/msgpack.ts",
-      "browser": "./packages/ts/sdk/src/msgpack.ts",
       "source": "./packages/ts/sdk/src/msgpack.ts",
+      "bun": "./packages/ts/sdk/src/msgpack.ts",
+      "types": "./packages/ts/sdk/dist/msgpack.d.ts",
+      "browser": "./packages/ts/sdk/dist/msgpack.js",
       "import": "./packages/ts/sdk/dist/msgpack.js"
     },
     "./coordinator": {
-      "types": "./packages/ts/sdk/src/coordinator.ts",
-      "bun": "./packages/ts/sdk/src/coordinator.ts",
-      "browser": "./packages/ts/sdk/src/coordinator.ts",
       "source": "./packages/ts/sdk/src/coordinator.ts",
+      "bun": "./packages/ts/sdk/src/coordinator.ts",
+      "types": "./packages/ts/sdk/dist/coordinator.d.ts",
+      "browser": "./packages/ts/sdk/dist/coordinator.js",
       "import": "./packages/ts/sdk/dist/coordinator.js"
     },
     "./manager": {
-      "types": "./packages/ts/sdk/src/manager.ts",
-      "bun": "./packages/ts/sdk/src/manager.ts",
-      "browser": "./packages/ts/sdk/src/manager.ts",
       "source": "./packages/ts/sdk/src/manager.ts",
+      "bun": "./packages/ts/sdk/src/manager.ts",
+      "types": "./packages/ts/sdk/dist/manager.d.ts",
+      "browser": "./packages/ts/sdk/dist/manager.js",
       "import": "./packages/ts/sdk/dist/manager.js"
     },
     "./rpc": {
-      "types": "./packages/ts/sdk/src/rpc.ts",
-      "bun": "./packages/ts/sdk/src/rpc.ts",
-      "browser": "./packages/ts/sdk/src/rpc.ts",
       "source": "./packages/ts/sdk/src/rpc.ts",
+      "bun": "./packages/ts/sdk/src/rpc.ts",
+      "types": "./packages/ts/sdk/dist/rpc.d.ts",
+      "browser": "./packages/ts/sdk/dist/rpc.js",
       "import": "./packages/ts/sdk/dist/rpc.js"
     },
     "./telemetry": {
-      "types": "./packages/ts/sdk/src/telemetry.ts",
-      "bun": "./packages/ts/sdk/src/telemetry.ts",
-      "browser": "./packages/ts/sdk/src/telemetry.ts",
       "source": "./packages/ts/sdk/src/telemetry.ts",
+      "bun": "./packages/ts/sdk/src/telemetry.ts",
+      "types": "./packages/ts/sdk/dist/telemetry.d.ts",
+      "browser": "./packages/ts/sdk/dist/telemetry.js",
       "import": "./packages/ts/sdk/dist/telemetry.js"
     },
     "./http": {
-      "types": "./packages/ts/sdk/src/http.ts",
-      "bun": "./packages/ts/sdk/src/http.ts",
-      "browser": "./packages/ts/sdk/src/http.ts",
       "source": "./packages/ts/sdk/src/http.ts",
+      "bun": "./packages/ts/sdk/src/http.ts",
+      "types": "./packages/ts/sdk/dist/http.d.ts",
+      "browser": "./packages/ts/sdk/dist/http.js",
       "import": "./packages/ts/sdk/dist/http.js"
     }
   },

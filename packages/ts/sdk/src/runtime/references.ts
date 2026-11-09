@@ -117,7 +117,7 @@ export class References {
       key: typeof key === "string" ? [key] : [...key],
       principal: options.principal ?? ctx?.principal ?? session.principal,
     };
-    const acquired = session.kernel.command<Acquisition>(KernelOp.Acquire, {
+    const acquired = session.kernel.command(KernelOp.Acquire, {
       ...address,
       apiVersion: options.apiVersion ?? 0,
       methods: options.methods ?? [],
@@ -285,7 +285,7 @@ export class References {
     if (definition) return definition;
     let metadata = this.#metadata.get(id);
     if (!metadata) {
-      metadata = this.session.kernel.command<KernelOrb>(KernelOp.Orb, { id });
+      metadata = this.session.kernel.command(KernelOp.Orb, { id });
       this.#metadata.set(id, metadata);
     }
     return metadata;
@@ -342,7 +342,7 @@ export class References {
   /** Native claim release can precede its asynchronous metadata notification. */
   private claimExists(reference: number): boolean {
     try {
-      const status = this.session.kernel.command<Status>(KernelOp.Status, { reference });
+      const status = this.session.kernel.command(KernelOp.Status, { reference });
       return status !== Status.Released && status !== Status.Gone;
     } catch (error) {
       if (

@@ -40,14 +40,10 @@ test("a cancellation delivered as its root ends does not retain a controller", a
   await host.close();
 });
 
-test("one root checks its lazy signal once and refuses first access after expiry", async () => {
+test("a fresh root needs no extra signal check and refuses access after expiry", async () => {
   const host = createHost();
-  let checks = 0;
-  const request = host.session.kernel.port.request.bind(host.session.kernel.port);
-  const commands = spyOn(host.session.kernel.port, "request").mockImplementation((metadata) => {
-    if (JSON.parse(metadata).op === KernelOp.CheckRoot) checks++;
-    return request(metadata);
-  });
+  const commands = spyOn(host.session.kernel.port, "command");
+  const checks = () => commands.mock.calls.filter(([op]) => op === KernelOp.CheckRoot).length;
   let expired: Context | undefined;
   try {
     await host.root((ctx) => {
@@ -58,7 +54,7 @@ test("one root checks its lazy signal once and refuses first access after expiry
       expect(first.aborted).toBe(true);
       expect(ctx.signal).toBe(first);
     });
-    expect(checks).toBe(1);
+    expect(checks()).toBe(0);
     await host.root((ctx) => {
       expired = ctx;
     });
@@ -68,6 +64,25 @@ test("one root checks its lazy signal once and refuses first access after expiry
     expect(host.session.controllers.size).toBe(0);
   } finally {
     commands.mockRestore();
+    await host.close();
+  }
+});
+
+test("foreign issued roots still check cancellation before creating their signal mirror", async () => {
+  const host = createHost();
+  const root = host.session.kernel.command(KernelOp.Root, { principal: "foreign" });
+  host.session.kernel.command(KernelOp.CancelRoot, { root });
+  try {
+    await host.session.calls.root(
+      (ctx) => {
+        expect(ctx.signal.aborted).toBe(true);
+        expect(ctx.signal.reason).toMatchObject({ code: "cancelled", reason: "root" });
+      },
+      false,
+      root,
+    );
+    expect(host.session.controllers.size).toBe(0);
+  } finally {
     await host.close();
   }
 });

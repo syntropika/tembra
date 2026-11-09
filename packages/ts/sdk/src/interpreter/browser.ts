@@ -1,16 +1,13 @@
-import * as io from "@bytecodealliance/preview2-shim/io";
-import * as cli from "@bytecodealliance/preview2-shim/cli";
-import * as clocks from "@bytecodealliance/preview2-shim/clocks";
-import * as filesystem from "@bytecodealliance/preview2-shim/filesystem";
-import * as sockets from "@bytecodealliance/preview2-shim/sockets";
-import { materialize, type AdaptedOrb } from "#tembra-adapters";
 import type { OrbDefinition, OrbArtifact, LoadOptions } from "../authoring/types.ts";
-import { BrowserPort, type BrowserGuestModule } from "./browser-port.ts";
+import { BrowserPort } from "./browser-port.ts";
+import { checkInterpreter, CoreGuest } from "./core.ts";
 import type { FilesystemProvider } from "./filesystem.ts";
+import { BrowserCapabilities } from "./io.ts";
 import { Revision } from "./revision.ts";
-import { kebab, query, type ContractPort, type ProviderBinding } from "./types.ts";
+import { query, type ContractPort, type InstallationPlan } from "./types.ts";
 
 export interface BrowserInterpreterOptions {
+  /** URL of the interpreter core module; defaults to the packaged `interpreter.wasm`. */
   engine?: string | URL;
   providers?: { filesystem?: Readonly<Record<string, FilesystemProvider>> };
   limits?: {
@@ -25,49 +22,67 @@ export interface BrowserInterpreterOptions {
 interface BrowserArtifact extends ContractPort {
   description(): string;
   source(): string;
+  free(): void;
 }
 interface ContractModule {
   WasmArtifact: new (bytes: Uint8Array) => BrowserArtifact;
   default(input?: unknown): Promise<unknown>;
 }
 
-/** A browser backend uses per-instance namespaces; global WASI provider setters are never used. */
-export class BrowserExecution {
-  #instances = 0;
-  readonly #core = new Map<string, Promise<WebAssembly.Module>>();
+/** Compile the trusted interpreter once; a failed request may be retried by a later Orb. */
+async function compileEngine(url: URL): Promise<WebAssembly.Module> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error("Engine module request failed");
+  const module = await WebAssembly.compile(await response.arrayBuffer());
+  checkInterpreter(module);
+  return module;
+}
 
-  /** Keep the optional parser and generated trusted engine out of metadata-only hosts. */
+/** A browser backend instantiates one isolated core module, memory and heap per Orb. */
+export class BrowserExecution {
+  #engine: Promise<WebAssembly.Module> | undefined;
+
+  /** Keep the prepared-contract validator and trusted engine out of metadata-only hosts. */
   constructor(
     readonly options: BrowserInterpreterOptions,
-    readonly module: BrowserGuestModule,
     readonly contracts: ContractModule,
   ) {}
 
-  /** Decode data once while keeping every installation's executable heap separate. */
-  decode(bytes: Uint8Array, options: LoadOptions = {}): OrbDefinition {
-    const artifact = new this.contracts.WasmArtifact(bytes);
-    const identity = JSON.parse(artifact.description()) as {
-      name: string;
-      apiVersion: number;
-      kind: string;
-    };
-    if (identity.kind !== "source")
-      throw new Error("Compiled Orb execution is unavailable in this browser backend");
-    const captured = structuredClone(options);
-    return Object.freeze({
-      name: identity.name,
-      apiVersion: identity.apiVersion,
-      [materialize]: () => this.open(artifact, captured),
-    } as AdaptedOrb);
+  /** Share compiled code between installations; every instance still owns its state. */
+  private engine(): Promise<WebAssembly.Module> {
+    if (!this.#engine) {
+      const compiled = compileEngine(new URL(this.options.engine!));
+      this.#engine = compiled;
+      compiled.catch(() => {
+        if (this.#engine === compiled) this.#engine = undefined;
+      });
+    }
+    return this.#engine;
   }
 
-  /** Materialize bytes supplied directly through a common Orb declaration. */
+  /** Own one checked contract for exactly one installed revision. */
   async materialize(definition: OrbArtifact): Promise<OrbDefinition> {
-    return this.open(new this.contracts.WasmArtifact(definition.artifact), definition);
+    const artifact = new this.contracts.WasmArtifact(definition.artifact);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      artifact.free();
+    };
+    try {
+      return await this.open(artifact, definition, release);
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   /** Check installation authority before creating any guest heap or filesystem descriptors. */
-  private async open(contract: BrowserArtifact, installation: LoadOptions): Promise<OrbDefinition> {
+  private async open(
+    contract: BrowserArtifact,
+    installation: LoadOptions,
+    release: () => void,
+  ): Promise<OrbDefinition> {
     const identity = JSON.parse(contract.description()) as {
       name: string;
       apiVersion: number;
@@ -75,34 +90,27 @@ export class BrowserExecution {
     };
     if (identity.kind !== "source")
       throw new Error("Compiled Orb execution is unavailable in this browser backend");
-    const bindings = query<Record<string, ProviderBinding>>(contract, {
-      kind: "bindings",
+    if (installation.grants?.network?.length)
+      throw new Error("This browser host has no raw TCP provider");
+    const prepared = query<InstallationPlan>(contract, {
+      kind: "install",
+      name: identity.name,
+      apiVersion: identity.apiVersion,
       requires: installation.requires ?? {},
       grants: installation.grants ?? {},
+      filesystem: Object.keys(this.options.providers?.filesystem ?? {}),
+      network: [],
     });
-    const options = { ...identity, bindings, grants: installation.grants };
-    const mounted: {
-      types: unknown;
-      preopens: { getDirectories(): [unknown, string][] };
-      dispose(): void | Promise<void>;
-    }[] = [];
-    let counted = false;
+    const options = { ...identity, grants: installation.grants };
+    let capabilities: BrowserCapabilities | undefined;
     const port = new BrowserPort(
       this.options.limits?.timeoutMs ?? 10000,
       async () => {
-        const settled = await Promise.allSettled(
-          mounted.map(async (filesystem) => filesystem.dispose()),
-        );
-        if (counted) {
-          this.#instances--;
-          counted = false;
+        try {
+          await capabilities?.dispose();
+        } finally {
+          release();
         }
-        const failures = settled.filter((result) => result.status === "rejected");
-        if (failures.length)
-          throw new AggregateError(
-            failures.map((result) => result.reason),
-            "Filesystem disposal failed",
-          );
       },
       (record) => {
         if (!["log", "debug", "info", "warn", "error"].includes(record.level))
@@ -120,66 +128,18 @@ export class BrowserExecution {
       this.options.limits?.packetBytes ?? 8 << 20,
     );
     try {
-      query(contract, { kind: "profile", bindings });
-      const plan = query<{ hostImports: { contract: string; provider: string }[] }>(contract, {
-        kind: "plan",
-        name: options.name,
-        apiVersion: options.apiVersion,
-        bindings,
-      });
-      const imports: Record<string, any> = {};
-      for (const [package_, module] of Object.entries({ cli, clocks, filesystem, sockets, io }))
-        for (const [name, value] of Object.entries(module))
-          if (!name.startsWith("_")) imports[`wasi:${package_}/${kebab(name)}`] = value;
-      if (options.grants?.network?.length)
-        throw new Error("This browser host has no raw TCP provider");
-      query(contract, {
-        kind: "grants",
-        imports: plan.hostImports,
-        grants: options.grants ?? {},
-        filesystem: Object.keys(this.options.providers?.filesystem ?? {}),
-        network: [],
-      });
-      for (const grant of options.grants?.filesystem ?? []) {
-        const provider = this.options.providers!.filesystem![grant.provider]!;
-        mounted.push(provider.open(grant.mount, grant.writable));
-      }
-      imports["wasi:filesystem/preopens"] = {
-        getDirectories: () =>
-          mounted
-            .flatMap((filesystem) => filesystem.preopens.getDirectories())
-            .map(([descriptor, mount]) => [port.io.descriptor(descriptor as object), mount]),
-      };
-      imports["wasi:cli/environment"] = {
-        getEnvironment: () => [],
-        getArguments: () => [],
-        getInitialCwd: () => undefined,
-      };
-      const denied = () => {
-        throw { payload: { tag: "access-denied" } };
-      };
-      imports["wasi:cli/exit"] = { exit: denied, exitWithCode: denied };
-      imports["wasi:sockets/tcp-create-socket"] = { createTcpSocket: denied };
-      imports["wasi:sockets/udp-create-socket"] = { createUdpSocket: denied };
-      imports["host-sync"] = { default: (packet: string) => port.sync(packet) };
-      port.guest = await this.module.instantiate((name) => {
-        const url = new URL(name, this.options.engine!).href;
-        let compiled = this.#core.get(url);
-        if (!compiled) {
-          compiled = fetch(url).then(async (response) => {
-            if (!response.ok) throw new Error("Engine module request failed");
-            return WebAssembly.compile(await response.arrayBuffer());
-          });
-          this.#core.set(url, compiled);
-          compiled.catch(() => {
-            if (this.#core.get(url) === compiled) this.#core.delete(url);
-          });
-        }
-        return compiled;
-      }, imports);
       const memory = this.options.limits?.memoryBytes ?? 128 << 20;
       if (!Number.isSafeInteger(memory) || memory < 2 << 20 || memory > 0xffffffff)
         throw new Error("Invalid interpreter memory bound");
+      capabilities = await BrowserCapabilities.open(
+        options.grants ?? {},
+        this.options.providers?.filesystem ?? {},
+      );
+      // The instance links no filesystem, socket or environment capability.
+      port.guest = await CoreGuest.create(await this.engine(), memory, {
+        sync: (packet) => port.sync(packet),
+        log: (level, message) => port.log({ operation: "console", level, message }),
+      });
       await port.load(
         JSON.stringify({
           source: contract.source(),
@@ -188,11 +148,9 @@ export class BrowserExecution {
           contract: query(contract, { kind: "describe" }),
         }),
       );
-      this.#instances++;
-      counted = true;
-      return new Revision(port, contract, this.options.limits?.timeoutMs ?? 10000).definition(
-        options,
-      );
+      return new Revision(port, contract, this.options.limits?.timeoutMs ?? 10000, (request) =>
+        capabilities!.execute(request),
+      ).definition(options, prepared);
     } catch (error) {
       try {
         await port.close();
@@ -205,27 +163,18 @@ export class BrowserExecution {
       throw error;
     }
   }
-  /** Count physically retained interpreter instances. */
-  instances(): number {
-    return this.#instances;
-  }
 }
 
-/** Load the optional trusted interpreter assets and shared WIT parser behind Tembra's facade. */
+/** Load the optional interpreter assets and prepared-contract validator behind Tembra's facade. */
 export async function createExecution(
   options: BrowserInterpreterOptions,
 ): Promise<BrowserExecution> {
-  const wasm = WebAssembly as typeof WebAssembly & { promising?: unknown; Suspending?: unknown };
-  if (!wasm.promising || !wasm.Suspending)
-    throw new Error("This browser does not support WebAssembly JSPI");
-  const engine = new URL(
-    options.engine ?? import.meta.resolve("@syntropika/tembra-engine-wasm/interpreter"),
-    globalThis.location?.href,
-  );
-  const [module, contracts] = await Promise.all([
-    import(engine.href) as Promise<BrowserGuestModule>,
-    import("@syntropika/tembra-engine-wasm/contracts") as Promise<ContractModule>,
-  ]);
+  // The engine package locates its own interpreter, so bundled SDK code needs no import map.
+  const engine =
+    options.engine === undefined
+      ? (await import("@syntropika/tembra-engine-wasm/assets")).interpreterURL()
+      : new URL(options.engine, globalThis.location?.href);
+  const contracts = (await import("@syntropika/tembra-engine-wasm/contracts")) as ContractModule;
   await contracts.default(options.contractsInput);
-  return new BrowserExecution({ ...options, engine }, module, contracts);
+  return new BrowserExecution({ ...options, engine }, contracts);
 }

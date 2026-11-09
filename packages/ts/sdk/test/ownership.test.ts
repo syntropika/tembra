@@ -2,7 +2,6 @@ import { KernelOp } from "../src/protocol.ts";
 import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
 import { orb } from "../src/orb.ts";
-import type { Reload } from "../src/kernel.ts";
 
 test("resource dependencies reject foreign handles even when host-local IDs collide", async () => {
   const first = createHost({ resources: { base: { open: () => "first" } } });
@@ -79,7 +78,7 @@ test("native provider metadata is looked up once by acquired orb identity", asyn
       },
     },
   });
-  const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
+  const prepared = host.session.kernel.command(KernelOp.Prepare, {
     orbs: [
       {
         name: "native",

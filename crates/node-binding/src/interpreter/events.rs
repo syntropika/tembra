@@ -48,7 +48,7 @@ pub(super) fn spawn(
                 }
                 Err(error)=>{
                     replies.lock().expect("response map").clear();
-                    if delivering {let _=callback.call(json!({"event":"complete","result":envelope(Err(error))}).to_string(),ThreadsafeFunctionCallMode::NonBlocking);}
+                    if delivering {let _=callback.call(json!({"event":"complete","result":envelope::<String>(Err(error))}).to_string(),ThreadsafeFunctionCallMode::NonBlocking);}
                     break;
                 }
             }

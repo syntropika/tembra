@@ -17,17 +17,19 @@ export type NodeHostOptions = Omit<HostOptions, "kernel"> & {
 /** Configure the ordinary host and lazily create isolated execution for Wasm Orbs. */
 export function createHost(options: NodeHostOptions = {}): Host {
   const require = createRequire(import.meta.url);
-  const binding = options.kernel
-    ? undefined
-    : (require("@syntropika/tembra-engine-node") as {
-        NodeKernel: new () => KernelPort;
-      });
+  let kernel = options.kernel;
+  if (!kernel) {
+    const { NodeKernel } = require("@syntropika/tembra-engine-node") as {
+      NodeKernel: new () => KernelPort;
+    };
+    kernel = new NodeKernel();
+  }
   let execution: NodeExecution | undefined;
   const backend = () => (execution ??= new NodeExecution(options.isolated ?? {}));
   return new Host({
     [isolate]: (definition) => backend().materialize(definition),
     ...options,
-    kernel: options.kernel ?? new binding!.NodeKernel(),
+    kernel,
     load:
       options.load ??
       (async (location, registration) => {
@@ -37,14 +39,16 @@ export function createHost(options: NodeHostOptions = {}): Host {
             : /^[a-z]+:/i.test(location)
               ? new URL(location)
               : pathToFileURL(path.resolve(location));
-        if (url.pathname.endsWith(".wasm")) {
-          const source =
-            url.protocol === "file:"
-              ? new Uint8Array(await readFile(url))
-              : new Uint8Array(await (await fetch(url)).arrayBuffer());
-          return backend().decode(source, registration);
+        if (!url.pathname.endsWith(".wasm"))
+          throw new Error("Orb loading requires a built .wasm artifact");
+        let source: Uint8Array;
+        if (url.protocol === "file:") source = new Uint8Array(await readFile(url));
+        else {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`Orb request failed: ${response.status}`);
+          source = new Uint8Array(await response.arrayBuffer());
         }
-        throw new Error("Orb loading requires a built .wasm artifact");
+        return { ...registration, artifact: source };
       }),
   } as AdaptedHostOptions);
 }
@@ -67,4 +71,4 @@ export { ContextKey, ContextKind, opaqueFrom, type OpaqueContextValue } from "./
 
 export { directoryFilesystem, type DirectoryFilesystem } from "./interpreter/node.ts";
 export type { InterpreterOptions as IsolatedOptions } from "./interpreter/node.ts";
-export type { Grants } from "./interpreter/types.ts";
+export type { Grants } from "./authoring/types.ts";

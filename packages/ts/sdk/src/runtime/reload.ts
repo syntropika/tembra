@@ -1,5 +1,6 @@
 import {
   disposeDefinitions,
+  discardDefinitions,
   prepareDefinitions,
   isolate,
   type AdaptedHostOptions,
@@ -59,6 +60,15 @@ export class Replacements {
     await this.#pending?.catch(() => undefined);
   }
 
+  /** Treat the expected abort acknowledgement as settlement while preserving recovery failures. */
+  private async settleAbort(program: number): Promise<void> {
+    try {
+      await this.session.programs.run(program);
+    } catch (error) {
+      if (!(error instanceof TembraError) || error.reason !== Reason.ReloadAborted) throw error;
+    }
+  }
+
   /** Bind candidate callbacks to the kernel's prepared replacement. */
   private async capture(
     definitions: readonly OrbInput[],
@@ -76,13 +86,12 @@ export class Replacements {
     try {
       if (session.closing) throw new TembraError(Errors.Closed.Host);
       declarations = session.orbs.declarations(materialized);
-      reload = session.kernel.command<Reload>(KernelOp.Prepare, {
+      reload = session.kernel.command(KernelOp.Prepare, {
         orbs: declarations.metadata,
         remove,
       });
     } catch (error) {
-      await disposeDefinitions(materialized);
-      throw error;
+      return discardDefinitions(materialized, error);
     }
     const definitionsByName = new Map(
       declarations.definitions.map((definition) => [definition.name, definition]),
@@ -110,7 +119,7 @@ export class Replacements {
         }
       }
       for (const record of records) record.ticket = undefined;
-      program = session.kernel.command<number>(KernelOp.ScopesReloadRegistered, {
+      program = session.kernel.command(KernelOp.ScopesReloadRegistered, {
         ticket: reload.id,
         deadline: options.deadline ?? 5000,
         now: session.now(),
@@ -121,19 +130,19 @@ export class Replacements {
       if (session.closing) await session.programs.run(program);
     } catch (error) {
       this.#program = undefined;
+      let failure = error;
       try {
         if (program === undefined) {
           session.kernel.command(KernelOp.Abort, { ticket: reload.id });
           const scopes = reload.orbs.flatMap((orb) =>
-            session.kernel.command<number[]>(KernelOp.ScopesForOrb, { orb: orb.id }),
+            session.kernel.command(KernelOp.ScopesForOrb, { orb: orb.id }),
           );
           await session.programs.cleanupScopes(scopes);
         }
-      } finally {
-        await disposeDefinitions(materialized);
+      } catch (recovery) {
+        failure = new AggregateError([error, recovery], "Orb preparation and recovery failed");
       }
-
-      throw error;
+      return discardDefinitions(materialized, failure);
     }
     this.#program = undefined;
     const id = program;
@@ -155,16 +164,17 @@ export class Replacements {
         try {
           session.kernel.command(KernelOp.ProgramCommit, { program: id });
         } catch (error) {
+          let failure = error;
           try {
             session.kernel.command(KernelOp.ProgramAbort, { program: id });
-            await session.programs.run(id).catch(() => {});
-          } finally {
-            await disposeDefinitions(materialized);
+            await this.settleAbort(id);
+          } catch (recovery) {
+            failure = new AggregateError([error, recovery], "Orb commit and recovery failed");
           }
 
           status = ReloadStatus.Aborted;
           this.#pending = undefined;
-          throw error;
+          return discardDefinitions(materialized, failure);
         }
         status = ReloadStatus.Committed;
         this.#pending = undefined;
@@ -179,14 +189,13 @@ export class Replacements {
         status = ReloadStatus.Aborted;
         this.#prepared = undefined;
         this.#pending = undefined;
-        session.kernel.command(KernelOp.ProgramAbort, { program: id });
         try {
-          await session.programs.run(id);
+          session.kernel.command(KernelOp.ProgramAbort, { program: id });
+          await this.settleAbort(id);
         } catch (error) {
-          if (!(error instanceof TembraError) || error.reason !== Reason.ReloadAborted) throw error;
-        } finally {
-          await disposeDefinitions(materialized);
+          return discardDefinitions(materialized, error);
         }
+        await disposeDefinitions(materialized);
       },
     });
   }

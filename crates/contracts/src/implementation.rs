@@ -1,8 +1,7 @@
 //! Validate executable declarations before any adapter publishes kernel metadata.
-use crate::{Binding, Contract, Error, javascript_name, service_name};
+use crate::{Binding, Error, PreparedContract, javascript_name, model::Item, service_name};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use wit_parser::WorldItem;
 
 /// A guest-declared executable bundle before it is matched against the selected world.
 #[derive(Deserialize, Serialize)]
@@ -62,7 +61,7 @@ pub struct ServiceBinding {
     pub signature: Option<String>,
 }
 
-impl Contract {
+impl PreparedContract {
     /// Require the exact identity, services and callbacks declared by the selected world.
     pub fn check_implementation(
         &self,
@@ -82,29 +81,25 @@ impl Contract {
                 "bundle identity differs from its registration".into(),
             ));
         }
-        let mut services = crate::lower::services(&self.resolve, self.world, name)?
+        let mut services = self
+            .services(name)?
             .into_iter()
             .map(|service| (service.name.clone(), service))
             .collect::<BTreeMap<_, _>>();
         let mut provided = implementation.services;
         let mut plan = Vec::new();
-        for item in self.resolve.worlds[self.world].exports.values() {
-            let WorldItem::Interface { id, .. } = item else {
+        for entry in &self.model().exports {
+            let Item::Interface(declared) = &entry.item else {
                 continue;
             };
             // Lowering already rejected anonymous exports and skipped callback-free interfaces.
-            let Some(interface) = self.resolve.id_of(*id) else {
+            let Some(interface) = declared.contract.clone() else {
                 continue;
             };
             let Some(service) = services.remove(&service_name(name, &interface)) else {
                 continue;
             };
-            let alias = javascript_name(
-                self.resolve.interfaces[*id]
-                    .name
-                    .as_deref()
-                    .unwrap_or_default(),
-            );
+            let alias = javascript_name(declared.name.as_deref().unwrap_or_default());
             let Some(implementation) = provided.remove(&alias) else {
                 return Err(Error(format!(
                     "{interface}: missing service implementation {alias}"
@@ -161,41 +156,18 @@ impl Contract {
         bindings: &BTreeMap<String, Binding>,
     ) -> Result<BTreeMap<String, String>, Error> {
         let mut result = BTreeMap::new();
-        for (key, item) in &self.resolve.worlds[self.world].imports {
-            let WorldItem::Interface { id, .. } = item else {
+        for entry in &self.model().imports {
+            let Item::Interface(interface) = &entry.item else {
                 continue;
             };
-            let binding = self.resolve.name_world_key(key);
-            let Some(Binding::Orb { name, .. }) = bindings.get(&binding) else {
+            let Some(Binding::Orb { name, .. }) = bindings.get(&entry.key) else {
                 continue;
             };
-            let contract = self.resolve.id_of(*id).ok_or_else(|| {
+            let contract = interface.contract.as_deref().ok_or_else(|| {
                 Error("anonymous import needs an explicit provider mapping".into())
             })?;
-            result.insert(binding, service_name(name, &contract));
+            result.insert(entry.key.clone(), service_name(name, contract));
         }
         Ok(result)
-    }
-
-    /// Resolve a JavaScript import method through the original WIT names, never by guessing.
-    pub fn import_method(&self, binding: &str, method: &str) -> Result<String, Error> {
-        for (key, item) in &self.resolve.worlds[self.world].imports {
-            if self.resolve.name_world_key(key) != binding {
-                continue;
-            }
-            if let WorldItem::Interface { id, .. } = item {
-                let matching = self.resolve.interfaces[*id]
-                    .functions
-                    .keys()
-                    .filter(|name| javascript_name(name) == method)
-                    .collect::<Vec<_>>();
-                if let [name] = matching.as_slice() {
-                    return Ok((*name).clone());
-                }
-            }
-        }
-        Err(Error(format!(
-            "unknown or ambiguous WIT import method {binding}#{method}"
-        )))
     }
 }

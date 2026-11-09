@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,7 +23,12 @@ const library =
       : "libtembra_node_binding.so";
 const target = path.resolve(root, process.env.CARGO_TARGET_DIR ?? "target");
 mkdirSync(destination, { recursive: true });
-copyFileSync(
-  path.join(target, debug ? "debug" : "release", library),
-  path.join(destination, `tembra-${process.platform}-${process.arch}.node`),
-);
+// Replace the packaged inode atomically: another process may still map the previous library.
+const packaged = path.join(destination, `tembra-${process.platform}-${process.arch}.node`);
+const temporary = `${packaged}.${process.pid}.tmp`;
+try {
+  copyFileSync(path.join(target, debug ? "debug" : "release", library), temporary);
+  renameSync(temporary, packaged);
+} finally {
+  rmSync(temporary, { force: true });
+}

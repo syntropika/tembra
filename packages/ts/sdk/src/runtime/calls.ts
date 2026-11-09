@@ -1,3 +1,4 @@
+import { capturedMethod, type CapturedInvocation } from "#tembra-adapters";
 import type { Completion } from "../authoring/types.ts";
 import { Code } from "../bridge/identifiers.ts";
 import type { Invocation } from "../bridge/kernel.ts";
@@ -18,7 +19,7 @@ export class Calls {
     return Promise.resolve().then(operation);
   }
 
-  /** Lazily mirror root cancellation into an AbortSignal. */
+  /** Read the root mirror; foreign-issued roots are checked before its first creation. */
   signal(root: number): AbortSignal {
     const session = this.session;
     let controller = session.controllers.get(root);
@@ -53,16 +54,18 @@ export class Calls {
     const session = this.session;
     const root =
       issuedRoot ??
-      session.kernel.command<number>(cleanup ? KernelOp.CleanupRoot : KernelOp.Root, { principal });
+      session.kernel.command(cleanup ? KernelOp.CleanupRoot : KernelOp.Root, { principal });
+    // A newly issued root is live and uncancelled on this synchronous path. Register its
+    // cancellation mirror before user code runs; admission still rechecks after every wait.
+    if (issuedRoot === undefined) session.controllers.set(root, new AbortController());
     const ctx = new Context(session, root);
     try {
       return await operation(ctx);
     } finally {
       this.releaseRoot(root);
       session.options.native?.rootEnded?.(root);
-      if (!session.lifecycle.closedDiagnostics) session.kernel.command(KernelOp.EndRoot, { root });
+      if (!session.lifecycle.closedDiagnostics) session.lifecycle.endRoot(root);
       session.controllers.delete(root);
-      session.lifecycle.flush();
     }
   }
 
@@ -72,23 +75,24 @@ export class Calls {
     method: string,
     arguments_: unknown[],
     ctx: Context,
+    capture?: CapturedInvocation,
   ): Promise<unknown> {
     const session = this.session;
     context(ctx, session);
     if (reference.released) throw new TembraError(Errors.Released.Reference);
-    await reference.ready;
+    await this.observe(reference.ready, ctx.signal);
     const admission = session.options.native?.admit?.(reference.id, method, ctx);
     let invocation: Invocation;
     if (admission) invocation = admission.call;
-    else {
-      ctx.check();
-      invocation = session.kernel.command<Invocation>(KernelOp.BeginCall, {
+    else
+      // One bounded exchange rechecks the caller's context, then admits the call.
+      invocation = session.kernel.command(KernelOp.AdmitCall, {
         reference: reference.id,
         root: ctx.root,
+        parent: ctx.invocation?.id,
         context: ctx.frame || undefined,
         method,
       });
-    }
     const entered = new Context(session, ctx.root, invocation, ctx.frame);
     const physical = session.track(
       (async () => {
@@ -104,6 +108,14 @@ export class Calls {
           const handle =
             environment?.orb.definition.services?.[reference.address.service]?.methods[method];
           if (!environment || !handle) throw new TembraError(Errors.Gone.Implementation);
+          const prepared = capture && capturedMethod(handle, capture.signature);
+          if (prepared) {
+            // This channel never enters user arguments. A trusted intermediary cannot forward it.
+            capture!.output = await this.execute(() =>
+              prepared.invoke(environment.value, entered, capture!.input),
+            );
+            return undefined;
+          }
           return await this.execute(() => handle(environment.value, entered, ...arguments_));
         } catch (error) {
           outcome = Outcome.Error;
@@ -134,7 +146,7 @@ export class Calls {
   ): Promise<T> {
     const session = this.session;
     const execute = async (ctx: Context) => {
-      const invocation = session.kernel.command<Invocation>(KernelOp.BeginOperation, {
+      const invocation = session.kernel.command(KernelOp.BeginOperation, {
         orb: environment.orb.info.id,
         root: ctx.root,
         context: ctx.frame || undefined,

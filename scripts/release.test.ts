@@ -1,6 +1,15 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -68,6 +77,72 @@ test("staged npm archives resolve workspace dependencies without shipping develo
     ]);
     expect(readFileSync(path.join(source, "package.json"), "utf8")).toContain("workspace:*");
     expect(() => checkArtifacts(root, "0.1.0")).toThrow("Missing release artifact");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restaging replaces a previous snapshot without following links or touching sources", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "tembra-restage-"));
+  try {
+    const source = path.join(root, "packages/ts/sdk");
+    const dist = path.join(source, "dist");
+    const mounted = path.join(root, "mounted");
+    mkdirSync(dist, { recursive: true });
+    mkdirSync(mounted);
+    writeFileSync(path.join(root, "LICENSE"), "Apache-2.0");
+    writeFileSync(path.join(root, "README.md"), "Release fixture");
+    writeFileSync(path.join(mounted, "data.txt"), "kept");
+    writeFileSync(
+      path.join(source, "package.json"),
+      JSON.stringify({ name: "@syntropika/tembra-sdk", version: "0.1.0", files: ["dist"] }),
+    );
+    writeFileSync(path.join(dist, "removed.js"), "export {};");
+    writeFileSync(path.join(dist, "old-name.js"), "export {};");
+    const output = path.join(root, "release");
+    const staged = stagePackage(root, "sdk", output, "0.1.0");
+    // A link left in a previous snapshot must be removed itself, never followed.
+    symlinkSync(mounted, path.join(staged, "dist/mounted"), "dir");
+    rmSync(path.join(dist, "removed.js"));
+    renameSync(path.join(dist, "old-name.js"), path.join(dist, "new-name.js"));
+    writeFileSync(path.join(dist, "current.js"), "export {};");
+    expect(stagePackage(root, "sdk", output, "0.1.0")).toBe(staged);
+    const [packed] = JSON.parse(
+      execFileSync("npm", ["pack", "--ignore-scripts", "--dry-run", "--json"], {
+        cwd: staged,
+        encoding: "utf8",
+      }),
+    );
+    expect(packed.files.map((file: { path: string }) => file.path).sort()).toEqual([
+      "LICENSE",
+      "README.md",
+      "dist/current.js",
+      "dist/new-name.js",
+      "package.json",
+    ]);
+    expect(readdirSync(mounted)).toEqual(["data.txt"]);
+    expect(readFileSync(path.join(mounted, "data.txt"), "utf8")).toBe("kept");
+    expect(readdirSync(dist).sort()).toEqual(["current.js", "new-name.js"]);
+    // Staging owns only output/staging/<name>; it refuses names and outputs that overlap sources.
+    for (const name of ["", ".", "..", "../sdk", "sdk/../sdk", "a/b"])
+      expect(() => stagePackage(root, name, output, "0.1.0")).toThrow("Invalid package name");
+    const nested = path.join(root, "nested");
+    const nestedRoot = path.join(nested, "staging/sdk");
+    mkdirSync(path.join(nestedRoot, "packages/ts"), { recursive: true });
+    symlinkSync(source, path.join(nestedRoot, "packages/ts/sdk"), "dir");
+    writeFileSync(path.join(nestedRoot, "LICENSE"), "Apache-2.0");
+    const linked = path.join(root, "linked");
+    mkdirSync(linked);
+    symlinkSync(source, path.join(linked, "staging"), "dir");
+    for (const [base, overlap] of [
+      [root, path.join(source, "build")],
+      [nestedRoot, nested],
+      [root, linked],
+    ] as const)
+      expect(() => stagePackage(base, "sdk", overlap, "0.1.0")).toThrow("overlaps");
+    expect(readdirSync(source).sort()).toEqual(["dist", "package.json"]);
+    expect(readdirSync(dist).sort()).toEqual(["current.js", "new-name.js"]);
+    expect(readdirSync(nestedRoot).sort()).toEqual(["LICENSE", "packages"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

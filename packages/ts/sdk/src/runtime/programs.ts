@@ -53,21 +53,21 @@ export class Programs {
 
   /** Activate an already registered scope and wait for its program. */
   activate(scope: number): Promise<void> {
-    return this.run(this.session.kernel.command<number>(KernelOp.ScopeActivate, { scope }));
+    return this.run(this.session.kernel.command(KernelOp.ScopeActivate, { scope }));
   }
 
   /** Ask the kernel to retire existing scopes and await completion. */
   cleanup(environments: readonly Environment[]): Promise<void> {
     const scopes = environments
       .map((environment) => environment.id)
-      .filter((scope) => this.session.kernel.command<boolean>(KernelOp.ScopeExists, { scope }));
+      .filter((scope) => this.session.kernel.command(KernelOp.ScopeExists, { scope }));
     return this.cleanupScopes(scopes);
   }
 
   /** Run cleanup for kernel-issued scope identities without resolving JS callbacks. */
   cleanupScopes(scopes: readonly number[]): Promise<void> {
     return scopes.length
-      ? this.run(this.session.kernel.command<number>(KernelOp.ScopesCleanup, { scopes }))
+      ? this.run(this.session.kernel.command(KernelOp.ScopesCleanup, { scopes }))
       : Promise.resolve();
   }
 
@@ -151,8 +151,9 @@ export class Programs {
     } else {
       const completion = this.#pending.get(action.id);
       this.#pending.delete(action.id);
-      if (action.error) {
-        const error = new TembraError(action.error);
+      const failed = action.type === ActionType.ProgramComplete ? action.error : null;
+      if (failed) {
+        const error = new TembraError(failed);
         if (completion) completion.reject(error);
         else {
           this.session.cleanupErrors.push(error);
@@ -171,8 +172,9 @@ export class Programs {
 
   /** Execute a language effect without deciding lifecycle order. */
   private async execute(effect: Effect): Promise<number | void> {
-    const environment = effect.scope === undefined ? undefined : this.scopes.get(effect.scope);
-    if (effect.scope !== undefined && !environment && this.session.options.native)
+    const scope = "scope" in effect ? effect.scope : undefined;
+    const environment = scope === undefined ? undefined : this.scopes.get(scope);
+    if (scope !== undefined && !environment && this.session.options.native)
       return this.session.options.native.effect(effect);
     if (
       (effect.type === EffectType.Close || effect.type === EffectType.Open) &&
@@ -264,7 +266,7 @@ export class Programs {
         break;
       }
       default:
-        throw new TembraError(Errors.Unsupported.EngineEffect, effect.type);
+        throw new TembraError(Errors.Unsupported.EngineEffect, (effect as Effect).type);
     }
   }
 

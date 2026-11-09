@@ -3,6 +3,8 @@
  * Mirrors `crates/executor-wasm/src/protocol.rs`: unknown operation names are unsupported,
  * while a known operation with missing, mistyped or extra fields is malformed.
  * Payloads (`initial`, `value`, `args`) stay JSON because the WIT contract validates them.
+ * Snapshot reads may name the revision the guest already retains (`known`); the host then
+ * answers with the current identity and omits a value that has not changed.
  */
 
 /** Handle issued by one environment table; `scope` selects the table, never an authority. */
@@ -11,12 +13,19 @@ export interface Handle {
   readonly id: number;
 }
 
+/** A snapshot read optionally names the kernel revision whose value the guest already holds. */
+export interface SnapshotRead extends Handle {
+  readonly known?: string;
+}
+
+/** Longest kernel revision spelling accepted from a guest (a decimal `u64`). */
+const REVISION_LENGTH = 20;
+
 export type LogLevel = "log" | "debug" | "info" | "warn" | "error";
 
 /** Synchronous host operations. */
 export type HostRequest =
   | { readonly operation: "console"; readonly level: LogLevel; readonly message: string }
-  | { readonly operation: "io.check" }
   | { readonly operation: "address" }
   | { readonly operation: "orb" }
   | { readonly operation: "signal.cancelled" }
@@ -29,7 +38,7 @@ export type HostRequest =
       readonly version: number;
       readonly validate: number | null;
     }
-  | ({ readonly operation: "state.read" } & Handle)
+  | ({ readonly operation: "state.read" } & SnapshotRead)
   | ({ readonly operation: "state.update"; readonly value: unknown } & Handle)
   | {
       readonly operation: "reference.declare";
@@ -38,7 +47,7 @@ export type HostRequest =
     }
   | ({ readonly operation: "reference.release" } & Handle)
   | ({ readonly operation: "reference.status" } & Handle)
-  | ({ readonly operation: "reference.state" } & Handle)
+  | ({ readonly operation: "reference.state" } & SnapshotRead)
   | {
       readonly operation: "resource.declare";
       readonly name: string;
@@ -51,6 +60,7 @@ export type HostRequest =
 
 /** Asynchronous host operations, awaited outside the guest heap. */
 export type AsyncHostRequest =
+  | IORequest
   | ({ readonly operation: "reference.ready" } & Handle)
   | ({
       readonly operation: "reference.call";
@@ -59,12 +69,24 @@ export type AsyncHostRequest =
     } & Handle)
   | { readonly operation: "wait"; readonly milliseconds: number };
 
+/** Source I/O is authorized and executed by the host, never by guest WASI. */
+export type IORequest =
+  | { readonly operation: "filesystem.read-text"; readonly path: string }
+  | { readonly operation: "filesystem.write-text"; readonly path: string; readonly value: string }
+  | {
+      readonly operation: "transport.exchange";
+      readonly ip: string;
+      readonly port: number;
+      readonly request: string;
+    };
+
 /** Longest cooperative timer a callback may request. */
 export const WAIT_LIMIT_MILLISECONDS = 5000;
 
 /** Field kinds; a trailing `?` marks a field that may be absent (or null) and takes a default. */
 type Kind =
   | "u32"
+  | "u16"
   | "string"
   | "keys"
   | "level"
@@ -72,13 +94,14 @@ type Kind =
   | "json?"
   | "callback?"
   | "scope?"
+  | "revision?"
   | "handles?";
 type Schema = Readonly<Record<string, Kind>>;
 
 const HANDLE = { scope: "scope?", id: "u32" } as const satisfies Schema;
+const SNAPSHOT = { ...HANDLE, known: "revision?" } as const satisfies Schema;
 const SYNC = {
   console: { level: "level", message: "string" },
-  "io.check": {},
   address: {},
   orb: {},
   "signal.cancelled": {},
@@ -86,12 +109,12 @@ const SYNC = {
   "context.principal": {},
   "context.cancel": {},
   "state.declare": { initial: "json?", version: "u32", validate: "callback?" },
-  "state.read": HANDLE,
+  "state.read": SNAPSHOT,
   "state.update": { ...HANDLE, value: "json?" },
   "reference.declare": { service: "string", key: "keys" },
   "reference.release": HANDLE,
   "reference.status": HANDLE,
-  "reference.state": HANDLE,
+  "reference.state": SNAPSHOT,
   "resource.declare": {
     name: "string",
     version: "u32",
@@ -102,6 +125,9 @@ const SYNC = {
   "resource.read": HANDLE,
 } as const satisfies Record<HostRequest["operation"], Schema>;
 const ASYNC = {
+  "filesystem.read-text": { path: "string" },
+  "filesystem.write-text": { path: "string", value: "string" },
+  "transport.exchange": { ip: "string", port: "u16", request: "string" },
   "reference.ready": HANDLE,
   "reference.call": { ...HANDLE, method: "string", args: "json" },
   wait: { milliseconds: "u32" },
@@ -163,6 +189,9 @@ function decode(packet: string, schemas: Readonly<Record<string, Schema>>, label
 function field(value: unknown, kind: Kind, invalid: () => Error): unknown {
   const absent = value === undefined || value === null;
   switch (kind) {
+    case "u16":
+      if (!isU32(value) || value > 65535) throw invalid();
+      return value;
     case "u32":
       if (!isU32(value)) throw invalid();
       return value;
@@ -184,6 +213,11 @@ function field(value: unknown, kind: Kind, invalid: () => Error): unknown {
     case "callback?":
       if (absent) return null;
       if (!isU32(value)) throw invalid();
+      return value;
+    case "revision?":
+      if (absent) return undefined;
+      if (typeof value !== "string" || value.length > REVISION_LENGTH || !/^\d+$/.test(value))
+        throw invalid();
       return value;
     case "scope?":
       if (absent) return undefined;

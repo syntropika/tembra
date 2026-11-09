@@ -19,13 +19,13 @@ export class Activities {
       const source =
         typeof definition.source === "function" ? definition.source() : definition.source;
       if (!source || typeof source.subscribe !== "function") refuse(Errors.Invalid.EventSource);
-      const id = this.session.kernel.command<number>(KernelOp.Listen, {
+      const id = this.session.kernel.command(KernelOp.Listen, {
         scope: environment.id,
         previous: previous?.id,
         name: definition.name,
         source: this.identity(source),
         sizing: definition.options.sizeOf ? this.identity(definition.options.sizeOf) : 0,
-        operation: this.session.kernel.command<number>(KernelOp.Allocate),
+        operation: this.session.kernel.command(KernelOp.Allocate),
         maxPending: definition.options.maxPending ?? 64,
         ...(definition.options.maxBytes ? { maxBytes: definition.options.maxBytes } : {}),
         coalesce: "select" in source,
@@ -84,9 +84,9 @@ export class Activities {
   private startTask(environment: Environment, definition: TaskDefinition): void {
     if (definition.running || environment.phase !== EnvironmentPhase.Live || this.session.closing)
       return;
-    const id = this.session.kernel.command<number>(KernelOp.Task, { owner: environment.owner });
+    const id = this.session.kernel.command(KernelOp.Task, { owner: environment.owner });
     const controller = new AbortController();
-    const operation = this.session.kernel.command<number>(KernelOp.Allocate);
+    const operation = this.session.kernel.command(KernelOp.Allocate);
     const record: TaskRecord = { id, controller, done: Promise.resolve() };
     definition.running = record;
     this.tasks.set(id, record);
@@ -97,7 +97,7 @@ export class Activities {
             signal: controller.signal,
             /** Issue operation authority under the task's retained version. */
             root: (callback) => {
-              const root = this.session.kernel.command<number>(KernelOp.TaskRoot, {
+              const root = this.session.kernel.command(KernelOp.TaskRoot, {
                 task: id,
                 principal: this.session.principalFor(environment.object?.id ?? 0),
               });
@@ -125,7 +125,7 @@ export class Activities {
   private identity(value: object): number {
     let id = this.#identities.get(value);
     if (id === undefined) {
-      id = this.session.kernel.command<number>(KernelOp.Allocate);
+      id = this.session.kernel.command(KernelOp.Allocate);
       this.#identities.set(value, id);
     }
     return id;

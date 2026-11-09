@@ -11,16 +11,16 @@ function watchReloadWait(host: Host) {
   const waiting = deferred<void>();
   let program: number | undefined;
   let stopSettled = false;
-  const request = host.session.kernel.port.request.bind(host.session.kernel.port);
-  const commands = spyOn(host.session.kernel.port, "request").mockImplementation((metadata) => {
-    const answer = request(metadata);
-    const input = JSON.parse(metadata);
-    const output = JSON.parse(answer);
-    if (input.op === KernelOp.ScopesReloadRegistered) program = output.ok;
-    if (input.op === KernelOp.ProgramCompleteStep && input.program === program) stopSettled = true;
+  const command = host.session.kernel.port.command.bind(host.session.kernel.port);
+  const commands = spyOn(host.session.kernel.port, "command").mockImplementation((op, input) => {
+    const output = command(op, input);
+    if (op === KernelOp.ScopesReloadRegistered) program = output.ok as number;
+    if (op === KernelOp.ProgramCompleteStep && (input as { program: number }).program === program)
+      stopSettled = true;
     // The shared Rust program reaches its gate after acknowledging the old scope's Stop effect.
-    if (input.op === KernelOp.Drain && stopSettled && output.ok?.length === 0) waiting.resolve();
-    return answer;
+    if (op === KernelOp.Drain && stopSettled && (output.ok as unknown[] | undefined)?.length === 0)
+      waiting.resolve();
+    return output;
   });
   return { waiting: waiting.promise, restore: () => commands.mockRestore() };
 }

@@ -1,141 +1,8 @@
 /** Closed adapter vocabulary. Strings are retained only as the wire representation. */
 type ValueOf<T> = T[keyof T];
 
-export const KernelOp = Object.freeze({
-  ContextDerive: "context-derive",
-  ContextValue: "context-value",
-  ContextStats: "context-stats",
-  Allocate: "allocate",
-  ScopeRegister: "scope-register",
-  ScopeExists: "scope-exists",
-  ScopesForOwner: "scopes-for-owner",
-  ScopesForOrb: "scopes-for-orb",
-  ScopeAddResource: "scope-add-resource",
-  ScopeActivate: "scope-activate",
-  ScopesCleanup: "scopes-cleanup",
-  ScopesReloadRegistered: "scopes-reload-registered",
-  ScopesReload: "scopes-reload",
-  ProgramRun: "program-run",
-  ProgramNext: "program-next",
-  ProgramCompleteStep: "program-complete-step",
-  ProgramCommit: "program-commit",
-  ProgramAbort: "program-abort",
-  ProgramForget: "program-forget",
-  Features: "features",
-  Prepare: "prepare",
-  Gate: "gate",
-  GateOrbs: "gate-orbs",
-  Commit: "commit",
-  Abort: "abort",
-  Orbs: "orbs",
-  Orb: "orb",
-  OrbNamed: "orb-named",
-  NextDeadline: "next-deadline",
-  Address: "address",
-  Acquire: "acquire",
-  Ready: "ready",
-  Dependency: "dependency",
-  Undepend: "undepend",
-  Fail: "fail",
-  Status: "status",
-  Release: "release",
-  Forget: "forget",
-  Root: "root",
-  CleanupRoot: "cleanup-root",
-  RootPrincipal: "root-principal",
-  CheckContext: "check-context",
-  CheckRoot: "check-root",
-  EndRoot: "end-root",
-  CancelRoot: "cancel-root",
-  BeginCall: "begin-call",
-  BeginOperation: "begin-operation",
-  BeginHookObservation: "begin-hook-observation",
-  FinishCall: "finish-call",
-  Invocation: "invocation",
-  StateInit: "state-init",
-  Snapshot: "snapshot",
-  StateAdopt: "state-adopt",
-  Task: "task",
-  TaskRoot: "task-root",
-  StopTask: "stop-task",
-  FinishTask: "finish-task",
-  Resource: "resource",
-  ResourceOpened: "resource-opened",
-  ResourceValue: "resource-value",
-  CloseResource: "close-resource",
-  ResourceClosed: "resource-closed",
-  Disposed: "disposed",
-  Tick: "tick",
-  NextWake: "next-wake",
-  NextIdle: "next-idle",
-  Close: "close",
-  FinishClose: "finish-close",
-  Diagnostics: "diagnostics",
-  Drain: "drain",
-  Restrict: "restrict",
-  Contribute: "contribute",
-  ContributionOrdinal: "contribution-ordinal",
-  HookPlan: "hook-plan",
-  Listen: "listen",
-  Subscribe: "subscribe",
-  Enqueue: "enqueue",
-  NextDelivery: "next-delivery",
-  FinishDelivery: "finish-delivery",
-  Unsubscribe: "unsubscribe",
-} as const);
-export type KernelOp = ValueOf<typeof KernelOp>;
-
-export const ActionType = Object.freeze({
-  Execute: "execute",
-  CancelEffects: "cancel-effects",
-  ProgramPrepared: "program-prepared",
-  ProgramComplete: "program-complete",
-  Dispose: "dispose",
-  CloseResource: "close-resource",
-  DropValue: "drop-value",
-  CancelRoot: "cancel-root",
-  CancelTask: "cancel-task",
-  RetireOrb: "retire-orb",
-  State: "state",
-  SubscriptionFailed: "subscription-failed",
-  DetachSubscription: "detach-subscription",
-  Deliver: "deliver",
-} as const);
-export type ActionType = ValueOf<typeof ActionType>;
-
-export const EffectType = Object.freeze({
-  Stop: "stop",
-  Open: "open",
-  Close: "close",
-  Restore: "restore",
-  Prepare: "prepare",
-  Validate: "validate",
-  Initialize: "initialize",
-  Migrate: "migrate",
-  Adopt: "adopt",
-  Start: "start",
-  Drop: "drop",
-} as const);
-export type EffectType = ValueOf<typeof EffectType>;
-
-export const StepType = Object.freeze({
-  Execute: "execute",
-  Wait: "wait",
-  Prepared: "prepared",
-  Complete: "complete",
-  Failed: "failed",
-} as const);
-export type StepType = ValueOf<typeof StepType>;
-
-export const NativeOp = Object.freeze({
-  Activate: "activate",
-  Dispose: "dispose",
-  CancelEffect: "cancel-effect",
-  Effect: "effect",
-  Invoke: "invoke",
-  Contribute: "contribute",
-} as const);
-export type NativeOp = ValueOf<typeof NativeOp>;
+/** Kernel, native, ownership and lifecycle names are generated from Rust. */
+export { ActionType, EffectType, KernelOp, NativeOp, OwnerKind, StepType } from "./commands.ts";
 
 export const RpcOp = Object.freeze({
   Describe: "describe",
@@ -150,13 +17,6 @@ export const RpcEvent = Object.freeze({
   State: "state",
 } as const);
 export type RpcEvent = ValueOf<typeof RpcEvent>;
-
-export const OwnerKind = Object.freeze({
-  Host: "host",
-  Orb: "orb",
-  Object: "object",
-} as const);
-export type OwnerKind = ValueOf<typeof OwnerKind>;
 
 export const EnvironmentPhase = Object.freeze({
   Declaring: "declaring",

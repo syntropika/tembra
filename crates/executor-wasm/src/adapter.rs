@@ -1,5 +1,9 @@
 //! Install interpreter-backed callbacks through the existing native Orb facade.
-use crate::{bindings::Environment, failure, worker::Session};
+use crate::{
+    bindings::{BoundMethod, Environment, Import},
+    failure,
+    worker::Session,
+};
 use serde_json::Value;
 use std::{cell::Cell, collections::BTreeMap, rc::Rc};
 use tembra::{Orb, Result, Service, core};
@@ -9,15 +13,46 @@ pub(crate) fn orb(
     metadata: core::Orb,
     session: Session,
     services: Vec<tembra_contracts::ServiceBinding>,
-    contract: tembra_contracts::Contract,
+    contract: tembra_contracts::PreparedContract,
     bindings: &BTreeMap<String, tembra_contracts::Binding>,
 ) -> Result<Orb> {
     let mut orb = Orb::new(&metadata.name, metadata.api_version).isolated();
-    let imports = Rc::new(contract.import_services(bindings).map_err(failure)?);
-    let contract = Rc::new(contract);
+    let imports = contract
+        .import_services(bindings)
+        .map_err(failure)?
+        .into_iter()
+        .map(|(binding, service)| {
+            let entry = contract
+                .model()
+                .imports
+                .iter()
+                .find(|entry| entry.key == binding)
+                .ok_or_else(|| failure("missing prepared import"))?;
+            let tembra_contracts::Item::Interface(interface) = &entry.item else {
+                return Err(failure("Orb import must be an interface"));
+            };
+            let mut methods = BTreeMap::new();
+            for function in &interface.functions {
+                let name = function.name.clone();
+                let slot = contract.bind(&binding, &name, false).map_err(failure)?;
+                if methods
+                    .insert(
+                        tembra_contracts::javascript_name(&name),
+                        BoundMethod { name, slot },
+                    )
+                    .is_some()
+                {
+                    return Err(failure("ambiguous import method"));
+                }
+            }
+            Ok((binding, Rc::new(Import { service, methods })))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let imports = Rc::new(imports);
     let next = Rc::new(Cell::new(0_u64));
     let root_session = session.clone();
     let root_imports = imports.clone();
+    // The prepared contract is shared internally, so each clone only adds a reference.
     let root_contract = contract.clone();
     let root_next = next.clone();
     orb = orb.create(move |declaration| {
@@ -58,23 +93,20 @@ pub(crate) fn orb(
             async move { session.reserve_factory().await }
         });
         for (method, spelling) in service.methods {
-            let called = method.clone();
+            let slot = contract
+                .bind(&service.interface, &method, true)
+                .map_err(failure)?;
             let contract = contract.clone();
-            let interface = service.interface.clone();
             implementation = implementation.method::<Value, Value, _, _>(
                 method,
                 move |environment, context, args| {
-                    let called = called.clone();
                     let spelling = spelling.clone();
                     let contract = contract.clone();
-                    let interface = interface.clone();
                     async move {
-                        contract
-                            .validate_arguments(&interface, &called, &args)
-                            .map_err(failure)?;
+                        contract.validate_slot(slot, true, &args).map_err(failure)?;
                         let value = environment.invoke(context, &spelling, args).await?;
                         contract
-                            .validate_result(&interface, &called, &value)
+                            .validate_slot(slot, false, &value)
                             .map_err(failure)?;
                         Ok(value)
                     }

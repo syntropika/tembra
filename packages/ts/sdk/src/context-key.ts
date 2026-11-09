@@ -64,20 +64,17 @@ export function readContextValue<T>(
   key: ContextKey<T>,
   frame: number,
 ): T | undefined {
-  const entry = ctx.session.kernel.command<{
-    kind: ContextKind;
-    value?: T;
-    source?: number;
-  } | null>(KernelOp.ContextValue, {
+  const entry = ctx.session.kernel.command(KernelOp.ContextValue, {
     root: ctx.root,
     context: frame,
     call: ctx.invocation?.id,
     key,
   });
   if (!entry) return undefined;
-  if (entry.kind !== ContextKind.Opaque) return entry.value;
+  // SAFETY: Rust matched the scalar binding kind to the supplied typed key.
+  if (entry.kind !== ContextKind.Opaque) return entry.value as T;
   const token = Object.freeze({ opaque: true as const });
-  ctx.session.contextTokens.set(token, { root: ctx.root, source: entry.source! });
+  ctx.session.contextTokens.set(token, { root: ctx.root, source: entry.source });
   // SAFETY: Rust matched the opaque binding to the supplied typed key.
   return token as T;
 }

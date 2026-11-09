@@ -1,9 +1,8 @@
 //! Resolve deployment choices without making a WIT import an implicit capability grant.
-use crate::{Binding, Contract, Grants, describe::has_resource};
+use crate::{Binding, Grants, PreparedContract, model::Item};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use tembra_core::{Code, Error, Result};
-use wit_parser::WorldItem;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -12,7 +11,7 @@ pub struct OrbProvider {
     pub api_version: u32,
 }
 
-impl Contract {
+impl PreparedContract {
     /// Derive host bindings from grants and Orb bindings from the installation's explicit choices.
     pub fn providers(
         &self,
@@ -21,15 +20,14 @@ impl Contract {
     ) -> Result<BTreeMap<String, Binding>> {
         let mut bindings = BTreeMap::new();
         let mut used = BTreeSet::new();
-        for (key, item) in &self.resolve.worlds[self.world].imports {
-            let WorldItem::Interface { id, .. } = item else {
+        for entry in &self.model().imports {
+            let Item::Interface(interface) = &entry.item else {
                 continue;
             };
-            let interface = &self.resolve.interfaces[*id];
-            if interface.functions.is_empty() && !has_resource(&self.resolve, *id) {
+            if interface.functions.is_empty() && !interface.resources {
                 continue;
             }
-            let binding = self.resolve.name_world_key(key);
+            let binding = entry.key.clone();
             if let Some(requirement) = requires.get(&binding) {
                 if requirement.orb.trim().is_empty() || requirement.api_version == 0 {
                     return Err(Error::new(
@@ -48,7 +46,7 @@ impl Contract {
                 used.insert(binding);
                 continue;
             }
-            let contract = self.resolve.id_of(*id).ok_or_else(|| {
+            let contract = interface.contract.clone().ok_or_else(|| {
                 Error::new(
                     Code::Unsupported,
                     "wit_binding",

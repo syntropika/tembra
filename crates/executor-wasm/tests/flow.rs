@@ -14,7 +14,6 @@ fn real_interpreter_flow() {
         std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
     let bytes =
         std::fs::read(std::env::var_os("TEMBRA_WASM_ORB").expect("TEMBRA_WASM_ORB")).unwrap();
-    let prepared = tembra_contracts::Artifact::decode(&bytes).unwrap();
     let engine = Engine::new(Limits::default())
         .unwrap()
         .interpreter(&component)
@@ -26,7 +25,7 @@ fn real_interpreter_flow() {
     assert!(engine.load(&corrupted, install()).is_err());
     assert_eq!(engine.instances(), 0);
     let orb = engine.load(&bytes, install()).unwrap();
-    let native = support::native_math(&prepared.contract, "native.math");
+    let native = support::native_math("native.math");
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![native, orb]).unwrap();

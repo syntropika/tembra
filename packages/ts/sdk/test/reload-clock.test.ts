@@ -21,7 +21,7 @@ for (const origin of [0, 1_700_000_000_000]) {
           version,
           async open() {
             if (version === 2) {
-              deadline = host.session.kernel.command<number>(KernelOp.NextDeadline);
+              deadline = host.session.kernel.command(KernelOp.NextDeadline) ?? undefined;
               await new Promise((resolve) => setTimeout(resolve, 0));
               now += 10;
               host.session.kernel.command(KernelOp.Tick, { now: host.session.now() });

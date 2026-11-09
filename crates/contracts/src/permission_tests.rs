@@ -132,11 +132,22 @@ fn network_grants_are_checked_against_the_selected_import_and_provider() {
 
 #[test]
 fn metadata_requests_reject_unknown_control_fields_and_preserve_error_codes() {
-    let contract =
-        Contract::from_source("empty.wit", "package example:empty; world empty {}", None).unwrap();
+    let contract = PreparedContract::new(Model {
+        world: "empty".into(),
+        package: Some("example:empty".into()),
+        types: vec![],
+        imports: vec![],
+        exports: vec![],
+    })
+    .unwrap();
     for packet in [
         r#"{"kind":"describe","source":"unexpected"}"#,
-        r#"{"kind":"bindings","requires":{},"grants":{"network":[],"allowEverything":true}}"#,
+        r#"{"kind":"install","name":"empty","apiVersion":1,"grants":{"network":[],"allowEverything":true}}"#,
+        // Value checks and per-method lookups go through bound slots, not metadata requests.
+        r#"{"kind":"bind","binding":"x","method":"y","exports":true}"#,
+        r#"{"kind":"arguments","binding":"x","method":"y","value":[]}"#,
+        r#"{"kind":"import-method","binding":"x","method":"y"}"#,
+        r#"{"kind":"plan","name":"empty","apiVersion":1,"bindings":{}}"#,
     ] {
         let response: serde_json::Value = serde_json::from_str(&contract.request(packet)).unwrap();
         assert_eq!(response["error"]["code"], "invalid");

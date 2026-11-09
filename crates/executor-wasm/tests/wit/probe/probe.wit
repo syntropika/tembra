@@ -1,0 +1,23 @@
+package example:probe@1.0.0;
+
+/// Controlled compiled-component behavior for settlement, quarantine and grant conformance tests.
+interface probe {
+    /// Run a bounded guest loop and return its wrapping checksum.
+    spin: func(rounds: u32) -> u32;
+    /// Execute an unreachable instruction.
+    trap: func();
+    /// Open one path for reading through the preopen that contains it.
+    open: async func(path: string) -> result<_, string>;
+    /// Create one new empty file.
+    create-file: async func(path: string) -> result<_, string>;
+    /// Create one directory.
+    create-directory: async func(path: string) -> result<_, string>;
+    /// Remove one empty directory.
+    remove-directory: async func(path: string) -> result<_, string>;
+}
+
+world probe-provider {
+    import wasi:filesystem/types@0.3.0;
+    import wasi:filesystem/preopens@0.3.0;
+    export probe;
+}

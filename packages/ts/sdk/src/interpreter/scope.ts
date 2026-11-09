@@ -1,3 +1,4 @@
+import type { CapturedInvocation } from "#tembra-adapters";
 import type { Declaration } from "../authoring/declaration.ts";
 import type { DynamicReference, Resource } from "../authoring/types.ts";
 import type { Context } from "../runtime/context.ts";
@@ -10,7 +11,7 @@ import {
   survivesCancellation,
 } from "./host-protocol.ts";
 import type { Revision } from "./revision.ts";
-import { query } from "./types.ts";
+import { check, encode } from "./codec.ts";
 
 const scopeEnded = Object.freeze(new Error("Interpreter callback scope ended"));
 
@@ -19,6 +20,13 @@ type Authority =
   | { context: Context }
   | { signal: AbortSignal }
   | { validation: true };
+
+/** Read cancellation from the host-issued authority without transferring it to the guest. */
+function authoritySignal(authority: Authority): AbortSignal | undefined {
+  if ("context" in authority) return authority.context.signal;
+  if ("signal" in authority) return authority.signal;
+  return undefined;
+}
 
 /** Host-owned tables restrict guest numbers to one environment and its explicit Orb parent. */
 export class Scope {
@@ -37,24 +45,23 @@ export class Scope {
     readonly service: string | null,
   ) {
     this.id = declaration.environment.id;
-    this.parent = service === null ? undefined : (declaration.orb as Scope);
+    const parent = service === null ? undefined : declaration.environment.orb.scope;
+    this.parent = service === null || !parent ? undefined : revision.scopes.get(parent.id);
+    if (service !== null && !this.parent) throw new Error("Missing interpreter Orb scope");
   }
 
   /** Adapt an issued host authority to the interpreter transport without serializing it. */
   exchange(authority: Authority): ExecutionScope {
     let ended: AbortController | undefined;
     let cancelled = false;
+    const signal = authoritySignal(authority);
     return {
       cancel: () => {
         if (cancelled) return;
         cancelled = true;
         ended?.abort(scopeEnded);
       },
-      ...("context" in authority
-        ? { signal: authority.context.signal }
-        : "signal" in authority
-          ? { signal: authority.signal }
-          : {}),
+      ...(signal ? { signal } : {}),
       check: () => {
         if ("context" in authority) authority.context.check();
         if ("signal" in authority) authority.signal.throwIfAborted();
@@ -95,10 +102,16 @@ export class Scope {
     return value;
   }
 
-  /** Return the kernel's snapshot revision rather than inventing guest state identities. */
-  private snapshot(value: unknown, object: number): unknown {
+  /**
+   * Return the kernel's snapshot revision rather than inventing guest state identities. When the
+   * guest already retains the current revision, only the identity crosses back; the protected value
+   * is omitted because a revision never names two different values.
+   */
+  private snapshot(value: unknown, object: number, known?: string): unknown {
     const snapshot = this.declaration.session.snapshot(object);
-    return { value, revision: snapshot.revision, version: snapshot.version };
+    return snapshot.revision === known
+      ? { revision: snapshot.revision, version: snapshot.version }
+      : { value, revision: snapshot.revision, version: snapshot.version };
   }
 
   /** Service synchronous requests against one immutable authority selected by the host callback. */
@@ -132,10 +145,12 @@ export class Scope {
         return id;
       }
       case "state.read": {
+        // Ownership and the state's lifetime are checked even when its value is not resent.
         const selected = this.selected(request.scope);
         return selected.snapshot(
           this.handle(selected.states, request.id, "state").value,
           selected.declaration.environment.object!.id,
+          request.known,
         );
       }
       case "state.update": {
@@ -160,7 +175,7 @@ export class Scope {
       case "reference.state": {
         const reference = this.reference(request).reference;
         const record = this.declaration.session.handles.reference(reference);
-        return this.snapshot(reference.state.value, record.object);
+        return this.snapshot(reference.state.value, record.object, request.known);
       }
       case "resource.declare": {
         const declaration = this.factory(authority);
@@ -177,12 +192,12 @@ export class Scope {
           deps: dependencies,
           open: (signal: AbortSignal) =>
             this.revision.execute(
-              { kind: "callback", callback: open, value: null },
+              JSON.stringify({ kind: "callback", callback: open, value: null }),
               this.exchange({ signal }),
             ) as Promise<number>,
           close: (value: number, context: Context) =>
             this.revision.execute(
-              { kind: "callback", callback: close, value },
+              JSON.stringify({ kind: "callback", callback: close, value }),
               this.exchange({ context }),
             ),
         };
@@ -194,24 +209,15 @@ export class Scope {
       case "resource.read":
         return this.handle(this.selected(request.scope).resources, request.id, "resource").value;
       case "context.check":
-        this.context(authority);
+        if (!("context" in authority)) throw new Error("Operation requires an admitted invocation");
         return null;
       case "context.cancel":
         this.context(authority).cancel();
         return null;
       case "context.principal":
         return this.context(authority).principal;
-      case "io.check":
-        // Liveness only: WASI enforces grants, this keeps I/O inside an admitted callback.
-        if (!("context" in authority || "signal" in authority))
-          throw new Error("I/O must run in a resource opener or an admitted call");
-        return null;
       case "signal.cancelled":
-        return "context" in authority
-          ? authority.context.signal.aborted
-          : "signal" in authority
-            ? authority.signal.aborted
-            : false;
+        return authoritySignal(authority)?.aborted ?? false;
     }
   }
 
@@ -228,13 +234,16 @@ export class Scope {
   ): Promise<unknown> {
     ended.throwIfAborted();
     switch (request.operation) {
+      case "filesystem.read-text":
+      case "filesystem.write-text":
+      case "transport.exchange": {
+        if ("context" in authority) authority.context.check();
+        else if ("signal" in authority) authority.signal.throwIfAborted();
+        else throw new Error("I/O requires an active callback");
+        return this.revision.io(request);
+      }
       case "reference.ready": {
-        const owner =
-          "context" in authority
-            ? authority.context.signal
-            : "signal" in authority
-              ? authority.signal
-              : undefined;
+        const owner = authoritySignal(authority);
         await this.declaration.session.calls.observe(
           this.reference(request).reference.ready,
           owner ? AbortSignal.any([owner, ended]) : ended,
@@ -244,39 +253,34 @@ export class Scope {
       case "reference.call": {
         const context = this.context(authority);
         const { reference, binding } = this.reference(request);
-        const method = query<string>(this.revision.contract, {
-          kind: "import-method",
-          binding,
-          method: request.method,
-        });
-        query(this.revision.contract, {
-          kind: "import-arguments",
-          binding,
-          method,
-          value: request.args,
-        });
+        const bound = this.revision.importMethods.get(binding)?.get(request.method);
+        if (!bound) throw new Error("Unknown prepared import method");
+        const method = bound.name;
+        // The importing heap is untrusted: check its decoded arguments under its own signature.
+        const input = check(this.revision.contract, bound.slot, true, encode(request.args));
+        const signature = this.revision.importSignatures.get(binding);
+        const capture: CapturedInvocation | undefined = signature
+          ? { signature, input }
+          : undefined;
         // The WIT check above already rejects non-list arguments; this narrows the payload.
         if (!Array.isArray(request.args)) throw new Error("Import arguments must be a list");
         const record = this.declaration.session.handles.reference(reference);
         if (!record.methods.has(method)) throw new Error("Reference does not expose this method");
         const result =
           (await this.declaration.session.calls.observe(
-            this.declaration.session.calls.invoke(record, method, request.args, context),
+            this.declaration.session.calls.invoke(record, method, request.args, context, capture),
             ended,
           )) ?? null;
-        query(this.revision.contract, { kind: "import-result", binding, method, value: result });
-        return result;
+        // The provider may be an ordinary host implementation returning hostile JavaScript. Reply
+        // with the checked capture, never with the original object graph.
+        return capture?.output ?? check(this.revision.contract, bound.slot, false, encode(result));
       }
       case "wait": {
         const { milliseconds } = request;
         if (milliseconds > WAIT_LIMIT_MILLISECONDS)
           throw new Error("Timer exceeds the callback wait limit");
-        const ownerSignal =
-          "context" in authority
-            ? this.context(authority).signal
-            : "signal" in authority
-              ? authority.signal
-              : undefined;
+        if ("context" in authority) this.context(authority);
+        const ownerSignal = authoritySignal(authority);
         if (!ownerSignal) throw new Error("Timer requires an active callback");
         const signal = AbortSignal.any([ownerSignal, ended]);
         signal.throwIfAborted();

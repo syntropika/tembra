@@ -1,12 +1,15 @@
 export class NodeKernel {
-  /** Execute one metadata request in the Rust engine. */
-  request(metadata: string): string;
+  check(root: number, call?: number): string | null;
+  /** Execute one closed kernel operation on structured input; returns `{ ok }` or `{ error }`. */
+  command(op: string, input: object): unknown;
 }
 
 /** Resolve WIT and its bundled standard contracts for build-time type generation. */
 export class NodeArtifact {
   constructor(bytes: Uint8Array);
   description(): string;
+  bind(binding: string, method: string, exports: boolean): number;
+  validate(slot: number, arguments_: boolean, value: string): string;
   request(packet: string): string;
 }
 
@@ -36,6 +39,7 @@ export class NodeInterpreter {
 
 /** Scoped interpreter transport; application consumers should use the SDK facade. */
 export class NodeInterpreterPort {
+  io(packet: string): Promise<string>;
   release(environment: number): void;
   description(): string;
   declare(packet: string, callback: (packet: string) => string): string;

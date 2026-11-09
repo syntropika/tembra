@@ -11,12 +11,6 @@
   const resourceMarker = Symbol("tembra-resource");
   const wire = globalThis.__tembraValues;
   const stateValues = globalThis.__tembraState;
-  const readText = globalThis.__readText!;
-  const writeText = globalThis.__writeText!;
-  const exchange = globalThis.__tcpExchange!;
-  delete globalThis.__readText;
-  delete globalThis.__writeText;
-  delete globalThis.__tcpExchange;
   const imports = new Set(globalThis.__tembraContract.imports.map((item) => item.contract));
   const writeLog = globalThis.__writeLog!;
   delete globalThis.__writeLog;
@@ -118,7 +112,9 @@
           version: options.version ?? 1,
           validate: check,
         });
-        const view = stateValues.readable(() => scoped("state.read", { id }));
+        const view = stateValues.readable((known) =>
+          scoped("state.read", known === undefined ? { id } : { id, known }),
+        );
         if (check !== null) validate(view.value);
         return Object.freeze({
           get value() {
@@ -146,7 +142,9 @@
           service,
           key: typeof key === "string" ? [key] : [...key],
         });
-        const state = stateValues.readable(() => scoped("reference.state", { id }));
+        const state = stateValues.readable((known) =>
+          scoped("reference.state", known === undefined ? { id } : { id, known }),
+        );
         return new Proxy(Object.create(null), {
           get(_target, method) {
             if (method === "then") return undefined;
@@ -365,10 +363,10 @@
       ? {
           filesystem: Object.freeze({
             async readText(path: string) {
-              return readText(path);
+              return call("filesystem.read-text", { path });
             },
             async writeText(path: string, value: string) {
-              writeText(path, value);
+              await call("filesystem.write-text", { path, value });
             },
           }),
         }
@@ -377,7 +375,7 @@
       ? {
           transport: Object.freeze({
             async exchange(ip: string, port: number, request: string) {
-              return exchange(ip, port, request);
+              return call("transport.exchange", { ip, port, request });
             },
           }),
         }

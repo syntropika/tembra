@@ -21,20 +21,34 @@ const entrypoints = [
 ];
 await rm(path.join(root, "dist"), { recursive: true, force: true });
 await mkdir(path.join(root, "dist"), { recursive: true });
-for (const entry of entrypoints) {
-  const result = await Bun.build({
-    entrypoints: [path.join(root, "src", `${entry}.ts`)],
-    outdir: path.join(root, "dist", path.dirname(entry)),
-    naming: `${path.basename(entry)}.js`,
-    target: entry === "node" || entry.startsWith("tooling") ? "node" : "browser",
-    packages: "external",
-    external: ["#tembra-adapters"],
-    splitting: entry === "browser",
-    minify: false,
-    format: "esm",
-  });
-  if (!result.success) throw new AggregateError(result.logs, `Failed to build ${entry}`);
-}
+// Build one module graph so classes and adapter state have one identity across entrypoints.
+const result = await Bun.build({
+  entrypoints: entrypoints.map((entry) => path.join(root, "src", `${entry}.ts`)),
+  root: path.join(root, "src"),
+  outdir: path.join(root, "dist"),
+  naming: { entry: "[dir]/[name].js", chunk: "chunks/[name]-[hash].js" },
+  target: "browser",
+  packages: "external",
+  external: ["node:*", "bun:*"],
+  conditions: ["source"],
+  plugins: [
+    {
+      name: "shared-adapters",
+      /** Keep private adapter state in the same compiled graph as its callers. */
+      setup(builder) {
+        builder.onResolve({ filter: /^#tembra-adapters$/ }, () => ({
+          path: path.join(root, "src/runtime/adapters.ts"),
+        }));
+      },
+    },
+  ],
+  splitting: true,
+  // Consuming applications choose preloads; library chunk paths change when rebundled.
+  modulePreload: false,
+  minify: false,
+  format: "esm",
+});
+if (!result.success) throw new AggregateError(result.logs, "SDK build failed");
 const config = ts.readConfigFile(path.join(root, "tsconfig.json"), ts.sys.readFile);
 const parsed = ts.parseJsonConfigFileContent(
   { ...config.config, include: ["src/**/*.ts"] },

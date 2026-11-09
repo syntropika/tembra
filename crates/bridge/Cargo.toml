@@ -16,7 +16,8 @@ telemetry = ["tembra-core/telemetry"]
 
 [dependencies]
 tembra-core.workspace = true
-serde_json.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 
 [lints]
 workspace = true

@@ -26,7 +26,9 @@ test("the SDK and the native executor share one host-operation vocabulary", () =
     [...block(name).matchAll(/rename = "([^"]+)"/g)].map((match) => match[1]!);
   const sync = operations("Request");
   const asynchronous = operations("AsyncRequest");
-  expect(sync).toContain("io.check");
+  expect(sync).not.toContain("io.check");
+  expect(asynchronous).toContain("filesystem.read-text");
+  expect(asynchronous).toContain("transport.exchange");
   expect(sync).not.toContain("filesystem");
   expect(sync).not.toContain("network");
   for (const operation of sync) {
@@ -76,7 +78,6 @@ test("malformed and unsupported requests are distinguished", () => {
     '{"operation":"state.read","id":4294967296}',
     '{"operation":"state.read","id":1,"scope":"7"}',
     '{"operation":"state.read","id":1,"context":3}',
-    '{"operation":"io.check","path":"/"}',
     '{"operation":"address","scope":1}',
     '{"operation":"state.declare","scope":1,"version":1}',
     '{"operation":"reference.declare","service":"s","key":"main"}',
@@ -96,4 +97,14 @@ test("malformed and unsupported requests are distinguished", () => {
   expect(
     outcome(decodeAsyncHostRequest, '{"operation":"reference.call","id":1,"method":"m"}'),
   ).toBe("malformed");
+});
+
+test("host I/O packets reject forged context and invalid ports", () => {
+  for (const packet of [
+    { operation: "filesystem.read-text", path: "/data/input", context: 1 },
+    { operation: "filesystem.write-text", path: "/data/input" },
+    { operation: "transport.exchange", ip: "127.0.0.1", port: 65536, request: "x" },
+    { operation: "transport.exchange", ip: "127.0.0.1", port: -1, request: "x" },
+  ])
+    expect(outcome(decodeAsyncHostRequest, JSON.stringify(packet))).toBe("malformed");
 });

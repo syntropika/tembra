@@ -6,6 +6,29 @@
 //! table, never a host context: the host accepts only its own table or its issued parent's.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
+
+/// Interpreter interrupt polls granted to one callback and, separately, to its cleanup.
+pub const DEFAULT_INSTRUCTION_TICKS: u32 = 10_000;
+
+/// Source revision and VM bounds delivered by `Operation::Load`.
+///
+/// Hosts may omit `instruction_ticks`; the guest then applies `DEFAULT_INSTRUCTION_TICKS`.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Load<'a> {
+    #[serde(borrow)]
+    pub source: Cow<'a, str>,
+    pub heap_bytes: usize,
+    pub contract: Value,
+    #[serde(default = "default_instruction_ticks")]
+    pub instruction_ticks: u32,
+}
+
+/// Serde default for hosts that do not configure an instruction bound.
+fn default_instruction_ticks() -> u32 {
+    DEFAULT_INSTRUCTION_TICKS
+}
 
 /// Host-selected callbacks contain typed control fields and WIT-checked argument values.
 #[derive(Serialize)]
@@ -79,10 +102,6 @@ pub enum Request {
     /// Attributed diagnostic record; requires no callback authority.
     #[serde(rename = "console")]
     Console { level: LogLevel, message: String },
-    /// Confirm the admitted callback is still live before guest WASI I/O.
-    /// Grants themselves are enforced by WASI, not by this check.
-    #[serde(rename = "io.check")]
-    IoCheck {},
     #[serde(rename = "address")]
     Address {},
     #[serde(rename = "orb")]
@@ -104,11 +123,14 @@ pub enum Request {
         #[serde(default)]
         validate: Option<u32>,
     },
+    /// `known` names the kernel revision whose protected value the guest already retains.
     #[serde(rename = "state.read")]
     StateRead {
         #[serde(default)]
         scope: Option<ScopeId>,
         id: u32,
+        #[serde(default)]
+        known: Option<String>,
     },
     #[serde(rename = "state.update")]
     StateUpdate {
@@ -132,11 +154,14 @@ pub enum Request {
         scope: Option<ScopeId>,
         id: u32,
     },
+    /// `known` names the kernel revision whose protected value the guest already retains.
     #[serde(rename = "reference.state")]
     ReferenceState {
         #[serde(default)]
         scope: Option<ScopeId>,
         id: u32,
+        #[serde(default)]
+        known: Option<String>,
     },
     #[serde(rename = "resource.declare")]
     ResourceDeclare {
@@ -176,6 +201,16 @@ pub enum AsyncRequest {
         method: String,
         args: Value,
     },
+    #[serde(rename = "filesystem.read-text")]
+    ReadText { path: String },
+    #[serde(rename = "filesystem.write-text")]
+    WriteText { path: String, value: String },
+    #[serde(rename = "transport.exchange")]
+    Exchange {
+        ip: String,
+        port: u16,
+        request: String,
+    },
     #[serde(rename = "wait")]
     Wait { milliseconds: u32 },
     /// Any operation name outside this vocabulary.
@@ -183,7 +218,8 @@ pub enum AsyncRequest {
     Unsupported,
 }
 
-/// Snapshot returned for state and reference-state reads.
+/// Snapshot returned for state and reference-state reads. A read naming the current revision as
+/// `known` receives only `revision` and `version`; the unchanged value is not resent.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Snapshot {
     pub value: Value,
@@ -229,6 +265,14 @@ impl Request {
 }
 
 impl AsyncRequest {
+    /// Physical I/O remains owned even after the guest stops awaiting its reply.
+    pub fn is_io(&self) -> bool {
+        matches!(
+            self,
+            Self::ReadText { .. } | Self::WriteText { .. } | Self::Exchange { .. }
+        )
+    }
+
     /// Decode one asynchronous packet, labelling structural failures as malformed.
     pub fn decode(packet: &str) -> Result<Self, String> {
         serde_json::from_str(packet)
@@ -256,8 +300,22 @@ mod tests {
         );
         assert_eq!(
             Request::decode(r#"{"operation":"state.read","id":1}"#).unwrap(),
-            Request::StateRead { scope: None, id: 1 }
+            Request::StateRead {
+                scope: None,
+                id: 1,
+                known: None,
+            }
         );
+        assert_eq!(
+            Request::decode(r#"{"operation":"reference.state","id":1,"known":"7"}"#).unwrap(),
+            Request::ReferenceState {
+                scope: None,
+                id: 1,
+                known: Some("7".into()),
+            }
+        );
+        assert!(Request::decode(r#"{"operation":"state.read","id":1,"known":7}"#).is_err());
+        assert!(Request::decode(r#"{"operation":"state.update","id":1,"known":"7"}"#).is_err());
     }
 
     #[test]
@@ -310,7 +368,6 @@ mod tests {
             r#"{"operation":"state.read","id":"1"}"#,
             r#"{"operation":"state.read","id":1,"scope":"7"}"#,
             r#"{"operation":"state.read","id":1,"context":3}"#,
-            r#"{"operation":"io.check","path":"/"}"#,
             r#"{"operation":"address","scope":1}"#,
             r#"{"operation":"state.declare","scope":1,"version":1}"#,
             r#"{"operation":"reference.declare","service":"s","key":"main"}"#,
@@ -343,10 +400,37 @@ mod tests {
             r#"{"operation":"console","level":"warn","message":"hi"}"#
         );
         assert_eq!(Request::decode(&console.encode()).unwrap(), console);
-        assert_eq!(Request::IoCheck {}.encode(), r#"{"operation":"io.check"}"#);
+    }
+
+    #[test]
+    fn load_packets_default_ticks_and_refuse_unknown_fields() {
+        let packet = serde_json::to_string(&Load {
+            source: "let a = \"\\n\";".into(),
+            heap_bytes: 64,
+            contract: json!({"services": {}}),
+            instruction_ticks: DEFAULT_INSTRUCTION_TICKS,
+        })
+        .unwrap();
         assert_eq!(
-            Request::decode(r#"{"operation":"io.check"}"#).unwrap(),
-            Request::IoCheck {}
+            packet,
+            r#"{"source":"let a = \"\\n\";","heap_bytes":64,"contract":{"services":{}},"instruction_ticks":10000}"#
+        );
+        let decoded: Load<'_> = serde_json::from_str(&packet).unwrap();
+        assert_eq!(decoded.source, "let a = \"\\n\";");
+        assert_eq!(decoded.instruction_ticks, DEFAULT_INSTRUCTION_TICKS);
+        let omitted: Load<'_> =
+            serde_json::from_str(r#"{"source":"","heap_bytes":1,"contract":null}"#).unwrap();
+        assert_eq!(omitted.instruction_ticks, DEFAULT_INSTRUCTION_TICKS);
+        let configured: Load<'_> = serde_json::from_str(
+            r#"{"source":"","heap_bytes":1,"contract":null,"instruction_ticks":50}"#,
+        )
+        .unwrap();
+        assert_eq!(configured.instruction_ticks, 50);
+        assert!(
+            serde_json::from_str::<Load<'_>>(
+                r#"{"source":"","heap_bytes":1,"contract":null,"ticks":50}"#
+            )
+            .is_err()
         );
     }
 

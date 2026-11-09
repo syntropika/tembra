@@ -33,8 +33,8 @@ A `.ts` or `.js` entry exports a default orb with literal `name` and `apiVersion
 For each source build, `build()`:
 
 1. compiles the WIT file and selects `world`;
-2. generates the official Jco type declarations;
-3. typechecks the entry and its imports;
+2. generates the TypeScript declarations from WIT;
+3. typechecks the entry, its imports and project-selected ambient declarations against the guest globals;
 4. bundles the entry and its installed dependencies into one closed script;
 5. writes the script and the encoded contract into the artifact.
 
@@ -84,3 +84,8 @@ See the [React Native guide](react-native.md) for the mobile entrypoint.
 
 See [build implementation](../packages/ts/sdk/src/tooling/build.ts) and
 [dependency resolution](../packages/ts/sdk/src/tooling/resolver.ts).
+
+The build uses the ECMAScript standard library plus the guest's `console` and `tembra` declarations.
+Browser and Node globals such as `setTimeout`, `Buffer`, `fetch` and `URL` are unavailable, even if
+the application project enables their type libraries. Import the guest HTTP helper explicitly.
+Ambient `.d.ts` files selected by the project configuration remain available for build-time constants.

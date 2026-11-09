@@ -20,3 +20,36 @@ jobs:
       - run: just install-tools
       - run: just install
       - run: just check
+
+  # Build the pinned interpreter and compiled provider once, then run every isolated Orb suite.
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - run: cargo install just --version 1.21.0 --locked
+      - run: just install-tools
+      - run: just install
+      - run: just build-node
+      - run: bun run --cwd packages/ts/engine-wasm build --features=hooks,subscriptions,views,telemetry
+      - name: Build the pinned interpreter into both engine packages
+        run: |
+          rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip1 --target wasm32-wasip3 --target wasm32-unknown-unknown
+          curl --fail --location --retry 3 https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz --output "$RUNNER_TEMP/wasi-sdk.tar.gz"
+          printf '%s  %s\n' b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4 "$RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$RUNNER_TEMP"
+          just build-interpreter "$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux" "$RUNNER_TEMP/interpreter"
+      - run: just build-sdk
+      - run: just build-provider "$RUNNER_TEMP/provider"
+      - run: just build-probe "$RUNNER_TEMP/provider"
+      # The runner image provides Google Chrome; fail here if that changes.
+      - run: google-chrome --version
+      - run: just test-wasm-acceptance --out "$RUNNER_TEMP/acceptance" --provider "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" --probe "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm"

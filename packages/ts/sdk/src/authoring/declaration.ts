@@ -180,7 +180,7 @@ export class Declaration {
     this.check();
     if (!this.session.kernel.features.hooks) refuse(Errors.Invalid.HooksDisabled);
     if (!this.environment.orb.definition.hooks?.[name]) refuse(Errors.Invalid.Hook, name);
-    const operation = this.session.kernel.command<number>(KernelOp.Allocate);
+    const operation = this.session.kernel.command(KernelOp.Allocate);
     return {
       /** Require an issued context before entering the declared hook. */
       run: (context, input) => this.session.orbs.runHook(this.environment, name, context, input),

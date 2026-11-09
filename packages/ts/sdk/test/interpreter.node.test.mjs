@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer } from "node:net";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import { test } from "node:test";
@@ -56,6 +56,11 @@ test(
       assert.equal(await reference.sum({ values: [2, 4, 6] }), 24);
       assert.equal(reference.state.value, 24);
       assert.equal(await reference["resource-value"](), 42);
+      const installedVersion = host.diagnostics().codeVersion;
+      await assert.rejects(host.install(calculator), /Use reload/);
+      assert.equal(engines[0].instances(), 2);
+      assert.equal(host.diagnostics().codeVersion, installedVersion);
+      assert.equal(await reference.read(), 24);
       await assert.rejects(reference.fail(), /Expected guest failure/);
       await assert.rejects(reference.forbidden());
       await assert.rejects(reference.malformed());
@@ -100,13 +105,28 @@ test(
         }),
       );
       assert.equal(await reference.recover(), 42);
-      const server = createServer((_request, response) => {
-        const body = '{"values":[1,2,3]}';
-        response.writeHead(200, {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body),
+      let releaseResponse;
+      let enteredResponse;
+      const entered = new Promise((resolve) => {
+        enteredResponse = resolve;
+      });
+      // The guest closes its request half before awaiting the complete HTTP response.
+      const server = createServer({ allowHalfOpen: true }, (socket) => {
+        let request = "";
+        socket.on("data", (bytes) => {
+          request += bytes.toString();
         });
-        response.end(body);
+        socket.on("end", () => {
+          const body = '{"values":[1,2,3]}';
+          const respond = () =>
+            socket.end(
+              `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+            );
+          if (request.startsWith("GET /delayed ")) {
+            releaseResponse = respond;
+            enteredResponse();
+          } else respond();
+        });
       });
       server.listen(0, "127.0.0.1");
       await once(server, "listening");
@@ -123,6 +143,26 @@ test(
         });
         const network = await host.get("online::example:integrated/calculation@1.0.0", "main");
         assert.equal(await network["fetch-and-sum"](`http://127.0.0.1:${port}/values`), 12);
+        const pending = network["fetch-and-sum"](`http://127.0.0.1:${port}/delayed`);
+        await entered;
+        let timer;
+        try {
+          // Even with UV_THREADPOOL_SIZE=1, Orb sockets must not block Node filesystem work.
+          const text = await Promise.race([
+            readFile(path.join(directory, "input.txt"), "utf8"),
+            new Promise((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error("Orb I/O blocked Node's worker pool")),
+                1000,
+              );
+            }),
+          ]);
+          assert.equal(text, "initial");
+        } finally {
+          clearTimeout(timer);
+          releaseResponse();
+          assert.equal(await pending, 12);
+        }
         network.release();
       } finally {
         await new Promise((resolve, reject) =>

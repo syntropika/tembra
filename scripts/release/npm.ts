@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { manifest, nodePlatforms, npmPackages } from "./metadata.ts";
 
@@ -8,7 +16,9 @@ export function checkArtifacts(root: string, version: string): void {
   const required = [
     ...nodePlatforms.map((platform) => `engine-node/dist/tembra-${platform}.node`),
     "engine-node/dist/interpreter.wasm",
-    "engine-wasm/dist/interpreter/interpreter.js",
+    "engine-wasm/dist/interpreter/interpreter.wasm",
+    "engine-wasm/dist/assets.js",
+    "engine-wasm/dist/assets.d.ts",
     "engine-wasm/dist/contracts.js",
     "engine-wasm/dist/contracts_bg.wasm",
     "engine-wasm/dist/tembra.js",
@@ -38,11 +48,20 @@ export function checkArtifacts(root: string, version: string): void {
   }
 }
 
-/** Copy only shipped files and resolve workspace requirements in a separate staging tree. */
+/** Replace one staged snapshot with only shipped files and resolved workspace requirements. */
 export function stagePackage(root: string, name: string, output: string, version: string): string {
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error(`Invalid package name: ${name}`);
   const source = path.join(root, "packages/ts", name);
   const destination = path.join(output, "staging", name);
+  // Compare physical paths, so a linked output cannot select the repository or a package source.
+  const owned = physical(destination);
+  const sources = physical(source);
+  if (inside(owned, physical(root)) || inside(owned, sources) || inside(sources, owned))
+    throw new Error(`Release staging overlaps package sources: ${destination}`);
   const item = manifest(source);
+  // Files removed or renamed in the source must not survive from an earlier snapshot.
+  // Removal unlinks symbolic links in the old snapshot and never follows them.
+  rmSync(destination, { recursive: true, force: true });
   mkdirSync(destination, { recursive: true });
   for (const file of item.files)
     cpSync(path.join(source, file), path.join(destination, file), { recursive: true });
@@ -62,6 +81,23 @@ export function stagePackage(root: string, name: string, output: string, version
   }
   writeFileSync(path.join(destination, "package.json"), `${JSON.stringify(item, null, 2)}\n`);
   return destination;
+}
+
+/** Resolve links in the existing part of a path whose tail may not exist yet. */
+function physical(file: string): string {
+  const absolute = path.resolve(file);
+  const parent = path.dirname(absolute);
+  if (parent === absolute || existsSync(absolute)) return realpathSync(absolute);
+  return path.join(physical(parent), path.basename(absolute));
+}
+
+/** Report whether a path is the parent directory itself or one of its descendants. */
+function inside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return (
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  );
 }
 
 /** Pack the exact staged payloads that will be submitted to npm. */

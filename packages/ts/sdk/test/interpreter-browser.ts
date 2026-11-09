@@ -6,13 +6,31 @@ import {
 } from "../src/browser.ts";
 import type { OrbArtifact } from "../src/authoring/types.ts";
 
+/** Fetch one prepared qualification artifact from the test server. */
+async function source(name: string): Promise<Uint8Array> {
+  const response = await fetch(`/${name}.wasm`);
+  if (!response.ok) throw new Error(`Missing fixture ${name}`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+/** Run one call on the selected engine; omitting `engine` uses the package-located default. */
+export async function verifyEngineSelection(engine?: URL): Promise<void> {
+  const host = await createHost({ isolated: engine ? { engine } : {} });
+  try {
+    await host.install({ artifact: await source("arithmetic-source") });
+    const reference = await host.get("arithmetic::example:integrated/arithmetic@1.0.0", "main");
+    const doubled = await reference.double(3);
+    if (doubled !== 6) throw new Error(`Engine selection returned ${doubled}`);
+    reference.release();
+  } finally {
+    await host.close();
+  }
+  if (host.diagnostics().values !== 0) throw new Error("Engine selection leaked values");
+}
+
 /** Qualify actual Wasm callbacks, isolated descriptors, OPFS persistence and bounded termination. */
-export async function verifyBrowserInterpreter(): Promise<void> {
-  const source = async (name: string) => {
-    const response = await fetch(`/${name}.wasm`);
-    if (!response.ok) throw new Error(`Missing fixture ${name}`);
-    return new Uint8Array(await response.arrayBuffer());
-  };
+export async function verifyBrowserInterpreter(engine?: URL): Promise<void> {
+  await verifySetupRetry(engine);
   const memory = memoryFilesystem({ "input.txt": "initial" });
   const root = await navigator.storage.getDirectory();
   const directoryName = `tembra-${crypto.randomUUID()}`;
@@ -39,7 +57,7 @@ export async function verifyBrowserInterpreter(): Promise<void> {
   });
   const host = await createHost({
     isolated: {
-      engine: new URL("/engine/interpreter.js", location.href),
+      ...(engine ? { engine } : {}),
       providers: { filesystem: { memory: tracked(memory), durable: tracked(durable) } },
       limits: { timeoutMs: 1000 },
       onLog: (record) => {
@@ -85,6 +103,10 @@ export async function verifyBrowserInterpreter(): Promise<void> {
     equal(await calculation.sum({ values: [2, 4, 6] }), 24);
     equal(calculation.state.value, 24);
     equal(await calculation["resource-value"](), 42);
+    const installedVersion = host.diagnostics().codeVersion;
+    equal((await rejects(host.install(calculator))).includes("Use reload"), true);
+    equal(host.diagnostics().codeVersion, installedVersion);
+    equal(calculation.state.value, 24);
     await rejects(calculation.fail());
     await rejects(calculation.forbidden());
     await rejects(calculation.malformed());
@@ -176,4 +198,44 @@ export async function verifyBrowserInterpreter(): Promise<void> {
   equal(messages.includes("slow-finished"), true);
   equal(mounts, 0);
   equal(host.diagnostics().values, 0);
+}
+
+/** A transient validator download failure must not poison later installations on the same host. */
+async function verifySetupRetry(engine?: URL): Promise<void> {
+  const artifact = await source("arithmetic-source");
+  const host = await createHost({ isolated: engine ? { engine } : {} });
+  const fetch = globalThis.fetch;
+  let refused = false;
+  globalThis.fetch = Object.assign(
+    (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!refused && url.endsWith("/contracts_bg.wasm")) {
+        refused = true;
+        return Promise.reject(new Error("Transient validator download failure"));
+      }
+      return fetch(input, init);
+    },
+    fetch,
+  );
+  try {
+    let failed = false;
+    try {
+      await host.install({ artifact });
+    } catch (error) {
+      if (!String(error).includes("Transient validator download failure")) throw error;
+      failed = true;
+    }
+    if (!refused || !failed) throw new Error("Validator download failure was not exercised");
+    globalThis.fetch = fetch;
+    await host.install({ artifact });
+    const reference = await host.get("arithmetic::example:integrated/arithmetic@1.0.0", "main");
+    try {
+      if ((await reference.double(3)) !== 6) throw new Error("Backend retry failed");
+    } finally {
+      reference.release();
+    }
+  } finally {
+    globalThis.fetch = fetch;
+    await host.close();
+  }
 }

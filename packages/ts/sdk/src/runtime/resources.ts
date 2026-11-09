@@ -39,7 +39,7 @@ export class Resources {
 
   /** Ask Rust to resolve this named resource declaration. */
   private register(environment: Environment, name: string, options: ResourceOptions<any>): number {
-    return this.session.kernel.command<{ id: number; value: number | null }>(KernelOp.Resource, {
+    return this.session.kernel.command(KernelOp.Resource, {
       owner: environment.owner,
       name,
       version: options.version ?? 1,
@@ -76,7 +76,7 @@ export class Resources {
       get value() {
         if (environment.phase === EnvironmentPhase.Declaring)
           refuse(Errors.Invalid.ResourceInFactory, "Resources open after declaration");
-        const value = record.session.kernel.command<number>(KernelOp.ResourceValue, {
+        const value = record.session.kernel.command(KernelOp.ResourceValue, {
           resource: record.id,
         });
         return record.session.value<T>(value);

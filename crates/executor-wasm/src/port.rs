@@ -1,7 +1,9 @@
 //! Platform adapters route scoped host callbacks without embedding another lifecycle engine.
 use crate::{
-    Binding, Engine, Grants, failure,
-    worker::{Event, Session},
+    Binding, Engine, Grants,
+    abi::Operation,
+    failure,
+    worker::{self, Event, Session},
 };
 use serde_json::Value;
 use std::{
@@ -47,8 +49,13 @@ impl Engine {
                 contract.check_import_value_profile(name).map_err(failure)?;
             }
         }
-        let context = self.providers.context(&plan.host_imports, grants)?;
-        let session = Session::start(self.clone(), context, name.into())?;
+        let io = crate::io::SourceIo::new(
+            &self.providers,
+            &plan.host_imports,
+            grants,
+            std::time::Duration::from_millis(self.limits.timeout_ms),
+        )?;
+        let session = Session::start(self.clone(), name.into(), io)?;
         let description = session.load(source, contract.describe())?;
         let services = contract
             .check_implementation(
@@ -68,6 +75,11 @@ impl Engine {
 }
 
 impl InterpreterPort {
+    /// Prepare host I/O after the embedding scope has checked callback authority.
+    pub fn io_operation(&self, packet: &str) -> Result<crate::IoOperation> {
+        self.session.io_operation(packet)
+    }
+
     /// Queue pure guest-map cleanup after the kernel releases the environment's physical owners.
     pub fn release(&self, environment: u64) {
         self.session.release_environment(environment);
@@ -84,12 +96,13 @@ impl InterpreterPort {
         packet: Value,
         host: impl FnMut(&str, bool) -> Result<Value>,
     ) -> Result<Value> {
-        self.session.blocking("declare", packet.to_string(), host)
+        self.session
+            .blocking(Operation::Declare, packet.to_string(), host)
     }
 
     /// Split a platform exchange into a local owner ticket and a Send event receiver.
-    pub fn begin(&self, packet: Value) -> Result<(PortTicket, PortEvents)> {
-        let events = self.session.begin("dispatch", packet.to_string())?;
+    pub fn begin(&self, packet: String) -> Result<(PortTicket, PortEvents)> {
+        let events = self.session.begin(Operation::Start, packet)?;
         let done = Arc::new(AtomicBool::new(false));
         Ok((
             PortTicket {
@@ -158,9 +171,7 @@ impl PortEvents {
             }),
             Event::Done(result) => {
                 self.done.store(true, Ordering::Release);
-                let result = result
-                    .map_err(failure)
-                    .and_then(|value| serde_json::from_str(&value).map_err(failure));
+                let result = result.map_err(failure);
                 Ok(PortEvent::Complete(result))
             }
         }
@@ -171,10 +182,7 @@ impl Drop for PortEvents {
     /// Release buffered response senders if the embedding event loop stops consuming requests.
     fn drop(&mut self) {
         if !self.done.load(Ordering::Acquire) {
-            self.events.close();
-            while let Ok(event) = self.events.try_recv() {
-                drop(event);
-            }
+            worker::close_replies(&self.events);
         }
     }
 }
@@ -186,16 +194,8 @@ pub struct PortReply {
 }
 impl PortReply {
     /// Resolve one host request without exposing native kernel handles or executable callbacks.
-    pub fn complete(self, result: Result<Value>) {
-        let result = result.map_err(|error| error.to_string()).and_then(|value| {
-            let value = value.to_string();
-            if value.len() > self.limit {
-                Err("host result exceeds the configured packet limit".into())
-            } else {
-                Ok(value)
-            }
-        });
-        let _ = self.reply.send(result);
+    pub fn complete(self, result: Result<String>) {
+        let _ = self.reply.send(worker::encode(result, self.limit));
     }
     /// Detect a revoked observer without treating cancellation as physical callback settlement.
     pub fn is_closed(&self) -> bool {
@@ -210,5 +210,5 @@ pub enum PortEvent {
         asynchronous: bool,
         reply: PortReply,
     },
-    Complete(Result<Value>),
+    Complete(Result<String>),
 }

@@ -6,7 +6,6 @@ import { TembraError } from "../src/error.ts";
 import { jsonCodec, utf8 } from "../src/codec.ts";
 import { KernelOp } from "../src/protocol.ts";
 import { deferred } from "../src/runtime/records.ts";
-import type { Action, Reload } from "../src/kernel.ts";
 
 for (const fused of [false, true])
   for (const failure of ["decode", "drop", "unprintable"] as const)
@@ -34,15 +33,15 @@ for (const fused of [false, true])
                     host.session.kernel.command(KernelOp.Tick, { now });
                     host.session.kernel.command(KernelOp.FinishCall, { call });
                     return {
-                      actions: host.session.kernel.command<Action[]>(KernelOp.Drain),
-                      deadline: host.session.kernel.command<number | null>(KernelOp.NextDeadline),
+                      actions: host.session.kernel.command(KernelOp.Drain),
+                      deadline: host.session.kernel.command(KernelOp.NextDeadline),
                     };
                   },
                 }
               : {}),
             hasOrb: (id) => id === orbId,
             activate: async (object) => {
-              const value = host.session.kernel.command<number>(KernelOp.Allocate);
+              const value = host.session.kernel.command(KernelOp.Allocate);
               values.set(value, { count: 0 });
               host.session.kernel.command(KernelOp.StateInit, { object, value, version: 1 });
             },
@@ -51,7 +50,7 @@ for (const fused of [false, true])
               await finish.promise;
               const previous = host.session.snapshot(invocation.object);
               failingValue = previous.value;
-              const value = host.session.kernel.command<number>(KernelOp.Allocate);
+              const value = host.session.kernel.command(KernelOp.Allocate);
               values.set(value, { count: failure === "decode" ? 2 ** 60 : 1 });
               host.session.kernel.command(KernelOp.StateAdopt, {
                 call: invocation.id,
@@ -73,7 +72,7 @@ for (const fused of [false, true])
             effect: async () => {},
           },
         });
-        const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
+        const prepared = host.session.kernel.command(KernelOp.Prepare, {
           orbs: [
             { name: "native", apiVersion: 1, services: [{ name: "native", methods: ["update"] }] },
           ],

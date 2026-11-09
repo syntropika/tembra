@@ -1,5 +1,8 @@
 import { KernelOp, EffectType, ActionType, OwnerKind } from "../src/protocol.ts";
-import type { Action, KernelPort } from "../src/kernel.ts";
+import type { Action, KernelError, KernelPort } from "../src/kernel.ts";
+
+/** Untyped access for hostile inputs that the generated TypeScript types would reject. */
+type RawPort = (op: string, input: unknown) => { ok?: any; error?: KernelError };
 
 /** Shared assertions run against the real Node and browser/Worker WASM bindings. */
 export function verifyIdentifierPrecision(create: () => KernelPort): number {
@@ -25,8 +28,8 @@ export function verifyIdentifierPrecision(create: () => KernelPort): number {
     );
   for (const expected of values) {
     const port = create();
-    const request = (op: string, fields: Record<string, unknown> = {}) =>
-      JSON.parse(port.request(JSON.stringify({ op, ...fields })));
+    const raw = port.command.bind(port) as unknown as RawPort;
+    const request = (op: string, fields: Record<string, unknown> = {}) => raw(op, fields);
     const command = (op: string, fields: Record<string, unknown> = {}): any => {
       const result = request(op, fields);
       if (result.error) throw new Error(JSON.stringify(result.error));
@@ -60,21 +63,31 @@ export function verifyIdentifierPrecision(create: () => KernelPort): number {
 
       const before = JSON.stringify(command(KernelOp.Diagnostics));
       for (const invalid of [
-        "9007199254740992",
-        "9007199254740993",
-        "18446744073709551615",
-        "-1",
-        "1.5",
-        "1e100",
+        2 ** 53,
+        2 ** 53 + 2,
+        2 ** 64,
+        -1,
+        1.5,
+        1e100,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        "1",
+        null,
+        [1],
+        { id: 1 },
       ]) {
-        const result = JSON.parse(
-          port.request(`{"op":"${KernelOp.ScopeExists}","scope":${invalid}}`),
-        );
+        const result = raw(KernelOp.ScopeExists, { scope: invalid });
         check(
           result.error?.code === "invalid" && result.error?.reason === "metadata",
-          `Unsafe identity accepted: ${invalid}`,
+          `Unsafe identity accepted: ${String(invalid)}`,
         );
       }
+      for (const fields of [{ scope: 1, extra: 1 }, {}, { scope: 1, owner: null }])
+        check(
+          raw(KernelOp.ScopeExists, fields).error?.reason === "metadata",
+          `Unknown or missing field accepted: ${JSON.stringify(fields)}`,
+        );
+      check(raw("scope-activte", {}).error?.code === "unsupported", "Unknown operation accepted");
       for (const fields of [
         { scopes: [Number(maximum) + 1] },
         { scopes: [], object: Number(maximum) + 1 },
@@ -120,16 +133,16 @@ export function verifyIdentifierPrecision(create: () => KernelPort): number {
       for (let batch = 0; batch < 16 && !complete; batch++) {
         for (const action of command(KernelOp.Drain) as Action[]) {
           if (action.type === ActionType.Execute) {
-            for (const effect of action.effects!) {
-              if (effect.scope !== undefined)
+            for (const effect of action.effects) {
+              if ("scope" in effect)
                 check(effect.scope === id || effect.scope === parent, "Effect identity changed");
               if (effect.type === EffectType.Close)
                 command(KernelOp.ResourceClosed, { resource: effect.resource });
-              if (effect.type === EffectType.Drop) droppedScopes.push(effect.scope!);
+              if (effect.type === EffectType.Drop) droppedScopes.push(effect.scope);
             }
             command(KernelOp.ProgramCompleteStep, {
               program,
-              results: action.effects!.map(() => ({ value: null })),
+              results: action.effects.map(() => ({ value: null })),
             });
           } else if (action.type === ActionType.DropValue) {
             exact(action.id, expected);

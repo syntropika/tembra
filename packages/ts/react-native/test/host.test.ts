@@ -16,7 +16,8 @@ const native: Spec = {
     if (failRequest) throw new Error("Transport unavailable");
     const kernel = kernels.get(id);
     if (!kernel) throw new Error("Unknown kernel");
-    return kernel.request(metadata);
+    const { op, ...input } = JSON.parse(metadata);
+    return JSON.stringify(kernel.command(op, input));
   },
   releaseKernel(id) {
     released++;
@@ -85,10 +86,10 @@ test("releases native storage when host construction fails", () => {
 
 test("prevents use after release and makes repeated release harmless", () => {
   const port = new NativeKernelPort(native);
-  expect(JSON.parse(port.request('{"op":"features"}')).ok).toBeDefined();
+  expect(port.command("features", {}).ok).toBeDefined();
   const before = released;
   port.free();
   port.free();
   expect(released - before).toBe(1);
-  expect(() => port.request("{}")).toThrow("released");
+  expect(() => port.command("features", {})).toThrow("released");
 });

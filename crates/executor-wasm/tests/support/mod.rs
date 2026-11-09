@@ -1,9 +1,12 @@
 use tembra::{Orb, Service};
 use tembra_executor_wasm::Contract;
 
-pub fn native_math(contract: &Contract, name: &str) -> Orb {
-    let provider =
-        Contract::from_bytes(&contract.encode().unwrap(), Some("arithmetic-provider")).unwrap();
+pub fn native_math(name: &str) -> Orb {
+    let provider = Contract::from_dir(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/wasm-orb"),
+        Some("arithmetic-provider"),
+    )
+    .unwrap();
     let metadata = provider
         .plan(name, 1, &Default::default())
         .unwrap()

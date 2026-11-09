@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 use tembra_core::Host;
 
 const SOURCE: &str = r#"
@@ -140,13 +141,19 @@ fn resource_imports_require_a_provider_even_without_functions() {
 }
 
 #[test]
-fn rich_types_and_async_signatures_survive_inspection() {
-    let source = "package example:rich; interface values { resource file; record value { body: stream<u8>, done: future<u32> } use-file: async func(f: borrow<file>) -> own<file>; } world test { export values; }";
+fn rich_types_and_async_signatures_survive_preparation() {
+    let source = "package example:rich; interface values { resource file; record value { body: stream<u8>, done: future<u32> } record unused { flag: bool } use-file: async func(f: borrow<file>, v: value) -> own<file>; } world test { export values; }";
     let contract = Contract::from_source("rich.wit", source, None).unwrap();
     let description = contract.describe().to_string();
     for expected in ["stream", "future", "borrow", "own", "resource", "async"] {
         assert!(description.contains(expected), "missing {expected}");
     }
+    // Only definitions reachable from the world's signatures are carried at runtime.
+    assert!(!description.contains("\"flag\""));
+    let decoded = PreparedContract::decode(&contract.prepared().encode()).unwrap();
+    assert_eq!(&decoded, contract.prepared());
+    assert_eq!(decoded.describe(), contract.describe());
+    assert!(decoded.check_value_profile().is_err());
 }
 
 #[test]
@@ -167,43 +174,22 @@ fn malformed_ambiguous_and_unused_input_is_rejected() {
 #[test]
 fn value_validation_checks_records_widths_and_tuple_lengths() {
     let contract = Contract::from_source("example.wit", SOURCE, Some("provider")).unwrap();
-    let interface = "example:calculation/arithmetic@1.2.0";
+    let add = contract
+        .bind("example:calculation/arithmetic@1.2.0", "add", true)
+        .unwrap();
+    let arguments = |value| contract.validate_slot(add, true, &value);
+    assert!(arguments(serde_json::json!([{"left":1,"right":2}])).is_ok());
+    assert!(arguments(serde_json::json!([{"left":2147483648_u64,"right":2}])).is_err());
+    assert!(arguments(serde_json::json!([{"left":1,"right":2,"extra":3}])).is_err());
+    assert!(arguments(serde_json::json!([])).is_err());
     assert!(
         contract
-            .validate_arguments(interface, "add", &serde_json::json!([{"left":1,"right":2}]))
+            .validate_slot(add, false, &serde_json::json!(3))
             .is_ok()
     );
     assert!(
         contract
-            .validate_arguments(
-                interface,
-                "add",
-                &serde_json::json!([{"left":2147483648_u64,"right":2}])
-            )
-            .is_err()
-    );
-    assert!(
-        contract
-            .validate_arguments(
-                interface,
-                "add",
-                &serde_json::json!([{"left":1,"right":2,"extra":3}])
-            )
-            .is_err()
-    );
-    assert!(
-        contract
-            .validate_arguments(interface, "add", &serde_json::json!([]))
-            .is_err()
-    );
-    assert!(
-        contract
-            .validate_result(interface, "add", &serde_json::json!(3))
-            .is_ok()
-    );
-    assert!(
-        contract
-            .validate_result(interface, "add", &serde_json::json!("3"))
+            .validate_slot(add, false, &serde_json::json!("3"))
             .is_err()
     );
     assert!(contract.check_value_profile().is_err());
@@ -223,6 +209,31 @@ fn standard_contracts_are_managed_and_encoded_with_the_package() {
     );
     assert!(contract.encode().unwrap().starts_with(b"\0asm"));
     assert!(contract.plan("storage", 1, &BTreeMap::new()).is_err());
+    // WASI resources, handles, streams and futures survive the compact form unchanged.
+    let compact = contract.prepared().encode();
+    let decoded = PreparedContract::decode(&compact).unwrap();
+    assert_eq!(&decoded, contract.prepared());
+    assert_eq!(decoded.describe(), description);
+    assert!(compact.len() < contract.encode().unwrap().len());
+    let grants = Grants {
+        filesystem: vec![FilesystemGrant {
+            provider: "files".into(),
+            mount: "/data".into(),
+            writable: false,
+        }],
+        ..Grants::default()
+    };
+    let bindings = decoded.providers(&BTreeMap::new(), &grants).unwrap();
+    assert_eq!(
+        bindings,
+        contract.providers(&BTreeMap::new(), &grants).unwrap()
+    );
+    let plan = decoded.plan("storage", 1, &bindings).unwrap();
+    assert!(
+        plan.host_imports
+            .iter()
+            .any(|import| import.contract == "wasi:filesystem/preopens@0.3.0")
+    );
 }
 
 #[test]
@@ -236,9 +247,10 @@ fn lossy_values_are_refused_before_the_interpreter_runs() {
             .contains("tagged option")
     );
     let float = Contract::from_source("float.wit","package example:values; interface values { read: func() -> f32; } world run { export values; }",None).unwrap();
+    let read = float.bind("example:values/values", "read", true).unwrap();
     assert!(
         float
-            .validate_result("example:values/values", "read", &serde_json::json!(-0.0))
+            .validate_slot(read, false, &serde_json::json!(-0.0))
             .is_err()
     );
     let consumer = Contract::from_source("example.wit", SOURCE, Some("consumer")).unwrap();

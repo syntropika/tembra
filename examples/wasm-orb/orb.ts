@@ -30,7 +30,6 @@ export default orb({
       create,
       methods: {
         async sum(environment: Environment, context: Context, input: calculation.Input) {
-          if (!(input.values instanceof Int32Array)) throw new Error("WIT list shape differs");
           const total = sum([...input.values]);
           const doubled: number = await environment.arithmetic.double(total, context);
           environment.total.update(context, () => doubled);

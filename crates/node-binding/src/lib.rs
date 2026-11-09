@@ -2,7 +2,7 @@
 use napi_derive::napi;
 mod interpreter;
 
-/// Immutable Orb bytes and their resolved WIT graph, shared by every installation of this artifact.
+/// Immutable Orb bytes and their checked prepared contract, shared by every installation.
 #[napi]
 pub struct NodeArtifact {
     pub(crate) artifact: tembra_contracts::Artifact,
@@ -25,7 +25,24 @@ impl NodeArtifact {
         self.artifact.describe().to_string()
     }
 
-    /// Reuse this artifact's resolved contract for metadata and boundary validation.
+    /// Bind one prepared signature before invoking any executable callback.
+    #[napi]
+    pub fn bind(&self, binding: String, method: String, exports: bool) -> napi::Result<u32> {
+        self.artifact
+            .contract
+            .bind(&binding, &method, exports)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Decode only the portable value; control metadata is an installed signature slot.
+    #[napi]
+    pub fn validate(&self, slot: u32, arguments: bool, value: String) -> String {
+        self.artifact
+            .contract
+            .validate_packet(slot, arguments, &value)
+    }
+
+    /// Reuse this artifact's prepared contract for installation queries.
     #[napi]
     pub fn request(&self, packet: String) -> String {
         self.artifact.contract.request(&packet)
@@ -61,10 +78,24 @@ impl NodeKernel {
         }
     }
 
-    /// Execute one metadata request without retaining language values.
+    /// Check a fixed scalar scope without deserializing a JavaScript object.
+    #[napi(ts_return_type = "string | null")]
+    pub fn check(&self, root: f64, call: Option<f64>) -> Option<String> {
+        self.kernel.check(root, call)
+    }
+
+    /// Execute one closed kernel operation on structured input and return `{ ok }` or `{ error }`.
+    ///
+    /// No JSON text crosses this seam; the bridge decodes the object strictly within its budget.
     #[napi]
-    pub fn request(&self, metadata: String) -> String {
-        self.kernel.request(&metadata)
+    pub fn command<'env>(
+        &self,
+        env: &napi::Env,
+        op: String,
+        input: napi::bindgen_prelude::Object<'env>,
+    ) -> napi::Result<napi::bindgen_prelude::Unknown<'env>> {
+        let outcome = self.kernel.outcome(&op, &mut napi::De::new(&input));
+        env.to_js_value(&outcome)
     }
 }
 
@@ -108,7 +139,7 @@ impl NodeContract {
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         })
     }
-    /// Derive metadata or validate portable values through the shared WIT implementation.
+    /// Inspect and install through the shared prepared-contract implementation.
     #[napi]
     pub fn request(&self, packet: String) -> String {
         self.contract.request(&packet)

@@ -16,7 +16,6 @@ fn typescript_calls_a_compiled_rust_orb() {
             .unwrap();
     let bytes =
         std::fs::read(std::env::var_os("TEMBRA_WASM_ORB").expect("TEMBRA_WASM_ORB")).unwrap();
-    let prepared = tembra_contracts::Artifact::decode(&bytes).unwrap();
     let engine = Engine::new(Limits::default())
         .unwrap()
         .interpreter(&interpreter)
@@ -24,8 +23,8 @@ fn typescript_calls_a_compiled_rust_orb() {
     let wrong = Contract::from_source("wrong.wit","package example:integrated@1.0.0; interface arithmetic { double: func(value:string)->s32; } world provider { export arithmetic; }",None).unwrap();
     assert!(wrong.artifact(None, Some(&component), "math", 1).is_err());
     assert_eq!(engine.instances(), 0);
-    let provider = Contract::from_bytes(
-        &prepared.contract.encode().unwrap(),
+    let provider = Contract::from_dir(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/wasm-orb"),
         Some("arithmetic-provider"),
     )
     .unwrap();

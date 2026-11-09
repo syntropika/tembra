@@ -4,7 +4,8 @@ import { copyFile, lstat, mkdir, readFile, readdir, readlink, writeFile } from "
 import path from "node:path";
 import { parseArgs } from "node:util";
 import ts from "typescript";
-import { prepareBrowserEngine } from "../../../packages/ts/engine-wasm/interpreter.ts";
+import { checkEngine, prepareBrowserEngine } from "./check-engine.ts";
+import * as abi from "../../../packages/ts/sdk/src/interpreter/abi.ts";
 
 const revision = "b51e92c0c7ca3b0ae7afff1a1f2de8baf2e7a34a";
 const root = import.meta.dir;
@@ -70,19 +71,26 @@ const bundled = await Bun.build({
   minify: false,
 });
 if (!bundled.success) throw new AggregateError(bundled.logs, "Guest bootstrap build failed");
+// The interpreter is a WASI preview 1 reactor core module. Its linear memory is imported so each
+// host instance supplies the configured maximum; the initial size is part of the private ABI.
+const target = "wasm32-wasip1";
 const sysroot = path.join(sdk, "share/wasi-sysroot");
 const env = {
   ...process.env,
   WASI_SDK: sdk,
   RQUICKJS_SYS_NO_WASI_SDK: "1",
-  CC_wasm32_wasip2: path.join(sdk, "bin/clang"),
-  AR_wasm32_wasip2: path.join(sdk, "bin/llvm-ar"),
-  CFLAGS_wasm32_wasip2: `--sysroot=${sysroot}`,
-  BINDGEN_EXTRA_CLANG_ARGS_wasm32_wasip2: `--sysroot=${sysroot} -isystem ${path.join(sysroot, "include/wasm32-wasip2")}`,
+  CC_wasm32_wasip1: path.join(sdk, "bin/clang"),
+  AR_wasm32_wasip1: path.join(sdk, "bin/llvm-ar"),
+  CFLAGS_wasm32_wasip1: `--sysroot=${sysroot}`,
+  BINDGEN_EXTRA_CLANG_ARGS_wasm32_wasip1: `--sysroot=${sysroot} -isystem ${path.join(sysroot, `include/${target}`)}`,
   CARGO_TARGET_DIR: path.join(cache, "target"),
   TEMBRA_GUEST_BOOTSTRAP_DIR: bootstrap,
 };
 const patch = `patch."https://github.com/stencil-hq/dquickts".rquickjs.path=${JSON.stringify(path.join(source, "rquickjs"))}`;
+const link = [
+  "-Clink-arg=--import-memory",
+  `-Clink-arg=--initial-memory=${abi.MEMORY_INITIAL_PAGES * abi.PAGE_BYTES}`,
+];
 run(
   "cargo",
   [
@@ -91,20 +99,23 @@ run(
     "--locked",
     "--release",
     "--target",
-    "wasm32-wasip2",
+    target,
     "--manifest-path",
     path.join(root, "Cargo.toml"),
     "--config",
     patch,
+    "--config",
+    `target.${target}.rustflags=${JSON.stringify(link)}`,
   ],
   env,
 );
 const destination = path.join(cache, "engine.wasm");
-await copyFile(path.join(cache, "target/wasm32-wasip2/release/tembra_dquickts.wasm"), destination);
+await copyFile(path.join(cache, `target/${target}/release/tembra_dquickts.wasm`), destination);
 const bytes = await readFile(destination);
+await checkEngine(bytes);
 const manifest = {
   engine: "dquickts",
-  protocol: "tembra:runtime/interpreter@0.4.0",
+  protocol: `${abi.IMPORT_MODULE} (wasm32-wasip1 core reactor)`,
   revision,
   sourceArchiveSha256: createHash("sha256").update(archive).digest("hex"),
   wasmSha256: createHash("sha256").update(bytes).digest("hex"),
@@ -119,7 +130,7 @@ if (values.package) {
   await copyFile(destination, path.join(packages, "engine-node/dist/interpreter.wasm"));
   await prepareBrowserEngine(bytes, path.join(packages, "engine-wasm/dist/interpreter"));
 }
-console.log(JSON.stringify({ component: destination, ...manifest }));
+console.log(JSON.stringify({ module: destination, ...manifest }));
 
 /** Stop the build when a tool fails, retaining the compiler's own diagnostic. */
 function run(command: string, args: string[], env = process.env): void {

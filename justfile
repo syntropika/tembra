@@ -1,6 +1,9 @@
 # Build executable adapters before running integration tests.
 set positional-arguments
 
+# Pinned nightly for the interpreter core module and compiled Wasm fixtures; CI reads this value.
+nightly := "nightly-2026-10-15"
+
 default:
     @just --list
 
@@ -49,12 +52,25 @@ test-doc:
     cargo test --locked --workspace --all-features --doc
 
 # Build the reusable dquickts interpreter and package it into the engine packages; Orb edits reuse it.
-build-interpreter sdk cache source:
-    bun crates/executor-wasm/guest/build.ts --sdk "{{sdk}}" --cache "{{cache}}" --source "{{source}}" --package
+# Without a dquickts checkout, the build clones one into the cache and still verifies the pinned revision.
+build-interpreter sdk cache source="" toolchain=nightly:
+    bun crates/executor-wasm/guest/build.ts --sdk "$1" --cache "$2" ${3:+--source "$3"} --toolchain "$4" --package
+
+# Compile the example Rust provider component; reuse the target directory between runs.
+build-provider target-dir toolchain=nightly:
+    cargo +"$2" build --locked --release --target wasm32-wasip3 --manifest-path crates/executor-wasm/rust-provider/Cargo.toml --target-dir "$1"
+
+# Compile the controlled component used to qualify settlement, quarantine and filesystem grants.
+build-probe target-dir toolchain=nightly:
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/probe-provider/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
 
 # Run the ignored executor tests against a built interpreter and Orb artifacts; regular tests do not supply them.
-test-wasm-orb engine orb provider scratch:
-    TEMBRA_WASM_ENGINE="{{engine}}" TEMBRA_WASM_ORB="{{orb}}" TEMBRA_WASM_PROVIDER="{{provider}}" TEMBRA_WASM_SCRATCH="{{scratch}}" cargo test --locked -p tembra-executor-wasm --tests -- --ignored --nocapture
+test-wasm-orb engine orb provider probe scratch:
+    TEMBRA_WASM_ENGINE="{{engine}}" TEMBRA_WASM_ORB="{{orb}}" TEMBRA_WASM_PROVIDER="{{provider}}" TEMBRA_WASM_PROBE="{{probe}}" TEMBRA_WASM_SCRATCH="{{scratch}}" cargo test --locked -p tembra-executor-wasm --tests -- --ignored --nocapture
+
+# Execute isolated Orb acceptance on native Rust, Node and Chrome after the packaged interpreter build.
+test-wasm-acceptance *args:
+    bun scripts/test-wasm-acceptance.ts "$@"
 
 # Verify native hook lifecycle contracts across the core, facade and Wasm executor.
 test-hook-lifecycle: build-node build-wasm build-sdk

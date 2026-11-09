@@ -281,7 +281,10 @@ impl Inner {
             self.remove_observation_root(id);
             for frame in root.contexts {
                 if let Some(frame) = self.context_frames.remove(&frame)
-                    && let crate::ContextValue::Opaque(lease) = frame.value
+                    && let crate::context_values::FrameValue::Binding(
+                        _,
+                        crate::ContextValue::Opaque(lease),
+                    ) = frame.value
                 {
                     leases.push(lease);
                 }

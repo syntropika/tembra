@@ -1,3 +1,5 @@
+import { reply } from "./codec.ts";
+import { failure as fault } from "../error.ts";
 import type { NodeInterpreterPort } from "@syntropika/tembra-engine-node";
 import { decodeAsyncHostRequest, decodeHostRequest } from "./host-protocol.ts";
 import { answer, type ExecutionScope, type InterpreterPort } from "./types.ts";
@@ -6,6 +8,11 @@ import { answer, type ExecutionScope, type InterpreterPort } from "./types.ts";
 export class NodePort implements InterpreterPort {
   /** Retain one native transport until the revision physically closes. */
   constructor(readonly transport: NodeInterpreterPort) {}
+
+  /** Native directory and socket capabilities execute on the host's worker pool. */
+  async io(request: import("./host-protocol.ts").IORequest): Promise<unknown> {
+    return JSON.parse(await this.transport.io(JSON.stringify(request)));
+  }
 
   /** Read the validated source metadata once. */
   description(): string {
@@ -27,7 +34,7 @@ export class NodePort implements InterpreterPort {
   }
 
   /** Finish the native ticket only after admitted host operations physically settle. */
-  execute(packet: string, scope: ExecutionScope): Promise<unknown> {
+  execute(packet: string, scope: ExecutionScope): Promise<string> {
     return new Promise((resolve, reject) => {
       let failure: unknown;
       const pending = new Set<Promise<unknown>>();
@@ -41,7 +48,10 @@ export class NodePort implements InterpreterPort {
                 try {
                   this.transport.finish();
                   if (failure !== undefined) throw failure;
-                  resolve(answer(JSON.stringify(event.result)));
+                  if (!Object.hasOwn(event.result, "ok")) throw fault(event.result.error);
+                  if (typeof event.result.ok !== "string")
+                    throw new Error("Invalid guest result packet");
+                  resolve(event.result.ok);
                 } catch (error) {
                   reject(error);
                 }
@@ -93,7 +103,7 @@ export class NodePort implements InterpreterPort {
 /** Encode one native response without throwing through a callback frame. */
 function respond(operation: () => unknown): string {
   try {
-    return JSON.stringify({ ok: operation() ?? null });
+    return `{ "ok":${reply(operation())}}`;
   } catch (error) {
     return JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
   }

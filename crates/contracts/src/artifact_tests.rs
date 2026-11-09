@@ -1,5 +1,6 @@
 use super::*;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use wasm_encoder::{CustomSection, Encode, Section};
 
 fn contract(source: &str) -> Contract {
@@ -148,17 +149,15 @@ fn canonical_javascript_names_resolve_imports_without_reverse_guessing() {
         contract.describe()["javascriptNames"]["get-HTTP"],
         "getHttp"
     );
-    assert_eq!(
-        contract
-            .import_method("test:names/values", "getHttp")
-            .unwrap(),
-        "get-HTTP"
-    );
+    // Guests map spellings through `javascriptNames`; slots bind only the original WIT name.
     assert!(
         contract
-            .import_method("test:names/values", "getHTTP")
-            .is_err()
+            .bind("test:names/values", "get-HTTP", false)
+            .is_ok()
     );
+    for spelling in ["getHttp", "getHTTP"] {
+        assert!(contract.bind("test:names/values", spelling, false).is_err());
+    }
 }
 
 #[test]
@@ -221,8 +220,142 @@ fn colliding_javascript_service_and_method_names_fail_before_installation() {
         )
         .unwrap();
     let world = resolve.select_world(&[package], None).unwrap();
-    let contract = Contract { resolve, world };
+    let contract = Contract::new(resolve, world).unwrap();
     let error = contract.plan("stores", 1, &BTreeMap::new()).unwrap_err();
     assert!(error.0.contains("ambiguous JavaScript service store"));
     assert!(Contract::from_source("methods.wit", "package test:names; interface values { get-HTTP: func(); get-http: func(); } world run { export values; }", None).is_err());
+}
+
+#[test]
+fn forged_compiled_contracts_are_checked_against_the_real_component() {
+    let real = contract(
+        "package test:artifact; interface values { read: func() -> u32; } world run { export values; }",
+    );
+    let claimed = contract(
+        "package test:artifact; interface values { read: func() -> string; } world run { export values; }",
+    );
+    let identity = Identity {
+        name: "example".into(),
+        api_version: 1,
+        world: "run".into(),
+    };
+    let mut bytes = component(&real);
+    crate::artifact::append_section(
+        &mut bytes,
+        "tembra:orb",
+        &crate::artifact::encode_orb(&identity, claimed.prepared()),
+    );
+    let error = Artifact::decode(&bytes).err().unwrap();
+    assert!(error.0.contains("export signatures"), "{error}");
+    let packed = real
+        .artifact(None, Some(&component(&real)), "example", 1)
+        .unwrap();
+    let decoded = Artifact::decode(&packed).unwrap();
+    assert_eq!(decoded.contract, *real.prepared());
+    assert_eq!(decoded.contract.describe(), real.describe());
+}
+
+#[test]
+fn compiled_resource_only_imports_cannot_hide_their_provider_requirement() {
+    let contract = contract(
+        "package test:handle-checks; interface handles { resource handle; } interface values { get: func() -> u32; } world run { import handles; export values; }",
+    );
+    let mut bytes = component(&contract);
+    contract.check_component_exports(&bytes).unwrap();
+    let mut model = contract.prepared().model().clone();
+    let Item::Interface(interface) = &mut model.imports[0].item else {
+        panic!("expected an interface");
+    };
+    assert!(interface.resources);
+    interface.resources = false;
+    let forged = PreparedContract::new(model).unwrap();
+    let identity = Identity {
+        name: "forged".into(),
+        api_version: 1,
+        world: "run".into(),
+    };
+    append(
+        &mut bytes,
+        "tembra:orb",
+        &crate::artifact::encode_orb(&identity, &forged),
+    );
+    assert!(
+        Artifact::decode(&bytes)
+            .err()
+            .unwrap()
+            .0
+            .contains("import signatures differ")
+    );
+}
+
+#[test]
+fn compiled_imports_may_eliminate_unused_methods_but_cannot_change_retained_signatures() {
+    let make = |methods: &str| {
+        contract(&format!(
+            "package test:retained; interface storage {{ {methods} }} interface values {{ read: func() -> u32; }} world run {{ import storage; export values; }}"
+        ))
+    };
+    let declared =
+        make("read: func(path: string) -> string; write: func(path: string, value: string);");
+    let retained = make("read: func(path: string) -> string;");
+    let artifact = declared
+        .artifact(None, Some(&component(&retained)), "retained", 1)
+        .unwrap();
+    Artifact::decode(&artifact).unwrap();
+    for changed in [
+        "read: func(path: u32) -> string;",
+        "read: func(path: string) -> u32;",
+        "read: func(path: string) -> string; remove: func(path: string);",
+    ] {
+        assert!(
+            declared
+                .check_component_exports(&component(&make(changed)))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn compiled_resource_imports_keep_handle_identity_and_function_kinds() {
+    let make = |result: &str| {
+        contract(&format!(
+            "package test:resources; interface storage {{ resource folder; resource file {{ parent: func() -> {result}; }} }} interface values {{ read: func() -> u32; }} world run {{ import storage; export values; }}"
+        ))
+    };
+    let declared = make("own<folder>");
+    let artifact = declared
+        .artifact(None, Some(&component(&declared)), "resources", 1)
+        .unwrap();
+    Artifact::decode(&artifact).unwrap();
+    assert!(
+        declared
+            .check_component_exports(&component(&make("own<file>")))
+            .is_err()
+    );
+}
+
+#[test]
+fn compiled_imports_may_eliminate_unused_resource_types() {
+    let declared = contract(
+        "package test:pruned; interface storage { resource unused; read: func() -> u32; } interface values { read: func() -> u32; } world run { import storage; export values; }",
+    );
+    let retained = contract(
+        "package test:pruned; interface storage { read: func() -> u32; } interface values { read: func() -> u32; } world run { import storage; export values; }",
+    );
+    let bytes = declared
+        .artifact(None, Some(&component(&retained)), "pruned", 1)
+        .unwrap();
+    Artifact::decode(&bytes).unwrap();
+}
+
+#[test]
+fn compiled_resource_exports_are_refused_during_authoring() {
+    let declared = contract(
+        "package test:unsupported; interface handles { resource handle { read: func() -> u32; } } world run { export handles; }",
+    );
+    assert!(
+        declared
+            .artifact(None, Some(&component(&declared)), "unsupported", 1)
+            .is_err()
+    );
 }

@@ -53,7 +53,7 @@ export async function verifyContextValues(host: Host): Promise<void> {
         if ((await reference.temporary(root)) !== "temporary")
           throw new Error("Browser invocation lost its derived value");
       }
-      const stats = host.session.kernel.command<{ live: number }>(KernelOp.ContextStats);
+      const stats = host.session.kernel.command(KernelOp.ContextStats);
       if (stats.live !== 0) throw new Error("Browser retained completed invocation frames");
     });
   } finally {

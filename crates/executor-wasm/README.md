@@ -5,11 +5,11 @@ The existing Tembra host and kernel own admission, principals, versions, state,
 resources, replacement and physical settlement. This crate only executes
 callbacks, in Wasmtime. It is not published.
 
-An artifact is one immutable `.wasm` file with a WIT contract and an Orb identity.
+An artifact is one immutable `.wasm` file with a prepared WIT contract and an Orb identity.
 It contains either:
 
 - **source**: a closed TypeScript/JavaScript bundle, run by a reusable dquickts
-  interpreter component; or
+  interpreter core module; or
 - **component**: a compiled WebAssembly component, run directly.
 
 Each loaded Orb owns a separate Store. Engines share compiled code, not heaps or
@@ -64,6 +64,12 @@ cargo run --locked -p tembra-executor-wasm --example wasm -- \
 
 ## Contracts and installation
 
+Authoring resolves WIT once and lowers the selected world to a compact typed contract
+inside the artifact. Source runtimes validate that model without loading a WIT parser.
+Installation binds method signatures to slots; callback validation uses those slots
+instead of repeating interface and method queries. Native compiled components are
+also checked against the actual component imports and exports.
+
 WIT exports become services named `<orb>::<package>/<interface>@<version>`.
 WIT imports name required contracts only. `Install::requires` selects which
 installed Orb provides an import and its API version. A native Rust Orb can
@@ -72,8 +78,18 @@ provide an import when it registers the matching service name and signature.
 `Install::grants` holds per-Orb authority. A WIT import never grants access:
 
 - **Filesystem.** `FilesystemGrant { provider, mount, writable }` mounts a
-  registered directory at a normalized virtual path. Guests can read and write
-  bounded UTF-8 text.
+  registered directory at a normalized virtual path. The operations available
+  inside the mount depend on the artifact kind:
+  - Source Orbs call host helpers that read and write bounded UTF-8 text files.
+    They receive no WASI descriptors.
+  - Compiled components receive the directory as a standard WASI preopen. A
+    read-only grant allows reads only. A writable grant allows the WASI
+    filesystem operations on files and directories inside the mount, including
+    binary data, creating and removing entries, and listing directories. The
+    text-only and size bounds of the source helpers do not apply.
+
+  Neither kind can reach paths outside the mount.
+
 - **Network.** `NetworkGrant { provider, connect }` permits outbound TCP to exact
   literal socket addresses. There is no DNS, listening socket or UDP.
 
@@ -99,6 +115,14 @@ records, tuples, simple options, flags, enums, variants and results. Negative
 zero, nested options, 64-bit integers, resource handles, streams and futures are
 rejected.
 
+Host JavaScript arguments are captured once before serialization. Accessors, `toJSON`,
+non-data objects, sparse arrays and cycles are refused; numeric typed arrays become lists
+and explicit `undefined` becomes an absent option. The prepared contract checks those exact
+bytes. Interpreted dependencies can reuse the checked capture only when the actual admitted
+handler has the identical structural signature; ordinary host handlers retain boundary checks.
+Guest result text is checked before decoding. Unchanged state reads transfer only their
+kernel revision, while still checking the handle and its owner's lifetime.
+
 Compiled components are checked against their full exported signatures and called
 through the Canonical ABI. They support plain interface functions and the WASI
 providers above. Imports from a compiled component to another Orb are not yet
@@ -112,7 +136,9 @@ the granted filesystem and the granted TCP transport.
 
 Not yet available:
 
-- full WASI filesystem, HTTP, sockets, clocks and random as guest capabilities;
+- WASI HTTP, random and general clock capabilities, and socket listening, UDP or DNS;
+- descriptor-level WASI filesystem access for source Orbs; only compiled components
+  receive it, and only inside a filesystem grant;
 - guest tasks, listeners, hooks, state subscriptions and migration;
 - service access policies and exclusive or opaque resources;
 - causal reentry into the same interpreter;
@@ -125,30 +151,78 @@ active native one-shot task blocks replacement.
 
 ## Build the interpreter
 
-Building the interpreter requires a Rust nightly with the `wasm32-wasip2` target
-and WASI SDK 34. It pins and verifies a dquickts source revision.
+Building the interpreter requires the pinned Rust nightly with the `wasm32-wasip1`
+target and WASI SDK 34. It pins and verifies a dquickts source revision. The
+justfile `nightly` variable names the toolchain used locally, in CI and for releases.
 
 ```sh
-just build-interpreter <wasi-sdk> <cache-directory> <dquickts-checkout>
+rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip1 --target wasm32-wasip3 --target wasm32-unknown-unknown
+just build-interpreter <wasi-sdk> <cache-directory> [<dquickts-checkout>]
 ```
 
-With `--package`, the recipe copies `interpreter.wasm` into
-`@syntropika/tembra-engine-node` and the browser modules into
+Without a checkout, the build clones dquickts into the cache directory. The recipe
+copies the same verified `interpreter.wasm` into `@syntropika/tembra-engine-node` and
 `@syntropika/tembra-engine-wasm`. Orb changes do not require rebuilding it.
 
 ## Qualification
 
-Runtime tests need built artifacts and are ignored by ordinary workspace tests.
-`scripts/test-wasm-fixtures.ts --out <directory> [--provider <component.wasm>]`
-builds the fixture Orbs; `just test-wasm-orb` runs the ignored Rust tests against
-supplied artifacts.
+Runtime tests need built artifacts. Ordinary workspace tests and `just check` skip
+them. The CI `acceptance` job builds the interpreter and the compiled Rust provider
+once, then runs every suite against them:
 
-The private interpreter transport is `tembra:runtime/interpreter@0.4.0`.
-The interpreter returns typed progress and pending effects. The host waits outside
-the Wasm stack and resumes the same heap with the completed effects. Completion
-identities never select kernel roots, declarations or contexts.
+```sh
+just build-provider <target-directory>
+just build-probe <target-directory>
+just test-wasm-acceptance --out <directory> \
+  --provider <target-directory>/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm \
+  --probe <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm
+```
 
-The serialized interpreter uses the WASIp2 toolchain to keep its stack inside Wasm.
-This is an internal engine choice. Orb contracts and the compiled-component host
-retain their WASI interfaces. Browser JSPI suspends actual WASI I/O; ordinary
-inter-Orb waits do not create component asynchronous tasks.
+The runner builds the fixture Orbs with `scripts/test-wasm-fixtures.ts`, or reuses a
+directory passed with `--fixtures`. It runs the ignored executor tests natively, the
+SDK Bun and Node suites, Chrome with the packaged default engine and with an override
+engine directory, the [Wasm Orb example](../../examples/wasm-orb/README.md), and
+packed consumers in Node, Bun and Chrome with a clean NodeNext typecheck.
+Repeat `--suite native|sdk|node|browser|example|package` to select suites. The output
+directory must not contain the checkout. `just test-wasm-orb` runs only the ignored
+Rust tests against supplied artifacts.
+
+The interpreter is a `wasm32-wasip1` reactor core module behind a private
+fixed-buffer ABI, `tembra-interpreter-v1`. [`src/abi.rs`](src/abi.rs) is its only
+definition: the guest includes it, the native host compiles it, and the browser host
+uses TypeScript constants generated from it. Two exports reserve one input buffer and
+run one logical operation (load, declare, start, resume, cancel or capture); two
+imports answer synchronous host requests. Replies list at most 128 pending effects
+with JavaScript-safe integer identities. The host waits outside the Wasm stack and
+resumes the same heap with the completed effects. Completion identities never select
+kernel roots, declarations or contexts. Layout, UTF-8 or ownership violations and
+any trap quarantine that instance.
+
+Linear memory is imported: each instance receives its own memory whose maximum is
+the configured `memoryBytes`, in addition to the VM heap limit and, natively, Store
+limits and fuel. The module may import only that memory, the two host functions and
+an exact WASI preview 1 allowlist with capabilityless implementations: an empty
+environment, real clocks, standard output and error forwarded to attributed
+diagnostics, and no preopened directories or other descriptors. `proc_exit` traps.
+Engines with any other import are refused before instantiation. Orb contracts and
+the compiled-component host retain their WASI interfaces. Source filesystem and transport
+operations are host effects, so the browser interpreter does not require JSPI. Native source providers
+use directory capabilities and exact socket destination grants. Browser providers
+use memory or an explicitly supplied OPFS directory handle. The source VM receives
+no WASI filesystem preopens or socket grants; its standard-library imports cannot
+reach those providers.
+
+Source helpers check the admitted callback before each I/O effect and retain physical
+ownership until the operation settles, including after cancellation or an abandoned
+Promise. TypeScript still constructs and parses HTTP inside the guest; only the
+permitted raw transport runs in the host. Native source I/O uses four dedicated
+workers and a bounded queue, shared by Rust and Node without occupying Node's
+libuv pool. Permissions and request bounds are checked before queue admission;
+expired queued operations cannot begin filesystem writes. Regular-file operations
+retain ownership until physical completion; their completion is not interruptible.
+
+Compiled-component calls settle through their dedicated Wasmtime worker without
+occupying the libuv pool. Rust callbacks can cancel while waiting for admission;
+admitted callbacks retain physical ownership until their WASI work settles.
+A terminal failure quarantines that Orb and refuses its
+queued calls only after the Store and blocking WASI operations have stopped.

@@ -1,16 +1,27 @@
-use serde_json::json;
+use serde_json::{Value, json};
 use tembra_bridge::{Kernel, core::*, protocol::KernelOp};
+
+/// Exchange one JSON request and split its envelope.
+fn execute(kernel: &Kernel, request: &Value) -> std::result::Result<Value, Value> {
+    let envelope: Value = serde_json::from_str(&kernel.request(&request.to_string())).unwrap();
+    match envelope.get("error") {
+        Some(error) => Err(error.clone()),
+        None => Ok(envelope["ok"].clone()),
+    }
+}
 
 #[cfg(not(feature = "hooks"))]
 #[test]
 fn terminal_observation_is_explicitly_unavailable_without_hooks() {
     let kernel = Kernel::new();
     let before = kernel.host.diagnostics();
-    let error = kernel
-        .execute(&json!({"op": KernelOp::BeginHookObservation.as_str()}))
-        .unwrap_err();
-    assert_eq!(error.code, Code::Unsupported);
-    assert_eq!(error.reason, Reason::Operation.as_str());
+    let error = execute(
+        &kernel,
+        &json!({"op": KernelOp::BeginHookObservation.as_str()}),
+    )
+    .unwrap_err();
+    assert_eq!(error["code"], Code::Unsupported.as_str());
+    assert_eq!(error["reason"], Reason::Operation.as_str());
     assert_eq!(kernel.host.diagnostics(), before);
 }
 
@@ -65,7 +76,7 @@ mod enabled {
             invalid[field] = json!([]);
             let before = kernel.host.diagnostics();
             assert_eq!(
-                kernel.execute(&invalid).unwrap_err().reason,
+                execute(&kernel, &invalid).unwrap_err()["reason"],
                 Reason::Metadata.as_str()
             );
             assert_eq!(kernel.host.diagnostics(), before);
@@ -73,11 +84,11 @@ mod enabled {
         let mut wrong_owner = request.clone();
         wrong_owner["orb"] = json!(other.id);
         assert_eq!(
-            kernel.execute(&wrong_owner).unwrap_err().reason,
+            execute(&kernel, &wrong_owner).unwrap_err()["reason"],
             "operation_owner"
         );
         let before = kernel.host.diagnostics();
-        let admitted = kernel.execute(&request).unwrap();
+        let admitted = execute(&kernel, &request).unwrap();
         let invocation = &admitted["invocation"];
         let call = invocation["id"].as_u64().unwrap() as Id;
         let observed_root = invocation["root"].as_u64().unwrap() as Id;
@@ -91,14 +102,14 @@ mod enabled {
         let mut duplicate = request.clone();
         duplicate["operation"] = json!(402);
         assert_eq!(
-            kernel.execute(&duplicate).unwrap_err().reason,
+            execute(&kernel, &duplicate).unwrap_err()["reason"],
             "observation_admitted"
         );
         assert_eq!(kernel.host.diagnostics(), after);
         let mut recursive = request;
         recursive["source"] = json!(call);
         assert_eq!(
-            kernel.execute(&recursive).unwrap_err().reason,
+            execute(&kernel, &recursive).unwrap_err()["reason"],
             "observation_source"
         );
         assert_eq!(kernel.host.diagnostics(), after);

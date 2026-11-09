@@ -4,8 +4,7 @@ import { createRequire } from "node:module";
 import type { NodeArtifact, NodeInterpreter } from "@syntropika/tembra-engine-node";
 import type { OrbDefinition, OrbArtifact, LoadOptions } from "../authoring/types.ts";
 import { Revision } from "./revision.ts";
-import { materialize, type AdaptedOrb } from "#tembra-adapters";
-import { query, type ProviderBinding } from "./types.ts";
+import { query, type InstallationPlan } from "./types.ts";
 
 export interface DirectoryFilesystem {
   readonly kind: "directory";
@@ -36,17 +35,6 @@ export class NodeExecution {
 
   /** Register host configuration without compiling an interpreter for metadata-only hosts. */
   constructor(readonly options: InterpreterOptions) {}
-
-  /** Decode immutable artifact data once; every installation still receives a fresh guest. */
-  decode(bytes: Uint8Array, options: LoadOptions = {}): OrbDefinition {
-    const artifact = new this.#binding.NodeArtifact(bytes);
-    const identity = JSON.parse(artifact.description()) as { name: string; apiVersion: number };
-    const captured = structuredClone(options);
-    return Object.freeze({
-      ...identity,
-      [materialize]: () => this.open(artifact, captured),
-    } as AdaptedOrb);
-  }
 
   /** Materialize source bytes supplied directly through an Orb declaration. */
   async materialize(definition: OrbArtifact): Promise<OrbDefinition> {
@@ -85,24 +73,16 @@ export class NodeExecution {
       apiVersion: number;
       kind: "source" | "component";
     };
-    const bindings = query<Record<string, ProviderBinding>>(artifact, {
-      kind: "bindings",
-      requires: options.requires ?? {},
-      grants: options.grants ?? {},
-    });
-    const plan = query<{ hostImports: unknown[] }>(artifact, {
-      kind: "plan",
+    const prepared = query<InstallationPlan>(artifact, {
+      kind: "install",
       name: identity.name,
       apiVersion: identity.apiVersion,
-      bindings,
-    });
-    query(artifact, {
-      kind: "grants",
-      imports: plan.hostImports,
+      requires: options.requires ?? {},
       grants: options.grants ?? {},
       filesystem: Object.keys(this.options.providers?.filesystem ?? {}),
       network: this.options.providers?.network ?? [],
     });
+    const { bindings } = prepared;
     if (identity.kind === "component") {
       const port = this.backend().openComponent(
         artifact,
@@ -126,14 +106,10 @@ export class NodeExecution {
       JSON.stringify(options.grants ?? {}),
     );
     try {
-      return new Revision(
-        new NodePort(port),
-        artifact,
-        this.options.limits?.timeoutMs ?? 10000,
-      ).definition({
-        ...identity,
-        bindings,
-      });
+      const transport = new NodePort(port);
+      return new Revision(transport, artifact, this.options.limits?.timeoutMs ?? 10000, (request) =>
+        transport.io(request),
+      ).definition(identity, prepared);
     } catch (error) {
       port.close();
       throw error;

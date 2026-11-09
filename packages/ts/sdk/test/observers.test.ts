@@ -2,7 +2,6 @@ import { KernelOp } from "../src/protocol.ts";
 import { expect, spyOn, test } from "bun:test";
 import { createHost } from "../src/node.ts";
 import { orb } from "../src/orb.ts";
-import type { Reload, Snapshot } from "../src/kernel.ts";
 
 const counter = () =>
   orb({
@@ -54,15 +53,15 @@ test("foreign state publication adopts the kernel snapshot despite a failing con
     native: {
       hasOrb: (id) => id === orbId,
       activate: async (object) => {
-        const value = host.session.kernel.command<number>(KernelOp.Allocate);
+        const value = host.session.kernel.command(KernelOp.Allocate);
         values.set(value, { count: 0 });
         host.session.kernel.command(KernelOp.StateInit, { object, value, version: 1 });
       },
       invoke: async (invocation) => {
-        const previous = host.session.kernel.command<Snapshot>(KernelOp.Snapshot, {
+        const previous = host.session.kernel.command(KernelOp.Snapshot, {
           object: invocation.object,
         });
-        const value = host.session.kernel.command<number>(KernelOp.Allocate);
+        const value = host.session.kernel.command(KernelOp.Allocate);
         values.set(value, { count: values.get(previous.value)!.count + 1 });
         host.session.kernel.command(KernelOp.StateAdopt, {
           call: invocation.id,
@@ -79,7 +78,7 @@ test("foreign state publication adopts the kernel snapshot despite a failing con
       },
     },
   });
-  const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
+  const prepared = host.session.kernel.command(KernelOp.Prepare, {
     orbs: [
       { name: "native", apiVersion: 1, services: [{ name: "native", methods: ["increment"] }] },
     ],

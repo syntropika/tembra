@@ -18,22 +18,21 @@ views = ["tembra-bridge/views"]
 telemetry = ["tembra-bridge/telemetry"]
 
 [dependencies]
-napi = { version = "=3.14.2", default-features = false, features = ["napi8", "dyn-symbols"] }
+napi = { version = "=3.14.2", default-features = false, features = [
+  "napi8",
+  "dyn-symbols",
+  "serde-json",
+] }
 napi-derive = "=3.6.12"
 tembra-bridge.workspace = true
 tembra-contracts.workspace = true
 tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2" }
 tembra = { path = "../tembra", version = "=0.2.2" }
 serde.workspace = true
-serde_json.workspace = true
-futures.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 
 [build-dependencies]
 napi-build = "=2.6.0"
 
 [lints]
 workspace = true
-
-# The derive macro expands into the napi runtime dependency.
-[package.metadata.cargo-machete]
-ignored = ["napi"]

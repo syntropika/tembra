@@ -5,17 +5,21 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Optional browser binding for resolved Tembra WIT contracts"
+description = "Browser binding for prepared Tembra Orb contracts"
 publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-tembra-contracts.workspace = true
+# Runtime model only: no WIT parser, component decoder or compiled-component verifier.
+tembra-contracts = { path = "../contracts", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.129"
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

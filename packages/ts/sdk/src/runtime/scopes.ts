@@ -22,7 +22,7 @@ export class Scopes {
   /** Allocate the JS callback storage for one declared scope. */
   environment(owner: Owner, orb: OrbRecord, object?: ObjectRecord): Environment {
     const environment: Environment = {
-      id: this.session.kernel.command<number>(KernelOp.Allocate),
+      id: this.session.kernel.command(KernelOp.Allocate),
       owner,
       orb,
       ...(object ? { object } : {}),
@@ -48,7 +48,7 @@ export class Scopes {
         object.address.key,
         object.address.principal,
       );
-      const scopes = session.kernel.command<number[]>(KernelOp.ScopesForOwner, {
+      const scopes = session.kernel.command(KernelOp.ScopesForOwner, {
         owner: { kind: OwnerKind.Object, id: object.id },
       });
       await Promise.all(scopes.map((scope) => session.programs.activate(scope)));
@@ -76,8 +76,7 @@ export class Scopes {
       await this.session.programs.activate(environment.id);
     }
     if (
-      session.kernel.command<Status>(KernelOp.Status, { reference: acquired.reference }) ===
-      Status.Loading
+      session.kernel.command(KernelOp.Status, { reference: acquired.reference }) === Status.Loading
     )
       session.kernel.command(KernelOp.Ready, { object: object.id });
     object.live = true;
@@ -149,7 +148,7 @@ export class Scopes {
     for (const [alias, requirement] of Object.entries(environment.orb.definition.requires ?? {})) {
       let provider: KernelOrb;
       try {
-        provider = this.session.kernel.command<KernelOrb>(KernelOp.OrbNamed, {
+        provider = this.session.kernel.command(KernelOp.OrbNamed, {
           name: requirement.orb ?? alias,
           ticket: environment.orb.ticket,
         });

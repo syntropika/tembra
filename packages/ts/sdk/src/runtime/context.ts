@@ -29,12 +29,15 @@ export class Context {
   /** Derive one binding without changing identity or lifetime. */
   with<T>(key: ContextKey<T>, value: T): Context {
     const source = key.source(value, this);
-    const frame = this.session.kernel.command<number>(KernelOp.ContextDerive, {
+    const frame = this.session.kernel.command(KernelOp.ContextDerive, {
       root: this.root,
       context: this.frame,
       call: this.invocation?.id,
       key,
-      ...(key.kind === ContextKind.Opaque ? { source } : { value }),
+      // Rust checks that the scalar matches the key kind.
+      ...(key.kind === ContextKind.Opaque
+        ? { source }
+        : { value: value as string | number | boolean }),
     });
     return new Context(this.session, this.root, this.invocation, frame);
   }
@@ -58,7 +61,7 @@ export class Context {
 
   /** Read the root identity from the kernel. */
   get principal(): string {
-    return this.session.kernel.command<string>(KernelOp.RootPrincipal, { root: this.root });
+    return this.session.kernel.command(KernelOp.RootPrincipal, { root: this.root });
   }
 
   /** Read the shared cancellation signal for this root. */
@@ -68,10 +71,7 @@ export class Context {
 
   /** Reject a cancelled root or expired invocation. */
   check(): void {
-    this.session.kernel.command(KernelOp.CheckContext, {
-      root: this.root,
-      call: this.invocation?.id,
-    });
+    this.session.kernel.check(this.root, this.invocation?.id);
   }
 
   /** Cancel the root and dispatch its cancellation actions. */

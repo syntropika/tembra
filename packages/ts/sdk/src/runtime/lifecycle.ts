@@ -27,7 +27,7 @@ export class Lifecycle {
     this.#flushing = true;
     try {
       for (;;) {
-        const actions = initial ?? this.session.kernel.command<Action[]>(KernelOp.Drain);
+        const actions = initial ?? this.session.kernel.command(KernelOp.Drain);
         initial = undefined;
         if (!actions.length) break;
         for (const action of actions) {
@@ -44,21 +44,34 @@ export class Lifecycle {
     }
   }
 
-  /** Compose kernel finish bookkeeping through the embedded adapter when available. */
-  finishCall(call: number): void {
-    const session = this.session;
-    if (!this.#flushing && session.options.native?.finish) {
-      const batch = session.options.native.finish(call, session.now());
-      if (!batch.actions.length) {
-        this.scheduleLinger(batch.deadline);
-        return;
-      }
-      this.flush(batch.actions);
+  /** End a logical root and dispatch its resulting cleanup without extra drain/deadline queries. */
+  endRoot(root: number): void {
+    if (this.#flushing) {
+      this.session.kernel.command(KernelOp.EndRoot, { root });
       return;
     }
-    session.kernel.command(KernelOp.Tick, { now: session.now() });
-    session.kernel.command(KernelOp.FinishCall, { call });
-    this.flush();
+    const batch = this.session.kernel.command(KernelOp.EndRootBatch, { root });
+    if (batch.actions.length) this.flush(batch.actions);
+    else this.scheduleLinger(batch.deadline);
+  }
+
+  /** Finish a call in one bounded kernel exchange: tick, finish, drain and next deadline. */
+  finishCall(call: number): void {
+    const session = this.session;
+    if (this.#flushing) {
+      // The active flush drains these actions in order; do not dispatch them reentrantly.
+      session.kernel.command(KernelOp.Tick, { now: session.now() });
+      session.kernel.command(KernelOp.FinishCall, { call });
+      return;
+    }
+    const batch = session.options.native?.finish
+      ? session.options.native.finish(call, session.now())
+      : session.kernel.command(KernelOp.FinishCallBatch, { call, now: session.now() });
+    if (!batch.actions.length) {
+      this.scheduleLinger(batch.deadline);
+      return;
+    }
+    this.flush(batch.actions);
   }
 
   /** Execute one action using its owning JS module. */
@@ -135,7 +148,7 @@ export class Lifecycle {
     object.disposing ??= (async () => {
       const errors: unknown[] = [];
       await object.activation.catch(() => {});
-      const scopes = session.kernel.command<number[]>(KernelOp.ScopesForOwner, {
+      const scopes = session.kernel.command(KernelOp.ScopesForOwner, {
         owner: { kind: OwnerKind.Object, id },
       });
       try {
@@ -162,9 +175,7 @@ export class Lifecycle {
     const session = this.session;
     if (session.closing) return;
     const deadline =
-      (known === undefined
-        ? session.kernel.command<number | null>(KernelOp.NextDeadline)
-        : known) ?? undefined;
+      (known === undefined ? session.kernel.command(KernelOp.NextDeadline) : known) ?? undefined;
     if (deadline === this.#lingerDeadline) return;
     if (this.#linger !== undefined) clearTimeout(this.#linger);
     this.#linger = undefined;
@@ -188,7 +199,7 @@ export class Lifecycle {
     const session = this.session;
     if (this.#finalDiagnostics) return this.#finalDiagnostics;
     return {
-      ...session.kernel.command<Diagnostics>(KernelOp.Diagnostics),
+      ...session.kernel.command(KernelOp.Diagnostics),
       values: session.values.size,
       pendingJobs: session.jobs.size,
     };

@@ -36,8 +36,9 @@ interface GuestValues {
   importResult(service: string, method: string, value: unknown): unknown;
 }
 type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
+/** `value` is omitted only when the read named this same retained revision. */
 interface Snapshot {
-  value: Json;
+  value?: Json;
   revision: string;
   version: number;
 }
@@ -48,14 +49,16 @@ interface GuestReadable {
 }
 interface GuestState {
   protect(value: unknown, ancestors?: Set<object>, depth?: number): Json;
-  readable(read: () => Snapshot): GuestReadable & { adopt(snapshot: Snapshot): Json };
+  readable(
+    read: (known: string | undefined) => Snapshot,
+  ): GuestReadable & { adopt(snapshot: Snapshot): Json };
 }
 /** Handle issued by one environment table; `scope` selects the table, never an authority. */
 interface HostHandle {
   scope?: number;
   id: number;
 }
-/** Synchronous host operations; mirrors `crates/executor-wasm/src/protocol.rs` (`io.check` and `console` are emitted by Rust natives). */
+/** Synchronous host operations; mirrors `crates/executor-wasm/src/protocol.rs` (`console` is emitted by a registered native). */
 interface HostRequests {
   address: {};
   orb: {};
@@ -64,12 +67,12 @@ interface HostRequests {
   "context.principal": {};
   "context.cancel": {};
   "state.declare": { initial: unknown; version: number; validate: number | null };
-  "state.read": HostHandle;
+  "state.read": HostHandle & { known?: string };
   "state.update": HostHandle & { value: unknown };
   "reference.declare": { service: string; key: string[] };
   "reference.release": HostHandle;
   "reference.status": HostHandle;
-  "reference.state": HostHandle;
+  "reference.state": HostHandle & { known?: string };
   "resource.declare": {
     name: string;
     version: number;
@@ -81,6 +84,9 @@ interface HostRequests {
 }
 /** Asynchronous host operations awaited by the outer driver. */
 interface AsyncHostRequests {
+  "filesystem.read-text": { path: string };
+  "filesystem.write-text": { path: string; value: string };
+  "transport.exchange": { ip: string; port: number; request: string };
   "reference.ready": HostHandle;
   "reference.call": HostHandle & { method: string; args: unknown[] };
   wait: { milliseconds: number };
@@ -110,9 +116,6 @@ declare var __tembraOrb: {
 declare var __hostSync: (packet: string) => string;
 declare var __hostAsync: (packet: string) => Promise<string>;
 declare var __scopeActive: (() => boolean) | undefined;
-declare var __readText: ((path: string) => string) | undefined;
-declare var __writeText: ((path: string, value: string) => void) | undefined;
-declare var __tcpExchange: ((ip: string, port: number, request: string) => string) | undefined;
 declare var __writeLog: ((level: string, message: string) => void) | undefined;
 declare var __tembraTakeEffects: () => { id: number; packet: string }[];
 declare var __tembraCompleteEffect: (id: number, ok: boolean, value: string) => void;

@@ -87,6 +87,18 @@ impl Context {
         })
     }
 
+    /// Retain the admitted isolated revision in this invocation's private execution ancestry.
+    pub fn enter_execution(&self) -> Result<Self> {
+        let call = self.invocation()?;
+        let frame = self.host.kernel().enter_execution(call.id, self.frame)?;
+        Ok(Self {
+            host: self.host.clone(),
+            root: self.root,
+            call: self.call.clone(),
+            frame,
+        })
+    }
+
     /// Read typed metadata while this invocation remains valid.
     pub fn value<T: core::ContextDatum>(&self, key: &core::ContextKey<T>) -> Result<Option<T>> {
         self.check()?;

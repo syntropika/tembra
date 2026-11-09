@@ -10,10 +10,19 @@ export class NativeKernelPort implements KernelPort {
     this.#handle = native.createKernel();
   }
 
-  /** Forward metadata without serializing application values or callbacks. */
-  request(metadata: string): string {
+  /**
+   * Exchange one typed command as the JSON text the TurboModule accepts. The native kernel decodes
+   * it into the same strictly checked command; application values and callbacks never cross.
+   */
+  command: KernelPort["command"] = (op, input) => {
     if (this.#handle === undefined) throw new Error("The native kernel has been released");
-    return this.native.request(this.#handle, metadata);
+    return JSON.parse(this.native.request(this.#handle, JSON.stringify({ ...input, op })));
+  };
+
+  /** String-only platforms adapt the scalar scope check to the same typed command. */
+  check(root: number, call?: number): string | undefined {
+    const outcome = this.command("check-context", { root, call });
+    return outcome.error === undefined ? undefined : JSON.stringify(outcome.error);
   }
 
   /** Release native storage once, after the SDK has drained host cleanup. */

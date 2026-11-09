@@ -108,6 +108,25 @@ pub struct NodeInterpreterPort {
 
 #[napi]
 impl NodeInterpreterPort {
+    /// Settle host I/O through a threadsafe deferred, without borrowing libuv worker threads.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn io<'env>(
+        &self,
+        env: &'env napi::Env,
+        packet: String,
+    ) -> napi::Result<napi::bindgen_prelude::Object<'env>> {
+        if self.ticket.borrow().is_none() {
+            return Err(js_error("I/O requires an active exchange"));
+        }
+        let operation = self.port()?.io_operation(&packet).map_err(js_error)?;
+        let (deferred, promise) = env.create_deferred::<String, _>()?;
+        operation.submit(move |result| {
+            let result = result.map(|value| value.to_string());
+            deferred.resolve(move |_| result.map_err(js_error));
+        });
+        Ok(promise)
+    }
+
     /// Release guest closures without reentering a quarantined Store or inventing a lifecycle effect.
     #[napi]
     pub fn release(&self, environment: f64) -> napi::Result<()> {
@@ -164,7 +183,6 @@ impl NodeInterpreterPort {
         if let Some(thread) = self.bridge.borrow_mut().take() {
             let _ = thread.join();
         }
-        let packet = serde_json::from_str(&packet).map_err(js_error)?;
         let (start, receive) = std::sync::mpsc::channel::<tembra_executor_wasm::PortEvents>();
         let replies = self.replies.clone();
         let sequence = self.sequence.clone();
@@ -192,7 +210,7 @@ impl NodeInterpreterPort {
     pub fn reply(&self, id: u32, packet: String) -> napi::Result<bool> {
         let reply = self.replies.lock().map_err(js_error)?.remove(&id);
         if let Some(reply) = reply {
-            reply.complete(decode(&packet));
+            reply.complete(decode_raw(&packet));
             Ok(true)
         } else {
             Ok(false)
@@ -235,7 +253,7 @@ impl NodeInterpreterPort {
 }
 
 /// Preserve typed native errors across the platform transport without serializing executable data.
-pub(super) fn envelope(result: tembra::Result<Value>) -> Value {
+pub(super) fn envelope<T: Serialize>(result: tembra::Result<T>) -> Value {
     let reply = match result {
         Ok(value) => Reply::Ok(value),
         Err(error) => Reply::Error(ReplyError {
@@ -269,7 +287,31 @@ fn decode(packet: &str) -> tembra::Result<Value> {
         Reply::Error(message) => Err(tembra::Error::invalid("platform_reply", message)),
     }
 }
+/// Retain the checked payload verbatim; parsing through Value would rewrite its numbers.
+fn decode_raw(packet: &str) -> tembra::Result<String> {
+    let value: Reply<Box<serde_json::value::RawValue>, String> = serde_json::from_str(packet)
+        .map_err(|error| tembra::Error::invalid("platform_reply", error.to_string()))?;
+    match value {
+        Reply::Ok(value) => Ok(value.get().to_owned()),
+        Reply::Error(message) => Err(tembra::Error::invalid("platform_reply", message)),
+    }
+}
+
 /// Convert infrastructure diagnostics to the Node binding's ordinary error type.
 pub(super) fn js_error(error: impl ToString) -> napi::Error {
     napi::Error::from_reason(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn host_reply_preserves_checked_bytes() {
+        let text = r#"{ "value": 1.0000000000000002, "zero": -0, "nested": [1e-30] }"#;
+        assert_eq!(
+            super::decode_raw(&format!(r#"{{"ok":{text}}}"#)).unwrap(),
+            text
+        );
+        assert!(super::decode_raw(r#"{"ok": invalid}"#).is_err());
+        assert!(super::decode_raw(r#"{"error":"refused"}"#).is_err());
+    }
 }

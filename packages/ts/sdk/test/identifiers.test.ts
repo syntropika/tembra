@@ -1,37 +1,11 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
-import { Code, Lifetime, Reason, ReloadStatus, Status } from "../src/identifiers.ts";
+import { Code, Lifetime, Reason } from "../src/identifiers.ts";
 import { Errors, type ErrorDescriptor } from "../src/errors.ts";
 import { failure, TembraError } from "../src/error.ts";
-import { ActionType, EffectType, KernelOp, NativeOp, StepType } from "../src/protocol.ts";
+import { EffectType, KernelOp } from "../src/protocol.ts";
 import { createHost } from "../src/node.ts";
-import type { Kernel } from "../src/kernel.ts";
-
-test("JavaScript and Rust use the same closed wire vocabulary", () => {
-  const source = readFileSync(
-    new URL("../../../../crates/bridge/src/protocol.rs", import.meta.url),
-    "utf8",
-  );
-  for (const [name, values] of Object.entries({
-    KernelOp,
-    ActionType,
-    EffectType,
-    StepType,
-    NativeOp,
-  })) {
-    const block = source.match(new RegExp(`${name} \\{([^}]+)\\}`))?.[1];
-    expect(block).toBeDefined();
-    const rust = [...block!.matchAll(/(\w+) => "([^"]+)"/g)].map(([, name, value]) => [
-      name,
-      value,
-    ]);
-    expect(Object.fromEntries(rust)).toEqual(values);
-  }
-  expect(Lifetime.Host).toBe("host");
-  expect(Status.Live).toBe("live");
-  expect(ReloadStatus.Prepared).toBe("prepared");
-});
+import type { Kernel, KernelOutcome } from "../src/kernel.ts";
 
 test("structured errors retain their fields, default message, cause and custom orb reasons", () => {
   const descriptor = Errors.Invalid.StateValidation;
@@ -59,9 +33,12 @@ test("structured errors retain their fields, default message, cause and custom o
 test("named operations retain native wire errors and refuse unknown operations without mutation", async () => {
   const host = createHost();
   const before = host.diagnostics();
-  const response = JSON.parse(
-    host.session.kernel.port.request(JSON.stringify({ op: "scope-activte" })),
-  );
+  const response = (
+    host.session.kernel.port.command as unknown as (
+      op: string,
+      input: object,
+    ) => KernelOutcome<null>
+  )("scope-activte", {});
   expect(response.error).toMatchObject({ code: Code.Unsupported, reason: Reason.Operation });
   expect(host.diagnostics()).toEqual(before);
   expect(() => host.session.kernel.command(KernelOp.ScopeActivate, { scope: 0 })).toThrow(

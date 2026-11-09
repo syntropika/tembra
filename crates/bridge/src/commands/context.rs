@@ -1,86 +1,90 @@
-//! Transport typed metadata and owner-issued opaque handles.
+//! Context commands transport typed metadata and owner-issued opaque frame identities only.
 
-use super::*;
+use super::{Handle, Kernel, frame, input};
+use crate::wire::{ContextEntry, ContextScalar, Ident};
+use tembra_core::{ContextKind, ContextValue, Error, Id, Reason, Result};
 
-impl Kernel {
-    /// Decode context operations without interpreting owner resources.
-    pub(super) fn execute_context(&self, request: &Value, op: KernelOp) -> Result<Value> {
-        let h = &self.host;
-        let id = |key| identity(request, key);
-        match op {
-            KernelOp::ContextStats => {
-                let (live, peak, keys) = h.context_stats();
-                Ok(json!({"live":live,"peak":peak,"keys":keys}))
-            }
-            KernelOp::ContextDerive | KernelOp::ContextValue => {
-                let root = id("root")?;
-                let frame = optional_identity(request, "context")?.unwrap_or(0);
-                let key = context_contract(&request["key"])?;
-                if let Some(call) = optional_identity(request, "call")?
-                    && h.invocation(call)?.root != root
-                {
-                    return Err(Error::invalid(Reason::Context, "foreign invocation"));
-                }
-                if op == KernelOp::ContextValue {
-                    return Ok(match h.context_value(root, frame, &key)? {
-                        None => Value::Null,
-                        Some(ContextValue::Text(value)) => json!({"kind":"text","value":&*value}),
-                        Some(ContextValue::Integer(value)) => {
-                            json!({"kind":"integer","value":value})
-                        }
-                        Some(ContextValue::Boolean(value)) => {
-                            json!({"kind":"boolean","value":value})
-                        }
-                        Some(ContextValue::Opaque(_)) => json!({"kind":"opaque","source":frame}),
-                    });
-                }
-                let value = match key.kind {
-                    ContextKind::Text => ContextValue::Text(text(request, "value")?.into()),
-                    ContextKind::Integer => {
-                        ContextValue::Integer(request["value"].as_i64().ok_or_else(|| {
-                            Error::invalid(Reason::Context, "expected a safe integer")
-                        })?)
-                    }
-                    ContextKind::Boolean => ContextValue::Boolean(
-                        request["value"]
-                            .as_bool()
-                            .ok_or_else(|| Error::invalid(Reason::Context, "expected a boolean"))?,
-                    ),
-                    ContextKind::Opaque => h
-                        .context_value(root, id("source")?, &key)?
-                        .filter(|value| matches!(value, ContextValue::Opaque(_)))
-                        .ok_or_else(|| {
-                            Error::invalid(
-                                Reason::Context,
-                                "opaque references must be issued by their owner",
-                            )
-                        })?,
-                };
-                Ok(json!(h.derive_context(
-                    root,
-                    frame,
-                    optional_identity(request, "call")?,
-                    key,
-                    value
-                )?))
-            }
-            _ => Err(unavailable(op.as_str())),
-        }
-    }
+/// Recheck a root and, when supplied, that the invocation belongs to it.
+pub(super) fn check(kernel: &Kernel, root: Handle, call: Option<Handle>) -> Result<()> {
+    kernel.host.check_root(root.0)?;
+    foreign(kernel, root.0, call)
 }
 
-/// Decode a stable key identity and scalar kind.
-fn context_contract(value: &Value) -> Result<ContextContract> {
-    let kind = match text(value, "kind")? {
-        "text" => ContextKind::Text,
-        "integer" => ContextKind::Integer,
-        "boolean" => ContextKind::Boolean,
-        "opaque" => ContextKind::Opaque,
-        _ => return Err(Error::invalid(Reason::Context, "unknown context kind")),
+/// Refuse an invocation identity issued under another root.
+fn foreign(kernel: &Kernel, root: Id, call: Option<Handle>) -> Result<()> {
+    if let Some(call) = call
+        && kernel.host.invocation(call.0)?.root != root
+    {
+        return Err(Error::invalid(Reason::Context, "foreign invocation"));
+    }
+    Ok(())
+}
+
+/// Derive one binding. Scalar values must match the key kind; opaque values must come from an
+/// owner-issued source frame of the same root.
+pub(super) fn derive(kernel: &Kernel, input: input::ContextDerive) -> Result<Id> {
+    let host = &kernel.host;
+    let root = input.root.0;
+    let parent = frame(input.context);
+    let key = input.key.contract();
+    foreign(kernel, root, input.call)?;
+    let value = match (key.kind, input.value, input.source) {
+        (ContextKind::Text, Some(ContextScalar::Text(value)), None) => {
+            ContextValue::Text(value.into())
+        }
+        (ContextKind::Text, _, None) => {
+            return Err(Error::invalid(Reason::Metadata, "value must be text"));
+        }
+        (ContextKind::Integer, Some(ContextScalar::Integer(value)), None) => {
+            ContextValue::Integer(value)
+        }
+        (ContextKind::Integer, _, None) => {
+            return Err(Error::invalid(Reason::Context, "expected a safe integer"));
+        }
+        (ContextKind::Boolean, Some(ContextScalar::Boolean(value)), None) => {
+            ContextValue::Boolean(value)
+        }
+        (ContextKind::Boolean, _, None) => {
+            return Err(Error::invalid(Reason::Context, "expected a boolean"));
+        }
+        (ContextKind::Opaque, None, Some(source)) => host
+            .context_value(root, source.0, &key)?
+            .filter(|value| matches!(value, ContextValue::Opaque(_)))
+            .ok_or_else(|| {
+                Error::invalid(
+                    Reason::Context,
+                    "opaque references must be issued by their owner",
+                )
+            })?,
+        (ContextKind::Opaque, _, _) => {
+            return Err(Error::invalid(
+                Reason::Context,
+                "opaque references must be issued by their owner",
+            ));
+        }
+        (_, _, Some(_)) => {
+            return Err(Error::invalid(
+                Reason::Context,
+                "only opaque keys accept a source frame",
+            ));
+        }
     };
-    Ok(ContextContract {
-        name: text(value, "name")?.into(),
-        version: number(value, "version")?,
-        kind,
+    host.derive_context(root, parent, input.call.map(|call| call.0), key, value)
+}
+
+/// Read the nearest binding. Opaque bindings are returned as their issuing frame identity.
+pub(super) fn value(kernel: &Kernel, input: input::ContextValue) -> Result<Option<ContextEntry>> {
+    let root = input.root.0;
+    let at = frame(input.context);
+    let key = input.key.contract();
+    foreign(kernel, root, input.call)?;
+    Ok(match kernel.host.context_value(root, at, &key)? {
+        None => None,
+        Some(ContextValue::Text(value)) => Some(ContextEntry::Text {
+            value: value.to_string(),
+        }),
+        Some(ContextValue::Integer(value)) => Some(ContextEntry::Integer { value }),
+        Some(ContextValue::Boolean(value)) => Some(ContextEntry::Boolean { value }),
+        Some(ContextValue::Opaque(_)) => Some(ContextEntry::Opaque { source: Ident(at) }),
     })
 }

@@ -10,7 +10,9 @@ use std::{
     collections::BTreeMap,
     rc::Rc,
 };
-use tembra::{Context, Declaration, Reference, Resource, ResourceSignal, Result, State};
+use tembra::{
+    Cancellation, Context, Declaration, Reference, Resource, ResourceSignal, Result, State,
+};
 
 mod operations;
 
@@ -22,12 +24,27 @@ pub(crate) enum Scope {
     Validation,
 }
 
+pub(crate) struct Import {
+    pub service: String,
+    pub methods: BTreeMap<String, BoundMethod>,
+}
+pub(crate) struct BoundMethod {
+    pub name: String,
+    pub slot: u32,
+}
+
+#[derive(Clone)]
+struct ReferenceHandle {
+    reference: Rc<Reference>,
+    import: Rc<Import>,
+}
+
 struct Handles {
     session: Session,
     environment: u64,
     next: Cell<u32>,
     states: RefCell<BTreeMap<u32, State<Value>>>,
-    references: RefCell<BTreeMap<u32, (Rc<Reference>, String)>>,
+    references: RefCell<BTreeMap<u32, ReferenceHandle>>,
     resources: RefCell<BTreeMap<u32, Resource<u32>>>,
 }
 
@@ -45,9 +62,9 @@ pub(crate) struct Environment {
     pub id: u64,
     handles: Rc<Handles>,
     service: Option<String>,
-    imports: Rc<BTreeMap<String, String>>,
+    imports: Rc<BTreeMap<String, Rc<Import>>>,
     parent: Option<Rc<Handles>>,
-    contract: Rc<tembra_contracts::Contract>,
+    contract: tembra_contracts::PreparedContract,
 }
 
 impl Environment {
@@ -57,8 +74,8 @@ impl Environment {
         id: u64,
         declaration: Declaration,
         service: Option<String>,
-        imports: Rc<BTreeMap<String, String>>,
-        contract: Rc<tembra_contracts::Contract>,
+        imports: Rc<BTreeMap<String, Rc<Import>>>,
+        contract: tembra_contracts::PreparedContract,
     ) -> Result<Self> {
         let parent = if service.is_some() {
             Some(declaration.orb::<Environment>()?.handles.clone())
@@ -84,7 +101,7 @@ impl Environment {
         };
         let scope = Scope::Declaration(declaration);
         environment.session.blocking(
-            "declare",
+            crate::abi::Operation::Declare,
             serde_json::to_string(&GuestCommand::Create {
                 environment: id,
                 service: environment.service.as_deref(),
@@ -102,30 +119,33 @@ impl Environment {
         method: &str,
         args: Value,
     ) -> Result<Value> {
-        context.check()?;
-        const STACK: tembra::core::ContextKey<String> =
-            tembra::core::ContextKey::new("tembra.executor.wasm.stack", 1);
-        let stack = context.value(&STACK)?.unwrap_or_default();
-        let current = self.session.identity().to_string();
-        if stack.split(',').any(|identity| identity == current) {
-            return Err(failure(
-                "causal reentry into the same interpreter is not supported",
-            ));
-        }
-        let context = context.with(&STACK, format!("{stack},{current}"))?;
+        let context = context.enter_execution()?;
+        let cancellation = context.signal();
         let packet = GuestCommand::Invoke {
             environment: self.id,
             service: self.service.as_deref(),
             method,
             args: &args,
         };
-        self.execute(Scope::Call(context), packet).await
+        self.execute(Scope::Call(context), Some(cancellation), packet)
+            .await
     }
 
     /// Run a callback while routing operations through this environment's owned handle table.
-    async fn execute(&self, scope: Scope, packet: GuestCommand<'_>) -> Result<Value> {
+    /// A cancellable callback may leave the admission queue; cleanup passes no cancellation.
+    async fn execute(
+        &self,
+        scope: Scope,
+        cancellation: Option<Cancellation>,
+        packet: GuestCommand<'_>,
+    ) -> Result<Value> {
+        let admission = self.session.admit(cancellation.as_ref()).await?;
+        if cancellation.is_some() {
+            // Authority can expire while the callback waits behind another one.
+            Self::authorize(&scope)?;
+        }
         self.session
-            .dispatch(packet, async |packet, asynchronous| {
+            .dispatch(admission, packet, async |packet, asynchronous| {
                 if asynchronous {
                     self.asynchronous(&scope, packet).await
                 } else {
@@ -133,6 +153,15 @@ impl Environment {
                 }
             })
             .await
+    }
+
+    /// Reject a scope whose root, invocation or opener was cancelled or has ended.
+    fn authorize(scope: &Scope) -> Result<()> {
+        match scope {
+            Scope::Call(context) => context.check(),
+            Scope::Open(signal) => signal.check(),
+            Scope::Declaration(_) | Scope::Validation => Ok(()),
+        }
     }
 
     /// Allocate a handle that is meaningful only inside this environment's host table.

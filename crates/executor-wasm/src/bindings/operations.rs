@@ -15,11 +15,7 @@ impl Environment {
             ));
         }
         if !request.survives_cancellation() {
-            match scope {
-                Scope::Call(context) => context.check()?,
-                Scope::Open(signal) => signal.check()?,
-                Scope::Declaration(_) | Scope::Validation => {}
-            }
+            Self::authorize(scope)?;
         }
         match request {
             Request::Console { .. } => self.session.log(packet),
@@ -57,7 +53,7 @@ impl Environment {
                     let environment = self.clone();
                     declaration.validate_on_reload(move || {
                         environment.session.blocking(
-                            "declare",
+                            crate::abi::Operation::Declare,
                             serde_json::to_string(&GuestCommand::Validate {
                                 callback,
                                 value: check_state.value()?.as_ref(),
@@ -72,13 +68,19 @@ impl Environment {
                 self.handles.states.borrow_mut().insert(id, state);
                 encode(&id)
             }
-            Request::StateRead { scope: owner, id } => {
+            Request::StateRead {
+                scope: owner,
+                id,
+                known,
+            } => {
+                // Handle ownership and the live kernel snapshot are checked on every read.
                 let state = self.state(owner, id)?;
                 let snapshot = state.snapshot()?;
-                snapshot_value(
-                    state.value()?.as_ref().clone(),
+                snapshot_reply(
                     snapshot.revision,
                     snapshot.version,
+                    known.as_deref(),
+                    || Ok(state.value()?.as_ref().clone()),
                 )
             }
             Request::StateUpdate {
@@ -97,24 +99,36 @@ impl Environment {
                     .imports
                     .get(&service)
                     .ok_or_else(|| failure("reference is not a selected WIT Orb import"))?;
-                let reference = Self::declaration(scope)?.get(binding, key)?;
+                let reference = Self::declaration(scope)?.get(&binding.service, key)?;
                 let id = self.allocate()?;
-                self.handles
-                    .references
-                    .borrow_mut()
-                    .insert(id, (reference, service));
+                self.handles.references.borrow_mut().insert(
+                    id,
+                    ReferenceHandle {
+                        reference,
+                        import: binding.clone(),
+                    },
+                );
                 encode(&id)
             }
             Request::ReferenceRelease { scope: owner, id } => {
-                self.reference(owner, id)?.0.release()?;
+                self.reference(owner, id)?.reference.release()?;
                 Ok(Value::Null)
             }
             Request::ReferenceStatus { scope: owner, id } => {
-                encode(self.reference(owner, id)?.0.status()?.as_str())
+                encode(self.reference(owner, id)?.reference.status()?.as_str())
             }
-            Request::ReferenceState { scope: owner, id } => {
-                let (snapshot, value) = self.reference(owner, id)?.0.state_snapshot()?;
-                snapshot_value(value, snapshot.revision, snapshot.version)
+            Request::ReferenceState {
+                scope: owner,
+                id,
+                known,
+            } => {
+                let (snapshot, value) = self.reference(owner, id)?.reference.state_snapshot()?;
+                snapshot_reply(
+                    snapshot.revision,
+                    snapshot.version,
+                    known.as_deref(),
+                    || Ok(value),
+                )
             }
             Request::ResourceDeclare {
                 name,
@@ -142,13 +156,6 @@ impl Environment {
                 Self::context(scope)?.cancel()?;
                 Ok(Value::Null)
             }
-            // Liveness only: WASI enforces grants, this keeps I/O inside an admitted callback.
-            Request::IoCheck {} => match scope {
-                Scope::Call(_) | Scope::Open(_) => Ok(Value::Null),
-                Scope::Declaration(_) | Scope::Validation => Err(failure(
-                    "I/O must run in a resource opener or an admitted call",
-                )),
-            },
             Request::SignalCancelled {} => encode(&match scope {
                 Scope::Call(context) => context.signal().is_cancelled(),
                 Scope::Open(signal) => signal.is_cancelled(),
@@ -188,9 +195,11 @@ impl Environment {
             &dependencies,
             move |signal| {
                 async move {
+                    let cancellation = signal.clone();
                     let value = opening
                         .execute(
                             Scope::Open(signal),
+                            Some(cancellation),
                             GuestCommand::Callback {
                                 callback: open,
                                 value: None,
@@ -203,9 +212,11 @@ impl Environment {
             },
             move |value, context| {
                 async move {
+                    // Cleanup must reach the guest even when its host is shutting down.
                     closing
                         .execute(
                             Scope::Call(context),
+                            None,
                             GuestCommand::Callback {
                                 callback: close,
                                 value: Some(*value),
@@ -224,11 +235,28 @@ impl Environment {
 
     /// Await portable references and cooperative timers under the active invocation's authority.
     pub(super) async fn asynchronous(&self, scope: &Scope, packet: &str) -> Result<Value> {
-        match AsyncRequest::decode(packet).map_err(failure)? {
+        let request = AsyncRequest::decode(packet).map_err(failure)?;
+        if request.is_io() {
+            match scope {
+                Scope::Call(context) => context.check()?,
+                Scope::Open(signal) => signal.check()?,
+                Scope::Declaration(_) | Scope::Validation => {
+                    return Err(failure("I/O requires an active callback"));
+                }
+            }
+            return self.session.io_operation(packet)?.execute().await;
+        }
+        match request {
             AsyncRequest::ReferenceReady { scope: owner, id } => {
-                let (reference, _) = self.reference(owner, id)?;
-                reference.ready().await?;
-                Ok(Value::Null)
+                let signal = Self::signal(scope, "readiness requires an active callback")?;
+                let reference = self.reference(owner, id)?.reference;
+                // Only the logical wait ends; activation stays owned by the kernel.
+                let ready = std::pin::pin!(reference.ready());
+                let cancelled = std::pin::pin!(signal.cancelled());
+                match futures::future::select(ready, cancelled).await {
+                    futures::future::Either::Left((result, _)) => result.map(|()| Value::Null),
+                    futures::future::Either::Right(_) => Err(failure("operation cancelled")),
+                }
             }
             AsyncRequest::ReferenceCall {
                 scope: owner,
@@ -237,17 +265,20 @@ impl Environment {
                 args,
             } => {
                 let context = Self::context(scope)?;
-                let (reference, binding) = self.reference(owner, id)?;
-                let method = self
-                    .contract
-                    .import_method(&binding, &method)
-                    .map_err(failure)?;
+                let ReferenceHandle {
+                    reference,
+                    import: binding,
+                } = self.reference(owner, id)?;
+                let method = binding
+                    .methods
+                    .get(&method)
+                    .ok_or_else(|| failure("unknown prepared import method"))?;
                 self.contract
-                    .validate_import_arguments(&binding, &method, &args)
+                    .validate_slot(method.slot, true, &args)
                     .map_err(failure)?;
-                let value = reference.call_value(context, &method, args).await?;
+                let value = reference.call_value(context, &method.name, args).await?;
                 self.contract
-                    .validate_import_result(&binding, &method, &value)
+                    .validate_slot(method.slot, false, &value)
                     .map_err(failure)?;
                 Ok(value)
             }
@@ -255,17 +286,7 @@ impl Environment {
                 if milliseconds > WAIT_LIMIT_MILLISECONDS {
                     return Err(failure("timer exceeds the callback wait limit"));
                 }
-                let signal = match scope {
-                    Scope::Call(context) => {
-                        context.check()?;
-                        context.signal()
-                    }
-                    Scope::Open(signal) => signal.clone(),
-                    Scope::Declaration(_) | Scope::Validation => {
-                        return Err(failure("timer requires an active callback"));
-                    }
-                };
-                signal.check()?;
+                let signal = Self::signal(scope, "timer requires an active callback")?;
                 let wait = std::pin::pin!(futures_timer::Delay::new(
                     std::time::Duration::from_millis(milliseconds.into())
                 ));
@@ -275,8 +296,27 @@ impl Environment {
                     futures::future::Either::Right(_) => Err(failure("operation cancelled")),
                 }
             }
+            AsyncRequest::ReadText { .. }
+            | AsyncRequest::WriteText { .. }
+            | AsyncRequest::Exchange { .. } => {
+                unreachable!("I/O was handled under callback authority")
+            }
             AsyncRequest::Unsupported => Err(failure("unsupported asynchronous host operation")),
         }
+    }
+
+    /// Select the live cancellation that owns a cooperative wait in this callback.
+    fn signal(scope: &Scope, inactive: &'static str) -> Result<Cancellation> {
+        let signal = match scope {
+            Scope::Call(context) => {
+                context.check()?;
+                context.signal()
+            }
+            Scope::Open(signal) => signal.clone(),
+            Scope::Declaration(_) | Scope::Validation => return Err(failure(inactive)),
+        };
+        signal.check()?;
+        Ok(signal)
     }
 
     /// Resolve a state handle from this environment or its issued parent.
@@ -290,7 +330,7 @@ impl Environment {
     }
 
     /// Resolve a reference handle and its WIT binding from this environment or its issued parent.
-    fn reference(&self, scope: Option<ScopeId>, id: u32) -> Result<(Rc<Reference>, String)> {
+    fn reference(&self, scope: Option<ScopeId>, id: u32) -> Result<ReferenceHandle> {
         self.selected_handles(scope)?
             .references
             .borrow()
@@ -312,4 +352,50 @@ fn snapshot_value(value: Value, revision: u64, version: u32) -> Result<Value> {
         revision: revision.to_string(),
         version,
     })
+}
+
+/// Answer a snapshot read. When the guest names the current revision it already retains, only
+/// the identity is returned: one kernel revision never names two values, so the protected guest
+/// copy stays authoritative for that revision and the value is neither cloned nor serialized.
+fn snapshot_reply(
+    revision: u64,
+    version: u32,
+    known: Option<&str>,
+    value: impl FnOnce() -> Result<Value>,
+) -> Result<Value> {
+    let current = revision.to_string();
+    if known == Some(current.as_str()) {
+        let mut reply = serde_json::Map::with_capacity(2);
+        reply.insert("revision".into(), Value::String(current));
+        reply.insert("version".into(), Value::from(version));
+        return Ok(Value::Object(reply));
+    }
+    snapshot_value(value()?, revision, version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_snapshot_reads_omit_only_the_value() {
+        let full = snapshot_reply(7, 2, None, || Ok(serde_json::json!({"a": [1]}))).unwrap();
+        assert_eq!(
+            full,
+            serde_json::json!({"value": {"a": [1]}, "revision": "7", "version": 2})
+        );
+        let stale = snapshot_reply(7, 2, Some("6"), || Ok(serde_json::json!(3))).unwrap();
+        assert_eq!(
+            stale,
+            serde_json::json!({"value": 3, "revision": "7", "version": 2})
+        );
+        let unchanged = snapshot_reply(7, 2, Some("7"), || -> Result<Value> {
+            panic!("an unchanged revision must not read its value")
+        })
+        .unwrap();
+        assert_eq!(
+            unchanged,
+            serde_json::json!({"revision": "7", "version": 2})
+        );
+    }
 }

@@ -105,7 +105,7 @@ for (const reload of [false, true])
       expect(
         commands.mock.calls
           .filter(([op]) => op === KernelOp.Root)
-          .map(([, fields]) => fields?.principal)
+          .map(([, fields]) => (fields as { principal?: string } | undefined)?.principal)
           .sort(),
       ).toEqual(["alice", "bob", "system"]);
       expect(host.errors()).toEqual([]);

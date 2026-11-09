@@ -130,22 +130,20 @@ export class Host {
 
   /** Describe installed orbs without activating their services. */
   installedOrbs() {
-    return this.session.kernel
-      .command<import("./bridge/kernel.ts").KernelOrb[]>(KernelOp.Orbs)
-      .map((info) => {
-        const definition = this.session.orbs.records.get(info.id)?.definition;
-        const description = Object.freeze({
-          ...info,
-          hookCapabilities: Object.fromEntries(
-            info.hooks.map((name) => [name, definition?.hooks?.[name]?.capabilities ?? []]),
-          ),
-        });
-        return Object.freeze({
-          ...info,
-          /** Return captured metadata without activating services. */
-          describe: () => description,
-        });
+    return this.session.kernel.command(KernelOp.Orbs).map((info) => {
+      const definition = this.session.orbs.records.get(info.id)?.definition;
+      const description = Object.freeze({
+        ...info,
+        hookCapabilities: Object.fromEntries(
+          info.hooks.map((name) => [name, definition?.hooks?.[name]?.capabilities ?? []]),
+        ),
       });
+      return Object.freeze({
+        ...info,
+        /** Return captured metadata without activating services. */
+        describe: () => description,
+      });
+    });
   }
 
   /** Wait for physical work and cleanup before releasing the kernel. */

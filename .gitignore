@@ -26,3 +26,6 @@ __pycache__/
 # Managed WIT editor declarations.
 **/.tembra/
 **/*.d.wit.ts
+
+# Local task evidence and operational artifacts.
+/.artifacts/

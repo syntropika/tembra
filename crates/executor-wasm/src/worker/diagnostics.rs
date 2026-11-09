@@ -22,7 +22,7 @@ impl Diagnostics {
     }
 
     /// Deliver one record without allowing observer panics to interrupt execution.
-    fn emit(&self, level: LogLevel, message: String) -> tembra::Result<Value> {
+    pub fn emit(&self, level: LogLevel, message: String) -> tembra::Result<Value> {
         if let Some(sink) = &self.sink {
             let record = LogRecord {
                 orb: self.orb.clone(),

@@ -113,7 +113,9 @@ grants: {
 ```
 
 Installation is refused when the orb imports a WASI interface without a matching grant.
-Filesystem grants permit bounded UTF-8 text reads and writes under the mount. Network grants permit
+For source orbs, filesystem grants permit bounded UTF-8 text reads and writes under the mount.
+Compiled native components receive standard WASI directory permissions within their preopens,
+including binary and directory operations; the source text limits do not apply. Network grants permit
 outbound TCP to exact literal IP addresses. The guest helper in `@syntropika/tembra-sdk/http` is a
 bounded HTTP/1 `GET` client for literal-IP `http:` URLs built on that TCP transport.
 
@@ -122,8 +124,21 @@ string form of `host.get`. Kebab-case WIT names stay kebab-case on the reference
 `reference["resource-value"]()`.
 
 The interpreter is loaded from `@syntropika/tembra-engine-node` when the first source orb is
-installed. Hosts that install only compiled components never load it. `isolated.limits` bounds
-memory, fuel, packet size and callback time; `isolated.onLog` receives guest console output.
+installed. Hosts that install only compiled components never load it. `isolated.onLog` receives
+console records attributed to the source Orb.
+
+Both hosts accept these `isolated.limits` options:
+
+| Option        | Default | Purpose                                         |
+| ------------- | ------: | ----------------------------------------------- |
+| `memoryBytes` | 128 MiB | Maximum Wasm linear memory per instance         |
+| `packetBytes` |   8 MiB | Maximum packet size across the interpreter seam |
+| `timeoutMs`   |  10,000 | Callback deadline in milliseconds               |
+
+Node also accepts `fuel` (default 100,000,000 Wasmtime units). Browsers instead accept
+`instructionTicks` (default 10,000 interpreter interrupt checks). These are different execution
+budgets, not comparable instruction counts. Native source orbs also have the interpreter's fixed
+10,000-check interrupt budget in addition to Wasmtime fuel.
 
 Inside an isolated orb, import `orb` from `@syntropika/tembra-sdk` as usual. The build selects the
 guest implementation. Guests can use state, selected dependencies, resources and granted I/O.
@@ -136,9 +151,19 @@ It loads `@syntropika/tembra-engine-wasm` unless the application supplies a kern
 Serve the generated WASM asset with its loader, or set `wasmInput`.
 The same entrypoint works in a module Worker.
 
-Browser hosts install isolated source orbs. They require JSPI. Register filesystem providers with
+Browser hosts install isolated source orbs through the same reusable dquickts Wasm module.
+Pending host effects are awaited outside Wasm; JSPI is not required. Register filesystem providers with
 `memoryFilesystem()` or `opfsFilesystem()`. Raw TCP and compiled components are not yet supported in
 the browser. Relative `host.load()` locations resolve against `baseURL` or the page location.
+
+The packaged interpreter is resolved automatically. Set `isolated.engine` only to override its
+location (an absolute URL in browsers, bytes in Node). Browser hosts can supply `wasmInput` for the kernel
+and `isolated.contractsInput` for the contract validator when the application owns asset loading;
+ordinary installations use the packaged defaults.
+
+Let the application bundler emit the engine package's Wasm assets, or serve its loaders beside
+their Wasm files. If dependency prebundling moves a loader without preserving those asset paths,
+exclude the engine package from that step or configure the explicit asset inputs above.
 
 ## React Native
 

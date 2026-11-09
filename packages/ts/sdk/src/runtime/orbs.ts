@@ -2,6 +2,7 @@ import {
   captureEnvironment,
   admitFactory,
   disposeDefinitions,
+  discardDefinitions,
   prepareDefinitions,
   isolate,
   isolatedRevision,
@@ -20,7 +21,7 @@ import type {
   Participant,
 } from "../authoring/types.ts";
 import { Lifetime } from "../bridge/identifiers.ts";
-import type { HookObservation, KernelOrb, Reload } from "../bridge/kernel.ts";
+import type { OrbDeclaration, Reload } from "../bridge/kernel.ts";
 import { EnvironmentPhase, KernelOp, OwnerKind } from "../bridge/protocol.ts";
 import { refuse, TembraError } from "../error.ts";
 import { Errors } from "../errors.ts";
@@ -40,10 +41,10 @@ export class Orbs {
   /** Capture definitions and encode their kernel-owned contracts. */
   declarations(definitions: readonly OrbDefinition[]): {
     definitions: OrbDefinition[];
-    metadata: unknown[];
+    metadata: OrbDeclaration[];
   } {
     const captured = definitions.map((definition) => orb(definition));
-    const current = this.session.kernel.command<KernelOrb[]>(KernelOp.Orbs);
+    const current = this.session.kernel.command(KernelOp.Orbs);
     const lookup = (name: string) => captured.find((f) => f.name === name);
     const metadata = captured.map((definition) => {
       if (
@@ -104,11 +105,6 @@ export class Orbs {
 
   /** Commit new orb metadata before opening its scopes. */
   async install(definitions: readonly OrbInput[]): Promise<void> {
-    const current = this.session.kernel.command<KernelOrb[]>(KernelOp.Orbs);
-    if (
-      definitions.some((f) => "name" in f && current.some((installed) => installed.name === f.name))
-    )
-      refuse(Errors.Invalid.OrbInstalled, "Use reload to replace an installed orb");
     const candidates = prepareDefinitions(
       definitions,
       (this.session.options as AdaptedHostOptions)[isolate],
@@ -118,12 +114,14 @@ export class Orbs {
     let reload: Reload;
     try {
       if (this.session.closing) throw new TembraError(Errors.Closed.Host);
+      const current = this.session.kernel.command(KernelOp.Orbs);
+      if (materialized.some((candidate) => current.some((orb) => orb.name === candidate.name)))
+        refuse(Errors.Invalid.OrbInstalled, "Use reload to replace an installed orb");
       prepared = this.declarations(materialized);
-      reload = this.session.kernel.command<Reload>(KernelOp.Prepare, { orbs: prepared.metadata });
+      reload = this.session.kernel.command(KernelOp.Prepare, { orbs: prepared.metadata });
       this.session.kernel.command(KernelOp.Commit, { ticket: reload.id });
     } catch (error) {
-      await disposeDefinitions(materialized);
-      throw error;
+      return discardDefinitions(materialized, error);
     }
     const records = reload.orbs.map((info) => ({
       info,
@@ -195,13 +193,10 @@ export class Orbs {
       const requirement = record.definition.requires![alias]!;
       const target = requirement.orb ?? alias;
       for (const [hook, contribution] of Object.entries(hooks)) {
-        const operation = this.session.kernel.command<number>(KernelOp.Allocate);
+        const operation = this.session.kernel.command(KernelOp.Allocate);
         const key = JSON.stringify([record.info.name, target, hook]);
         if (!this.#ordinals.has(key))
-          this.#ordinals.set(
-            key,
-            this.session.kernel.command<number>(KernelOp.ContributionOrdinal),
-          );
+          this.#ordinals.set(key, this.session.kernel.command(KernelOp.ContributionOrdinal));
         this.operations.set(operation, {
           orb: record,
           handler: typeof contribution === "function" ? contribution : contribution.handle,
@@ -212,7 +207,7 @@ export class Orbs {
           hook,
           operation,
           priority: typeof contribution === "function" ? 0 : (contribution.priority ?? 0),
-          ordinal: this.#ordinals.get(key),
+          ordinal: this.#ordinals.get(key)!,
         });
       }
     }
@@ -228,7 +223,7 @@ export class Orbs {
     context = checkedContext(context, this.session);
     const definition = environment.orb.definition.hooks?.[name];
     if (!definition) refuse(Errors.Invalid.Hook, name);
-    const plan = this.session.kernel.command<number[]>(KernelOp.HookPlan, {
+    const plan = this.session.kernel.command(KernelOp.HookPlan, {
       root: context.root,
       target: environment.orb.info.name,
       hook: name,
@@ -254,7 +249,7 @@ export class Orbs {
     const definition = environment.orb.definition.hooks?.[name];
     if (!definition) refuse(Errors.Invalid.Hook, name);
     if (!source.invocation) throw new TembraError(Errors.Forbidden.ObservationSource);
-    const admitted = this.session.kernel.command<HookObservation>(KernelOp.BeginHookObservation, {
+    const admitted = this.session.kernel.command(KernelOp.BeginHookObservation, {
       source: source.invocation.id,
       orb: environment.orb.info.id,
       operation,
@@ -312,7 +307,7 @@ export class Orbs {
 
   /** Clean up a retired version before removing its callbacks. */
   retire(id: number): void {
-    const scopes = this.session.kernel.command<number[]>(KernelOp.ScopesForOrb, { orb: id });
+    const scopes = this.session.kernel.command(KernelOp.ScopesForOrb, { orb: id });
     const cleanup = this.session.programs.cleanupScopes(scopes);
     this.session.track(
       cleanup.finally(async () => {

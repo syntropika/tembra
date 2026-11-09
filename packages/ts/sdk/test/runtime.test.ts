@@ -90,6 +90,7 @@ describe("minimal orb runtime on the real Rust Node binding", () => {
 
   test("abandoned observers do not release physical callback resources", async () => {
     const wait = deferred<void>();
+    const entered = deferred<void>();
     let closed = false;
     const host = createHost();
     await host.install(
@@ -109,6 +110,7 @@ describe("minimal orb runtime on the real Rust Node binding", () => {
             },
             methods: {
               async run() {
+                entered.resolve();
                 await wait.promise;
               },
             },
@@ -121,7 +123,7 @@ describe("minimal orb runtime on the real Rust Node binding", () => {
     const running = host.root(async (ctx) => {
       started.resolve();
       const physical = ref.run(ctx);
-      await Promise.resolve();
+      await entered.promise;
       ctx.cancel();
       await physical;
     });

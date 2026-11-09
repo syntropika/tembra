@@ -14,9 +14,12 @@ rquickjs = { git = "https://github.com/stencil-hq/dquickts", rev = "b51e92c0c7ca
   "std",
   "bindgen",
 ] }
-wit-bindgen = { version = "=0.63.0" }
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+
+[package.metadata.cargo-machete]
+# The shared protocol uses serde through #[path], outside this crate's source directory.
+ignored = ["serde"]
 
 [profile.release]
 opt-level = 3

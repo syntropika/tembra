@@ -37,7 +37,7 @@ bun examples/wasm-orb/build.ts \
   --provider crates/executor-wasm/rust-provider/target/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm
 ```
 
-`build()` compiles the WIT, generates Jco type declarations into ignored managed
+`build()` compiles the WIT, generates TypeScript declarations into ignored managed
 files (`.tembra/` and `contract.d.wit.ts`), typechecks `orb.ts` and bundles it with
 its installed dependencies. The included `tsconfig.json` gives the editor the same guest types. It does not download packages. A compiled component is
 checked against the selected world and receives its name and API version from the

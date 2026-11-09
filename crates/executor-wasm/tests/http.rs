@@ -109,8 +109,11 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
         .unwrap()
         .network("tcp")
         .unwrap();
-    let contract = Contract::from_bytes(
-        &prepared.contract.encode().unwrap(),
+    let contract = Contract::from_dir(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/ts/sdk/test/fixtures/wasm-orb"
+        ),
         Some("online-calculator"),
     )
     .unwrap();
@@ -139,7 +142,7 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
             allowed,
         )
         .unwrap();
-    let native = support::native_math(&prepared.contract, "native.math");
+    let native = support::native_math("native.math");
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![native, orb]).unwrap();

@@ -28,13 +28,12 @@ fn replace_and_abort_real_interpreted_orbs() {
         || Install::default().requires("example:integrated/arithmetic@1.0.0", "native.math", 1);
     let prepared = engine
         .load(
-            &contract
-                .artifact(Some(&source), None, "calculator", 1)
+            &tembra_contracts::Artifact::package_source("calculator", 1, &contract, &source)
                 .unwrap(),
             install(),
         )
         .unwrap();
-    let native = support::native_math(&contract, "native.math");
+    let native = support::native_math("native.math");
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![native, prepared]).unwrap();
@@ -94,8 +93,7 @@ fn replace_and_abort_real_interpreted_orbs() {
     assert_ne!(source, changed);
     let replacement = engine
         .load(
-            &contract
-                .artifact(Some(&changed), None, "calculator", 1)
+            &tembra_contracts::Artifact::package_source("calculator", 1, &contract, &changed)
                 .unwrap(),
             install(),
         )
@@ -144,8 +142,7 @@ globalThis.__tembraOrb.services.calculation.create = self => originalCreate(new 
     );
     let candidate = engine
         .load(
-            &contract
-                .artifact(Some(&validating), None, "calculator", 1)
+            &tembra_contracts::Artifact::package_source("calculator", 1, &contract, &validating)
                 .unwrap(),
             install(),
         )
@@ -178,8 +175,7 @@ globalThis.__tembraOrb.services.calculation.create = self => originalCreate(new 
     );
     let candidate = engine
         .load(
-            &contract
-                .artifact(Some(&failing), None, "calculator", 1)
+            &tembra_contracts::Artifact::package_source("calculator", 1, &contract, &failing)
                 .unwrap(),
             install(),
         )

@@ -1,4 +1,6 @@
 // The outer host validates independently; these conversions only restore JavaScript shapes.
+// Lowered values are rebuilt from fresh containers and primitive leaves, so the following
+// `JSON.stringify` cannot invoke `toJSON`, accessors or coercions on Orb-supplied objects.
 (() => {
   const contract = globalThis.__tembraContract;
   const types = new Map(contract.types.map(({ id, definition }) => [id, definition.kind]));
@@ -53,6 +55,10 @@
         (typeof value !== "number" || !Number.isInteger(value) || Object.is(value, -0))
       )
         throw new Error("WIT integers require an integer without negative zero");
+      if ((type === "string" || type === "char") && typeof value !== "string")
+        throw new Error("WIT strings require a JavaScript string");
+      if (type === "bool" && typeof value !== "boolean")
+        throw new Error("WIT bool requires a JavaScript boolean");
       return value;
     }
     const kind = types.get(type);
@@ -112,7 +118,20 @@
         ? { tag: value.tag }
         : { tag: value.tag, val: convert(payload, value.val, lift) };
     }
-    if (kind.flags || kind.enum) return value;
+    if (kind.enum) {
+      if (typeof value !== "string") throw new Error("WIT enum requires a case name");
+      return value;
+    }
+    if (kind.flags) {
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new Error("WIT flags require an object");
+      return Object.fromEntries(
+        Object.entries(value).map(([flag, set]) => {
+          if (typeof set !== "boolean") throw new Error("WIT flags require boolean members");
+          return [flag, set];
+        }),
+      );
+    }
     throw new Error("WIT type has no interpreter value adapter");
   }
 

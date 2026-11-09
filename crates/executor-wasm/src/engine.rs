@@ -8,7 +8,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use tembra::{Orb, Result};
-use wasmtime::component::Component;
+use wasmtime::{Module, component::Component};
 
 /// Console output is attributed by the host, never by a guest-provided Orb name.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -46,7 +46,8 @@ impl Default for Limits {
 #[derive(Clone)]
 pub struct Engine {
     pub(crate) engine: wasmtime::Engine,
-    pub(crate) component: Option<Arc<Component>>,
+    /// Reusable interpreter core module; each source Orb instantiates it in its own Store.
+    pub(crate) interpreter: Option<Arc<Module>>,
     compiled: Arc<Mutex<BTreeMap<[u8; 32], Weak<Component>>>>,
     pub(crate) limits: Limits,
     pub(crate) providers: Providers,
@@ -72,7 +73,7 @@ impl Engine {
         let engine = wasmtime::Engine::new(&config).map_err(failure)?;
         Ok(Self {
             engine,
-            component: None,
+            interpreter: None,
             compiled: Arc::default(),
             limits,
             providers: Providers::default(),
@@ -120,12 +121,14 @@ impl Engine {
     }
 
     /// Compile reusable interpreter code for source Orbs without changing earlier engine clones.
-    pub fn interpreter(mut self, component: &[u8]) -> Result<Self> {
-        if self.component.is_some() {
+    /// The module must match the private interpreter ABI and its exact import allowlist.
+    pub fn interpreter(mut self, module: &[u8]) -> Result<Self> {
+        if self.interpreter.is_some() {
             return Err(failure("interpreter is already configured"));
         }
-        let component = Arc::new(Component::new(&self.engine, component).map_err(failure)?);
-        self.component = Some(component);
+        let module = Module::new(&self.engine, module).map_err(failure)?;
+        crate::worker::check(&module).map_err(failure)?;
+        self.interpreter = Some(Arc::new(module));
         Ok(self)
     }
 
@@ -187,9 +190,16 @@ mod tests {
         let clone = engine.clone();
         let second = clone.compiled(bytes).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
-        let configured = clone.interpreter(bytes).unwrap();
-        assert!(configured.component.is_some());
-        assert!(engine.component.is_none());
         assert_eq!(engine.instances(), 0);
+    }
+
+    #[test]
+    fn interpreters_must_be_core_modules_matching_the_private_abi() {
+        let engine = Engine::new(Limits::default()).unwrap();
+        // A component, or a core module without the ABI exports, is refused before use.
+        for bytes in [&b"\0asm\x0d\0\x01\0"[..], &b"\0asm\x01\0\0\0"[..]] {
+            assert!(engine.clone().interpreter(bytes).is_err());
+        }
+        assert!(engine.interpreter.is_none());
     }
 }

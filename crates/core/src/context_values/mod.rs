@@ -5,7 +5,7 @@ mod key;
 mod value;
 
 use crate::{Error, Reason, Result};
-pub(crate) use frames::ContextFrame;
+pub(crate) use frames::{ContextFrame, FrameValue};
 pub use key::{ContextContract, ContextDatum, ContextKey, ContextKind};
 pub use value::{ContextValue, OpaqueContextValue};
 

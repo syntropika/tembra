@@ -6,7 +6,7 @@ import { bail } from "../src/index.ts";
 
 const Trace = ContextKey.text("test/trace");
 const stats = (host: ReturnType<typeof createHost>) =>
-  host.session.kernel.command<{ live: number; peak: number }>(KernelOp.ContextStats);
+  host.session.kernel.command(KernelOp.ContextStats);
 
 test("immutable concurrent branches propagate independently per admitted call", async () => {
   const host = createHost();
@@ -147,8 +147,8 @@ test("propagating a reused frame adds no per-call bridge requests", async () => 
       commands.mockClear();
       await reference.read(tagged);
       expect(commands.mock.calls.map(([op]) => op)).toEqual(plain);
-      const entered = commands.mock.calls.find(([op]) => op === KernelOp.BeginCall);
-      expect(entered?.[1]?.context).toBe(tagged.frame);
+      const entered = commands.mock.calls.find(([op]) => op === KernelOp.AdmitCall);
+      expect((entered?.[1] as { context?: number } | undefined)?.context).toBe(tagged.frame);
     });
   } finally {
     commands.mockRestore();

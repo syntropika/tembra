@@ -1,151 +1,161 @@
-//! Lossless WIT signature descriptions for preparation and inspection tools.
-use serde::Serialize;
-use serde_json::Value;
+//! Emit the guest value-adapter graph and inspection output from the typed model.
+//!
+//! The JSON layout matches the official `wit-parser` serialization the guest adapter consumes,
+//! so interpreter code restores typed arrays, options, results and field spellings unchanged.
+use crate::{
+    javascript_name,
+    model::{Entry, Function, Item, Kind, PreparedContract, Ty},
+};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
-use wit_parser::{InterfaceId, Resolve, Type, TypeDefKind, TypeId, WorldId, WorldItem};
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WorldDescription<'a> {
-    world: &'a str,
-    package: Option<String>,
-    imports: Vec<WorldBinding<'a>>,
-    exports: Vec<WorldBinding<'a>>,
-    types: Vec<TypeDescription<'a>>,
-    javascript_names: BTreeMap<String, String>,
-}
-
-#[derive(Serialize)]
-struct TypeDescription<'a> {
-    id: usize,
-    definition: &'a wit_parser::TypeDef,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum WorldBinding<'a> {
-    Interface {
-        binding: String,
-        contract: Option<String>,
-        type_only: bool,
-        resources: bool,
-        functions: &'a wit_parser::IndexMap<String, wit_parser::Function>,
-        types: BTreeMap<&'a str, usize>,
-    },
-    Function {
-        binding: String,
-        function: &'a wit_parser::Function,
-    },
-    Type {
-        binding: String,
-        r#type: usize,
-    },
-}
-
-/// Detect a resource through aliases instead of confusing it with plain type data.
-fn resource_type(resolve: &Resolve, mut id: TypeId) -> bool {
-    loop {
-        match resolve.types[id].kind {
-            TypeDefKind::Resource => return true,
-            TypeDefKind::Type(Type::Id(next)) => id = next,
-            _ => return false,
+impl PreparedContract {
+    /// Describe both sides of the selected world and every referenced type definition.
+    pub fn describe(&self) -> Value {
+        let model = self.model();
+        let mut names = BTreeMap::new();
+        let mut insert = |name: &str| {
+            names
+                .entry(name.to_owned())
+                .or_insert_with(|| javascript_name(name));
+        };
+        for entry in model.imports.iter().chain(&model.exports) {
+            match &entry.item {
+                Item::Interface(interface) => {
+                    if let Some(name) = &interface.name {
+                        insert(name);
+                    }
+                    for function in &interface.functions {
+                        insert(&function.name);
+                    }
+                }
+                Item::Function(function) => insert(&function.name),
+                Item::Type(_) => {}
+            }
         }
+        // Member spellings were derived once with the contract; reuse them instead of renaming.
+        for (id, kind) in model.types.iter().enumerate() {
+            let spellings = self.spellings(id as u32);
+            match kind {
+                Kind::Record(fields) => {
+                    for (field, spelling) in fields.iter().zip(spellings) {
+                        names
+                            .entry(field.name.clone())
+                            .or_insert_with(|| spelling.to_string());
+                    }
+                }
+                Kind::Flags(flags) => {
+                    for (flag, spelling) in flags.iter().zip(spellings) {
+                        names
+                            .entry(flag.clone())
+                            .or_insert_with(|| spelling.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        json!({
+            "world": model.world,
+            "package": model.package,
+            "imports": side(&model.imports),
+            "exports": side(&model.exports),
+            "types": model.types.iter().enumerate().map(|(id, kind)| {
+                json!({"id": id, "definition": {"kind": describe_kind(kind)}})
+            }).collect::<Vec<_>>(),
+            "javascriptNames": names,
+        })
     }
 }
 
-/// Report whether an interface owns or aliases a resource type.
-pub(crate) fn has_resource(resolve: &Resolve, id: InterfaceId) -> bool {
-    resolve.interfaces[id]
-        .types
-        .values()
-        .any(|id| resource_type(resolve, *id))
+fn side(entries: &[Entry]) -> Value {
+    entries
+        .iter()
+        .map(|Entry { key, item }| match item {
+            Item::Interface(interface) => json!({
+                "binding": key,
+                "contract": interface.contract,
+                "type_only": interface.functions.is_empty() && !interface.resources,
+                "resources": interface.resources,
+                "functions": interface.functions.iter().map(|function| {
+                    (function.name.clone(), describe_function(function))
+                }).collect::<Map<_, _>>(),
+            }),
+            Item::Function(function) => {
+                json!({"binding": key, "function": describe_function(function)})
+            }
+            Item::Type(ty) => json!({"binding": key, "type": describe_ty(*ty)}),
+        })
+        .collect()
 }
 
-/// Describe both sides of the selected world and preserve referenced type identities.
-pub(crate) fn world(resolve: &Resolve, world: WorldId) -> Value {
-    let selected = &resolve.worlds[world];
-    let side = |exports| {
-        let items = if exports {
-            &selected.exports
-        } else {
-            &selected.imports
-        };
-        items
+fn describe_function(function: &Function) -> Value {
+    let mut value = json!({
+        "name": function.name,
+        "kind": match function.kind.resource() {
+            Some(resource) => json!({function.kind.as_str(): resource}),
+            None => json!(function.kind.as_str()),
+        },
+        "params": function.params.iter().map(|param| {
+            json!({"name": param.name, "type": describe_ty(param.ty)})
+        }).collect::<Vec<_>>(),
+    });
+    if let Some(result) = function.result {
+        value["result"] = describe_ty(result);
+    }
+    value
+}
+
+fn describe_ty(ty: Ty) -> Value {
+    let name = match ty {
+        Ty::Bool => "bool",
+        Ty::U8 => "u8",
+        Ty::U16 => "u16",
+        Ty::U32 => "u32",
+        Ty::U64 => "u64",
+        Ty::S8 => "s8",
+        Ty::S16 => "s16",
+        Ty::S32 => "s32",
+        Ty::S64 => "s64",
+        Ty::F32 => "f32",
+        Ty::F64 => "f64",
+        Ty::Char => "char",
+        Ty::String => "string",
+        Ty::ErrorContext => "error-context",
+        Ty::Ref(id) => return json!(id),
+    };
+    json!(name)
+}
+
+fn describe_kind(kind: &Kind) -> Value {
+    let optional = |ty: Option<Ty>| ty.map_or(Value::Null, describe_ty);
+    let named = |names: &[String]| {
+        names
             .iter()
-            .map(|(key, item)| {
-                let name = resolve.name_world_key(key);
-                match item {
-                    WorldItem::Interface { id, .. } => {
-                        let interface = &resolve.interfaces[*id];
-                        WorldBinding::Interface {
-                            binding: name,
-                            contract: resolve.id_of(*id),
-                            type_only: interface.functions.is_empty()
-                                && !has_resource(resolve, *id),
-                            resources: has_resource(resolve, *id),
-                            functions: &interface.functions,
-                            types: interface
-                                .types
-                                .iter()
-                                .map(|(name, id)| (name.as_str(), id.index()))
-                                .collect(),
-                        }
-                    }
-                    WorldItem::Function(function) => WorldBinding::Function {
-                        binding: name,
-                        function,
-                    },
-                    WorldItem::Type { id, .. } => WorldBinding::Type {
-                        binding: name,
-                        r#type: id.index(),
-                    },
-                }
-            })
+            .map(|name| json!({"name": name}))
             .collect::<Vec<_>>()
     };
-    let mut names = BTreeMap::new();
-    let mut insert = |name: &str| {
-        names.insert(name.to_owned(), crate::javascript_name(name));
-    };
-    for (_, interface) in resolve.interfaces.iter() {
-        if let Some(name) = &interface.name {
-            insert(name);
+    match kind {
+        Kind::Alias(ty) => json!({"type": describe_ty(*ty)}),
+        Kind::Record(fields) => json!({"record": {"fields": fields.iter().map(|field| {
+            json!({"name": field.name, "type": describe_ty(field.ty)})
+        }).collect::<Vec<_>>()}}),
+        Kind::Tuple(types) => {
+            json!({"tuple": {"types": types.iter().map(|ty| describe_ty(*ty)).collect::<Vec<_>>()}})
         }
-        for name in interface.functions.keys() {
-            insert(name);
-        }
+        Kind::Variant(cases) => json!({"variant": {"cases": cases.iter().map(|case| {
+            json!({"name": case.name, "type": optional(case.ty)})
+        }).collect::<Vec<_>>()}}),
+        Kind::Enum(cases) => json!({"enum": {"cases": named(cases)}}),
+        Kind::Flags(flags) => json!({"flags": {"flags": named(flags)}}),
+        Kind::Option(ty) => json!({"option": describe_ty(*ty)}),
+        Kind::Result { ok, err } => json!({"result": {"ok": optional(*ok), "err": optional(*err)}}),
+        Kind::List(ty) => json!({"list": describe_ty(*ty)}),
+        Kind::FixedList(ty, length) => json!({"fixed-length-list": [describe_ty(*ty), length]}),
+        Kind::Map(key, value) => json!({"map": [describe_ty(*key), describe_ty(*value)]}),
+        Kind::Resource => json!("resource"),
+        Kind::Own(id) => json!({"handle": {"own": id}}),
+        Kind::Borrow(id) => json!({"handle": {"borrow": id}}),
+        Kind::Future(ty) => json!({"future": optional(*ty)}),
+        Kind::Stream(ty) => json!({"stream": optional(*ty)}),
     }
-    for (_, definition) in resolve.types.iter() {
-        match &definition.kind {
-            TypeDefKind::Record(record) => {
-                for field in &record.fields {
-                    insert(&field.name);
-                }
-            }
-            TypeDefKind::Flags(flags) => {
-                for flag in &flags.flags {
-                    insert(&flag.name);
-                }
-            }
-            _ => {}
-        }
-    }
-    serde_json::to_value(WorldDescription {
-        world: &selected.name,
-        package: selected
-            .package
-            .map(|id| resolve.packages[id].name.to_string()),
-        imports: side(false),
-        exports: side(true),
-        javascript_names: names,
-        types: resolve
-            .types
-            .iter()
-            .map(|(id, definition)| TypeDescription {
-                id: id.index(),
-                definition,
-            })
-            .collect(),
-    })
-    .expect("serializable WIT graph")
 }

@@ -70,30 +70,42 @@ Engine artifacts live in their owning package's `dist` directory.
 
 ## Isolated orbs
 
-Source orbs run in a reusable dquickts interpreter component. Build it once; orb changes do not
+Source orbs run in a reusable dquickts interpreter core module. Build it once; orb changes do not
 require rebuilding it. Compiled-only hosts do not need it.
 
-The interpreter build requires a Rust nightly with the `wasm32-wasip2` target, WASI SDK 34 and a
-dquickts Git checkout. The build pins and verifies the dquickts revision.
+The interpreter build requires WASI SDK 34 and the Rust nightly named by the justfile `nightly`
+variable, with the `wasm32-wasip1` target. The compiled Rust provider fixture uses the same nightly
+with the `wasm32-wasip3` target. The no-std probe uses `wasm32-unknown-unknown` with the component
+linker and explicit WASI 0.3 bindings, so compiler runtime CLI imports cannot affect its tests.
+The build pins and verifies the dquickts revision and the module's
+exact private imports and exports. Without a dquickts checkout, it clones one into the cache.
 
 ```sh
-just build-interpreter <wasi-sdk> <cache-directory> <dquickts-checkout>
+rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip1 --target wasm32-wasip3 --target wasm32-unknown-unknown
+just build-interpreter <wasi-sdk> <cache-directory> [<dquickts-checkout>]
+just build-provider <provider-target-directory>
+just build-probe <provider-target-directory>
 ```
 
-The recipe packages `interpreter.wasm` into `packages/ts/engine-node/dist` and the browser modules
-into `packages/ts/engine-wasm/dist/interpreter`. Keep the cache directory outside the checkout.
+The interpreter recipe packages the same `interpreter.wasm` into `packages/ts/engine-node/dist` and
+`packages/ts/engine-wasm/dist/interpreter`. Use reusable cache and target directories.
 
-Runtime acceptance uses real artifacts. Build the fixture orbs into a directory outside the checkout.
-`--provider` adds the compiled Rust provider from `crates/executor-wasm/rust-provider`:
+Runtime acceptance uses real artifacts. Build the engines, interpreter and SDK first. Then run
+every isolated orb suite with an output directory outside the checkout:
 
 ```sh
-bun scripts/test-wasm-fixtures.ts --out <fixtures> --provider <tembra_wasm_arithmetic.wasm>
-TEMBRA_WASM_FIXTURES=<fixtures> bun run --cwd packages/ts/sdk test:node
-TEMBRA_WASM_FIXTURES=<fixtures> bun scripts/test-wasm-browser.ts
+just test-wasm-acceptance --out <directory> \
+  --provider <provider-target-directory>/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm \
+  --probe <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm
 ```
 
-`just test-wasm-orb` runs the ignored Rust executor tests against supplied artifacts.
-See the [Wasm orb example](examples/wasm-orb/README.md) for an end-to-end build.
+The runner builds the fixture orbs into `<directory>/fixtures`, or reuses `--fixtures <directory>`.
+It runs the ignored Rust executor tests, the SDK Bun and Node suites, Chrome with the default and
+override engines, `bun run test:browser`, the [Wasm orb example](examples/wasm-orb/README.md), and
+packed consumers in Node, Bun and Chrome, including a clean NodeNext typecheck. The probe verifies
+component quarantine, physical WASI settlement, filesystem grants and calls with a one-thread libuv pool.
+Repeat `--suite native|sdk|node|browser|example|package` to run a subset. CI runs the same command in the
+`acceptance` job of the quality workflow. `just test-wasm-orb` runs only the ignored Rust tests.
 
 ## Native builds
 
@@ -173,7 +185,8 @@ bun run test:browser
 `just check` builds the engines and SDK. It checks formatting, TypeScript types and dependencies.
 It runs Clippy, oxlint, Rust tests, SDK tests and React Native adapter tests.
 It also runs Node compatibility tests, the WASM target check and the Rust examples.
-Browser acceptance runs separately against the built WASM engine.
+It does not build the interpreter, so isolated orb tests skip. Browser and isolated orb acceptance
+run separately; see [Isolated orbs](#isolated-orbs).
 
 | Command                    | Purpose                                            |
 | -------------------------- | -------------------------------------------------- |

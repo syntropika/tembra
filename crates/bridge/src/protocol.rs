@@ -1,10 +1,18 @@
 //! Closed names used only at adapter serialization seams.
+//!
+//! Kernel operation names are generated from the command table in `commands`, and lifecycle
+//! effect, action and step names from their wire unions in `wire`. They are re-exported here.
+
+/// Define a closed set of stable wire names with parsing and TypeScript generation support.
 macro_rules! names {
     ($(#[$meta:meta])* $name:ident { $($variant:ident => $wire:literal),+ $(,)? }) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
         pub enum $name { $($variant),+ }
         impl $name {
+            /// Every variant name paired with its stable wire name, in declaration order.
+            pub const ALL: &'static [(&'static str, &'static str)] =
+                &[$((stringify!($variant), $wire)),+];
             /// Return the stable wire name for this variant.
             pub const fn as_str(self) -> &'static str { match self { $(Self::$variant => $wire),+ } }
             /// Reject wire names outside this protocol enum.
@@ -15,139 +23,8 @@ macro_rules! names {
     };
 }
 
-names! {
-    /// Stable wire names; unknown input is rejected before dispatch.
-    KernelOp {
-        ContextDerive => "context-derive",
-        ContextValue => "context-value",
-        ContextStats => "context-stats",
-        Allocate => "allocate",
-        ScopeRegister => "scope-register",
-        ScopeExists => "scope-exists",
-        ScopesForOwner => "scopes-for-owner",
-        ScopesForOrb => "scopes-for-orb",
-        ScopeAddResource => "scope-add-resource",
-        ScopeActivate => "scope-activate",
-        ScopesCleanup => "scopes-cleanup",
-        ScopesReloadRegistered => "scopes-reload-registered",
-        ScopesReload => "scopes-reload",
-        ProgramRun => "program-run",
-        ProgramNext => "program-next",
-        ProgramCompleteStep => "program-complete-step",
-        ProgramCommit => "program-commit",
-        ProgramAbort => "program-abort",
-        ProgramForget => "program-forget",
-        Features => "features",
-        Prepare => "prepare",
-        Gate => "gate",
-        GateOrbs => "gate-orbs",
-        Commit => "commit",
-        Abort => "abort",
-        Orbs => "orbs",
-        Orb => "orb",
-        OrbNamed => "orb-named",
-        NextDeadline => "next-deadline",
-        Address => "address",
-        Acquire => "acquire",
-        Ready => "ready",
-        Dependency => "dependency",
-        Undepend => "undepend",
-        Fail => "fail",
-        Status => "status",
-        Release => "release",
-        Forget => "forget",
-        Root => "root",
-        CleanupRoot => "cleanup-root",
-        RootPrincipal => "root-principal",
-        CheckContext => "check-context",
-        CheckRoot => "check-root",
-        EndRoot => "end-root",
-        CancelRoot => "cancel-root",
-        BeginCall => "begin-call",
-        BeginOperation => "begin-operation",
-        BeginHookObservation => "begin-hook-observation",
-        FinishCall => "finish-call",
-        Invocation => "invocation",
-        StateInit => "state-init",
-        Snapshot => "snapshot",
-        StateAdopt => "state-adopt",
-        Task => "task",
-        TaskRoot => "task-root",
-        StopTask => "stop-task",
-        FinishTask => "finish-task",
-        Resource => "resource",
-        ResourceOpened => "resource-opened",
-        ResourceValue => "resource-value",
-        CloseResource => "close-resource",
-        ResourceClosed => "resource-closed",
-        Disposed => "disposed",
-        Tick => "tick",
-        NextWake => "next-wake",
-        NextIdle => "next-idle",
-        Close => "close",
-        FinishClose => "finish-close",
-        Diagnostics => "diagnostics",
-        Drain => "drain",
-        Restrict => "restrict",
-        Contribute => "contribute",
-        ContributionOrdinal => "contribution-ordinal",
-        HookPlan => "hook-plan",
-        Listen => "listen",
-        Subscribe => "subscribe",
-        Enqueue => "enqueue",
-        NextDelivery => "next-delivery",
-        FinishDelivery => "finish-delivery",
-        Unsubscribe => "unsubscribe",
-    }
-}
-
-names! {
-    /// Stable wire names; unknown input is rejected before dispatch.
-    EffectType {
-        Stop => "stop",
-        Open => "open",
-        Close => "close",
-        Restore => "restore",
-        Prepare => "prepare",
-        Validate => "validate",
-        Initialize => "initialize",
-        Migrate => "migrate",
-        Adopt => "adopt",
-        Start => "start",
-        Drop => "drop",
-    }
-}
-
-names! {
-    /// Stable wire names; unknown input is rejected before dispatch.
-    ActionType {
-        Execute => "execute",
-        CancelEffects => "cancel-effects",
-        ProgramPrepared => "program-prepared",
-        ProgramComplete => "program-complete",
-        Dispose => "dispose",
-        CloseResource => "close-resource",
-        DropValue => "drop-value",
-        CancelRoot => "cancel-root",
-        CancelTask => "cancel-task",
-        RetireOrb => "retire-orb",
-        State => "state",
-        SubscriptionFailed => "subscription-failed",
-        DetachSubscription => "detach-subscription",
-        Deliver => "deliver",
-    }
-}
-
-names! {
-    /// Stable wire names; unknown input is rejected before dispatch.
-    StepType {
-        Execute => "execute",
-        Wait => "wait",
-        Prepared => "prepared",
-        Complete => "complete",
-        Failed => "failed",
-    }
-}
+pub use crate::commands::KernelOp;
+pub use crate::wire::{ActionType, EffectType, StepType};
 
 names! {
     /// Stable wire names; unknown input is rejected before dispatch.

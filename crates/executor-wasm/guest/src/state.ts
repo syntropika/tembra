@@ -59,20 +59,25 @@
     return view;
   }
 
-  /** Retain snapshot identity until its kernel revision changes. */
-  function readable(read: () => Snapshot) {
+  /**
+   * Retain snapshot identity until its kernel revision changes. Each read names the retained
+   * revision so the host may omit an unchanged value; a changed revision must carry its value.
+   */
+  function readable(read: (known: string | undefined) => Snapshot) {
     let revision: string | undefined;
     let value: Json = null;
     const binding = {
       adopt(snapshot: Snapshot) {
         if (revision !== snapshot.revision) {
+          if (!Object.hasOwn(snapshot, "value"))
+            throw new Error("Host omitted a changed state value");
           value = protect(snapshot.value);
           revision = snapshot.revision;
         }
         return value;
       },
       get value() {
-        return binding.adopt(read());
+        return binding.adopt(read(revision));
       },
       select(compute: (value: Json) => Json) {
         return selection(binding, compute);

@@ -1,38 +1,11 @@
-import { BrowserIO } from "./browser-io.ts";
+import { reply } from "./codec.ts";
+import type { Completion, Guest, Outcome } from "./core.ts";
 import { decodeAsyncHostRequest, decodeHostRequest, type HostRequest } from "./host-protocol.ts";
 import type { ExecutionScope, InterpreterPort } from "./types.ts";
 
-type Result = { tag: "ok" | "err"; val: string };
-interface Outcome {
-  value: Result;
-  interrupted: boolean;
-}
-interface Completion {
-  id: bigint;
-  value: Result;
-}
-interface Progress {
-  outcome?: Outcome;
-  effects: { id: bigint; packet: string }[];
-}
-export interface BrowserGuest {
-  load(packet: string): Outcome | Promise<Outcome>;
-  declare(packet: string): Outcome | Promise<Outcome>;
-  start(packet: string): Progress | Promise<Progress>;
-  resume(completed: Completion[]): Progress | Promise<Progress>;
-  cancel(): Outcome | Promise<Outcome>;
-}
-export interface BrowserGuestModule {
-  instantiate(
-    core: (path: string) => Promise<WebAssembly.Module>,
-    imports: Record<string, unknown>,
-  ): BrowserGuest | Promise<BrowserGuest>;
-}
-
 /** A serialized Wasm heap yields data; host promises never enter its execution stack. */
 export class BrowserPort implements InterpreterPort {
-  guest: BrowserGuest | undefined;
-  readonly io = new BrowserIO();
+  guest: Guest | undefined;
   #description = "";
   #scope: ExecutionScope | undefined;
   #running = false;
@@ -66,7 +39,7 @@ export class BrowserPort implements InterpreterPort {
         return "null";
       }
       if (!this.#scope) throw new Error("No active host scope");
-      return this.bounded(JSON.stringify(this.#scope.sync(request) ?? null));
+      return this.bounded(reply(this.#scope.sync(request)));
     } catch (error) {
       throw error instanceof Error ? error.message : String(error);
     }
@@ -74,10 +47,25 @@ export class BrowserPort implements InterpreterPort {
 
   /** Observe cleanup and interruption in the same export result as the callback. */
   private value(outcome: Outcome): unknown {
+    return JSON.parse(this.text(outcome));
+  }
+
+  /** Preserve the bounded result bytes for the prepared contract to check before decoding. */
+  private text(outcome: Outcome): string {
     this.#poisoned ||= outcome.interrupted;
-    this.bounded(outcome.value.val);
-    if (outcome.value.tag === "err") throw new Error(outcome.value.val);
-    return JSON.parse(this.bounded(outcome.value.val));
+    this.bounded(outcome.value);
+    if (!outcome.ok) throw new Error(outcome.value);
+    return outcome.value;
+  }
+
+  /** Any exception leaving the guest is a trap; the instance is never entered again. */
+  private guard<T>(operation: () => T): T {
+    try {
+      return operation();
+    } catch (error) {
+      this.#poisoned = true;
+      throw error;
+    }
   }
 
   /** Refuse reuse until the previous stack and its I/O have physically returned. */
@@ -92,8 +80,9 @@ export class BrowserPort implements InterpreterPort {
   async load(packet: string): Promise<void> {
     this.enter();
     try {
-      const outcome = await this.guest!.load(this.bounded(packet));
-      this.#description = this.bounded(outcome.value.val);
+      const input = this.bounded(packet);
+      const outcome = this.guard(() => this.guest!.load(input));
+      this.#description = this.bounded(outcome.value);
       this.value(outcome);
     } finally {
       this.#running = false;
@@ -105,25 +94,22 @@ export class BrowserPort implements InterpreterPort {
     return this.#description;
   }
 
-  /** Factories receive only the declaration scope, even if WASI suspends a native stack. */
+  /** Factories receive only the synchronous declaration scope. */
   async declare(packet: string, scope: ExecutionScope): Promise<unknown> {
     this.enter(scope);
     try {
-      return this.value(await this.guest!.declare(this.bounded(packet)));
-    } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) this.#poisoned = true;
-      throw error;
+      const input = this.bounded(packet);
+      return this.value(this.guard(() => this.guest!.declare(input)));
     } finally {
       this.#scope = undefined;
-      await this.io.settled();
       this.#running = false;
     }
   }
 
   /** Wait between steps in the host, preserving Promise.race and concurrent effect completion. */
-  async execute(packet: string, scope: ExecutionScope): Promise<unknown> {
+  async execute(packet: string, scope: ExecutionScope): Promise<string> {
     this.enter(scope);
-    const pending = new Map<bigint, Promise<Completion>>();
+    const pending = new Map<number, Promise<Completion>>();
     const ready: Completion[] = [];
     let wake: (() => void) | undefined;
     let finished = false;
@@ -138,7 +124,8 @@ export class BrowserPort implements InterpreterPort {
       rejectDeadline(new Error("Interpreter callback exceeded its wall time limit"));
     }, this.timeout);
     try {
-      let progress = await this.guest!.start(this.bounded(packet));
+      const input = this.bounded(packet);
+      let progress = this.guard(() => this.guest!.start(input));
       while (!progress.outcome) {
         if (this.#poisoned) throw new Error("Interpreter callback exceeded its wall time limit");
         for (const effect of progress.effects) {
@@ -148,17 +135,12 @@ export class BrowserPort implements InterpreterPort {
             scope.async(decodeAsyncHostRequest(this.bounded(effect.packet))),
           );
           const completed = operation
-            .then(
-              (value) =>
-                ({
-                  id: effect.id,
-                  value: { tag: "ok", val: this.bounded(JSON.stringify(value ?? null)) },
-                }) as Completion,
-            )
-            .catch(
-              (error) =>
-                ({ id: effect.id, value: { tag: "err", val: String(error) } }) as Completion,
-            )
+            .then((value): Completion => ({
+              id: effect.id,
+              ok: true,
+              value: this.bounded(reply(value)),
+            }))
+            .catch((error): Completion => ({ id: effect.id, ok: false, value: String(error) }))
             .then((response) => {
               ready.push(response);
               wake?.();
@@ -176,25 +158,24 @@ export class BrowserPort implements InterpreterPort {
         wake = undefined;
         const completed = ready.splice(0);
         for (const response of completed) pending.delete(response.id);
-        progress = await this.guest!.resume(completed);
+        progress = this.guard(() => this.guest!.resume(completed));
       }
       finished = true;
       if (this.#poisoned) throw new Error("Interpreter callback exceeded its wall time limit");
-      return this.value(progress.outcome);
+      return this.text(progress.outcome);
     } finally {
       clearTimeout(timer);
       scope.cancel();
       if (!finished) {
         this.#poisoned = true;
         try {
-          await this.guest!.cancel();
+          this.guest!.cancel();
         } catch {
           /* A trapped instance is never reused. */
         }
       }
       this.#scope = undefined;
       await Promise.allSettled(pending.values());
-      await this.io.settled();
       this.#running = false;
     }
   }
@@ -220,7 +201,6 @@ export class BrowserPort implements InterpreterPort {
     if (this.#closed) return;
     this.#closed = true;
     this.guest = undefined;
-    await this.io.settled();
     await this.dispose();
   }
 }

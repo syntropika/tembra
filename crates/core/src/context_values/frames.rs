@@ -8,11 +8,59 @@ pub(crate) struct ContextFrame {
     pub parent: Id,
     pub depth: usize,
     references: usize,
-    pub key: ContextContract,
-    pub value: ContextValue,
+    pub value: FrameValue,
+}
+
+/// Application metadata and private execution ancestry share the same retained frame lifetime.
+pub(crate) enum FrameValue {
+    Binding(ContextContract, ContextValue),
+    Execution(Id),
 }
 
 impl crate::host::Inner {
+    fn push_frame(
+        &mut self,
+        root: Id,
+        parent: Id,
+        call: Option<Id>,
+        value: FrameValue,
+    ) -> Result<Id> {
+        let depth = if parent == 0 {
+            1
+        } else {
+            self.context_frames[&parent].depth + 1
+        };
+        if depth > 64 || self.roots[&root].contexts.len() >= 4096 {
+            return Err(Error::new(
+                Code::Exhausted,
+                Reason::Context,
+                "context depth or frame limit reached",
+            ));
+        }
+        let id = self.id()?;
+        self.retain_frame(parent);
+        if let Some(call) = call {
+            self.call_contexts.entry(call).or_default().push(id);
+        }
+        self.context_frames.insert(
+            id,
+            ContextFrame {
+                root,
+                parent,
+                depth,
+                references: 1,
+                value,
+            },
+        );
+        self.roots
+            .get_mut(&root)
+            .expect("checked root")
+            .contexts
+            .insert(id);
+        self.context_peak = self.context_peak.max(self.context_frames.len());
+        Ok(id)
+    }
+
     /// Retain a nonempty frame for a call or child frame.
     pub(crate) fn retain_frame(&mut self, frame: Id) {
         if frame != 0 {
@@ -41,7 +89,7 @@ impl crate::host::Inner {
                 .expect("frame retains root")
                 .contexts
                 .remove(&id);
-            if let ContextValue::Opaque(lease) = frame.value {
+            if let FrameValue::Binding(_, ContextValue::Opaque(lease)) = frame.value {
                 leases.push(lease);
             }
             id = frame.parent;
@@ -80,18 +128,6 @@ impl Host {
         if call.is_some_and(|id| inner.calls.get(&id).is_none_or(|value| value.root != root)) {
             return Err(invalid("originating invocation has ended"));
         }
-        let depth = if parent == 0 {
-            1
-        } else {
-            inner.context_frames[&parent].depth + 1
-        };
-        if depth > 64 || inner.roots[&root].contexts.len() >= 4096 {
-            return Err(Error::new(
-                Code::Exhausted,
-                Reason::Context,
-                "context depth or frame limit reached",
-            ));
-        }
         if key.name.is_empty()
             || key.name.len() > 256
             || key.version == 0
@@ -117,31 +153,42 @@ impl Host {
                 "context key limit reached",
             ));
         }
-        let id = inner.id()?;
-        inner.retain_frame(parent);
-        if let Some(call) = call {
-            inner.call_contexts.entry(call).or_default().push(id);
-        }
-        inner.context_contracts.insert(identity, key.kind);
-        inner.context_frames.insert(
-            id,
-            ContextFrame {
-                root,
-                parent,
-                depth,
-                references: 1,
-                key,
-                value,
-            },
-        );
-        inner
-            .roots
-            .get_mut(&root)
-            .expect("checked root")
-            .contexts
-            .insert(id);
-        inner.context_peak = inner.context_peak.max(inner.context_frames.len());
+        let kind = key.kind;
+        let id = inner.push_frame(root, parent, call, FrameValue::Binding(key, value))?;
+        inner.context_contracts.insert(identity, kind);
         Ok(id)
+    }
+
+    /// Enter the actual isolated revision admitted by this invocation, without application keys.
+    /// The realm is derived by the kernel; callers cannot select another heap's identity.
+    pub fn enter_execution(&self, call: Id, parent: Id) -> Result<Id> {
+        let mut inner = self.inner.borrow_mut();
+        let invocation = inner
+            .calls
+            .get(&call)
+            .ok_or_else(|| invalid("originating invocation has ended"))?;
+        let root = invocation.root;
+        let realm = invocation.orb;
+        inner.check_root(root)?;
+        inner.check_frame(root, parent)?;
+        if !inner
+            .orbs
+            .get(&realm)
+            .is_some_and(|orb| orb.declaration.isolated)
+        {
+            return Err(invalid("execution requires an isolated revision"));
+        }
+        let mut current = parent;
+        while current != 0 {
+            let frame = &inner.context_frames[&current];
+            if matches!(frame.value, FrameValue::Execution(id) if id == realm) {
+                return Err(invalid(
+                    "causal reentry into the same interpreter is unsupported",
+                ));
+            }
+            current = frame.parent;
+        }
+        inner.push_frame(root, parent, Some(call), FrameValue::Execution(realm))
     }
 
     /// Read the nearest binding and refuse a mismatched contract.
@@ -156,11 +203,14 @@ impl Host {
         inner.check_frame(root, frame)?;
         while frame != 0 {
             let node = &inner.context_frames[&frame];
-            if node.key.name == key.name && node.key.version == key.version {
-                if node.key.kind != key.kind {
+            if let FrameValue::Binding(contract, value) = &node.value
+                && contract.name == key.name
+                && contract.version == key.version
+            {
+                if contract.kind != key.kind {
                     return Err(invalid("incompatible context key contract"));
                 }
-                return Ok(Some(node.value.clone()));
+                return Ok(Some(value.clone()));
             }
             frame = node.parent;
         }

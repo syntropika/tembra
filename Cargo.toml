@@ -11,7 +11,11 @@ members = [
   "crates/mobile",
 ]
 resolver = "2"
-exclude = ["crates/executor-wasm/guest", "crates/executor-wasm/rust-provider"]
+exclude = [
+  "crates/executor-wasm/guest",
+  "crates/executor-wasm/rust-provider",
+  "crates/executor-wasm/probe-provider",
+]
 
 [workspace.package]
 version = "0.2.2"

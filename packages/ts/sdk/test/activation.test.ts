@@ -3,7 +3,6 @@ import { expect, test } from "bun:test";
 import { createHost } from "../src/node.ts";
 import { orb } from "../src/orb.ts";
 import { deferred } from "../src/runtime/records.ts";
-import type { Reload } from "../src/kernel.ts";
 import { Reason } from "../src/identifiers.ts";
 
 for (const mode of ["activation", "reload"] as const)
@@ -375,14 +374,14 @@ test("native opener cancellation signals the provider and retains its physical f
     native: {
       hasOrb: (id) => id === orbId,
       activate: async (object) => {
-        const resource = host.session.kernel.command<{ id: number }>(KernelOp.Resource, {
+        const resource = host.session.kernel.command(KernelOp.Resource, {
           owner: { kind: OwnerKind.Object, id: object },
           name: "native",
           version: 1,
           dependencies: [],
         });
         host.session.kernel.command(KernelOp.ScopeRegister, {
-          scope: host.session.kernel.command<number>(KernelOp.Allocate),
+          scope: host.session.kernel.command(KernelOp.Allocate),
           owner: { kind: OwnerKind.Object, id: object },
           orb: orbId,
           parents: [],
@@ -412,7 +411,7 @@ test("native opener cancellation signals the provider and retains its physical f
       },
     },
   });
-  const prepared = host.session.kernel.command<Reload>(KernelOp.Prepare, {
+  const prepared = host.session.kernel.command(KernelOp.Prepare, {
     orbs: [{ name: "native", apiVersion: 1, services: [{ name: "native", methods: [] }] }],
   });
   orbId = prepared.orbs[0]!.id;

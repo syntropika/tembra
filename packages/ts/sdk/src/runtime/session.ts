@@ -62,7 +62,7 @@ export class Session implements StateBackend {
     this.telemetry = options.telemetry
       ? new Telemetry(options.telemetry.capacity, options.telemetry.sampleEvery)
       : undefined;
-    this.values = new Values(() => this.kernel.command<number>(KernelOp.Allocate));
+    this.values = new Values(() => this.kernel.command(KernelOp.Allocate));
     this.codec = options.serialization ?? jsonCodec;
     this.name = options.name ?? "host";
     this.principal = options.principal ?? "host";

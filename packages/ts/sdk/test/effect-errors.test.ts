@@ -10,11 +10,12 @@ for (const kind of ["unprintable", "oversized", "hostile", "unicode"] as const)
     const host = createHost();
     const sizes: number[] = [];
     const port = host.session.kernel.port;
-    const request = port.request.bind(port);
-    const commands = spyOn(port, "request").mockImplementation((metadata) => {
-      if (JSON.parse(metadata).op === KernelOp.ProgramCompleteStep)
-        sizes.push(new TextEncoder().encode(metadata).length);
-      return request(metadata);
+    const command = port.command.bind(port);
+    const commands = spyOn(port, "command").mockImplementation((op, input) => {
+      // Measure the metadata as the string-only adapters would encode it.
+      if (op === KernelOp.ProgramCompleteStep)
+        sizes.push(new TextEncoder().encode(JSON.stringify({ ...input, op })).length);
+      return command(op, input);
     });
     const huge = kind === "unicode" ? "\uD800" + "😀".repeat(200_000) : "\u0000😀".repeat(200_000);
     const error =
