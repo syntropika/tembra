@@ -53,3 +53,5 @@ jobs:
       # The runner image provides Google Chrome; fail here if that changes.
       - run: google-chrome --version
       - run: just test-wasm-acceptance --out "$RUNNER_TEMP/acceptance" --provider "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" --probe "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm"
+      - name: Test portable mobile execution and foreign continuation delivery
+        run: just test-mobile-wasm packages/ts/engine-node/dist/interpreter.wasm "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm"

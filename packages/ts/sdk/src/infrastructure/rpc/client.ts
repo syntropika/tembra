@@ -1,3 +1,4 @@
+import { checkSignal } from "../../runtime/signals.ts";
 import type { DynamicReference } from "../../authoring/types.ts";
 import { Status } from "../../bridge/identifiers.ts";
 import { RpcEvent, RpcOp } from "../../bridge/protocol.ts";
@@ -59,7 +60,7 @@ export class RemoteHost {
     signal?: AbortSignal,
     received?: (value: any) => void,
   ): Promise<any> {
-    signal?.throwIfAborted();
+    if (signal) checkSignal(signal);
     if (this.#pending.size >= this.channel.maxPending)
       throw new TembraError(Errors.Exhausted.PendingRequests);
     const id = ++this.#next;

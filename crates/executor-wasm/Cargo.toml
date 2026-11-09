@@ -23,16 +23,17 @@ futures.workspace = true
 futures-timer = "3"
 async-channel = "2"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
-wasmtime = { version = "=50.0.1", default-features = false, features = [
+wasmtime = { version = "=51.0.0-rc.1", default-features = false, features = [
   "anyhow",
   "component-model",
   "component-model-async",
   "async",
   "cranelift",
+  "pulley",
   "runtime",
   "std",
 ] }
-wasmtime-wasi = { version = "=50.0.0", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi = { version = "=51.0.0-rc.1", default-features = false, features = ["p2", "p3"] }
 
 [lints]
 workspace = true

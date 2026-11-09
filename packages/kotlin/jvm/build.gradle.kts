@@ -13,6 +13,7 @@ sourceSets["main"].resources.srcDir("../src/generated/resources")
 java { withSourcesJar() }
 
 dependencies {
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     implementation("net.java.dev.jna:jna:5.17.0")
     testImplementation("junit:junit:4.13.2")
 }
@@ -30,4 +31,10 @@ publishing {
             url = uri(rootProject.layout.buildDirectory.dir("repository"))
         }
     }
+}
+
+// Run source-checkout tests against their explicitly selected native build.
+tasks.test {
+    val library = providers.gradleProperty("tembraHostLibraryDir").orElse("../../target/debug")
+    systemProperty("jna.library.path", rootProject.file(library.get()).absolutePath)
 }

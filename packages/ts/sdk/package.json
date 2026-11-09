@@ -34,6 +34,7 @@
       "bun": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "browser": "./dist/index.js",
+      "react-native": "./dist/index.js",
       "import": "./dist/index.js"
     },
     "./node": {
@@ -55,6 +56,7 @@
       "bun": "./src/host.ts",
       "types": "./dist/host.d.ts",
       "browser": "./dist/host.js",
+      "react-native": "./dist/host.js",
       "import": "./dist/host.js"
     },
     "./tooling": {

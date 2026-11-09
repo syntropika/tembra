@@ -58,6 +58,16 @@ pub struct Engine {
 impl Engine {
     /// Configure Wasmtime limits without loading an interpreter for compiled-only hosts.
     pub fn new(limits: Limits) -> Result<Self> {
+        Self::configured(limits, cfg!(target_os = "ios"))
+    }
+
+    /// Execute portable bytecode without allocating executable native memory.
+    pub fn interpreted(limits: Limits) -> Result<Self> {
+        Self::configured(limits, true)
+    }
+
+    /// Share the same limits and capabilities across native and interpreted execution.
+    fn configured(limits: Limits, interpreted: bool) -> Result<Self> {
         if limits.memory_bytes < 2 << 20
             || limits.memory_bytes > u32::MAX as usize
             || limits.fuel == 0
@@ -70,6 +80,15 @@ impl Engine {
         }
         let mut config = wasmtime::Config::new();
         config.wasm_component_model_async(true).consume_fuel(true);
+        if interpreted {
+            config
+                .target(if cfg!(target_pointer_width = "64") {
+                    "pulley64"
+                } else {
+                    "pulley32"
+                })
+                .map_err(failure)?;
+        }
         let engine = wasmtime::Engine::new(&config).map_err(failure)?;
         Ok(Self {
             engine,

@@ -169,7 +169,7 @@ export class Calls {
 
   /** Stop waiting on cancellation while physical work remains tracked. */
   async observe<T>(physical: Promise<T>, signal: AbortSignal): Promise<T> {
-    if (signal.aborted) throw signal.reason;
+    if (signal.aborted) throw signal.reason ?? new TembraError(Errors.Cancelled.Root);
     let abort!: () => void;
     const cancelled = new Promise<never>((_, reject) => {
       abort = () => reject(signal.reason ?? new TembraError(Errors.Cancelled.Root));

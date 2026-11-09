@@ -127,3 +127,7 @@ test-swift:
 
 test-kotlin: build-kotlin
     gradle -p packages/kotlin :jvm:test
+
+# Exercise the portable mobile transport with real source and compiled guests.
+test-mobile-wasm engine provider probe:
+    TEMBRA_WASM_ENGINE="{{absolute_path(engine)}}" TEMBRA_WASM_PROVIDER="{{absolute_path(provider)}}" TEMBRA_WASM_PROBE="{{absolute_path(probe)}}" cargo test --locked -p tembra-mobile --test execution --test compiled_filesystem -- --ignored

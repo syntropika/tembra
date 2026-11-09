@@ -1,4 +1,3 @@
-import type { NodeComponentPort } from "@syntropika/tembra-engine-node";
 import type { OrbDefinition } from "../authoring/types.ts";
 import type { Context } from "../runtime/context.ts";
 import { signature, disposeOrb, isolatedRevision, type AdaptedOrb } from "#tembra-adapters";
@@ -7,7 +6,11 @@ import { encode } from "./codec.ts";
 
 /** Compiled callbacks enter the same kernel-owned call lifecycle as interpreted source callbacks. */
 export function componentDefinition(
-  port: NodeComponentPort,
+  port: {
+    description(): string;
+    call(binding: string, method: string, arguments_: string): Promise<string>;
+    close(): void;
+  },
   name: string,
   apiVersion: number,
 ): OrbDefinition {

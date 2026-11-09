@@ -170,3 +170,12 @@ export {
 export { Errors, type ErrorDescriptor } from "./errors.ts";
 
 export type { KernelPort } from "./bridge/kernel.ts";
+
+// Platform adapters share the isolated lifecycle without importing private implementation files.
+export {
+  createMobileHost,
+  type MobileBackend,
+  type MobileArtifact,
+  type MobilePort,
+  type MobileExecutionOptions,
+} from "./interpreter/mobile.ts";

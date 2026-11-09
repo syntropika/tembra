@@ -5,7 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Thread-safe Swift and Kotlin bindings for the Tembra metadata kernel"
+description = "Swift and Kotlin bindings for the Tembra kernel and isolated Wasm execution"
+publish = false
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
@@ -25,10 +26,17 @@ bindgen = ["uniffi/cli"]
 
 [dependencies]
 tembra-bridge.workspace = true
+tembra-executor-wasm = { path = "../executor-wasm" }
+tembra-contracts.workspace = true
+tembra = { path = "../tembra" }
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread"] }
 uniffi = "=0.32.2"
 
 [dev-dependencies]
-serde_json.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true

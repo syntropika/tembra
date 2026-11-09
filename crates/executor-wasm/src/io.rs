@@ -191,27 +191,38 @@ impl IoOperation {
                 Ok(Value::Null)
             }
             Operation::Exchange { address, request } => {
-                let mut socket =
-                    TcpStream::connect_timeout(&address, remaining(deadline)?).map_err(failure)?;
+                let mut socket = TcpStream::connect_timeout(&address, remaining(deadline)?)
+                    .map_err(|e| failure(format!("transport connect: {e}")))?;
                 let mut sent = request.as_bytes();
                 while !sent.is_empty() {
                     socket
                         .set_write_timeout(Some(remaining(deadline)?))
-                        .map_err(failure)?;
-                    let count = socket.write(sent).map_err(failure)?;
+                        .map_err(|e| failure(format!("transport write timeout: {e}")))?;
+                    let count = socket
+                        .write(sent)
+                        .map_err(|e| failure(format!("transport write: {e}")))?;
                     if count == 0 {
                         return Err(failure("transport closed while writing"));
                     }
                     sent = &sent[count..];
                 }
-                socket.shutdown(Shutdown::Write).map_err(failure)?;
+                socket.set_nonblocking(true).map_err(failure)?;
+                socket
+                    .shutdown(Shutdown::Write)
+                    .map_err(|e| failure(format!("transport half-close: {e}")))?;
                 let mut response = Vec::new();
                 let mut buffer = [0; 8192];
                 loop {
-                    socket
-                        .set_read_timeout(Some(remaining(deadline)?))
-                        .map_err(failure)?;
-                    let count = socket.read(&mut buffer).map_err(failure)?;
+                    remaining(deadline)?;
+                    let count = match socket.read(&mut buffer) {
+                        Ok(count) => count,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            wait_readable(&socket, deadline)?;
+                            continue;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) => return Err(failure(format!("transport read: {e}"))),
+                    };
                     if count == 0 {
                         break;
                     }
@@ -236,6 +247,45 @@ impl IoOperation {
         receive.await.map_err(failure)?
     }
 }
+/// Wait against the original deadline without changing options after the peer closes.
+/// Darwin can reject SO_RCVTIMEO updates after EOF, including on iOS.
+fn wait_readable(socket: &TcpStream, deadline: Instant) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        loop {
+            let milliseconds = remaining(deadline)?
+                .as_millis()
+                .saturating_add(1)
+                .min(i32::MAX as u128) as i32;
+            let mut descriptor = libc::pollfd {
+                fd: socket.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // The borrowed socket and its single descriptor remain live throughout this wait.
+            let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+            if ready > 0 {
+                return Ok(());
+            }
+            if ready == 0 {
+                remaining(deadline)?;
+                continue;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(failure(error));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket;
+        std::thread::sleep(remaining(deadline)?.min(Duration::from_millis(1)));
+        Ok(())
+    }
+}
+
 fn bounded(text: &str) -> Result<()> {
     if text.len() > TEXT_LIMIT {
         Err(failure("text exceeds the one mebibyte limit"))
@@ -341,6 +391,56 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn transport_reads_a_complete_response_when_the_peer_closes() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = String::new();
+            socket.read_to_string(&mut request).unwrap();
+            assert_eq!(request, "request");
+            socket.write_all(b"response").unwrap();
+        });
+        let io = SourceIo {
+            mounts: Arc::default(),
+            destinations: Arc::new(BTreeSet::from([address])),
+            timeout: Duration::from_secs(2),
+        };
+        let result = run(&io, &serde_json::json!({"operation":"transport.exchange","ip":"127.0.0.1","port":address.port(),"request":"request"}).to_string());
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), "response");
+    }
+
+    #[test]
+    fn transport_read_wait_respects_the_original_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = String::new();
+            socket.read_to_string(&mut request).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let io = SourceIo {
+            mounts: Arc::default(),
+            destinations: Arc::new(BTreeSet::from([address])),
+            timeout: Duration::from_millis(50),
+        };
+        let start = Instant::now();
+        let result = run(&io, &serde_json::json!({"operation":"transport.exchange","ip":"127.0.0.1","port":address.port(),"request":"request"}).to_string());
+        let elapsed = start.elapsed();
+        server.join().unwrap();
+        assert!(result.unwrap_err().message.contains("deadline exceeded"));
+        assert!(elapsed < Duration::from_millis(200));
+    }
+
     #[test]
     fn expired_work_cannot_start_a_write() {
         let directory = tempfile::tempdir().unwrap();

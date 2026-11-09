@@ -3,17 +3,24 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
 uniffi::setup_scaffolding!();
+mod execution;
+pub use execution::*;
 
 #[derive(Debug, uniffi::Error)]
 pub enum MobileError {
     Closed,
     WorkerUnavailable,
+    Execution { diagnostic: String },
 }
 
 impl std::fmt::Display for MobileError {
     /// Describe transport failures separately from kernel protocol errors.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::Execution { diagnostic } = self {
+            return f.write_str(diagnostic);
+        }
         f.write_str(match self {
+            Self::Execution { .. } => unreachable!(),
             Self::Closed => "The native kernel has been released",
             Self::WorkerUnavailable => "The native kernel worker is unavailable",
         })

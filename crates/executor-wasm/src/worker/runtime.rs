@@ -198,7 +198,7 @@ pub(super) async fn instantiate(
     let maximum = u32::try_from(engine.limits.memory_bytes / abi::PAGE_BYTES as usize)?;
     let memory = Memory::new(
         &mut store,
-        MemoryType::new(abi::MEMORY_INITIAL_PAGES, Some(maximum)),
+        MemoryType::new(abi::MEMORY_INITIAL_PAGES, Some(maximum))?,
     )?;
     store.data_mut().memory = Some(memory);
     let mut linker = linker(&engine.engine)?;

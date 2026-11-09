@@ -6,24 +6,24 @@ const kernels = new Map<string, NodeKernel>();
 let sequence = 0;
 let released = 0;
 let failRequest = false;
-const native: Spec = {
+const native = {
   createKernel() {
     const id = String(++sequence);
     kernels.set(id, new NodeKernel());
     return id;
   },
-  request(id, metadata) {
+  request(id: string, metadata: string) {
     if (failRequest) throw new Error("Transport unavailable");
     const kernel = kernels.get(id);
     if (!kernel) throw new Error("Unknown kernel");
     const { op, ...input } = JSON.parse(metadata);
     return JSON.stringify(kernel.command(op, input));
   },
-  releaseKernel(id) {
+  releaseKernel(id: string) {
     released++;
     return kernels.delete(id);
   },
-};
+} as Spec;
 mock.module("react-native", () => ({
   TurboModuleRegistry: { get: () => native },
 }));

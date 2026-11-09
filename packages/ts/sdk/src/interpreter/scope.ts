@@ -1,3 +1,4 @@
+import { checkSignal, combinedSignal } from "../runtime/signals.ts";
 import type { CapturedInvocation } from "#tembra-adapters";
 import type { Declaration } from "../authoring/declaration.ts";
 import type { DynamicReference, Resource } from "../authoring/types.ts";
@@ -64,7 +65,7 @@ export class Scope {
       ...(signal ? { signal } : {}),
       check: () => {
         if ("context" in authority) authority.context.check();
-        if ("signal" in authority) authority.signal.throwIfAborted();
+        if ("signal" in authority) checkSignal(authority.signal);
       },
       sync: (request) => this.sync(request, authority),
       async: (request) => {
@@ -122,7 +123,7 @@ export class Scope {
       throw new Error("Validators may only read retained state");
     if (!survivesCancellation(request)) {
       if ("context" in authority) authority.context.check();
-      if ("signal" in authority) authority.signal.throwIfAborted();
+      if ("signal" in authority) checkSignal(authority.signal);
     }
     switch (request.operation) {
       case "address": {
@@ -232,13 +233,13 @@ export class Scope {
     authority: Authority,
     ended: AbortSignal,
   ): Promise<unknown> {
-    ended.throwIfAborted();
+    checkSignal(ended);
     switch (request.operation) {
       case "filesystem.read-text":
       case "filesystem.write-text":
       case "transport.exchange": {
         if ("context" in authority) authority.context.check();
-        else if ("signal" in authority) authority.signal.throwIfAborted();
+        else if ("signal" in authority) checkSignal(authority.signal);
         else throw new Error("I/O requires an active callback");
         return this.revision.io(request);
       }
@@ -246,7 +247,7 @@ export class Scope {
         const owner = authoritySignal(authority);
         await this.declaration.session.calls.observe(
           this.reference(request).reference.ready,
-          owner ? AbortSignal.any([owner, ended]) : ended,
+          owner ? combinedSignal(owner, ended) : ended,
         );
         return null;
       }
@@ -282,8 +283,8 @@ export class Scope {
         if ("context" in authority) this.context(authority);
         const ownerSignal = authoritySignal(authority);
         if (!ownerSignal) throw new Error("Timer requires an active callback");
-        const signal = AbortSignal.any([ownerSignal, ended]);
-        signal.throwIfAborted();
+        const signal = combinedSignal(ownerSignal, ended);
+        checkSignal(signal);
         await new Promise<void>((resolve, reject) => {
           const cancel = () => {
             clearTimeout(timer);

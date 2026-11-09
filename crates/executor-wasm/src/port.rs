@@ -102,7 +102,21 @@ impl InterpreterPort {
 
     /// Split a platform exchange into a local owner ticket and a Send event receiver.
     pub fn begin(&self, packet: String) -> Result<(PortTicket, PortEvents)> {
-        let events = self.session.begin(Operation::Start, packet)?;
+        self.begin_operation(packet, Operation::Start)
+    }
+
+    /// Suspend synchronous guest factories at host requests without calling into a foreign JS stack.
+    pub fn begin_declaration(&self, packet: String) -> Result<(PortTicket, PortEvents)> {
+        self.begin_operation(packet, Operation::Declare)
+    }
+
+    /// Retain one owner until the selected guest exchange physically settles.
+    fn begin_operation(
+        &self,
+        packet: String,
+        operation: Operation,
+    ) -> Result<(PortTicket, PortEvents)> {
+        let events = self.session.begin(operation, packet)?;
         let done = Arc::new(AtomicBool::new(false));
         Ok((
             PortTicket {
@@ -154,9 +168,25 @@ pub struct PortEvents {
     packet_bytes: usize,
 }
 impl PortEvents {
+    /// Revoke pending requests when the embedding JavaScript runtime is invalidated.
+    pub fn close(&self) {
+        self.events.close();
+        worker::close_replies(&self.events);
+    }
+
     /// Forward an actual host request or physical completion to the embedding event loop.
     pub fn receive(&self) -> Result<PortEvent> {
-        match self.events.recv_blocking().map_err(failure)? {
+        self.event(self.events.recv_blocking().map_err(failure)?)
+    }
+
+    /// Await the next event without blocking an embedding runtime thread.
+    pub async fn receive_async(&self) -> Result<PortEvent> {
+        self.event(self.events.recv().await.map_err(failure)?)
+    }
+
+    /// Mark physical completion before allowing the embedding owner to finish.
+    fn event(&self, event: Event) -> Result<PortEvent> {
+        match event {
             Event::Host {
                 packet,
                 asynchronous,

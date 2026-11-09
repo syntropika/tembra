@@ -128,6 +128,13 @@ It contains arm64 device libraries and arm64/x86_64 libraries for the simulator 
 The minimum versions are iOS 15.1 and macOS 11.
 Swift Package Manager and CocoaPods compile the shared Swift sources.
 
+The mobile FFI crate is an internal build target, like the Node binding; the Swift, Kotlin and React Native packages distribute its compiled libraries. React Native native packaging also copies the qualified `packages/ts/engine-node/dist/interpreter.wasm`; build that shared interpreter before packaging the mobile module.
+
+The executor currently pins Wasmtime and `wasmtime-wasi` together to `51.0.0-rc.1`.
+This prerelease includes the [Android `openat2` API-level guard](https://github.com/bytecodealliance/wasmtime/commit/b67df87c061d548508aa7b9be692392f14b80770),
+which prevents the app sandbox from terminating compiled WASI filesystem calls on older Android API levels.
+Qualify upgrades with the native, browser and mobile acceptance suites; an Android shell process does not exercise the app's seccomp restrictions.
+
 For Kotlin/JVM, install Java 17 and Gradle 8.11.1:
 
 ```sh
@@ -230,3 +237,11 @@ For mobile acceptance, build an application and test it on each target platform.
 Compare the same workloads when changing hot paths. Record the build profile, enabled features,
 runtime and workload with every size or performance result. Keep profiling reports outside the
 source tree.
+
+To test the mobile execution transport with real interpreter and compiled-provider bytes on the current Rust host:
+
+```sh
+just test-mobile-wasm /path/to/interpreter.wasm /path/to/arithmetic-component.wasm /path/to/filesystem-probe.wasm
+```
+
+This checks portable execution, heap isolation, filesystem/network grants, compiled calls, foreign continuation delivery and invalidation. It complements application tests on iOS and Android; a successful host run does not establish handset qualification.

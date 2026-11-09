@@ -81,8 +81,34 @@ export function prepareDefinitions(
   const captured = definitions.map((definition) =>
     "artifact" in definition
       ? {
-          ...(definition.requires ? { requires: structuredClone(definition.requires) } : {}),
-          ...(definition.grants ? { grants: structuredClone(definition.grants) } : {}),
+          ...(definition.requires
+            ? {
+                requires: Object.fromEntries(
+                  Object.entries(definition.requires).map(([name, provider]) => [
+                    name,
+                    { ...provider },
+                  ]),
+                ),
+              }
+            : {}),
+          ...(definition.grants
+            ? {
+                grants: {
+                  ...definition.grants,
+                  ...(definition.grants.filesystem
+                    ? { filesystem: definition.grants.filesystem.map((mount) => ({ ...mount })) }
+                    : {}),
+                  ...(definition.grants.network
+                    ? {
+                        network: definition.grants.network.map((grant) => ({
+                          ...grant,
+                          connect: [...grant.connect],
+                        })),
+                      }
+                    : {}),
+                },
+              }
+            : {}),
           artifact: definition.artifact.slice(),
         }
       : definition,

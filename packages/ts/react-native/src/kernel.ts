@@ -10,6 +10,12 @@ export class NativeKernelPort implements KernelPort {
     this.#handle = native.createKernel();
   }
 
+  /** Read the issued native host identity for its execution adapter. */
+  get handle(): string {
+    if (this.#handle === undefined) throw new Error("The native kernel has been released");
+    return this.#handle;
+  }
+
   /**
    * Exchange one typed command as the JSON text the TurboModule accepts. The native kernel decodes
    * it into the same strictly checked command; application values and callbacks never cross.
