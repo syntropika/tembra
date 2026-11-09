@@ -12,10 +12,150 @@ use tembra::{
 fn requirement(hooks: &[&str]) -> Requirement {
     Requirement {
         signatures: Default::default(),
+        hook_signatures: Default::default(),
         orb: "provider".into(),
         api_version: 1,
         methods: Default::default(),
         hooks: hooks.iter().map(|hook| (*hook).into()).collect(),
+    }
+}
+
+#[test]
+fn native_wit_contributors_pin_their_hook_contract_across_provider_replacement() {
+    for requires_first in [true, false] {
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let hook = Hook::<u32, u32>::waterfall("guard").signature("original-contract");
+        let contributor = Orb::new("contributor", 1);
+        let contributor = if requires_first {
+            contributor.requires(requirement(&["guard"])).contribute(
+                "provider",
+                &hook,
+                0,
+                |_, value| async move { Ok(value) },
+            )
+        } else {
+            contributor
+                .contribute("provider", &hook, 0, |_, value| async move { Ok(value) })
+                .requires(requirement(&["guard"]))
+        };
+        host.install(vec![
+            Orb::new("provider", 1).hook(hook.clone()),
+            contributor,
+        ])
+        .unwrap();
+        pool.run_until_stalled();
+        let replaced = Orb::new("provider", 1)
+            .hook(Hook::<u32, u32>::waterfall("guard").signature("different-contract"));
+        let error = pool
+            .run_until(host.reload(vec![replaced], 5000))
+            .unwrap_err();
+        assert_eq!(error.message, "hook contract signature differs for guard");
+        pool.run_until(host.reload(vec![Orb::new("provider", 1).hook(hook)], 5000))
+            .unwrap();
+        pool.run_until(host.close()).unwrap();
+    }
+}
+
+#[test]
+fn portable_contributions_share_typed_native_stop_predicates_and_order() {
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+    struct Admission {
+        value: i32,
+        blocked: bool,
+    }
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let hook = Hook::<Admission, Admission>::waterfall_until("before-call", |input| input.blocked)
+        .signature("prepared-wit-admission-v1");
+    let bound = hook.clone();
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let first = seen.clone();
+    let second = seen.clone();
+    host.install(vec![
+        Orb::new("provider", 1).hook(hook.clone()).service(
+            Service::new("provider", move |declaration| declaration.hook(&bound))
+                .method("run", |hook, context, input: Admission| async move {
+                    hook.run(&context, input).await
+                }),
+        ),
+        Orb::new("isolated", 1)
+            .isolated()
+            .requires(requirement(&["before-call"]))
+            .contribute_portable(
+                "provider",
+                "before-call",
+                "prepared-wit-admission-v1",
+                0,
+                move |context, mut input| {
+                    first.borrow_mut().push("portable");
+                    async move {
+                        context.check()?;
+                        input["value"] = serde_json::json!(input["value"].as_i64().unwrap() + 1);
+                        Ok(Some(input))
+                    }
+                },
+            ),
+        Orb::new("guard", 1)
+            .requires(requirement(&["before-call"]))
+            .contribute("provider", &hook, 1, move |_, mut input| {
+                second.borrow_mut().push("guard");
+                async move {
+                    input.blocked = true;
+                    Ok(input)
+                }
+            })
+            .contribute("provider", &hook, 2, |_, _| async {
+                panic!("blocked plan continued")
+            }),
+    ])
+    .unwrap();
+    let result: Admission = run(
+        &mut pool,
+        &host,
+        "run",
+        Admission {
+            value: 2,
+            blocked: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        result,
+        Admission {
+            value: 3,
+            blocked: true
+        }
+    );
+    assert_eq!(&*seen.borrow(), &["portable", "guard"]);
+    pool.run_until(host.close()).unwrap();
+}
+
+#[test]
+fn portable_contributions_require_matching_declared_wit_contracts() {
+    for signature in [None, Some("different-wit-contract")] {
+        let pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let hook = Hook::<i32, i32>::waterfall("transform");
+        let hook = if let Some(signature) = signature {
+            hook.signature(signature)
+        } else {
+            hook
+        };
+        let result = host.install(vec![
+            Orb::new("provider", 1).hook(hook),
+            Orb::new("isolated", 1)
+                .requires(requirement(&["transform"]))
+                .contribute_portable(
+                    "provider",
+                    "transform",
+                    "expected-wit-contract",
+                    0,
+                    |_, input| async move { Ok(Some(input)) },
+                ),
+        ]);
+        assert!(result.is_err(), "unverified portable hook installed");
+        assert!(host.kernel().installed_orbs().is_empty());
     }
 }
 

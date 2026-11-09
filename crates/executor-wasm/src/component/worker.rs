@@ -1,306 +1,142 @@
-//! Keep a compiled component Store isolated and physically owned until each native call settles.
+//! Run one compiled component Store behind the shared session owner and private host protocol.
+//!
+//! The Store never receives a kernel object, Context, Reference or callback. Declarations
+//! acquire dependency references through the existing synchronous `reference.declare` request;
+//! every dependency import issues the existing asynchronous `reference.call` request on the
+//! channel of the call that physically issued it. The embedding adapter performs that call under
+//! its admitted invocation, so kernel execution frames and WIT slot validation apply unchanged.
+//!
+//! Authority is attributed to Wasmtime task groups, not to a mutable "current call" field. A
+//! call is staged with `start_call_concurrent`; the task-group hook binds that call's authority
+//! when its group starts. An import resolves the group entered by the thread that issued it and
+//! is refused when that group carries no authority (initialization or an unrelated task). A call
+//! completes only after its result is available and its task group has finished, so task work
+//! that outlives the returned value still runs under the call's own authority and can never
+//! observe a later call's scope.
 use super::values;
-use crate::{Engine, failure};
-use serde_json::Value;
-use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    },
-    thread,
+use crate::{
+    Engine,
+    abi::Operation,
+    worker::{Command, Event, Terminal},
 };
-use tembra::Result;
+use async_channel::Sender;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex, mpsc},
+};
+use tokio::sync::oneshot;
 use wasmtime::{
     Store, StoreLimits, StoreLimitsBuilder,
-    component::{Component, Instance, Linker, ResourceTable, Val},
+    component::{
+        Accessor, Component, Func, Linker, ResourceTable, TaskGroupHook, TaskGroupId, Val,
+        types::ComponentFunc,
+    },
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-/// Receive one call result on the component worker, or on the submitter when no Store accepts it.
-pub(super) type Complete = Box<dyn FnOnce(Result<Value>) + Send>;
+/// Default dependency object selected by a plain WIT import, which carries no object key.
+const DEFAULT_KEY: &str = "main";
 
-struct Call {
-    interface: String,
-    method: String,
-    arguments: Value,
-    reply: Reply,
+/// Exported callbacks and selected Orb imports, resolved from the prepared contract.
+pub(crate) struct Layout {
+    /// JavaScript service alias to its interface identity and method spellings.
+    pub exports: BTreeMap<String, Export>,
+    /// Orb-bound import interfaces, in world order.
+    pub imports: Vec<Import>,
+    /// Checked contribution binding to its callback export; never an ordinary service.
+    pub contributions: BTreeMap<String, (String, String)>,
 }
 
-/// Settle each submitted call exactly once, including calls that no Store will execute.
-struct Reply {
-    complete: Option<Complete>,
-    poison: Arc<Mutex<Option<String>>>,
+pub(crate) struct Export {
+    pub interface: String,
+    /// JavaScript method spelling to original WIT function name.
+    pub methods: BTreeMap<String, String>,
 }
 
-impl Reply {
-    /// Publish one result to the submitter's completion.
-    fn send(mut self, result: Result<Value>) {
-        if let Some(complete) = self.complete.take() {
-            complete(result);
+pub(crate) struct Import {
+    /// World import key; the embedding adapter maps it to the selected provider service.
+    pub binding: String,
+    pub functions: Vec<ImportFunction>,
+    /// This import anchors a contribution's type and grants no callable service reference.
+    pub contribution: bool,
+}
+
+pub(crate) struct ImportFunction {
+    pub name: String,
+    /// JavaScript spelling used by the private `reference.call` request.
+    pub spelling: String,
+    /// `async func` imports are linked as concurrent host functions.
+    pub asynchronous: bool,
+}
+
+/// Immutable authority of one admitted call, shared by every thread of its task group.
+#[derive(Clone)]
+struct Authority {
+    events: Sender<Event>,
+    /// Orb root environment whose handle table holds the dependency references.
+    scope: u64,
+    handles: Arc<BTreeMap<String, u32>>,
+}
+
+struct Bound {
+    authority: Authority,
+    finished: Option<futures::channel::oneshot::Sender<()>>,
+}
+
+/// Task-group attribution shared between the Store's hook and its import functions.
+#[derive(Default)]
+struct Groups {
+    /// Group of the thread the runtime has entered, if any.
+    current: Option<TaskGroupId>,
+    /// Authority waiting for the next staged call's group to start.
+    pending: Option<Bound>,
+    bound: HashMap<TaskGroupId, Bound>,
+}
+
+struct Hook(Arc<Mutex<Groups>>);
+
+impl Hook {
+    fn groups(&self) -> wasmtime::Result<std::sync::MutexGuard<'_, Groups>> {
+        self.0
+            .lock()
+            .map_err(|_| wasmtime::Error::msg("task-group attribution is poisoned"))
+    }
+}
+
+impl TaskGroupHook for Hook {
+    /// Bind the staged call's authority; groups started without one never receive authority.
+    fn handle_start(&mut self, id: TaskGroupId) -> wasmtime::Result<()> {
+        let mut groups = self.groups()?;
+        if let Some(pending) = groups.pending.take() {
+            groups.bound.insert(id, pending);
         }
+        Ok(())
     }
-}
 
-impl Drop for Reply {
-    /// Refuse a discarded call with the worker's terminal diagnostic.
-    fn drop(&mut self) {
-        if let Some(complete) = self.complete.take() {
-            let poison = self.poison.lock().ok().and_then(|poison| poison.clone());
-            complete(Err(failure(
-                poison.unwrap_or_else(|| "component worker stopped".into()),
-            )));
+    fn handle_enter(&mut self, id: TaskGroupId) -> wasmtime::Result<()> {
+        self.groups()?.current = Some(id);
+        Ok(())
+    }
+
+    fn handle_exit(&mut self, id: TaskGroupId) -> wasmtime::Result<()> {
+        let mut groups = self.groups()?;
+        if groups.current == Some(id) {
+            groups.current = None;
         }
+        Ok(())
     }
-}
 
-/// A failed call whose reply must wait until the Store and its runtime have stopped.
-struct Terminal {
-    reply: Reply,
-    message: String,
-}
-
-pub(super) struct Session {
-    commands: Option<mpsc::Sender<Call>>,
-    thread: Option<thread::JoinHandle<()>>,
-    poison: Arc<Mutex<Option<String>>>,
-    packet_bytes: usize,
-}
-
-impl Session {
-    /// Instantiate the compiled code once with this Orb revision's own standard providers.
-    pub(super) fn start(
-        engine: Engine,
-        component: Component,
-        wasi: WasiCtxBuilder,
-    ) -> Result<Self> {
-        let (send, receive) = mpsc::channel::<Call>();
-        let (ready, initialized) = mpsc::channel::<std::result::Result<(), String>>();
-        let poison = Arc::new(Mutex::new(None));
-        let worker_poison = poison.clone();
-        let packet_bytes = engine.limits.packet_bytes;
-        let thread = thread::Builder::new()
-            .name("tembra-component".into())
-            .spawn(move || {
-                engine.active_instances.fetch_add(1, Ordering::Release);
-                let count = Count(engine.active_instances.clone());
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        drop(count);
-                        let _ =
-                            ready.send(Err(format!("component initialization failed: {error:#}")));
-                        return;
-                    }
-                };
-                let outcome = runtime.block_on(serve(&engine, &component, wasi, &ready, &receive));
-                match outcome {
-                    Ok(terminal) => {
-                        publish_after_shutdown(runtime, count, terminal, &worker_poison, receive);
-                    }
-                    Err(error) => {
-                        drop(runtime);
-                        drop(count);
-                        let _ =
-                            ready.send(Err(format!("component initialization failed: {error:#}")));
-                    }
-                }
-            })
-            .map_err(failure)?;
-        match initialized.recv().map_err(failure)? {
-            Ok(()) => Ok(Self {
-                commands: Some(send),
-                thread: Some(thread),
-                poison,
-                packet_bytes,
-            }),
-            Err(error) => {
-                drop(send);
-                let _ = thread.join();
-                Err(failure(error))
-            }
+    /// Retire the authority before the identifier can be reused, then release the waiting call.
+    fn handle_finish(&mut self, id: TaskGroupId) -> wasmtime::Result<()> {
+        let bound = self.groups()?.bound.remove(&id);
+        if let Some(mut bound) = bound
+            && let Some(finished) = bound.finished.take()
+        {
+            let _ = finished.send(());
         }
-    }
-
-    /// Queue one call in order; the dedicated worker publishes its result without a waiting thread.
-    pub(super) fn submit(
-        &self,
-        interface: String,
-        method: String,
-        arguments: Value,
-        complete: Complete,
-    ) {
-        let reply = Reply {
-            complete: Some(complete),
-            poison: self.poison.clone(),
-        };
-        let poison = self.poison.lock().expect("poison state").clone();
-        if let Some(error) = poison {
-            reply.send(Err(failure(error)));
-            return;
-        }
-        if arguments.to_string().len() > self.packet_bytes {
-            reply.send(Err(failure("component arguments exceed the packet limit")));
-            return;
-        }
-        let call = Call {
-            interface,
-            method,
-            arguments,
-            reply,
-        };
-        // A stopped worker returns the call; dropping it refuses the call with the terminal diagnostic.
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(call);
-        }
-    }
-}
-
-impl Drop for Session {
-    /// Join only this Store after its last owner is released.
-    fn drop(&mut self) {
-        self.commands.take();
-        if let Some(thread) = self.thread.take() {
-            // A completion can release the last owner on the worker itself.
-            // The closed channel then ends that worker after the completion returns.
-            if thread.thread().id() != thread::current().id() {
-                let _ = thread.join();
-            }
-        }
-    }
-}
-
-/// Instantiate once, then execute queued calls until the owner closes or one call fails terminally.
-async fn serve(
-    engine: &Engine,
-    component: &Component,
-    mut wasi: WasiCtxBuilder,
-    ready: &mpsc::Sender<std::result::Result<(), String>>,
-    receive: &mpsc::Receiver<Call>,
-) -> wasmtime::Result<Option<Terminal>> {
-    let mut linker = Linker::<State>::new(&engine.engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    let mut store = Store::new(
-        &engine.engine,
-        State {
-            wasi: wasi.build(),
-            table: ResourceTable::new(),
-            limits: StoreLimitsBuilder::new()
-                .memory_size(engine.limits.memory_bytes)
-                .build(),
-        },
-    );
-    store.limiter(|state| &mut state.limits);
-    store.set_fuel(engine.limits.fuel)?;
-    store.fuel_async_yield_interval(Some(10_000))?;
-    let instance = tokio::time::timeout(
-        std::time::Duration::from_millis(engine.limits.timeout_ms),
-        linker.instantiate_async(&mut store, component),
-    )
-    .await
-    .map_err(|_| wasmtime::Error::msg("component initialization timed out"))??;
-    let _ = ready.send(Ok(()));
-    while let Ok(call) = receive.recv() {
-        let Call {
-            interface,
-            method,
-            arguments,
-            reply,
-        } = call;
-        let result = match store.set_fuel(engine.limits.fuel) {
-            Ok(()) => tokio::time::timeout(
-                std::time::Duration::from_millis(engine.limits.timeout_ms),
-                execute(
-                    engine, &mut store, &instance, &interface, &method, &arguments,
-                ),
-            )
-            .await
-            .map_err(|_| wasmtime::Error::msg("component call timed out"))
-            .and_then(|result| result),
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(result) => reply.send(result),
-            Err(error) => {
-                // The Store is dropped when this future returns; the reply waits for runtime shutdown.
-                return Ok(Some(Terminal {
-                    reply,
-                    message: format!("component trap: {error:#}"),
-                }));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Run one export; the outer error is terminal, the inner error refuses only this call.
-async fn execute(
-    engine: &Engine,
-    store: &mut Store<State>,
-    instance: &Instance,
-    interface: &str,
-    method: &str,
-    arguments: &Value,
-) -> wasmtime::Result<Result<Value>> {
-    let (_, exported) = instance
-        .get_export(&mut *store, None, interface)
-        .ok_or_else(|| wasmtime::Error::msg("missing component interface"))?;
-    let (_, index) = instance
-        .get_export(&mut *store, Some(&exported), method)
-        .ok_or_else(|| wasmtime::Error::msg("missing component method"))?;
-    let function = instance
-        .get_func(&mut *store, index)
-        .ok_or_else(|| wasmtime::Error::msg("component export is not a function"))?;
-    let ty = function.ty(&*store);
-    let args = arguments
-        .as_array()
-        .ok_or_else(|| wasmtime::Error::msg("component arguments require a tuple"))?;
-    if args.len() != ty.params().len() || ty.results().len() > 1 {
-        return Err(wasmtime::Error::msg("component function arity differs"));
-    }
-    let arguments = match ty
-        .params()
-        .zip(args)
-        .map(|((_, ty), value)| values::lower(ty, value))
-        .collect::<Result<Vec<_>>>()
-    {
-        Ok(arguments) => arguments,
-        Err(error) => return Ok(Err(error)),
-    };
-    let mut results = vec![Val::Bool(false); ty.results().len()];
-    function
-        .call_async(&mut *store, &arguments, &mut results)
-        .await?;
-    let value = match results.into_iter().next().map(values::lift).transpose() {
-        Ok(value) => value.unwrap_or(Value::Null),
-        Err(error) => return Ok(Err(error)),
-    };
-    if value.to_string().len() > engine.limits.packet_bytes {
-        return Ok(Err(failure("component result exceeds the packet limit")));
-    }
-    Ok(Ok(value))
-}
-
-/// Runtime destruction joins WASI blocking work before any call can observe the quarantine.
-fn publish_after_shutdown(
-    runtime: tokio::runtime::Runtime,
-    count: Count,
-    terminal: Option<Terminal>,
-    poison: &Mutex<Option<String>>,
-    queued: mpsc::Receiver<Call>,
-) {
-    drop(runtime);
-    drop(count);
-    if let Some(Terminal { reply, message }) = terminal {
-        *poison.lock().expect("poison state") = Some(message.clone());
-        reply.send(Err(failure(message)));
-    }
-    // Refuse queued calls in order. Calls sent after this drain are discarded by the closed channel.
-    while let Ok(call) = queued.try_recv() {
-        drop(call);
+        Ok(())
     }
 }
 
@@ -308,6 +144,8 @@ struct State {
     wasi: WasiCtx,
     table: ResourceTable,
     limits: StoreLimits,
+    groups: Arc<Mutex<Groups>>,
+    packet_bytes: usize,
 }
 
 impl WasiView for State {
@@ -320,203 +158,503 @@ impl WasiView for State {
     }
 }
 
-struct Count(Arc<AtomicUsize>);
+/// Host-selected commands; a component has no guest closures to validate or call back.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum Packet {
+    Create {
+        environment: u64,
+        service: Option<String>,
+    },
+    Invoke {
+        environment: u64,
+        service: Option<String>,
+        method: String,
+        args: Value,
+    },
+    Contribute {
+        environment: u64,
+        binding: String,
+        service: String,
+        method: String,
+        args: Value,
+    },
+    Release {
+        environment: u64,
+    },
+    #[serde(other)]
+    Unsupported,
+}
 
-impl Drop for Count {
-    /// Retire the metric after the Store and its runtime are dropped, including instantiation failure.
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Release);
+/// Dependency handles issued to Orb root environments, and each service's root.
+#[derive(Default)]
+struct Environments {
+    roots: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
+    parents: BTreeMap<u64, u64>,
+}
+
+/// Instantiate the component, report readiness, then serve commands until the owner closes or a
+/// call fails terminally.
+pub(crate) async fn run(
+    engine: Engine,
+    component: Component,
+    wasi: WasiCtxBuilder,
+    layout: Layout,
+    ready: mpsc::Sender<std::result::Result<(), String>>,
+    commands: mpsc::Receiver<Command>,
+) -> Terminal {
+    let groups = Arc::new(Mutex::new(Groups::default()));
+    let (mut store, exports) = match instantiate(&engine, &component, wasi, &layout, &groups).await
+    {
+        Ok(instance) => instance,
+        Err(error) => {
+            let _ = ready.send(Err(format!("component initialization failed: {error:#}")));
+            return Vec::new();
+        }
+    };
+    let _ = ready.send(Ok(()));
+    let mut environments = Environments::default();
+    while let Ok(command) = commands.recv() {
+        let served = serve(
+            &engine,
+            &mut store,
+            &exports,
+            &layout,
+            &mut environments,
+            &groups,
+            &command,
+        )
+        .await;
+        match served {
+            Ok(result) => {
+                let _ = command.events.send(Event::Done(result)).await;
+            }
+            Err(error) => {
+                // The Store is dropped with this future; its completion waits for runtime shutdown.
+                return vec![(command.events, format!("component trap: {error:#}"))];
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Link granted WASI and the selected Orb imports, then instantiate within the callback bound.
+async fn instantiate(
+    engine: &Engine,
+    component: &Component,
+    mut wasi: WasiCtxBuilder,
+    layout: &Layout,
+    groups: &Arc<Mutex<Groups>>,
+) -> wasmtime::Result<(Store<State>, BTreeMap<(String, String), Func>)> {
+    let mut linker = Linker::<State>::new(&engine.engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    link_imports(&mut linker, layout)?;
+    let mut store = Store::new(
+        &engine.engine,
+        State {
+            wasi: wasi.build(),
+            table: ResourceTable::new(),
+            limits: StoreLimitsBuilder::new()
+                .memory_size(engine.limits.memory_bytes)
+                .build(),
+            groups: groups.clone(),
+            packet_bytes: engine.limits.packet_bytes,
+        },
+    );
+    store.limiter(|state| &mut state.limits);
+    store.set_fuel(engine.limits.fuel)?;
+    store.fuel_async_yield_interval(Some(10_000))?;
+    store.task_group_hook(Hook(groups.clone()));
+    let instance = tokio::time::timeout(
+        std::time::Duration::from_millis(engine.limits.timeout_ms),
+        linker.instantiate_async(&mut store, component),
+    )
+    .await
+    .map_err(|_| wasmtime::Error::msg("component initialization timed out"))??;
+    let mut exports = BTreeMap::new();
+    for (alias, export) in &layout.exports {
+        let (_, interface) = instance
+            .get_export(&mut store, None, &export.interface)
+            .ok_or_else(|| wasmtime::Error::msg("missing component interface"))?;
+        for (spelling, method) in &export.methods {
+            let (_, index) = instance
+                .get_export(&mut store, Some(&interface), method)
+                .ok_or_else(|| wasmtime::Error::msg("missing component method"))?;
+            let function = instance
+                .get_func(&mut store, index)
+                .ok_or_else(|| wasmtime::Error::msg("component export is not a function"))?;
+            exports.insert((alias.clone(), spelling.clone()), function);
+        }
+    }
+    Ok((store, exports))
+}
+
+/// Define each selected dependency function; WASI imports remain the installation's grants.
+fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result<()> {
+    for import in &layout.imports {
+        let mut instance = linker.instance(&import.binding)?;
+        for function in &import.functions {
+            if import.contribution {
+                let message = format!(
+                    "hook import {} is a contribution type anchor and cannot be called",
+                    import.binding
+                );
+                instance.func_new(&function.name, move |_, _, _, _| {
+                    Err(wasmtime::Error::msg(message.clone()))
+                })?;
+                continue;
+            }
+            let target = Arc::new((import.binding.clone(), function.spelling.clone()));
+            if function.asynchronous {
+                instance.func_new_concurrent(
+                    &function.name,
+                    move |accessor: &Accessor<State>, ty, params, results| {
+                        // The first poll runs inside the issuing guest call, so the entered group
+                        // is still the caller's when its authority is captured.
+                        let request =
+                            accessor.with(|mut access| request(access.data_mut(), &target, params));
+                        Box::pin(async move { settle(request?, ty, results).await })
+                    },
+                )?;
+            } else {
+                instance.func_new_async(&function.name, move |store, ty, params, results| {
+                    let request = request(store.data(), &target, params);
+                    Box::new(async move { settle(request?, ty, results).await })
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Capture the issuing task group's authority and publish one bounded `reference.call` request.
+fn request(
+    state: &State,
+    (binding, method): &(String, String),
+    params: &[Val],
+) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+    let authority = {
+        let groups = state
+            .groups
+            .lock()
+            .map_err(|_| wasmtime::Error::msg("task-group attribution is poisoned"))?;
+        groups
+            .current
+            .and_then(|group| groups.bound.get(&group))
+            .map(|bound| bound.authority.clone())
+            .ok_or_else(|| wasmtime::Error::msg("dependency import has no admitted invocation"))?
+    };
+    let id = *authority
+        .handles
+        .get(binding)
+        .ok_or_else(|| wasmtime::Error::msg("dependency import has no declared reference"))?;
+    let args = params
+        .iter()
+        .cloned()
+        .map(values::lift)
+        .collect::<tembra::Result<Vec<_>>>()
+        .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+    let packet = json!({
+        "operation": "reference.call",
+        "scope": authority.scope,
+        "id": id,
+        "method": method,
+        "args": args,
+    })
+    .to_string();
+    if packet.len() > state.packet_bytes {
+        return Err(wasmtime::Error::msg("host packet limit exceeded"));
+    }
+    let (reply, receive) = oneshot::channel();
+    authority
+        .events
+        .try_send(Event::Host {
+            packet,
+            asynchronous: true,
+            reply,
+        })
+        .map_err(|_| wasmtime::Error::msg("host operation queue is full or closed"))?;
+    Ok(receive)
+}
+
+/// Lower a checked dependency result; a refusal traps the importer, which quarantines its Store.
+async fn settle(
+    receive: oneshot::Receiver<std::result::Result<String, String>>,
+    ty: ComponentFunc,
+    results: &mut [Val],
+) -> wasmtime::Result<()> {
+    let text = receive
+        .await
+        .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+        .map_err(|message| wasmtime::Error::msg(format!("dependency call failed: {message}")))?;
+    let value: Value = serde_json::from_str(&text)?;
+    match (ty.results().next(), results.first_mut()) {
+        (Some(ty), Some(result)) => {
+            *result = values::lower(ty, &value)
+                .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+        }
+        (None, None) if value.is_null() => {}
+        _ => {
+            return Err(wasmtime::Error::msg(
+                "dependency result differs from its import",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Send one synchronous declaration request through the command's own channel.
+async fn declaration(
+    events: &Sender<Event>,
+    packet: Value,
+    limit: usize,
+) -> std::result::Result<Value, String> {
+    let packet = packet.to_string();
+    if packet.len() > limit {
+        return Err("host packet limit exceeded".into());
+    }
+    let (reply, receive) = oneshot::channel();
+    events
+        .send(Event::Host {
+            packet,
+            asynchronous: false,
+            reply,
+        })
+        .await
+        .map_err(|_| "declaration scope ended".to_owned())?;
+    let text = receive
+        .await
+        .map_err(|_| "declaration scope ended".to_owned())??;
+    serde_json::from_str(&text).map_err(|error| error.to_string())
+}
+
+/// Serve one command. The outer error is terminal; the inner error refuses only this command.
+async fn serve(
+    engine: &Engine,
+    store: &mut Store<State>,
+    exports: &BTreeMap<(String, String), Func>,
+    layout: &Layout,
+    environments: &mut Environments,
+    groups: &Arc<Mutex<Groups>>,
+    command: &Command,
+) -> wasmtime::Result<std::result::Result<String, String>> {
+    if !matches!(command.operation, Operation::Declare | Operation::Start) {
+        return Ok(Err(
+            "compiled components accept only declarations and calls".into(),
+        ));
+    }
+    let packet: Packet = match serde_json::from_str(&command.packet) {
+        Ok(packet) => packet,
+        Err(error) => return Ok(Err(format!("malformed component command: {error}"))),
+    };
+    let expected = match packet {
+        Packet::Create { .. } => Operation::Declare,
+        Packet::Invoke { .. } | Packet::Contribute { .. } | Packet::Release { .. } => {
+            Operation::Start
+        }
+        Packet::Unsupported => return Ok(Err("unknown compiled command".into())),
+    };
+    if command.operation != expected {
+        return Ok(Err("command does not match its execution entrypoint".into()));
+    }
+    let limit = engine.limits.packet_bytes;
+    let packet = match packet {
+        Packet::Contribute {
+            environment,
+            binding,
+            service,
+            method,
+            args,
+        } => {
+            if layout.contributions.get(&binding) != Some(&(service.clone(), method.clone())) {
+                return Ok(Err("unknown compiled contribution callback".into()));
+            }
+            Packet::Invoke {
+                environment,
+                service: Some(service),
+                method,
+                args,
+            }
+        }
+        packet => packet,
+    };
+    match packet {
+        Packet::Create {
+            environment,
+            service,
+        } => Ok(declare(
+            environment,
+            service,
+            layout,
+            environments,
+            &command.events,
+            limit,
+        )
+        .await
+        .map(|()| "null".to_owned())),
+        Packet::Release { environment } => {
+            environments.roots.remove(&environment);
+            environments.parents.remove(&environment);
+            Ok(Ok("null".into()))
+        }
+        Packet::Invoke {
+            environment,
+            service: Some(service),
+            method,
+            args,
+        } if command.operation == Operation::Start => {
+            let Some(function) = exports.get(&(service, method)).copied() else {
+                return Ok(Err("unknown component export".into()));
+            };
+            let root = environments
+                .parents
+                .get(&environment)
+                .copied()
+                .unwrap_or(environment);
+            let handles = match (environments.roots.get(&root), layout.imports.is_empty()) {
+                (Some(handles), _) => handles.clone(),
+                (None, true) => Arc::default(),
+                (None, false) => return Ok(Err("component environment is not declared".into())),
+            };
+            let authority = Authority {
+                events: command.events.clone(),
+                scope: root,
+                handles,
+            };
+            invoke(engine, store, function, &args, authority, groups).await
+        }
+        Packet::Invoke { .. } | Packet::Contribute { .. } | Packet::Unsupported => Ok(Err(
+            "compiled components have no guest callbacks of this kind".into(),
+        )),
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Limits;
-    use std::time::Duration;
-
-    /// The smallest valid component: it instantiates and exports nothing.
-    const EMPTY: &[u8] = b"\0asm\x0d\0\x01\0";
-
-    /// Capture one completion on a channel.
-    fn capture() -> (Complete, mpsc::Receiver<Result<Value>>) {
-        let (send, receive) = mpsc::channel();
-        (
-            Box::new(move |result| {
-                let _ = send.send(result);
+/// Acquire default-key dependency references for an Orb root; services record their root.
+async fn declare(
+    environment: u64,
+    service: Option<String>,
+    layout: &Layout,
+    environments: &mut Environments,
+    events: &Sender<Event>,
+    limit: usize,
+) -> std::result::Result<(), String> {
+    if layout.imports.is_empty() {
+        return Ok(());
+    }
+    if service.is_some() {
+        let root = declaration(events, json!({"operation": "orb"}), limit).await?;
+        let root = root
+            .as_u64()
+            .filter(|root| environments.roots.contains_key(root))
+            .ok_or("service environment has no declared Orb root")?;
+        environments.parents.insert(environment, root);
+        return Ok(());
+    }
+    let mut handles = BTreeMap::new();
+    for import in &layout.imports {
+        if import.contribution {
+            continue;
+        }
+        let id = declaration(
+            events,
+            json!({
+                "operation": "reference.declare",
+                "service": import.binding,
+                "key": [DEFAULT_KEY],
             }),
-            receive,
+            limit,
         )
+        .await?;
+        let id = id
+            .as_u64()
+            .and_then(|id| u32::try_from(id).ok())
+            .ok_or("invalid dependency reference handle")?;
+        handles.insert(import.binding.clone(), id);
     }
+    environments.roots.insert(environment, Arc::new(handles));
+    Ok(())
+}
 
-    /// Start a real Store whose every call fails terminally.
-    fn empty_session(engine: &Engine) -> Session {
-        let component = Component::new(&engine.engine, EMPTY).unwrap();
-        Session::start(engine.clone(), component, WasiCtxBuilder::new()).unwrap()
+/// Run one export as a staged concurrent call and settle it only after its task group finishes.
+async fn invoke(
+    engine: &Engine,
+    store: &mut Store<State>,
+    function: Func,
+    arguments: &Value,
+    authority: Authority,
+    groups: &Arc<Mutex<Groups>>,
+) -> wasmtime::Result<std::result::Result<String, String>> {
+    let ty = function.ty(&*store);
+    let Some(args) = arguments.as_array() else {
+        return Ok(Err("component arguments require a tuple".into()));
+    };
+    if args.len() != ty.params().len() || ty.results().len() > 1 {
+        return Ok(Err("component function arity differs".into()));
     }
-
-    /// A detached WASI blocking operation must finish before the trap reply or poison is published.
-    #[test]
-    fn trap_reply_waits_for_blocking_runtime_work() {
-        let (started, entered) = mpsc::channel();
-        let (release, blocked) = mpsc::channel::<()>();
-        let (complete, observed) = capture();
-        let (queued_complete, queued_observed) = capture();
-        let poison = Arc::new(Mutex::new(None));
-        let worker_poison = poison.clone();
-        let instances = Arc::new(AtomicUsize::new(1));
-        let count = Count(instances.clone());
-        let (queue, queued) = mpsc::channel();
-        queue
-            .send(Call {
-                interface: String::new(),
-                method: String::new(),
-                arguments: Value::Null,
-                reply: Reply {
-                    complete: Some(queued_complete),
-                    poison: poison.clone(),
-                },
-            })
-            .unwrap();
-        let terminal = Terminal {
-            reply: Reply {
-                complete: Some(complete),
-                poison: poison.clone(),
-            },
-            message: "component trap: timed out".into(),
-        };
-        let worker = thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.spawn_blocking(move || {
-                let _ = started.send(());
-                let _ = blocked.recv();
-            });
-            publish_after_shutdown(runtime, count, Some(terminal), &worker_poison, queued);
+    let args = match ty
+        .params()
+        .zip(args)
+        .map(|((_, ty), value)| values::lower(ty, value))
+        .collect::<tembra::Result<Vec<_>>>()
+    {
+        Ok(args) => args,
+        Err(error) => return Ok(Err(error.to_string())),
+    };
+    let count = ty.results().len();
+    store.set_fuel(engine.limits.fuel)?;
+    let (finished, settled) = futures::channel::oneshot::channel();
+    let groups = groups.clone();
+    let call = store.run_concurrent(async move |accessor: &Accessor<State>| {
+        let mut results = vec![Val::Bool(false); count];
+        lock(&groups)?.pending = Some(Bound {
+            authority,
+            finished: Some(finished),
         });
-        entered.recv().unwrap();
-        let premature = observed.recv_timeout(Duration::from_millis(100));
-        let early_poison = poison.lock().unwrap().clone();
-        let early_instances = instances.load(Ordering::Acquire);
-        release.send(()).unwrap();
-        worker.join().unwrap();
-        assert!(
-            premature.is_err(),
-            "trap reply preceded physical completion"
-        );
-        assert_eq!(
-            early_poison, None,
-            "quarantine preceded physical completion"
-        );
-        assert_eq!(early_instances, 1, "Store metric retired before shutdown");
-        let error = observed.recv().unwrap().unwrap_err();
-        assert!(error.message.contains("timed out"), "{error}");
-        let queued = queued_observed.recv().unwrap().unwrap_err();
-        assert!(queued.message.contains("timed out"), "{queued}");
-        assert_eq!(instances.load(Ordering::Acquire), 0);
-    }
-
-    /// Queued calls receive the quarantine diagnostic; none waits on a thread or stays unsettled.
-    #[test]
-    fn queued_calls_settle_after_quarantine() {
-        let engine = Engine::new(Limits::default()).unwrap();
-        let session = empty_session(&engine);
-        assert_eq!(engine.instances(), 1);
-        let receivers = (0..3)
-            .map(|_| {
-                let (complete, receive) = capture();
-                session.submit(
-                    "missing".into(),
-                    "call".into(),
-                    Value::Array(vec![]),
-                    complete,
-                );
-                receive
-            })
-            .collect::<Vec<_>>();
-        for receive in receivers {
-            let error = receive
-                .recv_timeout(Duration::from_secs(10))
-                .expect("queued call settled")
-                .unwrap_err();
-            assert!(
-                error.message.contains("missing component interface"),
-                "{error}"
-            );
+        let staged = accessor
+            .with(|mut access| function.start_call_concurrent(&mut access, &args, &mut results));
+        let staged = match staged {
+            Ok(staged) => staged,
+            Err(error) => {
+                lock(&groups)?.pending = None;
+                return Err(error);
+            }
+        };
+        let group = staged.group();
+        {
+            let groups = lock(&groups)?;
+            if groups.pending.is_some() || !groups.bound.contains_key(&group) {
+                return Err(wasmtime::Error::msg(
+                    "component call authority was not bound to its task group",
+                ));
+            }
         }
-        let (complete, late) = capture();
-        session.submit(
-            "missing".into(),
-            "call".into(),
-            Value::Array(vec![]),
-            complete,
-        );
-        let error = late
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap()
-            .unwrap_err();
-        assert!(
-            error.message.contains("missing component interface"),
-            "{error}"
-        );
-        drop(session);
-        assert_eq!(engine.instances(), 0);
+        function.finish_call_concurrent(accessor, staged).await?;
+        // A published result is not physical completion: wait until every task and subtask of
+        // this call has exited, so no continuation can outlive the call's authority.
+        settled
+            .await
+            .map_err(|_| wasmtime::Error::msg("component task group ended without finishing"))?;
+        Ok(results)
+    });
+    let results = tokio::time::timeout(
+        std::time::Duration::from_millis(engine.limits.timeout_ms),
+        call,
+    )
+    .await
+    .map_err(|_| wasmtime::Error::msg("component call timed out"))???;
+    let value = match results.into_iter().next().map(values::lift).transpose() {
+        Ok(value) => value.unwrap_or(Value::Null),
+        Err(error) => return Ok(Err(error.to_string())),
+    };
+    let text = value.to_string();
+    if text.len() > engine.limits.packet_bytes {
+        return Ok(Err("component result exceeds the packet limit".into()));
     }
+    Ok(Ok(text))
+}
 
-    /// Oversized arguments are refused before they reach the Store.
-    #[test]
-    fn oversized_arguments_do_not_poison_the_store() {
-        let engine = Engine::new(Limits {
-            packet_bytes: 8,
-            ..Limits::default()
-        })
-        .unwrap();
-        let session = empty_session(&engine);
-        let (complete, receive) = capture();
-        session.submit(
-            "missing".into(),
-            "call".into(),
-            Value::String("exceeds the packet".into()),
-            complete,
-        );
-        let error = receive.recv().unwrap().unwrap_err();
-        assert!(error.message.contains("packet limit"), "{error}");
-        assert_eq!(*session.poison.lock().unwrap(), None);
-    }
-
-    /// A completion may release the last owner on the worker without joining that worker.
-    #[test]
-    fn completion_releases_last_owner_on_the_worker() {
-        let engine = Engine::new(Limits::default()).unwrap();
-        let session = Arc::new(empty_session(&engine));
-        let held = session.clone();
-        let (entered, inside) = mpsc::channel();
-        let (release, gate) = mpsc::channel::<()>();
-        let (finished, done) = mpsc::channel();
-        session.submit(
-            "missing".into(),
-            "call".into(),
-            Value::Array(vec![]),
-            Box::new(move |result| {
-                let _ = entered.send(result.is_err());
-                let _ = gate.recv();
-                drop(held);
-                let _ = finished.send(thread::current().name().map(str::to_owned));
-            }),
-        );
-        assert!(inside.recv_timeout(Duration::from_secs(10)).unwrap());
-        drop(session);
-        release.send(()).unwrap();
-        let name = done
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the worker released its last owner without joining itself");
-        assert_eq!(name.as_deref(), Some("tembra-component"));
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while engine.instances() != 0 && std::time::Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(engine.instances(), 0);
-    }
+fn lock(groups: &Mutex<Groups>) -> wasmtime::Result<std::sync::MutexGuard<'_, Groups>> {
+    groups
+        .lock()
+        .map_err(|_| wasmtime::Error::msg("task-group attribution is poisoned"))
 }

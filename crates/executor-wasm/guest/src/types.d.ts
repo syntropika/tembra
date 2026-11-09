@@ -31,6 +31,8 @@ interface WitGraph {
 interface GuestValues {
   hasImportMethod(service: string, method: unknown): boolean;
   arguments(service: string, method: string, arguments_: unknown[]): unknown[];
+  exportArguments(service: string, method: string, arguments_: unknown[]): unknown[];
+  exportResult(service: string, method: string, value: unknown): unknown;
   invoke(service: string, method: string, callback: () => unknown): Promise<unknown>;
   importArguments(service: string, method: string, arguments_: unknown[]): unknown[];
   importResult(service: string, method: string, value: unknown): unknown;
@@ -81,12 +83,17 @@ interface HostRequests {
     dependencies: HostHandle[];
   };
   "resource.read": HostHandle;
+  "hook.declare": { name: string };
 }
 /** Asynchronous host operations awaited by the outer driver. */
 interface AsyncHostRequests {
+  "hook.run": HostHandle & { value: unknown };
   "filesystem.read-text": { path: string };
   "filesystem.write-text": { path: string; value: string };
-  "transport.exchange": { ip: string; port: number; request: string };
+  "transport.connect": { ip: string; port: number };
+  "transport.read": { id: number };
+  "transport.write": { id: number; bytes: number[] };
+  "transport.close": { id: number };
   "reference.ready": HostHandle;
   "reference.call": HostHandle & { method: string; args: unknown[] };
   wait: { milliseconds: number };
@@ -132,5 +139,11 @@ declare var tembra: {
     readText(path: string): Promise<string>;
     writeText(path: string, value: string): Promise<void>;
   };
-  transport?: { exchange(ip: string, port: number, request: string): Promise<string> };
+  transport?: { connect(ip: string, port: number): Promise<TransportStream> };
 };
+/** One incremental byte stream; reads return at most 16 KiB and `null` at end of stream. */
+interface TransportStream {
+  read(): Promise<Uint8Array | null>;
+  write(bytes: Uint8Array): Promise<void>;
+  close(): Promise<void>;
+}

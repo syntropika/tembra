@@ -85,6 +85,8 @@ rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target
 just build-interpreter <wasi-sdk> <cache-directory> [<dquickts-checkout>]
 just build-provider <provider-target-directory>
 just build-probe <provider-target-directory>
+just build-consumer <provider-target-directory>
+just build-contributor <provider-target-directory>
 ```
 
 The interpreter recipe packages the same `interpreter.wasm` into `packages/ts/engine-node/dist` and
@@ -96,16 +98,18 @@ every isolated orb suite with an output directory outside the checkout:
 ```sh
 just test-wasm-acceptance --out <directory> \
   --provider <provider-target-directory>/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm \
-  --probe <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm
+  --probe <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm \
+  --consumer <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm \
+  --contributor <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm
 ```
 
 The runner builds the fixture orbs into `<directory>/fixtures`, or reuses `--fixtures <directory>`.
-It runs the ignored Rust executor tests, the SDK Bun and Node suites, Chrome with the default and
+It runs the Rust executor tests including artifact-dependent cases, the SDK Bun and Node suites, Chrome with the default and
 override engines, `bun run test:browser`, the [Wasm orb example](examples/wasm-orb/README.md), and
 packed consumers in Node, Bun and Chrome, including a clean NodeNext typecheck. The probe verifies
 component quarantine, physical WASI settlement, filesystem grants and calls with a one-thread libuv pool.
 Repeat `--suite native|sdk|node|browser|example|package` to run a subset. CI runs the same command in the
-`acceptance` job of the quality workflow. `just test-wasm-orb` runs only the ignored Rust tests.
+`acceptance` job of the quality workflow. `just test-wasm-orb` runs the Rust tests against supplied artifacts.
 
 ## Native builds
 

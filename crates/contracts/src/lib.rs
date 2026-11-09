@@ -8,6 +8,7 @@ mod artifact;
 mod authoring;
 mod codec;
 mod describe;
+mod hooks;
 mod implementation;
 mod lower;
 mod model;
@@ -24,6 +25,7 @@ mod validate;
 pub use artifact::{Artifact, Identity, Implementation as ArtifactImplementation};
 #[cfg(feature = "authoring")]
 pub use authoring::Contract;
+pub use hooks::{ContributionBinding, HookBinding, HookComposition, HookPlan};
 pub use implementation::{Implementation, Lifetime, ServiceBinding, ServiceImplementation};
 pub use lower::{Binding, HostImport, Plan};
 pub use model::{

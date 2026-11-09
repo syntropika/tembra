@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { checkSignal, combinedSignal } from "../src/runtime/signals.ts";
 
 /** React Native's AbortSignal exposes events and aborted, without newer DOM conveniences. */
-function legacyController() {
+function mobileController() {
   const events = new EventTarget();
   const signal = Object.assign(events, { aborted: false }) as AbortSignal;
   return {
@@ -15,7 +15,7 @@ function legacyController() {
 }
 
 test("mobile cancellation works without throwIfAborted or signal reasons", () => {
-  const controller = legacyController();
+  const controller = mobileController();
   checkSignal(controller.signal);
   controller.abort();
   expect(() => checkSignal(controller.signal)).toThrow();
@@ -25,14 +25,14 @@ test("fallback signals observe owner cancellation and already-ended callback lif
   const original = AbortSignal.any;
   try {
     Object.defineProperty(AbortSignal, "any", { configurable: true, value: undefined });
-    const owner = legacyController(),
-      ended = legacyController();
+    const owner = mobileController(),
+      ended = mobileController();
     const combined = combinedSignal(owner.signal, ended.signal);
     expect(combined.aborted).toBe(false);
     owner.abort();
     expect(combined.aborted).toBe(true);
     ended.abort();
-    expect(combinedSignal(legacyController().signal, ended.signal).aborted).toBe(true);
+    expect(combinedSignal(mobileController().signal, ended.signal).aborted).toBe(true);
   } finally {
     Object.defineProperty(AbortSignal, "any", { configurable: true, value: original });
   }

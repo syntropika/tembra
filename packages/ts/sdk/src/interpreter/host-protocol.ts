@@ -56,11 +56,13 @@ export type HostRequest =
       readonly close: number;
       readonly dependencies: readonly Handle[];
     }
-  | ({ readonly operation: "resource.read" } & Handle);
+  | ({ readonly operation: "resource.read" } & Handle)
+  | { readonly operation: "hook.declare"; readonly name: string };
 
 /** Asynchronous host operations, awaited outside the guest heap. */
 export type AsyncHostRequest =
   | IORequest
+  | ({ readonly operation: "hook.run"; readonly value: unknown } & Handle)
   | ({ readonly operation: "reference.ready" } & Handle)
   | ({
       readonly operation: "reference.call";
@@ -73,15 +75,20 @@ export type AsyncHostRequest =
 export type IORequest =
   | { readonly operation: "filesystem.read-text"; readonly path: string }
   | { readonly operation: "filesystem.write-text"; readonly path: string; readonly value: string }
+  | { readonly operation: "transport.connect"; readonly ip: string; readonly port: number }
+  | { readonly operation: "transport.read"; readonly id: number }
   | {
-      readonly operation: "transport.exchange";
-      readonly ip: string;
-      readonly port: number;
-      readonly request: string;
-    };
+      readonly operation: "transport.write";
+      readonly id: number;
+      readonly bytes: readonly number[];
+    }
+  | { readonly operation: "transport.close"; readonly id: number };
 
 /** Longest cooperative timer a callback may request. */
 export const WAIT_LIMIT_MILLISECONDS = 5000;
+
+/** Largest byte chunk carried by one transport read or write request. */
+export const TRANSPORT_CHUNK_BYTES = 16 * 1024;
 
 /** Field kinds; a trailing `?` marks a field that may be absent (or null) and takes a default. */
 type Kind =
@@ -95,7 +102,8 @@ type Kind =
   | "callback?"
   | "scope?"
   | "revision?"
-  | "handles?";
+  | "handles?"
+  | "bytes";
 type Schema = Readonly<Record<string, Kind>>;
 
 const HANDLE = { scope: "scope?", id: "u32" } as const satisfies Schema;
@@ -123,11 +131,16 @@ const SYNC = {
     dependencies: "handles?",
   },
   "resource.read": HANDLE,
+  "hook.declare": { name: "string" },
 } as const satisfies Record<HostRequest["operation"], Schema>;
 const ASYNC = {
   "filesystem.read-text": { path: "string" },
   "filesystem.write-text": { path: "string", value: "string" },
-  "transport.exchange": { ip: "string", port: "u16", request: "string" },
+  "transport.connect": { ip: "string", port: "u16" },
+  "transport.read": { id: "u32" },
+  "transport.write": { id: "u32", bytes: "bytes" },
+  "transport.close": { id: "u32" },
+  "hook.run": { ...HANDLE, value: "json" },
   "reference.ready": HANDLE,
   "reference.call": { ...HANDLE, method: "string", args: "json" },
   wait: { milliseconds: "u32" },
@@ -158,6 +171,11 @@ export function survivesCancellation(request: HostRequest): boolean {
     default:
       return false;
   }
+}
+
+/** Closing an issued transport stream is cleanup and stays permitted after cancellation. */
+export function asyncSurvivesCancellation(request: AsyncHostRequest): boolean {
+  return request.operation === "transport.close";
 }
 
 /** Validate a packet against the schema for its operation, filling defaults for optional fields. */
@@ -222,6 +240,14 @@ function field(value: unknown, kind: Kind, invalid: () => Error): unknown {
     case "scope?":
       if (absent) return undefined;
       if (!Number.isSafeInteger(value) || (value as number) < 0) throw invalid();
+      return value;
+    case "bytes":
+      if (
+        !Array.isArray(value) ||
+        value.length > TRANSPORT_CHUNK_BYTES ||
+        !value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)
+      )
+        throw invalid();
       return value;
     case "handles?":
       if (absent) return [];

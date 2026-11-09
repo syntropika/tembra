@@ -139,39 +139,35 @@ extension Tembra {
     /** Release one host-owned prepared artifact. */
     @objc public func releaseArtifact(_ handle: String, artifact: String) throws -> NSNumber { try checked { try execution(handle).releaseArtifact(artifact); return NSNumber(value: true) } }
     /** Prepare a fresh Store without blocking the JavaScript event loop. */
-    @objc public func openPort(_ handle: String, artifact: String, bindings: String, grants: String, component: Bool, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [self] in do { resolve(try execution(handle).open(artifact, bindings: bindings, grants: grants, component: component)) } catch { reject(diagnostic(error)) } }
+    @objc public func openPort(_ handle: String, artifact: String, bindings: String, grants: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in do { resolve(try execution(handle).open(artifact, bindings: bindings, grants: grants)) } catch { reject(diagnostic(error)) } }
     }
     /** Read checked executable metadata. */
     @objc public func portDescription(_ handle: String, port: String) throws -> String { try checked { try execution(handle).description(port) } }
     /** Transfer bounded, host-attributed guest diagnostics. */
     @objc public func portLogs(_ handle: String, port: String) throws -> String { try checked { try execution(handle).logs(port) } }
     /** Start a factory or an admitted callback. */
-    @objc public func portBegin(_ handle: String, port: String, packet: String, declaration: Bool) throws -> NSNumber { try checked { try execution(handle).source(port).begin(packet: packet, declaration: declaration); return NSNumber(value: true) } }
+    @objc public func portBegin(_ handle: String, port: String, packet: String, declaration: Bool) throws -> NSNumber { try checked { try execution(handle).port(port).begin(packet: packet, declaration: declaration); return NSNumber(value: true) } }
     /** Await native events without blocking a platform worker. */
     @objc public func portReceive(_ handle: String, port: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
-        Task { do { resolve(try await execution(handle).source(port).receive()) } catch { reject(diagnostic(error)) } }
+        Task { do { resolve(try await execution(handle).port(port).receive()) } catch { reject(diagnostic(error)) } }
     }
     /** Resolve only an issued native host request. */
-    @objc public func portReply(_ handle: String, port: String, id: NSNumber, packet: String) throws -> NSNumber { try checked { return NSNumber(value: try execution(handle).source(port).reply(id: id.uint32Value, packet: packet)) } }
+    @objc public func portReply(_ handle: String, port: String, id: NSNumber, packet: String) throws -> NSNumber { try checked { return NSNumber(value: try execution(handle).port(port).reply(id: id.uint32Value, packet: packet)) } }
     /** Release the physical admission ticket after completion. */
-    @objc public func portFinish(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).source(port).finish(); return NSNumber(value: true) } }
+    @objc public func portFinish(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).port(port).finish(); return NSNumber(value: true) } }
     /** Quarantine a failed exchange and await physical shutdown away from the JS thread. */
     @objc public func abortPort(_ handle: String, port: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
         DispatchQueue.global(qos: .utility).async { [self] in
-            do { try execution(handle).source(port).invalidate(); resolve("") }
+            do { try execution(handle).port(port).invalidate(); resolve("") }
             catch { reject(diagnostic(error)) }
         }
     }
     /** Release guest-owned environment bookkeeping. */
-    @objc public func portRelease(_ handle: String, port: String, environment: NSNumber) throws -> NSNumber { try checked { try execution(handle).source(port).release(environment: environment.uint64Value); return NSNumber(value: true) } }
+    @objc public func portRelease(_ handle: String, port: String, environment: NSNumber) throws -> NSNumber { try checked { try execution(handle).port(port).release(environment: environment.uint64Value); return NSNumber(value: true) } }
     /** Run capability-bound native filesystem or transport work. */
     @objc public func portIo(_ handle: String, port: String, packet: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
-        Task { do { resolve(try await execution(handle).source(port).io(packet: packet)) } catch { reject(diagnostic(error)) } }
-    }
-    /** Await an ordinary compiled-component call. */
-    @objc public func componentCall(_ handle: String, port: String, binding: String, method: String, arguments: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
-        Task { do { resolve(try await execution(handle).component(port).call(binding: binding, method: method, arguments: arguments)) } catch { reject(diagnostic(error)) } }
+        Task { do { resolve(try await execution(handle).port(port).io(packet: packet)) } catch { reject(diagnostic(error)) } }
     }
     /** Close a revision after shared lifecycle cleanup. */
     @objc public func closePort(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).closePort(port); return NSNumber(value: true) } }

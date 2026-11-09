@@ -20,6 +20,25 @@ pub(crate) struct InterfaceShape {
 }
 
 impl PreparedContract {
+    /// Identify one hook callback independently of its import/export spelling.
+    pub fn function_signature(
+        &self,
+        binding: &str,
+        method: &str,
+        exports: bool,
+    ) -> Result<String, Error> {
+        use sha2::{Digest, Sha256};
+        let slot = self.bind(binding, method, exports)?;
+        let function = self.function(self.slots()[slot as usize]);
+        let mut writer = Writer::default();
+        writer.len(function.params.len());
+        for parameter in &function.params {
+            self.shape(&mut writer, parameter.ty, 0)?;
+        }
+        self.option_shape(&mut writer, function.result, 0)?;
+        Ok(format!("{:x}", Sha256::digest(writer.finish())))
+    }
+
     /// Compilers eliminate unused imports; compare every retained function against its declaration.
     #[cfg(feature = "authoring")]
     pub(crate) fn used_import_signatures(&self, actual: &Self) -> Result<Side, Error> {

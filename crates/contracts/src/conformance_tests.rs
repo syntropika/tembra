@@ -317,7 +317,7 @@ fn prepared_runtime_contracts_preserve_wit_value_semantics() {
     authoring.check_import_value_profile(IMPORT).unwrap();
     let artifact = Artifact::decode(
         &authoring
-            .artifact(Some("globalThis.__tembraOrb={}"), None, "conformance", 1)
+            .source_artifact("globalThis.__tembraOrb={}", "conformance", 1)
             .unwrap(),
     )
     .unwrap();

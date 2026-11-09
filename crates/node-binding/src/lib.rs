@@ -114,17 +114,47 @@ pub struct NodeContract {
 
 #[napi]
 impl NodeContract {
-    /// Package checked source or component bytes for the ordinary build pipeline.
+    /// Package a closed source bundle for the selected world.
     #[napi]
-    pub fn artifact(
+    pub fn source_artifact(
         &self,
-        source: Option<String>,
-        component: Option<napi::bindgen_prelude::Uint8Array>,
+        source: String,
         name: String,
         api_version: u32,
     ) -> napi::Result<napi::bindgen_prelude::Buffer> {
         self.contract
-            .artifact(source.as_deref(), component.as_deref(), &name, api_version)
+            .source_artifact(&source, &name, api_version)
+            .map(Into::into)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Package a checked component with its WIT-derived contribution roles.
+    #[napi]
+    pub fn component_artifact(
+        &self,
+        component: napi::bindgen_prelude::Uint8Array,
+        name: String,
+        api_version: u32,
+        contributes: Option<std::collections::HashMap<String, f64>>,
+    ) -> napi::Result<napi::bindgen_prelude::Buffer> {
+        let contributions = contributes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(binding, priority)| {
+                if !priority.is_finite()
+                    || priority.fract() != 0.0
+                    || priority < f64::from(i32::MIN)
+                    || priority > f64::from(i32::MAX)
+                {
+                    return Err(napi::Error::from_reason(
+                        "contribution priority must be a signed 32-bit integer",
+                    ));
+                }
+                Ok((binding, priority as i32))
+            })
+            .collect::<napi::Result<_>>()?;
+        self.contract
+            .component_artifact(&component, &name, api_version, &contributions)
             .map(Into::into)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }

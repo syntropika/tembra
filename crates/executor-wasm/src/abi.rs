@@ -17,7 +17,7 @@
 //! `count`, then `count` records `id_low, id_high, status, value_len`, then every value.
 
 /// Import module for the interpreter's host functions; it carries the ABI version.
-pub const IMPORT_MODULE: &str = "tembra-interpreter-v1";
+pub const IMPORT_MODULE: &str = "tembra-interpreter-v2";
 /// Synchronous host request: `(packet_ptr, packet_len) -> header`. The header holds the reply
 /// length; [`SYNC_ERROR`] marks an error message instead of a JSON value.
 pub const SYNC_IMPORT: &str = "sync";

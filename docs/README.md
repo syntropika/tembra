@@ -37,4 +37,4 @@ For setup and repository checks, see [DEVELOP.md](../DEVELOP.md).
 For code style, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 For hook admission, ownership and composition guarantees, see [Hook decisions](decisions.md)
-and [Hook compatibility](compatibility.md).
+and [Runtime contract guarantees](contracts.md).

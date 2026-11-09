@@ -2,13 +2,13 @@ import type { HostOptions, OrbArtifact, OrbDefinition } from "../authoring/types
 import { Host } from "../host.ts";
 import { isolate, type AdaptedHostOptions } from "#tembra-adapters";
 import { Revision } from "./revision.ts";
-import { componentDefinition } from "./component.ts";
 import { decodeAsyncHostRequest, decodeHostRequest } from "./host-protocol.ts";
 import { reply } from "./codec.ts";
 import {
   answer,
   query,
   type ContractPort,
+  type DirectoryFilesystem,
   type ExecutionScope,
   type InstallationPlan,
   type InterpreterPort,
@@ -32,23 +32,13 @@ export interface MobilePort {
 }
 export interface MobileBackend {
   artifact(bytes: Uint8Array): MobileArtifact;
+  /** Open a source or compiled revision; both answer the same scoped host requests. */
   open(artifact: MobileArtifact, bindings: string, grants: string): Promise<MobilePort>;
-  openComponent(
-    artifact: MobileArtifact,
-    bindings: string,
-    grants: string,
-  ): Promise<{
-    description(): string;
-    call(binding: string, method: string, arguments_: string): Promise<string>;
-    close(): void;
-  }>;
 }
 export interface MobileExecutionOptions {
   onLog?: (record: { orb: string; level: string; message: string }) => void;
   providers?: {
-    filesystem?: Readonly<
-      Record<string, string | { readonly kind: "directory"; readonly path: string }>
-    >;
+    filesystem?: Readonly<Record<string, DirectoryFilesystem>>;
     network?: readonly string[];
   };
   limits?: { memoryBytes?: number; fuel?: number; packetBytes?: number; timeoutMs?: number };
@@ -181,17 +171,6 @@ export function createMobileHost(
         });
         const bindings = JSON.stringify(installation.bindings),
           grants = JSON.stringify(definition.grants ?? {});
-        if (identity.kind === "component") {
-          const component = await backend.openComponent(artifact, bindings, grants);
-          try {
-            return componentDefinition(component, identity.name, identity.apiVersion);
-          } catch (error) {
-            component.close();
-            throw error;
-          } finally {
-            artifact.free();
-          }
-        }
         const port = await backend.open(artifact, bindings, grants);
         const driver = new MobileDriver(port, () => artifact.free());
         try {

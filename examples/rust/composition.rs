@@ -17,6 +17,7 @@ fn main() -> tembra::Result<()> {
     let client = Orb::new("client", 1)
         .requires(Requirement {
             signatures: Default::default(),
+            hook_signatures: Default::default(),
             orb: "counter".into(),
             api_version: 1,
             methods: [("counter".into(), ["increment".into()].into())].into(),

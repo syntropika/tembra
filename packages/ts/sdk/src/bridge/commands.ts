@@ -210,6 +210,7 @@ export interface RequirementInfo {
   services: Record<string, string[]>;
   signatures: Record<string, string>;
   hooks: string[];
+  hookSignatures: Record<string, string>;
 }
 
 export interface KernelOrb {
@@ -220,6 +221,7 @@ export interface KernelOrb {
   apiVersion: number;
   services: ServiceInfo[];
   hooks: string[];
+  hookSignatures: Record<string, string>;
   requires: RequirementInfo[];
   isolated: boolean;
 }
@@ -506,6 +508,7 @@ export interface RequirementDeclaration {
   services?: Readonly<Record<string, readonly string[]>> | null | undefined;
   signatures?: Readonly<Record<string, string>> | null | undefined;
   hooks?: readonly string[] | null | undefined;
+  hookSignatures?: Readonly<Record<string, string>> | null | undefined;
 }
 
 export interface OrbDeclaration {
@@ -514,6 +517,7 @@ export interface OrbDeclaration {
   services: readonly ServiceDeclaration[];
   requires?: readonly RequirementDeclaration[] | null | undefined;
   hooks?: readonly string[] | null | undefined;
+  hookSignatures?: Readonly<Record<string, string>> | null | undefined;
   isolated?: boolean | null | undefined;
 }
 

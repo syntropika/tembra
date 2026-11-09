@@ -44,6 +44,13 @@ pub enum GuestCommand<'a> {
         method: &'a str,
         args: &'a Value,
     },
+    Contribute {
+        environment: u64,
+        binding: &'a str,
+        service: &'a str,
+        method: &'a str,
+        args: &'a Value,
+    },
     Validate {
         callback: u32,
         value: &'a Value,
@@ -142,6 +149,8 @@ pub enum Request {
     },
     #[serde(rename = "reference.declare")]
     ReferenceDeclare { service: String, key: Vec<String> },
+    #[serde(rename = "hook.declare")]
+    HookDeclare { name: String },
     #[serde(rename = "reference.release")]
     ReferenceRelease {
         #[serde(default)]
@@ -187,6 +196,13 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum AsyncRequest {
+    #[serde(rename = "hook.run")]
+    HookRun {
+        #[serde(default)]
+        scope: Option<ScopeId>,
+        id: u32,
+        value: Value,
+    },
     #[serde(rename = "reference.ready")]
     ReferenceReady {
         #[serde(default)]
@@ -205,12 +221,18 @@ pub enum AsyncRequest {
     ReadText { path: String },
     #[serde(rename = "filesystem.write-text")]
     WriteText { path: String, value: String },
-    #[serde(rename = "transport.exchange")]
-    Exchange {
-        ip: String,
-        port: u16,
-        request: String,
-    },
+    /// Open one incremental byte stream to an exactly granted literal socket address.
+    #[serde(rename = "transport.connect")]
+    TransportConnect { ip: String, port: u16 },
+    /// Read at most `TRANSPORT_CHUNK_BYTES`; the host answers `null` at end of stream.
+    #[serde(rename = "transport.read")]
+    TransportRead { id: u32 },
+    /// Write one bounded chunk; each element must be a byte.
+    #[serde(rename = "transport.write")]
+    TransportWrite { id: u32, bytes: Vec<u8> },
+    /// Close a stream issued to this Orb and settle its pending reads and writes.
+    #[serde(rename = "transport.close")]
+    TransportClose { id: u32 },
     #[serde(rename = "wait")]
     Wait { milliseconds: u32 },
     /// Any operation name outside this vocabulary.
@@ -236,6 +258,9 @@ pub struct Address {
 
 /// Longest cooperative timer a callback may request.
 pub const WAIT_LIMIT_MILLISECONDS: u32 = 5000;
+
+/// Largest byte chunk carried by one transport read or write request.
+pub const TRANSPORT_CHUNK_BYTES: usize = 16 * 1024;
 
 impl Request {
     /// Decode one synchronous packet, labelling structural failures as malformed.
@@ -269,8 +294,29 @@ impl AsyncRequest {
     pub fn is_io(&self) -> bool {
         matches!(
             self,
-            Self::ReadText { .. } | Self::WriteText { .. } | Self::Exchange { .. }
+            Self::ReadText { .. }
+                | Self::WriteText { .. }
+                | Self::TransportConnect { .. }
+                | Self::TransportRead { .. }
+                | Self::TransportWrite { .. }
+                | Self::TransportClose { .. }
         )
+    }
+
+    /// Socket stream operations, whose lifetime ends with their callback or its cancellation.
+    pub fn is_transport(&self) -> bool {
+        matches!(
+            self,
+            Self::TransportConnect { .. }
+                | Self::TransportRead { .. }
+                | Self::TransportWrite { .. }
+                | Self::TransportClose { .. }
+        )
+    }
+
+    /// Closing an already issued stream is cleanup and stays permitted after cancellation.
+    pub fn survives_cancellation(&self) -> bool {
+        matches!(self, Self::TransportClose { .. })
     }
 
     /// Decode one asynchronous packet, labelling structural failures as malformed.
@@ -386,6 +432,37 @@ mod tests {
             r#"{"operation":"reference.ready","id":1,"extra":true}"#,
         ] {
             assert!(AsyncRequest::decode(packet).is_err(), "{packet}");
+        }
+    }
+
+    #[test]
+    fn transport_writes_accept_only_bytes() {
+        assert_eq!(
+            AsyncRequest::decode(r#"{"operation":"transport.write","id":3,"bytes":[0,255]}"#)
+                .unwrap(),
+            AsyncRequest::TransportWrite {
+                id: 3,
+                bytes: vec![0, 255],
+            }
+        );
+        for bytes in ["[256]", "[-1]", "[1.5]", r#""ab""#, "[null]", r#"{"0":1}"#] {
+            let packet = format!(r#"{{"operation":"transport.write","id":3,"bytes":{bytes}}}"#);
+            assert!(AsyncRequest::decode(&packet).is_err(), "{packet}");
+        }
+        for packet in [
+            r#"{"operation":"transport.connect","ip":"127.0.0.1","port":65536}"#,
+            r#"{"operation":"transport.read","id":-1}"#,
+            r#"{"operation":"transport.close","id":1,"scope":2}"#,
+        ] {
+            assert!(
+                !matches!(
+                    AsyncRequest::decode(packet),
+                    Ok(AsyncRequest::TransportConnect { .. }
+                        | AsyncRequest::TransportRead { .. }
+                        | AsyncRequest::TransportClose { .. })
+                ),
+                "{packet}"
+            );
         }
     }
 

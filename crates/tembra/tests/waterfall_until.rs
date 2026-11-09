@@ -13,6 +13,7 @@ use tembra::{
 fn requirement(hook: &str) -> Requirement {
     Requirement {
         signatures: Default::default(),
+        hook_signatures: Default::default(),
         orb: "provider".into(),
         api_version: 1,
         methods: Default::default(),

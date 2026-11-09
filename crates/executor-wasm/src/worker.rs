@@ -1,7 +1,9 @@
 //! Keep Wasmtime on an owned worker; only scope-bound requests cross to the native host.
 //!
-//! The interpreter is a core module behind the private fixed-buffer ABI in `abi.rs`; its Store
-//! links no filesystem, socket or environment capability.
+//! One session owns one Store per Orb revision. A source revision runs the interpreter core
+//! module behind the private fixed-buffer ABI in `abi.rs`; its Store links no filesystem, socket
+//! or environment capability. A compiled revision runs its component on the same owner and
+//! speaks the same private host protocol (see `component::worker`).
 use crate::{Engine, abi::Operation, failure};
 use async_channel::{Receiver, Sender};
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -16,7 +18,7 @@ use std::{
 use tembra::Result;
 use tokio::sync::oneshot;
 
-mod diagnostics;
+pub(crate) mod diagnostics;
 mod runtime;
 mod steps;
 mod wasi;
@@ -32,11 +34,15 @@ pub(crate) enum Event {
     Done(std::result::Result<String, String>),
 }
 
-struct Command {
-    operation: Operation,
-    packet: String,
-    events: Sender<Event>,
+/// One host-selected operation and the channel that carries its scoped requests and completion.
+pub(crate) struct Command {
+    pub(crate) operation: Operation,
+    pub(crate) packet: String,
+    pub(crate) events: Sender<Event>,
 }
+
+/// Terminal completions that must wait until the Store and its runtime have stopped.
+pub(crate) type Terminal = Vec<(Sender<Event>, String)>;
 
 struct Owner {
     commands: Option<mpsc::Sender<Command>>,
@@ -53,7 +59,9 @@ struct Owner {
 
 impl Owner {
     /// Release buffered replies and refuse future calls; the first recorded reason wins.
+    /// Streams of the abandoned callback close first, so its pending socket work settles.
     fn abandon(&self, events: &Receiver<Event>, reason: &str) {
+        self.io.streams().end_callback();
         close_replies(events);
         self.poison
             .lock()
@@ -64,7 +72,9 @@ impl Owner {
 
 impl Drop for Owner {
     /// Close the command stream and join only this interpreter's worker.
+    /// No transport stream survives its Orb's host.
     fn drop(&mut self) {
+        self.io.streams().end_callback();
         self.commands.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -77,6 +87,11 @@ impl Drop for Owner {
 pub(crate) struct Session(Rc<Owner>);
 
 impl Session {
+    /// Share the transport table so a foreign event receiver can end the callback's epoch.
+    pub(crate) fn streams(&self) -> crate::io::Streams {
+        self.0.io.streams().clone()
+    }
+
     pub(crate) fn io_operation(&self, packet: &str) -> Result<crate::IoOperation> {
         if packet.len() > self.0.packet_bytes {
             return Err(failure("host packet limit exceeded"));
@@ -86,6 +101,32 @@ impl Session {
 
     /// Start an owned Store with no filesystem preopens, environment or socket grants.
     pub(crate) fn start(engine: Engine, orb: String, io: crate::io::SourceIo) -> Result<Self> {
+        let worker = engine.clone();
+        Self::spawn(&engine, orb, io, move |commands, poison, diagnostics| {
+            runtime::run(worker, commands, poison, diagnostics)
+        })
+    }
+
+    /// Run one Store loop on a dedicated thread behind the shared admission and poison owner.
+    ///
+    /// The loop receives only owned commands; its terminal completions are published after its
+    /// runtime, including blocking WASI work, has stopped.
+    pub(crate) fn spawn<F, Run>(
+        engine: &Engine,
+        orb: String,
+        io: crate::io::SourceIo,
+        run: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(
+                mpsc::Receiver<Command>,
+                Arc<Mutex<Option<String>>>,
+                diagnostics::Diagnostics,
+            ) -> Run
+            + Send
+            + 'static,
+        Run: std::future::Future<Output = Terminal>,
+    {
         let (send, receive) = mpsc::channel();
         let packet_bytes = engine.limits.packet_bytes;
         let heap_bytes = engine.limits.memory_bytes / 2;
@@ -97,20 +138,19 @@ impl Session {
         let admission_ms = engine.limits.timeout_ms / 2;
         let poison = Arc::new(Mutex::new(None));
         let worker_poison = poison.clone();
+        let instances = engine.active_instances.clone();
         let thread = thread::Builder::new()
             .name("tembra-wasm".into())
             .spawn(move || {
+                instances.fetch_add(1, std::sync::atomic::Ordering::Release);
+                let count = Count(instances);
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build();
                 if let Ok(runtime) = runtime {
-                    let terminal = runtime.block_on(runtime::run(
-                        engine,
-                        receive,
-                        worker_poison,
-                        worker_diagnostics,
-                    ));
-                    publish_after_shutdown(runtime, terminal);
+                    let terminal =
+                        runtime.block_on(run(receive, worker_poison.clone(), worker_diagnostics));
+                    publish_after_shutdown(runtime, count, &worker_poison, terminal);
                 }
             })
             .map_err(failure)?;
@@ -205,6 +245,8 @@ impl Session {
             packet,
             events: send,
         };
+        // Transport streams opened by this callback belong to its epoch until it completes.
+        self.0.io.streams().begin_callback();
         if self
             .0
             .commands
@@ -213,6 +255,7 @@ impl Session {
             .send(command)
             .is_err()
         {
+            self.0.io.streams().end_callback();
             self.0.busy.set(false);
             return Err(failure("interpreter worker has stopped"));
         }
@@ -248,6 +291,7 @@ impl Session {
         loop {
             match events.recv_blocking().map_err(failure)? {
                 Event::Done(result) => {
+                    self.0.io.streams().end_callback();
                     guard.completed = true;
                     return decode(result);
                 }
@@ -323,6 +367,9 @@ impl Session {
             };
             match event.map_err(failure)? {
                 Event::Done(result) => {
+                    // Close this callback's streams before waiting, so abandoned reads wake now
+                    // instead of at their deadline; physical settlement is still awaited.
+                    self.0.io.streams().end_callback();
                     while pending.next().await.is_some() {}
                     guard.completed = true;
                     return decode(result);
@@ -385,13 +432,33 @@ impl Drop for Busy<'_> {
 }
 
 /// Runtime destruction joins WASI blocking work before a quarantine becomes observable.
+///
+/// The live-Store metric retires first, then the first terminal diagnostic becomes the
+/// quarantine reason, then each terminal completion is published.
 fn publish_after_shutdown(
     runtime: tokio::runtime::Runtime,
-    terminal: Vec<(Sender<Event>, String)>,
+    count: Count,
+    poison: &Mutex<Option<String>>,
+    terminal: Terminal,
 ) {
     drop(runtime);
+    drop(count);
+    if let Some((_, error)) = terminal.first() {
+        poison
+            .lock()
+            .expect("poison state")
+            .get_or_insert_with(|| error.clone());
+    }
     for (events, error) in terminal {
         let _ = events.send_blocking(Event::Done(Err(error)));
+    }
+}
+
+/// Count one live Store until its thread has dropped the Store and its runtime.
+struct Count(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for Count {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -438,7 +505,14 @@ mod tests {
                 let _ = started.send(());
                 let _ = blocked.recv();
             });
-            publish_after_shutdown(runtime, vec![(events, "quarantined".into())]);
+            let instances = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+            let poison = Mutex::new(None);
+            publish_after_shutdown(
+                runtime,
+                Count(instances),
+                &poison,
+                vec![(events, "quarantined".into())],
+            );
         });
         ready.recv().unwrap();
         let (published, observed) = mpsc::channel();
@@ -488,7 +562,7 @@ mod tests {
         session.load(r#"globalThis.__tembraOrb={services:{checks:{create(){__hostSync('{"operation":"state.read"}');return {}},methods:{run(){return 1}}}}};"#,contract.describe()).unwrap();
         let events = session
             .begin(
-                Operation::Start,
+                Operation::Declare,
                 serde_json::json!({"kind":"create","environment":1,"service":"checks"}).to_string(),
             )
             .unwrap();
@@ -613,6 +687,41 @@ mod tests {
         )
         .unwrap();
         (engine, session)
+    }
+
+    /// Source factories cannot enter through dispatch, and refusals do not corrupt declarations.
+    #[test]
+    #[ignore = "requires TEMBRA_WASM_ENGINE"]
+    fn source_commands_cannot_cross_execution_entrypoints() {
+        let (_engine, session) = tick_bounded_session("entrypoints");
+        let contract = Contract::from_source("checks.wit", "package example:entrypoints; interface checks { run: func() -> u32; } world test { export checks; }", None).unwrap();
+        session.load(r#"globalThis.__tembraOrb={create(){return {value:7}},services:{checks:{methods:{run(environment){return environment.value}}}}};"#,contract.describe()).unwrap();
+        let create =
+            serde_json::json!({"kind":"create","environment":1,"service":null}).to_string();
+        let invoke = serde_json::json!({"kind":"invoke","environment":1,"service":"checks","method":"run","args":[]}).to_string();
+        let no_host =
+            |_: &str, _: bool| -> tembra::Result<Value> { panic!("no host requests expected") };
+        let error = session
+            .blocking(Operation::Start, create.clone(), no_host)
+            .unwrap_err();
+        assert!(
+            error.message.contains("Unknown interpreter command"),
+            "{error}"
+        );
+        let error = session
+            .blocking(Operation::Declare, invoke.clone(), no_host)
+            .unwrap_err();
+        assert!(
+            error.message.contains("Only factory declarations"),
+            "{error}"
+        );
+        session
+            .blocking(Operation::Declare, create, no_host)
+            .unwrap();
+        assert_eq!(
+            session.blocking(Operation::Start, invoke, no_host).unwrap(),
+            serde_json::json!(7)
+        );
     }
 
     /// Quarantine actual JavaScript tick exhaustion even when it returns without a Wasm trap.

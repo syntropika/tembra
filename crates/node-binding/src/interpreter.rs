@@ -16,7 +16,6 @@ use tembra_executor_wasm::{
     Binding, Engine, Grants, InterpreterPort, Limits, PortReply, PortTicket,
 };
 
-mod component;
 mod events;
 
 type EventCallback = ThreadsafeFunction<String, (), String, Status, false>;
@@ -58,14 +57,17 @@ impl NodeInterpreter {
         Ok(Self { engine })
     }
 
-    /// Configure interpreter code lazily; compiled-component-only hosts do not load it.
+    /// Configure interpreter code lazily; hosts that install only compiled components never load it.
     #[napi]
     pub fn interpreter(&mut self, bytes: Uint8Array) -> napi::Result<()> {
         self.engine = self.engine.clone().interpreter(&bytes).map_err(js_error)?;
         Ok(())
     }
 
-    /// Materialize a fresh isolated revision from a closed source artifact and installation grants.
+    /// Materialize a fresh isolated revision from a closed source or compiled artifact.
+    ///
+    /// Both kinds return the same scoped port; compiled dependency calls arrive as ordinary host
+    /// events on the dispatch bridge, never on libuv worker threads.
     #[napi]
     pub fn open(
         &self,

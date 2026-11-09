@@ -58,8 +58,8 @@ fn browser_artifacts_bind_once_and_validate_by_slot() {
             .bind("test:browser/values@1.0.0", "readBytes", true)
             .is_err()
     );
-    let graph: Value = serde_json::from_str(&artifact.describe()).unwrap();
-    assert_eq!(graph["javascriptNames"]["read-bytes"], "readBytes");
+    let graph: Value = serde_json::from_str(&artifact.request(r#"{"kind":"describe"}"#)).unwrap();
+    assert_eq!(graph["ok"]["javascriptNames"]["read-bytes"], "readBytes");
     let install: Value = serde_json::from_str(
         &artifact.request(r#"{"kind":"install","name":"browser","apiVersion":1}"#),
     )

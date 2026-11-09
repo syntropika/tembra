@@ -39,17 +39,52 @@ fn append(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
 }
 
 #[test]
+fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
+    let contract = Contract::from_source("hooks.wit", "package test:hooks@1.0.0; interface guard { apply: func(value: u32) -> u32; } world extension { import guard; export guard; }", Some("extension")).unwrap();
+    let component = component(&contract);
+    let contributions = [("test:hooks/guard@1.0.0".into(), -7)].into();
+    let bytes = contract
+        .component_artifact(&component, "extension", 1, &contributions)
+        .unwrap();
+    assert_eq!(
+        Artifact::decode(&bytes).unwrap().contributions,
+        contributions
+    );
+    let invalid = [("test:hooks/missing@1.0.0".into(), 1)].into();
+    assert!(
+        contract
+            .component_artifact(&component, "extension", 1, &invalid)
+            .is_err()
+    );
+    let identity = Identity {
+        name: "extension".into(),
+        api_version: 1,
+        world: "extension".into(),
+    };
+    let mut forged = component;
+    crate::artifact::append_section(
+        &mut forged,
+        "tembra:orb",
+        &crate::artifact::encode_orb_contributions(&identity, contract.prepared(), &invalid),
+    );
+    assert!(Artifact::decode(&forged).is_err());
+    let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
+    crate::artifact::append_section(
+        &mut source,
+        "tembra:orb",
+        &crate::artifact::encode_orb_contributions(&identity, contract.prepared(), &contributions),
+    );
+    crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
+    assert!(Artifact::decode(&source).is_err());
+}
+
+#[test]
 fn source_and_compiled_artifacts_round_trip_without_executing_source() {
     let contract = contract(
         "package test:artifact; interface values { read: func() -> u32; } world run { export values; }",
     );
     let source = contract
-        .artifact(
-            Some("throw new Error('must not execute')"),
-            None,
-            "example",
-            1,
-        )
+        .source_artifact("throw new Error('must not execute')", "example", 1)
         .unwrap();
     let decoded = Artifact::decode(&source).unwrap();
     assert_eq!(
@@ -62,7 +97,7 @@ fn source_and_compiled_artifacts_round_trip_without_executing_source() {
     assert_eq!(decoded.identity.name, "example");
     let compiled = component(&contract);
     let packed = contract
-        .artifact(None, Some(&compiled), "example", 1)
+        .component_artifact(&compiled, "example", 1, &Default::default())
         .unwrap();
     let decoded = Artifact::decode(&packed).unwrap();
     assert_eq!(
@@ -75,7 +110,7 @@ fn source_and_compiled_artifacts_round_trip_without_executing_source() {
 
     assert!(
         contract
-            .artifact(None, Some(&packed), "example", 1)
+            .component_artifact(&packed, "example", 1, &Default::default())
             .is_err()
     );
 }
@@ -84,7 +119,7 @@ fn source_and_compiled_artifacts_round_trip_without_executing_source() {
 fn malformed_duplicate_unknown_and_forged_artifact_metadata_is_rejected() {
     let contract = contract("package test:artifact; world run {}");
     let original = contract
-        .artifact(Some("globalThis.__tembraOrb={}"), None, "example", 1)
+        .source_artifact("globalThis.__tembraOrb={}", "example", 1)
         .unwrap();
     for (name, data) in [
         ("tembra:source", b"other".as_slice()),
@@ -97,7 +132,7 @@ fn malformed_duplicate_unknown_and_forged_artifact_metadata_is_rejected() {
     }
     assert!(Artifact::decode(&contract.encode().unwrap()).is_err());
     let mut compiled = contract
-        .artifact(None, Some(&component(&contract)), "example", 1)
+        .component_artifact(&component(&contract), "example", 1, &Default::default())
         .unwrap();
     append(&mut compiled, "tembra:source", b"pretend source");
     assert!(Artifact::decode(&compiled).is_err());
@@ -114,7 +149,7 @@ fn nested_component_metadata_cannot_override_the_containing_orb() {
     let mut compiled = wasm_encoder::Component::new();
     compiled.section(&wasm_encoder::ModuleSection(&nested));
     let packed = contract
-        .artifact(None, Some(&compiled.finish()), "example", 1)
+        .component_artifact(&compiled.finish(), "example", 1, &Default::default())
         .unwrap();
     assert!(matches!(
         Artifact::decode(&packed).unwrap().implementation,
@@ -172,6 +207,8 @@ fn checked_implementations_share_aliases_lifetimes_and_original_method_names() {
             Implementation {
                 name: Some("example".into()),
                 api_version: Some(1),
+                hooks: Default::default(),
+                contributes: Default::default(),
                 services: BTreeMap::from([(
                     "values".into(),
                     ServiceImplementation {
@@ -248,7 +285,7 @@ fn forged_compiled_contracts_are_checked_against_the_real_component() {
     let error = Artifact::decode(&bytes).err().unwrap();
     assert!(error.0.contains("export signatures"), "{error}");
     let packed = real
-        .artifact(None, Some(&component(&real)), "example", 1)
+        .component_artifact(&component(&real), "example", 1, &Default::default())
         .unwrap();
     let decoded = Artifact::decode(&packed).unwrap();
     assert_eq!(decoded.contract, *real.prepared());
@@ -299,7 +336,7 @@ fn compiled_imports_may_eliminate_unused_methods_but_cannot_change_retained_sign
         make("read: func(path: string) -> string; write: func(path: string, value: string);");
     let retained = make("read: func(path: string) -> string;");
     let artifact = declared
-        .artifact(None, Some(&component(&retained)), "retained", 1)
+        .component_artifact(&component(&retained), "retained", 1, &Default::default())
         .unwrap();
     Artifact::decode(&artifact).unwrap();
     for changed in [
@@ -324,7 +361,7 @@ fn compiled_resource_imports_keep_handle_identity_and_function_kinds() {
     };
     let declared = make("own<folder>");
     let artifact = declared
-        .artifact(None, Some(&component(&declared)), "resources", 1)
+        .component_artifact(&component(&declared), "resources", 1, &Default::default())
         .unwrap();
     Artifact::decode(&artifact).unwrap();
     assert!(
@@ -343,7 +380,7 @@ fn compiled_imports_may_eliminate_unused_resource_types() {
         "package test:pruned; interface storage { read: func() -> u32; } interface values { read: func() -> u32; } world run { import storage; export values; }",
     );
     let bytes = declared
-        .artifact(None, Some(&component(&retained)), "pruned", 1)
+        .component_artifact(&component(&retained), "pruned", 1, &Default::default())
         .unwrap();
     Artifact::decode(&bytes).unwrap();
 }
@@ -355,7 +392,7 @@ fn compiled_resource_exports_are_refused_during_authoring() {
     );
     assert!(
         declared
-            .artifact(None, Some(&component(&declared)), "unsupported", 1)
+            .component_artifact(&component(&declared), "unsupported", 1, &Default::default())
             .is_err()
     );
 }

@@ -1,15 +1,11 @@
 import { NodePort } from "./node-port.ts";
-import { componentDefinition } from "./component.ts";
 import { createRequire } from "node:module";
 import type { NodeArtifact, NodeInterpreter } from "@syntropika/tembra-engine-node";
 import type { OrbDefinition, OrbArtifact, LoadOptions } from "../authoring/types.ts";
 import { Revision } from "./revision.ts";
-import { query, type InstallationPlan } from "./types.ts";
+import { query, type InstallationPlan, type DirectoryFilesystem } from "./types.ts";
+export type { DirectoryFilesystem } from "./types.ts";
 
-export interface DirectoryFilesystem {
-  readonly kind: "directory";
-  readonly path: string;
-}
 /** Register a system directory without granting an Orb access to it. */
 export function directoryFilesystem(path: string): DirectoryFilesystem {
   return Object.freeze({ kind: "directory", path });
@@ -18,7 +14,7 @@ export function directoryFilesystem(path: string): DirectoryFilesystem {
 export interface InterpreterOptions {
   engine?: Uint8Array;
   providers?: {
-    filesystem?: Readonly<Record<string, string | DirectoryFilesystem>>;
+    filesystem?: Readonly<Record<string, DirectoryFilesystem>>;
     network?: readonly string[];
   };
   limits?: { memoryBytes?: number; fuel?: number; packetBytes?: number; timeoutMs?: number };
@@ -51,7 +47,7 @@ export class NodeExecution {
         filesystem: Object.fromEntries(
           Object.entries(this.options.providers?.filesystem ?? {}).map(([name, provider]) => [
             name,
-            typeof provider === "string" ? provider : provider.path,
+            provider.path,
           ]),
         ),
       }),
@@ -82,27 +78,15 @@ export class NodeExecution {
       filesystem: Object.keys(this.options.providers?.filesystem ?? {}),
       network: this.options.providers?.network ?? [],
     });
-    const { bindings } = prepared;
-    if (identity.kind === "component") {
-      const port = this.backend().openComponent(
-        artifact,
-        JSON.stringify({ bindings, grants: options.grants ?? {} }),
-      );
-      try {
-        return componentDefinition(port, identity.name, identity.apiVersion);
-      } catch (error) {
-        port.close();
-        throw error;
-      }
-    }
     const backend = this.backend();
-    if (!this.#interpreter) {
+    // Compiled components execute without the interpreter; only source revisions load it.
+    if (identity.kind === "source" && !this.#interpreter) {
       backend.interpreter(this.options.engine ?? requireEngine());
       this.#interpreter = true;
     }
     const port = backend.open(
       artifact,
-      JSON.stringify(bindings),
+      JSON.stringify(prepared.bindings),
       JSON.stringify(options.grants ?? {}),
     );
     try {

@@ -62,6 +62,7 @@ impl Service {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Requirement {
     pub signatures: BTreeMap<String, String>,
+    pub hook_signatures: BTreeMap<String, String>,
     pub orb: String,
     pub api_version: Version,
     pub methods: BTreeMap<String, BTreeSet<String>>,
@@ -75,6 +76,7 @@ pub struct Orb {
     pub services: Vec<Service>,
     pub requires: Vec<Requirement>,
     pub hooks: BTreeSet<String>,
+    pub hook_signatures: BTreeMap<String, String>,
     /// Executor-backed revisions own a private resource realm instead of sharing native values.
     pub isolated: bool,
 }
@@ -88,6 +90,7 @@ impl Orb {
             services: Vec::new(),
             requires: Vec::new(),
             hooks: BTreeSet::new(),
+            hook_signatures: BTreeMap::new(),
             isolated: false,
         }
     }

@@ -90,6 +90,11 @@ export default orb({
           environment.total.update(context, () => doubled);
           return environment.total.value;
         },
+        async firstEvent(_environment: Environment, _context: Context, url: string) {
+          const response = await fetch(url);
+          for await (const event of response.events()) return event.data;
+          throw new Error("SSE ended without an event");
+        },
       } satisfies WitMethods<typeof calculation, Environment>,
     },
   },

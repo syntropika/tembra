@@ -148,8 +148,8 @@ RCT_EXPORT_MODULE(NativeTembra)
 }
 
 /** Forward one host-owned execution operation to the Swift storage. */
-- (void)openPort:(NSString *)handle artifact:(NSString *)artifact bindings:(NSString *)bindings grants:(NSString *)grants component:(BOOL)component resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
-  [_storage openPort:handle artifact:artifact bindings:bindings grants:grants component:component resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
+- (void)openPort:(NSString *)handle artifact:(NSString *)artifact bindings:(NSString *)bindings grants:(NSString *)grants resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  [_storage openPort:handle artifact:artifact bindings:bindings grants:grants resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
 }
 
 /** Forward one host-owned execution operation to the Swift storage. */
@@ -160,11 +160,6 @@ RCT_EXPORT_MODULE(NativeTembra)
 /** Forward one host-owned execution operation to the Swift storage. */
 - (void)portIo:(NSString *)handle port:(NSString *)port packet:(NSString *)packet resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
   [_storage portIo:handle port:port packet:packet resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
-}
-
-/** Forward one host-owned execution operation to the Swift storage. */
-- (void)componentCall:(NSString *)handle port:(NSString *)port binding:(NSString *)binding method:(NSString *)method arguments_:(NSString *)arguments_ resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
-  [_storage componentCall:handle port:port binding:binding method:method arguments:arguments_ resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
 }
 
 /** Transfer bounded guest diagnostics without changing execution authority. */

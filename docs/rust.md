@@ -193,7 +193,7 @@ Cancellation is cooperative, so an uncooperative observer can delay cleanup. His
 remain version/gate bookkeeping and do not define observation ownership.
 
 Rust and the JavaScript bound hook's `observe(source, payload)` use the same kernel admission and
-ownership indexes. See [decisions](decisions.md) and [compatibility](compatibility.md). This interface
+ownership indexes. See [decisions](decisions.md) and [runtime contracts](contracts.md). This interface
 adds no arbitrary callback operation on `Context` and no separate consumer lifecycle manager.
 
 Dependent calls inside observation additionally require exact registered orb/object scopes and

@@ -97,7 +97,36 @@ export async function verifyBrowserInterpreter(engine?: URL): Promise<void> {
       await storage("reader", "memory", false),
       await storage("persistent", "durable", true),
       await storage("persistent-reader", "durable", false),
+      { artifact: await source("hook-provider") },
+      {
+        artifact: await source("hook-extension"),
+        requires: Object.fromEntries(
+          ["guard", "audit", "choice"].map((hook) => [
+            `example:hooks/${hook}@1.0.0`,
+            { orb: "tools", apiVersion: 1 },
+          ]),
+        ),
+      },
     ]);
+    // The browser is source-only: one source participant decides each portable hook.
+    stage = "portable hooks";
+    const hooks = await host.get("tools::example:hooks/runner@1.0.0", "main");
+    const reporter = await host.get("extension::example:hooks/reporter@1.0.0", "main");
+    try {
+      equal(
+        JSON.stringify(await hooks.run({ value: 3, blocked: false })),
+        JSON.stringify({ value: 5, blocked: true }),
+      );
+      for (const input of [5, 7]) equal(await hooks.audit(input), null);
+      equal(
+        JSON.stringify(await Promise.all([0, 1, 2].map((input) => hooks.choose(input)))),
+        JSON.stringify([null, 11, 84]),
+      );
+      equal(JSON.stringify(await reporter.read()), JSON.stringify({ audit: 12, choices: 3 }));
+    } finally {
+      hooks.release();
+      reporter.release();
+    }
     stage = "calculator";
     const calculation = await host.get("calculator::example:integrated/calculation@1.0.0", "main");
     equal(await calculation.sum({ values: [2, 4, 6] }), 24);
@@ -138,7 +167,8 @@ export async function verifyBrowserInterpreter(engine?: URL): Promise<void> {
     durableReader.release();
     stage = "concurrent effects";
     equal(await calculation.race(), -1);
-    equal(messages.includes("slow-finished"), false);
+    // Returning the race's value does not release the callback before admitted work settles.
+    equal(messages.includes("slow-finished"), true);
     equal(await calculation.recover(), 42);
     stage = "reload";
     const candidate = await host.prepare([calculator]);

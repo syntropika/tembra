@@ -85,6 +85,22 @@ fn validate_orb(orb: &Orb) -> Result<()> {
             "hooks were excluded from this build",
         ));
     }
+    if orb
+        .hook_signatures
+        .iter()
+        .any(|(hook, signature)| !orb.hooks.contains(hook) || signature.is_empty())
+        || orb.requires.iter().any(|requirement| {
+            requirement
+                .hook_signatures
+                .iter()
+                .any(|(hook, signature)| !requirement.hooks.contains(hook) || signature.is_empty())
+        })
+    {
+        return Err(Error::invalid(
+            Reason::Hook,
+            "hook signatures require declared hooks and nonempty contracts",
+        ));
+    }
     let mut services = BTreeSet::new();
     for service in &orb.services {
         if service.name.is_empty()

@@ -30,9 +30,13 @@ test("host I/O rejects traversal, mount-prefix confusion and ungranted transport
     "/data/a\0b",
   ])
     await expect(io.execute({ operation: "filesystem.read-text", path })).rejects.toThrow();
-  await expect(
-    io.execute({ operation: "transport.exchange", ip: "127.0.0.1", port: 80, request: "GET /" }),
-  ).rejects.toThrow("no raw TCP");
+  for (const request of [
+    { operation: "transport.connect", ip: "127.0.0.1", port: 80 },
+    { operation: "transport.read", id: 1 },
+    { operation: "transport.write", id: 1, bytes: [1] },
+    { operation: "transport.close", id: 1 },
+  ] as const)
+    await expect(io.execute(request)).rejects.toThrow("no raw TCP");
   expect(await io.execute({ operation: "filesystem.read-text", path: "/data/input.txt" })).toBe(
     "value",
   );

@@ -79,6 +79,7 @@ export class Session implements StateBackend {
         codeVersion: 1,
         services: [],
         hooks: [],
+        hookSignatures: {},
         requires: [],
       },
       definition: { name: "$host", apiVersion: 1 },

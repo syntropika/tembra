@@ -2,6 +2,12 @@ import type { Lifetime } from "../bridge/identifiers.ts";
 import type { KernelOrb } from "../bridge/kernel.ts";
 import { failure } from "../error.ts";
 
+/** A host-owned system directory registered as a filesystem provider. */
+export interface DirectoryFilesystem {
+  readonly kind: "directory";
+  readonly path: string;
+}
+
 export interface Description {
   name?: string;
   apiVersion?: number;
@@ -9,6 +15,33 @@ export interface Description {
     string,
     { methods: string[]; lifetime?: Lifetime; linger?: number; access?: boolean }
   >;
+  hooks?: Record<string, "series" | "waterfall" | "bail">;
+  contributes?: Record<string, number>;
+}
+
+export interface HookBinding {
+  name: string;
+  alias: string;
+  method: string;
+  slot: number;
+  signature: string;
+  composition: "series" | "waterfall" | "bail";
+}
+export interface ContributionBinding {
+  binding: string;
+  target: string;
+  name: string;
+  alias: string;
+  method: string;
+  slot: number;
+  signature: string;
+  priority: number;
+  optional: boolean;
+}
+export interface CheckedImplementation {
+  services: ServiceBinding[];
+  hooks: { hooks: HookBinding[]; contributions: ContributionBinding[] };
+  plan: InstallationPlan["plan"];
 }
 
 export type ProviderBinding =
@@ -19,7 +52,10 @@ export interface InstallationPlan {
   bindings: Record<string, ProviderBinding>;
   importServices: Record<string, string>;
   plan: {
-    orb: Pick<KernelOrb, "name" | "apiVersion" | "services" | "requires" | "hooks">;
+    orb: Pick<
+      KernelOrb,
+      "name" | "apiVersion" | "services" | "requires" | "hooks" | "hookSignatures"
+    >;
   };
 }
 

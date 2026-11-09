@@ -3,7 +3,7 @@ use crate::MobileError;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, mpsc},
     thread,
 };
 use tembra_executor_wasm::{Binding, Engine, Grants, Limits};
@@ -92,7 +92,9 @@ impl NativeInterpreter {
         Ok(Arc::new(Self { engine }))
     }
 
-    /// Create an isolated source revision after validating its imports and installation grants.
+    /// Create an isolated source or compiled revision after validating its imports and grants.
+    ///
+    /// Compiled dependency calls arrive as ordinary scoped host events on the same port.
     pub fn open(
         &self,
         artifact: Arc<NativeArtifact>,
@@ -104,80 +106,9 @@ impl NativeInterpreter {
         NativePort::new(self.engine.clone(), artifact, bindings, grants)
     }
 
-    /// Open compiled-language Orbs with the same host capabilities and portable execution.
-    pub fn open_component(
-        &self,
-        artifact: Arc<NativeArtifact>,
-        bindings: String,
-        grants: String,
-    ) -> Result<Arc<NativeComponent>, MobileError> {
-        let bindings = serde_json::from_str(&bindings).map_err(error)?;
-        let grants = serde_json::from_str(&grants).map_err(error)?;
-        let logs = logs::Logs::default();
-        let port = logs
-            .attach(self.engine.clone())
-            .open_component(&artifact.artifact, &bindings, &grants)
-            .map_err(error)?;
-        Ok(Arc::new(NativeComponent {
-            port: Mutex::new(Some(Arc::new(port))),
-            logs,
-        }))
-    }
-
     /// Count physical guest Stores, including work still draining after cancellation.
     pub fn instances(&self) -> u64 {
         self.engine.instances() as u64
-    }
-}
-
-#[derive(uniffi::Object)]
-pub struct NativeComponent {
-    logs: logs::Logs,
-    port: Mutex<Option<Arc<tembra_executor_wasm::ComponentPort>>>,
-}
-
-#[uniffi::export]
-impl NativeComponent {
-    /// Return checked executable service metadata.
-    pub fn description(&self) -> Result<String, MobileError> {
-        Ok(self.live()?.description().to_string())
-    }
-
-    /// Drain bounded guest diagnostics without exposing guest-selected attribution.
-    pub fn take_logs(&self) -> String {
-        self.logs.take()
-    }
-
-    /// Await physical settlement without borrowing the platform thread pool.
-    pub async fn call(
-        &self,
-        binding: String,
-        method: String,
-        arguments: String,
-    ) -> Result<String, MobileError> {
-        let port = self.live()?;
-        let args = serde_json::from_str(&arguments).map_err(error)?;
-        let (send, receive) = futures::channel::oneshot::channel();
-        port.submit(&binding, &method, args, move |value| {
-            let _ = send.send(envelope(value));
-        });
-        receive.await.map_err(error)
-    }
-
-    /// Release this owner while admitted calls retain their original physical lifetime.
-    pub fn shutdown(&self) {
-        self.port.lock().unwrap_or_else(|e| e.into_inner()).take();
-    }
-}
-
-impl NativeComponent {
-    /// Refuse new calls after the platform owner closes.
-    fn live(&self) -> Result<Arc<tembra_executor_wasm::ComponentPort>, MobileError> {
-        self.port
-            .lock()
-            .map_err(error)?
-            .clone()
-            .ok_or(MobileError::Closed)
     }
 }
 
@@ -205,11 +136,6 @@ impl<T> From<tembra::Result<T>> for Reply<T> {
             }),
         }
     }
-}
-
-/// Encode the same typed result envelope used by the other native SDK transport.
-fn envelope<T: Serialize>(value: tembra::Result<T>) -> String {
-    serde_json::to_string(&Reply::from(value)).expect("serializable execution reply")
 }
 
 /// Wake foreign continuations on an OS stack, never on Wasmtime's temporary fiber stack.

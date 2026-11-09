@@ -116,10 +116,15 @@ Installation is refused when the orb imports a WASI interface without a matching
 For source orbs, filesystem grants permit bounded UTF-8 text reads and writes under the mount.
 Compiled native components receive standard WASI directory permissions within their preopens,
 including binary and directory operations; the source text limits do not apply. Network grants permit
-outbound TCP to exact literal IP addresses. The guest helper in `@syntropika/tembra-sdk/http` is a
-bounded HTTP/1 `GET` client for literal-IP `http:` URLs built on that TCP transport.
+outbound TCP to exact literal IP addresses. The guest helper in `@syntropika/tembra-sdk/http`
+frames HTTP/1 inside the guest, including request bodies, chunked responses and SSE. Consume
+`response.body` for byte streaming, `response.events()` for SSE, or `text()`/`json()` to collect
+up to 1 MiB. Iteration closes the connection when it ends or the consumer stops. The current
+URL profile is literal-IP `http:`; TLS, DNS, redirects and decompression are not implemented.
+Streams close when their callback completes or is cancelled. The host's `timeoutMs` still
+bounds the callback, so configure it for the expected duration of an SSE operation.
 
-WIT exports become services named `<orb>::<package>/<interface>@<version>`. Acquire them with the
+Ordinary WIT exports become services named `<orb>::<package>/<interface>@<version>`. Acquire them with the
 string form of `host.get`. Kebab-case WIT names stay kebab-case on the reference, for example
 `reference["resource-value"]()`.
 
@@ -142,7 +147,9 @@ budgets, not comparable instruction counts. Native source orbs also have the int
 
 Inside an isolated orb, import `orb` from `@syntropika/tembra-sdk` as usual. The build selects the
 guest implementation. Guests can use state, selected dependencies, resources and granted I/O.
-Tasks, listeners, hooks and state subscriptions are not yet available inside isolated orbs.
+Source Orbs declare and contribute `series`, `waterfall` and `bail` hooks through their WIT
+contracts. Compiled Orbs can contribute to those hooks. Tasks, listeners, state subscriptions
+and compiled hook providers are not yet available. See [extensions](extensions.md).
 
 ## Browser and Worker
 

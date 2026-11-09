@@ -106,27 +106,25 @@ class TembraModule(private val context: ReactApplicationContext) : NativeTembraS
     /** Release a prepared contract owner. */
     override fun releaseArtifact(handle: String, artifact: String): Boolean = nativeCall { execution(handle).releaseArtifact(artifact); true }
     /** Open a source or compiled revision away from the JS event loop. */
-    override fun openPort(handle: String, artifact: String, bindings: String, grants: String, component: Boolean, promise: Promise) = promise(promise) { execution(handle).open(artifact, bindings, grants, component) }
+    override fun openPort(handle: String, artifact: String, bindings: String, grants: String, promise: Promise) = promise(promise) { execution(handle).open(artifact, bindings, grants) }
     /** Read checked executable metadata. */
     override fun portDescription(handle: String, port: String): String = nativeCall { execution(handle).description(port) }
     /** Transfer host-attributed guest diagnostics. */
     override fun portLogs(handle: String, port: String): String = nativeCall { execution(handle).logs(port) }
     /** Start an issued declaration or callback. */
-    override fun portBegin(handle: String, port: String, packet: String, declaration: Boolean): Boolean = nativeCall { execution(handle).source(port).begin(packet, declaration); true }
+    override fun portBegin(handle: String, port: String, packet: String, declaration: Boolean): Boolean = nativeCall { execution(handle).port(port).begin(packet, declaration); true }
     /** Await physical requests without a waiting platform thread. */
-    override fun portReceive(handle: String, port: String, promise: Promise) = promise(promise) { execution(handle).source(port).receive() }
+    override fun portReceive(handle: String, port: String, promise: Promise) = promise(promise) { execution(handle).port(port).receive() }
     /** Resolve the exact request issued by this revision. */
-    override fun portReply(handle: String, port: String, id: Double, packet: String): Boolean = nativeCall { execution(handle).source(port).reply(id.toUInt(), packet) }
+    override fun portReply(handle: String, port: String, id: Double, packet: String): Boolean = nativeCall { execution(handle).port(port).reply(id.toUInt(), packet) }
     /** Release the physical admission ticket. */
-    override fun portFinish(handle: String, port: String): Boolean = nativeCall { execution(handle).source(port).finish(); true }
+    override fun portFinish(handle: String, port: String): Boolean = nativeCall { execution(handle).port(port).finish(); true }
     /** Quarantine a failed exchange away from the JS and UI threads. */
-    override fun abortPort(handle: String, port: String, promise: Promise) = promise(promise) { execution(handle).source(port).invalidate(); null }
+    override fun abortPort(handle: String, port: String, promise: Promise) = promise(promise) { execution(handle).port(port).invalidate(); null }
     /** Drop drained guest environment bookkeeping. */
-    override fun portRelease(handle: String, port: String, environment: Double): Boolean = nativeCall { execution(handle).source(port).release(environment.toULong()); true }
+    override fun portRelease(handle: String, port: String, environment: Double): Boolean = nativeCall { execution(handle).port(port).release(environment.toULong()); true }
     /** Execute capability-bound filesystem and network operations. */
-    override fun portIo(handle: String, port: String, packet: String, promise: Promise) = promise(promise) { execution(handle).source(port).io(packet) }
-    /** Await a compiled-language component call. */
-    override fun componentCall(handle: String, port: String, binding: String, method: String, arguments_: String, promise: Promise) = promise(promise) { execution(handle).component(port).call(binding, method, arguments_) }
+    override fun portIo(handle: String, port: String, packet: String, promise: Promise) = promise(promise) { execution(handle).port(port).io(packet) }
     /** Close a revision after shared lifecycle cleanup. */
     override fun closePort(handle: String, port: String): Boolean = nativeCall { execution(handle).closePort(port); true }
 

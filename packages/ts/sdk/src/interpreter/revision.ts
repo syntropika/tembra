@@ -1,6 +1,12 @@
 import type { Description } from "./types.ts";
 import type { Declaration } from "../authoring/declaration.ts";
-import type { OrbDefinition, ServiceDefinition } from "../authoring/types.ts";
+import type {
+  OrbDefinition,
+  ServiceDefinition,
+  HookDefinition,
+  Contribution,
+} from "../authoring/types.ts";
+import { series, waterfall, bail } from "../authoring/hooks.ts";
 import { KernelOp } from "../bridge/protocol.ts";
 import {
   declareFactory,
@@ -24,7 +30,8 @@ import { Scope } from "./scope.ts";
 import {
   query,
   type ContractPort,
-  type ServiceBinding,
+  type HookBinding,
+  type CheckedImplementation,
   type InstallationPlan,
   type InterpreterPort,
   type ExecutionScope,
@@ -36,6 +43,7 @@ export class Revision {
   readonly imports = new Map<string, string>();
   readonly importSignatures = new Map<string, string>();
   readonly importMethods = new Map<string, Map<string, { name: string; slot: number }>>();
+  readonly hooks = new Map<string, HookBinding>();
   readonly scopes = new Map<number, Scope>();
   active = false;
   #closed = false;
@@ -90,18 +98,23 @@ export class Revision {
     identity: Pick<OrbDefinition, "name" | "apiVersion">,
     installation: InstallationPlan,
   ): OrbDefinition {
-    const { plan, importServices: imports } = installation;
-    const checked = query<ServiceBinding[]>(this.contract, {
+    const { importServices: imports } = installation;
+    const checked = query<CheckedImplementation>(this.contract, {
       kind: "implementation",
       name: identity.name,
       apiVersion: identity.apiVersion,
       value: JSON.parse(this.port.description()) as Description,
+      bindings: installation.bindings,
     });
+    const { plan } = checked;
+    for (const hook of checked.hooks.hooks) this.hooks.set(hook.alias, hook);
     const description = query<{
       imports: { binding: string; functions?: Record<string, unknown> }[];
       javascriptNames: Record<string, string>;
     }>(this.contract, { kind: "describe" });
     for (const [binding, service] of Object.entries(imports)) {
+      if (checked.hooks.contributions.some((contribution) => contribution.binding === binding))
+        continue;
       this.imports.set(binding, service);
       const provider = installation.bindings[binding];
       const requirement =
@@ -123,8 +136,10 @@ export class Revision {
       }
       this.importMethods.set(binding, methods);
     }
+    let rootScope: Scope | undefined;
     const create = (service: string | null) => async (declaration: Declaration) => {
       const scope = new Scope(this, declaration, service);
+      if (service === null) rootScope = scope;
       this.scopes.set(scope.id, scope);
       await this.declare(
         JSON.stringify({ kind: "create", environment: scope.id, service }),
@@ -133,7 +148,7 @@ export class Revision {
       return scope;
     };
     const services: Record<string, ServiceDefinition> = {};
-    for (const service of checked) {
+    for (const service of checked.services) {
       const { interface: binding, alias } = service;
       services[service.name] = {
         [signature]: service.signature,
@@ -183,10 +198,58 @@ export class Revision {
         ),
       } as AdaptedService;
     }
+    const hooks: Record<string, HookDefinition> = {};
+    for (const binding of checked.hooks.hooks) {
+      const hook =
+        binding.composition === "series"
+          ? series()
+          : binding.composition === "bail"
+            ? bail()
+            : waterfall();
+      hooks[binding.name] = Object.assign(hook, { [signature]: binding.signature });
+    }
+    const contributes: Record<string, Record<string, Contribution>> = {};
+    for (const binding of checked.hooks.contributions) {
+      (contributes[binding.target] ??= {})[binding.name] = {
+        priority: binding.priority,
+        handle: async (context, input) => {
+          if (!rootScope || this.scopes.get(rootScope.id) !== rootScope)
+            throw new Error("Contribution Orb scope is unavailable");
+          const entered = new Context(
+            context.session,
+            context.root,
+            context.invocation,
+            context.session.kernel.command(KernelOp.EnterExecution, {
+              call: context.invocation!.id,
+              context: context.frame || undefined,
+            }),
+          );
+          const arguments_ = check(this.contract, binding.slot, true, encode([input]));
+          const result = await this.executeText(
+            packet(
+              {
+                kind: "contribute",
+                environment: rootScope.id,
+                binding: binding.binding,
+                service: binding.alias,
+                method: binding.method,
+              },
+              "args",
+              arguments_,
+            ),
+            rootScope.exchange({ context: entered }),
+          );
+          const value = JSON.parse(checkedResult(this.contract, binding.slot, result).text);
+          return binding.optional && value === null ? undefined : value;
+        },
+      };
+    }
     return {
       name: identity.name,
       apiVersion: identity.apiVersion,
       services,
+      hooks,
+      contributes,
       requires: Object.fromEntries(
         plan.orb.requires.map((requirement) => [
           requirement.orb,

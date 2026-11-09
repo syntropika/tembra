@@ -13,8 +13,6 @@ mod protocol;
 mod providers;
 mod worker;
 
-#[doc(hidden)]
-pub use component::ComponentPort;
 pub use engine::{Engine, Limits, LogRecord};
 pub use install::Install;
 #[doc(hidden)]

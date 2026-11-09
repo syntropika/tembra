@@ -31,6 +31,8 @@ enum Request {
         name: String,
         api_version: u32,
         value: crate::Implementation,
+        #[serde(default)]
+        bindings: BTreeMap<String, Binding>,
     },
 }
 
@@ -64,12 +66,7 @@ fn invalid(error: impl ToString) -> Error {
     Error::new(Code::Invalid, "wit_contract", error.to_string())
 }
 
-/// Serialize a contract answer, mapping contract diagnostics to invalid input.
-fn json<T: Serialize>(value: std::result::Result<T, crate::Error>) -> Result<Value> {
-    serde_json::to_value(value.map_err(invalid)?).map_err(invalid)
-}
-
-/// Encode the `{"ok":...}` / `{"error":{code,reason,message}}` envelope used by every binding.
+/// Encode structured contract diagnostics through the common platform boundary.
 pub fn envelope<T: Serialize>(result: Result<T>) -> String {
     let response = match result {
         Ok(value) => Response::Ok(value),
@@ -137,7 +134,18 @@ impl PreparedContract {
                 name,
                 api_version,
                 value,
-            } => json(self.check_implementation(&name, api_version, value)),
+                bindings,
+            } => {
+                let services = self
+                    .check_implementation(&name, api_version, value.clone())
+                    .map_err(invalid)?;
+                let hooks = self.check_hooks(&value, &bindings).map_err(invalid)?;
+                let mut plan = self.plan(&name, api_version, &bindings).map_err(invalid)?;
+                hooks.apply(&mut plan);
+                Ok(
+                    serde_json::json!({ "services": services, "hooks": hooks, "plan": plan.describe() }),
+                )
+            }
         }
     }
 }

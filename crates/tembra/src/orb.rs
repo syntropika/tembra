@@ -137,13 +137,13 @@ pub(crate) fn type_error() -> Error {
     )
 }
 
-/// Native orbs are compiled with their application. No schema or generated compatibility file.
+/// Native Orb declarations compile with the application and dispatch typed Rust callbacks.
 pub struct Orb {
     pub(crate) metadata: core::Orb,
     pub(crate) factory: Factory,
     pub(crate) services: BTreeMap<String, Implementation>,
     #[cfg(feature = "hooks")]
-    pub(crate) hooks: BTreeMap<String, std::any::TypeId>,
+    pub(crate) hooks: BTreeMap<String, crate::hooks::Signature>,
     #[cfg(feature = "hooks")]
     pub(crate) contributions: Vec<crate::hooks::Contribution>,
 }
@@ -165,6 +165,8 @@ impl Orb {
     /// Add an explicit versioned orb dependency.
     pub fn requires(mut self, requirement: core::Requirement) -> Self {
         self.metadata.requires.push(requirement);
+        #[cfg(feature = "hooks")]
+        self.bind_hook_requirements();
         self
     }
 
@@ -187,8 +189,42 @@ impl Orb {
 impl Orb {
     /// Declare an orb-owned hook contract.
     pub fn hook<A: 'static, R: 'static>(mut self, hook: crate::Hook<A, R>) -> Self {
-        self.hooks.insert(hook.name.clone(), hook.signature());
+        if let Some(signature) = &hook.wit {
+            self.metadata
+                .hook_signatures
+                .insert(hook.name.clone(), signature.clone());
+        }
+        self.hooks.insert(hook.name.clone(), hook.identity());
         self.metadata.hooks.insert(hook.name);
+        self
+    }
+
+    /// Register a WIT-checked executor callback in the ordinary contribution plan.
+    #[doc(hidden)]
+    pub fn contribute_portable<F, Fut>(
+        mut self,
+        target: impl Into<String>,
+        hook: impl Into<String>,
+        signature: impl Into<String>,
+        priority: i32,
+        handle: F,
+    ) -> Self
+    where
+        F: Fn(Context, Value) -> Fut + 'static,
+        Fut: Future<Output = Result<Option<Value>>> + 'static,
+    {
+        self.contributions.push(crate::hooks::Contribution {
+            target: target.into(),
+            hook: hook.into(),
+            priority,
+            signature: crate::hooks::Signature {
+                native: None,
+                wit: Some(signature.into()),
+            },
+            local: None,
+            portable: Rc::new(move |context, value| handle(context, value).boxed_local()),
+        });
+        self.bind_hook_requirements();
         self
     }
 
@@ -209,7 +245,27 @@ impl Orb {
     {
         self.contributions
             .push(hook.contribution(target.into(), priority, handle));
+        self.bind_hook_requirements();
         self
+    }
+
+    /// Keep WIT requirements in the kernel graph regardless of the builder's declaration order.
+    fn bind_hook_requirements(&mut self) {
+        for contribution in &self.contributions {
+            let Some(signature) = &contribution.signature.wit else {
+                continue;
+            };
+            for requirement in &mut self.metadata.requires {
+                if requirement.orb == contribution.target
+                    && requirement.hooks.contains(&contribution.hook)
+                {
+                    requirement
+                        .hook_signatures
+                        .entry(contribution.hook.clone())
+                        .or_insert_with(|| signature.clone());
+                }
+            }
+        }
     }
 }
 

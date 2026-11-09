@@ -48,6 +48,11 @@ export interface Declaration {
     options?: { version?: number; validate?(value: Readonly<T>): boolean | void },
   ): State<T>;
   get<Interface>(binding: string, key?: string | readonly string[]): WitReference<Interface>;
+  hook<Input = unknown, Output = Input>(
+    name: string,
+  ): {
+    run(context: Context, input: Input): Promise<Output>;
+  };
   resource<T>(
     name: string,
     options: {
@@ -80,13 +85,44 @@ interface Service {
   linger?: number;
 }
 
+export interface HookComposition {
+  readonly composition: "series" | "waterfall" | "bail";
+}
+
+/** Observe each contribution in the kernel's plan order. */
+export function series(): HookComposition {
+  return { composition: "series" };
+}
+/** Pass each contribution's result to the next participant. */
+export function waterfall(): HookComposition {
+  return { composition: "waterfall" };
+}
+/** Return the first defined contribution result. */
+export function bail(): HookComposition {
+  return { composition: "bail" };
+}
+
+/**
+ * A source contribution receives the Orb root environment returned by `orb.create`, then the
+ * issued context and the hook input, like a service method. Annotate the environment with its
+ * actual type, for example `ReturnType<typeof create>`.
+ */
+export type Contribution =
+  | ((environment: never, context: Context, input: never) => unknown)
+  | {
+      handle(environment: never, context: Context, input: never): unknown;
+      priority?: number;
+    };
+
 /** Retain literal identity and callbacks; the outer host validates them against WIT before admission. */
 export function orb<
   const Definition extends {
     name: string;
     apiVersion: number;
     create?(self: Declaration): unknown;
-    services: Record<string, Service>;
+    services?: Record<string, Service>;
+    hooks?: Readonly<Record<string, HookComposition>>;
+    contributes?: Readonly<Record<string, Contribution>>;
   },
 >(definition: Definition): Readonly<Definition> {
   return Object.freeze(definition);
@@ -107,6 +143,20 @@ declare global {
       readText(path: string): Promise<string>;
       writeText(path: string, value: string): Promise<void>;
     };
-    transport?: { exchange(ip: string, port: number, request: string): Promise<string> };
+    transport?: {
+      /** Open one byte stream to an exactly granted literal IP address and port. */
+      connect(ip: string, port: number): Promise<TransportStream>;
+    };
   };
+}
+
+/**
+ * One incremental byte stream issued to the active callback. It closes when that callback
+ * completes. Reads return at most 16 KiB, or `null` at end of stream; writes accept at most
+ * 16 KiB per call.
+ */
+export interface TransportStream {
+  read(): Promise<Uint8Array | null>;
+  write(bytes: Uint8Array): Promise<void>;
+  close(): Promise<void>;
 }

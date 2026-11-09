@@ -4,16 +4,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A guest-declared executable bundle before it is matched against the selected world.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Implementation {
     pub name: Option<String>,
     pub api_version: Option<u32>,
     pub services: BTreeMap<String, ServiceImplementation>,
+    #[serde(default)]
+    pub hooks: BTreeMap<String, crate::HookComposition>,
+    #[serde(default)]
+    pub contributes: BTreeMap<String, i32>,
 }
 
 /// One guest service keyed by its JavaScript alias.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceImplementation {
     pub methods: BTreeSet<String>,
@@ -87,6 +91,7 @@ impl PreparedContract {
             .map(|service| (service.name.clone(), service))
             .collect::<BTreeMap<_, _>>();
         let mut provided = implementation.services;
+        let hook_exports = self.hook_exports(&implementation.hooks, &implementation.contributes)?;
         let mut plan = Vec::new();
         for entry in &self.model().exports {
             let Item::Interface(declared) = &entry.item else {
@@ -100,6 +105,14 @@ impl PreparedContract {
                 continue;
             };
             let alias = javascript_name(declared.name.as_deref().unwrap_or_default());
+            if hook_exports.contains(&interface) {
+                if provided.contains_key(&alias) {
+                    return Err(Error(format!(
+                        "{interface}: hook callbacks cannot also declare a service"
+                    )));
+                }
+                continue;
+            }
             let Some(implementation) = provided.remove(&alias) else {
                 return Err(Error(format!(
                     "{interface}: missing service implementation {alias}"

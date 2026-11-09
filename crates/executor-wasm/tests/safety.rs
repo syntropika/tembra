@@ -84,7 +84,7 @@ fn scope_cleanup_and_termination() {
     host.install(vec![
         engine
             .load(
-                &contract.artifact(Some(SOURCE), None, "safe", 1).unwrap(),
+                &contract.source_artifact(SOURCE, "safe", 1).unwrap(),
                 Install::default(),
             )
             .unwrap(),
@@ -196,7 +196,7 @@ fn scope_cleanup_and_termination() {
         host.install(vec![
             engine
                 .load(
-                    &contract.artifact(Some(SOURCE), None, "limited", 1).unwrap(),
+                    &contract.source_artifact(SOURCE, "limited", 1).unwrap(),
                     Install::default(),
                 )
                 .unwrap(),
@@ -290,7 +290,7 @@ globalThis.__tembraOrb.services.checks.methods.run=(e,c,mode) => mode === "reent
         bridge,
         engine
             .load(
-                &contract.artifact(Some(&source), None, "safe", 1).unwrap(),
+                &contract.source_artifact(&source, "safe", 1).unwrap(),
                 Install::default().requires("example:safety/bridge", "bridge", 1),
             )
             .unwrap(),

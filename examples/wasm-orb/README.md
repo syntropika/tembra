@@ -77,5 +77,9 @@ await host.load(calculatorFile, {
 ```
 
 The helper frames HTTP/1 in TypeScript over the granted TCP connection. It supports
-bounded UTF-8 `GET` requests to literal-IP `http:` URLs only. It is not WASI HTTP
-or WHATWG Fetch: TLS, DNS, redirects and streaming are not supported.
+request bodies, Content-Length and chunked responses, byte streaming through
+`response.body`, and SSE through `response.events()`. `text()` and `json()` collect
+at most 1 MiB. Ending iteration early closes the connection; cancellation and the
+host's callback deadline also close it. URLs currently require literal-IP `http:`
+addresses. TLS, DNS, redirects and decompression are not implemented, and the
+helper does not expose WASI HTTP or complete WHATWG Fetch semantics.

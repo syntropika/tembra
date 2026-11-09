@@ -4,7 +4,7 @@
 //! by the prepared contract it produces, so tooling and runtimes share one implementation.
 use crate::{
     Artifact, Error, PreparedContract,
-    artifact::{Container, Identity, append_section, encode_orb},
+    artifact::{Container, Identity, append_section, encode_orb_contributions},
 };
 use std::path::Path;
 use wit_parser::{Resolve, WorldId};
@@ -99,43 +99,44 @@ impl Contract {
         Ok(())
     }
 
-    /// Package checked source or component bytes without evaluating the author's implementation.
-    pub fn artifact(
+    /// Package a closed source bundle for the selected world.
+    pub fn source_artifact(
         &self,
-        source: Option<&str>,
-        component: Option<&[u8]>,
+        source: &str,
         name: &str,
         api_version: u32,
     ) -> Result<Vec<u8>, Error> {
-        match (source, component) {
-            (Some(source), None) => {
-                Artifact::package_source(name, api_version, &self.prepared, source)
-            }
-            (None, Some(component)) => {
-                let identity = Identity {
-                    name: name.into(),
-                    api_version,
-                    world: self.prepared.world().to_owned(),
-                };
-                identity.validate()?;
-                if !Container::parse(component)?.tembra.is_empty() {
-                    return Err(Error(
-                        "component already contains Orb artifact metadata".into(),
-                    ));
-                }
-                self.check_component_exports(component)?;
-                let mut bytes = component.to_vec();
-                append_section(
-                    &mut bytes,
-                    "tembra:orb",
-                    &encode_orb(&identity, &self.prepared),
-                );
-                Ok(bytes)
-            }
-            _ => Err(Error(
-                "an artifact requires exactly one source bundle or component".into(),
-            )),
+        Artifact::package_source(name, api_version, &self.prepared, source)
+    }
+
+    /// Package a component with typed contribution roles; WIT owns every callback signature.
+    pub fn component_artifact(
+        &self,
+        component: &[u8],
+        name: &str,
+        api_version: u32,
+        contributions: &std::collections::BTreeMap<String, i32>,
+    ) -> Result<Vec<u8>, Error> {
+        self.prepared.check_contribution_roles(contributions)?;
+        let identity = Identity {
+            name: name.into(),
+            api_version,
+            world: self.prepared.world().to_owned(),
+        };
+        identity.validate()?;
+        if !Container::parse(component)?.tembra.is_empty() {
+            return Err(Error(
+                "component already contains Orb artifact metadata".into(),
+            ));
         }
+        self.check_component_exports(component)?;
+        let mut bytes = component.to_vec();
+        append_section(
+            &mut bytes,
+            "tembra:orb",
+            &encode_orb_contributions(&identity, &self.prepared, contributions),
+        );
+        Ok(bytes)
     }
 }
 

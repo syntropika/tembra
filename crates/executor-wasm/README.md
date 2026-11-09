@@ -70,7 +70,7 @@ Installation binds method signatures to slots; callback validation uses those sl
 instead of repeating interface and method queries. Native compiled components are
 also checked against the actual component imports and exports.
 
-WIT exports become services named `<orb>::<package>/<interface>@<version>`.
+Ordinary WIT exports become services named `<orb>::<package>/<interface>@<version>`.
 WIT imports name required contracts only. `Install::requires` selects which
 installed Orb provides an import and its API version. A native Rust Orb can
 provide an import when it registers the matching service name and signature.
@@ -97,7 +97,7 @@ Installation fails when an Orb imports WASI sockets or filesystem without a
 matching grant, or when a grant names an unregistered provider. The standard
 WASI 0.3 definitions are bundled by `tembra-contracts`; authors do not copy them.
 
-Wasmtime 50.0.1 and wasmtime-wasi 50.0.0 provide WASIp3 support. That support is
+Wasmtime and wasmtime-wasi 51.0.0-rc.1 provide WASIp3 support. That support is
 still experimental upstream.
 
 ## Limits and failure
@@ -125,26 +125,46 @@ kernel revision, while still checking the handle and its owner's lifetime.
 
 Compiled components are checked against their full exported signatures and called
 through the Canonical ABI. They support plain interface functions and the WASI
-providers above. Imports from a compiled component to another Orb are not yet
-supported.
+providers above. A compiled component can import selected Orbs:
+
+- Its Orb root acquires one reference per Orb import binding, for the default key
+  `main`. A plain WIT import names no object key, so other keyed objects are not
+  addressable yet.
+- Each import call travels through the same scoped host request as a source Orb's
+  dependency call, under the caller's admitted invocation. Kernel execution frames
+  refuse causal reentry into the suspended importer; import arguments and results
+  are checked against the importer's WIT signature, and the value profile applies to
+  imports as well as exports.
+- `func` imports block only the guest while the host awaits the provider. `async func`
+  imports use P3 async lowering. A synchronously lifted export must not block on an
+  `async func` import: the Component Model traps that call.
+- Authority belongs to the call's Wasmtime task group. A call settles only after its
+  result and all of its task group's work have finished, so work after `task.return`
+  still runs under the call that started it. An import without such authority, for
+  example during instantiation, is refused.
+- A refused or failed import traps the importer and quarantines its Store; Tembra does
+  not fabricate WIT error values. This includes an import issued after the caller was
+  cancelled. Provider calls already in flight remain physically owned until they settle.
 
 ## Current scope
 
 Guests can use state reads, updates and selections, selected dependency
 references, resource dependencies, internal cooperative waits, console output,
-the granted filesystem and the granted TCP transport.
+the granted filesystem, the granted TCP transport and WIT-checked hook contributions.
+Source Orbs can also declare `series`, `waterfall` and `bail` hooks. See
+[portable hook contracts](../../docs/extensions.md#portable-hook-contracts).
 
 Not yet available:
 
 - WASI HTTP, random and general clock capabilities, and socket listening, UDP or DNS;
 - descriptor-level WASI filesystem access for source Orbs; only compiled components
   receive it, and only inside a filesystem grant;
-- guest tasks, listeners, hooks, state subscriptions and migration;
+- guest tasks, listeners, state subscriptions and migration;
+- compiled hook providers and portable custom composition, middleware or observation;
 - service access policies and exclusive or opaque resources;
 - causal reentry into the same interpreter;
 - durable checkpoint and restore;
-- compiled-component execution in the browser;
-- mobile hosts.
+- compiled-component execution in the browser.
 
 Replacement refuses a provider whose initial activation is still pending, and an
 active native one-shot task blocks replacement.
@@ -173,22 +193,26 @@ once, then runs every suite against them:
 ```sh
 just build-provider <target-directory>
 just build-probe <target-directory>
+just build-consumer <target-directory>
+just build-contributor <target-directory>
 just test-wasm-acceptance --out <directory> \
   --provider <target-directory>/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm \
-  --probe <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm
+  --probe <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm \
+  --consumer <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm \
+  --contributor <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm
 ```
 
 The runner builds the fixture Orbs with `scripts/test-wasm-fixtures.ts`, or reuses a
-directory passed with `--fixtures`. It runs the ignored executor tests natively, the
+directory passed with `--fixtures`. It runs all executor tests natively, including artifact-dependent cases, the
 SDK Bun and Node suites, Chrome with the packaged default engine and with an override
 engine directory, the [Wasm Orb example](../../examples/wasm-orb/README.md), and
 packed consumers in Node, Bun and Chrome with a clean NodeNext typecheck.
 Repeat `--suite native|sdk|node|browser|example|package` to select suites. The output
-directory must not contain the checkout. `just test-wasm-orb` runs only the ignored
+directory must not contain the checkout. `just test-wasm-orb` runs the
 Rust tests against supplied artifacts.
 
 The interpreter is a `wasm32-wasip1` reactor core module behind a private
-fixed-buffer ABI, `tembra-interpreter-v1`. [`src/abi.rs`](src/abi.rs) is its only
+fixed-buffer ABI, `tembra-interpreter-v2`. [`src/abi.rs`](src/abi.rs) is its only
 definition: the guest includes it, the native host compiles it, and the browser host
 uses TypeScript constants generated from it. Two exports reserve one input buffer and
 run one logical operation (load, declare, start, resume, cancel or capture); two
@@ -215,14 +239,37 @@ reach those providers.
 Source helpers check the admitted callback before each I/O effect and retain physical
 ownership until the operation settles, including after cancellation or an abandoned
 Promise. TypeScript still constructs and parses HTTP inside the guest; only the
-permitted raw transport runs in the host. Native source I/O uses four dedicated
-workers and a bounded queue, shared by Rust and Node without occupying Node's
-libuv pool. Permissions and request bounds are checked before queue admission;
+permitted raw transport runs in the host. One shared reactor handles nonblocking
+sockets; at most four blocking workers handle filesystem operations with bounded
+admission. Rust, Node and mobile share this path without occupying Node's libuv
+pool. Permissions and request bounds are checked before queue admission;
 expired queued operations cannot begin filesystem writes. Regular-file operations
 retain ownership until physical completion; their completion is not interruptible.
 
-Compiled-component calls settle through their dedicated Wasmtime worker without
-occupying the libuv pool. Rust callbacks can cancel while waiting for admission;
-admitted callbacks retain physical ownership until their WASI work settles.
-A terminal failure quarantines that Orb and refuses its
-queued calls only after the Store and blocking WASI operations have stopped.
+`tembra.transport.connect(ip, port)` returns a byte stream with `read`, `write` and
+`close`. Each chunk is at most 16 KiB. Streams belong to the callback that opened
+them and close on completion, abandonment or cancellation; an old handle cannot
+be used by the next callback. A slow read occupies no filesystem worker.
+
+`@syntropika/tembra-sdk/http` implements HTTP/1 request and response framing in
+TypeScript inside the guest. It supports request bodies, incremental byte bodies,
+Content-Length, chunked responses and SSE through `response.events()`. Iteration
+applies backpressure and closes the stream on an early return. `text()` and
+`json()` collect at most 1 MiB; byte iteration does not collect the whole body.
+The helper currently accepts literal-IP `http:` URLs. TLS, DNS, redirects and
+content decompression are not implemented. These helpers do not expose the WASI
+HTTP interface or a complete WHATWG Fetch implementation.
+
+SSE stays within its admitted callback and the configured callback/read deadlines.
+Long-running operations need an appropriate host `timeoutMs`; cancellation closes
+the connection promptly. Exceeding the callback deadline quarantines the Orb,
+as with any other callback. WIT stream values remain outside the current inter-Orb
+value profile.
+
+Compiled components run on the same session owner as source Orbs: one Store per Orb
+revision on a dedicated Wasmtime worker, admitted one callback at a time, without
+occupying the libuv pool. They answer the same private host requests, so native, Node
+and mobile adapters use one port type for both kinds. Callbacks can cancel while
+waiting for admission; admitted callbacks retain physical ownership until their WASI
+work and dependency calls settle. A terminal failure quarantines that Orb and refuses
+its queued calls only after the Store and blocking WASI operations have stopped.

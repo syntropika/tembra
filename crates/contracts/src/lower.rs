@@ -45,6 +45,7 @@ struct OrbDescription<'a> {
     services: Vec<ServiceDescription<'a>>,
     requires: Vec<RequirementDescription<'a>>,
     hooks: &'a std::collections::BTreeSet<String>,
+    hook_signatures: &'a BTreeMap<String, String>,
 }
 #[derive(Serialize)]
 struct ServiceDescription<'a> {
@@ -62,6 +63,7 @@ struct RequirementDescription<'a> {
     services: &'a BTreeMap<String, std::collections::BTreeSet<String>>,
     signatures: &'a BTreeMap<String, String>,
     hooks: &'a std::collections::BTreeSet<String>,
+    hook_signatures: &'a BTreeMap<String, String>,
 }
 
 impl Plan {
@@ -73,6 +75,7 @@ impl Plan {
                 name: &self.orb.name,
                 api_version: self.orb.api_version,
                 hooks: &self.orb.hooks,
+                hook_signatures: &self.orb.hook_signatures,
                 services: self
                     .orb
                     .services
@@ -95,6 +98,7 @@ impl Plan {
                         services: &requirement.methods,
                         signatures: &requirement.signatures,
                         hooks: &requirement.hooks,
+                        hook_signatures: &requirement.hook_signatures,
                     })
                     .collect(),
             },
@@ -215,6 +219,7 @@ impl PreparedContract {
                             .entry(name.clone())
                             .or_insert_with(|| Requirement {
                                 signatures: Default::default(),
+                                hook_signatures: Default::default(),
                                 orb: name.clone(),
                                 api_version: *api_version,
                                 methods: BTreeMap::new(),

@@ -185,33 +185,18 @@ impl Engine {
     /// Materialize one closed artifact through the common native Orb installation model.
     pub fn load(&self, bytes: &[u8], install: crate::Install) -> Result<Orb> {
         let artifact = tembra_contracts::Artifact::decode(bytes).map_err(failure)?;
-        self.load_artifact(&artifact, &install)
-    }
-
-    /// Reuse an already resolved artifact without reparsing its contract or copying its payload.
-    pub(crate) fn load_artifact(
-        &self,
-        artifact: &tembra_contracts::Artifact,
-        install: &crate::Install,
-    ) -> Result<Orb> {
         let bindings = artifact
             .contract
             .providers(&install.requires, &install.grants)?;
-        match &artifact.implementation {
-            tembra_contracts::ArtifactImplementation::Source(_) => {
-                let port = self.open_port(artifact, &bindings, &install.grants)?;
-                adapter::orb(
-                    port.metadata,
-                    port.session,
-                    port.services,
-                    artifact.contract.clone(),
-                    &bindings,
-                )
-            }
-            tembra_contracts::ArtifactImplementation::Component(_) => {
-                self.component_orb(artifact, &bindings, &install.grants)
-            }
-        }
+        let port = self.open_port(&artifact, &bindings, &install.grants)?;
+        adapter::orb(
+            port.metadata,
+            port.session,
+            port.services,
+            artifact.contract.clone(),
+            &bindings,
+            port.hooks,
+        )
     }
 }
 
@@ -238,5 +223,19 @@ mod tests {
             assert!(engine.clone().interpreter(bytes).is_err());
         }
         assert!(engine.interpreter.is_none());
+    }
+
+    #[test]
+    fn previous_private_protocol_engines_are_refused_before_use() {
+        let engine = Engine::new(Limits::default()).unwrap();
+        let legacy = wat::parse_str(r#"(module (import "tembra-interpreter-v1" "sync" (func (param i32 i32) (result i32))))"#).unwrap();
+        let Err(error) = engine.interpreter(&legacy) else {
+            panic!("old protocol accepted")
+        };
+        assert!(
+            error
+                .message
+                .contains("tembra-interpreter-v1::sync is not allowed")
+        );
     }
 }

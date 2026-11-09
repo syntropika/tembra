@@ -2,11 +2,7 @@
 use super::{Command, Event};
 use crate::{Engine, abi};
 use async_channel::Sender;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
-    mpsc,
-};
+use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::oneshot;
 use wasmtime::{
     Caller, ExternType, Linker, Memory, MemoryType, Module, Store, StoreLimits, StoreLimitsBuilder,
@@ -23,14 +19,6 @@ pub(super) struct State {
     deadline: Option<std::time::Instant>,
     /// A synchronous reply waiting for the guest's matching `sync_read`.
     reply: Option<Vec<u8>>,
-}
-
-struct InstanceCount(Arc<AtomicUsize>);
-impl Drop for InstanceCount {
-    /// Retire the instance metric after its Store and pending imports have been dropped.
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Release);
-    }
 }
 
 /// Refuse interpreter modules whose imports or exports differ from the private ABI.
@@ -214,9 +202,7 @@ pub(super) async fn run(
     commands: mpsc::Receiver<Command>,
     poison: Arc<Mutex<Option<String>>>,
     diagnostics: super::diagnostics::Diagnostics,
-) -> Vec<(Sender<Event>, String)> {
-    engine.active_instances.fetch_add(1, Ordering::Release);
-    let _instance = InstanceCount(engine.active_instances.clone());
+) -> super::Terminal {
     let outcome = async {
         let (mut store, driver) = instantiate(&engine, diagnostics).await?;
         while let Ok(command) = commands.recv() {

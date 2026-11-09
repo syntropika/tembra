@@ -4,9 +4,16 @@ import { parseArgs } from "node:util";
 import { build } from "../packages/ts/sdk/src/tooling/index.ts";
 
 const { values } = parseArgs({
-  options: { out: { type: "string" }, provider: { type: "string" } },
+  options: {
+    out: { type: "string" },
+    provider: { type: "string" },
+    contributor: { type: "string" },
+  },
 });
 if (!values.out) throw new Error("Supply --out with an external qualification artifact directory");
+// The compiled hook contributor is part of every hook fixture set, so its tests never skip.
+if (!values.contributor)
+  throw new Error("Supply --contributor with the compiled hook contributor component");
 const root = path.resolve(import.meta.dir, "..");
 const directory = path.resolve(values.out);
 const sources = path.join(directory, "sources");
@@ -87,6 +94,33 @@ write:async(_e:unknown,_c:unknown,path:string,value:string)=>tembra.filesystem!.
     minify: false,
   };
 }
+for (const world of ["provider", "extension"]) {
+  const target = `hook-${world}`;
+  await mkdir(path.join(sources, target), { recursive: true });
+  await writeFile(
+    path.join(sources, target, "contract.wit"),
+    await readFile(path.join(root, "crates/executor-wasm/tests/wit/hooks/hooks.wit")),
+  );
+  const source = await readFile(
+    path.join(root, `packages/ts/sdk/test/fixtures/wasm-hooks/${world}.ts`),
+    "utf8",
+  );
+  await writeFile(
+    path.join(sources, target, "orb.ts"),
+    source.replaceAll('"@syntropika/tembra-sdk"', guest),
+  );
+  builds[target] = { entry: `${target}/orb.ts`, wit: `${target}/contract.wit`, world };
+}
+// The real Rust contributor joins all three hooks before the source participants.
+builds["hook-compiled"] = {
+  entry: path.resolve(values.contributor),
+  wit: "hook-extension/contract.wit",
+  world: "extension",
+  apiVersion: 1,
+  contributes: Object.fromEntries(
+    ["guard", "audit", "choice"].map((hook) => [`example:hooks/${hook}@1.0.0`, -7]),
+  ),
+};
 if (values.provider)
   builds.arithmetic = {
     entry: path.resolve(values.provider),

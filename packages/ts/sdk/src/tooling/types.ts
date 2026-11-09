@@ -4,6 +4,8 @@ export interface BuildTarget {
   world?: string;
   /** Compiled components receive their identity from this target's name and API version. */
   apiVersion?: number;
+  /** Compiled callback interfaces contributing to their selected Orb's hook, with execution priority. */
+  contributes?: Readonly<Record<string, number>>;
   minify?: boolean;
   define?: Readonly<Record<string, string>>;
 }

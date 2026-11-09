@@ -50,8 +50,10 @@ jobs:
       - run: just build-sdk
       - run: just build-provider "$RUNNER_TEMP/provider"
       - run: just build-probe "$RUNNER_TEMP/provider"
+      - run: just build-consumer "$RUNNER_TEMP/provider"
+      - run: just build-contributor "$RUNNER_TEMP/provider"
       # The runner image provides Google Chrome; fail here if that changes.
       - run: google-chrome --version
-      - run: just test-wasm-acceptance --out "$RUNNER_TEMP/acceptance" --provider "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" --probe "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm"
+      - run: just test-wasm-acceptance --out "$RUNNER_TEMP/acceptance" --provider "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" --probe "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm" --consumer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm" --contributor "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm"
       - name: Test portable mobile execution and foreign continuation delivery
         run: just test-mobile-wasm packages/ts/engine-node/dist/interpreter.wasm "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm"

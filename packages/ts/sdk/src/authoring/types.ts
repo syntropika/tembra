@@ -26,6 +26,7 @@ export interface Requirement {
   methods?: readonly string[];
   services?: Readonly<Record<string, readonly string[]>>;
   hooks?: readonly string[];
+  hookSignatures?: Readonly<Record<string, string>>;
 }
 
 export interface HookDefinition {

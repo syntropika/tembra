@@ -162,6 +162,26 @@ impl Reference {
             method,
             context.frame(),
         )?;
+        let isolated = boundary.is_some()
+            && !portable_input
+            && self.host.kernel().orb(call.orb)?.declaration.isolated;
+        let portable = if isolated {
+            self.host
+                .0
+                .objects
+                .borrow()
+                .get(&call.object)
+                .and_then(|object| object.versions.get(&call.orb))
+                .and_then(|object| {
+                    object
+                        .implementation
+                        .portable
+                        .get(method)
+                        .map(|handle| (object.environment.clone(), handle.clone()))
+                })
+        } else {
+            None
+        };
         let selected = {
             let objects = self.host.0.objects.borrow();
             objects
@@ -194,7 +214,12 @@ impl Reference {
         let host = self.host.clone();
         let entered = host.context(call.root, Some(call.clone()))?;
         let receive = self.host.spawn_managed(call.id,async move {
-            if let Some((environment, handle))=selected {
+            if let Some((environment, handle))=portable {
+                let (encode, decode) = boundary.ok_or_else(|| Error::invalid(Reason::LocalValue, "isolated calls require a portable boundary"))?;
+                let input = encode(&arguments)?;
+                let result = decode(handle(environment, entered, input).await?)?;
+                Ok(Box::new(result) as Box<dyn std::any::Any>)
+            } else if let Some((environment, handle))=selected {
                 handle(environment, entered, Box::new(arguments)).await
             } else if !host.has_orb(call.orb) {
                 let (encode,decode)=boundary.ok_or_else(||Error::invalid(Reason::LocalValue,"use call_portable for a foreign service"))?;

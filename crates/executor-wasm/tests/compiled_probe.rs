@@ -24,7 +24,9 @@ fn probe(engine: &Engine, name: &str, grants: Grants) -> tembra::Result<Orb> {
     let mut install = Install::default();
     install.grants = grants;
     engine.load(
-        &contract.artifact(None, Some(&component), name, 1).unwrap(),
+        &contract
+            .component_artifact(&component, name, 1, &Default::default())
+            .unwrap(),
         install,
     )
 }

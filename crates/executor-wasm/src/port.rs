@@ -1,4 +1,5 @@
 //! Platform adapters route scoped host callbacks without embedding another lifecycle engine.
+//! One port type serves source bundles and compiled components.
 use crate::{
     Binding, Engine, Grants,
     abi::Operation,
@@ -15,18 +16,22 @@ use std::{
 };
 use tembra::Result;
 
-/// A thread-affine interpreter endpoint for an existing platform-owned Tembra kernel.
+/// A thread-affine execution endpoint for an existing platform-owned Tembra kernel.
 pub struct InterpreterPort {
     pub(crate) session: Session,
     pub(crate) description: Value,
     /// Checked once here so the native facade installs callbacks without revalidating the guest.
     pub(crate) services: Vec<tembra_contracts::ServiceBinding>,
     pub(crate) metadata: tembra::core::Orb,
+    pub(crate) hooks: tembra_contracts::HookPlan,
     packet_bytes: usize,
 }
 
 impl Engine {
-    /// Validate source, imports and grants before creating a platform-owned interpreter endpoint.
+    /// Validate an artifact, its selected imports and grants before creating its endpoint.
+    ///
+    /// Source bundles and compiled components return the same port: both execute behind one
+    /// session owner and answer the same scoped host requests.
     pub fn open_port(
         &self,
         artifact: &tembra_contracts::Artifact,
@@ -36,11 +41,7 @@ impl Engine {
         let contract = &artifact.contract;
         let name = &artifact.identity.name;
         let api_version = artifact.identity.api_version;
-        let tembra_contracts::ArtifactImplementation::Source(source) = &artifact.implementation
-        else {
-            return Err(failure("source interpreter requires a source artifact"));
-        };
-        let plan = contract
+        let mut plan = contract
             .plan(name, api_version, bindings)
             .map_err(failure)?;
         contract.check_value_profile().map_err(failure)?;
@@ -49,26 +50,50 @@ impl Engine {
                 contract.check_import_value_profile(name).map_err(failure)?;
             }
         }
-        let io = crate::io::SourceIo::new(
-            &self.providers,
-            &plan.host_imports,
-            grants,
-            std::time::Duration::from_millis(self.limits.timeout_ms),
-        )?;
-        let session = Session::start(self.clone(), name.into(), io)?;
-        let description = session.load(source, contract.describe())?;
-        let services = contract
-            .check_implementation(
-                name,
-                api_version,
-                serde_json::from_value(description.clone()).map_err(failure)?,
-            )
-            .map_err(failure)?;
+        let checked = |description: &Value| {
+            let implementation: tembra_contracts::Implementation =
+                serde_json::from_value(description.clone()).map_err(failure)?;
+            let services = contract
+                .check_implementation(name, api_version, implementation.clone())
+                .map_err(failure)?;
+            let hooks = contract
+                .check_hooks(&implementation, bindings)
+                .map_err(failure)?;
+            Ok::<_, tembra::Error>((services, hooks))
+        };
+        let (session, description, services, hooks) = match &artifact.implementation {
+            tembra_contracts::ArtifactImplementation::Source(source) => {
+                let io = crate::io::SourceIo::new(
+                    &self.providers,
+                    &plan.host_imports,
+                    grants,
+                    std::time::Duration::from_millis(self.limits.timeout_ms),
+                )?;
+                let session = Session::start(self.clone(), name.into(), io)?;
+                let description = session.load(source, contract.describe())?;
+                let (services, hooks) = checked(&description)?;
+                (session, description, services, hooks)
+            }
+            tembra_contracts::ArtifactImplementation::Component(_) => {
+                let description = crate::component::describe(
+                    contract,
+                    name,
+                    api_version,
+                    &artifact.contributions,
+                );
+                let (services, hooks) = checked(&description)?;
+                let session =
+                    self.component_session(artifact, &plan, &services, bindings, grants, &hooks)?;
+                (session, description, services, hooks)
+            }
+        };
+        hooks.apply(&mut plan);
         Ok(InterpreterPort {
             session,
             description,
             services,
             metadata: plan.orb,
+            hooks,
             packet_bytes: self.limits.packet_bytes,
         })
     }
@@ -129,6 +154,7 @@ impl InterpreterPort {
                 events,
                 done,
                 packet_bytes: self.packet_bytes,
+                streams: self.session.streams(),
             },
         ))
     }
@@ -166,10 +192,13 @@ pub struct PortEvents {
     events: async_channel::Receiver<Event>,
     done: Arc<AtomicBool>,
     packet_bytes: usize,
+    /// The callback's transport epoch ends here, before the embedding awaits pending I/O.
+    streams: crate::io::Streams,
 }
 impl PortEvents {
     /// Revoke pending requests when the embedding JavaScript runtime is invalidated.
     pub fn close(&self) {
+        self.streams.end_callback();
         self.events.close();
         worker::close_replies(&self.events);
     }
@@ -200,6 +229,8 @@ impl PortEvents {
                 },
             }),
             Event::Done(result) => {
+                // Close this callback's streams before the embedding drains its pending I/O.
+                self.streams.end_callback();
                 self.done.store(true, Ordering::Release);
                 let result = result.map_err(failure);
                 Ok(PortEvent::Complete(result))
@@ -212,6 +243,7 @@ impl Drop for PortEvents {
     /// Release buffered response senders if the embedding event loop stops consuming requests.
     fn drop(&mut self) {
         if !self.done.load(Ordering::Acquire) {
+            self.streams.end_callback();
             worker::close_replies(&self.events);
         }
     }
@@ -226,10 +258,6 @@ impl PortReply {
     /// Resolve one host request without exposing native kernel handles or executable callbacks.
     pub fn complete(self, result: Result<String>) {
         let _ = self.reply.send(worker::encode(result, self.limit));
-    }
-    /// Detect a revoked observer without treating cancellation as physical callback settlement.
-    pub fn is_closed(&self) -> bool {
-        self.reply.is_closed()
     }
 }
 

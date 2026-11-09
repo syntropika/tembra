@@ -8,6 +8,7 @@ import type {
   OrbInput,
   OrbArtifact,
   ServiceDefinition,
+  HookDefinition,
 } from "../authoring/types.ts";
 import type { Environment } from "./records.ts";
 
@@ -70,6 +71,7 @@ export type AdaptedService = ServiceDefinition & {
   [declareFactory]?: (declaration: Declaration) => Promise<unknown>;
   [admitFactory]?: () => Promise<() => void>;
 };
+export type AdaptedHook = HookDefinition & { [signature]?: string };
 
 /** Materialize a fresh revision per installation, disposing earlier candidates on failure. */
 export function prepareDefinitions(

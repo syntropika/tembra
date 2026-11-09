@@ -1,6 +1,6 @@
 //! Hook adapters retain callbacks; kernel plans select identities and retain physical owners.
 use super::*;
-use crate::hooks::{Contribution, Decode};
+use crate::hooks::{Contribution, Decode, Signature};
 use std::any::TypeId;
 
 type Dispatcher =
@@ -8,7 +8,7 @@ type Dispatcher =
 
 #[derive(Default)]
 pub(super) struct Hooks {
-    pub(super) declarations: RefCell<BTreeMap<core::Id, BTreeMap<String, TypeId>>>,
+    pub(super) declarations: RefCell<BTreeMap<core::Id, BTreeMap<String, Signature>>>,
     pub(super) contributions: RefCell<BTreeMap<core::Id, (core::Id, Contribution)>>,
     dispatcher: RefCell<Option<Dispatcher>>,
 }
@@ -44,7 +44,13 @@ impl Host {
                             .and_then(|orb| declarations.get(&orb.id))
                             .and_then(|hooks| hooks.get(&contribution.hook))
                     });
-                if signature.is_some_and(|signature| *signature != contribution.signature) {
+                if contribution.signature.native.is_none() && signature.is_none() {
+                    return Err(Error::invalid(
+                        Reason::Hook,
+                        "portable contributions require a declared WIT hook contract",
+                    ));
+                }
+                if signature.is_some_and(|signature| !signature.matches(&contribution.signature)) {
                     return Err(type_error());
                 }
                 let exists = pending
@@ -62,7 +68,7 @@ impl Host {
     pub(super) fn install_hooks(
         &self,
         orb: core::Id,
-        hooks: BTreeMap<String, TypeId>,
+        hooks: BTreeMap<String, Signature>,
         contributions: Vec<Contribution>,
     ) -> Result<()> {
         self.0.hooks.declarations.borrow_mut().insert(orb, hooks);
@@ -145,7 +151,8 @@ impl Host {
         if let Some((orb, contribution)) = contribution {
             self.ready_orb(orb).await?;
             context.check()?;
-            if contribution.signature != TypeId::of::<(A, R)>() {
+            let local = contribution.signature.native == Some(TypeId::of::<(A, R)>());
+            if !local && contribution.signature.wit.is_none() {
                 return Err(type_error());
             }
             let call = self.kernel().begin_operation_with_context(
@@ -160,11 +167,16 @@ impl Host {
                 call: call.id,
             };
             let entered = self.context(call.root, Some(call))?;
-            let output = (contribution.local)(entered, Box::new(input)).await?;
-            output
-                .downcast::<R>()
-                .map(|value| *value)
-                .map_err(|_| type_error())
+            if local {
+                let handle = contribution.local.as_ref().ok_or_else(type_error)?;
+                let output = handle(entered, Box::new(input)).await?;
+                output
+                    .downcast::<R>()
+                    .map(|value| *value)
+                    .map_err(|_| type_error())
+            } else {
+                decode((contribution.portable)(entered, crate::hooks::to_value(input)?).await?)
+            }
         } else {
             let dispatch = self.0.hooks.dispatcher.borrow().clone().ok_or_else(|| {
                 Error::new(
@@ -212,7 +224,7 @@ impl Declaration {
             .get(&self.orb)
             .and_then(|hooks| hooks.get(&hook.name))
             .ok_or_else(|| Error::invalid(Reason::Hook, &hook.name))?;
-        if *signature != hook.signature() {
+        if !signature.matches(&hook.identity()) {
             return Err(type_error());
         }
         Ok(crate::HookHandle {

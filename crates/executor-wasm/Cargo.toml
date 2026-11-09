@@ -14,7 +14,7 @@ path = "../../examples/rust/wasm.rs"
 
 [dependencies]
 cap-std = "=4.0.3"
-tembra = { path = "../tembra", version = "=0.2.2" }
+tembra = { path = "../tembra", version = "=0.2.2", features = ["hooks"] }
 tembra-contracts.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,7 +23,15 @@ futures.workspace = true
 futures-timer = "3"
 rayon = "1"
 async-channel = "2"
-tokio = { version = "1", features = ["rt", "sync", "time"] }
+tokio = { version = "1", features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
 wasmtime = { version = "=51.0.0-rc.1", default-features = false, features = [
   "anyhow",
   "component-model",
@@ -34,6 +42,7 @@ wasmtime = { version = "=51.0.0-rc.1", default-features = false, features = [
   "pulley",
   "runtime",
   "std",
+  "task-group-hook",
 ] }
 wasmtime-wasi = { version = "=51.0.0-rc.1", default-features = false, features = ["p2", "p3"] }
 
@@ -45,3 +54,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+wat = "=1.263.0"
+wit-component = "=0.261.0"
+wit-parser = "=0.261.0"

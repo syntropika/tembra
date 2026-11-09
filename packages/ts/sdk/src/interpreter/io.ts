@@ -40,7 +40,10 @@ export class BrowserCapabilities {
 
   /** Authority and liveness are checked by Scope immediately before this operation is admitted. */
   async execute(request: IORequest): Promise<unknown> {
-    if (request.operation === "transport.exchange")
+    if (
+      request.operation !== "filesystem.read-text" &&
+      request.operation !== "filesystem.write-text"
+    )
       throw new Error("This browser host has no raw TCP provider");
     const path = request.path;
     if (

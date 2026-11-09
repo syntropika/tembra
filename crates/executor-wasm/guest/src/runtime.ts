@@ -133,6 +133,27 @@
           },
         });
       },
+      hook(name: string) {
+        checkFactory();
+        const exported = globalThis.__tembraContract.exports.find((item) => {
+          const alias = item.contract?.split("/").at(-1)?.split("@")[0];
+          return alias && globalThis.__tembraContract.javascriptNames[alias] === name;
+        });
+        const method = exported && Object.keys(exported.functions)[0];
+        if (!method) throw new Error("Unknown WIT hook");
+        const spelling = globalThis.__tembraContract.javascriptNames[method]!;
+        const id = sync("hook.declare", { name });
+        return Object.freeze({
+          async run(ctx: GuestObject, input: unknown) {
+            if (ctx?.[contextMarker] !== true)
+              throw new Error("Hook calls require an issued context");
+            ctx.check();
+            const args = wire.exportArguments(name, spelling, [input]);
+            const result = await call("hook.run", { scope: owner, id, value: args[0] });
+            return wire.exportResult(name, spelling, result);
+          },
+        });
+      },
       get(service: string, key: string | readonly string[] = ["main"], options?: unknown) {
         checkFactory();
         if (options !== undefined)
@@ -265,11 +286,29 @@
   globalThis.__tembraDescribe = () => {
     const orb = globalThis.__tembraOrb;
     if (!orb || typeof orb !== "object") throw new Error("Bundle must export a default Orb");
-    if (Object.keys(orb.hooks ?? {}).length || Object.keys(orb.contributes ?? {}).length)
-      throw new Error("Hook execution is not implemented by this adapter");
+    for (const hook of Object.values(orb.hooks ?? {})) {
+      if (!["series", "waterfall", "bail"].includes(hook.composition))
+        throw new Error("Portable hooks require a supported composition");
+    }
+    for (const contribution of Object.values(orb.contributes ?? {})) {
+      if (
+        typeof (typeof contribution === "function" ? contribution : contribution.handle) !==
+        "function"
+      )
+        throw new Error("A contribution requires an executable callback");
+    }
     return JSON.stringify({
       name: orb.name,
       apiVersion: orb.apiVersion,
+      hooks: Object.fromEntries(
+        Object.entries(orb.hooks ?? {}).map(([name, hook]) => [name, hook.composition]),
+      ),
+      contributes: Object.fromEntries(
+        Object.entries(orb.contributes ?? {}).map(([binding, contribution]) => [
+          binding,
+          typeof contribution === "function" ? 0 : (contribution.priority ?? 0),
+        ]),
+      ),
       services: Object.fromEntries(
         Object.entries(orb.services ?? {}).map(([name, value]) => [
           name,
@@ -317,10 +356,6 @@
       const orb = globalThis.__tembraOrb;
       let result;
       switch (request.kind) {
-        case "create": {
-          result = JSON.parse(globalThis.__tembraDeclare(packet));
-          break;
-        }
         case "invoke":
           result = await wire.invoke(request.service, request.method, () =>
             orb.services[request.service]!.methods[request.method]!(
@@ -330,6 +365,20 @@
             ),
           );
           break;
+        case "contribute": {
+          const contribution = orb.contributes?.[request.binding];
+          const handle = typeof contribution === "function" ? contribution : contribution?.handle;
+          if (!handle) throw new Error("Unknown contribution callback");
+          // Contributions run in the Orb root environment, like that environment's services.
+          result = await wire.invoke(request.service, request.method, () =>
+            handle(
+              environments.get(request.environment),
+              context(),
+              wire.arguments(request.service, request.method, request.args)[0],
+            ),
+          );
+          break;
+        }
         case "callback":
           result = await callbacks.get(request.callback)!(request.value);
           break;
@@ -350,6 +399,32 @@
       if (activeCallback === callback) activeCallback = null;
     }
   };
+
+  /** Largest byte chunk carried by one transport read or write. */
+  const TRANSPORT_CHUNK_BYTES = 16 * 1024;
+
+  /**
+   * Wrap a host-issued stream identity. The identity selects only this Orb's streams of the
+   * active callback; the host closes every stream when that callback completes.
+   */
+  function transportStream(id: number): TransportStream {
+    return Object.freeze({
+      async read() {
+        const bytes: number[] | null = await call("transport.read", { id });
+        return bytes === null ? null : Uint8Array.from(bytes);
+      },
+      async write(bytes: Uint8Array) {
+        if (!(bytes instanceof Uint8Array))
+          throw new TypeError("Transport writes require a Uint8Array");
+        if (bytes.length > TRANSPORT_CHUNK_BYTES)
+          throw new RangeError("Transport writes are limited to 16 KiB per call");
+        await call("transport.write", { id, bytes: Array.from(bytes) });
+      },
+      async close() {
+        await call("transport.close", { id });
+      },
+    });
+  }
 
   globalThis.__tembraAbandon = () => {
     activeCallback = null;
@@ -374,8 +449,9 @@
     ...(imports.has("wasi:sockets/types@0.3.0")
       ? {
           transport: Object.freeze({
-            async exchange(ip: string, port: number, request: string) {
-              return call("transport.exchange", { ip, port, request });
+            /** Open one incremental byte stream to an exactly granted literal address. */
+            async connect(ip: string, port: number): Promise<TransportStream> {
+              return transportStream(await call("transport.connect", { ip, port }));
             },
           }),
         }

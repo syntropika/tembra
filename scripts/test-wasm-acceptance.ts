@@ -17,17 +17,20 @@ import { stagePackage } from "./release/npm.ts";
 const suites = ["native", "sdk", "node", "browser", "example", "package"];
 const usage =
   "Usage: bun scripts/test-wasm-acceptance.ts --out <directory> --provider <component.wasm> " +
-  `--probe <component.wasm> [--fixtures <directory>] [--suite <${suites.join("|")}>]...`;
+  `--probe <component.wasm> --consumer <component.wasm> --contributor <component.wasm> [--fixtures <directory>] [--suite <${suites.join("|")}>]...`;
 const { values } = parseArgs({
   options: {
     out: { type: "string" },
     provider: { type: "string" },
     probe: { type: "string" },
+    consumer: { type: "string" },
+    contributor: { type: "string" },
     fixtures: { type: "string" },
     suite: { type: "string", multiple: true },
   },
 });
-if (!values.out || !values.provider || !values.probe) throw new Error(usage);
+if (!values.out || !values.provider || !values.probe || !values.consumer || !values.contributor)
+  throw new Error(usage);
 const selected = values.suite ?? suites;
 for (const name of selected) if (!suites.includes(name)) throw new Error(usage);
 
@@ -39,9 +42,18 @@ if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)
   throw new Error("Choose an output directory that does not contain the checkout");
 const provider = path.resolve(values.provider);
 const probe = path.resolve(values.probe);
+const consumer = path.resolve(values.consumer);
+const contributor = path.resolve(values.contributor);
 const engine = path.join(root, "packages/ts/engine-node/dist/interpreter.wasm");
 const browserEngine = path.join(root, "packages/ts/engine-wasm/dist/interpreter");
-for (const file of [engine, path.join(browserEngine, "interpreter.wasm"), provider, probe])
+for (const file of [
+  engine,
+  path.join(browserEngine, "interpreter.wasm"),
+  provider,
+  probe,
+  consumer,
+  contributor,
+])
   if (!existsSync(file)) throw new Error(`Missing acceptance input: ${file}`);
 // Native, Node and browser suites must qualify the same packaged interpreter bytes.
 if (!readFileSync(engine).equals(readFileSync(path.join(browserEngine, "interpreter.wasm"))))
@@ -87,23 +99,37 @@ function artifact(directory: string): string {
 const bun = process.execPath;
 const fixtures = values.fixtures ? path.resolve(values.fixtures) : path.join(out, "fixtures");
 if (!values.fixtures)
-  run(bun, ["scripts/test-wasm-fixtures.ts", "--out", fixtures, "--provider", provider]);
+  run(bun, [
+    "scripts/test-wasm-fixtures.ts",
+    "--out",
+    fixtures,
+    "--provider",
+    provider,
+    "--contributor",
+    contributor,
+  ]);
 const environment = {
   TEMBRA_WASM_ENGINE: engine,
   TEMBRA_WASM_FIXTURES: fixtures,
   TEMBRA_WASM_ORB: path.join(fixtures, "calculator.wasm"),
   TEMBRA_WASM_PROVIDER: provider,
   TEMBRA_WASM_PROBE: probe,
+  TEMBRA_WASM_CONSUMER: consumer,
+  TEMBRA_WASM_CONTRIBUTOR: contributor,
 };
 const timings: string[] = [];
 for (const suite of selected) {
   const started = performance.now();
   if (suite === "native") {
-    // Ignored executor tests require these artifacts; each reads its inputs or fails.
-    run("cargo", ["test", "--locked", "-p", "tembra-executor-wasm", "--tests", "--", "--ignored"], {
-      ...environment,
-      TEMBRA_WASM_SCRATCH: fresh("scratch"),
-    });
+    // Acceptance runs both self-contained components and tests requiring these real artifacts.
+    run(
+      "cargo",
+      ["test", "--locked", "-p", "tembra-executor-wasm", "--tests", "--", "--include-ignored"],
+      {
+        ...environment,
+        TEMBRA_WASM_SCRATCH: fresh("scratch"),
+      },
+    );
   } else if (suite === "sdk") {
     run(bun, ["run", "--cwd", "packages/ts/sdk", "test"], environment);
   } else if (suite === "node") {

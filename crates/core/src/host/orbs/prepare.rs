@@ -100,6 +100,15 @@ impl Host {
                         ));
                     }
                 }
+                for (hook, signature) in &requirement.hook_signatures {
+                    if provider.declaration.hook_signatures.get(hook) != Some(signature) {
+                        return Err(Error::new(
+                            Code::Conflict,
+                            Reason::MissingHook,
+                            format!("hook contract signature differs for {hook}"),
+                        ));
+                    }
+                }
                 if !requirement.hooks.is_subset(&provider.declaration.hooks) {
                     return Err(conflict(Reason::MissingHook));
                 }

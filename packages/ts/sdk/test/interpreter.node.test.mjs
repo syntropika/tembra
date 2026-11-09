@@ -11,6 +11,54 @@ import { createHost, directoryFilesystem } from "../dist/node.js";
 const fixtures = process.env.TEMBRA_WASM_FIXTURES;
 
 test(
+  "isolated TypeScript hooks compose waterfall, series and bail with a compiled contributor",
+  { skip: !fixtures },
+  async () => {
+    const bytes = async (name) =>
+      new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
+    const engine = process.env.TEMBRA_WASM_ENGINE;
+    const host = createHost(
+      engine ? { isolated: { engine: new Uint8Array(await readFile(engine)) } } : {},
+    );
+    const requires = Object.fromEntries(
+      ["guard", "audit", "choice"].map((hook) => [
+        `example:hooks/${hook}@1.0.0`,
+        { orb: "tools", apiVersion: 1 },
+      ]),
+    );
+    try {
+      await host.install([
+        { artifact: await bytes("hook-provider") },
+        { artifact: await bytes("hook-extension"), requires },
+        // The SDK revision sends this compiled port its contribute commands.
+        { artifact: await bytes("hook-compiled"), requires },
+      ]);
+      const runner = await host.get("tools::example:hooks/runner@1.0.0", "main");
+      const source = await host.get("extension::example:hooks/reporter@1.0.0", "main");
+      const compiled = await host.get("hook-compiled::example:hooks/reporter@1.0.0", "main");
+      // Waterfall in plan order: compiled (-7) adds 20, then source (0) adds 2 and blocks.
+      assert.deepEqual(await runner.run({ value: 3, blocked: false }), {
+        value: 25,
+        blocked: true,
+      });
+      // Series: every participant observes each input; WIT void reaches consumers as null.
+      for (const input of [5, 7]) assert.equal(await runner.audit(input), null);
+      // Bail: `none` continues and the first `some` stops; an undecided `none` is null.
+      assert.equal(await runner.choose(0), null);
+      assert.equal(await runner.choose(1), 42);
+      assert.equal(await runner.choose(2), 84);
+      assert.deepEqual(await source.read(), { audit: 12, choices: 2 });
+      assert.deepEqual(await compiled.read(), { audit: 12, choices: 3 });
+      for (const reference of [runner, source, compiled]) reference.release();
+    } finally {
+      await host.close();
+    }
+    assert.equal(host.diagnostics().values, 0);
+    assert.equal(host.diagnostics().pendingJobs, 0);
+  },
+);
+
+test(
   "published Node host installs real TS and Rust Wasm artifacts with grants, reload and physical disposal",
   {
     skip: !fixtures,
@@ -110,13 +158,30 @@ test(
       const entered = new Promise((resolve) => {
         enteredResponse = resolve;
       });
-      // The guest closes its request half before awaiting the complete HTTP response.
-      const server = createServer({ allowHalfOpen: true }, (socket) => {
+      const sockets = new Set();
+      let observeSseClose;
+      const sseClosed = new Promise((resolve) => {
+        observeSseClose = resolve;
+      });
+      const server = createServer((socket) => {
+        sockets.add(socket);
+        socket.once("close", () => sockets.delete(socket));
         let request = "";
+        let served = false;
         socket.on("data", (bytes) => {
           request += bytes.toString();
-        });
-        socket.on("end", () => {
+          if (served || !request.includes("\r\n\r\n")) return;
+          served = true;
+          if (request.startsWith("GET /events ")) {
+            socket.once("close", observeSseClose);
+            const response = Buffer.from(
+              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: hé🌍\n\n",
+            );
+            socket.write(response.subarray(0, response.length - 4));
+            setImmediate(() => socket.write(response.subarray(response.length - 4)));
+            // The peer stays open: the first event must settle before EOF and stop its reader.
+            return;
+          }
           const body = '{"values":[1,2,3]}';
           const respond = () =>
             socket.end(
@@ -143,6 +208,8 @@ test(
         });
         const network = await host.get("online::example:integrated/calculation@1.0.0", "main");
         assert.equal(await network["fetch-and-sum"](`http://127.0.0.1:${port}/values`), 12);
+        assert.equal(await network["first-event"](`http://127.0.0.1:${port}/events`), "hé🌍");
+        await sseClosed;
         const pending = network["fetch-and-sum"](`http://127.0.0.1:${port}/delayed`);
         await entered;
         let timer;
@@ -165,6 +232,7 @@ test(
         }
         network.release();
       } finally {
+        for (const socket of sockets) socket.destroy();
         await new Promise((resolve, reject) =>
           server.close((error) => (error ? reject(error) : resolve())),
         );

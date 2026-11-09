@@ -10,6 +10,7 @@ import {
   type HostRequest,
   WAIT_LIMIT_MILLISECONDS,
   survivesCancellation,
+  asyncSurvivesCancellation,
 } from "./host-protocol.ts";
 import type { Revision } from "./revision.ts";
 import { check, encode } from "./codec.ts";
@@ -37,6 +38,10 @@ export class Scope {
   readonly states = new Map<number, State<unknown>>();
   readonly references = new Map<number, { reference: DynamicReference; binding: string }>();
   readonly resources = new Map<number, Resource<number>>();
+  readonly hooks = new Map<
+    number,
+    { handle: ReturnType<Declaration["hook"]>; binding: import("./types.ts").HookBinding }
+  >();
   #next = 0;
 
   /** Retain only issued declarations; service scopes inherit their own revision's Orb resources. */
@@ -160,6 +165,14 @@ export class Scope {
         const value = state.update(this.context(authority), () => request.value);
         return selected.snapshot(value, selected.declaration.environment.object!.id);
       }
+      case "hook.declare": {
+        const binding = this.revision.hooks.get(request.name);
+        if (!binding) throw new Error("Hook is absent from the checked WIT declaration");
+        const handle = this.factory(authority).hook(binding.name);
+        const id = ++this.#next;
+        this.hooks.set(id, { handle, binding });
+        return id;
+      }
       case "reference.declare": {
         const service = this.revision.imports.get(request.service);
         if (!service) throw new Error("Reference is not a selected WIT Orb import");
@@ -237,11 +250,40 @@ export class Scope {
     switch (request.operation) {
       case "filesystem.read-text":
       case "filesystem.write-text":
-      case "transport.exchange": {
-        if ("context" in authority) authority.context.check();
-        else if ("signal" in authority) checkSignal(authority.signal);
-        else throw new Error("I/O requires an active callback");
-        return this.revision.io(request);
+      case "transport.connect":
+      case "transport.read":
+      case "transport.write":
+      case "transport.close": {
+        if (!("context" in authority) && !("signal" in authority))
+          throw new Error("I/O requires an active callback");
+        // Closing an owned stream is cleanup; it still needs a callback but survives cancellation.
+        if (!asyncSurvivesCancellation(request)) {
+          if ("context" in authority) authority.context.check();
+          else checkSignal(authority.signal);
+        }
+        const result = await this.revision.io(request);
+        if (request.operation === "transport.connect") {
+          // Cancellation ends the stream's authority; closing it settles pending socket work.
+          const owner = authoritySignal(authority)!;
+          const close = () =>
+            void this.revision
+              .io({ operation: "transport.close", id: result as number })
+              .catch(() => {});
+          if (owner.aborted) close();
+          else owner.addEventListener("abort", close, { once: true });
+        }
+        return result;
+      }
+      case "hook.run": {
+        const context = this.context(authority);
+        const { handle, binding } = this.handle(
+          this.selected(request.scope).hooks,
+          request.id,
+          "hook",
+        );
+        check(this.revision.contract, binding.slot, true, encode([request.value]));
+        const result = (await handle.run(context, request.value)) ?? null;
+        return check(this.revision.contract, binding.slot, false, encode(result));
       }
       case "reference.ready": {
         const owner = authoritySignal(authority);
@@ -268,9 +310,12 @@ export class Scope {
         const record = this.declaration.session.handles.reference(reference);
         if (!record.methods.has(method)) throw new Error("Reference does not expose this method");
         const result =
-          (await this.declaration.session.calls.observe(
-            this.declaration.session.calls.invoke(record, method, request.args, context, capture),
-            ended,
+          (await this.declaration.session.calls.invokePhysical(
+            record,
+            method,
+            request.args,
+            context,
+            capture,
           )) ?? null;
         // The provider may be an ordinary host implementation returning hostile JavaScript. Reply
         // with the checked capture, never with the original object graph.

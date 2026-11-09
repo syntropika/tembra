@@ -4,6 +4,49 @@ import type { Context } from "../src/runtime/context.ts";
 import { KernelOp } from "../src/protocol.ts";
 import { deferred } from "../src/runtime/records.ts";
 
+test("an admitted foreign dependency settles physically after its caller cancels", async () => {
+  const host = createHost();
+  const entered = deferred<void>();
+  const resume = deferred<void>();
+  let settled = false;
+  try {
+    await host.install({
+      name: "provider",
+      apiVersion: 1,
+      services: {
+        "provider.work": {
+          methods: {
+            async run() {
+              entered.resolve();
+              await resume.promise;
+              settled = true;
+              return 42;
+            },
+          },
+        },
+      },
+    });
+    const reference = await host.get("provider.work", "main");
+    const record = host.session.handles.reference(reference);
+    await host.root(async (context) => {
+      const pending = host.session.calls.invokePhysical(record, "run", [], context);
+      await entered.promise;
+      context.cancel();
+      expect(settled).toBe(false);
+      await expect(
+        host.session.calls.invokePhysical(record, "run", [], context),
+      ).rejects.toMatchObject({ code: "cancelled" });
+      resume.resolve();
+      expect(await pending).toBe(42);
+      expect(settled).toBe(true);
+    });
+    reference.release();
+  } finally {
+    resume.resolve();
+    await host.close();
+  }
+});
+
 for (const close of [false, true])
   test(`a signal first requested after ${close ? "host close" : "explicit cancellation"} is aborted`, async () => {
     const host = createHost();

@@ -49,7 +49,7 @@ export class MobileExecution implements MobileBackend {
           filesystem: Object.fromEntries(
             Object.entries(this.options.providers?.filesystem ?? {}).map(([name, provider]) => [
               name,
-              typeof provider === "string" ? provider : provider.path,
+              provider.path,
             ]),
           ),
           network: this.options.providers?.network ?? [],
@@ -86,12 +86,12 @@ export class MobileExecution implements MobileBackend {
     return artifact;
   }
 
-  /** Open source execution while the shared SDK retains all lifecycle and callback authority. */
+  /** Open source or compiled execution while the shared SDK retains lifecycle and callback authority. */
   async open(artifact: MobileArtifact, bindings: string, grants: string) {
     await this.ready();
     const native = this.native,
       host = this.kernel.handle;
-    const id = await native.openPort(host, this.artifactId(artifact), bindings, grants, false);
+    const id = await native.openPort(host, this.artifactId(artifact), bindings, grants);
     this.logs(host, id);
     return {
       description: () => native.portDescription(host, id),
@@ -103,23 +103,6 @@ export class MobileExecution implements MobileBackend {
       abort: () => native.abortPort(host, id),
       release: (environment: number) => native.portRelease(host, id, environment),
       io: (packet: string) => native.portIo(host, id, packet),
-      close: () => native.closePort(host, id),
-    };
-  }
-
-  /** Use the same installation path for compiled-language components. */
-  async openComponent(artifact: MobileArtifact, bindings: string, grants: string) {
-    await this.ready();
-    const native = this.native,
-      host = this.kernel.handle;
-    const id = await native.openPort(host, this.artifactId(artifact), bindings, grants, true);
-    this.logs(host, id);
-    return {
-      description: () => native.portDescription(host, id),
-      call: (binding: string, method: string, arguments_: string) =>
-        native
-          .componentCall(host, id, binding, method, arguments_)
-          .finally(() => this.logs(host, id)),
       close: () => native.closePort(host, id),
     };
   }

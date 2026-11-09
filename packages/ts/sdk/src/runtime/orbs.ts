@@ -73,6 +73,7 @@ export class Orbs {
               signatures
             ] ?? {},
           hooks: requirement.hooks ?? [],
+          hookSignatures: requirement.hookSignatures ?? {},
         };
       });
       for (const [alias, hooks] of Object.entries(definition.contributes ?? {})) {
@@ -90,6 +91,12 @@ export class Orbs {
         apiVersion: definition.apiVersion,
         requires,
         hooks: Object.keys(definition.hooks ?? {}),
+        hookSignatures: Object.fromEntries(
+          Object.entries(definition.hooks ?? {}).flatMap(([name, hook]) => {
+            const prepared = (hook as import("./adapters.ts").AdaptedHook)[signature];
+            return prepared ? [[name, prepared]] : [];
+          }),
+        ),
         isolated: (definition as AdaptedOrb)[isolatedRevision] === true,
         services: Object.entries(definition.services ?? {}).map(([name, service]) => ({
           name,

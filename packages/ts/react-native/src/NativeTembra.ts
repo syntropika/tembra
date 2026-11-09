@@ -28,13 +28,7 @@ export interface Spec extends TurboModule {
     value: string,
   ): string;
   releaseArtifact(handle: string, artifact: string): boolean;
-  openPort(
-    handle: string,
-    artifact: string,
-    bindings: string,
-    grants: string,
-    component: boolean,
-  ): Promise<string>;
+  openPort(handle: string, artifact: string, bindings: string, grants: string): Promise<string>;
   portDescription(handle: string, port: string): string;
   portLogs(handle: string, port: string): string;
   portBegin(handle: string, port: string, packet: string, declaration: boolean): boolean;
@@ -44,13 +38,6 @@ export interface Spec extends TurboModule {
   abortPort(handle: string, port: string): Promise<void>;
   portRelease(handle: string, port: string, environment: number): boolean;
   portIo(handle: string, port: string, packet: string): Promise<string>;
-  componentCall(
-    handle: string,
-    port: string,
-    binding: string,
-    method: string,
-    arguments_: string,
-  ): Promise<string>;
   closePort(handle: string, port: string): boolean;
 }
 

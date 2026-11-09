@@ -47,6 +47,7 @@ test("only the exact private imports are accepted", async () => {
     importing(abi.WASI_MODULE, "sock_accept"),
     importing(abi.WASI_MODULE, "random_get"),
     importing(abi.IMPORT_MODULE, "spawn"),
+    importing("tembra-interpreter-v1", abi.SYNC_IMPORT),
     importing("env", "table_memory", true),
   ])
     expect(() => checkInterpreter(new WebAssembly.Module(bytes))).toThrow("is not allowed");

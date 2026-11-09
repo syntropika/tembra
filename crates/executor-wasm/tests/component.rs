@@ -21,7 +21,11 @@ fn typescript_calls_a_compiled_rust_orb() {
         .interpreter(&interpreter)
         .unwrap();
     let wrong = Contract::from_source("wrong.wit","package example:integrated@1.0.0; interface arithmetic { double: func(value:string)->s32; } world provider { export arithmetic; }",None).unwrap();
-    assert!(wrong.artifact(None, Some(&component), "math", 1).is_err());
+    assert!(
+        wrong
+            .component_artifact(&component, "math", 1, &Default::default())
+            .is_err()
+    );
     assert_eq!(engine.instances(), 0);
     let provider = Contract::from_dir(
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/wasm-orb"),
@@ -31,7 +35,7 @@ fn typescript_calls_a_compiled_rust_orb() {
     let math = engine
         .load(
             &provider
-                .artifact(None, Some(&component), "math", 1)
+                .component_artifact(&component, "math", 1, &Default::default())
                 .unwrap(),
             Install::default(),
         )

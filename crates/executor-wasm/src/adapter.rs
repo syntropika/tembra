@@ -15,12 +15,19 @@ pub(crate) fn orb(
     services: Vec<tembra_contracts::ServiceBinding>,
     contract: tembra_contracts::PreparedContract,
     bindings: &BTreeMap<String, tembra_contracts::Binding>,
+    hooks: tembra_contracts::HookPlan,
 ) -> Result<Orb> {
     let mut orb = Orb::new(&metadata.name, metadata.api_version).isolated();
     let imports = contract
         .import_services(bindings)
         .map_err(failure)?
         .into_iter()
+        .filter(|(binding, _)| {
+            !hooks
+                .contributions
+                .iter()
+                .any(|contribution| &contribution.binding == binding)
+        })
         .map(|(binding, service)| {
             let entry = contract
                 .model()
@@ -49,6 +56,45 @@ pub(crate) fn orb(
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let imports = Rc::new(imports);
+    for binding in &hooks.hooks {
+        use tembra_contracts::HookComposition;
+        orb = match binding.composition {
+            HookComposition::Series => orb.hook(
+                tembra::Hook::<Value, ()>::series(&binding.name).signature(&binding.signature),
+            ),
+            HookComposition::Waterfall => orb.hook(
+                tembra::Hook::<Value, Value>::waterfall(&binding.name)
+                    .signature(&binding.signature),
+            ),
+            HookComposition::Bail => orb.hook(
+                tembra::Hook::<Value, Option<Value>>::bail(&binding.name)
+                    .signature(&binding.signature),
+            ),
+        };
+    }
+    for binding in hooks.contributions {
+        orb = orb.contribute_portable(
+            binding.target.clone(),
+            binding.name.clone(),
+            binding.signature.clone(),
+            binding.priority,
+            move |context, value| {
+                let binding = binding.clone();
+                async move {
+                    let environment = context.orb::<Environment>()?;
+                    environment.contribute(context, &binding, value).await
+                }
+            },
+        );
+    }
+    let hook_bindings = Rc::new(
+        hooks
+            .hooks
+            .into_iter()
+            .map(|binding| (binding.alias.clone(), binding))
+            .collect::<BTreeMap<_, _>>(),
+    );
+    let root_hooks = hook_bindings.clone();
     let next = Rc::new(Cell::new(0_u64));
     let root_session = session.clone();
     let root_imports = imports.clone();
@@ -63,6 +109,7 @@ pub(crate) fn orb(
             None,
             root_imports.clone(),
             root_contract.clone(),
+            root_hooks.clone(),
         )
     });
     for requirement in metadata.requires {
@@ -75,6 +122,7 @@ pub(crate) fn orb(
         let service_imports = imports.clone();
         let service_contract = contract.clone();
         let gate_session = session.clone();
+        let service_hooks = hook_bindings.clone();
         let mut implementation = Service::new(&service.name, move |declaration| {
             let id = allocate_environment(&next)?;
             Environment::create(
@@ -84,6 +132,7 @@ pub(crate) fn orb(
                 Some(create_alias.clone()),
                 service_imports.clone(),
                 service_contract.clone(),
+                service_hooks.clone(),
             )
         })
         .signature(service.signature)

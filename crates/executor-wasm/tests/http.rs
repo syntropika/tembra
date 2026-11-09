@@ -21,6 +21,7 @@ struct Server {
     thread: Option<thread::JoinHandle<()>>,
     address: SocketAddr,
     requests: Arc<Mutex<Vec<String>>>,
+    event_closed: std::sync::mpsc::Receiver<()>,
 }
 
 impl Server {
@@ -33,6 +34,7 @@ impl Server {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let ended = stop.clone();
         let received = requests.clone();
+        let (event_closed, observed_close) = std::sync::mpsc::channel();
         let thread = thread::spawn(move || {
             while !ended.load(Ordering::Acquire) {
                 let (mut socket, _) = match listener.accept() {
@@ -56,14 +58,25 @@ impl Server {
                     );
                     request.extend_from_slice(&bytes[..count]);
                 }
+                let event = request.starts_with(b"GET /events ");
                 received
                     .lock()
                     .unwrap()
                     .push(String::from_utf8(request).unwrap());
+                if event {
+                    socket.write_all("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: hé🌍\n\n".as_bytes()).unwrap();
+                    // No EOF is sent: the guest must consume one event and close its reader.
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    assert_eq!(socket.read(&mut bytes).unwrap(), 0);
+                    event_closed.send(()).unwrap();
+                    continue;
+                }
                 let body = r#"{"values":[3,4,5]}"#;
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x};part=1\r\n{body}\r\n0\r\nX-Finished: yes\r\n\r\n",
+                    body.len(),
                 );
                 socket.write_all(response.as_bytes()).unwrap();
             }
@@ -73,6 +86,7 @@ impl Server {
             thread: Some(thread),
             address,
             requests,
+            event_closed: observed_close,
         }
     }
 }
@@ -91,6 +105,12 @@ impl Drop for Server {
 #[test]
 #[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_ORB"]
 fn typescript_owns_http_and_the_host_only_grants_transport() {
+    for interpreted in [false, true] {
+        run(interpreted);
+    }
+}
+
+fn run(interpreted: bool) {
     let server = Server::start();
     let component =
         std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
@@ -103,12 +123,16 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
     let source = format!(
         "{source}\nglobalThis.__tembraOrb = {{...globalThis.__tembraOrb, name: 'online'}};"
     );
-    let engine = Engine::new(Limits::default())
-        .unwrap()
-        .interpreter(&component)
-        .unwrap()
-        .network("tcp")
-        .unwrap();
+    let engine = if interpreted {
+        Engine::interpreted(Limits::default())
+    } else {
+        Engine::new(Limits::default())
+    }
+    .unwrap()
+    .interpreter(&component)
+    .unwrap()
+    .network("tcp")
+    .unwrap();
     let contract = Contract::from_dir(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -122,7 +146,7 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
     assert!(
         engine
             .load(
-                &contract.artifact(Some(&source), None, "online", 1).unwrap(),
+                &contract.source_artifact(&source, "online", 1).unwrap(),
                 install()
             )
             .is_err()
@@ -138,7 +162,7 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
     allowed.grants = grants;
     let orb = engine
         .load(
-            &contract.artifact(Some(&source), None, "online", 1).unwrap(),
+            &contract.source_artifact(&source, "online", 1).unwrap(),
             allowed,
         )
         .unwrap();
@@ -157,6 +181,7 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
     pool.run_until(reference.ready()).unwrap();
     let called = reference.clone();
     let url = format!("http://{}/numbers", server.address);
+    let events_url = format!("http://{}/events", server.address);
     pool.run_until(host.root("alice", move |context| {
         async move {
             assert_eq!(
@@ -168,6 +193,12 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
             assert_eq!(
                 called.call::<_, Value>(&context, "read", json!([])).await?,
                 24
+            );
+            assert_eq!(
+                called
+                    .call::<_, Value>(&context, "first-event", json!([events_url]))
+                    .await?,
+                "hé🌍"
             );
             assert!(
                 called
@@ -184,6 +215,10 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
         .boxed_local()
     }))
     .unwrap();
+    server
+        .event_closed
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
     assert!(server.requests.lock().unwrap()[0].starts_with("GET /numbers HTTP/1.1\r\n"));
     reference.release().unwrap();
     pool.run_until(host.close()).unwrap();

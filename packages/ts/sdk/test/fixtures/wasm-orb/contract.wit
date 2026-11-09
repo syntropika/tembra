@@ -18,6 +18,7 @@ interface calculation {
     fanout: async func() -> s32;
     pending: async func() -> s32;
     fetch-and-sum: async func(url: string) -> s32;
+    first-event: async func(url: string) -> string;
 }
 
 world arithmetic-provider { export arithmetic; }

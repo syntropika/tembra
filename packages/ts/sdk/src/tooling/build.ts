@@ -36,66 +36,63 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
       }
     }
     let bytes: Uint8Array;
-    let contract: NodeContract | undefined;
-    try {
-      contract = new NodeContract(
-        types?.contract ?? compileContract(path.dirname(wit), target.world),
-        target.world,
+    const contract = new NodeContract(
+      types?.contract ?? compileContract(path.dirname(wit), target.world),
+      target.world,
+    );
+    if (compiled) {
+      if (!target.apiVersion)
+        throw new Error(`Build ${name} requires apiVersion for a compiled Orb`);
+      bytes = contract.componentArtifact(
+        await Bun.file(entry).bytes(),
+        name,
+        target.apiVersion,
+        target.contributes,
       );
-      if (compiled) {
-        if (!target.apiVersion)
-          throw new Error(`Build ${name} requires apiVersion for a compiled Orb`);
-        bytes = contract!.artifact(
-          undefined,
-          await Bun.file(entry).bytes(),
-          name,
-          target.apiVersion,
-        );
-      } else {
-        if (target.apiVersion !== undefined)
-          throw new Error(`Build ${name} declares apiVersion in its source Orb`);
-        const program = typecheck(entry, root, types!.files, ["tembra-wasm"]);
-        const result = await Bun.build({
-          entrypoints: ["tembra:entry"],
-          root,
-          format: "iife",
-          target: "browser",
-          splitting: false,
-          minify: target.minify ?? true,
-          ...(target.define ? { define: { ...target.define } } : {}),
-          plugins: [resolver(root, target)],
-        });
-        if (!result.success) throw new AggregateError(result.logs, `Build ${name} failed`);
-        if (result.outputs.length !== 1 || result.outputs[0]?.kind !== "entry-point")
-          throw new Error(`Build ${name} requires exactly one closed bundle`);
-        const source = await result.outputs[0]!.text();
-        const parsed = ts.createSourceFile(
-          "bundle.js",
-          source,
-          ts.ScriptTarget.Latest,
-          true,
-          ts.ScriptKind.JS,
-        );
-        /** Reject module operations that cannot resolve in the selected runtime. */
-        function verify(node: ts.Node): void {
-          let specifier: ts.Expression | undefined;
-          if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
-            specifier = node.moduleSpecifier;
-          if (
-            ts.isCallExpression(node) &&
-            (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-              (ts.isIdentifier(node.expression) && node.expression.text === "require"))
-          )
-            specifier = node.arguments[0];
-          if (specifier) throw new Error(`Build ${name} contains an unresolved import`);
-          ts.forEachChild(node, verify);
-        }
-        verify(parsed);
-        const registration = identity(program!, entry);
-        bytes = contract!.artifact(source, undefined, registration.name, registration.apiVersion);
+    } else {
+      if (target.apiVersion !== undefined)
+        throw new Error(`Build ${name} declares apiVersion in its source Orb`);
+      if (target.contributes !== undefined)
+        throw new Error(`Build ${name} declares contributions in its source Orb`);
+      const program = typecheck(entry, root, types!.files, ["tembra-wasm"]);
+      const result = await Bun.build({
+        entrypoints: ["tembra:entry"],
+        root,
+        format: "iife",
+        target: "browser",
+        splitting: false,
+        minify: target.minify ?? true,
+        ...(target.define ? { define: { ...target.define } } : {}),
+        plugins: [resolver(root, target)],
+      });
+      if (!result.success) throw new AggregateError(result.logs, `Build ${name} failed`);
+      if (result.outputs.length !== 1 || result.outputs[0]?.kind !== "entry-point")
+        throw new Error(`Build ${name} requires exactly one closed bundle`);
+      const source = await result.outputs[0]!.text();
+      const parsed = ts.createSourceFile(
+        "bundle.js",
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.JS,
+      );
+      /** Reject module operations that cannot resolve in the selected runtime. */
+      function verify(node: ts.Node): void {
+        let specifier: ts.Expression | undefined;
+        if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+          specifier = node.moduleSpecifier;
+        if (
+          ts.isCallExpression(node) &&
+          (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+            (ts.isIdentifier(node.expression) && node.expression.text === "require"))
+        )
+          specifier = node.arguments[0];
+        if (specifier) throw new Error(`Build ${name} contains an unresolved import`);
+        ts.forEachChild(node, verify);
       }
-    } finally {
-      contract?.free?.();
+      verify(parsed);
+      const registration = identity(program!, entry);
+      bytes = contract.sourceArtifact(source, registration.name, registration.apiVersion);
     }
     const hash = createHash("sha256").update(bytes).digest("hex");
     const directory = path.join(outDir, name);

@@ -595,6 +595,7 @@ record! {
         services: Option<BTreeMap<String, Vec<String>>>,
         signatures: Option<BTreeMap<String, String>>,
         hooks: Option<Vec<String>>,
+        hook_signatures: Option<BTreeMap<String, String>>,
     }
 }
 
@@ -606,6 +607,7 @@ record! {
         services: Vec<ServiceDeclaration>,
         requires: Option<Vec<RequirementDeclaration>>,
         hooks: Option<Vec<String>>,
+        hook_signatures: Option<BTreeMap<String, String>>,
         isolated: Option<bool>,
     }
 }
@@ -635,6 +637,7 @@ impl OrbDeclaration {
                 .flatten()
                 .map(|requirement| core::Requirement {
                     signatures: requirement.signatures.unwrap_or_default(),
+                    hook_signatures: requirement.hook_signatures.unwrap_or_default(),
                     orb: requirement.orb,
                     api_version: requirement.api_version,
                     methods: requirement
@@ -647,6 +650,7 @@ impl OrbDeclaration {
                 })
                 .collect(),
             hooks: self.hooks.into_iter().flatten().collect(),
+            hook_signatures: self.hook_signatures.unwrap_or_default(),
             isolated: self.isolated.unwrap_or(false),
         }
     }
@@ -737,6 +741,7 @@ record! {
         services: BTreeMap<String, Vec<String>>,
         signatures: BTreeMap<String, String>,
         hooks: Vec<String>,
+        hook_signatures: BTreeMap<String, String>,
     }
 }
 
@@ -750,6 +755,7 @@ record! {
         api_version: u32,
         services: Vec<ServiceInfo>,
         hooks: Vec<String>,
+        hook_signatures: BTreeMap<String, String>,
         requires: Vec<RequirementInfo>,
         isolated: bool,
     }
@@ -776,6 +782,7 @@ impl From<&core::InstalledOrb> for KernelOrb {
                 })
                 .collect(),
             hooks: declaration.hooks.iter().cloned().collect(),
+            hook_signatures: declaration.hook_signatures.clone(),
             requires: declaration
                 .requires
                 .iter()
@@ -790,6 +797,7 @@ impl From<&core::InstalledOrb> for KernelOrb {
                         })
                         .collect(),
                     signatures: requirement.signatures.clone(),
+                    hook_signatures: requirement.hook_signatures.clone(),
                     hooks: requirement.hooks.iter().cloned().collect(),
                 })
                 .collect(),

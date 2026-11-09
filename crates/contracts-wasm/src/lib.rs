@@ -47,11 +47,6 @@ impl WasmArtifact {
         self.artifact.contract.request(packet)
     }
 
-    /// Emit the guest value-adapter graph for the interpreter.
-    pub fn describe(&self) -> String {
-        self.artifact.contract.describe().to_string()
-    }
-
     /// Bind an export (by interface identity) or import (by world binding) method once.
     pub fn bind(&self, binding: &str, method: &str, exports: bool) -> Result<u32, Failure> {
         self.artifact

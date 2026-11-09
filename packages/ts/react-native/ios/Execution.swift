@@ -6,8 +6,7 @@ final class Execution: @unchecked Sendable {
     private var closed = false
     private var engine: NativeInterpreter?
     private var artifacts: [String: NativeArtifact] = [:]
-    private var sources: [String: NativePort] = [:]
-    private var components: [String: NativeComponent] = [:]
+    private var ports: [String: NativePort] = [:]
 
     /** Serialize table access and reject operations after host invalidation. */
     private func live<T>(_ operation: () throws -> T) throws -> T {
@@ -44,55 +43,42 @@ final class Execution: @unchecked Sendable {
     func releaseArtifact(_ id: String) throws { _ = try live { artifacts.removeValue(forKey: id) } }
 
     /** Open one fresh source or compiled Store after checking installation authority. */
-    func open(_ id: String, bindings: String, grants: String, component: Bool) throws -> String {
+    func open(_ id: String, bindings: String, grants: String) throws -> String {
         let (engine, artifact) = try live { () throws -> (NativeInterpreter, NativeArtifact) in
             guard let engine, let artifact = artifacts[id] else { throw MobileError.Closed }
             return (engine, artifact)
         }
         let id = UUID().uuidString
-        if component {
-            let port = try engine.openComponent(artifact: artifact, bindings: bindings, grants: grants)
-            try live { components[id] = port }
-        } else {
-            let port = try engine.open(artifact: artifact, bindings: bindings, grants: grants)
-            try live { sources[id] = port }
-        }
+        let port = try engine.open(artifact: artifact, bindings: bindings, grants: grants)
+        try live { ports[id] = port }
         return id
     }
 
-    /** Resolve an isolated source revision without retaining a table lock across awaits. */
-    func source(_ id: String) throws -> NativePort {
-        try live { guard let port = sources[id] else { throw MobileError.Closed }; return port }
+    /** Resolve an isolated revision without retaining a table lock across awaits. */
+    func port(_ id: String) throws -> NativePort {
+        try live { guard let port = ports[id] else { throw MobileError.Closed }; return port }
     }
 
-    /** Resolve a compiled revision only from its owning host. */
-    func component(_ id: String) throws -> NativeComponent {
-        try live { guard let port = components[id] else { throw MobileError.Closed }; return port }
-    }
-
-    /** Return checked executable metadata for either implementation language. */
+    /** Return checked executable metadata. */
     func description(_ id: String) throws -> String {
         try live {
-            if let port = sources[id] { return try port.description() }
-            if let port = components[id] { return try port.description() }
-            throw MobileError.Closed
+            guard let port = ports[id] else { throw MobileError.Closed }
+            return try port.description()
         }
     }
 
-    /** Drain host-attributed diagnostics for either implementation. */
+    /** Drain host-attributed diagnostics. */
     func logs(_ id: String) throws -> String {
         try live {
-            if let port = sources[id] { return port.takeLogs() }
-            if let port = components[id] { return port.takeLogs() }
-            throw MobileError.Closed
+            guard let port = ports[id] else { throw MobileError.Closed }
+            return port.takeLogs()
         }
     }
 
-    /** Retain a source revision if physical work prevents it from closing yet. */
+    /** Retain a revision if physical work prevents it from closing yet. */
     func closePort(_ id: String) throws {
         try live {
-            if let port = sources[id] { try port.shutdown(); sources.removeValue(forKey: id) }
-            if let port = components.removeValue(forKey: id) { port.shutdown() }
+            if let port = ports[id] { try port.shutdown(); ports.removeValue(forKey: id) }
         }
     }
 
@@ -101,19 +87,16 @@ final class Execution: @unchecked Sendable {
         lock.lock()
         guard !closed else { lock.unlock(); return }
         closed = true
-        let pendingSources = Array(sources.values)
-        let pendingComponents = Array(components.values)
+        let pendingPorts = Array(ports.values)
         let pendingArtifacts = Array(artifacts.values)
         let pendingEngine = engine
-        sources.removeAll()
-        components.removeAll()
+        ports.removeAll()
         artifacts.removeAll()
         engine = nil
         lock.unlock()
         DispatchQueue.global(qos: .utility).async {
-            for port in pendingSources { port.invalidate() }
-            for port in pendingComponents { port.shutdown() }
-            withExtendedLifetime((pendingSources, pendingComponents, pendingArtifacts, pendingEngine)) {}
+            for port in pendingPorts { port.invalidate() }
+            withExtendedLifetime((pendingPorts, pendingArtifacts, pendingEngine)) {}
         }
     }
 }

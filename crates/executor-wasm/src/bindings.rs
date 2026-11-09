@@ -46,6 +46,7 @@ struct Handles {
     states: RefCell<BTreeMap<u32, State<Value>>>,
     references: RefCell<BTreeMap<u32, ReferenceHandle>>,
     resources: RefCell<BTreeMap<u32, Resource<u32>>>,
+    hooks: RefCell<BTreeMap<u32, BoundHook>>,
 }
 
 impl Drop for Handles {
@@ -65,6 +66,7 @@ pub(crate) struct Environment {
     imports: Rc<BTreeMap<String, Rc<Import>>>,
     parent: Option<Rc<Handles>>,
     contract: tembra_contracts::PreparedContract,
+    hook_bindings: Rc<BTreeMap<String, tembra_contracts::HookBinding>>,
 }
 
 impl Environment {
@@ -76,6 +78,7 @@ impl Environment {
         service: Option<String>,
         imports: Rc<BTreeMap<String, Rc<Import>>>,
         contract: tembra_contracts::PreparedContract,
+        hook_bindings: Rc<BTreeMap<String, tembra_contracts::HookBinding>>,
     ) -> Result<Self> {
         let parent = if service.is_some() {
             Some(declaration.orb::<Environment>()?.handles.clone())
@@ -89,6 +92,7 @@ impl Environment {
             states: RefCell::default(),
             references: RefCell::default(),
             resources: RefCell::default(),
+            hooks: RefCell::default(),
         });
         let environment = Self {
             session,
@@ -98,6 +102,7 @@ impl Environment {
             imports,
             parent,
             contract,
+            hook_bindings,
         };
         let scope = Scope::Declaration(declaration);
         environment.session.blocking(
@@ -129,6 +134,38 @@ impl Environment {
         };
         self.execute(Scope::Call(context), Some(cancellation), packet)
             .await
+    }
+
+    /// Contributions retain the same Orb environment and execution ancestry as service calls.
+    pub(crate) async fn contribute(
+        &self,
+        context: Context,
+        binding: &tembra_contracts::ContributionBinding,
+        value: Value,
+    ) -> Result<Option<Value>> {
+        let context = context.enter_execution()?;
+        let args = Value::Array(vec![value]);
+        self.contract
+            .validate_slot(binding.slot, true, &args)
+            .map_err(failure)?;
+        let packet = GuestCommand::Contribute {
+            environment: self.id,
+            binding: &binding.binding,
+            service: &binding.alias,
+            method: &binding.method,
+            args: &args,
+        };
+        let value = self
+            .execute(Scope::Call(context.clone()), Some(context.signal()), packet)
+            .await?;
+        self.contract
+            .validate_slot(binding.slot, false, &value)
+            .map_err(failure)?;
+        Ok(if binding.optional && value.is_null() {
+            None
+        } else {
+            Some(value)
+        })
     }
 
     /// Run a callback while routing operations through this environment's owned handle table.
@@ -204,5 +241,30 @@ impl Environment {
             .as_ref()
             .filter(|parent| parent.environment == owner)
             .ok_or_else(|| failure("foreign environment handle"))
+    }
+}
+
+/// Typed hook handles keep composition in the ordinary native host.
+#[derive(Clone)]
+enum BoundHook {
+    Series(tembra::HookHandle<Value, ()>, u32),
+    Waterfall(tembra::HookHandle<Value, Value>, u32),
+    Bail(tembra::HookHandle<Value, Option<Value>>, u32),
+}
+impl BoundHook {
+    fn slot(&self) -> u32 {
+        match self {
+            Self::Series(_, slot) | Self::Waterfall(_, slot) | Self::Bail(_, slot) => *slot,
+        }
+    }
+    async fn run(&self, context: &Context, value: Value) -> Result<Value> {
+        match self {
+            Self::Series(handle, _) => {
+                handle.run(context, value).await?;
+                Ok(Value::Null)
+            }
+            Self::Waterfall(handle, _) => handle.run(context, value).await,
+            Self::Bail(handle, _) => Ok(handle.run(context, value).await?.unwrap_or(Value::Null)),
+        }
     }
 }

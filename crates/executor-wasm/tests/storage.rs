@@ -35,7 +35,7 @@ fn wasi_filesystem_grants_are_per_orb() {
     assert!(
         engine
             .load(
-                &contract.artifact(Some(SOURCE), None, "denied", 1).unwrap(),
+                &contract.source_artifact(SOURCE, "denied", 1).unwrap(),
                 Install::default()
             )
             .is_err()
@@ -57,24 +57,18 @@ fn wasi_filesystem_grants_are_per_orb() {
         ..Grants::default()
     };
     let writer = engine
-        .load(
-            &contract.artifact(Some(SOURCE), None, "writer", 1).unwrap(),
-            {
-                let mut install = Install::default();
-                install.grants = writable;
-                install
-            },
-        )
+        .load(&contract.source_artifact(SOURCE, "writer", 1).unwrap(), {
+            let mut install = Install::default();
+            install.grants = writable;
+            install
+        })
         .unwrap();
     let reader = engine
-        .load(
-            &contract.artifact(Some(SOURCE), None, "reader", 1).unwrap(),
-            {
-                let mut install = Install::default();
-                install.grants = readonly;
-                install
-            },
-        )
+        .load(&contract.source_artifact(SOURCE, "reader", 1).unwrap(), {
+            let mut install = Install::default();
+            install.grants = readonly;
+            install
+        })
         .unwrap();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());

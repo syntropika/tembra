@@ -18,13 +18,31 @@ pub(crate) type LocalContribution = Rc<
 pub(crate) type PortableContribution =
     Rc<dyn Fn(Context, Value) -> LocalBoxFuture<'static, Result<Option<Value>>>>;
 
+/// Local Rust identity and an optional prepared WIT identity share one contribution registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Signature {
+    pub native: Option<TypeId>,
+    pub wit: Option<String>,
+}
+
+impl Signature {
+    pub fn matches(&self, other: &Self) -> bool {
+        match (&self.wit, &other.wit) {
+            (Some(left), Some(right)) if left != right => false,
+            _ if self.native.is_some() && self.native == other.native => true,
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Contribution {
     pub target: String,
     pub hook: String,
-    pub signature: TypeId,
+    pub signature: Signature,
     pub priority: i32,
-    pub local: LocalContribution,
+    pub local: Option<LocalContribution>,
     pub portable: PortableContribution,
 }
 
@@ -39,6 +57,7 @@ pub(crate) struct Contribution {
 /// ```
 pub struct Hook<A, R> {
     pub(crate) name: String,
+    pub(crate) wit: Option<String>,
     pub(crate) compose: Compose<A, R>,
     pub(crate) encode: Encode<R>,
     pub(crate) decode: Decode<R>,
@@ -48,6 +67,7 @@ impl<A, R> Clone for Hook<A, R> {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
+            wit: self.wit.clone(),
             compose: self.compose.clone(),
             encode: self.encode.clone(),
             decode: self.decode.clone(),
@@ -62,6 +82,7 @@ impl<A: Clone + Serialize + DeserializeOwned + 'static> Hook<A, ()> {
         let participant = decode.clone();
         Self {
             name: name.into(),
+            wit: None,
             encode: Rc::new(|()| Ok(None)),
             decode,
             compose: Rc::new(move |host, ctx, plan, input: A| {
@@ -86,6 +107,7 @@ impl<A: Serialize + DeserializeOwned + 'static> Hook<A, A> {
         let participant = decode.clone();
         Self {
             name: name.into(),
+            wit: None,
             encode: Rc::new(|value| to_value(value).map(Some)),
             decode,
             compose: Rc::new(move |host, ctx, plan, mut input| {
@@ -137,6 +159,7 @@ impl<A: Serialize + DeserializeOwned + 'static> Hook<A, A> {
     ///     Orb::new("contributor", 1)
     ///         .requires(Requirement {
     ///             signatures: Default::default(),
+    ///             hook_signatures: Default::default(),
     ///             orb: "provider".into(), api_version: 1,
     ///             methods: Default::default(), hooks: ["limit".into()].into(),
     ///         })
@@ -160,6 +183,7 @@ impl<A: Serialize + DeserializeOwned + 'static> Hook<A, A> {
         let should_stop = Rc::new(should_stop);
         Self {
             name: name.into(),
+            wit: None,
             encode: Rc::new(|value| to_value(value).map(Some)),
             decode,
             compose: Rc::new(move |host, ctx, plan, mut input| {
@@ -197,6 +221,7 @@ where
         let participant = decode.clone();
         Self {
             name: name.into(),
+            wit: None,
             encode: Rc::new(|value| value.map(to_value).transpose()),
             decode,
             compose: Rc::new(move |host, ctx, plan, input: A| {
@@ -224,8 +249,17 @@ impl<A: 'static, R: 'static> Hook<A, R> {
         &self.name
     }
 
-    pub(crate) fn signature(&self) -> TypeId {
-        TypeId::of::<(A, R)>()
+    /// Attach the prepared WIT identity required for participants from an isolated Orb.
+    pub fn signature(mut self, signature: impl Into<String>) -> Self {
+        self.wit = Some(signature.into());
+        self
+    }
+
+    pub(crate) fn identity(&self) -> Signature {
+        Signature {
+            native: Some(TypeId::of::<(A, R)>()),
+            wit: self.wit.clone(),
+        }
     }
 
     pub(crate) fn contribution<F, Fut>(
@@ -245,14 +279,14 @@ impl<A: 'static, R: 'static> Hook<A, R> {
         Contribution {
             target,
             hook: self.name.clone(),
-            signature: self.signature(),
+            signature: self.identity(),
             priority,
-            local: Rc::new(move |ctx, input| {
+            local: Some(Rc::new(move |ctx, input| {
                 let input = input.downcast::<A>().map_err(|_| crate::orb::type_error());
                 let handle = handle.clone();
                 async move { Ok(Box::new(handle(ctx, *input?).await?) as Box<dyn std::any::Any>) }
                     .boxed_local()
-            }),
+            })),
             portable: Rc::new(move |ctx, input| {
                 let input = serde_json::from_value(input)
                     .map_err(|error| Error::invalid(core::Reason::Arguments, error.to_string()));

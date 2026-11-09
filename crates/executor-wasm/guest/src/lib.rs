@@ -25,7 +25,7 @@ compile_error!("The interpreter requires the single-threaded Wasm target");
 /// Host functions; the literal names must equal `abi::IMPORT_MODULE` and its import names,
 /// which the engine build verifies against the actual import section.
 mod host {
-    #[link(wasm_import_module = "tembra-interpreter-v1")]
+    #[link(wasm_import_module = "tembra-interpreter-v2")]
     unsafe extern "C" {
         pub fn sync(packet: *const u8, length: usize) -> u32;
         pub fn sync_read(destination: *mut u8, length: usize);

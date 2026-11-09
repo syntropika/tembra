@@ -114,7 +114,7 @@ fn cancelled_queued_source_call_rejects_before_admission() {
     host.install(vec![
         engine
             .load(
-                &contract.artifact(Some(SOURCE), None, "probe", 1).unwrap(),
+                &contract.source_artifact(SOURCE, "probe", 1).unwrap(),
                 Install::default(),
             )
             .unwrap(),

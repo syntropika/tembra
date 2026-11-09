@@ -7,7 +7,7 @@ use crate::{
 use serde_json::Value;
 
 #[derive(Clone)]
-pub(super) struct Diagnostics {
+pub(crate) struct Diagnostics {
     pub orb: String,
     pub sink: Option<LogSink>,
 }

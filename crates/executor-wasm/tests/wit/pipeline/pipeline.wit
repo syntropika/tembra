@@ -1,0 +1,25 @@
+package example:pipeline@1.0.0;
+
+/// Provided by another Orb; the compiled consumer lowers it synchronously.
+interface arithmetic {
+    double: func(value: s32) -> s32;
+}
+
+/// Provided by another Orb; the compiled consumer awaits it through P3 async lowering.
+interface delayed {
+    double: async func(value: s32) -> s32;
+}
+
+interface pipeline {
+    quadruple: func(value: s32) -> s32;
+    octuple: async func(value: s32) -> s32;
+}
+
+world consumer {
+    import arithmetic;
+    import delayed;
+    export pipeline;
+}
+
+world arithmetic-provider { export arithmetic; }
+world delayed-provider { export delayed; }

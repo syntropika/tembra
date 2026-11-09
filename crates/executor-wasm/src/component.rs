@@ -1,231 +1,191 @@
-//! Compiled-language components use the same Orb registration and kernel-owned call lifecycle.
+//! Compiled-language components share the source Orb session, port and lifecycle adapters.
+//!
+//! A component cannot describe itself at runtime, so its implementation description is derived
+//! from the prepared WIT contract and checked by the same `check_implementation` as a source
+//! bundle. Its Store then serves the same private host protocol as the interpreter.
 mod values;
-mod worker;
-use crate::{Binding, Engine, Grants, failure};
-use futures::channel::oneshot;
-use serde_json::Value;
-use std::{collections::BTreeMap, sync::Arc};
-use tembra::{Orb, Result, Service};
+pub(crate) mod worker;
+use crate::{Binding, Engine, Grants, failure, worker::Session};
+use serde_json::{Map, Value, json};
+use std::{collections::BTreeMap, sync::mpsc};
+use tembra::Result;
+use tembra_contracts::{
+    FunctionKind, Item, Plan, PreparedContract, ServiceBinding, javascript_name,
+};
 
-/// A compiled component endpoint contains no thread-affine kernel callbacks or guest handles.
-pub struct ComponentPort {
-    session: worker::Session,
-    admission: futures::lock::Mutex<()>,
-    contract: tembra_contracts::PreparedContract,
-    /// Export slots bound once at open, keyed by interface identity and original WIT method name.
-    slots: BTreeMap<String, BTreeMap<String, u32>>,
-    description: Value,
-    metadata: tembra::core::Orb,
-    _component: Arc<wasmtime::component::Component>,
-}
-impl ComponentPort {
-    /// Read the WIT-derived plan after executable signatures and grants have been checked.
-    pub fn description(&self) -> &Value {
-        &self.description
-    }
-
-    /// Execute one bounded Canonical ABI call while the embedding host retains its invocation.
-    pub async fn call(&self, interface: &str, method: &str, arguments: Value) -> Result<Value> {
-        let slot = self.slot(interface, method)?;
-        self.call_slot(slot, interface, method, arguments, None)
-            .await
-    }
-
-    /// Queue one call without a waiting thread; the component worker publishes the checked result.
-    ///
-    /// `complete` runs exactly once. It runs on the caller when the call is refused before
-    /// admission, and on the component worker otherwise. A completion that releases the last
-    /// owner of this port on the worker lets that worker finish by itself.
-    pub fn submit(
-        &self,
-        interface: &str,
-        method: &str,
-        arguments: Value,
-        complete: impl FnOnce(Result<Value>) + Send + 'static,
-    ) {
-        match self.slot(interface, method) {
-            Ok(slot) => self.submit_slot(slot, interface, method, arguments, complete),
-            Err(error) => complete(Err(error)),
-        }
-    }
-
-    /// Find the slot bound at open without scanning the contract.
-    fn slot(&self, interface: &str, method: &str) -> Result<u32> {
-        self.slots
-            .get(interface)
-            .and_then(|methods| methods.get(method))
-            .copied()
-            .ok_or_else(|| failure(format!("unknown WIT export {interface}#{method}")))
-    }
-
-    /// Await one submitted call through a slot bound to this port's contract.
-    async fn call_slot(
-        &self,
-        slot: u32,
-        interface: &str,
-        method: &str,
-        arguments: Value,
-        cancellation: Option<tembra::Cancellation>,
-    ) -> Result<Value> {
-        // Rust callbacks wait outside the worker queue, where their thread-affine cancellation
-        // can still withdraw them. Node uses submit() and its own host admission without libuv.
-        let admission = std::pin::pin!(self.admission.lock());
-        let _permit = if let Some(cancellation) = cancellation.as_ref() {
-            let cancelled = std::pin::pin!(cancellation.cancelled());
-            match futures::future::select(admission, cancelled).await {
-                futures::future::Either::Left((permit, _)) => {
-                    cancellation.check()?;
-                    permit
-                }
-                futures::future::Either::Right(_) => {
-                    cancellation.check()?;
-                    return Err(failure("cancellation completed without a request"));
-                }
-            }
-        } else {
-            admission.await
+/// Describe the plain interface exports a compiled artifact implements.
+///
+/// Compiled services have no guest-selected lifetime, linger or access policy.
+pub(crate) fn describe(
+    contract: &PreparedContract,
+    name: &str,
+    api_version: u32,
+    contributions: &BTreeMap<String, i32>,
+) -> Value {
+    let mut services = Map::new();
+    for entry in &contract.model().exports {
+        let Item::Interface(interface) = &entry.item else {
+            continue;
         };
-        let (reply, receive) = oneshot::channel();
-        self.submit_slot(slot, interface, method, arguments, move |result| {
-            let _ = reply.send(result);
-        });
-        receive.await.map_err(failure)?
-    }
-
-    /// Validate both sides of one call; the result is checked before its completion observes it.
-    fn submit_slot(
-        &self,
-        slot: u32,
-        interface: &str,
-        method: &str,
-        arguments: Value,
-        complete: impl FnOnce(Result<Value>) + Send + 'static,
-    ) {
-        if let Err(error) = self.contract.validate_slot(slot, true, &arguments) {
-            complete(Err(failure(error)));
-            return;
+        if interface.contract.is_none() || interface.functions.is_empty() {
+            continue;
         }
-        let contract = self.contract.clone();
-        self.session.submit(
-            interface.into(),
-            method.into(),
-            arguments,
-            Box::new(move |result: Result<Value>| {
-                complete(result.and_then(|value| {
-                    contract
-                        .validate_slot(slot, false, &value)
-                        .map_err(failure)?;
-                    Ok(value)
-                }));
-            }),
+        if interface
+            .contract
+            .as_ref()
+            .is_some_and(|identity| contributions.contains_key(identity))
+        {
+            continue;
+        }
+        let methods = interface
+            .functions
+            .iter()
+            .map(|function| javascript_name(&function.name))
+            .collect::<Vec<_>>();
+        services.insert(
+            javascript_name(interface.name.as_deref().unwrap_or_default()),
+            json!({ "methods": methods }),
         );
     }
+    json!({ "name": name, "apiVersion": api_version, "services": services, "contributes": contributions })
 }
 
-/// Bind every function of every identified export interface, the set a caller may address.
-fn export_slots(
-    contract: &tembra_contracts::PreparedContract,
-) -> Result<BTreeMap<String, BTreeMap<String, u32>>> {
-    let mut slots = BTreeMap::<String, BTreeMap<String, u32>>::new();
-    for entry in &contract.model().exports {
-        let tembra_contracts::Item::Interface(interface) = &entry.item else {
-            continue;
-        };
-        // Inline interfaces have no identity, so no caller can address them.
-        let Some(identity) = &interface.contract else {
-            continue;
-        };
-        let methods = slots.entry(identity.clone()).or_default();
-        for function in &interface.functions {
-            let slot = contract
-                .bind(identity, &function.name, true)
-                .map_err(failure)?;
-            methods.insert(function.name.clone(), slot);
-        }
+/// Resolve checked exports and selected Orb imports into Send-only Store dispatch tables.
+fn layout(
+    contract: &PreparedContract,
+    services: &[ServiceBinding],
+    bindings: &BTreeMap<String, Binding>,
+    hooks: &tembra_contracts::HookPlan,
+) -> Result<worker::Layout> {
+    let mut exports: BTreeMap<_, _> = services
+        .iter()
+        .map(|service| {
+            (
+                service.alias.clone(),
+                worker::Export {
+                    interface: service.interface.clone(),
+                    methods: service
+                        .methods
+                        .iter()
+                        .map(|(method, spelling)| (spelling.clone(), method.clone()))
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    let mut contributions = BTreeMap::new();
+    for contribution in &hooks.contributions {
+        let function = contract
+            .model()
+            .exports
+            .iter()
+            .find_map(|entry| match &entry.item {
+                Item::Interface(interface)
+                    if interface.contract.as_deref() == Some(&contribution.name) =>
+                {
+                    interface.functions.first()
+                }
+                _ => None,
+            })
+            .ok_or_else(|| failure("checked contribution callback is missing"))?;
+        exports.insert(
+            contribution.alias.clone(),
+            worker::Export {
+                interface: contribution.name.clone(),
+                methods: [(contribution.method.clone(), function.name.clone())].into(),
+            },
+        );
+        contributions.insert(
+            contribution.binding.clone(),
+            (contribution.alias.clone(), contribution.method.clone()),
+        );
     }
-    Ok(slots)
+    let mut imports = Vec::new();
+    for entry in &contract.model().imports {
+        if !matches!(bindings.get(&entry.key), Some(Binding::Orb { .. })) {
+            continue;
+        }
+        let Item::Interface(interface) = &entry.item else {
+            return Err(failure("Orb import must be an interface"));
+        };
+        if interface.resources {
+            return Err(failure(format!(
+                "{}: resource imports require a lifecycle adapter",
+                entry.key
+            )));
+        }
+        let functions = interface
+            .functions
+            .iter()
+            .map(|function| match function.kind {
+                FunctionKind::Freestanding | FunctionKind::AsyncFreestanding => {
+                    Ok(worker::ImportFunction {
+                        name: function.name.clone(),
+                        spelling: javascript_name(&function.name),
+                        asynchronous: function.kind == FunctionKind::AsyncFreestanding,
+                    })
+                }
+                _ => Err(failure(format!(
+                    "{}#{}: only freestanding Orb import functions are supported",
+                    entry.key, function.name
+                ))),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        imports.push(worker::Import {
+            binding: entry.key.clone(),
+            functions,
+            contribution: contributions.contains_key(&entry.key),
+        });
+    }
+    Ok(worker::Layout {
+        exports,
+        imports,
+        contributions,
+    })
 }
 
 impl Engine {
-    /// Materialize a compiled endpoint for an existing platform-owned lifecycle adapter.
-    #[doc(hidden)]
-    pub fn open_component(
+    /// Start a compiled Store whose WASI context holds only this installation's grants.
+    ///
+    /// Instantiation completes before this returns, so link and initialization failures are
+    /// reported at installation rather than on the first call.
+    pub(crate) fn component_session(
         &self,
         artifact: &tembra_contracts::Artifact,
+        plan: &Plan,
+        services: &[ServiceBinding],
         bindings: &BTreeMap<String, Binding>,
         grants: &Grants,
-    ) -> Result<ComponentPort> {
-        let contract = &artifact.contract;
-        let name = &artifact.identity.name;
-        let api_version = artifact.identity.api_version;
+        hooks: &tembra_contracts::HookPlan,
+    ) -> Result<Session> {
         let tembra_contracts::ArtifactImplementation::Component(bytes) = &artifact.implementation
         else {
-            return Err(failure("compiled endpoint requires a component artifact"));
+            return Err(failure("compiled execution requires a component artifact"));
         };
-        let plan = contract
-            .plan(name, api_version, bindings)
-            .map_err(failure)?;
-        if !plan.orb.requires.is_empty() {
-            return Err(failure(
-                "compiled component Orb imports require an additional linker adapter",
-            ));
-        }
-        contract.check_value_profile().map_err(failure)?;
-        let slots = export_slots(contract)?;
+        let layout = layout(&artifact.contract, services, bindings, hooks)?;
         let wasi = self.providers.context(&plan.host_imports, grants)?;
-        let component = self.compiled(bytes)?;
-        Ok(ComponentPort {
-            session: worker::Session::start(self.clone(), component.as_ref().clone(), wasi)?,
-            admission: futures::lock::Mutex::new(()),
-            contract: contract.clone(),
-            slots,
-            description: plan.describe(),
-            metadata: plan.orb,
-            _component: component,
-        })
-    }
-
-    /// Register plain WIT interface exports from a compiled component under the same Orb model.
-    pub(crate) fn component_orb(
-        &self,
-        artifact: &tembra_contracts::Artifact,
-        bindings: &BTreeMap<String, Binding>,
-        grants: &Grants,
-    ) -> Result<Orb> {
-        let name = &artifact.identity.name;
-        let api_version = artifact.identity.api_version;
-        let port = Arc::new(self.open_component(artifact, bindings, grants)?);
-        let mut orb = Orb::new(name, api_version).isolated();
-        for metadata in &port.metadata.services {
-            let interface = metadata
-                .name
-                .strip_prefix(&format!("{name}::"))
-                .ok_or_else(|| failure("invalid prepared component service"))?
-                .to_owned();
-            let create = port.clone();
-            let mut service = Service::new(&metadata.name, move |_| Ok(create.clone()))
-                .signature(metadata.signature.clone());
-            for method in &metadata.methods {
-                // Resolve the slot during registration; calls never look up names in the contract.
-                let slot = port.slot(&interface, method)?;
-                let interface = interface.clone();
-                let called = method.clone();
-                service =
-                    service.method::<Value, Value, _, _>(method, move |port, context, args| {
-                        let interface = interface.clone();
-                        let method = called.clone();
-                        async move {
-                            context.check()?;
-                            let result = port
-                                .call_slot(slot, &interface, &method, args, Some(context.signal()))
-                                .await?;
-                            context.check()?;
-                            Ok(result)
-                        }
-                    });
-            }
-            orb = orb.service(service);
+        let component = self.compiled(bytes)?.as_ref().clone();
+        // Compiled Orbs use their WASI preopens and sockets; the source I/O helpers stay empty.
+        let io = crate::io::SourceIo::new(
+            &self.providers,
+            &[],
+            &Grants::default(),
+            std::time::Duration::from_millis(self.limits.timeout_ms),
+        )?;
+        let (ready, initialized) = mpsc::channel();
+        let engine = self.clone();
+        let session = Session::spawn(
+            self,
+            artifact.identity.name.clone(),
+            io,
+            move |commands, _poison, _diagnostics| {
+                worker::run(engine, component, wasi, layout, ready, commands)
+            },
+        )?;
+        match initialized.recv() {
+            Ok(Ok(())) => Ok(session),
+            Ok(Err(error)) => Err(failure(error)),
+            Err(_) => Err(failure("component worker stopped during initialization")),
         }
-        Ok(orb)
     }
 }

@@ -173,6 +173,15 @@
         convert(param.type, args[index], true),
       );
     },
+    exportArguments(service, method, args) {
+      const type = signature(exports, service, method);
+      if (args.length !== type.params.length) throw new Error("WIT hook argument count differs");
+      return type.params.map((param, index) => convert(param.type, args[index], false));
+    },
+    exportResult(service, method, value) {
+      const type = signature(exports, service, method).result;
+      return type === undefined ? undefined : convert(type, value, true);
+    },
     async invoke(service, method, callback) {
       const type = signature(exports, service, method).result;
       const result = resultType(type);

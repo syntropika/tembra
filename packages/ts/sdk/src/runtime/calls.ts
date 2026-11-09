@@ -8,6 +8,7 @@ import { Errors } from "../errors.ts";
 import { Context, context } from "./context.ts";
 import type { Environment, ReferenceRecord } from "./records.ts";
 import type { Session } from "./session.ts";
+import { checkSignal } from "./signals.ts";
 
 /** Execute JS calls. Rust controls admission and physical lifetime. */
 export class Calls {
@@ -69,8 +70,24 @@ export class Calls {
     }
   }
 
-  /** Execute one admitted service call and retain physical ownership. */
+  /** Let an application stop observing a call while its actual work remains owned. */
   async invoke(
+    reference: ReferenceRecord,
+    method: string,
+    arguments_: unknown[],
+    ctx: Context,
+    capture?: CapturedInvocation,
+  ): Promise<unknown> {
+    context(ctx, this.session);
+    checkSignal(ctx.signal);
+    return this.observe(
+      this.invokePhysical(reference, method, arguments_, ctx, capture),
+      ctx.signal,
+    );
+  }
+
+  /** Foreign callbacks retain their dependency until it physically settles, including on cancellation. */
+  async invokePhysical(
     reference: ReferenceRecord,
     method: string,
     arguments_: unknown[],
@@ -134,7 +151,7 @@ export class Calls {
         }
       })(),
     );
-    return this.observe(physical, ctx.signal);
+    return physical;
   }
 
   /** Fresh callback roots inherit owner identity; supplied roots retain the caller's authority. */

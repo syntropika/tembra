@@ -94,6 +94,40 @@ impl Environment {
                 let snapshot = state.snapshot()?;
                 snapshot_value(Value::clone(&value), snapshot.revision, snapshot.version)
             }
+            Request::HookDeclare { name } => {
+                let declaration = Self::declaration(scope)?;
+                let binding = self
+                    .hook_bindings
+                    .get(&name)
+                    .ok_or_else(|| failure("hook is absent from the checked WIT declaration"))?;
+                use tembra_contracts::HookComposition;
+                let handle = match binding.composition {
+                    HookComposition::Series => BoundHook::Series(
+                        declaration.hook(
+                            &tembra::Hook::<Value, ()>::series(&binding.name)
+                                .signature(&binding.signature),
+                        )?,
+                        binding.slot,
+                    ),
+                    HookComposition::Waterfall => BoundHook::Waterfall(
+                        declaration.hook(
+                            &tembra::Hook::<Value, Value>::waterfall(&binding.name)
+                                .signature(&binding.signature),
+                        )?,
+                        binding.slot,
+                    ),
+                    HookComposition::Bail => BoundHook::Bail(
+                        declaration.hook(
+                            &tembra::Hook::<Value, Option<Value>>::bail(&binding.name)
+                                .signature(&binding.signature),
+                        )?,
+                        binding.slot,
+                    ),
+                };
+                let id = self.allocate()?;
+                self.handles.hooks.borrow_mut().insert(id, handle);
+                encode(&id)
+            }
             Request::ReferenceDeclare { service, key } => {
                 let binding = self
                     .imports
@@ -237,16 +271,64 @@ impl Environment {
     pub(super) async fn asynchronous(&self, scope: &Scope, packet: &str) -> Result<Value> {
         let request = AsyncRequest::decode(packet).map_err(failure)?;
         if request.is_io() {
-            match scope {
-                Scope::Call(context) => context.check()?,
-                Scope::Open(signal) => signal.check()?,
+            // Closing an owned stream is cleanup; it needs a callback but survives cancellation.
+            let cleanup = request.survives_cancellation();
+            let signal = match scope {
+                Scope::Call(context) => {
+                    if !cleanup {
+                        context.check()?;
+                    }
+                    context.signal()
+                }
+                Scope::Open(signal) => {
+                    if !cleanup {
+                        signal.check()?;
+                    }
+                    signal.clone()
+                }
                 Scope::Declaration(_) | Scope::Validation => {
                     return Err(failure("I/O requires an active callback"));
                 }
+            };
+            let operation = self.session.io_operation(packet)?.execute();
+            if !request.is_transport() {
+                return operation.await;
             }
-            return self.session.io_operation(packet)?.execute().await;
+            // Cancellation ends this callback's transport authority: its streams close, so the
+            // pending socket work settles now; it is still awaited to physical completion.
+            let mut operation = std::pin::pin!(operation);
+            let cancelled = std::pin::pin!(signal.cancelled());
+            return match futures::future::select(operation.as_mut(), cancelled).await {
+                futures::future::Either::Left((result, _)) => result,
+                futures::future::Either::Right(_) => {
+                    self.session.streams().end_callback();
+                    operation.await
+                }
+            };
         }
         match request {
+            AsyncRequest::HookRun {
+                scope: owner,
+                id,
+                value,
+            } => {
+                let context = Self::context(scope)?;
+                let handles = self.selected_handles(owner)?;
+                let hook = handles
+                    .hooks
+                    .borrow()
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(|| failure("unknown hook handle"))?;
+                self.contract
+                    .validate_slot(hook.slot(), true, &Value::Array(vec![value.clone()]))
+                    .map_err(failure)?;
+                let value = hook.run(context, value).await?;
+                self.contract
+                    .validate_slot(hook.slot(), false, &value)
+                    .map_err(failure)?;
+                Ok(value)
+            }
             AsyncRequest::ReferenceReady { scope: owner, id } => {
                 let signal = Self::signal(scope, "readiness requires an active callback")?;
                 let reference = self.reference(owner, id)?.reference;
@@ -298,7 +380,10 @@ impl Environment {
             }
             AsyncRequest::ReadText { .. }
             | AsyncRequest::WriteText { .. }
-            | AsyncRequest::Exchange { .. } => {
+            | AsyncRequest::TransportConnect { .. }
+            | AsyncRequest::TransportRead { .. }
+            | AsyncRequest::TransportWrite { .. }
+            | AsyncRequest::TransportClose { .. } => {
                 unreachable!("I/O was handled under callback authority")
             }
             AsyncRequest::Unsupported => Err(failure("unsupported asynchronous host operation")),
