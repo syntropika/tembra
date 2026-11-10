@@ -273,7 +273,7 @@ directory must not contain the checkout. `just test-wasm-orb` runs the
 Rust tests against supplied artifacts.
 
 The interpreter is a `wasm32-wasip1` reactor core module behind a private
-fixed-buffer ABI, `tembra-interpreter-v3`. Its import namespace also carries the
+fixed-buffer ABI, `tembra-interpreter-v7`. Its import namespace also carries the
 digest of the generated WASI method and type table, so mismatched host/interpreter
 bindings are refused before execution. [`src/abi.rs`](src/abi.rs) is its only
 definition: the guest includes it, the native host compiles it, and the browser host
@@ -289,7 +289,7 @@ Linear memory is imported: each instance receives its own memory whose maximum i
 the configured `memoryBytes`, in addition to the VM heap limit and, natively, Store
 limits and fuel. The module may import only that memory, the two host functions and
 an exact WASI preview 1 allowlist with capabilityless implementations: an empty
-environment, real clocks, standard output and error forwarded to attributed
+environment, granted clocks (constant zero time without a clocks grant), standard output and error forwarded to attributed
 diagnostics, and no preopened directories or other descriptors. `proc_exit` traps.
 Engines with any other import are refused before instantiation. Orb contracts and
 the compiled-component host retain their WASI interfaces. Source filesystem and transport
