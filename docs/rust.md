@@ -78,10 +78,12 @@ host.install(vec![orb])?;
 call or provide services through the same kernel. Each loaded orb runs in its own Wasm Store.
 See [Wasm orb execution](../crates/executor-wasm/README.md) and
 [the Wasm consumer example](../examples/rust/wasm.rs). To write a compiled orb in Rust without a
-WIT file, see [the Rust orb example](../examples/rust-orb/README.md): `#[orb]` derives the
+WIT file, see [the Rust orb example](../examples/rust-orb-service/README.md): `#[orb]` derives the
 contract from a module and `cargo tembra build` packages the artifact. A service of such an orb
 can own kernel-managed state with `#[state]`; see
-[the Rust state example](../examples/rust-orb-state/README.md).
+[the Rust state example](../examples/rust-orb-state/README.md). Such an orb can also declare a hook
+for other orbs to contribute to; see
+[the Rust hook declaration example](../examples/rust-orb-hook-declaration/README.md).
 
 ## Serve incoming HTTP
 
