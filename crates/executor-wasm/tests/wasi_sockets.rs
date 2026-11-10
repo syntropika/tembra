@@ -187,14 +187,7 @@ fn compiled_components_use_standard_wasi_sockets() {
 
         // UDP: `create` is WIT-synchronous and Rust-async upstream.
         let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
-        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let address = peer.local_addr().unwrap();
-        let echo = thread::spawn(move || {
-            let mut buffer = [0; 64];
-            let (count, from) = peer.recv_from(&mut buffer).unwrap();
-            peer.send_to(&[b"echo:", &buffer[..count]].concat(), from)
-                .unwrap();
-        });
         let mut orb = Orb::install(
             &engine,
             &artifact,
@@ -203,6 +196,15 @@ fn compiled_components_use_standard_wasi_sockets() {
                 ..Default::default()
             },
         );
+        // The peer's receive bound starts once the Orb is ready: installation may recompile the
+        // component after the previous Orb released its code, and that is not peer wait time.
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let echo = thread::spawn(move || {
+            let mut buffer = [0; 64];
+            let (count, from) = peer.recv_from(&mut buffer).unwrap();
+            peer.send_to(&[b"echo:", &buffer[..count]].concat(), from)
+                .unwrap();
+        });
         assert_eq!(
             ok(orb.call("udp-echo", json!([address.port(), "ping"]))),
             "echo:ping"
