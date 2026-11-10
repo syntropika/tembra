@@ -1,5 +1,6 @@
 package example:greeter@1.0.0;
 
+/// The service: a unit struct marked #[service], with an impl block of public functions.
 interface greeting {
   /// Counts over a text.
   record stats {
