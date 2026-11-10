@@ -14,13 +14,15 @@ use std::{
 };
 use tembra::Result;
 use tembra_contracts::{
-    FunctionKind, Item, Plan, PreparedContract, ServiceBinding, javascript_name,
+    FunctionKind, Item, Plan, PreparedContract, ServiceBinding, guest, javascript_name,
 };
 pub(crate) use worker::State as ComponentState;
 
 /// Describe the plain interface exports a compiled artifact implements.
 ///
-/// Compiled services have no guest-selected lifetime, linger or access policy.
+/// Compiled services have no guest-selected lifetime, linger or access policy. Hook callbacks and
+/// the kernel's own callbacks (`tembra:guest`) are answered to their callers, never offered as
+/// services.
 pub(crate) fn describe(
     contract: &PreparedContract,
     name: &str,
@@ -37,11 +39,9 @@ pub(crate) fn describe(
         if interface.contract.is_none() || interface.functions.is_empty() {
             continue;
         }
-        if interface
-            .contract
-            .as_ref()
-            .is_some_and(|identity| contributions.contains_key(identity))
-        {
+        if interface.contract.as_ref().is_some_and(|identity| {
+            contributions.contains_key(identity) || guest::reserved(identity)
+        }) {
             continue;
         }
         let methods = interface
@@ -123,9 +123,16 @@ fn layout(
     // links the same type, and distinct resources (even with equal names) never share one.
     let mut payloads = BTreeMap::<(String, String), u32>::new();
     for entry in &contract.model().imports {
-        if !matches!(bindings.get(&entry.key), Some(Binding::Orb { .. })) {
-            continue;
-        }
+        let contribution = hooks
+            .contributions
+            .iter()
+            .any(|contribution| contribution.binding == entry.key);
+        let role = match bindings.get(&entry.key) {
+            Some(Binding::Orb { .. }) if contribution => worker::Role::Contribution,
+            Some(Binding::Orb { .. }) => worker::Role::Dependency,
+            Some(Binding::Kernel) => worker::Role::Kernel,
+            Some(Binding::Host { .. }) | None => continue,
+        };
         let Item::Interface(interface) = &entry.item else {
             return Err(failure("Orb import must be an interface"));
         };
@@ -203,11 +210,8 @@ fn layout(
             binding: entry.key.clone(),
             resources,
             functions,
+            role,
             reference: view.is_some(),
-            contribution: hooks
-                .contributions
-                .iter()
-                .any(|contribution| contribution.binding == entry.key),
         });
     }
     Ok(worker::Layout {
@@ -215,6 +219,7 @@ fn layout(
         imports,
         contributions,
         ingress: contract.ingress().map(str::to_owned),
+        state_init: guest::exports_state_init(contract.model()),
     })
 }
 
@@ -335,6 +340,65 @@ impl Engine {
             Ok(Err(error)) => Err(failure(error)),
             Err(_) => Err(failure("component worker stopped during initialization")),
         }
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use tembra_contracts::{Contract, Implementation};
+
+    const WIT: &str = "package example:counter@1.0.0;
+        interface counter { add: func(by: s64) -> s64; }
+        world stateful {
+            import tembra:guest/state@1.0.0;
+            export tembra:guest/state-init@1.0.0;
+            export counter;
+        }";
+
+    /// The kernel interfaces are neither services nor dependencies: the layout links the state
+    /// import to the kernel and remembers the state-init export the worker calls on creation.
+    #[test]
+    fn kernel_state_is_linked_to_the_kernel_and_never_described_as_a_service() {
+        let contract = Contract::from_source("counter.wit", WIT, None).unwrap();
+        let bindings = contract
+            .providers(&Default::default(), &Grants::default())
+            .unwrap();
+        let description = describe(&contract, "counter", 1, &BTreeMap::new());
+        assert_eq!(
+            description["services"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["counter"]
+        );
+        let implementation: Implementation = serde_json::from_value(description).unwrap();
+        let services = contract
+            .check_implementation("counter", 1, implementation.clone())
+            .unwrap();
+        let hooks = contract.check_hooks(&implementation, &bindings).unwrap();
+        let layout = layout(&contract, &services, &bindings, &hooks).unwrap();
+        assert!(layout.state_init);
+        assert_eq!(
+            layout
+                .exports
+                .iter()
+                .map(|export| export.service.as_str())
+                .collect::<Vec<_>>(),
+            ["counter"]
+        );
+        assert_eq!(layout.imports.len(), 1);
+        assert_eq!(layout.imports[0].binding, guest::STATE);
+        assert_eq!(layout.imports[0].role, worker::Role::Kernel);
+        assert_eq!(
+            layout.imports[0]
+                .functions
+                .iter()
+                .map(|function| function.name.as_str())
+                .collect::<Vec<_>>(),
+            ["read", "update"]
+        );
     }
 }
 
