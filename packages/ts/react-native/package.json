@@ -39,14 +39,14 @@
   },
   "devDependencies": {
     "@syntropika/tembra-sdk": "workspace:*",
-    "@types/react": "^19.0.0",
-    "react": "19.1.1",
-    "react-native": "0.82.1"
+    "@types/react": "^19.2.0",
+    "react": "19.3.0",
+    "react-native": "0.88.1"
   },
   "peerDependencies": {
     "@syntropika/tembra-sdk": "0.2.2",
-    "react": ">=19",
-    "react-native": ">=0.82 <1"
+    "react": ">=19.3",
+    "react-native": ">=0.88.1 <1"
   },
   "codegenConfig": {
     "name": "TembraSpec",

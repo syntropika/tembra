@@ -34,8 +34,19 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 
+// The application resolves this library's packaged runtime dependency as well, so every project
+// resolves the Tembra group exclusively from the packaged repository.
+def tembraRepository = file("../native/maven")
+rootProject.allprojects {
+    repositories {
+        exclusiveContent {
+            forRepository { maven { url = uri(tembraRepository) } }
+            filter { includeGroup("dev.tembra") }
+        }
+    }
+}
+
 repositories {
-    maven { url = uri("../native/maven") }
     google()
     mavenCentral()
 }

@@ -1,7 +1,7 @@
 # React Native
 
 Use `@syntropika/tembra-react-native` to run isolated TypeScript and compiled-language Wasm Orbs on iOS and Android.
-The package requires React Native 0.82 or newer with the New Architecture.
+The package requires React Native 0.88.1 or newer with the New Architecture and React 19.3 or newer.
 Swift and Kotlin bindings connect its TurboModule to the Rust kernel.
 Trusted application callbacks stay in Hermes. Isolated Orb code executes in its own Wasm memory through the native executor.
 The mobile executor uses Wasmtime Pulley and does not generate executable native code.
@@ -83,7 +83,16 @@ Source and compiled Orbs share the native executor's standard WASI filesystem de
 
 `@syntropika/tembra-sdk/http` uses standard `wasi:http` resources for outgoing HTTP and incremental SSE. The native host handles HTTP framing, DNS and TLS; exact HTTP origin grants remain independent of raw socket grants. Request and response bodies stream with backpressure and cancellation. This helper is a limited Fetch facade, not a complete WHATWG Fetch implementation. See [TypeScript](typescript.md) for transport and collection limits.
 
-Source and compiled Orbs use standard `wasi:sockets` TCP/UDP resources and name lookup under separate destination and resolution grants. Socket resources and their receive, send and listen streams have independent lifetimes; drop each resource when finished. Incoming HTTP is pending. Shared Rust/Pulley tests and generated bindings cover the common implementation, but do not establish physical iOS or Android device support for every operation. See the [WASI coverage matrix](../crates/executor-wasm/README.md#wasi-coverage).
+Source and compiled Orbs use standard `wasi:sockets` TCP/UDP resources and name lookup under separate destination and resolution grants. Socket resources and their receive, send and listen streams have independent lifetimes; drop each resource when finished. Shared Rust/Pulley tests and generated bindings cover the common implementation, but do not establish physical iOS or Android device support for every operation. See the [WASI coverage matrix](../crates/executor-wasm/README.md#wasi-coverage).
+
+Incoming HTTP uses `host.handleHttp` with the raw `IncomingHttpRequest` form described in
+[TypeScript](typescript.md#incoming-http). The application owns listening and routing. Raw
+header values, body chunks, trailers and typed refusals cross the TurboModule as binary
+`ArrayBuffer` values, with demand-driven delivery. The raw facade uses
+`AsyncIterable<Uint8Array>` and needs no WHATWG streams. The `Request`/`Response` convenience is
+unsupported on the qualified React Native 0.88.1 runtime: Hermes has no `ReadableStream`, and
+its fetch `Request` exposes no body stream. Tembra refuses that form before dispatching the
+handler. Use the raw form to preserve request bytes.
 
 Guest factories stay synchronous. The native worker pauses at a host request while the mobile bridge asynchronously delivers its response. This avoids invoking Hermes callbacks synchronously from a native interpreter stack. The shared SDK still owns admission, state, references, resources, cancellation and reload. Native invalidation revokes pending replies and drains physical work outside the UI thread. Logging is attributed by the host and retained in bounded batches between native exchanges.
 

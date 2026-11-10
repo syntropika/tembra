@@ -1,5 +1,6 @@
 package com.tembra
 
+import com.facebook.react.bridge.ArrayBuffer
 import com.facebook.react.bridge.ReactApplicationContext
 import java.util.UUID
 import android.util.Base64
@@ -125,6 +126,20 @@ class TembraModule(private val context: ReactApplicationContext) : NativeTembraS
     override fun portRelease(handle: String, port: String, environment: Double): Boolean = nativeCall { execution(handle).port(port).release(environment.toULong()); true }
     /** Cancel standard WASI work owned by the active callback. */
     override fun portCancel(handle: String, port: String): Boolean = nativeCall { execution(handle).port(port).cancel(); true }
+    /** Start an incoming HTTP exchange; the head's field values arrive as one typed buffer. */
+    override fun portBeginIngress(handle: String, port: String, packet: String, head: String, fields: ArrayBuffer): Boolean =
+        nativeCall { execution(handle).port(port).beginIngress(packet, IngressCodec.head(head, IngressCodec.copy(fields))); true }
+    /** Await the next ingress event; byte events park their buffer for the synchronous take. */
+    override fun portReceiveIngress(handle: String, port: String, promise: Promise) = promise(promise) { execution(handle).receiveIngress(port) }
+    /** Move the received event's owning buffer to JavaScript. */
+    override fun portTakeIngress(handle: String, port: String): ArrayBuffer = nativeCall { execution(handle).takeIngress(port) }
+    /** Answer the pending request pull with typed bytes. */
+    override fun portSupplyRequest(handle: String, port: String, chunk: String, bytes: ArrayBuffer): Boolean =
+        nativeCall { execution(handle).port(port).supplyRequest(IngressCodec.chunk(chunk, IngressCodec.copy(bytes))) }
+    /** Ask for the next response frame. */
+    override fun portPullResponse(handle: String, port: String): Boolean = nativeCall { execution(handle).port(port).pullResponse(); true }
+    /** Drop the response because the client went away. */
+    override fun portDisconnect(handle: String, port: String): Boolean = nativeCall { execution(handle).port(port).disconnect(); true }
     /** Close a revision after shared lifecycle cleanup. */
     override fun closePort(handle: String, port: String): Boolean = nativeCall { execution(handle).closePort(port); true }
 

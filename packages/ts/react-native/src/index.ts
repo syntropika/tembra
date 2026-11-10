@@ -14,8 +14,25 @@ export type ReactNativeHostOptions = Omit<HostOptions, "kernel" | "native"> & {
   isolated?: MobileExecutionOptions & { engine?: Uint8Array };
 };
 
+/**
+ * Refuse runtimes without the language features the shared SDK relies on. Hermes V1 under the
+ * bridgeless React Native 0.88.1 runtime provides all three; nothing is polyfilled here.
+ */
+function requireRuntime(): void {
+  const missing = [
+    typeof WeakRef === "function" ? undefined : "WeakRef",
+    typeof FinalizationRegistry === "function" ? undefined : "FinalizationRegistry",
+    typeof Symbol.asyncIterator === "symbol" ? undefined : "Symbol.asyncIterator",
+  ].filter((name) => name !== undefined);
+  if (missing.length)
+    throw new Error(
+      `This JavaScript runtime lacks ${missing.join(", ")}; Tembra requires React Native 0.88.1 or newer with Hermes V1.`,
+    );
+}
+
 /** Run trusted host callbacks and isolated Wasm Orbs through the shared Rust lifecycle engine. */
 export function createHost(options: ReactNativeHostOptions = {}): Host {
+  requireRuntime();
   if (!NativeTembra) {
     throw new Error("NativeTembra is unavailable. Install the native library and rebuild the app.");
   }

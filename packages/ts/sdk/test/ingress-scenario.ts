@@ -16,6 +16,11 @@ export interface IngressScenarioOptions {
   fixture(name: string): Promise<Uint8Array>;
   /** How this platform's WHATWG `Response` treats `set-cookie` (browsers hide it). */
   setCookie: "kept" | "refused";
+  /**
+   * Exercise the WHATWG `Request`/`Response` convenience block (default `true`). Hosts without
+   * WHATWG streams set `false`; the report then states that block was not exercised.
+   */
+  whatwg?: boolean;
 }
 
 export function same(actual: unknown, expected: unknown, what: string): void {
@@ -344,29 +349,35 @@ async function scenario(options: IngressScenarioOptions, report: string[]): Prom
     report.push("handler-only outbound denied; direct handler access refused");
 
     // WHATWG convenience: representable responses convert, the rest is refused.
-    const fetched = await host.handleHttp(ORB, new Request("https://app.example.test/revision"));
-    same([fetched.status, /^\d+$/.test(await fetched.text())], [200, true], "WHATWG response");
-    const early = await host
-      .handleHttp(ORB, new Request("https://app.example.test/status/103"))
-      .catch((error) => String(error));
-    same(String(early).includes("103"), true, "1xx refused");
-    const cookie = await host.handleHttp(ORB, new Request("https://app.example.test/cookie")).then(
-      async (response) => `kept:${response.headers.get("set-cookie")}:${await response.text()}`,
-      (error) => String(error),
-    );
-    if (options.setCookie === "kept") same(cookie, "kept:a=1:x", "set-cookie kept");
-    else same(cookie.includes("set-cookie"), true, "set-cookie refused by the platform");
-    const trailed = await host.handleHttp(ORB, new Request("https://app.example.test/trailers"));
-    same(
-      await trailed.text().then(
-        () => "read",
-        (error) => String(error),
-      ),
-      "TypeError: response trailers have no WHATWG representation",
-      "trailers refused",
-    );
-    await settled(host);
-    report.push("WHATWG Request/Response convenience with explicit refusals");
+    if (options.whatwg === false)
+      report.push("WHATWG Request/Response convenience not exercised on this host");
+    else {
+      const fetched = await host.handleHttp(ORB, new Request("https://app.example.test/revision"));
+      same([fetched.status, /^\d+$/.test(await fetched.text())], [200, true], "WHATWG response");
+      const early = await host
+        .handleHttp(ORB, new Request("https://app.example.test/status/103"))
+        .catch((error) => String(error));
+      same(String(early).includes("103"), true, "1xx refused");
+      const cookie = await host
+        .handleHttp(ORB, new Request("https://app.example.test/cookie"))
+        .then(
+          async (response) => `kept:${response.headers.get("set-cookie")}:${await response.text()}`,
+          (error) => String(error),
+        );
+      if (options.setCookie === "kept") same(cookie, "kept:a=1:x", "set-cookie kept");
+      else same(cookie.includes("set-cookie"), true, "set-cookie refused by the platform");
+      const trailed = await host.handleHttp(ORB, new Request("https://app.example.test/trailers"));
+      same(
+        await trailed.text().then(
+          () => "read",
+          (error) => String(error),
+        ),
+        "TypeError: response trailers have no WHATWG representation",
+        "trailers refused",
+      );
+      await settled(host);
+      report.push("WHATWG Request/Response convenience with explicit refusals");
+    }
   } finally {
     await host.close();
   }

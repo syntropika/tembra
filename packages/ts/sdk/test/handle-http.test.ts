@@ -373,3 +373,65 @@ test("a request failing before any port took it gets its body closed once (L-1)"
     await owner.close();
   }
 });
+
+test.serial("unavailable WHATWG request streams are refused before the handler runs", async () => {
+  const originalStream = globalThis.ReadableStream;
+  const requestDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Request")!;
+  const streamDescriptor = Object.getOwnPropertyDescriptor(globalThis, "ReadableStream")!;
+  // React Native's buffered fetch implementation has no public body stream.
+  class BufferedRequest {
+    readonly url = "https://app.example.test/echo";
+    readonly method = "POST";
+    readonly headers = new Headers();
+    readonly _bodyInit = "abc";
+  }
+  const received: string[] = [];
+  const backend = port(async (_dispatch, exchange) => {
+    const incoming = exchange.own();
+    if (incoming.body)
+      for await (const chunk of incoming.body) received.push(decoder.decode(chunk));
+    const stream = streamed(204);
+    stream.end();
+    exchange.respond(stream.response);
+    await stream.delivery;
+  });
+  const served = await host(backend);
+  try {
+    Object.defineProperty(globalThis, "Request", { configurable: true, value: BufferedRequest });
+    for (const streams of [undefined, originalStream]) {
+      Object.defineProperty(globalThis, "ReadableStream", {
+        configurable: true,
+        value: streams,
+      });
+      const result = await served
+        .handleHttp("edge", new BufferedRequest() as unknown as Request)
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(result).toBeInstanceOf(TypeError);
+      expect(String(result)).toContain("IncomingHttpRequest");
+      expect(backend.entered).toBe(0);
+      expect(served.diagnostics().roots).toBe(0);
+    }
+    // The raw form remains usable without any WHATWG stream globals.
+    Object.defineProperty(globalThis, "ReadableStream", { configurable: true, value: undefined });
+    const response = await served.handleHttp("edge", {
+      ...request(),
+      method: "POST",
+      body: {
+        async *[Symbol.asyncIterator]() {
+          yield text("abc");
+        },
+      },
+    });
+    for await (const chunk of response.body) expect(chunk.length).toBe(0);
+    await response.trailers;
+    expect(received).toEqual(["abc"]);
+    expect(backend.entered).toBe(1);
+  } finally {
+    Object.defineProperty(globalThis, "Request", requestDescriptor);
+    Object.defineProperty(globalThis, "ReadableStream", streamDescriptor);
+    await served.close();
+  }
+});

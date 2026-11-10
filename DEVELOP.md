@@ -181,6 +181,13 @@ The JVM artifact is `tembra-kotlin-jvm`. The Android artifact is `tembra-kotlin`
 
 ## React Native builds
 
+Use React Native 0.88.1 or newer with React 19.3 or newer and the New Architecture.
+Hermes V1 is the qualified runtime; the host must provide `WeakRef`, `FinalizationRegistry`
+and `Symbol.asyncIterator`.
+The binary incoming HTTP bridge requires Codegen support for `ArrayBuffer` arguments and
+synchronous results. Its asynchronous receive announces metadata before a synchronous buffer
+take; no Promise carries an `ArrayBuffer` across the TurboModule.
+
 The adapter builds and packages the same native code:
 
 ```sh

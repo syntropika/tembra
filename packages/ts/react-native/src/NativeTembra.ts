@@ -45,6 +45,28 @@ export interface Spec extends TurboModule {
   portRelease(handle: string, port: string, environment: number): boolean;
   portCancel(handle: string, port: string): boolean;
   closePort(handle: string, port: string): boolean;
+  /**
+   * Incoming HTTP over the port's typed carrier. Metadata JSON carries only control tags, the
+   * method, target, status, field names and byte lengths; every field value and body byte travels
+   * in the `ArrayBuffer`, field values concatenated in their order (duplicates kept).
+   */
+  portBeginIngress(
+    handle: string,
+    port: string,
+    packet: string,
+    head: string,
+    fields: ArrayBuffer,
+  ): boolean;
+  /**
+   * Resolve the next event's metadata. A `head`, `data`, `trailers` or `refused` event leaves one
+   * buffer with the port, which `portTakeIngress` must take before the next receive.
+   */
+  portReceiveIngress(handle: string, port: string): Promise<string>;
+  /** Take the received event's buffer; it never waits and refuses when none is pending. */
+  portTakeIngress(handle: string, port: string): ArrayBuffer;
+  portSupplyRequest(handle: string, port: string, chunk: string, bytes: ArrayBuffer): boolean;
+  portPullResponse(handle: string, port: string): boolean;
+  portDisconnect(handle: string, port: string): boolean;
 }
 
 export default TurboModuleRegistry.get<Spec>("NativeTembra");

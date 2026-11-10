@@ -167,6 +167,33 @@ extension Tembra {
     @objc public func portRelease(_ handle: String, port: String, environment: NSNumber) throws -> NSNumber { try checked { try execution(handle).port(port).release(environment: environment.uint64Value); return NSNumber(value: true) } }
     /** Cancel standard WASI work owned by the active callback. */
     @objc public func portCancel(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).port(port).cancel(); return NSNumber(value: true) } }
+    /** Start an incoming HTTP exchange; the head's field values arrive as one typed buffer. */
+    @objc public func portBeginIngress(_ handle: String, port: String, packet: String, head: String, fields: NSMutableData) throws -> NSNumber {
+        try checked {
+            let head = try IngressCodec.head(head, Data(referencing: fields))
+            try execution(handle).port(port).beginIngress(packet: packet, head: head)
+            return NSNumber(value: true)
+        }
+    }
+    /** Await the next ingress event; byte events park their buffer for the synchronous take. */
+    @objc public func portReceiveIngress(_ handle: String, port: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
+        Task { do { resolve(try await execution(handle).receiveIngress(port)) } catch { reject(diagnostic(error)) } }
+    }
+    /** Move the received event's bytes to JavaScript without copying them again. */
+    @objc public func portTakeIngress(_ handle: String, port: String) throws -> NSMutableData {
+        try checked { try execution(handle).takeIngress(port) }
+    }
+    /** Answer the pending request pull with typed bytes. */
+    @objc public func portSupplyRequest(_ handle: String, port: String, chunk: String, bytes: NSMutableData) throws -> NSNumber {
+        try checked {
+            let chunk = try IngressCodec.chunk(chunk, Data(referencing: bytes))
+            return NSNumber(value: try execution(handle).port(port).supplyRequest(chunk: chunk))
+        }
+    }
+    /** Ask for the next response frame. */
+    @objc public func portPullResponse(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).port(port).pullResponse(); return NSNumber(value: true) } }
+    /** Drop the response because the client went away. */
+    @objc public func portDisconnect(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).port(port).disconnect(); return NSNumber(value: true) } }
     /** Close a revision after shared lifecycle cleanup. */
     @objc public func closePort(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).closePort(port); return NSNumber(value: true) } }
 }

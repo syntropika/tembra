@@ -148,8 +148,13 @@ export class Host {
     request: IncomingHttpRequest | Request,
     options: HandleHttpOptions = {},
   ): Promise<HttpHandlerResponse | Response> {
-    if (isFetchRequest(request))
-      return this.handleHttp(orb, fromFetchRequest(request), options).then(toFetchResponse);
+    if (isFetchRequest(request)) {
+      try {
+        return this.handleHttp(orb, fromFetchRequest(request), options).then(toFetchResponse);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
     let exchange: IngressExchange;
     try {
       exchange = new IngressExchange(checkedRequest(request));

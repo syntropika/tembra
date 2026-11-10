@@ -165,6 +165,51 @@ RCT_EXPORT_MODULE(NativeTembra)
   [_storage portReceive:handle port:port resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
 }
 
+/** Start an incoming HTTP exchange with its head field values as one typed buffer. */
+- (NSNumber *)portBeginIngress:(NSString *)handle port:(NSString *)port packet:(NSString *)packet head:(NSString *)head fields:(NSMutableData *)fields {
+  NSError *error = nil;
+  NSNumber *result = [_storage portBeginIngress:handle port:port packet:packet head:head fields:fields error:&error];
+  if (error) { @throw [NSException exceptionWithName:@"TembraError" reason:error.localizedDescription userInfo:nil]; }
+  return result;
+}
+
+/** Resolve the next ingress event's metadata after any bytes are parked for the take. */
+- (void)portReceiveIngress:(NSString *)handle port:(NSString *)port resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  [_storage portReceiveIngress:handle port:port resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
+}
+
+/** Return the received event's buffer; React Native wraps it for JavaScript without a copy. */
+- (NSMutableData *)portTakeIngress:(NSString *)handle port:(NSString *)port {
+  NSError *error = nil;
+  NSMutableData *result = [_storage portTakeIngress:handle port:port error:&error];
+  if (error) { @throw [NSException exceptionWithName:@"TembraError" reason:error.localizedDescription userInfo:nil]; }
+  return result;
+}
+
+/** Answer the pending request pull with typed bytes. */
+- (NSNumber *)portSupplyRequest:(NSString *)handle port:(NSString *)port chunk:(NSString *)chunk bytes:(NSMutableData *)bytes {
+  NSError *error = nil;
+  NSNumber *result = [_storage portSupplyRequest:handle port:port chunk:chunk bytes:bytes error:&error];
+  if (error) { @throw [NSException exceptionWithName:@"TembraError" reason:error.localizedDescription userInfo:nil]; }
+  return result;
+}
+
+/** Ask for the next response frame. */
+- (NSNumber *)portPullResponse:(NSString *)handle port:(NSString *)port {
+  NSError *error = nil;
+  NSNumber *result = [_storage portPullResponse:handle port:port error:&error];
+  if (error) { @throw [NSException exceptionWithName:@"TembraError" reason:error.localizedDescription userInfo:nil]; }
+  return result;
+}
+
+/** Drop the response because the client went away. */
+- (NSNumber *)portDisconnect:(NSString *)handle port:(NSString *)port {
+  NSError *error = nil;
+  NSNumber *result = [_storage portDisconnect:handle port:port error:&error];
+  if (error) { @throw [NSException exceptionWithName:@"TembraError" reason:error.localizedDescription userInfo:nil]; }
+  return result;
+}
+
 /** Transfer bounded guest diagnostics without changing execution authority. */
 - (NSString *)portLogs:(NSString *)handle port:(NSString *)port {
   NSError *error = nil;

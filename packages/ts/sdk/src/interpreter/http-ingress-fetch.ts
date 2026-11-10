@@ -40,6 +40,16 @@ function iterate(stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> 
 
 /** The raw request a WHATWG `Request` describes. */
 export function fromFetchRequest(request: Request): IncomingHttpRequest {
+  if (typeof ReadableStream !== "function")
+    throw new TypeError(
+      "WHATWG ReadableStream is unavailable on this host; pass an IncomingHttpRequest to receive raw parts",
+    );
+  // Some hosts install a buffered fetch polyfill whose Request has no public body stream.
+  const body = (request as Partial<Request>).body;
+  if (body === undefined)
+    throw new TypeError(
+      "WHATWG Request has no body stream on this host; pass an IncomingHttpRequest to receive raw parts",
+    );
   const url = new URL(request.url);
   return {
     method: request.method,
@@ -47,7 +57,7 @@ export function fromFetchRequest(request: Request): IncomingHttpRequest {
     authority: url.host,
     pathWithQuery: url.pathname + url.search,
     fields: [...request.headers].map(([name, value]) => [name, bytesOf(value)] as const),
-    body: request.body ? iterate(request.body) : null,
+    body: body ? iterate(body) : null,
   };
 }
 
