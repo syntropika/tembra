@@ -4,10 +4,11 @@
 the WIT from it and generates the bindings, so an author writes neither a `.wit` file nor a build
 script. [`cargo tembra build`](../cargo-tembra/README.md) compiles the crate, reads the contract the
 macro embedded in the component and packages the artifact. The
-[Rust orb example](../../examples/rust-orb/README.md) shows the whole path; the
-[hooks example](../../examples/rust-orb-hooks/README.md) adds a contribution to another Orb's hook;
-the [state example](../../examples/rust-orb-state/README.md) gives a service kernel-managed state;
-the hooks example also keeps its counts in a resource of the Orb's root.
+[service example](../../examples/rust-orb-service/README.md) shows the whole path; the
+[hook contribution example](../../examples/rust-orb-hook-contribution/README.md) adds a
+contribution to another Orb's hook and keeps its counts in a resource of the Orb's root; the
+[hook declaration example](../../examples/rust-orb-hook-declaration/README.md) declares a hook; the
+[state example](../../examples/rust-orb-state/README.md) gives a service kernel-managed state.
 
 ```rust
 #![cfg_attr(target_arch = "wasm32", no_std)]
@@ -53,7 +54,8 @@ mod greeter {
 | a struct with named fields, when a service method or a state uses it   | a `record`                                                                            |
 | an enum, when a service method uses it                                 | an `enum` when every variant is empty, otherwise a `variant`                          |
 | `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples  | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`          |
-| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`   | `import` and `export` of that hook interface in the world                             |
+| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`   | `import` and `export` of that hook interface in the world: a contribution             |
+| a unit struct with `#[hook("ns:name/hook@version", composition = c)]`  | `import` and `export` of that hook interface in the world: a declaration              |
 | a struct with named fields and `#[state(service = Name, version = n)]` | `import tembra:guest/state` and `export tembra:guest/state-init` in the world         |
 | a struct with `#[resource(version = n)]` and a `pub fn open() -> Self` | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world |
 | `///` comments                                                         | `///` comments in the WIT                                                             |
@@ -93,6 +95,45 @@ the author writes `guard::Admission`, and forwards the callback to the function.
 name is free; its single parameter and its result are the callback's. The priority travels in the
 component, in a `tembra:hooks` custom section, and `cargo tembra build` packages it with the
 artifact.
+
+## Declaring a hook
+
+An Orb that owns a hook marks a unit struct with the hook's identity and its composition, one of
+`series`, `waterfall` and `bail`, and names the directory holding the hook's WIT package, as a
+contributor does:
+
+```rust
+#[tembra_orb_macro::orb(package = "example:gate@1.0.0", wit = "../wit")]
+mod gate {
+    /// Each contributor may change the admission or block it, in plan order.
+    #[hook("example:admission/guard@1.0.0", composition = waterfall)]
+    pub struct Guard;
+
+    pub struct Decision { pub value: i32, pub blocked: bool }
+
+    #[service]
+    pub struct Admissions;
+
+    impl Admissions {
+        /// Run the hook over a fresh admission and report what the contributors decided.
+        pub fn admit(value: i32) -> Decision {
+            let decided = Guard::run(guard::Admission { value, blocked: false });
+            Decision { value: decided.value, blocked: decided.blocked }
+        }
+    }
+}
+```
+
+The macro gives the struct `Guard::run(input)`, which hands the input to the kernel: the kernel
+calls the contributions of other Orbs in plan order and returns the composed result, nothing for a
+series hook, the input type for a waterfall, an option for a bail. The callback's shape must fit the
+composition, and the macro checks it against the WIT. In the world the hook interface is imported
+and exported, as for a contribution: the export is what the portable hook contract requires of a
+provider, and the macro answers it with a callback that traps, because the contributions answer the
+hook; the import is the typed entry to the plan. Which role an interface plays travels in the
+`tembra:hooks` section next to the contribution priorities, and `cargo tembra build` packages it;
+an Orb declares a hook or contributes to it, never both. Service signatures use the module's own
+types, so a method that reports the hook's record converts it, as `admit` does.
 
 ## Kernel-managed state
 
@@ -180,8 +221,9 @@ WIT has no spelling for, such as a client of some granted I/O.
 The macro rewrites the module with:
 
 1. `pub const WIT: &str`, the derived WIT text;
-2. the same text as a `tembra:wit` custom section of the Wasm module, and the hook priorities as
-   a `tembra:hooks` section. `cargo tembra build` reads them and packages the contract exactly as
+2. the same text as a `tembra:wit` custom section of the Wasm module, and the hook roles, the
+   declared hooks with their composition and the contributions with their priorities, as a
+   `tembra:hooks` section. `cargo tembra build` reads them and packages the contract exactly as
    written here, with the `///` comments the binary type section loses and the hook imports the
    linker drops because nothing calls them;
 3. the `no_std` prelude for the Wasm target, `#[global_allocator]` on `dlmalloc` and a
@@ -192,11 +234,13 @@ The macro rewrites the module with:
    `tembra:guest` package nested in the inline text and `serde` derives on the generated types;
 5. `pub use exports::...::{Stats}`: the author's record and enum definitions are replaced by the
    generated types with the same names and public fields, so the author's functions and the
-   generated traits share one type; and `pub use exports::...::guard;` for each contributed hook;
+   generated traits share one type; `pub use exports::...::guard;` for each contributed hook and
+   `pub use ...::guard;`, the import module, for each declared one;
 6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface by forwarding to the
    author's functions, hook callbacks and the kernel's `state-init` and `resources-init`
-   callbacks included, and `export!`;
+   callbacks included, with a trapping callback for each declared hook, and `export!`;
+   with a declared hook, `run` on its struct, calling the hook's import;
 8. with a state, `Default` and the `read`/`update` functions on each state type, over a hidden
    module that maps the kernel's JSON to the type with `serde_json`;
 9. with a resource, one slot in the component's memory per resource, filled by `open` and
@@ -210,8 +254,8 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
 
 - Imports of other Orbs' services and of WASI interfaces are not expressed yet; a hook
   contribution is the only way to consume another Orb's WIT.
-- Compiled Orbs cannot declare hooks: the kernel does not accept hook providers from components
-  yet, so a provider stays native or TypeScript.
+- A declared hook's types enter no service signature: a method that reports the hook's record
+  returns a record of the module, converted from it.
 - Functions are associated functions without `self`. Besides a service's state and the root's
   resources, data lives in `static`s, as in the compiled fixtures of `executor-wasm`.
 - Resources belong to the root, declare no dependencies on one another, and are opened in the
