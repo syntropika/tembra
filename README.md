@@ -23,30 +23,35 @@ the same lifecycle.
 
 ## Repository
 
-| Directory                                              | Contents                                                          |
-| ------------------------------------------------------ | ----------------------------------------------------------------- |
-| [crates/core/](crates/core/)                           | Shared Rust engine for ownership, state revisions and orb updates |
-| [crates/tembra/](crates/tembra/)                       | Rust interface for declaring and running orbs                     |
-| [crates/bridge/](crates/bridge/)                       | Communication between the engine and its platform integrations    |
-| [crates/contracts/](crates/contracts/)                 | WIT contracts, orb artifacts and installation grants              |
-| [crates/executor-wasm/](crates/executor-wasm/)         | Runs orb artifacts in Wasmtime for Rust hosts                     |
-| [crates/node-binding/](crates/node-binding/)           | Connects Node.js to the Rust engine                               |
-| [crates/mobile/](crates/mobile/)                       | Shared Rust kernel bindings for Swift and Kotlin                  |
-| [crates/browser-wasm/](crates/browser-wasm/)           | Makes the Rust engine available in browsers and Workers           |
-| [packages/ts/sdk/](packages/ts/sdk/)                   | TypeScript SDK and orb tooling                                    |
-| [packages/ts/engine-node/](packages/ts/engine-node/)   | Native engine packaging and builds                                |
-| [packages/ts/engine-wasm/](packages/ts/engine-wasm/)   | WASM engine packaging and builds                                  |
-| [packages/swift/](packages/swift/)                     | Swift bindings for iOS and macOS                                  |
-| [packages/kotlin/](packages/kotlin/)                   | Kotlin bindings for the JVM and Android                           |
-| [packages/ts/react-native/](packages/ts/react-native/) | React Native TurboModule, native packaging and mobile builds      |
-| [packages/ts/test/](packages/ts/test/)                 | Browser integration tests                                         |
-| [examples/rust/](examples/rust/)                       | Native orbs, identity, execution and resource lifetime            |
-| [examples/wasm-orb/](examples/wasm-orb/)               | A TypeScript orb and a compiled Rust orb built from one WIT file  |
+| Directory                                              | Contents                                                              |
+| ------------------------------------------------------ | --------------------------------------------------------------------- |
+| [crates/core/](crates/core/)                           | Shared Rust engine for ownership, state revisions and orb updates     |
+| [crates/tembra/](crates/tembra/)                       | Rust interface for declaring and running orbs                         |
+| [crates/bridge/](crates/bridge/)                       | Communication between the engine and its platform integrations        |
+| [crates/contracts/](crates/contracts/)                 | WIT contracts, orb artifacts and installation grants                  |
+| [crates/executor-wasm/](crates/executor-wasm/)         | Runs orb artifacts in Wasmtime for Rust hosts                         |
+| [crates/node-binding/](crates/node-binding/)           | Connects Node.js to the Rust engine                                   |
+| [crates/mobile/](crates/mobile/)                       | Shared Rust kernel bindings for Swift and Kotlin                      |
+| [crates/browser-wasm/](crates/browser-wasm/)           | Makes the Rust engine available in browsers and Workers               |
+| [crates/orb-macro/](crates/orb-macro/)                 | Derives a compiled orb's WIT contract and bindings from a Rust module |
+| [crates/cargo-tembra/](crates/cargo-tembra/)           | `cargo tembra`: builds, inspects and packages Rust orbs               |
+| [packages/ts/sdk/](packages/ts/sdk/)                   | TypeScript SDK and orb tooling                                        |
+| [packages/ts/engine-node/](packages/ts/engine-node/)   | Native engine packaging and builds                                    |
+| [packages/ts/engine-wasm/](packages/ts/engine-wasm/)   | WASM engine packaging and builds                                      |
+| [packages/swift/](packages/swift/)                     | Swift bindings for iOS and macOS                                      |
+| [packages/kotlin/](packages/kotlin/)                   | Kotlin bindings for the JVM and Android                               |
+| [packages/ts/react-native/](packages/ts/react-native/) | React Native TurboModule, native packaging and mobile builds          |
+| [packages/ts/test/](packages/ts/test/)                 | Browser integration tests                                             |
+| [examples/rust/](examples/rust/)                       | Native orbs, identity, execution and resource lifetime                |
+| [examples/wasm-orb/](examples/wasm-orb/)               | A TypeScript orb and a compiled Rust orb built from one WIT file      |
+| [examples/rust-orb/](examples/rust-orb/)               | A Rust orb written from its code and built with `cargo tembra`        |
 
 ## Development
 
 The [Wasm orb example](examples/wasm-orb/README.md) builds a TypeScript orb with an npm dependency
-and a compiled Rust provider, then installs both artifacts in a Node host.
+and a compiled Rust provider, then installs both artifacts in a Node host. The
+[Rust orb example](examples/rust-orb/README.md) writes a compiled orb from a Rust module with
+`#[orb]` and builds its artifact with `cargo tembra`.
 
 See the [guide](docs/README.md) for concepts and Rust and TypeScript usage.
 See [DEVELOP.md](DEVELOP.md) for setup, tools, builds, tests and technical details.

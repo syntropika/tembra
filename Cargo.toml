@@ -22,6 +22,8 @@ exclude = [
   "crates/executor-wasm/rust-sockets",
   "crates/executor-wasm/probe-provider",
   "crates/executor-wasm/stream-adapter",
+  "examples/rust-orb/greeter",
+  "examples/rust-orb/host",
 ]
 
 [workspace.package]
