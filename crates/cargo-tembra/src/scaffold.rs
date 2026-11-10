@@ -85,7 +85,8 @@ extern crate alloc;
 mod {module} {{
     use alloc::{{format, string::String}};
 
-    /// The service: a unit struct with an impl block of public functions.
+    /// The service: a unit struct marked #[service], with an impl block of public functions.
+    #[service]
     pub struct Api;
 
     impl Api {{

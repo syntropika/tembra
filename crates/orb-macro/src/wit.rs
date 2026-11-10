@@ -27,7 +27,11 @@ pub(crate) fn render(
 ) -> String {
     let mut wit = format!("package {package};\n");
     for (index, service) in services.iter().enumerate() {
-        wit.push_str(&format!("\ninterface {} {{\n", kebab(&service.ident)));
+        wit.push('\n');
+        for doc in &service.docs {
+            wit.push_str(&format!("///{doc}\n"));
+        }
+        wit.push_str(&format!("interface {} {{\n", kebab(&service.ident)));
         if index == 0 {
             for shape in shapes {
                 wit.push_str(&shape.wit);
@@ -133,6 +137,7 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
         wit.push_str(&format!("  ///{doc}\n"));
     }
     wit.push_str(&format!("  record {} {{\n", kebab(&item.ident)));
+    let mut references = Vec::new();
     for field in &fields.named {
         let Some(ident) = &field.ident else {
             return Err(syn::Error::new(field.span(), "a record field needs a name"));
@@ -142,11 +147,13 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
             kebab(ident),
             wit_type(&field.ty)?
         ));
+        self::references(&field.ty, &mut references);
     }
     wit.push_str("  }\n");
     Ok(Shape {
         ident: item.ident.clone(),
         wit,
+        references,
     })
 }
 
@@ -163,6 +170,7 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
     }
     let keyword = if plain { "enum" } else { "variant" };
     wit.push_str(&format!("  {keyword} {} {{\n", kebab(&item.ident)));
+    let mut references = Vec::new();
     for variant in &item.variants {
         let case = kebab(&variant.ident);
         match &variant.fields {
@@ -172,6 +180,7 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
                     "    {case}({}),\n",
                     wit_type(&fields.unnamed[0].ty)?
                 ));
+                self::references(&fields.unnamed[0].ty, &mut references);
             }
             _ => {
                 return Err(syn::Error::new(
@@ -185,7 +194,41 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
     Ok(Shape {
         ident: item.ident.clone(),
         wit,
+        references,
     })
+}
+
+/// Rust types with a WIT spelling of their own; any other name is a type of the module.
+const BUILTIN: &[&str] = &[
+    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool", "char", "String",
+    "Vec", "Option", "Result",
+];
+
+/// Collect the module types a Rust type mentions, looking through generics and tuples.
+pub(crate) fn references(ty: &Type, out: &mut Vec<Ident>) {
+    match ty {
+        Type::Path(path) => {
+            let Some(segment) = path.path.segments.last() else {
+                return;
+            };
+            if !BUILTIN.contains(&segment.ident.to_string().as_str()) {
+                out.push(segment.ident.clone());
+            }
+            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                for arg in &args.args {
+                    if let syn::GenericArgument::Type(ty) = arg {
+                        references(ty, out);
+                    }
+                }
+            }
+        }
+        Type::Tuple(tuple) => {
+            for element in &tuple.elems {
+                references(element, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Translate an owned Rust type into its WIT spelling.
