@@ -4,15 +4,24 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
-use tembra_contracts::{Contract, guest};
+use tembra_contracts::{ComponentRoles, Contract, HookComposition, guest};
 use wasmparser::{Parser, Payload};
 use wit_component::{DecodedWasm, WitPrinter};
 use wit_parser::{InterfaceId, PackageId, Resolve, WorldId, WorldItem, WorldKey};
 
 /// The custom section in which the macro stores the WIT it derived from the module.
 const WIT_SECTION: &str = "tembra:wit";
-/// The custom section in which the macro stores the hook priorities, as a JSON object.
+/// The custom section in which the macro stores the hook roles, as a JSON object.
 const HOOKS_SECTION: &str = "tembra:hooks";
+
+/// The hook roles the macro stored in the component: the hooks it contributes to, with their
+/// priorities, and the hooks it declares, with their composition.
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EmbeddedHooks {
+    pub contributes: BTreeMap<String, i32>,
+    pub declares: BTreeMap<String, HookComposition>,
+}
 
 /// `cargo tembra wit`: print the reconstructed WIT, or write the contract with --emit.
 pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) -> Result<()> {
@@ -97,12 +106,13 @@ fn embedded_wit(bytes: &[u8]) -> Result<Option<String>> {
         .transpose()
 }
 
-/// The hook priorities the macro stored in the component: `{"ns:name/hook@version": n}`.
-pub fn embedded_hooks(bytes: &[u8]) -> Result<BTreeMap<String, i32>> {
+/// The hook roles the macro stored in the component:
+/// `{"contributes": {"ns:name/hook@version": n}, "declares": {"ns:name/hook@version": "waterfall"}}`.
+pub fn embedded_hooks(bytes: &[u8]) -> Result<EmbeddedHooks> {
     match embedded_section(bytes, HOOKS_SECTION)? {
         Some(data) => serde_json::from_slice(&data)
-            .context("the tembra:hooks section is not a JSON object of priorities"),
-        None => Ok(BTreeMap::new()),
+            .context("the tembra:hooks section is not a JSON object of hook roles"),
+        None => Ok(EmbeddedHooks::default()),
     }
 }
 
@@ -200,13 +210,11 @@ fn interface(item: &WorldItem) -> Option<InterfaceId> {
     }
 }
 
-/// The hook contributions of a contract: the interfaces its world both imports and exports, with
-/// the priorities the component carries, or 0. A priority for an interface that is not a
-/// contribution is an error.
-pub fn contributions(
-    contract: &Contract,
-    priorities: &BTreeMap<String, i32>,
-) -> Result<BTreeMap<String, i32>> {
+/// The hook roles of a contract. A hook interface is one the world both imports and exports: the
+/// ones the component declares, with their composition, are its own hooks; the others are
+/// contributions, with the priority the component carries, or 0. A role the component names
+/// for an interface that is not such a pair is an error.
+pub fn roles(contract: &Contract, embedded: &EmbeddedHooks) -> Result<ComponentRoles> {
     let model = contract.prepared().model();
     let identities = |entries: &[tembra_contracts::Entry]| -> BTreeSet<String> {
         entries
@@ -218,18 +226,31 @@ pub fn contributions(
             .collect()
     };
     let exported = identities(&model.exports);
-    let mut contributions: BTreeMap<String, i32> = identities(&model.imports)
+    let paired: BTreeSet<String> = identities(&model.imports)
         .into_iter()
         .filter(|id| exported.contains(id))
-        .map(|id| (id, 0))
         .collect();
-    for (id, priority) in priorities {
+    for id in embedded.declares.keys() {
+        if !paired.contains(id) {
+            bail!("#[hook] declares {id}, but the contract does not import and export it");
+        }
+    }
+    let mut contributions: BTreeMap<String, i32> = paired
+        .iter()
+        .filter(|id| !embedded.declares.contains_key(*id))
+        .map(|id| (id.clone(), 0))
+        .collect();
+    for (id, priority) in &embedded.contributes {
         let slot = contributions.get_mut(id).with_context(|| {
-            format!("#[hook] names {id}, but the contract does not import and export it")
+            format!("#[hook] contributes to {id}, but the contract does not import and export it as a contribution")
         })?;
         *slot = *priority;
     }
-    Ok(contributions)
+    Ok(ComponentRoles {
+        contributions,
+        hooks: embedded.declares.clone(),
+        ..Default::default()
+    })
 }
 
 /// `cargo tembra inspect`: core import sections, the summary and, against a WIT, the verdict.
@@ -280,17 +301,13 @@ pub fn inspect(
         }
         None => None,
     };
-    let contributions = match &contract {
-        Some((contract, ..)) => contributions(contract, &embedded_hooks(&bytes)?)?,
-        None => BTreeMap::new(),
+    let roles = match &contract {
+        Some((contract, ..)) => roles(contract, &embedded_hooks(&bytes)?)?,
+        None => ComponentRoles::default(),
     };
-    summary(&resolve, world, "orb", &contributions);
+    summary(&resolve, world, "orb", &roles);
     if let Some((contract, name, wit_dir)) = contract {
         println!("checked against world {name} of {}:", wit_dir.display());
-        let roles = tembra_contracts::ComponentRoles {
-            contributions: contributions.clone(),
-            ..Default::default()
-        };
         match contract.component_artifact(&bytes, "orb", 1, &roles) {
             Ok(artifact) => println!("  ACCEPTED, artifact of {} bytes", artifact.len()),
             Err(error) => println!("  REFUSED: {error}"),
@@ -317,20 +334,20 @@ fn world_key(resolve: &Resolve, key: &WorldKey, local: Option<PackageId>) -> Str
     }
 }
 
-/// Exports as services and methods, hook contributions, kernel-managed state, and imports with
-/// the grant they will need at installation.
-pub fn summary(
-    resolve: &Resolve,
-    world: WorldId,
-    orb_name: &str,
-    contributions: &BTreeMap<String, i32>,
-) {
+/// Exports as services and methods, hooks declared and contributed to, kernel-managed state and
+/// resources, and imports with the grant they will need at installation.
+pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &ComponentRoles) {
+    let ComponentRoles {
+        contributions,
+        hooks,
+        ..
+    } = roles;
     let world = &resolve.worlds[world];
     let (mut state, mut resources) = (false, false);
     println!("exports, the services of {orb_name}:");
     for (key, item) in &world.exports {
         let id = world_key(resolve, key, None);
-        if contributions.contains_key(&id) {
+        if contributions.contains_key(&id) || hooks.contains_key(&id) {
             continue; // a hook callback, not a service
         }
         if guest::reserved(&id) {
@@ -348,6 +365,15 @@ pub fn summary(
             println!("  {orb_name}::{id}  methods: {}", methods.join(", "));
         } else {
             println!("  {id}");
+        }
+    }
+    if !hooks.is_empty() {
+        println!("hooks declared, run by the kernel's plan of contributions:");
+        for (id, composition) in hooks {
+            println!(
+                "  {id}  {}",
+                serde_json::json!(composition).as_str().unwrap_or_default()
+            );
         }
     }
     if !contributions.is_empty() {
@@ -378,8 +404,10 @@ pub fn summary(
             continue; // types only: nothing to bind
         }
         let id = world_key(resolve, key, None);
-        if contributions.contains_key(&id) || guest::reserved(&id) {
-            continue; // bound to the provider through the contribution, or served by the kernel
+        if contributions.contains_key(&id) || hooks.contains_key(&id) || guest::reserved(&id) {
+            // Bound to the provider through the contribution, the entry to the Orb's own hook,
+            // or served by the kernel.
+            continue;
         }
         let kind = match id.split('/').next().unwrap_or_default() {
             "wasi:filesystem" => "filesystem (FilesystemGrant)",
@@ -397,7 +425,7 @@ pub fn summary(
         grants.entry(kind).or_default().push(id);
     }
     if requires.is_empty() && grants.is_empty() {
-        if contributions.is_empty() {
+        if contributions.is_empty() && hooks.is_empty() {
             println!("imports: none; the installer grants nothing");
         } else {
             println!("other imports: none; the installer grants nothing");

@@ -1,5 +1,5 @@
 //! `cargo tembra build`: compile, derive the WIT, verify, package, summarize.
-use crate::component::{contract_text, contributions, decode, embedded_hooks, summary};
+use crate::component::{contract_text, decode, embedded_hooks, roles, summary};
 use anyhow::{Context, Result, bail};
 use heck::{ToKebabCase, ToSnakeCase};
 use sha2::{Digest, Sha256};
@@ -95,13 +95,10 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .with_context(|| format!("reading the WIT in {}", wit_dir.display()))?;
 
     // 3. Verify and package: the same component_artifact the SDK build uses for a provider.
-    //    Hook contributions are the interfaces the contract both imports and exports; their
-    //    priorities travel in the component, written by the macro from #[hook(.., priority = n)].
-    let contributions = contributions(&contract, &embedded_hooks(&component)?)?;
-    let roles = tembra_contracts::ComponentRoles {
-        contributions: contributions.clone(),
-        ..Default::default()
-    };
+    //    Hook interfaces are the ones the contract both imports and exports; which are declared,
+    //    with what composition, and which are contributions, with what priority, travels in the
+    //    component, written by the macro from the #[hook] attributes.
+    let roles = roles(&contract, &embedded_hooks(&component)?)?;
     let artifact = contract
         .component_artifact(&component, &orb_name, api_version, &roles)
         .map_err(|error| anyhow::anyhow!("{error}"))
@@ -143,6 +140,6 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         println!("  {world}.wit         the contract, copied from contract/");
     }
     println!("  checksums.txt");
-    summary(&resolve, world_id, &orb_name, &contributions);
+    summary(&resolve, world_id, &orb_name, &roles);
     Ok(())
 }
