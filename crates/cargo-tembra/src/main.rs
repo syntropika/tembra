@@ -44,8 +44,8 @@ enum Command {
         /// Use the debug profile instead of release.
         #[arg(long)]
         debug: bool,
-        /// Where to write the component, the artifact and the checksums; default: artifacts/
-        /// next to Cargo.toml.
+        /// Where to collect the outputs, contract included, instead of artifacts/ next to
+        /// Cargo.toml: one directory for every Orb of a repository.
         #[arg(long)]
         out: Option<PathBuf>,
     },

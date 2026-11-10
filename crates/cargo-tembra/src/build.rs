@@ -104,15 +104,24 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .component_artifact(&component, &orb_name, api_version, &contributions)
         .map_err(|error| anyhow::anyhow!("{error}"))
         .context("the component does not satisfy its contract")?;
+    //    The outputs stay inside the crate, next to contract/; with --out they are collected
+    //    elsewhere together with a copy of the contract, so one directory can hold every Orb.
+    let collected = out.is_some();
     let artifacts = out.unwrap_or_else(|| manifest_dir.join("artifacts"));
     std::fs::create_dir_all(&artifacts)?;
     std::fs::copy(&component_path, artifacts.join(format!("{orb_name}.wasm")))?;
     std::fs::write(artifacts.join(format!("{orb_name}.orb.wasm")), &artifact)?;
+    let mut files = vec![
+        (format!("{orb_name}.wasm"), component.clone()),
+        (format!("{orb_name}.orb.wasm"), artifact.clone()),
+    ];
+    if collected {
+        let name = format!("{world}.wit");
+        std::fs::copy(&wit_file, artifacts.join(&name))?;
+        files.push((name, std::fs::read(&wit_file)?));
+    }
     let mut checksums = String::new();
-    for (file, bytes) in [
-        (format!("{orb_name}.wasm"), &component),
-        (format!("{orb_name}.orb.wasm"), &artifact),
-    ] {
+    for (file, bytes) in &files {
         checksums.push_str(&format!("{:x}  {file}\n", Sha256::digest(bytes)));
     }
     std::fs::write(artifacts.join("checksums.txt"), &checksums)?;
@@ -128,6 +137,9 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         "  {orb_name}.orb.wasm   {} bytes  the Tembra artifact ({orb_name} v{api_version})",
         artifact.len()
     );
+    if collected {
+        println!("  {world}.wit         the contract, copied from contract/");
+    }
     println!("  checksums.txt");
     summary(&resolve, world_id, &orb_name, &contributions);
     Ok(())
