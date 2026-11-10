@@ -1,0 +1,14 @@
+[package]
+name = "tembra-example-native-gate"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+# The native provider of the hook: trusted application code declared with the `tembra` facade,
+# in a crate of its own so the host stays the wiring that installs and drives the Orbs.
+[dependencies]
+tembra = { path = "../../../crates/tembra", features = ["hooks"] }
+tembra-executor-wasm = { path = "../../../crates/executor-wasm" }
+serde = { version = "1", features = ["derive"] }

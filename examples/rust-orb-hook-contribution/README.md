@@ -3,24 +3,26 @@
 This example runs two Orbs. A native Orb, `gate`, declares a waterfall hook and keeps a ledger of
 the admissions it decided. A compiled Orb, `filter`, written in Rust with `#[orb]` and built with
 `cargo tembra`, contributes to that hook, blocks negative values and counts what it saw in a
-resource of its root that the kernel opens and closes. The host installs both, drives three
-admissions, reloads the contributor and drives one more.
+resource of its root that the kernel opens and closes. The host is wiring only: it installs both,
+drives three admissions, reloads the contributor and drives one more.
 
-| File                         | Role                                                                                              |
-| ---------------------------- | ------------------------------------------------------------------------------------------------- |
-| `wit/admission.wit`          | The hook contract: the `guard` interface with its `apply` callback, exported by `provider`        |
-| `filter/src/lib.rs`          | The compiled contributor: `#[hook]` on a `pub fn`, counts in a `#[resource]`, a `report` service  |
-| `filter/contract/filter.wit` | The contract `cargo tembra build` wrote: the hook imported and exported, the kernel's resources   |
-| `host/src/main.rs`           | The native `gate` Orb with its hook and ledger, and the application code installing and reloading |
-| `run.sh`                     | Build, show the contract, run the host                                                            |
+| File                         | Role                                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------------------------ |
+| `wit/admission.wit`          | The hook contract: the `guard` interface with its `apply` callback, exported by `provider`       |
+| `gate/src/lib.rs`            | The native provider, a crate of its own: the `guard` hook with the WIT signature and a ledger    |
+| `filter/src/lib.rs`          | The compiled contributor: `#[hook]` on a `pub fn`, counts in a `#[resource]`, a `report` service |
+| `filter/contract/filter.wit` | The contract `cargo tembra build` wrote: the hook imported and exported, the kernel's resources  |
+| `host/src/main.rs`           | The wiring: installs the two Orbs, drives admissions, reloads the contributor; it defines no Orb |
+| `run.sh`                     | Build, show the contract, run the host                                                           |
 
-## Why the provider is native
+## Why the provider is native here
 
-Compiled Orbs can contribute to hooks but cannot declare them yet; see
-[portable hook contracts](../../docs/extensions.md#portable-hook-contracts). The provider is
-therefore trusted application code declared with the `tembra` facade, as in
-[examples/rust/hooks.rs](../rust/hooks.rs). It attaches the WIT callback signature to its hook with
-`Hook::signature`, so the compiled contributor is checked against the same contract at installation.
+A compiled Orb can declare a hook too; [rust-orb-hook-declaration](../rust-orb-hook-declaration/README.md)
+shows it. This example keeps the provider native on purpose: a sandboxed contributor plugging into
+a hook of trusted application code is the case of an application extended by plugins. The provider
+is declared with the `tembra` facade, as in [examples/rust/hooks.rs](../rust/hooks.rs), and attaches
+the WIT callback signature to its hook with `Hook::signature`, so the compiled contributor is
+checked against the same contract at installation.
 
 ## Build
 
@@ -28,7 +30,7 @@ Run from the repository root.
 
 ```sh
 cargo install --path crates/cargo-tembra
-cargo tembra build --manifest-path examples/rust-orb-hooks/filter/Cargo.toml
+cargo tembra build --manifest-path examples/rust-orb-hook-contribution/filter/Cargo.toml
 ```
 
 The summary lists the contribution and the resources next to the service:
@@ -50,7 +52,7 @@ and the linker is free to drop the unused import.
 ## Run
 
 ```sh
-cargo run --manifest-path examples/rust-orb-hooks/host/Cargo.toml -- examples/rust-orb-hooks/filter/artifacts/filter.orb.wasm
+cargo run --manifest-path examples/rust-orb-hook-contribution/host/Cargo.toml -- examples/rust-orb-hook-contribution/filter/artifacts/filter.orb.wasm
 ```
 
 ```text
