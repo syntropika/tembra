@@ -1,0 +1,17 @@
+package example:blocker@1.0.0;
+
+world blocker {
+  import example:admission/guard@1.0.0;
+  export example:admission/guard@1.0.0;
+}
+
+package example:admission@1.0.0 {
+  interface guard {
+    record admission {
+      value: s32,
+      blocked: bool,
+    }
+
+    apply: func(input: admission) -> admission;
+  }
+}
