@@ -253,7 +253,7 @@ source tree.
 To test the mobile execution transport with real interpreter and compiled-provider bytes on the current Rust host:
 
 ```sh
-just test-mobile-wasm /path/to/interpreter.wasm /path/to/arithmetic-component.wasm /path/to/filesystem-probe.wasm
+just test-mobile-wasm /path/to/interpreter.wasm /path/to/arithmetic-component.wasm /path/to/filesystem-probe.wasm /path/to/http-handler.wasm
 ```
 
 This checks portable execution, heap isolation, filesystem/network grants, compiled calls, foreign continuation delivery and invalidation. It complements application tests on iOS and Android; a successful host run does not establish handset qualification.
