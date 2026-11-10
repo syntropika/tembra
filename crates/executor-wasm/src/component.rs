@@ -220,6 +220,7 @@ fn layout(
         contributions,
         ingress: contract.ingress().map(str::to_owned),
         state_init: guest::exports(contract.model(), guest::STATE_INIT),
+        resource_init: guest::exports(contract.model(), guest::RESOURCE_INIT),
     })
 }
 
@@ -353,6 +354,8 @@ mod state_tests {
         world stateful {
             import tembra:guest/state@1.0.0;
             export tembra:guest/state-init@1.0.0;
+            import tembra:guest/resources@1.0.0;
+            export tembra:guest/resources-init@1.0.0;
             export counter;
         }";
 
@@ -380,6 +383,7 @@ mod state_tests {
         let hooks = contract.check_hooks(&implementation, &bindings).unwrap();
         let layout = layout(&contract, &services, &bindings, &hooks).unwrap();
         assert!(layout.state_init);
+        assert!(layout.resource_init);
         assert_eq!(
             layout
                 .exports
@@ -388,7 +392,7 @@ mod state_tests {
                 .collect::<Vec<_>>(),
             ["counter"]
         );
-        assert_eq!(layout.imports.len(), 1);
+        assert_eq!(layout.imports.len(), 2);
         assert_eq!(layout.imports[0].binding, guest::STATE);
         assert_eq!(layout.imports[0].role, worker::Role::Kernel);
         assert_eq!(
@@ -399,6 +403,8 @@ mod state_tests {
                 .collect::<Vec<_>>(),
             ["read", "update"]
         );
+        assert_eq!(layout.imports[1].binding, guest::RESOURCE);
+        assert_eq!(layout.imports[1].role, worker::Role::Kernel);
     }
 }
 
