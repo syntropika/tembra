@@ -18,7 +18,7 @@ and reloads the Orb with a fresh component instance while the count stays.
 /// The state of one counter object: its total and the number of additions made.
 #[state(version = 1)]
 pub struct Count {
-    pub total: i32,
+    pub total: i64,
     pub steps: u32,
 }
 ```
@@ -27,7 +27,9 @@ pub struct Count {
 otherwise `#[state(service = Counter)]`. The kernel keeps exactly one state per object, so a service
 has one state struct; `version` is what the kernel compares when the Orb is reloaded. The macro
 generates `Count::read()` and `Count::update(|count| ...)`, and the initial value is
-`Count::default()`, implemented field by field. The world gains two lines:
+`Count::default()`, implemented field by field. `total` is an `i64`: the WIT says `s64`, and the
+executor carries 64-bit integers exactly across the boundary, so the host can add five billion. The
+world gains two lines:
 
 ```wit
 world tally {
@@ -69,14 +71,14 @@ cargo run --manifest-path examples/rust-orb-state/host/Cargo.toml -- examples/ru
 
 ```text
 observed state      {"steps":0,"total":0}
-observed state      {"steps":1,"total":5}
-add(5)           -> {"steps":1,"total":5}
-observed state      {"steps":2,"total":3}
-add(-2)          -> {"steps":2,"total":3}
+observed state      {"steps":1,"total":5000000000}
+add(5000000000)  -> {"steps":1,"total":5000000000}
+observed state      {"steps":2,"total":4999999998}
+add(-2)          -> {"steps":2,"total":4999999998}
 reloaded            component instances: 1
-read()           -> {"steps":2,"total":3}
-observed state      {"steps":3,"total":4}
-add(1)           -> {"steps":3,"total":4}
+read()           -> {"steps":2,"total":4999999998}
+observed state      {"steps":3,"total":4999999999}
+add(1)           -> {"steps":3,"total":4999999999}
 ```
 
 The `observed state` lines come from `reference.state::<Value>()?.subscribe(..)` in the host: the

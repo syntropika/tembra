@@ -107,7 +107,7 @@ mod tally {
     /// The state of one counter object.
     #[state(service = Counter, version = 1)]
     pub struct Count {
-        pub total: i32,
+        pub total: i64,
         pub steps: u32,
     }
 
@@ -116,7 +116,7 @@ mod tally {
 
     impl Counter {
         /// Add `by` to the count and return the new count.
-        pub fn add(by: i32) -> Count {
+        pub fn add(by: i64) -> Count {
             Count::update(|count| {
                 count.total += by;
                 count.steps += 1;
@@ -218,8 +218,8 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
   order the kernel chooses; `open` and `close` take no arguments besides the value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary.
-- Types: records, enums, variants and the scalar, string, list, option, result and tuple types.
-  No 64-bit integers across the boundary, no `resource`, `flags`, `stream` or `future`.
+- Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
+  64-bit integers cross the boundary exactly. No `resource`, `flags`, `stream` or `future`.
 - Replacing the author's types drops their `#[derive]`s.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.

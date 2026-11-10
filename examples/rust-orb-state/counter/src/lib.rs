@@ -9,7 +9,7 @@ mod tally {
     /// The state of one counter object: its total and the number of additions made.
     #[state(version = 1)]
     pub struct Count {
-        pub total: i32,
+        pub total: i64,
         pub steps: u32,
     }
 
@@ -19,7 +19,7 @@ mod tally {
 
     impl Counter {
         /// Add `by` to the count and return the new count.
-        pub fn add(by: i32) -> Count {
+        pub fn add(by: i64) -> Count {
             Count::update(|count| {
                 count.total += by;
                 count.steps += 1;
