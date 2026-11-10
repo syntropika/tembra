@@ -70,10 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. The compiled contributor. Its artifact names the contribution; the installation binds
     //    the imported hook interface to the `gate` Orb, like any other required import.
     let engine = Engine::new(Limits::default())?;
-    let filter = engine.load(
-        &std::fs::read(artifact)?,
-        Install::default().requires(GUARD, "gate", 1),
-    )?;
+    let bytes = std::fs::read(artifact)?;
+    let filter = engine.load(&bytes, Install::default().requires(GUARD, "gate", 1))?;
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![gate, filter])?;
@@ -83,20 +81,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = Rc::new(host.get(REPORT, vec!["main".into()], "alice")?);
     pool.run_until(gate.ready())?;
     pool.run_until(report.ready())?;
-    let mut call = |reference: &Rc<Reference>, method: &'static str, arguments: Value| {
-        let reference = reference.clone();
-        pool.run_until(host.root("alice", move |context| {
-            // The portable entrypoint takes JSON for native and compiled services alike.
-            Box::pin(async move { reference.call_value(&context, method, arguments).await })
-        }))
-    };
     for value in [5, -3, 8] {
-        println!("admit({value}) -> {}", call(&gate, "admit", json!(value))?);
+        let decision = call(&mut pool, &host, &gate, "admit", json!(value))?;
+        println!("admit({value}) -> {decision}");
     }
-    println!("gate ledger -> {}", call(&gate, "ledger", Value::Null)?);
-    println!("filter report -> {}", call(&report, "read", json!([]))?);
+    println!(
+        "gate ledger -> {}",
+        call(&mut pool, &host, &gate, "ledger", Value::Null)?
+    );
+    println!(
+        "filter report -> {}",
+        call(&mut pool, &host, &report, "read", json!([]))?
+    );
+
+    // 4. Reload the contributor: a second load of the same artifact is a new revision with a
+    //    fresh component instance. The kernel reopens the root's resource in the new heap, so the
+    //    counts start again; the ledger of the native `gate` is untouched.
+    let replacement = engine.load(&bytes, Install::default().requires(GUARD, "gate", 1))?;
+    pool.run_until(host.reload(vec![replacement], 5_000))?;
+    pool.run_until(host.settled());
+    println!("filter reloaded");
+    println!(
+        "admit(-1) -> {}",
+        call(&mut pool, &host, &gate, "admit", json!(-1))?
+    );
+    println!(
+        "gate ledger -> {}",
+        call(&mut pool, &host, &gate, "ledger", Value::Null)?
+    );
+    println!(
+        "filter report -> {}",
+        call(&mut pool, &host, &report, "read", json!([]))?
+    );
     gate.release()?;
     report.release()?;
     pool.run_until(host.close())?;
+    // Cleanup failures (a resource closer, an observer) are reported here, not as call errors.
+    let errors = host.errors();
+    if !errors.is_empty() {
+        return Err(format!("host errors: {errors:?}").into());
+    }
     Ok(())
+}
+
+/// Call one method under a root context of the principal `alice`. The portable entrypoint takes
+/// JSON for native and compiled services alike.
+fn call(
+    pool: &mut LocalPool,
+    host: &Host,
+    reference: &Rc<Reference>,
+    method: &'static str,
+    arguments: Value,
+) -> tembra::Result<Value> {
+    let reference = reference.clone();
+    pool.run_until(host.root("alice", move |context| {
+        Box::pin(async move { reference.call_value(&context, method, arguments).await })
+    }))
 }

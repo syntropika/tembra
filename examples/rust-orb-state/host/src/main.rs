@@ -64,6 +64,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     counter.release()?;
     pool.run_until(host.close())?;
+    // Cleanup failures (a resource closer, an observer) are reported here, not as call errors.
+    let errors = host.errors();
+    if !errors.is_empty() {
+        return Err(format!("host errors: {errors:?}").into());
+    }
     Ok(())
 }
 
