@@ -1,10 +1,9 @@
 //! `cargo tembra build`: compile, derive the WIT, verify, package, summarize.
-use crate::component::{contract_text, contributions, decode, summary};
+use crate::component::{contract_text, contributions, decode, embedded_hooks, summary};
 use anyhow::{Context, Result, bail};
 use heck::{ToKebabCase, ToSnakeCase};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -20,8 +19,6 @@ struct Metadata {
     /// The world name of a component without an embedded contract; default: the Orb name in
     /// kebab-case. A component built with the macro names its world itself.
     world: Option<String>,
-    /// Priorities of hook contributions; a contribution not listed here has priority 0.
-    contributes: BTreeMap<String, i32>,
 }
 
 pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>) -> Result<()> {
@@ -98,8 +95,9 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .with_context(|| format!("reading the WIT in {}", wit_dir.display()))?;
 
     // 3. Verify and package: the same component_artifact the SDK build uses for a provider.
-    //    Hook contributions are the interfaces the contract both imports and exports.
-    let contributions = contributions(&contract, &metadata.contributes)?;
+    //    Hook contributions are the interfaces the contract both imports and exports; their
+    //    priorities travel in the component, written by the macro from #[hook(.., priority = n)].
+    let contributions = contributions(&contract, &embedded_hooks(&component)?)?;
     let artifact = contract
         .component_artifact(&component, &orb_name, api_version, &contributions)
         .map_err(|error| anyhow::anyhow!("{error}"))

@@ -233,6 +233,7 @@ dependencies = [
  "clap",
  "heck",
  "serde",
+ "serde_json",
  "sha2",
  "tembra-contracts",
  "toml 0.8.23",
