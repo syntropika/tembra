@@ -1,0 +1,24 @@
+package tembra:guest@1.0.0;
+
+/// The kernel-managed state of a service object. The kernel retains one JSON value per object
+/// across reloads and notifies the observers of the object's references. A call reaches the
+/// state of the object it runs on. The executor serves this interface itself: a world imports
+/// it without a provider and without a grant.
+interface state {
+    /// The current value, as JSON.
+    read: func() -> string;
+    /// Replace the value with the given JSON and return the value the kernel retained.
+    update: func(value: string) -> string;
+}
+
+/// Exported by a compiled Orb whose services own kernel-managed state. The kernel asks when it
+/// creates a service object and binds the answer to the state it retains for that object.
+interface state-init {
+    /// The initial value, as JSON, and the version the kernel compares on reload.
+    record declaration {
+        initial: string,
+        version: u32,
+    }
+    /// The state of the service exporting the named interface, if it owns one.
+    declare: func(service: string) -> option<declaration>;
+}
