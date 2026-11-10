@@ -3,8 +3,8 @@
 //! This module is the only user of `wit-parser` and `wit-component`. Runtime queries are answered
 //! by the prepared contract it produces, so tooling and runtimes share one implementation.
 use crate::{
-    Artifact, Error, PreparedContract,
-    artifact::{Container, Identity, append_section, encode_orb_contributions},
+    Artifact, CallbackRoles, Error, PreparedContract,
+    artifact::{Container, Identity, append_section, encode_orb_roles},
 };
 use std::{collections::BTreeSet, path::Path};
 use wit_parser::{
@@ -247,10 +247,10 @@ impl Contract {
         component: &[u8],
         name: &str,
         api_version: u32,
-        contributions: &std::collections::BTreeMap<String, i32>,
+        roles: &CallbackRoles,
     ) -> Result<Vec<u8>, Error> {
         self.prepared.check_resource_profile()?;
-        self.prepared.check_contribution_roles(contributions)?;
+        self.prepared.check_callback_roles(roles)?;
         let identity = Identity {
             name: name.into(),
             api_version,
@@ -267,7 +267,7 @@ impl Contract {
         append_section(
             &mut bytes,
             "tembra:orb",
-            &encode_orb_contributions(&identity, &self.prepared, contributions),
+            &encode_orb_roles(&identity, &self.prepared, roles),
         );
         Ok(bytes)
     }

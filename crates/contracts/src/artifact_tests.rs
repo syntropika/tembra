@@ -43,14 +43,20 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
     let contract = Contract::from_source("hooks.wit", "package test:hooks@1.0.0; interface guard { apply: func(value: u32) -> u32; } world extension { import guard; export guard; }", Some("extension")).unwrap();
     let component = component(&contract);
     let contributions = [("test:hooks/guard@1.0.0".into(), -7)].into();
+    let roles = CallbackRoles {
+        contributions,
+        ..Default::default()
+    };
     let bytes = contract
-        .component_artifact(&component, "extension", 1, &contributions)
+        .component_artifact(&component, "extension", 1, &roles)
         .unwrap();
-    assert_eq!(
-        Artifact::decode(&bytes).unwrap().contributions,
-        contributions
-    );
-    let invalid = [("test:hooks/missing@1.0.0".into(), 1)].into();
+    let decoded = Artifact::decode(&bytes).unwrap();
+    assert_eq!(decoded.contributions, roles.contributions);
+    assert!(decoded.hooks.is_empty());
+    let invalid = CallbackRoles {
+        contributions: [("test:hooks/missing@1.0.0".into(), 1)].into(),
+        ..Default::default()
+    };
     assert!(
         contract
             .component_artifact(&component, "extension", 1, &invalid)
@@ -65,14 +71,67 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
     crate::artifact::append_section(
         &mut forged,
         "tembra:orb",
-        &crate::artifact::encode_orb_contributions(&identity, contract.prepared(), &invalid),
+        &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &invalid),
     );
     assert!(Artifact::decode(&forged).is_err());
     let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
     crate::artifact::append_section(
         &mut source,
         "tembra:orb",
-        &crate::artifact::encode_orb_contributions(&identity, contract.prepared(), &contributions),
+        &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &roles),
+    );
+    crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
+    assert!(Artifact::decode(&source).is_err());
+}
+
+/// A compiled provider exports the hook it declares and imports it to run its plan. The artifact
+/// carries the composition; a shape the composition refuses, a role the world does not export,
+/// an interface in both roles and a source bundle claiming the role are all refused.
+#[test]
+fn compiled_hook_declarations_travel_in_the_artifact_and_are_checked() {
+    let contract = Contract::from_source("hooks.wit", "package test:hooks@1.0.0; interface guard { record admission { value: s32, blocked: bool } apply: func(input: admission) -> admission; } interface gate { admit: func(value: s32) -> admission; use guard.{admission}; } world provider { import guard; export guard; export gate; }", Some("provider")).unwrap();
+    let component = component(&contract);
+    let identity = "test:hooks/guard@1.0.0";
+    let roles = CallbackRoles {
+        hooks: [(identity.into(), HookComposition::Waterfall)].into(),
+        ..Default::default()
+    };
+    let bytes = contract
+        .component_artifact(&component, "gate", 1, &roles)
+        .unwrap();
+    let decoded = Artifact::decode(&bytes).unwrap();
+    assert_eq!(decoded.hooks, roles.hooks);
+    assert!(decoded.contributions.is_empty());
+    for refused in [
+        CallbackRoles {
+            hooks: [(identity.into(), HookComposition::Series)].into(),
+            ..Default::default()
+        },
+        CallbackRoles {
+            hooks: [("test:hooks/gate@1.0.0".into(), HookComposition::Waterfall)].into(),
+            ..Default::default()
+        },
+        CallbackRoles {
+            hooks: [(identity.into(), HookComposition::Waterfall)].into(),
+            contributions: [(identity.into(), 0)].into(),
+        },
+    ] {
+        assert!(
+            contract
+                .component_artifact(&component, "gate", 1, &refused)
+                .is_err()
+        );
+    }
+    let packaged = Identity {
+        name: "gate".into(),
+        api_version: 1,
+        world: "provider".into(),
+    };
+    let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
+    crate::artifact::append_section(
+        &mut source,
+        "tembra:orb",
+        &crate::artifact::encode_orb_roles(&packaged, contract.prepared(), &roles),
     );
     crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
     assert!(Artifact::decode(&source).is_err());

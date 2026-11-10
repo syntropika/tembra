@@ -119,6 +119,14 @@ impl PreparedContract {
                     },
                 );
                 continue;
+            } else if self.model().exports.iter().any(|entry| {
+                matches!(&entry.item, Item::Interface(exported)
+                    if exported.contract.as_deref() == Some(contract.as_str()))
+            }) {
+                // An import of an interface this world also exports, with no provider required
+                // for it, is the Orb's typed entry to a hook it declares: the kernel runs its plan.
+                bindings.insert(binding, Binding::Hook);
+                continue;
             } else {
                 return Err(Error::new(
                     Code::Invalid,

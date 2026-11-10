@@ -26,7 +26,7 @@ mod signatures;
 mod standard;
 mod validate;
 
-pub use artifact::{Artifact, Identity, Implementation as ArtifactImplementation};
+pub use artifact::{Artifact, CallbackRoles, Identity, Implementation as ArtifactImplementation};
 #[cfg(feature = "authoring")]
 pub use authoring::Contract;
 pub use hooks::{ContributionBinding, HookBinding, HookComposition, HookPlan};
