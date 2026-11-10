@@ -7,6 +7,13 @@
 //! invocation with the WIT inline, the `Guest` implementations forwarding to the author's
 //! functions, `export!`, and the `no_std` runtime prelude for the Wasm target.
 //!
+//! A free `pub fn` marked `#[contributes("ns:name/hook@version")]` contributes to another Orb's
+//! hook. The hook interface comes from the provider's WIT, found in the directory named by
+//! `wit = "dir"` on the attribute, relative to the crate manifest. The macro imports and exports
+//! that interface, as the portable hook contract requires, and forwards its callback to the
+//! author's function; the generated module of the interface is re-exported under its own name,
+//! so the author writes its types as `guard::Admission`.
+//!
 //! The crate using the macro must depend on `wit-bindgen` (features `macros` and `realloc`) and
 //! `dlmalloc` (feature `global`), because the generated code names them. `cargo tembra build`
 //! compiles the crate, extracts the same WIT from the component and packages the artifact.
@@ -16,29 +23,42 @@ use heck::ToSnakeCase;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
+use std::collections::BTreeSet;
 use syn::{
-    Fields, FnArg, Ident, Item, ItemMod, LitStr, Pat, ReturnType, Type, Visibility,
-    parse_macro_input, spanned::Spanned,
+    Fields, FnArg, Ident, Item, ItemFn, ItemMod, LitByteStr, LitStr, Pat, ReturnType, Type,
+    Visibility, parse_macro_input, spanned::Spanned,
 };
 
 /// Declare a compiled Orb from a module; the crate documentation lists the rules.
 #[proc_macro_attribute]
 pub fn orb(attribute: TokenStream, item: TokenStream) -> TokenStream {
-    let mut package = None;
+    let mut options = Options::default();
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("package") {
-            package = Some(meta.value()?.parse::<LitStr>()?.value());
-            Ok(())
+            options.package = Some(meta.value()?.parse::<LitStr>()?.value());
+        } else if meta.path.is_ident("wit") {
+            options.wit = Some(meta.value()?.parse::<LitStr>()?.value());
         } else {
-            Err(meta.error("unknown attribute; use #[orb(package = \"ns:name@1.0.0\")]"))
+            return Err(meta
+                .error("unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\")]"));
         }
+        Ok(())
     });
     parse_macro_input!(attribute with parser);
     let module = parse_macro_input!(item as ItemMod);
-    match expand(package, module) {
+    match expand(options, module) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
+}
+
+/// The attribute options.
+#[derive(Default)]
+struct Options {
+    /// The WIT package identity of this Orb.
+    package: Option<String>,
+    /// A directory with the WIT packages this Orb consumes, relative to the crate manifest.
+    wit: Option<String>,
 }
 
 /// A type declared in the module, with its WIT definition.
@@ -61,8 +81,17 @@ struct Function {
     result: Option<(Type, String)>,
 }
 
-fn expand(package: Option<String>, module: ItemMod) -> syn::Result<proc_macro2::TokenStream> {
-    let package = package
+/// A hook contribution: a free `pub fn` marked `#[contributes("ns:name/hook@version")]`.
+struct Contribution {
+    hook: String,
+    ident: Ident,
+    param: (Ident, Type),
+    result: Option<Type>,
+}
+
+fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenStream> {
+    let package = options
+        .package
         .ok_or_else(|| syn::Error::new(module.span(), "missing package = \"ns:name@1.0.0\""))?;
     let (namespace, rest) = package
         .split_once(':')
@@ -76,9 +105,10 @@ fn expand(package: Option<String>, module: ItemMod) -> syn::Result<proc_macro2::
         ));
     };
 
-    // Read the module: types, services, and everything else to copy through unchanged.
+    // Read the module: types, services, contributions, and everything else to copy through.
     let mut shapes = Vec::new();
     let mut services = Vec::new();
+    let mut contributions = Vec::new();
     let mut passthrough = Vec::new();
     let mut impls = Vec::new();
     for item in items {
@@ -97,6 +127,17 @@ fn expand(package: Option<String>, module: ItemMod) -> syn::Result<proc_macro2::
             Item::Impl(ref i) if i.trait_.is_none() => {
                 impls.push(i.clone());
                 passthrough.push(item);
+            }
+            Item::Fn(mut function) => {
+                let marker = function
+                    .attrs
+                    .iter()
+                    .position(|attr| attr.path().is_ident("contributes"));
+                if let Some(index) = marker {
+                    let hook: LitStr = function.attrs.remove(index).parse_args()?;
+                    contributions.push(contribution(&function, &hook)?);
+                }
+                passthrough.push(Item::Fn(function));
             }
             other => passthrough.push(other),
         }
@@ -127,10 +168,33 @@ fn expand(package: Option<String>, module: ItemMod) -> syn::Result<proc_macro2::
             "no service found: declare a unit struct with an impl block of pub fn",
         ));
     }
-    let wit = wit::render(&package, &world, &shapes, &services);
+    let hooks: BTreeSet<String> = contributions
+        .iter()
+        .map(|contribution| contribution.hook.clone())
+        .collect();
+    if hooks.len() != contributions.len() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "one contribution per hook",
+        ));
+    }
+
+    // Consumed packages: the hook callbacks are read from the provider's WIT.
+    let wit_dir = options.wit.as_deref().map(wit::absolute).transpose()?;
+    let callbacks = match (&wit_dir, hooks.is_empty()) {
+        (_, true) => Default::default(),
+        (Some(dir), false) => wit::callbacks(dir, &hooks)?,
+        (None, false) => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "contributions need wit = \"<dir>\", the directory with the provider's WIT package",
+            ));
+        }
+    };
+    let wit = wit::render(&package, &world, &shapes, &services, &hooks);
 
     // Generate the Rust side: the bindings from the inline WIT, the author's types replaced by
-    // the generated ones, the bridge to the author's functions, and the no_std prelude.
+    // the generated ones, the bridges to the author's functions, and the no_std prelude.
     let module_ident = module.ident;
     let vis = module.vis;
     let attrs = module.attrs;
@@ -170,8 +234,42 @@ fn expand(package: Option<String>, module: ItemMod) -> syn::Result<proc_macro2::
             }
         }
     });
+    // Each hook's generated module is re-exported under its interface name, and its callback
+    // forwards to the author's function.
+    let hook_modules = hooks.iter().map(|hook| {
+        let [ns, package, interface] = hook_path(hook);
+        quote! { pub use exports::#ns::#package::#interface; }
+    });
+    let contribution_bridges = contributions.iter().map(|contribution| {
+        let [ns, package, interface] = hook_path(&contribution.hook);
+        let callback = format_ident!("{}", callbacks[&contribution.hook].to_snake_case());
+        let target = &contribution.ident;
+        let (param, ty) = &contribution.param;
+        let result = contribution
+            .result
+            .as_ref()
+            .map(|ty| quote! { -> #ty })
+            .unwrap_or_default();
+        quote! {
+            impl exports::#ns::#package::#interface::Guest for __TembraExports {
+                fn #callback(#param: #ty) #result { #target(#param) }
+            }
+        }
+    });
     let wit_literal = LitStr::new(&wit, Span::call_site());
+    let wit_bytes = LitByteStr::new(wit.as_bytes(), Span::call_site());
+    let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
     let world_literal = LitStr::new(&world, Span::call_site());
+    let generate = match &wit_dir {
+        Some(dir) => {
+            let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
+            // Foreign interfaces need `generate_all`, or wit-bindgen asks for a `with` mapping.
+            quote! { ::wit_bindgen::generate!({ path: #dir, inline: #wit_literal, world: #world_literal, generate_all }); }
+        }
+        None => {
+            quote! { ::wit_bindgen::generate!({ inline: #wit_literal, world: #world_literal }); }
+        }
+    };
     Ok(quote! {
         #(#attrs)*
         #vis mod #module_ident {
@@ -190,14 +288,24 @@ fn expand(package: Option<String>, module: ItemMod) -> syn::Result<proc_macro2::
                 ::core::arch::wasm32::unreachable()
             }
 
-            ::wit_bindgen::generate!({ inline: #wit_literal, world: #world_literal });
+            // The exact WIT of this module travels inside the component as a custom section, so
+            // `cargo tembra build` packages the contract as written here: hook imports the
+            // linker drops and `///` comments the binary type section loses.
+            #[cfg(target_arch = "wasm32")]
+            #[unsafe(link_section = "tembra:wit")]
+            #[used]
+            static __TEMBRA_WIT: [u8; #wit_len] = *#wit_bytes;
+
+            #generate
 
             #reexports
+            #(#hook_modules)*
 
             #(#passthrough)*
 
             struct __TembraExports;
             #(#bridges)*
+            #(#contribution_bridges)*
             export!(__TembraExports);
         }
     })
@@ -229,17 +337,68 @@ fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
             }
         }
     }
-    let result = match &function.sig.output {
-        ReturnType::Default => None,
-        ReturnType::Type(_, ty) => match &**ty {
-            Type::Tuple(tuple) if tuple.elems.is_empty() => None,
-            other => Some(((**ty).clone(), wit::wit_type(other)?)),
-        },
-    };
     Ok(Function {
         ident: function.sig.ident.clone(),
         docs: wit::docs(&function.attrs),
         params,
-        result,
+        result: match result(&function.sig.output) {
+            Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
+            None => None,
+        },
     })
+}
+
+/// Read a hook contribution: a `pub fn` taking the hook input and returning its output.
+fn contribution(function: &ItemFn, hook: &LitStr) -> syn::Result<Contribution> {
+    let id = hook.value();
+    if !id.contains(':') || !id.contains('/') {
+        return Err(syn::Error::new(
+            hook.span(),
+            "a hook is named ns:name/interface@version",
+        ));
+    }
+    if !matches!(function.vis, Visibility::Public(_)) {
+        return Err(syn::Error::new(
+            function.sig.span(),
+            "a contribution is a pub fn",
+        ));
+    }
+    let mut inputs = function.sig.inputs.iter();
+    let (Some(FnArg::Typed(typed)), None) = (inputs.next(), inputs.next()) else {
+        return Err(syn::Error::new(
+            function.sig.span(),
+            "a hook callback takes exactly one parameter, the hook input",
+        ));
+    };
+    let Pat::Ident(pat) = &*typed.pat else {
+        return Err(syn::Error::new(
+            typed.span(),
+            "parameters need a plain name",
+        ));
+    };
+    Ok(Contribution {
+        hook: id,
+        ident: function.sig.ident.clone(),
+        param: (pat.ident.clone(), (*typed.ty).clone()),
+        result: result(&function.sig.output).cloned(),
+    })
+}
+
+/// The declared result type, with `()` read as no result.
+fn result(output: &ReturnType) -> Option<&Type> {
+    match output {
+        ReturnType::Default => None,
+        ReturnType::Type(_, ty) => match &**ty {
+            Type::Tuple(tuple) if tuple.elems.is_empty() => None,
+            other => Some(other),
+        },
+    }
+}
+
+/// The generated module of a hook interface: `exports::<ns>::<package>::<interface>`.
+fn hook_path(hook: &str) -> [Ident; 3] {
+    let (package, rest) = hook.split_once('/').unwrap_or((hook, ""));
+    let (namespace, name) = package.split_once(':').unwrap_or((package, ""));
+    let interface = rest.split('@').next().unwrap_or(rest);
+    [namespace, name, interface].map(|part| format_ident!("{}", part.to_snake_case()))
 }

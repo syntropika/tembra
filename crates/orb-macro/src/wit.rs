@@ -1,6 +1,11 @@
-//! The WIT text derived from the module items.
+//! The WIT text derived from the module items, and the consumed packages it refers to.
 use crate::{Service, Shape};
 use heck::ToKebabCase;
+use proc_macro2::Span;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 use syn::{
     Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, Meta, Type, spanned::Spanned,
 };
@@ -11,8 +16,15 @@ pub(crate) fn kebab(ident: &Ident) -> String {
 }
 
 /// Write the package: one interface per service, the types in the first interface and borrowed by
-/// the others with `use`, then a world exporting every interface.
-pub(crate) fn render(package: &str, world: &str, shapes: &[Shape], services: &[Service]) -> String {
+/// the others with `use`, then a world importing and exporting every contributed hook and
+/// exporting every interface.
+pub(crate) fn render(
+    package: &str,
+    world: &str,
+    shapes: &[Shape],
+    services: &[Service],
+    hooks: &BTreeSet<String>,
+) -> String {
     let mut wit = format!("package {package};\n");
     for (index, service) in services.iter().enumerate() {
         wit.push_str(&format!("\ninterface {} {{\n", kebab(&service.ident)));
@@ -54,11 +66,61 @@ pub(crate) fn render(package: &str, world: &str, shapes: &[Shape], services: &[S
         wit.push_str("}\n");
     }
     wit.push_str(&format!("\nworld {world} {{\n"));
+    for hook in hooks {
+        wit.push_str(&format!("  import {hook};\n  export {hook};\n"));
+    }
     for service in services {
         wit.push_str(&format!("  export {};\n", kebab(&service.ident)));
     }
     wit.push_str("}\n");
     wit
+}
+
+/// A directory of consumed WIT packages, resolved against the crate manifest.
+pub(crate) fn absolute(dir: &str) -> syn::Result<PathBuf> {
+    let manifest = std::env::var_os("CARGO_MANIFEST_DIR")
+        .ok_or_else(|| error("CARGO_MANIFEST_DIR is not set"))?;
+    Ok(PathBuf::from(manifest).join(dir))
+}
+
+/// The callback of every hook: the single function of its interface in the consumed packages.
+pub(crate) fn callbacks(
+    dir: &Path,
+    hooks: &BTreeSet<String>,
+) -> syn::Result<BTreeMap<String, String>> {
+    let mut resolve = wit_parser::Resolve::default();
+    resolve.push_dir(dir).map_err(|cause| {
+        error(format!(
+            "cannot read the WIT packages in {}: {cause:#}",
+            dir.display()
+        ))
+    })?;
+    hooks
+        .iter()
+        .map(|hook| {
+            let (_, interface) = resolve
+                .interfaces
+                .iter()
+                .find(|(id, _)| resolve.id_of(*id).as_deref() == Some(hook.as_str()))
+                .ok_or_else(|| {
+                    error(format!(
+                        "hook {hook} is not an interface of the WIT packages in {}",
+                        dir.display()
+                    ))
+                })?;
+            let mut functions = interface.functions.keys();
+            match (functions.next(), functions.next()) {
+                (Some(callback), None) => Ok((hook.clone(), callback.clone())),
+                _ => Err(error(format!(
+                    "hook {hook} must declare exactly one callback"
+                ))),
+            }
+        })
+        .collect()
+}
+
+fn error(message: impl std::fmt::Display) -> syn::Error {
+    syn::Error::new(Span::call_site(), message.to_string())
 }
 
 /// A struct with named fields becomes a `record`.
