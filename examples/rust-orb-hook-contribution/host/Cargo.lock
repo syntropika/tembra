@@ -1370,8 +1370,17 @@ name = "tembra-example-admission-host"
 version = "0.1.0"
 dependencies = [
  "futures",
- "serde",
  "serde_json",
+ "tembra",
+ "tembra-example-native-gate",
+ "tembra-executor-wasm",
+]
+
+[[package]]
+name = "tembra-example-native-gate"
+version = "0.1.0"
+dependencies = [
+ "serde",
  "tembra",
  "tembra-executor-wasm",
 ]

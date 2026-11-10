@@ -5,12 +5,12 @@ This example writes a compiled Orb whose state belongs to the kernel, not to the
 state through the kernel; the host observes the state through a reference, with no method call,
 and reloads the Orb with a fresh component instance while the count stays.
 
-| File                         | Role                                                                                    |
-| ---------------------------- | --------------------------------------------------------------------------------------- |
-| `counter/src/lib.rs`         | The Orb: `#[state]` on a struct, `Count::read()` and `Count::update(..)` in the methods |
-| `counter/contract/tally.wit` | The contract `cargo tembra build` wrote: the kernel's state interfaces in the world     |
-| `host/src/main.rs`           | Application code: subscribes to the state, calls `add`, reloads, calls again            |
-| `run.sh`                     | Build, show the contract, run the host                                                  |
+| File                         | Role                                                                                      |
+| ---------------------------- | ----------------------------------------------------------------------------------------- |
+| `counter/src/lib.rs`         | The Orb: `#[state]` on a struct, `Count::read()` and `Count::update(..)` in the methods   |
+| `counter/contract/tally.wit` | The contract `cargo tembra build` wrote: the kernel's state interfaces in the world       |
+| `host/src/main.rs`           | The wiring: subscribes to the state, calls `add`, reloads, calls again; it defines no Orb |
+| `run.sh`                     | Build, show the contract, run the host                                                    |
 
 ## The state
 
@@ -93,5 +93,5 @@ zero. `run.sh` runs the three steps in order.
 A state belongs to one service object and is reached only by that service's methods: a call runs
 on one object, and the kernel refuses an update from any other context. The Orb's root is not an
 object, so a hook contribution has no kernel state; a root resource is what it can use, see
-[the hooks example](../rust-orb-hooks/README.md#why-the-counts-are-a-resource-not-a-state). The
+[the hook contribution example](../rust-orb-hook-contribution/README.md#why-the-counts-are-a-resource-not-a-state). The
 kernel stores the state as JSON written by `serde`, with the Rust field names.
