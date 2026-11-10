@@ -72,7 +72,10 @@ fn source_extension(engine: &Engine) -> Orb {
 
 /// The real Rust contributor, packaged with priority -7 for each callback.
 fn compiled_contributor(engine: &Engine, component: &[u8]) -> Orb {
-    let roles = BTreeMap::from([GUARD, AUDIT, CHOICE].map(|hook| (hook.to_owned(), -7)));
+    let roles = tembra_contracts::CallbackRoles {
+        contributions: BTreeMap::from([GUARD, AUDIT, CHOICE].map(|hook| (hook.to_owned(), -7))),
+        ..Default::default()
+    };
     engine
         .load(
             &contract("extension")

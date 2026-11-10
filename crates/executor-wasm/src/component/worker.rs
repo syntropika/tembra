@@ -26,6 +26,12 @@
 //! and the kernel later runs the component's `open` and `close` through `callback` commands. The
 //! kernel keeps only the handle the component returned; the value stays in the component.
 //!
+//! A component declaring hooks exports each hook's interface, as a source provider does, and
+//! imports it as the typed entry to its plan. While the root is created the worker binds each
+//! declared hook through the existing `hook.declare` request; a call of the import issues
+//! `hook.run` on the channel of the call that physically issued it, and the kernel runs the
+//! plan of contributions exactly as it does for a source provider.
+//!
 //! Standard `wasi:http` imports use upstream `wasmtime-wasi-http` P3 resources and its sender.
 //! Each request is attributed the same way as a dependency import: the hook captures the entered
 //! task group's authority synchronously, checks the installation's HTTP origin grants and then
@@ -73,6 +79,9 @@ pub(crate) struct Layout {
     pub state_init: bool,
     /// The component exports `tembra:guest/resources-init`: its root owns resources.
     pub resource_init: bool,
+    /// The hooks this Orb declares: the import binding of each, to the alias of its export,
+    /// which `hook.declare` names.
+    pub hooks: BTreeMap<String, String>,
 }
 
 /// The standard handler's `handle`, typed against the host's own request and response
@@ -126,6 +135,8 @@ pub(crate) enum Role {
     Contribution,
     /// The kernel's own state interface, served for the object running the call.
     Kernel,
+    /// The typed entry to a hook this Orb declares; calling it runs the plan through the kernel.
+    Hook,
 }
 
 pub(crate) struct ImportFunction {
@@ -156,6 +167,8 @@ struct Authority {
     state: Option<u32>,
     /// The root's resource handles by name, for the kernel's resource reads.
     resources: Arc<BTreeMap<String, u32>>,
+    /// The root's hook handles by import binding, for running the hooks this Orb declares.
+    hooks: Arc<BTreeMap<String, u32>>,
 }
 
 struct Bound {
@@ -431,6 +444,7 @@ struct Environments {
     resources: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
     callbacks: BTreeMap<u32, ResourceCallback>,
     next_callback: u32,
+    hooks: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
 }
 
 /// One numbered callback of a root resource: its opener or its closer.
@@ -767,6 +781,20 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                             )));
                         }
                     }
+                    continue;
+                }
+                Role::Hook => {
+                    let binding = import.binding.clone();
+                    instance.func_new_async(
+                        &function.name,
+                        move |store, ty, params, results| {
+                            let request = hook_request(store.data(), &binding, params);
+                            Box::new(async move {
+                                let value = hook_settle(request?).await?;
+                                store_result(results, lower_result(&ty, &value)?)
+                            })
+                        },
+                    )?;
                     continue;
                 }
                 Role::Dependency => {}
@@ -1146,6 +1174,57 @@ fn synchronous(
     Ok(receive)
 }
 
+/// Capture the issuing call's authority and publish one `hook.run` for a hook this Orb declares:
+/// the kernel runs the plan of contributions over the single input and answers with the result.
+fn hook_request(
+    state: &State,
+    binding: &str,
+    params: &[Val],
+) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+    let authority = issuing_authority(state, "running a hook needs an admitted invocation")?;
+    let Some(id) = authority.hooks.get(binding) else {
+        return Err(wasmtime::Error::msg(format!(
+            "the Orb root declares no hook for the import {binding}"
+        )));
+    };
+    let [input] = params else {
+        return Err(wasmtime::Error::msg("a hook callback takes one input"));
+    };
+    let value =
+        values::lift(input.clone()).map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+    let packet = json!({
+        "operation": "hook.run",
+        "scope": authority.scope,
+        "id": id,
+        "value": value,
+    })
+    .to_string();
+    if packet.len() > state.packet_bytes {
+        return Err(wasmtime::Error::msg("host packet limit exceeded"));
+    }
+    let (reply, receive) = oneshot::channel();
+    authority
+        .events
+        .try_send(Event::Host {
+            packet,
+            asynchronous: true,
+            reply,
+        })
+        .map_err(|_| wasmtime::Error::msg("host operation queue is full or closed"))?;
+    Ok(receive)
+}
+
+/// The composed result of a hook run; a refusal traps the caller.
+async fn hook_settle(
+    receive: oneshot::Receiver<std::result::Result<String, String>>,
+) -> wasmtime::Result<Value> {
+    let text = receive
+        .await
+        .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+        .map_err(|message| wasmtime::Error::msg(format!("hook run failed: {message}")))?;
+    Ok(serde_json::from_str(&text)?)
+}
+
 /// Capture the issuing call's authority and publish one `resource.read` for a root resource the
 /// component named; the kernel answers with the handle the component gave it when it opened.
 fn resource_request(
@@ -1317,6 +1396,7 @@ async fn serve(
             let root = environments.parents.remove(&environment);
             environments.states.remove(&environment);
             environments.resources.remove(&environment);
+            environments.hooks.remove(&environment);
             environments
                 .callbacks
                 .retain(|_, callback| callback.environment != environment);
@@ -1388,6 +1468,11 @@ async fn serve(
                 state: None,
                 resources: environments
                     .resources
+                    .get(&environment)
+                    .cloned()
+                    .unwrap_or_default(),
+                hooks: environments
+                    .hooks
                     .get(&environment)
                     .cloned()
                     .unwrap_or_default(),
@@ -1472,6 +1557,7 @@ fn authority(
             .get(&root)
             .cloned()
             .unwrap_or_default(),
+        hooks: environments.hooks.get(&root).cloned().unwrap_or_default(),
     })
 }
 
@@ -1552,6 +1638,24 @@ async fn declare(
         }
         let handles = Arc::new(handles);
         environments.roots.insert(environment, handles.clone());
+        // The hooks this Orb declares are bound in the root's table, as a source provider binds
+        // them in its factory; the import of each runs the plan through that handle.
+        let mut hooks = BTreeMap::new();
+        for (binding, alias) in &layout.hooks {
+            let id = declaration(
+                events,
+                json!({"operation": "hook.declare", "name": alias}),
+                limit,
+            )
+            .await?;
+            let id = id
+                .as_u64()
+                .and_then(|id| u32::try_from(id).ok())
+                .ok_or("invalid hook handle")?;
+            hooks.insert(binding.clone(), id);
+        }
+        let hooks = Arc::new(hooks);
+        environments.hooks.insert(environment, hooks.clone());
         if !layout.resource_init {
             return Ok(());
         }
@@ -1569,6 +1673,7 @@ async fn declare(
             environment,
             state: None,
             resources: Arc::default(),
+            hooks,
         };
         let call = Call {
             function,
@@ -1659,6 +1764,7 @@ async fn declare(
             .get(&root)
             .cloned()
             .unwrap_or_default(),
+        hooks: environments.hooks.get(&root).cloned().unwrap_or_default(),
     };
     let call = Call {
         function,

@@ -139,8 +139,12 @@ impl NodeContract {
                 Ok((binding, priority as i32))
             })
             .collect::<napi::Result<_>>()?;
+        let roles = tembra_contracts::CallbackRoles {
+            contributions,
+            ..Default::default()
+        };
         self.contract
-            .component_artifact(&component, &name, api_version, &contributions)
+            .component_artifact(&component, &name, api_version, &roles)
             .map(Into::into)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
