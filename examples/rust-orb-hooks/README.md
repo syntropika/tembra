@@ -8,7 +8,7 @@ The host installs both and drives three admissions.
 | File                         | Role                                                                                                |
 | ---------------------------- | --------------------------------------------------------------------------------------------------- |
 | `wit/admission.wit`          | The hook contract: the `guard` interface with its `apply` callback, exported by `provider`          |
-| `filter/src/lib.rs`          | The compiled contributor: `#[contributes]` on a `pub fn`, state in statics, a `report` service      |
+| `filter/src/lib.rs`          | The compiled contributor: `#[hook]` on a `pub fn`, counts in statics, a `report` service            |
 | `filter/contract/filter.wit` | The contract `cargo tembra build` wrote: the hook imported and exported, `example:admission` nested |
 | `host/src/main.rs`           | The native `gate` Orb with its hook and ledger, and the application code installing both            |
 | `run.sh`                     | Build, show the contract, run the host                                                              |
@@ -39,10 +39,11 @@ hook contributions, bound to the provider with Install::requires:
   example:admission/guard@1.0.0  priority -7
 ```
 
-The priority comes from `[package.metadata.tembra] contributes` in `filter/Cargo.toml`. The
-contract in `filter/contract/filter.wit` imports and exports `example:admission/guard@1.0.0`, as the
-portable hook contract requires, although the component never calls the import: the macro wrote
-that contract into the component, and the linker is free to drop the unused import.
+The priority comes from the attribute, `#[hook("example:admission/guard@1.0.0", priority = -7)]`,
+and travels in the component like the contract. The contract in `filter/contract/filter.wit`
+imports and exports `example:admission/guard@1.0.0`, as the portable hook contract requires,
+although the component never calls the import: the macro wrote that contract into the component,
+and the linker is free to drop the unused import.
 
 ## Run
 
@@ -64,3 +65,12 @@ the imported hook interface is bound to the `gate` Orb like any other required i
 decision. The two states diverge as expected: the ledger belongs to `gate`, the counts to `filter`,
 which keeps them in statics for as long as it stays installed. `run.sh` runs the three steps in
 order.
+
+## Why the counts are statics
+
+The kernel keeps state for service objects, and a contribution runs in its Orb's root, which is not
+an object: there is no kernel state a contribution could update, in a compiled Orb as in a
+TypeScript one (whose contributions keep root-level data in a root resource, a value of the guest
+heap). The `report` service could own a kernel state, but only its own methods could change it.
+So the counts live in the component, and `report` reads them. The
+[state example](../rust-orb-state/README.md) shows a service whose state the kernel does keep.

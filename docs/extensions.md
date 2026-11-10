@@ -84,7 +84,7 @@ Compiled contributors implement the same WIT callback export. Their build target
 `contributes: { "example:hooks/guard@1.0.0": 0 }` alongside `entry`, `wit`, `world` and
 `apiVersion`. Only the binding and priority are stored in the artifact; callback slots and
 signatures are derived on loading. A Rust contributor can also mark a `pub fn` with
-`#[contributes("example:hooks/guard@1.0.0")]` under `#[orb]` and build with `cargo tembra`; see the
+`#[hook("example:hooks/guard@1.0.0", priority = 0)]` under `#[orb]` and build with `cargo tembra`; see the
 [Rust hooks example](../examples/rust-orb-hooks/README.md). The contributed import is a type anchor, not a callable
 service dependency; attempting to call it traps the contributor.
 
