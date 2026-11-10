@@ -564,3 +564,101 @@ fn portable_compiled_orb_calls_the_same_wit_abi() {
     port.shutdown().unwrap();
     assert_eq!(backend.instances(), 0);
 }
+
+/// A compiled `wasi:http/handler` streams through the typed UniFFI carrier: raw-byte head and
+/// fields, one request chunk per pull, one response frame per pull, trailers, then completion.
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
+fn portable_compiled_handler_streams_through_the_typed_carrier() {
+    use tembra_mobile::{MobileField, MobileIngressEvent, MobileRequestChunk, MobileRequestHead};
+    let raw = std::fs::read(std::env::var_os("TEMBRA_WASM_HTTP_HANDLER").unwrap()).unwrap();
+    let contract = Contract::from_dir(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../executor-wasm/tests/wit/handler"
+        ),
+        Some("handler"),
+    )
+    .unwrap();
+    let artifact = NativeArtifact::new(
+        contract
+            .component_artifact(&raw, "web", 1, &Default::default())
+            .unwrap(),
+    )
+    .unwrap();
+    let bindings =
+        json!({"wasi:http/types@0.3.0": {"kind": "host", "provider": "wasi:http/handler@0.3.0"}});
+    let backend = NativeInterpreter::new("{}".into(), vec![]).unwrap();
+    let port = backend
+        .open(artifact, bindings.to_string(), "{}".into(), None)
+        .unwrap();
+    exchange(
+        &port,
+        json!({"kind":"create","environment":1,"service":null}),
+        true,
+    );
+    exchange(
+        &port,
+        json!({"kind":"create","environment":2,"service":"handler"}),
+        true,
+    );
+    port.begin_ingress(
+        json!({"kind":"ingress","environment":2,"service":"handler","method":"handle"}).to_string(),
+        MobileRequestHead {
+            method: "POST".into(),
+            scheme: Some("http".into()),
+            authority: Some("ingress.test".into()),
+            path_with_query: Some("/sse".into()),
+            fields: vec![MobileField {
+                name: "x-raw".into(),
+                value: vec![0xff, b'A', 0x80],
+            }],
+        },
+    )
+    .unwrap();
+    let mut chunks = vec![
+        MobileRequestChunk::Data {
+            bytes: b"alpha".to_vec(),
+        },
+        MobileRequestChunk::End { trailers: vec![] },
+    ]
+    .into_iter();
+    let mut frames = Vec::new();
+    let result = loop {
+        match block_on(port.receive_ingress()).unwrap() {
+            MobileIngressEvent::Head { status, fields } => {
+                assert_eq!(status, 200);
+                assert!(fields.iter().any(
+                    |field| field.name == "content-type" && field.value == b"text/event-stream"
+                ));
+                port.pull_response().unwrap();
+            }
+            MobileIngressEvent::RequestPull => {
+                assert!(port.supply_request(chunks.next().unwrap()).unwrap());
+            }
+            MobileIngressEvent::Data { bytes } => {
+                frames.push(String::from_utf8(bytes).unwrap());
+                port.pull_response().unwrap();
+            }
+            MobileIngressEvent::Trailers { fields } => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].value, b"3");
+                port.pull_response().unwrap();
+            }
+            MobileIngressEvent::End => {}
+            MobileIngressEvent::Error { message } => panic!("response failed: {message}"),
+            MobileIngressEvent::Host { packet, .. } => panic!("unexpected host request {packet}"),
+            MobileIngressEvent::Complete { result } => break result,
+        }
+    };
+    port.finish().unwrap();
+    assert_eq!(result, r#"{"ok":"null"}"#);
+    assert_eq!(
+        frames,
+        ["data: open\n\n", "data: alpha\n\n", "data: end\n\n"]
+    );
+    port.release(2).unwrap();
+    port.release(1).unwrap();
+    port.shutdown().unwrap();
+    assert_eq!(backend.instances(), 0);
+}

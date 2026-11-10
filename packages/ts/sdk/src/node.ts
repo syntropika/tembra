@@ -67,6 +67,14 @@ export {
 
 export { Errors, type ErrorDescriptor } from "./errors.ts";
 
+export {
+  HttpHandlerError,
+  type HandleHttpOptions,
+  type HttpHandlerResponse,
+  type IncomingHttpRequest,
+} from "./interpreter/http-ingress.ts";
+export type { HttpField } from "./interpreter/http-provider.ts";
+
 export { ContextKey, ContextKind, opaqueFrom, type OpaqueContextValue } from "./context-key.ts";
 
 export { directoryFilesystem, type DirectoryFilesystem } from "./interpreter/node.ts";

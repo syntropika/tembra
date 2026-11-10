@@ -36,6 +36,25 @@ impl Host {
     }
 }
 
+impl Host {
+    /// Run a root operation as a task of this host instead of the caller's future.
+    ///
+    /// The root lives until the operation itself completes, whoever (if anyone) awaits the
+    /// returned receiver: dropping it neither ends the root nor stops the operation. The task is
+    /// tracked like every callback, so [`Host::close`] waits for it. Use it when work admitted
+    /// under the root must outlive the caller's own wait, for example a response that keeps
+    /// streaming after its headers were handed to the application.
+    pub fn spawn_root<T: 'static>(
+        &self,
+        principal: &str,
+        operation: impl FnOnce(Context) -> LocalBoxFuture<'static, Result<T>> + 'static,
+    ) -> Result<futures::channel::oneshot::Receiver<Result<T>>> {
+        let host = self.clone();
+        let principal = principal.to_owned();
+        self.spawn(async move { host.root(&principal, operation).await })
+    }
+}
+
 pub(super) struct RootGuard {
     pub(super) host: Host,
     pub(super) root: core::Id,

@@ -76,6 +76,13 @@ export {
 
 export { Errors, type ErrorDescriptor } from "./errors.ts";
 
+export {
+  HttpHandlerError,
+  type HandleHttpOptions,
+  type HttpHandlerResponse,
+  type IncomingHttpRequest,
+} from "./interpreter/http-ingress.ts";
+
 export { ContextKey, ContextKind, opaqueFrom, type OpaqueContextValue } from "./context-key.ts";
 
 export {
@@ -96,9 +103,8 @@ export {
 export type { BrowserInterpreterOptions as IsolatedOptions } from "./interpreter/browser.ts";
 export type { Grants, CliOptions } from "./authoring/types.ts";
 
+export { fetchHttpProvider, FETCH_BODY_BYTES } from "./interpreter/fetch-http-provider.ts";
 export {
-  fetchHttpProvider,
-  FETCH_BODY_BYTES,
   HttpProviderError,
   type HttpField,
   type HttpProvider,

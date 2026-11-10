@@ -83,14 +83,18 @@ impl Grants {
     /// artifact metadata, so a forged type-only claim cannot unlock an ambient capability.
     /// Versions are ignored because the upstream linker also satisfies semver-compatible
     /// imports with the pinned implementation.
-    pub fn check_component_import(&self, name: &str) -> Result<()> {
+    ///
+    /// `serves_http` states that the same binary exports the incoming HTTP handler. Its request
+    /// and response types are then admitted without an outgoing grant; `wasi:http/client` never is.
+    pub fn check_component_import(&self, name: &str, serves_http: bool) -> Result<()> {
         let interface = name
             .split_once('@')
             .map_or(name, |(interface, _)| interface);
         let granted = match interface {
             "wasi:filesystem/types" | "wasi:filesystem/preopens" => !self.filesystem.is_empty(),
             "wasi:sockets/types" | "wasi:sockets/ip-name-lookup" => !self.network.is_empty(),
-            "wasi:http/types" | "wasi:http/client" => !self.http.is_empty(),
+            "wasi:http/types" => serves_http || !self.http.is_empty(),
+            "wasi:http/client" => !self.http.is_empty(),
             other => match system_capability(&format!("{other}@0.3.0")) {
                 Some(capability) => self.system.contains(&capability),
                 None => {
@@ -124,6 +128,25 @@ impl Grants {
         network: &BTreeSet<String>,
         http: &BTreeSet<String>,
     ) -> Result<()> {
+        // The incoming HTTP provider is selected by planning only; no installer grant may claim
+        // its name, whatever kind of grant it is.
+        let reserved = self
+            .filesystem
+            .iter()
+            .map(|grant| &grant.provider)
+            .chain(self.network.iter().map(|grant| &grant.provider))
+            .chain(self.http.iter().map(|grant| &grant.provider))
+            .any(|provider| provider == crate::lower::INGRESS_PROVIDER);
+        if reserved {
+            return Err(Error::new(
+                Code::Invalid,
+                "host_provider",
+                format!(
+                    "{} is reserved for incoming HTTP and cannot be granted",
+                    crate::lower::INGRESS_PROVIDER
+                ),
+            ));
+        }
         for import in imports {
             let granted = match import.contract.as_str() {
                 "wasi:filesystem/types@0.3.0" | "wasi:filesystem/preopens@0.3.0" => self
@@ -134,6 +157,10 @@ impl Grants {
                     .network
                     .iter()
                     .any(|grant| grant.provider == import.provider),
+                // Planning admits the ingress provider only for a handler world's types.
+                "wasi:http/types@0.3.0" if import.provider == crate::lower::INGRESS_PROVIDER => {
+                    true
+                }
                 "wasi:http/types@0.3.0" | "wasi:http/client@0.3.0" => self
                     .http
                     .iter()

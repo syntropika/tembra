@@ -7,6 +7,7 @@ import {
   FUTURE_READ,
   FUTURE_WRITE,
   type HandleCodec,
+  INGRESS_HEAD,
   Reader,
   STANDARD_PACKET,
   STREAM_CHUNK,
@@ -476,6 +477,68 @@ import { InputBindings } from "./standard-inputs.ts";
     if (imported.has(contract!) || (filesystem && imported.has("wasi:filesystem/preopens@0.3.0")))
       (modules[contract!] ??= {})[classes[index]!.name] = classes[index];
   }
+  /** `wasi:http/handler#handle`'s result, the same generated type `client.send` returns. */
+  const HANDLER_RESULT = METHODS.find(
+    (method) => method.interface === "wasi:http/client@0.3.0" && method.name === "send",
+  )!.result!;
+  const REQUEST = RESOURCES.indexOf("wasi:http/types@0.3.0#request");
+
+  /**
+   * Publish the handler's result once. Ownership follows `invoke`: the response handle leaves
+   * the guest when the packet is queued; a refusal before the host took it drops it again. The
+   * host completes this operation only after the response delivery ended.
+   */
+  function publish(result: unknown): Promise<void> {
+    const transaction = claims();
+    const writer = packet(INGRESS_HEAD);
+    encode(writer, HANDLER_RESULT, result, transaction.codec);
+    const delivered = __hostAsync(writer.finish());
+    transaction.commit();
+    return delivered.then(
+      () => undefined,
+      (error) => {
+        transaction.abandon();
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * End the incoming HTTP callback only once its own work is done: no host operation pending,
+   * no body pump still producing, and nothing new started across one host round trip (the
+   * round trip lets every continuation queued before it run first). A future input whose
+   * author promise never settles is not work: callback end abandons it, as for any callback.
+   */
+  async function quiescent(): Promise<void> {
+    const effects = globalThis.__tembraEffects!;
+    for (;;) {
+      await effects.idle();
+      await inputs.idle();
+      const waiting = globalThis.tembra.wait(0);
+      const started = effects.sequence;
+      await waiting;
+      if (effects.pending === 0 && inputs.pumps.size === 0 && effects.sequence === started) return;
+    }
+  }
+
+  globalThis.__tembraIngress = Object.freeze({
+    async serve(handle: number, handler: (request: unknown) => unknown): Promise<void> {
+      if (REQUEST < 0 || !imported.has("wasi:http/types@0.3.0"))
+        throw new Error("incoming HTTP requires the wasi:http/types import");
+      const request = handles.value("own", REQUEST, handle);
+      let result: unknown;
+      try {
+        result = { tag: "ok", val: await handler(request) };
+      } catch (error) {
+        // A thrown standard error is the handler's `error-code`, as for any WIT result.
+        if (error === null || typeof error !== "object" || !Object.hasOwn(error, "payload"))
+          throw error;
+        result = { tag: "err", val: (error as { payload: unknown }).payload };
+      }
+      await publish(result);
+      await quiescent();
+    },
+  });
   globalThis.__tembraStandard = Object.freeze(
     Object.fromEntries(
       Object.entries(modules).map(([name, value]) => [name, Object.freeze(value)]),

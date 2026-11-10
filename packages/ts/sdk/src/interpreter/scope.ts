@@ -12,7 +12,8 @@ import {
   survivesCancellation,
 } from "./host-protocol.ts";
 import type { Revision } from "./revision.ts";
-import { check, encode } from "./codec.ts";
+import { check, encode, VALUE_LIMIT } from "./codec.ts";
+import { lift } from "./wit-shape.ts";
 
 const scopeEnded = Object.freeze(new Error("Interpreter callback scope ended"));
 
@@ -254,9 +255,17 @@ export class Scope {
           request.id,
           "hook",
         );
+        // The guest's wire text is checked as is; host participants then receive bigint values.
         check(this.revision.contract, binding.slot, true, encode([request.value]));
-        const result = (await handle.run(context, request.value)) ?? null;
-        return check(this.revision.contract, binding.slot, false, encode(result));
+        const shape = this.revision.signatures.get(binding.slot);
+        const [input] = lift(shape?.params, [request.value]) as [unknown];
+        const result = (await handle.run(context, input)) ?? null;
+        return check(
+          this.revision.contract,
+          binding.slot,
+          false,
+          encode(result, VALUE_LIMIT, shape?.result),
+        );
       }
       case "reference.ready": {
         const owner = authoritySignal(authority);
@@ -282,17 +291,30 @@ export class Scope {
         if (!Array.isArray(request.args)) throw new Error("Import arguments must be a list");
         const record = this.declaration.session.handles.reference(reference);
         if (!record.methods.has(method)) throw new Error("Reference does not expose this method");
+        // Whether the captured route runs is decided by the provider at invocation, not by the
+        // existence of a signature. Every non-captured route (a native adapter or a host handler)
+        // takes the JavaScript domain form, WIT 64-bit positions as bigint; the captured route
+        // ignores these arguments and splices the checked wire text `input` instead.
+        const shape = this.revision.signatures.get(bound.slot);
         const result =
           (await this.declaration.session.calls.invokePhysical(
             record,
             method,
-            request.args,
+            lift(shape?.params, request.args) as unknown[],
             context,
             capture,
           )) ?? null;
         // The provider may be an ordinary host implementation returning hostile JavaScript. Reply
         // with the checked capture, never with the original object graph.
-        return capture?.output ?? check(this.revision.contract, bound.slot, false, encode(result));
+        return (
+          capture?.output ??
+          check(
+            this.revision.contract,
+            bound.slot,
+            false,
+            encode(result, VALUE_LIMIT, shape?.result),
+          )
+        );
       }
       case "wait": {
         const { milliseconds } = request;

@@ -238,6 +238,7 @@ impl Environment {
                                 callback: open,
                                 value: None,
                             },
+                            None,
                         )
                         .await?;
                     serde_json::from_value::<u32>(value).map_err(failure)
@@ -255,6 +256,7 @@ impl Environment {
                                 callback: close,
                                 value: Some(*value),
                             },
+                            None,
                         )
                         .await?;
                     Ok(())
@@ -284,14 +286,19 @@ impl Environment {
                     .get(&id)
                     .cloned()
                     .ok_or_else(|| failure("unknown hook handle"))?;
-                self.contract
-                    .validate_slot(hook.slot(), true, &Value::Array(vec![value.clone()]))
-                    .map_err(failure)?;
+                // The guest's packet is wire form; the kernel and other Orbs see exact numbers.
+                let value = match self
+                    .contract
+                    .from_wire(hook.slot(), true, Value::Array(vec![value]))
+                    .map_err(failure)?
+                {
+                    Value::Array(mut values) if values.len() == 1 => values.remove(0),
+                    _ => return Err(failure("a checked hook argument changed shape")),
+                };
                 let value = hook.run(context, value).await?;
                 self.contract
-                    .validate_slot(hook.slot(), false, &value)
-                    .map_err(failure)?;
-                Ok(value)
+                    .to_wire(hook.slot(), false, value)
+                    .map_err(failure)
             }
             AsyncRequest::ReferenceReady { scope: owner, id } => {
                 let signal = Self::signal(scope, "readiness requires an active callback")?;
@@ -319,14 +326,14 @@ impl Environment {
                     .methods
                     .get(&method)
                     .ok_or_else(|| failure("unknown prepared import method"))?;
-                self.contract
-                    .validate_slot(method.slot, true, &args)
+                let args = self
+                    .contract
+                    .from_wire(method.slot, true, args)
                     .map_err(failure)?;
                 let value = reference.call_value(context, &method.name, args).await?;
                 self.contract
-                    .validate_slot(method.slot, false, &value)
-                    .map_err(failure)?;
-                Ok(value)
+                    .to_wire(method.slot, false, value)
+                    .map_err(failure)
             }
             AsyncRequest::Wait { milliseconds } => {
                 if milliseconds > WAIT_LIMIT_MILLISECONDS {

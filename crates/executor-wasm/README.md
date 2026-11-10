@@ -140,10 +140,17 @@ Factory admission waits at most half the callback timeout.
 ## Value profile
 
 Source Orbs exchange domain values as WIT-validated, bounded JSON. Supported
-values: finite numbers, integers up to 32 bits, strings, characters, lists,
+values: finite numbers, integers through 64 bits, strings, characters, lists,
 records, tuples, simple options, flags, enums, variants and results. Negative
-zero, nested options, 64-bit integers, resource handles, streams and futures are
-rejected.
+zero, nested options, resource handles, streams and futures are rejected by
+Tembra's inter-Orb transport; these are not restrictions of WIT or WebAssembly.
+
+WIT `u64` and `s64` use `bigint` in JavaScript and ordinary `u64` and `i64` in Rust,
+including inside records, lists and tagged payloads. JavaScript numbers, numeric
+strings and out-of-range values are refused in 64-bit positions. Executor packets
+carry canonical decimal strings at those positions, selected by the WIT type;
+native Rust values remain exact numbers. A WIT `string` that contains digits stays
+a string. Authors need no serialization wrappers or custom Serde attributes.
 
 Host JavaScript arguments are captured once before serialization. Accessors, `toJSON`,
 non-data objects, sparse arrays and cycles are refused; numeric typed arrays become lists
@@ -202,11 +209,18 @@ The host supplies the clock and initial non-cryptographic seed; secure random by
 standard random interface and never fall back to `Math.random`. The experimental `wasi:clocks/timezone` interface is not linked by
 the pinned upstream runtime.
 
-Incoming `wasi:http/handler` serving is not integrated. Its resource-valued
-exports cannot currently be exposed as ordinary portable Orb services. Browser
-compiled components remain unsupported. Native/mobile share the native
+Compiled Orbs exporting exactly `wasi:http/handler@0.3.0` serve incoming HTTP through the
+native Rust facade `tembra_executor_wasm::ingress::serve`. The application owns the
+listener, authentication and routing; `serve` runs each request under its own root until
+the call has physically ended and returns the head while the body still streams. A
+handler-only Orb needs no grant; `wasi:http/client` still requires an HTTP grant. The
+handler is host-local, never a portable Orb service. Each revision serves one request at
+a time, and the engine's `timeout_ms` bounds the whole request including its streamed
+body: a response streaming longer than that times out and quarantines the revision.
+Source handlers, Node, mobile and browser hosts refuse such Orbs before installation.
+Browser compiled components remain unsupported. Native/mobile share the native
 implementation, but host/Pulley tests do not establish iOS or Android device
-qualification. Incoming HTTP remains work to do.
+qualification.
 
 ## Current scope
 
@@ -275,7 +289,7 @@ directory must not contain the checkout. `just test-wasm-orb` runs the
 Rust tests against supplied artifacts.
 
 The interpreter is a `wasm32-wasip1` reactor core module behind a private
-fixed-buffer ABI, `tembra-interpreter-v7`. Its import namespace also carries the
+fixed-buffer ABI, `tembra-interpreter-v9`. Its import namespace also carries the
 digest of the generated WASI method and type table, so mismatched host/interpreter
 bindings are refused before execution. [`src/abi.rs`](src/abi.rs) is its only
 definition: the guest includes it, the native host compiles it, and the browser host

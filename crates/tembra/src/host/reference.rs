@@ -210,10 +210,23 @@ impl Reference {
                         .map(|handle| (object.environment.clone(), handle.clone()))
                 })
         };
+        // A host-local method refuses every portable caller, whichever boundary it uses.
+        let local_only = boundary.is_some()
+            && self
+                .host
+                .0
+                .objects
+                .borrow()
+                .get(&call.object)
+                .and_then(|object| object.versions.get(&call.orb))
+                .is_some_and(|object| object.implementation.local_only(method));
         let method_name = method.to_owned();
         let host = self.host.clone();
         let entered = host.context(call.root, Some(call.clone()))?;
         let receive = self.host.spawn_managed(call.id,async move {
+            if local_only {
+                return Err(Error::invalid(Reason::LocalValue, format!("{method_name} is a host-local method without a portable entrypoint")));
+            }
             if let Some((environment, handle))=portable {
                 let (encode, decode) = boundary.ok_or_else(|| Error::invalid(Reason::LocalValue, "isolated calls require a portable boundary"))?;
                 let input = encode(&arguments)?;

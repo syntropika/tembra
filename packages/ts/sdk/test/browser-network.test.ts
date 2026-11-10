@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { BrowserNetwork } from "../src/interpreter/browser-network.ts";
-import { fetchHttpProvider } from "../src/interpreter/http-provider.ts";
+import { fetchHttpProvider } from "../src/interpreter/fetch-http-provider.ts";
 import { decodeAsyncHostRequest } from "../src/interpreter/host-protocol.ts";
 import { BrowserCapabilities } from "../src/interpreter/io.ts";
 

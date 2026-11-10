@@ -132,8 +132,36 @@ impl Environment {
             method,
             args: &args,
         };
-        self.execute(Scope::Call(context), Some(cancellation), packet)
+        self.execute(Scope::Call(context), Some(cancellation), packet, None)
             .await
+    }
+
+    /// Serve one incoming HTTP request under an admitted native context.
+    ///
+    /// The call is an ordinary callback of this revision: it waits for admission, holds the
+    /// Store's one callback slot and the kernel pin until it has physically settled, and its
+    /// caller's cancellation ends it. Its response head leaves early on the call's own channel.
+    pub(crate) async fn ingress(
+        &self,
+        context: Context,
+        method: &str,
+        ingress: crate::ingress::Ingress,
+    ) -> Result<()> {
+        let context = context.enter_execution()?;
+        let cancellation = context.signal();
+        let packet = GuestCommand::Ingress {
+            environment: self.id,
+            service: self.service.as_deref(),
+            method,
+        };
+        self.execute(
+            Scope::Call(context),
+            Some(cancellation),
+            packet,
+            Some(ingress.0),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Contributions retain the same Orb environment and execution ancestry as service calls.
@@ -144,9 +172,9 @@ impl Environment {
         value: Value,
     ) -> Result<Option<Value>> {
         let context = context.enter_execution()?;
-        let args = Value::Array(vec![value]);
-        self.contract
-            .validate_slot(binding.slot, true, &args)
+        let args = self
+            .contract
+            .to_wire(binding.slot, true, Value::Array(vec![value]))
             .map_err(failure)?;
         let packet = GuestCommand::Contribute {
             environment: self.id,
@@ -156,10 +184,16 @@ impl Environment {
             args: &args,
         };
         let value = self
-            .execute(Scope::Call(context.clone()), Some(context.signal()), packet)
+            .execute(
+                Scope::Call(context.clone()),
+                Some(context.signal()),
+                packet,
+                None,
+            )
             .await?;
-        self.contract
-            .validate_slot(binding.slot, false, &value)
+        let value = self
+            .contract
+            .from_wire(binding.slot, false, value)
             .map_err(failure)?;
         Ok(if binding.optional && value.is_null() {
             None
@@ -175,6 +209,7 @@ impl Environment {
         scope: Scope,
         cancellation: Option<Cancellation>,
         packet: GuestCommand<'_>,
+        ingress: Option<crate::ingress::IngressCall>,
     ) -> Result<Value> {
         let admission = self.session.admit(cancellation.as_ref()).await?;
         if cancellation.is_some() {
@@ -186,6 +221,7 @@ impl Environment {
                 admission,
                 cancellation.as_ref(),
                 packet,
+                ingress,
                 async |packet, asynchronous| {
                     if asynchronous {
                         self.asynchronous(&scope, packet).await

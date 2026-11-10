@@ -28,7 +28,9 @@ pub use artifact::{Artifact, Identity, Implementation as ArtifactImplementation}
 #[cfg(feature = "authoring")]
 pub use authoring::Contract;
 pub use hooks::{ContributionBinding, HookBinding, HookComposition, HookPlan};
-pub use implementation::{Implementation, Lifetime, ServiceBinding, ServiceImplementation};
+pub use implementation::{
+    Implementation, IngressBinding, Lifetime, ServiceBinding, ServiceImplementation,
+};
 pub use lower::{Binding, HostImport, Plan};
 pub use model::{
     Case, Entry, Field, Function, FunctionKind, Interface, Item, Kind, Model, PreparedContract, Ty,
@@ -56,10 +58,19 @@ pub fn service_name(provider: &str, contract: &str) -> String {
     format!("{provider}::{contract}")
 }
 
+/// The one standard export served through the host-local incoming HTTP adapter.
+///
+/// It is recognized by this exact identity only. Its owned `request`/`response` resources never
+/// become portable Orb values: the export lowers to no kernel service metadata, no signature and
+/// no value-profile slot, and the host's ingress adapter is its only caller.
+pub const HTTP_HANDLER: &str = "wasi:http/handler@0.3.0";
+
 #[cfg(all(test, feature = "authoring"))]
 mod artifact_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod conformance_tests;
+#[cfg(all(test, feature = "authoring"))]
+mod ingress_tests;
 #[cfg(test)]
 mod permission_tests;
 #[cfg(test)]
@@ -68,3 +79,5 @@ mod prepared_tests;
 mod provenance_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod tests;
+#[cfg(all(test, feature = "authoring"))]
+mod wire_tests;

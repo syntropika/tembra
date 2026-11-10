@@ -7,8 +7,33 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { readFile, mkdtemp, writeFile, rm, readdir } from "node:fs/promises";
 import { createHost, directoryFilesystem } from "../dist/node.js";
+import { verifyPrecisionScenario } from "./precision-scenario.ts";
 
 const fixtures = process.env.TEMBRA_WASM_FIXTURES;
+
+test("Node: exact 64-bit values cross source Orbs without loss", { skip: !fixtures }, async () => {
+  const host = createHost();
+  try {
+    const report = await verifyPrecisionScenario(
+      host,
+      async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
+    );
+    assert.match(report, /application -> source -> source/);
+  } finally {
+    await host.close();
+  }
+  for (const key of [
+    "objects",
+    "references",
+    "calls",
+    "roots",
+    "resources",
+    "tasks",
+    "values",
+    "pendingJobs",
+  ])
+    if (typeof host.diagnostics()[key] === "number") assert.equal(host.diagnostics()[key], 0, key);
+});
 
 test(
   "isolated TypeScript hooks compose waterfall, series and bail with a compiled contributor",

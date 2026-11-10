@@ -10,7 +10,9 @@ use tembra_executor_wasm::{Binding, Engine, Grants, Limits};
 
 mod logs;
 mod port;
-pub use port::NativePort;
+pub use port::{
+    MobileField, MobileIngressEvent, MobileRequestChunk, MobileRequestHead, NativePort,
+};
 
 /// Preserve execution diagnostics across Swift and Kotlin without exporting host capabilities.
 fn error(value: impl ToString) -> MobileError {

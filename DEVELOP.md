@@ -89,6 +89,7 @@ just build-consumer <provider-target-directory>
 just build-contributor <provider-target-directory>
 just build-http-client <provider-target-directory>
 just build-sockets <provider-target-directory>
+just build-http-handler <http-handler-target-directory>
 ```
 
 The interpreter recipe packages the same `interpreter.wasm` into `packages/ts/engine-node/dist` and
@@ -104,7 +105,9 @@ just test-wasm-acceptance --out <directory> \
   --consumer <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm \
   --contributor <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm \
   --http-client <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm \
-  --sockets <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm
+  --sockets <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm \
+  --http-handler <http-handler-target-directory>/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm \
+  --http-proxy <http-handler-target-directory>/proxy/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm
 ```
 
 The runner builds the fixture orbs into `<directory>/fixtures`, or reuses `--fixtures <directory>`.
@@ -113,7 +116,8 @@ override engines, `bun run test:browser`, the [Wasm orb example](examples/wasm-o
 packed consumers in Node, Bun and Chrome, including a clean NodeNext typecheck. The probe verifies
 component quarantine, physical WASI settlement, filesystem grants and calls with a one-thread libuv pool.
 Repeat `--suite native|sdk|node|browser|example|package` to run a subset. CI runs the same command in the
-`acceptance` job of the quality workflow. `just test-wasm-orb` runs the Rust tests against supplied artifacts.
+`acceptance` job of the quality workflow. Incoming HTTP acceptance requires both the handler-only
+and outgoing-proxy fixtures through `--http-handler` and `--http-proxy`. `just test-wasm-orb` runs the Rust tests against supplied artifacts.
 
 ## Native builds
 

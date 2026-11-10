@@ -17,7 +17,7 @@ import { stagePackage } from "./release/npm.ts";
 const suites = ["native", "sdk", "node", "browser", "example", "package"];
 const usage =
   "Usage: bun scripts/test-wasm-acceptance.ts --out <directory> --provider <component.wasm> " +
-  `--probe <component.wasm> --consumer <component.wasm> --contributor <component.wasm> --http-client <component.wasm> --sockets <component.wasm> [--fixtures <directory>] [--suite <${suites.join("|")}>]...`;
+  `--probe <component.wasm> --consumer <component.wasm> --contributor <component.wasm> --http-client <component.wasm> --sockets <component.wasm> --http-handler <component.wasm> --http-proxy <component.wasm> [--fixtures <directory>] [--suite <${suites.join("|")}>]...`;
 const { values } = parseArgs({
   options: {
     out: { type: "string" },
@@ -27,6 +27,8 @@ const { values } = parseArgs({
     contributor: { type: "string" },
     "http-client": { type: "string" },
     sockets: { type: "string" },
+    "http-handler": { type: "string" },
+    "http-proxy": { type: "string" },
     fixtures: { type: "string" },
     suite: { type: "string", multiple: true },
   },
@@ -38,7 +40,9 @@ if (
   !values.consumer ||
   !values.contributor ||
   !values["http-client"] ||
-  !values.sockets
+  !values.sockets ||
+  !values["http-handler"] ||
+  !values["http-proxy"]
 )
   throw new Error(usage);
 const selected = values.suite ?? suites;
@@ -56,6 +60,8 @@ const consumer = path.resolve(values.consumer);
 const contributor = path.resolve(values.contributor);
 const httpClient = path.resolve(values["http-client"]);
 const sockets = path.resolve(values.sockets);
+const httpHandler = path.resolve(values["http-handler"]);
+const httpProxy = path.resolve(values["http-proxy"]);
 const engine = path.join(root, "packages/ts/engine-node/dist/interpreter.wasm");
 const browserEngine = path.join(root, "packages/ts/engine-wasm/dist/interpreter");
 for (const file of [
@@ -67,6 +73,8 @@ for (const file of [
   contributor,
   httpClient,
   sockets,
+  httpHandler,
+  httpProxy,
 ])
   if (!existsSync(file)) throw new Error(`Missing acceptance input: ${file}`);
 // Native, Node and browser suites must qualify the same packaged interpreter bytes.
@@ -132,6 +140,9 @@ const environment = {
   TEMBRA_WASM_CONTRIBUTOR: contributor,
   TEMBRA_WASM_HTTP_CLIENT: httpClient,
   TEMBRA_WASM_SOCKETS: sockets,
+  TEMBRA_WASM_HTTP_HANDLER: httpHandler,
+  TEMBRA_WASM_HTTP_PROXY: httpProxy,
+  TEMBRA_WASM_SOURCE_HANDLER: path.join(fixtures, "ingress-carrier.wasm"),
 };
 const timings: string[] = [];
 for (const suite of selected) {

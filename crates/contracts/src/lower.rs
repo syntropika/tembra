@@ -1,7 +1,7 @@
 //! Explicit provider bindings and lowering into the existing kernel metadata model.
 use crate::{
-    Error,
-    model::{Entry, Interface, Item, PreparedContract},
+    Error, HTTP_HANDLER,
+    model::{Entry, FunctionKind, Interface, Item, PreparedContract},
     service_name,
 };
 use serde::{Deserialize, Serialize};
@@ -29,13 +29,26 @@ pub struct HostImport {
 pub struct Plan {
     pub orb: Orb,
     pub host_imports: Vec<HostImport>,
+    /// The incoming HTTP export ([`HTTP_HANDLER`]) this Orb serves through the host-local
+    /// ingress adapter. It is deliberately absent from `orb.services`: it has no portable
+    /// entrypoint and no Orb can bind to it.
+    pub ingress: Option<String>,
 }
+
+/// Host provider bound to `wasi:http/types` for an Orb that only serves incoming HTTP.
+///
+/// The types interface carries no outgoing authority by itself; `wasi:http/client` still needs an
+/// HTTP grant. [`PreparedContract::plan`] admits this provider only for `wasi:http/types` of a
+/// contract that exports [`HTTP_HANDLER`].
+pub const INGRESS_PROVIDER: &str = HTTP_HANDLER;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PlanDescription<'a> {
     orb: OrbDescription<'a>,
     host_imports: &'a [HostImport],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ingress: Option<&'a str>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +84,7 @@ impl Plan {
     pub fn describe(&self) -> serde_json::Value {
         serde_json::to_value(PlanDescription {
             host_imports: &self.host_imports,
+            ingress: self.ingress.as_deref(),
             orb: OrbDescription {
                 name: &self.orb.name,
                 api_version: self.orb.api_version,
@@ -107,12 +121,48 @@ impl Plan {
     }
 }
 
+/// Whether an export entry is the exact standard incoming HTTP handler.
+///
+/// Recognition is by the exact versioned identity, bound under its own key, with the standard
+/// shape `handle: async func(request) -> result<response, error-code>`. The compiled worker
+/// additionally checks the binary's actual function type against the host resource types.
+pub(crate) fn is_ingress(entry: &Entry) -> bool {
+    let Item::Interface(interface) = &entry.item else {
+        return false;
+    };
+    entry.key == HTTP_HANDLER
+        && interface.contract.as_deref() == Some(HTTP_HANDLER)
+        && matches!(
+            interface.functions.as_slice(),
+            [function] if function.name == "handle"
+                && function.kind == FunctionKind::AsyncFreestanding
+                && function.params.len() == 1
+                && function.result.is_some()
+        )
+}
+
 impl PreparedContract {
+    /// The exact incoming HTTP export, if this world serves one.
+    pub fn ingress(&self) -> Option<&str> {
+        self.model()
+            .exports
+            .iter()
+            .any(is_ingress)
+            .then_some(HTTP_HANDLER)
+    }
+
     /// Lower supported exported interfaces without inventing resource lifecycle semantics.
+    ///
+    /// The incoming HTTP handler is skipped: it is served only through the host-local ingress
+    /// adapter and never becomes portable service metadata.
     pub(crate) fn services(&self, provider: &str) -> Result<Vec<Service>, Error> {
         let mut services = Vec::new();
         let mut aliases = BTreeMap::new();
-        for Entry { key, item } in &self.model().exports {
+        for entry in &self.model().exports {
+            if is_ingress(entry) {
+                continue;
+            }
+            let Entry { key, item } = entry;
             match item {
                 Item::Interface(interface) => {
                     let contract = interface.contract.clone().ok_or_else(|| {
@@ -203,6 +253,15 @@ impl PreparedContract {
                     if provider.trim().is_empty() {
                         return Err(Error(format!("empty host provider for {binding}")));
                     }
+                    // The reserved ingress provider grants nothing beyond request and response
+                    // types, and exists only for a world that serves incoming HTTP.
+                    if provider == INGRESS_PROVIDER
+                        && (!contract.starts_with("wasi:http/types@") || self.ingress().is_none())
+                    {
+                        return Err(Error(format!(
+                            "{binding}: the incoming HTTP provider binds only wasi:http/types of a handler world"
+                        )));
+                    }
                     host_imports.push(HostImport {
                         binding: binding.to_owned(),
                         contract,
@@ -248,7 +307,11 @@ impl PreparedContract {
             return Err(Error(format!("unused provider binding {unused}")));
         }
         orb.requires = requirements.into_values().collect();
-        Ok(Plan { orb, host_imports })
+        Ok(Plan {
+            orb,
+            host_imports,
+            ingress: self.ingress().map(str::to_owned),
+        })
     }
 
     /// Imports that need a provider: interfaces with functions or resources, in world order.

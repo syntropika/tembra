@@ -53,6 +53,41 @@ fn declared_imports_never_supply_their_own_authority() {
 }
 
 #[test]
+fn cli_authority_never_implies_process_execution_or_other_host_capabilities() {
+    let grants = Grants {
+        system: [SystemCapability::Cli].into(),
+        ..Default::default()
+    };
+    for interface in [
+        "wasi:cli/environment@0.3.0",
+        "wasi:cli/stdin@0.3.0",
+        "wasi:cli/stdout@0.3.0",
+        "wasi:cli/stderr@0.3.0",
+        "wasi:cli/exit@0.3.0",
+    ] {
+        grants.check_component_import(interface, false).unwrap();
+    }
+    for interface in [
+        "wasi:filesystem/types@0.3.0",
+        "wasi:sockets/types@0.3.0",
+        "wasi:http/client@0.3.0",
+        "wasi:clocks/system-clock@0.3.0",
+        "wasi:random/random@0.3.0",
+    ] {
+        let error = grants.check_component_import(interface, false).unwrap_err();
+        assert_eq!(error.code, tembra_core::Code::Forbidden, "{interface}");
+        assert_eq!(error.reason, "orb_grant", "{interface}");
+    }
+    // The CLI namespace is an allowlist, not authority for arbitrary host operations.
+    // These are deliberately unknown imports, not supported WASI process interfaces.
+    for interface in ["wasi:cli/spawn@0.3.0", "wasi:process/spawn@0.3.0"] {
+        let error = grants.check_component_import(interface, false).unwrap_err();
+        assert_eq!(error.code, tembra_core::Code::Unsupported, "{interface}");
+        assert_eq!(error.reason, "wasi_contract", "{interface}");
+    }
+}
+
+#[test]
 fn filesystem_grants_require_real_providers_imports_and_distinct_normalized_mounts() {
     let providers = BTreeSet::from(["files".into()]);
     let imports = [import("wasi:filesystem/preopens@0.3.0", "files")];

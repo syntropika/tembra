@@ -129,6 +129,48 @@ impl<E: 'static> Service<E> {
     }
 }
 
+impl<E: 'static> Service<E> {
+    /// Bind a host-local callback with typed Rust values and no portable entrypoint.
+    ///
+    /// The method exists only for callers in this process that hold the exact argument type, such
+    /// as an executor's lifecycle adapter carrying owned host resources. Every portable access
+    /// (`call_portable`, `call_value`, foreign hosts and isolated Orb references) is refused with
+    /// [`Reason::LocalValue`] before the callback runs; no serde conversion is ever attempted.
+    pub fn local_method<A, R, F, Fut>(mut self, name: impl Into<String>, handle: F) -> Self
+    where
+        A: 'static,
+        R: 'static,
+        F: Fn(Rc<E>, Context, A) -> Fut + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+    {
+        let name = name.into();
+        let handle = Rc::new(handle);
+        self.implementation.local.insert(
+            name.clone(),
+            Rc::new(move |environment, context, arguments| {
+                let result = environment
+                    .downcast::<E>()
+                    .map_err(|_| type_error())
+                    .and_then(|environment| {
+                        let arguments = arguments.downcast::<A>().map_err(|_| type_error())?;
+                        Ok(handle(environment, context, *arguments))
+                    });
+                async move { Ok(Box::new(result?.await?) as Box<dyn Any>) }.boxed_local()
+            }),
+        );
+        self.implementation.portable.remove(&name);
+        self.metadata.methods.insert(name);
+        self
+    }
+}
+
+impl Implementation {
+    /// Whether a method has only a typed local entrypoint.
+    pub(crate) fn local_only(&self, method: &str) -> bool {
+        self.local.contains_key(method) && !self.portable.contains_key(method)
+    }
+}
+
 /// Report an argument or result type mismatch at native dispatch.
 pub(crate) fn type_error() -> Error {
     Error::invalid(

@@ -41,7 +41,10 @@ export interface ContributionBinding {
 export interface CheckedImplementation {
   services: ServiceBinding[];
   hooks: { hooks: HookBinding[]; contributions: ContributionBinding[] };
-  plan: InstallationPlan["plan"];
+  plan: InstallationPlan["plan"] & {
+    /** The incoming HTTP export served through `Host.handleHttp`, absent without one. */
+    ingress?: string | null;
+  };
 }
 
 export type ProviderBinding =
@@ -85,11 +88,27 @@ export interface ExecutionScope {
   sync(request: import("./host-protocol.ts").HostRequest): unknown;
   async(request: import("./host-protocol.ts").AsyncHostRequest): Promise<unknown>;
 }
+/** The guest service and method that serve incoming HTTP in one environment. */
+export interface IngressDispatch {
+  environment: number;
+  /** The guest's JavaScript service name for the `wasi:http/handler` export. */
+  service: string;
+  method: string;
+}
 export interface InterpreterPort {
   release(environment: number): void | Promise<void>;
   description(): string;
   declare(packet: string, scope: ExecutionScope): unknown | Promise<unknown>;
   execute(packet: string, scope: ExecutionScope): Promise<string>;
+  /**
+   * Serve one incoming HTTP request; resolves only after the response delivery ended and the
+   * callback physically settled. Absent where this host cannot serve incoming HTTP yet.
+   */
+  ingress?(
+    dispatch: IngressDispatch,
+    exchange: import("./http-ingress.ts").IngressExchange,
+    scope: ExecutionScope,
+  ): Promise<void>;
   close(): void | Promise<void>;
 }
 

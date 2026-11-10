@@ -2,11 +2,8 @@
 // Raw packets exercise the exact wire the generated guest bindings use. Providers are local and
 // deterministic; no test touches the network.
 import { expect, test } from "bun:test";
-import {
-  FETCH_BODY_BYTES,
-  fetchHttpProvider,
-  HttpProviderError,
-} from "../src/interpreter/http-provider.ts";
+import { FETCH_BODY_BYTES, fetchHttpProvider } from "../src/interpreter/fetch-http-provider.ts";
+import { HttpProviderError } from "../src/interpreter/http-provider.ts";
 import { METHODS } from "../src/interpreter/standard.ts";
 import { httpMethods } from "../src/interpreter/standard-http.ts";
 import { methodKey } from "../src/interpreter/standard-streams.ts";

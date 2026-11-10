@@ -254,6 +254,11 @@ impl Driver {
                 revoked = true;
                 // Sends this callback feeds are aborted; retirement waits for their close.
                 store.data().transport.commands.cancel();
+                // An ingress callback's request closes, its response is taken away, and a
+                // response published later is refused.
+                if let Some(ingress) = &store.data().ingress {
+                    ingress.exchange.abort();
+                }
                 super::standard::retire(store, &mut tasks).await?;
                 discard(store, &mut pending)?;
                 if outstanding.is_empty() {

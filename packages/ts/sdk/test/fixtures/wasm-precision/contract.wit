@@ -1,0 +1,35 @@
+package example:precision@1.0.0;
+
+/// Exact 64-bit integers through every WIT container the portable profile carries.
+interface numbers {
+    type big = u64;
+    record sample {
+        id: big,
+        values: list<s64>,
+        maybe: option<u64>,
+        small: u32,
+        label: string,
+    }
+    variant pick {
+        signed(s64),
+        none,
+    }
+    add: func(a: u64, b: s64) -> u64;
+    echo: func(s: sample, p: pick, t: tuple<u64, string>) -> result<sample, s64>;
+}
+
+/// The same calls, relayed by a second Orb through its WIT import.
+interface relay {
+    use numbers.{sample, pick};
+    add: func(a: u64, b: s64) -> u64;
+    echo: func(s: sample, p: pick, t: tuple<u64, string>) -> result<sample, s64>;
+}
+
+world provider {
+    export numbers;
+}
+
+world consumer {
+    import numbers;
+    export relay;
+}

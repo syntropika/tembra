@@ -1,0 +1,459 @@
+//! The typed platform carrier serves a compiled handler through `InterpreterPort`, as Node and
+//! mobile do: control packets stay JSON, while heads, bodies and trailers are raw bytes pulled
+//! one at a time in each direction.
+use std::{sync::mpsc, thread, time::Duration};
+use tembra_executor_wasm::{
+    Contract, Engine, Grants, InterpreterPort, Limits, PortEvent, PortReply, PortTicket,
+    ingress::{
+        IngressEvent, IngressField, IngressPort, IngressRequestChunk, IngressRequestHead,
+        IngressResponseFrame,
+    },
+};
+
+const ORB: &str = "web";
+
+fn fixture() -> Option<Vec<u8>> {
+    let Some(path) = std::env::var_os("TEMBRA_WASM_HTTP_HANDLER") else {
+        eprintln!("skipped: TEMBRA_WASM_HTTP_HANDLER names no compiled HTTP handler");
+        return None;
+    };
+    Some(std::fs::read(path).unwrap())
+}
+
+/// Open the handler revision through the platform port and declare its environments the way
+/// a platform kernel does: the Orb root, then the handler service.
+fn open(engine: &Engine, component: &[u8]) -> InterpreterPort {
+    let bytes = Contract::from_dir(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/wit/handler"),
+        Some("handler"),
+    )
+    .unwrap()
+    .component_artifact(component, ORB, 1, &Default::default())
+    .unwrap();
+    let artifact = tembra_contracts::Artifact::decode(&bytes).unwrap();
+    let bindings = artifact
+        .contract
+        .providers(&Default::default(), &Grants::default())
+        .unwrap();
+    let port = engine
+        .open_port(
+            &artifact,
+            &bindings,
+            &Grants::default(),
+            &Default::default(),
+        )
+        .unwrap();
+    for packet in [
+        serde_json::json!({"kind": "create", "environment": 1, "service": null}),
+        serde_json::json!({"kind": "create", "environment": 2, "service": "handler"}),
+    ] {
+        port.declare(packet, |_, _| Ok(serde_json::Value::Null))
+            .unwrap();
+    }
+    port
+}
+
+fn field(name: &str, value: &[u8]) -> IngressField {
+    IngressField {
+        name: name.into(),
+        value: value.to_vec(),
+    }
+}
+
+fn head(path: &str) -> IngressRequestHead {
+    IngressRequestHead {
+        method: "POST".into(),
+        scheme: Some("http".into()),
+        authority: Some("ingress.test".into()),
+        path_with_query: Some(path.into()),
+        fields: vec![field("x-dup", b"1"), field("x-dup", b"\xff2")],
+    }
+}
+
+const PACKET: &str = r#"{"kind":"ingress","environment":2,"service":"handler","method":"handle"}"#;
+
+enum Ev {
+    Host(String, PortReply),
+    Complete(tembra::Result<String>),
+    Ingress(IngressEvent),
+}
+
+/// One platform exchange: its owner ticket, its carrier port and its forwarded events.
+struct Exchange {
+    ticket: Option<PortTicket>,
+    port: IngressPort,
+    events: mpsc::Receiver<Ev>,
+    /// Request-body pulls announced and not yet answered.
+    pulls: usize,
+}
+
+impl Exchange {
+    fn begin(port: &InterpreterPort, path: &str) -> Self {
+        let (ticket, events, carrier) = port.begin_ingress(PACKET.into(), head(path)).unwrap();
+        let (send, receive) = mpsc::channel();
+        thread::spawn(move || {
+            loop {
+                let event = match events.receive().unwrap() {
+                    PortEvent::Host { reply, packet, .. } => Ev::Host(packet, reply),
+                    PortEvent::Complete(result) => {
+                        let _ = send.send(Ev::Complete(result));
+                        return;
+                    }
+                    PortEvent::Ingress(event) => Ev::Ingress(event),
+                };
+                if send.send(event).is_err() {
+                    return;
+                }
+            }
+        });
+        Self {
+            ticket: Some(ticket),
+            port: carrier,
+            events: receive,
+            pulls: 0,
+        }
+    }
+
+    /// The next ingress event or completion; host requests are refused (none are expected).
+    fn next(&mut self) -> Ev {
+        loop {
+            match self.events.recv_timeout(Duration::from_secs(10)).unwrap() {
+                Ev::Host(packet, reply) => answer(&packet, reply),
+                Ev::Ingress(IngressEvent::RequestPull) => self.pulls += 1,
+                other => return other,
+            }
+        }
+    }
+
+    fn frame(&mut self) -> IngressResponseFrame {
+        self.port.pull_response().unwrap();
+        match self.next() {
+            Ev::Ingress(IngressEvent::Response(frame)) => frame,
+            _ => panic!("expected a response frame"),
+        }
+    }
+
+    /// Wait for the guest's request-body pull, then answer it.
+    fn supply(&mut self, chunk: IngressRequestChunk) -> bool {
+        while self.pulls == 0 {
+            match self.events.recv_timeout(Duration::from_secs(10)).unwrap() {
+                Ev::Ingress(IngressEvent::RequestPull) => self.pulls += 1,
+                Ev::Host(packet, reply) => answer(&packet, reply),
+                _ => panic!("expected a request-body pull"),
+            }
+        }
+        self.pulls -= 1;
+        self.port.supply_request(chunk).unwrap()
+    }
+
+    fn complete(mut self) -> tembra::Result<String> {
+        let result = loop {
+            if let Ev::Complete(result) = self.next() {
+                break result;
+            }
+        };
+        self.ticket.take().unwrap().finish().unwrap();
+        result
+    }
+}
+
+/// Answer a control request as a platform kernel would: a source guest's quiescence check
+/// waits one host round trip (`wait`); nothing else is expected.
+fn answer(packet: &str, reply: PortReply) {
+    let packet: serde_json::Value = serde_json::from_str(packet).unwrap();
+    match packet["operation"].as_str() {
+        Some("wait") => reply.complete(Ok("null".into())),
+        operation => panic!("unexpected host request {operation:?}"),
+    }
+}
+
+fn data(text: &str) -> IngressResponseFrame {
+    IngressResponseFrame::Data(format!("data: {text}\n\n").into_bytes())
+}
+
+fn engines() -> [Engine; 2] {
+    [
+        Engine::new(Limits::default()).unwrap(),
+        Engine::interpreted(Limits::default()).unwrap(),
+    ]
+}
+
+/// The status route's `x-last-exit`, served through the carrier: the revision is still usable.
+fn last_exit(port: &InterpreterPort) -> String {
+    let mut exchange = Exchange::begin(port, "/status");
+    let Ev::Ingress(IngressEvent::Head(head)) = exchange.next() else {
+        panic!("expected a head")
+    };
+    assert_eq!(exchange.frame(), IngressResponseFrame::End);
+    exchange.complete().unwrap();
+    let exit = head
+        .fields
+        .iter()
+        .find(|field| field.name == "x-last-exit")
+        .unwrap();
+    String::from_utf8(exit.value.clone()).unwrap()
+}
+
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
+fn the_platform_carrier_streams_bytes_both_ways() {
+    let Some(component) = fixture() else {
+        return;
+    };
+    for engine in engines() {
+        let port = open(&engine, &component);
+        let mut exchange = Exchange::begin(&port, "/sse");
+        let Ev::Ingress(IngressEvent::Head(head)) = exchange.next() else {
+            panic!("expected the head first")
+        };
+        assert_eq!(head.status, 200);
+        assert!(
+            head.fields
+                .contains(&field("content-type", b"text/event-stream"))
+        );
+        // The first event arrives while the request body is still open.
+        assert_eq!(exchange.frame(), data("open"));
+        assert!(exchange.supply(IngressRequestChunk::Data(b"alpha".to_vec())));
+        assert_eq!(exchange.frame(), data("alpha"));
+        // Protocol misuse is refused: a second pull before its frame, a second answer to one pull.
+        exchange.port.pull_response().unwrap();
+        assert!(exchange.port.pull_response().is_err());
+        assert!(exchange.supply(IngressRequestChunk::Data(b"beta".to_vec())));
+        let Ev::Ingress(IngressEvent::Response(frame)) = exchange.next() else {
+            panic!("expected the pending frame")
+        };
+        assert_eq!(frame, data("beta"));
+        assert!(exchange.supply(IngressRequestChunk::End {
+            trailers: vec![field("x-request", b"done")],
+        }));
+        assert_eq!(exchange.frame(), data("end"));
+        assert_eq!(
+            exchange.frame(),
+            IngressResponseFrame::Trailers(vec![field("x-events", b"4")])
+        );
+        assert_eq!(exchange.frame(), IngressResponseFrame::End);
+        // Nothing may be pulled after the end, and a late request answer owns nothing.
+        assert!(exchange.port.pull_response().is_err());
+        assert!(
+            !exchange
+                .port
+                .supply_request(IngressRequestChunk::Data(b"late".to_vec()))
+                .unwrap_or(false)
+        );
+        assert_eq!(exchange.complete().unwrap(), "null");
+        assert!(last_exit(&port).starts_with("complete events=4 transmit=Ok"));
+        drop(port);
+        assert_eq!(engine.instances(), 0);
+    }
+}
+
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
+fn the_carrier_refuses_invalid_bytes_before_admission() {
+    let Some(component) = fixture() else {
+        return;
+    };
+    let engine = Engine::new(Limits::default()).unwrap();
+    let port = open(&engine, &component);
+    for invalid in [
+        IngressRequestHead {
+            fields: vec![field("x-bad", b"line\nbreak")],
+            ..head("/sse")
+        },
+        IngressRequestHead {
+            fields: vec![field("bad name", b"v")],
+            ..head("/sse")
+        },
+        IngressRequestHead {
+            method: "BAD METHOD".into(),
+            ..head("/sse")
+        },
+    ] {
+        assert!(port.begin_ingress(PACKET.into(), invalid).is_err());
+    }
+    // An ordinary dispatch cannot reach the handler, and a non-ingress packet cannot use the
+    // carrier.
+    assert!(
+        port.begin_ingress(r#"{"kind":"invoke"}"#.into(), head("/sse"))
+            .is_err()
+    );
+    let (ticket, events) = port
+        .begin(r#"{"kind":"invoke","environment":2,"service":"handler","method":"handle","args":[null]}"#.into())
+        .unwrap();
+    let PortEvent::Complete(result) = events.receive().unwrap() else {
+        panic!("expected completion")
+    };
+    assert!(result.is_err());
+    ticket.finish().unwrap();
+    // Invalid trailer bytes, or a platform body error, end the guest's request body with an
+    // error rather than a protocol fault; the response still completes.
+    for end in [
+        IngressRequestChunk::End {
+            trailers: vec![field("x-t", b"a\rb")],
+        },
+        IngressRequestChunk::Error("boom".into()),
+    ] {
+        let mut exchange = Exchange::begin(&port, "/sse");
+        assert!(matches!(
+            exchange.next(),
+            Ev::Ingress(IngressEvent::Head(_))
+        ));
+        assert_eq!(exchange.frame(), data("open"));
+        assert!(exchange.supply(end));
+        assert_eq!(exchange.frame(), data("end"));
+        assert!(matches!(
+            exchange.frame(),
+            IngressResponseFrame::Trailers(_)
+        ));
+        assert_eq!(exchange.frame(), IngressResponseFrame::End);
+        exchange.complete().unwrap();
+    }
+    drop(port);
+    assert_eq!(engine.instances(), 0);
+}
+
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
+fn cancellation_and_disconnect_end_the_carrier_and_late_answers_own_nothing() {
+    let Some(component) = fixture() else {
+        return;
+    };
+    for engine in engines() {
+        let port = open(&engine, &component);
+        // Cancellation while the guest waits for request data.
+        let mut exchange = Exchange::begin(&port, "/sse");
+        assert!(matches!(
+            exchange.next(),
+            Ev::Ingress(IngressEvent::Head(_))
+        ));
+        assert_eq!(exchange.frame(), data("open"));
+        exchange.ticket.as_ref().unwrap().cancel();
+        // A host-driven end: the pending pull's error frame and the completion may come in
+        // either order; completion always ends the body.
+        exchange.port.pull_response().unwrap();
+        let completion = loop {
+            match exchange.next() {
+                Ev::Ingress(IngressEvent::Response(frame)) => {
+                    assert!(matches!(frame, IngressResponseFrame::Error(_)), "{frame:?}");
+                }
+                Ev::Complete(result) => break result,
+                _ => panic!("unexpected event"),
+            }
+        };
+        assert!(
+            !exchange
+                .port
+                .supply_request(IngressRequestChunk::Data(b"late".to_vec()))
+                .unwrap_or(false)
+        );
+        completion.unwrap();
+        exchange.ticket.take().unwrap().finish().unwrap();
+        assert!(last_exit(&port).starts_with("request-ended"));
+
+        // A client disconnect (the platform drops its carrier port).
+        let mut exchange = Exchange::begin(&port, "/sse");
+        assert!(matches!(
+            exchange.next(),
+            Ev::Ingress(IngressEvent::Head(_))
+        ));
+        assert_eq!(exchange.frame(), data("open"));
+        exchange.port.disconnect();
+        exchange.complete().unwrap();
+        assert_eq!(
+            last_exit(&port),
+            "request-ended-then-write-dropped events=1"
+        );
+
+        // A handler error has no head; completion carries it after settlement.
+        let mut exchange = Exchange::begin(&port, "/error");
+        let Ev::Complete(result) = exchange.next() else {
+            panic!("an error has no head")
+        };
+        let error = result.unwrap_err();
+        assert!(error.message.contains("refused"), "{error}");
+        exchange.ticket.take().unwrap().finish().unwrap();
+        drop(port);
+        assert_eq!(engine.instances(), 0);
+    }
+}
+
+/// A source handler streams through the same typed carrier: the request is issued into the
+/// revision's standard table, the guest publishes its response once, and the callback lasts
+/// until the delivery ended.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_SOURCE_HANDLER"]
+fn source_handlers_stream_through_the_platform_carrier() {
+    let (Some(interpreter), Some(artifact)) = (
+        std::env::var_os("TEMBRA_WASM_ENGINE").map(|path| std::fs::read(path).unwrap()),
+        std::env::var_os("TEMBRA_WASM_SOURCE_HANDLER").map(|path| std::fs::read(path).unwrap()),
+    ) else {
+        eprintln!("skipped: TEMBRA_WASM_ENGINE or TEMBRA_WASM_SOURCE_HANDLER is not set");
+        return;
+    };
+    for engine in engines() {
+        let engine = engine.interpreter(&interpreter).unwrap();
+        let artifact = tembra_contracts::Artifact::decode(&artifact).unwrap();
+        let bindings = artifact
+            .contract
+            .providers(&Default::default(), &Grants::default())
+            .unwrap();
+        let port = engine
+            .open_port(
+                &artifact,
+                &bindings,
+                &Grants::default(),
+                &Default::default(),
+            )
+            .unwrap();
+        for packet in [
+            serde_json::json!({"kind": "create", "environment": 1, "service": null}),
+            serde_json::json!({"kind": "create", "environment": 2, "service": "handler"}),
+        ] {
+            port.declare(packet, |packet, _| {
+                let packet: serde_json::Value = serde_json::from_str(packet).unwrap();
+                match packet["operation"].as_str() {
+                    Some("orb") => Ok(serde_json::Value::Null),
+                    operation => panic!("unexpected declaration request {operation:?}"),
+                }
+            })
+            .unwrap();
+        }
+        let mut exchange = Exchange::begin(&port, "/sse");
+        let Ev::Ingress(IngressEvent::Head(head)) = exchange.next() else {
+            panic!("expected the head")
+        };
+        assert_eq!(head.status, 200);
+        assert_eq!(exchange.frame(), data("open"));
+        assert!(exchange.supply(IngressRequestChunk::Data(vec![0x80, 0, 0xff])));
+        assert_eq!(
+            exchange.frame(),
+            IngressResponseFrame::Data(vec![0x80, 0, 0xff])
+        );
+        assert!(exchange.supply(IngressRequestChunk::End { trailers: vec![] }));
+        assert_eq!(exchange.frame(), data("end"));
+        assert_eq!(
+            exchange.frame(),
+            IngressResponseFrame::Trailers(vec![field("x-chunks", b"1")])
+        );
+        assert_eq!(exchange.frame(), IngressResponseFrame::End);
+        assert_eq!(exchange.complete().unwrap(), "null");
+
+        // A handler error has no head; a disconnect ends the next stream; the port keeps serving.
+        let mut exchange = Exchange::begin(&port, "/error");
+        let Ev::Complete(result) = exchange.next() else {
+            panic!("an error has no head")
+        };
+        assert!(result.unwrap_err().message.contains("HttpRequestDenied"));
+        exchange.ticket.take().unwrap().finish().unwrap();
+        let mut exchange = Exchange::begin(&port, "/sse");
+        assert!(matches!(
+            exchange.next(),
+            Ev::Ingress(IngressEvent::Head(_))
+        ));
+        assert_eq!(exchange.frame(), data("open"));
+        exchange.port.disconnect();
+        exchange.complete().unwrap();
+        drop(port);
+        assert_eq!(engine.instances(), 0);
+    }
+}

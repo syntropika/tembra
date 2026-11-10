@@ -24,6 +24,8 @@ pub struct InterpreterPort {
     pub(crate) services: Vec<tembra_contracts::ServiceBinding>,
     pub(crate) metadata: tembra::core::Orb,
     pub(crate) hooks: tembra_contracts::HookPlan,
+    /// The checked host-local incoming HTTP handler, if this revision serves one.
+    pub(crate) ingress: Option<tembra_contracts::IngressBinding>,
     packet_bytes: usize,
 }
 
@@ -33,6 +35,20 @@ impl Engine {
     /// Source bundles and compiled components return the same port: both execute behind one
     /// session owner and answer the same scoped host requests.
     pub fn open_port(
+        &self,
+        artifact: &tembra_contracts::Artifact,
+        bindings: &BTreeMap<String, Binding>,
+        grants: &Grants,
+        cli: &crate::Cli,
+    ) -> Result<InterpreterPort> {
+        self.open(artifact, bindings, grants, cli)
+    }
+
+    /// Open a port for the native facade or a platform host.
+    ///
+    /// Source and compiled handlers are served through the native facade and through platform
+    /// ports' typed carrier (`begin_ingress`).
+    pub(crate) fn open(
         &self,
         artifact: &tembra_contracts::Artifact,
         bindings: &BTreeMap<String, Binding>,
@@ -60,16 +76,19 @@ impl Engine {
             let hooks = contract
                 .check_hooks(&implementation, bindings)
                 .map_err(failure)?;
-            Ok::<_, tembra::Error>((services, hooks))
+            let ingress = contract
+                .check_ingress(name, &implementation)
+                .map_err(failure)?;
+            Ok::<_, tembra::Error>((services, hooks, ingress))
         };
-        let (session, description, services, hooks) = match &artifact.implementation {
+        let (session, description, (services, hooks, ingress)) = match &artifact.implementation {
             tembra_contracts::ArtifactImplementation::Source(source) => {
                 let io =
                     crate::io::SourceIo::new(&self.providers, &plan.host_imports, grants, cli)?;
                 let session = Session::start(self.clone(), name.into(), io)?;
                 let description = session.load(source, contract.describe())?;
-                let (services, hooks) = checked(&description)?;
-                (session, description, services, hooks)
+                let checked = checked(&description)?;
+                (session, description, checked)
             }
             tembra_contracts::ArtifactImplementation::Component(_) => {
                 let description = crate::component::describe(
@@ -78,16 +97,16 @@ impl Engine {
                     api_version,
                     &artifact.contributions,
                 );
-                let (services, hooks) = checked(&description)?;
+                let checked = checked(&description)?;
                 let session = self.component_session(
                     artifact,
                     &plan,
-                    &services,
+                    &checked.0,
                     bindings,
                     (grants, cli),
-                    &hooks,
+                    &checked.1,
                 )?;
-                (session, description, services, hooks)
+                (session, description, checked)
             }
         };
         hooks.apply(&mut plan);
@@ -97,6 +116,7 @@ impl Engine {
             services,
             metadata: plan.orb,
             hooks,
+            ingress,
             packet_bytes: self.limits.packet_bytes,
         })
     }
@@ -133,6 +153,35 @@ impl InterpreterPort {
         self.begin_operation(packet, Operation::Declare)
     }
 
+    /// Start an incoming HTTP exchange of this revision's host-local handler.
+    ///
+    /// `packet` is the control packet `{"kind":"ingress","environment","service","method"}`;
+    /// the request travels typed beside it. The returned [`IngressPort`] answers request-body
+    /// pulls and pulls the response; its events arrive on the same [`PortEvents`] stream as the
+    /// exchange's host requests, always before its completion. See `crate::ingress` for the
+    /// lifetime rules, which are the native facade's.
+    ///
+    /// [`IngressPort`]: crate::ingress::IngressPort
+    pub fn begin_ingress(
+        &self,
+        packet: String,
+        head: crate::ingress::IngressRequestHead,
+    ) -> Result<(PortTicket, PortEvents, crate::ingress::IngressPort)> {
+        if self.ingress.is_none() {
+            return Err(failure("this revision serves no incoming HTTP handler"));
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "lowercase")]
+        enum Control {
+            Ingress {},
+        }
+        serde_json::from_str::<Control>(&packet)
+            .map_err(|_| failure("an incoming HTTP exchange needs an ingress control packet"))?;
+        let (events, port) = self.session.begin_ingress(packet, head)?;
+        let (ticket, events) = self.exchange(events);
+        Ok((ticket, events, port))
+    }
+
     /// Retain one owner until the selected guest exchange physically settles.
     fn begin_operation(
         &self,
@@ -140,8 +189,13 @@ impl InterpreterPort {
         operation: Operation,
     ) -> Result<(PortTicket, PortEvents)> {
         let events = self.session.begin(operation, packet)?;
+        Ok(self.exchange(events))
+    }
+
+    /// Split one submitted exchange into its owner ticket and its event receiver.
+    fn exchange(&self, events: async_channel::Receiver<Event>) -> (PortTicket, PortEvents) {
         let done = Arc::new(AtomicBool::new(false));
-        Ok((
+        (
             PortTicket {
                 session: self.session.clone(),
                 events: events.clone(),
@@ -154,7 +208,7 @@ impl InterpreterPort {
                 packet_bytes: self.packet_bytes,
                 scope: self.session.scope(),
             },
-        ))
+        )
     }
 }
 
@@ -245,6 +299,7 @@ impl PortEvents {
                 let result = result.map_err(failure);
                 Ok(PortEvent::Complete(result))
             }
+            Event::Ingress(event) => Ok(PortEvent::Ingress(event)),
         }
     }
 }
@@ -279,4 +334,7 @@ pub enum PortEvent {
         reply: PortReply,
     },
     Complete(Result<String>),
+    /// Typed incoming HTTP carrier events of an exchange started with
+    /// [`InterpreterPort::begin_ingress`].
+    Ingress(crate::ingress::IngressEvent),
 }

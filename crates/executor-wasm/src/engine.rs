@@ -247,9 +247,12 @@ impl Engine {
         directory: impl Into<std::path::PathBuf>,
     ) -> Result<Self> {
         let name = name.into();
-        if name.trim().is_empty() || self.providers.filesystem.contains_key(&name) {
+        if name.trim().is_empty()
+            || name == tembra_contracts::HTTP_HANDLER
+            || self.providers.filesystem.contains_key(&name)
+        {
             return Err(failure(
-                "filesystem provider names must be nonempty and unique",
+                "filesystem provider names must be nonempty, unique and not reserved",
             ));
         }
         self.providers.filesystem.insert(name, directory.into());
@@ -259,9 +262,12 @@ impl Engine {
     /// Register the host's TCP transport without granting any Orb a destination.
     pub fn network(mut self, name: impl Into<String>) -> Result<Self> {
         let name = name.into();
-        if name.trim().is_empty() || !self.providers.network.insert(name) {
+        if name.trim().is_empty()
+            || name == tembra_contracts::HTTP_HANDLER
+            || !self.providers.network.insert(name)
+        {
             return Err(failure(
-                "network provider names must be nonempty and unique",
+                "network provider names must be nonempty, unique and not reserved",
             ));
         }
         Ok(self)
@@ -298,7 +304,7 @@ impl Engine {
         let bindings = artifact
             .contract
             .providers(&install.requires, &install.grants)?;
-        let port = self.open_port(&artifact, &bindings, &install.grants, &install.cli)?;
+        let port = self.open(&artifact, &bindings, &install.grants, &install.cli)?;
         adapter::orb(
             port.metadata,
             port.session,
@@ -306,6 +312,7 @@ impl Engine {
             artifact.contract.clone(),
             &bindings,
             port.hooks,
+            port.ingress,
         )
     }
 }

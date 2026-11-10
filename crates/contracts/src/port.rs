@@ -88,12 +88,14 @@ impl PreparedContract {
         )
     }
 
-    /// Validate a JSON-encoded value through a bound slot and return the result envelope.
+    /// Validate a JSON-encoded executor-packet value through a bound slot and return the result
+    /// envelope. WIT `u64`/`s64` positions must be canonical decimal strings, the packet wire
+    /// form that [`Self::from_wire`] accepts.
     pub fn validate_packet(&self, slot: u32, arguments: bool, value: &str) -> String {
         envelope(
             serde_json::from_str::<Value>(value)
                 .map_err(invalid)
-                .and_then(|value| self.validate_slot(slot, arguments, &value).map_err(invalid))
+                .and_then(|value| self.validate_wire(slot, arguments, &value).map_err(invalid))
                 .map(|()| Value::Null),
         )
     }
@@ -143,12 +145,16 @@ impl PreparedContract {
                 let services = self
                     .check_implementation(&name, api_version, value.clone())
                     .map_err(invalid)?;
+                let ingress = self.check_ingress(&name, &value).map_err(invalid)?;
                 let hooks = self.check_hooks(&value, &bindings).map_err(invalid)?;
                 let mut plan = self.plan(&name, api_version, &bindings).map_err(invalid)?;
                 hooks.apply(&mut plan);
-                Ok(
-                    serde_json::json!({ "services": services, "hooks": hooks, "plan": plan.describe() }),
-                )
+                let mut checked = serde_json::json!({ "services": services, "hooks": hooks, "plan": plan.describe() });
+                // The host-local incoming HTTP handler, never an ordinary portable service.
+                if let Some(ingress) = ingress {
+                    checked["ingress"] = serde_json::to_value(ingress).map_err(invalid)?;
+                }
+                Ok(checked)
             }
         }
     }

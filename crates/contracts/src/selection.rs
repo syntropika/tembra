@@ -66,6 +66,21 @@ impl PreparedContract {
                     .map(|grant| grant.provider.as_str())
                     .collect()
             } else if contract.starts_with("wasi:http/") {
+                // A world that only serves incoming HTTP still imports the request and response
+                // types. Without an HTTP grant they bind to the ingress provider, which carries
+                // no outgoing authority; `wasi:http/client` stays ungranted.
+                if grants.http.is_empty()
+                    && contract.starts_with("wasi:http/types@")
+                    && self.ingress().is_some()
+                {
+                    bindings.insert(
+                        binding,
+                        Binding::Host {
+                            provider: crate::lower::INGRESS_PROVIDER.into(),
+                        },
+                    );
+                    continue;
+                }
                 grants
                     .http
                     .iter()

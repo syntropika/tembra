@@ -136,6 +136,14 @@ declare var __tembraAbandon: (() => void) | undefined;
 declare var __tembraDescribe: () => string;
 declare var __tembraDeclare: (packet: string) => string;
 declare var __tembraDispatch: (packet: string) => Promise<string>;
+/** Pending host operations of the current callback; set by the effect bridge. */
+declare var __tembraEffects:
+  | { readonly pending: number; readonly sequence: number; idle(): Promise<void> }
+  | undefined;
+/** Incoming HTTP: decode the host-issued request, run the handler, publish and settle. */
+declare var __tembraIngress:
+  | { serve(request: number, handler: (request: unknown) => unknown): Promise<void> }
+  | undefined;
 
 declare var tembra: {
   wait(milliseconds: number): Promise<void>;

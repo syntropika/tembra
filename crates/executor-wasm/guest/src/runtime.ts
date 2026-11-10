@@ -388,6 +388,17 @@ import "./builtins.ts";
           );
           break;
         }
+        case "ingress": {
+          // The host-local HTTP handler: an ordinary service method whose argument is the
+          // host-issued request handle. The callback lasts until the response was delivered.
+          const handle = orb.services[request.service]?.methods[request.method];
+          if (typeof handle !== "function") throw new Error("Unknown HTTP handler service");
+          const environment = environments.get(request.environment);
+          await globalThis.__tembraIngress!.serve(request.request, (incoming) =>
+            handle(environment, context(), incoming),
+          );
+          break;
+        }
         case "callback":
           result = await callbacks.get(request.callback)!(request.value);
           break;

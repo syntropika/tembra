@@ -8,6 +8,7 @@ mod component;
 mod dns;
 mod engine;
 mod http;
+pub mod ingress;
 mod install;
 mod io;
 mod port;

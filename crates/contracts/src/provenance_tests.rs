@@ -177,23 +177,27 @@ fn provenance_survives_the_prepared_codec_but_not_binary_wit() {
 #[test]
 fn compiled_binary_imports_require_grants_by_interface_identity() {
     let none = grants(false, false);
-    assert!(none.check_component_import(CLOCK).is_err());
+    assert!(none.check_component_import(CLOCK, false).is_err());
     assert!(
-        none.check_component_import("wasi:clocks/system-clock@0.3.9")
+        none.check_component_import("wasi:clocks/system-clock@0.3.9", false)
             .is_err()
     );
-    assert!(grants(true, false).check_component_import(CLOCK).is_ok());
     assert!(
-        none.check_component_import("wasi:filesystem/types@0.3.0")
+        grants(true, false)
+            .check_component_import(CLOCK, false)
+            .is_ok()
+    );
+    assert!(
+        none.check_component_import("wasi:filesystem/types@0.3.0", false)
             .is_err()
     );
     assert!(
         grants(false, true)
-            .check_component_import("wasi:filesystem/preopens@0.3.0")
+            .check_component_import("wasi:filesystem/preopens@0.3.0", false)
             .is_ok()
     );
     assert!(
-        none.check_component_import("wasi:clocks/timezone@0.3.0")
+        none.check_component_import("wasi:clocks/timezone@0.3.0", false)
             .is_err()
     );
 }

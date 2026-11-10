@@ -80,7 +80,9 @@ impl PreparedContract {
         let mut resources = std::collections::BTreeMap::new();
         let mut entries = self.side(exports).iter().collect::<Vec<_>>();
         entries.sort_by(|left, right| left.key.cmp(&right.key));
-        for Entry { key, item } in entries {
+        for entry in entries {
+            let ingress = exports && crate::lower::is_ingress(entry);
+            let Entry { key, item } = entry;
             match item {
                 Item::Type(_) => {}
                 Item::Function(_) => {
@@ -95,7 +97,9 @@ impl PreparedContract {
                             contract: interface.contract.clone(),
                             name: interface.name.clone(),
                             resources: interface.resources,
-                            functions: if exports {
+                            // The incoming HTTP handler is compared like a standard import:
+                            // its resources are host types, never portable values.
+                            functions: if exports && !ingress {
                                 self.interface_shape(interface)?
                             } else {
                                 self.component_shape(interface, &mut resources)?

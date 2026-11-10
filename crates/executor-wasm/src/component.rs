@@ -28,6 +28,8 @@ pub(crate) fn describe(
         let Item::Interface(interface) = &entry.item else {
             continue;
         };
+        // The incoming HTTP handler is declared like a service so `check_ingress` consumes it;
+        // it never becomes a portable service binding.
         if interface.contract.is_none() || interface.functions.is_empty() {
             continue;
         }
@@ -142,6 +144,7 @@ fn layout(
         exports,
         imports,
         contributions,
+        ingress: contract.ingress().map(str::to_owned),
     })
 }
 
@@ -156,6 +159,12 @@ pub(crate) fn check_component_imports(
     grants: &Grants,
 ) -> Result<()> {
     use wasmtime::component::types::ComponentItem;
+    // Request and response types are admitted without an outgoing grant only for a binary that
+    // itself exports the incoming HTTP handler; the client never is.
+    let serves_http = component
+        .component_type()
+        .exports(engine)
+        .any(|(name, _)| name == tembra_contracts::HTTP_HANDLER);
     for (name, item) in component.component_type().imports(engine) {
         let ComponentItem::ComponentInstance(instance) = item.ty else {
             continue;
@@ -167,7 +176,7 @@ pub(crate) fn check_component_imports(
             .exports(engine)
             .any(|(_, item)| matches!(item.ty, ComponentItem::ComponentFunc(_)))
         {
-            grants.check_component_import(name)?;
+            grants.check_component_import(name, serves_http)?;
         }
     }
     Ok(())

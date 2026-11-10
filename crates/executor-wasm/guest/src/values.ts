@@ -1,6 +1,12 @@
 // The outer host validates independently; these conversions only restore JavaScript shapes.
 // Lowered values are rebuilt from fresh containers and primitive leaves, so the following
 // `JSON.stringify` cannot invoke `toJSON`, accessors or coercions on Orb-supplied objects.
+// WIT `u64`/`s64` are `bigint` in JavaScript and canonical decimal strings on the wire.
+import {
+  integerText,
+  integerValue,
+} from "../../../../packages/ts/sdk/src/interpreter/wit-shape.ts";
+
 (() => {
   const contract = globalThis.__tembraContract;
   const types = new Map(contract.types.map(({ id, definition }) => [id, definition.kind]));
@@ -13,6 +19,8 @@
     s32: Int32Array,
     f32: Float32Array,
     f64: Float64Array,
+    u64: BigUint64Array,
+    s64: BigInt64Array,
   };
 
   /** Use the JavaScript spelling emitted by the official WIT type generator. */
@@ -41,6 +49,8 @@
 
   /** Convert between bounded JSON values and the official JavaScript binding shapes. */
   function convert(type: WitType, value: any, lift: boolean): any {
+    if (type === "u64" || type === "s64")
+      return lift ? integerValue(type, value) : integerText(type, value);
     if (typeof type !== "number") {
       if (type === "f32" || type === "f64") {
         if (typeof value !== "number" || !Number.isFinite(value) || Object.is(value, -0))

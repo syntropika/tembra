@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { createContext, runInContext } from "node:vm";
 import { TembraError } from "../src/error.ts";
 import { Encoded, check, encode, packet } from "../src/interpreter/codec.ts";
@@ -300,14 +300,18 @@ test("unchanged state reads omit the value but still check ownership and lifetim
   expect(() => reader.sync({ operation: "state.read", id, known: "5" })).toThrow(/gone/);
 });
 
-/** Load one guest script into a fresh realm, as the interpreter bootstrap does. */
+/** Load one guest script into a fresh realm, bundled as the interpreter build bundles it. */
 async function guest(name: string, globals: Record<string, unknown>) {
-  const source = await readFile(
-    new URL(`../../../../crates/executor-wasm/guest/src/${name}`, import.meta.url),
-    "utf8",
-  );
+  const built = await Bun.build({
+    entrypoints: [
+      fileURLToPath(new URL(`../../../../crates/executor-wasm/guest/src/${name}`, import.meta.url)),
+    ],
+    format: "iife",
+    target: "node",
+  });
+  if (!built.success) throw new AggregateError(built.logs);
   const context = createContext(globals);
-  runInContext(new Bun.Transpiler({ loader: "ts" }).transformSync(source), context);
+  runInContext(await built.outputs[0]!.text(), context);
   return context;
 }
 

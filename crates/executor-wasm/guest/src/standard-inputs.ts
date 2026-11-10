@@ -30,6 +30,9 @@ interface Input {
 /** One revision's callback-owned writers; the runtime closes them at callback end. */
 export class InputBindings {
   readonly active = new Set<Input>();
+  /** Body pumps still producing; futures depend on their author's promise instead. */
+  readonly pumps = new Set<Input>();
+  #idle: (() => void)[] = [];
   constructor(
     readonly sync: (bytes: Uint8Array) => Uint8Array,
     readonly async: (bytes: Uint8Array) => Promise<Uint8Array>,
@@ -43,6 +46,23 @@ export class InputBindings {
 
   close(): void {
     for (const writer of [...this.active]) writer.close();
+  }
+
+  /** A writer finished or closed; wake `idle` waiters once no pump is left. */
+  finished(input: Input): void {
+    this.active.delete(input);
+    this.pumps.delete(input);
+    if (this.pumps.size) return;
+    const waiters = this.#idle;
+    this.#idle = [];
+    for (const wake of waiters) wake();
+  }
+
+  /** Resolve once every body pump of the current callback has finished or closed. */
+  idle(): Promise<void> {
+    return this.pumps.size
+      ? new Promise<void>((resolve) => this.#idle.push(resolve))
+      : Promise.resolve();
   }
 
   drop(handle: number): void {
@@ -163,7 +183,7 @@ class FutureInput implements Input {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.bindings.active.delete(this);
+    this.bindings.finished(this);
     this.bindings.discardFuture(this.payload, this.#resolved);
     try {
       this.bindings.drop(this.handle);
@@ -213,6 +233,7 @@ class Pump {
       this.#iterator = source[Symbol.asyncIterator]?.() ?? source[Symbol.iterator]();
     }
     this.bindings.active.add(this);
+    this.bindings.pumps.add(this);
   }
 
   /** Run to end of input; resolve with the source's own failure, if any. */
@@ -277,7 +298,7 @@ class Pump {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.bindings.active.delete(this);
+    this.bindings.finished(this);
     const iterator = this.#iterator;
     this.#iterator = undefined;
     try {

@@ -46,6 +46,10 @@ pub(super) fn lower(ty: Type, value: &Value) -> Result<Val> {
                 .and_then(|v| v.try_into().ok())
                 .ok_or_else(invalid)?,
         ),
+        // The packet wire spells 64-bit integers as the canonical decimal strings the contract
+        // checked, so no JavaScript host ever parses an inexact number.
+        Type::S64 => Val::S64(wide(value).ok_or_else(invalid)?),
+        Type::U64 => Val::U64(wide(value).ok_or_else(invalid)?),
         Type::Float32 => Val::Float32(value.as_f64().ok_or_else(invalid)? as f32),
         Type::Float64 => Val::Float64(value.as_f64().ok_or_else(invalid)?),
         Type::Char => Val::Char(
@@ -136,6 +140,8 @@ pub(super) fn lift(value: Val) -> Result<Value> {
         Val::U8(value) => json!(value),
         Val::U16(value) => json!(value),
         Val::U32(value) => json!(value),
+        Val::S64(value) => json!(value.to_string()),
+        Val::U64(value) => json!(value.to_string()),
         Val::Float32(value) => float(value.into())?,
         Val::Float64(value) => float(value)?,
         Val::Char(value) => json!(value.to_string()),
@@ -171,6 +177,11 @@ pub(super) fn lift(value: Val) -> Result<Value> {
             ));
         }
     })
+}
+
+/// Parse a wire-form integer whose canonical spelling callers already checked against WIT.
+fn wide<T: std::str::FromStr>(value: &Value) -> Option<T> {
+    value.as_str()?.parse().ok()
 }
 
 /// Refuse values JSON would silently change or replace with null.

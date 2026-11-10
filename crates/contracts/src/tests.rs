@@ -192,7 +192,8 @@ fn value_validation_checks_records_widths_and_tuple_lengths() {
             .validate_slot(add, false, &serde_json::json!("3"))
             .is_err()
     );
-    assert!(contract.check_value_profile().is_err());
+    // `sum` returns an `s64`: 64-bit integers are part of the portable profile.
+    assert!(contract.check_value_profile().is_ok());
 }
 
 #[test]
@@ -253,11 +254,20 @@ fn lossy_values_are_refused_before_the_interpreter_runs() {
             .validate_slot(read, false, &serde_json::json!(-0.0))
             .is_err()
     );
+    // An Orb import with 64-bit integers is admitted; error contexts still have no codec.
     let consumer = Contract::from_source("example.wit", SOURCE, Some("consumer")).unwrap();
     assert!(
         consumer
             .check_import_value_profile("example:calculation/arithmetic@1.2.0")
-            .is_err()
+            .is_ok()
+    );
+    let context = Contract::from_source("context.wit","package example:values; interface values { read: func() -> error-context; } world run { export values; }",None).unwrap();
+    assert!(
+        context
+            .check_value_profile()
+            .unwrap_err()
+            .0
+            .contains("error contexts")
     );
 }
 

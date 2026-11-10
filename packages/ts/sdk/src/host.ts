@@ -14,6 +14,19 @@ import type {
 import { KernelOp } from "./bridge/protocol.ts";
 import { Context } from "./runtime/context.ts";
 import { Session } from "./runtime/session.ts";
+import {
+  checkedRequest,
+  HTTP_HANDLER,
+  IngressExchange,
+  type HandleHttpOptions,
+  type HttpHandlerResponse,
+  type IncomingHttpRequest,
+} from "./interpreter/http-ingress.ts";
+import {
+  fromFetchRequest,
+  isFetchRequest,
+  toFetchResponse,
+} from "./interpreter/http-ingress-fetch.ts";
 
 /** The application facade. Platform entrypoints provide its metadata kernel and module loader. */
 export class Host {
@@ -108,6 +121,72 @@ export class Host {
     return this.session.calls.root(operation, false, undefined, options.principal);
   }
 
+  /**
+   * Serve one incoming HTTP request with the named Orb's `wasi:http/handler` export. The
+   * application owns listening, routing and authentication; this only runs the handler.
+   *
+   * The promise resolves with the response head as soon as the handler returned it; the body is
+   * produced while it is read. The call runs in its own root, which stays open, with its
+   * authority, until the delivery ended and all physical work settled: reading the body and
+   * trailers to the end, calling `return()` on the body iterator (a client disconnect), or
+   * cancelling through `options.signal`. A failure before the head (the handler's
+   * `error-code` as `HttpHandlerError`, a trap, a refusal) is reported after that settlement.
+   * One request is one callback of the Orb's revision, and the revision timeout covers the
+   * whole exchange, body included; a timeout retires the revision.
+   *
+   * The raw form is lossless. A WHATWG `Request` is answered with a WHATWG `Response`, and a
+   * response that form cannot represent is refused.
+   */
+  handleHttp(
+    orb: string,
+    request: IncomingHttpRequest,
+    options?: HandleHttpOptions,
+  ): Promise<HttpHandlerResponse>;
+  handleHttp(orb: string, request: Request, options?: HandleHttpOptions): Promise<Response>;
+  handleHttp(
+    orb: string,
+    request: IncomingHttpRequest | Request,
+    options: HandleHttpOptions = {},
+  ): Promise<HttpHandlerResponse | Response> {
+    if (isFetchRequest(request))
+      return this.handleHttp(orb, fromFetchRequest(request), options).then(toFetchResponse);
+    let exchange: IngressExchange;
+    try {
+      exchange = new IngressExchange(checkedRequest(request));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const session = this.session;
+    const { signal, principal } = options;
+    const served = session.calls.root(
+      async (ctx) => {
+        const cancel = () => ctx.cancel();
+        if (signal?.aborted) cancel();
+        else signal?.addEventListener("abort", cancel, { once: true });
+        try {
+          const reference = await ctx.get(`${orb}::${HTTP_HANDLER}`, ["main"]);
+          // The root stays open for the physical call, not for the caller's observation of it.
+          await session.calls.invokePhysical(
+            session.handles.reference(reference),
+            "handle",
+            [exchange],
+            ctx,
+          );
+        } finally {
+          signal?.removeEventListener("abort", cancel);
+        }
+      },
+      false,
+      undefined,
+      principal,
+    );
+    void session.track(served).then(
+      () => exchange.settle(),
+      (error) => exchange.settle(error),
+    );
+    return exchange.head;
+  }
+
   /** Declare a resource owned by this host. */
   resource<T>(name: string, options: ResourceOptions<T>) {
     return this.session.scopes.resource(name, options);
@@ -168,6 +247,14 @@ export {
 } from "./bridge/identifiers.ts";
 
 export { Errors, type ErrorDescriptor } from "./errors.ts";
+
+export {
+  HttpHandlerError,
+  type HandleHttpOptions,
+  type HttpHandlerResponse,
+  type IncomingHttpRequest,
+} from "./interpreter/http-ingress.ts";
+export type { HttpField } from "./interpreter/http-provider.ts";
 
 export type { KernelPort } from "./bridge/kernel.ts";
 

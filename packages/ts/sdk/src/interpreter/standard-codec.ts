@@ -24,6 +24,13 @@ export const STREAM_WRITE = 5;
 export const FUTURE_NEW = 6;
 /** Resolve a guest-writable future with one typed payload. */
 export const FUTURE_WRITE = 7;
+/**
+ * Asynchronous, incoming HTTP callbacks only: publish the handler's
+ * `result<own<response>, error-code>` once. The host publishes the head at once and completes the
+ * operation only when the response delivery reached its end, so the callback stays alive while
+ * the response streams. The reply is empty.
+ */
+export const INGRESS_HEAD = 8;
 /** Largest byte chunk either side moves through one stream read or write. */
 export const STREAM_CHUNK = 64 << 10;
 

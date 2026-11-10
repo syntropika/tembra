@@ -274,6 +274,7 @@ impl<'a> Generator<'a> {
         );
         let (futures, writable) = self.writable_futures();
         rust += &futures;
+        rust += &self.ingress();
         rust += &self.helpers;
         let budgeted: Vec<String> = (0..self.resources.len())
             .map(|kind| self.budgeted_kind(kind).to_string())
@@ -337,6 +338,39 @@ impl<'a> Generator<'a> {
              match kind {{\n{drops}        _ => Err(invalid(\"unknown resource kind\")),\n    }}\n}}\n"
         );
         (rust, methods, writable)
+    }
+
+    /// Incoming HTTP support for source handlers, derived from `wasi:http/client#send`, whose
+    /// signature `wasi:http/handler#handle` shares exactly: the resource kinds of the request
+    /// the host issues and of the response the guest returns, and the decoder of the guest's
+    /// `result<own<response>, error-code>` with the same layout as `send`'s result.
+    fn ingress(&mut self) -> String {
+        let client = self.interface("wasi:http/client@0.3.0");
+        let send = self.resolve.interfaces[client]
+            .functions
+            .get("send")
+            .expect("bundled WIT has wasi:http/client#send");
+        let result = send.result.expect("send returns a result");
+        let kind = |qualified: &str| {
+            self.resources
+                .iter()
+                .position(|(name, _)| name == qualified)
+                .unwrap_or_else(|| panic!("generated bindings have no resource {qualified}"))
+        };
+        let request = kind("wasi:http/types@0.3.0#request");
+        let response = kind("wasi:http/types@0.3.0#response");
+        let rust = self.rust_type(result);
+        let decode = self.decode(result);
+        format!(
+            "/// Resource kind of the request a source handler receives.\n\
+             pub(super) const HTTP_REQUEST: u32 = {request};\n\
+             /// Resource kind of the response a source handler returns.\n\
+             #[allow(dead_code)] pub(super) const HTTP_RESPONSE: u32 = {response};\n\
+             /// Decode a handler's published result (`client.send`'s result layout); owned handles\n\
+             /// are claimed in `seen` and leave the table only once the caller commits them.\n\
+             #[allow(unused_variables, unused_mut, clippy::all)]\n\
+             fn decode_ingress_result(r: &mut Reader<'_>, h: &Handles) -> wasmtime::Result<({rust}, Vec<u64>)> {{ let mut seen = Vec::new(); let value: {rust} = {decode}; r.end()?; Ok((value, seen)) }}\n"
+        )
     }
 
     /// Generated guest-writable future support: the admitted `TYPES` indices, their typed

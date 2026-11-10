@@ -21,7 +21,7 @@ fn main() {
     let (rust, typescript) = codegen::generate(&resolve);
     // The core import name binds both sides to this exact generated value/method schema.
     let identity = Sha256::digest(typescript.as_bytes());
-    println!("cargo:rustc-env=TEMBRA_INTERPRETER_IMPORT_MODULE=tembra-interpreter-v7-{identity:x}");
+    println!("cargo:rustc-env=TEMBRA_INTERPRETER_IMPORT_MODULE=tembra-interpreter-v9-{identity:x}");
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out.join("standard.rs"), rust).expect("write Rust bindings");
     std::fs::write(out.join("standard.ts"), typescript).expect("write TypeScript table");

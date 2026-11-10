@@ -42,6 +42,9 @@ const STREAM_NEW: u8 = 4;
 const STREAM_WRITE: u8 = 5;
 const FUTURE_NEW: u8 = 6;
 const FUTURE_WRITE: u8 = 7;
+/// Asynchronous, incoming HTTP callbacks only: publish the handler's result once; completes
+/// when the response delivery ended.
+const INGRESS_HEAD: u8 = 8;
 /// Bytes buffered per stream before the upstream producer is paused.
 const PIPE_BYTES: usize = 64 << 10;
 /// Live handles per revision.
@@ -197,6 +200,84 @@ fn commit(
         }
         Err(error) => Err(error),
     }
+}
+
+/// Issue the incoming request of an ingress callback as an owned handle of this revision.
+pub(super) fn issue_request(
+    state: &mut State,
+    request: Resource<wasmtime_wasi_http::p3::Request>,
+) -> wasmtime::Result<Result<u64, String>> {
+    let id = state.standard.handles.own(HTTP_REQUEST, request);
+    Ok(commit(state, Ok(Vec::new()))?.map(|_| id))
+}
+
+/// Release the request of an ended ingress callback if the guest never took it.
+pub(super) fn release_unclaimed(state: &mut State, id: u64) -> wasmtime::Result<()> {
+    if matches!(
+        state.standard.handles.entries.get(&id),
+        Some(Entry::Resource { kind, .. }) if *kind == HTTP_REQUEST
+    ) {
+        match release(state, id) {
+            Err(error) if error.is::<Refused>() => {}
+            other => other?,
+        }
+    }
+    Ok(())
+}
+
+/// Publish an ingress callback's response once (`INGRESS_HEAD`). The response handle leaves the
+/// guest only after the whole packet validated; the head is published at once; the returned
+/// task completes only when the response delivery ended, so the callback lasts until then. A
+/// handler `error-code` publishes no response and completes at once.
+fn publish_ingress(
+    mut store: StoreContextMut<'_, State>,
+    reader: &mut Reader<'_>,
+    reply: Reply,
+) -> wasmtime::Result<JoinHandle> {
+    let Some(ingress) = store.data_mut().ingress.as_mut() else {
+        return Err(invalid("no incoming HTTP request is active"));
+    };
+    if ingress.head.is_none() {
+        return Err(invalid("the HTTP response was already published"));
+    }
+    let (value, seen) = decode_ingress_result(reader, &store.data().standard.handles)?;
+    let ingress = store.data_mut().ingress.as_mut().expect("checked above");
+    let head = ingress.head.take().expect("checked above");
+    let received = ingress.received.take().expect("taken with the head");
+    let exchange = Arc::clone(&ingress.exchange);
+    store.data_mut().standard.handles.commit(seen);
+    match value {
+        Ok(response) => {
+            use wasmtime_wasi_http::WasiHttpView;
+            let response = store.data_mut().http().table.delete(response)?;
+            let response =
+                response.into_http(store.as_context_mut(), exchange.transmission(received))?;
+            crate::ingress::IngressCall::publish(&exchange, head, response);
+        }
+        Err(code) => {
+            exchange.absent();
+            let message = format!("the incoming HTTP handler returned {code:?}");
+            if let Some(ingress) = store.data_mut().ingress.as_mut() {
+                ingress.refused = Some(message.clone());
+            }
+            let _ = head.send(Err(tembra::Error::new(
+                tembra::core::Code::Unavailable,
+                "wasi_http_handler",
+                message,
+            )));
+        }
+    }
+    store.spawn(async move |_: &wasmtime::component::Accessor<State>| {
+        exchange.delivered().await;
+        if let Some(reply) = reply {
+            let _ = reply.send(Ok(Delivery {
+                bytes: Vec::new(),
+                issued: Vec::new(),
+                read: None,
+            }));
+        }
+        Ok(())
+    })
 }
 
 /// Release handles whose reply never reached the guest, plus orphans of a refused reply.
@@ -593,6 +674,7 @@ pub(super) fn spawn(
                     },
                 )?
             }
+            INGRESS_HEAD => publish_ingress(store.as_context_mut(), &mut reader, reply)?,
             _ => return Err(invalid("unknown standard operation")),
         };
         Ok((handle, leases, receive))

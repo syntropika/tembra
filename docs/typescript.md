@@ -212,6 +212,12 @@ Browser clock/random providers can likewise be injected through `isolated.provid
 and `isolated.providers.random`. Without an injected random provider, secure bytes use
 `crypto.getRandomValues`; unavailable cryptography is an error, never a `Math.random` fallback.
 
+The `"cli"` grant provides only the supported environment, arguments, standard I/O, terminal
+queries and revision exit interfaces. It does not allow spawning native processes or grant
+filesystem, network, clock or random access. Native process execution, when needed, must be
+provided by an application-owned host adapter with separate, explicit authorization for the Orb.
+Tembra does not currently provide a native process adapter.
+
 `wasi:cli/exit` ends only the invoking revision, including inside a guest try/catch, and reports
 its exit status. Supplied adapters are not terminals, so terminal getters return none. The
 unstable timezone interface has no implementation in the pinned upstream release.
@@ -246,6 +252,12 @@ async function updateAndRead(consume: (chunk: Uint8Array) => void): Promise<void
 Ordinary WIT exports become services named `<orb>::<package>/<interface>@<version>`. Acquire them with the
 string form of `host.get`. Kebab-case WIT names stay kebab-case on the reference, for example
 `reference["resource-value"]()`.
+
+WIT `u64` and `s64` arguments and results use `bigint`, even for `0n` and `1n`.
+Tembra preserves their full range across Orb calls, including nested records, lists, options,
+variants and results. A JavaScript `number` or numeric `string` in a 64-bit position is refused;
+use `bigint` before any arithmetic that could exceed the safe integer range. WIT `string` values
+are never reinterpreted as integers.
 
 The interpreter is loaded from `@syntropika/tembra-engine-node` when the first source orb is
 installed. Hosts that install only compiled components never load it. `isolated.onLog` receives

@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 import { createContext, runInContext } from "node:vm";
 import path from "node:path";
 import { StandardHost } from "../src/interpreter/standard-host.ts";
-import { fetchHttpProvider } from "../src/interpreter/http-provider.ts";
+import { fetchHttpProvider } from "../src/interpreter/fetch-http-provider.ts";
 import { resolver } from "../src/tooling/resolver.ts";
 
 const imports = new Set(["wasi:http/client@0.3.0", "wasi:http/types@0.3.0"]);

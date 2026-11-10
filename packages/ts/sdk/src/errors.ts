@@ -167,6 +167,7 @@ export const Errors = Object.freeze({
       Reason.JsonValue,
       "This JSON codec requires explicit portable values",
     ),
+    LocalValue: define(Code.Invalid, Reason.LocalValue, "This host-local value is not portable"),
     Method: define(Code.Invalid, Reason.Method, "Methods must be functions"),
     NextUsed: define(Code.Invalid, Reason.NextUsed, "Invalid next used"),
     Priority: define(Code.Invalid, Reason.Priority, "Invalid priority"),

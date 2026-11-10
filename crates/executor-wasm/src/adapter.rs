@@ -16,6 +16,7 @@ pub(crate) fn orb(
     contract: tembra_contracts::PreparedContract,
     bindings: &BTreeMap<String, tembra_contracts::Binding>,
     hooks: tembra_contracts::HookPlan,
+    ingress: Option<tembra_contracts::IngressBinding>,
 ) -> Result<Orb> {
     let mut orb = Orb::new(&metadata.name, metadata.api_version).isolated();
     let imports = contract
@@ -152,19 +153,68 @@ pub(crate) fn orb(
                     let spelling = spelling.clone();
                     let contract = contract.clone();
                     async move {
-                        contract.validate_slot(slot, true, &args).map_err(failure)?;
+                        // Packets spell WIT 64-bit integers as canonical decimal strings.
+                        let args = contract.to_wire(slot, true, args).map_err(failure)?;
                         let value = environment.invoke(context, &spelling, args).await?;
-                        contract
-                            .validate_slot(slot, false, &value)
-                            .map_err(failure)?;
-                        Ok(value)
+                        contract.from_wire(slot, false, value).map_err(failure)
                     }
                 },
             );
         }
         orb = orb.service(implementation);
     }
+    if let Some(binding) = ingress {
+        orb = orb.service(handler(
+            binding,
+            session,
+            imports,
+            contract,
+            hook_bindings,
+            next,
+        ));
+    }
     Ok(orb)
+}
+
+/// The host-local service through which the facade calls the incoming HTTP handler.
+///
+/// It has no signature and no portable entrypoint: WIT dependency admission cannot select it,
+/// and every portable call is refused by the kernel. Its typed argument is constructed only by
+/// `crate::ingress::serve`.
+fn handler(
+    binding: tembra_contracts::IngressBinding,
+    session: Session,
+    imports: Rc<BTreeMap<String, Rc<Import>>>,
+    contract: tembra_contracts::PreparedContract,
+    hooks: Rc<BTreeMap<String, tembra_contracts::HookBinding>>,
+    next: Rc<Cell<u64>>,
+) -> Service<Environment> {
+    let gate = session.clone();
+    let alias = binding.alias;
+    let method = Rc::<str>::from(binding.method);
+    Service::new(binding.name, move |declaration| {
+        Environment::create(
+            session.clone(),
+            allocate_environment(&next)?,
+            declaration,
+            Some(alias.clone()),
+            imports.clone(),
+            contract.clone(),
+            hooks.clone(),
+        )
+    })
+    .lifetime(binding.lifetime.into(), binding.linger)
+    .before_create(move || {
+        let session = gate.clone();
+        async move { session.reserve_factory().await }
+    })
+    .local_method(
+        crate::ingress::HANDLE,
+        move |environment: Rc<Environment>, context, ingress: crate::ingress::Ingress| {
+            let method = method.clone();
+            async move { environment.ingress(context, &method, ingress).await }
+        },
+    )
 }
 
 /// Root and object redeclarations share an identity sequence and never overwrite an old heap slot.

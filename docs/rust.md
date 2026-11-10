@@ -22,6 +22,8 @@ It can declare state and managed resources.
 `method()` binds one callback for local and portable calls.
 Its argument type must implement `DeserializeOwned`; its result must implement `Serialize`.
 Local invocation still passes native values without serializing them.
+`local_method()` accepts types without those portable traits and refuses every portable call
+before entering the callback; use it for host-owned values such as streaming HTTP bodies.
 
 ## Execute and close
 
@@ -76,6 +78,39 @@ host.install(vec![orb])?;
 call or provide services through the same kernel. Each loaded orb runs in its own Wasm Store.
 See [Wasm orb execution](../crates/executor-wasm/README.md) and
 [the Wasm consumer example](../examples/rust/wasm.rs).
+
+## Serve incoming HTTP
+
+A compiled component can export the standard `wasi:http/handler@0.3.0` interface. The application
+owns its listener, authentication and routing, then passes each request to the installed orb:
+
+```rust,ignore
+use std::rc::Rc;
+use tembra_executor_wasm::ingress::{handler_service, serve};
+
+let reference = Rc::new(host.get(&handler_service("web"), vec!["main".into()], "authenticated-user")?);
+reference.ready().await?;
+let (response, settled) = serve(&host, "authenticated-user", reference, request).await?;
+// Send the status, fields and streaming body with the application's HTTP server.
+// The host's supplied executor must keep running while the response is consumed.
+send_response(response).await?;
+settled.await?;
+```
+
+`serve` returns the headers before the body ends. It owns a root on the host's existing executor,
+so returning the response or dropping the completion observer does not expire the orb's authority
+mid-stream. The body is `Send`; completion and cancellation stay on the host's thread.
+`settled.cancel()` cancels the request; dropping its response body signals disconnect and closes
+the incoming request body. `host.close()` waits for physical completion.
+
+A handler-only orb needs no outgoing HTTP grant. Importing the outgoing client still requires
+its own provider and origin grant. The handler is a host-local entrypoint; other orbs cannot
+bind to its owned request/response resources through the portable value ABI.
+
+One streaming request holds the revision's single callback slot. `Limits.timeout_ms` covers the
+whole request, including its body; exceeding it quarantines that revision. A guest that ignores
+all disconnect signals also remains bounded by that timeout. This compiled Rust facade is the
+first incoming HTTP slice; source and foreign-host support are qualified separately.
 
 ## Native composition and ownership
 

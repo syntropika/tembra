@@ -9,7 +9,93 @@ use std::{
 };
 use tembra_executor_wasm::{
     Binding, Engine, Grants, InterpreterPort, PortEvent, PortEvents, PortReply, PortTicket,
+    ingress::{
+        IngressEvent, IngressField, IngressPort, IngressRequestChunk, IngressRequestHead,
+        IngressResponseFrame,
+    },
 };
+
+/// One HTTP field; its value is raw bytes (`ByteArray` / `Data`).
+#[derive(uniffi::Record)]
+pub struct MobileField {
+    pub name: String,
+    pub value: Vec<u8>,
+}
+
+/// The incoming request head the host passes to `begin_ingress`.
+#[derive(uniffi::Record)]
+pub struct MobileRequestHead {
+    pub method: String,
+    pub scheme: Option<String>,
+    pub authority: Option<String>,
+    pub path_with_query: Option<String>,
+    pub fields: Vec<MobileField>,
+}
+
+/// The host's answer to one `RequestPull`.
+#[derive(uniffi::Enum)]
+pub enum MobileRequestChunk {
+    Data {
+        bytes: Vec<u8>,
+    },
+    /// The end of the request body; empty `trailers` for none.
+    End {
+        trailers: Vec<MobileField>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// One event of an incoming HTTP exchange; JSON appears only in host-request and completion
+/// packets, bodies and fields are bytes.
+#[derive(uniffi::Enum)]
+pub enum MobileIngressEvent {
+    Host {
+        id: u32,
+        asynchronous: bool,
+        packet: String,
+    },
+    /// The exchange's completion envelope (JSON); `finish` follows.
+    Complete {
+        result: String,
+    },
+    Head {
+        status: u16,
+        fields: Vec<MobileField>,
+    },
+    RequestPull,
+    Data {
+        bytes: Vec<u8>,
+    },
+    Trailers {
+        fields: Vec<MobileField>,
+    },
+    End,
+    Error {
+        message: String,
+    },
+}
+
+fn ingress_fields(fields: Vec<MobileField>) -> Vec<IngressField> {
+    fields
+        .into_iter()
+        .map(|field| IngressField {
+            name: field.name,
+            value: field.value,
+        })
+        .collect()
+}
+
+fn mobile_fields(fields: Vec<IngressField>) -> Vec<MobileField> {
+    fields
+        .into_iter()
+        .map(|field| MobileField {
+            name: field.name,
+            value: field.value,
+        })
+        .collect()
+}
 
 #[derive(serde::Serialize)]
 #[serde(tag = "event", rename_all = "lowercase")]
@@ -30,6 +116,8 @@ struct State {
 }
 struct Exchange {
     events: PortEvents,
+    /// The carrier of an incoming HTTP exchange.
+    ingress: Option<IngressPort>,
     closed: AtomicBool,
     replies: Mutex<BTreeMap<u32, PortReply>>,
     sequence: Arc<AtomicU32>,
@@ -44,6 +132,19 @@ pub struct NativePort {
 }
 
 impl NativePort {
+    /// Run `job` with the active incoming HTTP carrier.
+    fn carrier<R>(
+        &self,
+        job: impl FnOnce(&IngressPort) -> Result<R, MobileError>,
+    ) -> Result<R, MobileError> {
+        let exchange = self.active()?;
+        let carrier = exchange
+            .ingress
+            .as_ref()
+            .ok_or_else(|| error("No incoming HTTP exchange is active"))?;
+        job(carrier)
+    }
+
     /// Keep the executor port and its local ownership ticket on one dedicated thread.
     pub(super) fn new(
         engine: Engine,
@@ -123,6 +224,7 @@ impl NativePort {
         })?;
         *active = Some(Arc::new(Exchange {
             events,
+            ingress: None,
             closed: AtomicBool::new(false),
             replies: Mutex::default(),
             sequence: self.sequence.clone(),
@@ -165,10 +267,137 @@ impl NativePort {
                         })
                         .expect("serializable completion"))
                     }
+                    PortEvent::Ingress(_) => Err(error(
+                        "Incoming HTTP exchanges are received with receive_ingress",
+                    )),
                 }
             })
             .await
             .map_err(error)?
+    }
+
+    /// Start an incoming HTTP exchange of this revision's host-local handler.
+    ///
+    /// `packet` is the `{"kind":"ingress",…}` control packet; the head travels typed. Receive
+    /// its events with `receive_ingress`; `Complete` is followed by `finish`.
+    pub fn begin_ingress(
+        &self,
+        packet: String,
+        head: MobileRequestHead,
+    ) -> Result<(), MobileError> {
+        let mut active = self.exchange.lock().map_err(error)?;
+        if active.is_some() {
+            return Err(error("An interpreter exchange is already active"));
+        }
+        let head = IngressRequestHead {
+            method: head.method,
+            scheme: head.scheme,
+            authority: head.authority,
+            path_with_query: head.path_with_query,
+            fields: ingress_fields(head.fields),
+        };
+        let (events, carrier) = self.command(move |state| {
+            let (ticket, events, carrier) =
+                state.port.begin_ingress(packet, head).map_err(error)?;
+            state.ticket = Some(ticket);
+            Ok((events, carrier))
+        })?;
+        *active = Some(Arc::new(Exchange {
+            events,
+            ingress: Some(carrier),
+            closed: AtomicBool::new(false),
+            replies: Mutex::default(),
+            sequence: self.sequence.clone(),
+        }));
+        Ok(())
+    }
+
+    /// Suspend the foreign promise until the next event of the active incoming HTTP exchange.
+    pub async fn receive_ingress(&self) -> Result<MobileIngressEvent, MobileError> {
+        let exchange = self.active()?;
+        super::delivery()?
+            .spawn(async move {
+                Ok(
+                    match exchange.events.receive_async().await.map_err(error)? {
+                        PortEvent::Host {
+                            packet,
+                            asynchronous,
+                            reply,
+                        } => {
+                            let id = exchange
+                                .sequence
+                                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                                    n.checked_add(1)
+                                })
+                                .map_err(|_| error("Response identity space exhausted"))?
+                                + 1;
+                            let mut replies = exchange.replies.lock().map_err(error)?;
+                            if exchange.closed.load(Ordering::Acquire) {
+                                return Err(MobileError::Closed);
+                            }
+                            replies.insert(id, reply);
+                            MobileIngressEvent::Host {
+                                id,
+                                asynchronous,
+                                packet,
+                            }
+                        }
+                        PortEvent::Complete(value) => {
+                            exchange.replies.lock().map_err(error)?.clear();
+                            MobileIngressEvent::Complete {
+                                result: serde_json::to_string(&Reply::from(value))
+                                    .expect("serializable completion"),
+                            }
+                        }
+                        PortEvent::Ingress(IngressEvent::Head(head)) => MobileIngressEvent::Head {
+                            status: head.status,
+                            fields: mobile_fields(head.fields),
+                        },
+                        PortEvent::Ingress(IngressEvent::RequestPull) => {
+                            MobileIngressEvent::RequestPull
+                        }
+                        PortEvent::Ingress(IngressEvent::Response(frame)) => match frame {
+                            IngressResponseFrame::Data(bytes) => MobileIngressEvent::Data { bytes },
+                            IngressResponseFrame::Trailers(fields) => {
+                                MobileIngressEvent::Trailers {
+                                    fields: mobile_fields(fields),
+                                }
+                            }
+                            IngressResponseFrame::End => MobileIngressEvent::End,
+                            IngressResponseFrame::Error(message) => {
+                                MobileIngressEvent::Error { message }
+                            }
+                        },
+                    },
+                )
+            })
+            .await
+            .map_err(error)?
+    }
+
+    /// Answer the pending `RequestPull`; `false` when the answer is no longer wanted.
+    pub fn supply_request(&self, chunk: MobileRequestChunk) -> Result<bool, MobileError> {
+        let chunk = match chunk {
+            MobileRequestChunk::Data { bytes } => IngressRequestChunk::Data(bytes),
+            MobileRequestChunk::End { trailers } => IngressRequestChunk::End {
+                trailers: ingress_fields(trailers),
+            },
+            MobileRequestChunk::Error { message } => IngressRequestChunk::Error(message),
+        };
+        self.carrier(|carrier| carrier.supply_request(chunk).map_err(error))
+    }
+
+    /// Ask for the next response frame; it arrives as one `Data`, `Trailers`, `End` or `Error`.
+    pub fn pull_response(&self) -> Result<(), MobileError> {
+        self.carrier(|carrier| carrier.pull_response().map_err(error))
+    }
+
+    /// The client went away: the response is dropped and the guest's request body closes.
+    pub fn disconnect(&self) -> Result<(), MobileError> {
+        self.carrier(|carrier| {
+            carrier.disconnect();
+            Ok(())
+        })
     }
 
     /// Resolve only the exact host request issued by this active exchange.
@@ -247,6 +476,10 @@ impl NativePort {
             let mut replies = exchange.replies.lock().unwrap_or_else(|e| e.into_inner());
             exchange.closed.store(true, Ordering::Release);
             replies.clear();
+            // An invalidated runtime is a disconnect for an incoming HTTP exchange.
+            if let Some(carrier) = &exchange.ingress {
+                carrier.disconnect();
+            }
             exchange.events.close();
         }
         let owner = self.owner.lock().unwrap_or_else(|e| e.into_inner()).take();

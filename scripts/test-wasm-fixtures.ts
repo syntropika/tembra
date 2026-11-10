@@ -169,6 +169,57 @@ for (const [name, source] of [
   await writeFile(path.join(sources, "sockets", `${name}.ts`), source);
   builds[name] = { entry: `sockets/${name}.ts`, wit: "sockets/contract.wit", world: "sockets" };
 }
+// Incoming HTTP: the handler Orb and the dependency it calls after its response head.
+const ingressFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-ingress");
+for (const [name, file, world] of [
+  ["ingress", "orb.ts", "handler"],
+  ["ledger", "ledger.ts", "provider"],
+  ["ingress-carrier", "carrier.ts", "handler-only"],
+] as const) {
+  await mkdir(path.join(sources, `ingress-${world}`), { recursive: true });
+  await writeFile(
+    path.join(sources, `ingress-${world}/contract.wit`),
+    await readFile(path.join(ingressFixture, "contract.wit")),
+  );
+  await writeFile(
+    path.join(sources, `ingress-${world}/${name}.ts`),
+    (await readFile(path.join(ingressFixture, file), "utf8")).replaceAll(
+      '"@syntropika/tembra-sdk"',
+      guest,
+    ),
+  );
+  builds[name] = {
+    entry: `ingress-${world}/${name}.ts`,
+    wit: `ingress-${world}/contract.wit`,
+    world,
+    minify: false,
+  };
+}
+// Exact u64/s64: a provider and a consumer relaying through its WIT import.
+const precisionFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-precision");
+for (const [name, file, world] of [
+  ["precision", "provider.ts", "provider"],
+  ["precision-relay", "consumer.ts", "consumer"],
+] as const) {
+  await mkdir(path.join(sources, `precision-${world}`), { recursive: true });
+  await writeFile(
+    path.join(sources, `precision-${world}/contract.wit`),
+    await readFile(path.join(precisionFixture, "contract.wit")),
+  );
+  await writeFile(
+    path.join(sources, `precision-${world}/${name}.ts`),
+    (await readFile(path.join(precisionFixture, file), "utf8")).replaceAll(
+      '"@syntropika/tembra-sdk"',
+      guest,
+    ),
+  );
+  builds[name] = {
+    entry: `precision-${world}/${name}.ts`,
+    wit: `precision-${world}/contract.wit`,
+    world,
+    minify: false,
+  };
+}
 // Standard WASI source Orbs: the example scenario and the acceptance-only boundary probes. Two
 // boundary revisions let acceptance pass one revision's handle number to the other.
 const standardFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-standard");

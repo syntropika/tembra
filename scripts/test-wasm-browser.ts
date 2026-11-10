@@ -73,13 +73,14 @@ const sources = new Map([
 ]);
 // The full suite qualifies an alternate engine when one is supplied; the other path gets a smoke run.
 const page = `<!doctype html><body>running<script type="module">
-import { verifyBrowserInterpreter, verifyEngineSelection, verifyStandardScenario } from "/fixture.js";
+import { verifyBrowserInterpreter, verifyEngineSelection, verifyStandardScenario, verifyPrecisionBrowser } from "/fixture.js";
 try {
   const override = new URL(${JSON.stringify(overrideEngine)}, location.href);
   const alternate = ${JSON.stringify(Boolean(alternate))};
   await verifyBrowserInterpreter(alternate ? override : undefined);
   await verifyEngineSelection(alternate ? undefined : override);
   const standard = await verifyStandardScenario(alternate ? override : undefined);
+  await verifyPrecisionBrowser(alternate ? override : undefined);
   await fetch("/report", { method: "POST", body: JSON.stringify(standard) });
   document.body.textContent = "TEMBRA_WASM_PASS";
 } catch (error) {

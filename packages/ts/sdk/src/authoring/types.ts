@@ -234,7 +234,10 @@ export interface NativeAdapter {
   /** Check whether Rust owns a managed hook participant. */
   hasContribution?(operation: number): boolean;
 
-  /** Execute a native hook participant while retaining its physical lifetime. */
+  /**
+   * Execute a native hook participant while retaining its physical lifetime. `input` is in the
+   * JavaScript domain form, as for `invoke`.
+   */
   contribute?(operation: number, context: Context, input: unknown): Promise<unknown>;
 
   /** Check whether Rust owns this orb implementation. */
@@ -249,7 +252,13 @@ export interface NativeAdapter {
     principal: string,
   ): Promise<void>;
 
-  /** Execute an admitted call in Rust. */
+  /**
+   * Execute an admitted call in Rust. `arguments_` are in the JavaScript domain form on every
+   * route (an application call, a WIT import of an isolated Orb, a hook): WIT `u64`/`s64` values
+   * are `bigint`, never the executor wire's decimal strings, and the result follows the same form.
+   * An adapter bridging to the Rust kernel converts to and from its exact numeric JSON values
+   * with the WIT signature; no adapter implementation ships with the SDK.
+   */
   invoke(
     invocation: Invocation,
     arguments_: readonly unknown[],

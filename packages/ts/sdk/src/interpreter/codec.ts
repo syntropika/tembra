@@ -3,12 +3,16 @@
  *
  * Hostile JavaScript input is read exactly once and written directly as JSON text. Everything
  * that `JSON.stringify` would coerce silently is refused before any text exists: non-finite
- * numbers, negative zero, BigInt, functions, symbols, accessors, `toJSON`, class instances,
- * sparse arrays, cycles and BigInt or DataView buffers. This is only a data encoder; the trusted
- * Rust prepared contract remains the single WIT validator and always checks these exact bytes.
+ * numbers, negative zero, functions, symbols, accessors, `toJSON`, class instances, sparse
+ * arrays, cycles and DataView buffers. A `bigint` (or a `BigUint64Array`/`BigInt64Array`) is
+ * accepted only where the prepared signature's `Shape` marks a WIT `u64`/`s64`, and is written in
+ * the same walk as canonical decimal text; no other JavaScript kind is accepted there. This is
+ * only a data encoder; the trusted Rust prepared contract remains the single WIT validator and
+ * always checks these exact bytes.
  */
 import { failure } from "../error.ts";
 import type { ContractPort } from "./types.ts";
+import { isInteger, type IntegerKind, type Shape } from "./wit-shape.ts";
 
 /** Default ceiling for one captured value, matching the default interpreter packet bound. */
 export const VALUE_LIMIT = 8 << 20;
@@ -64,8 +68,18 @@ function number(value: number): string {
   return "" + value;
 }
 
-/** Capture `value` once, bounded by UTF-16 length and container depth. */
-export function encode(value: unknown, limit = VALUE_LIMIT): Encoded {
+/** The 64-bit element kind of a list shape, if any. */
+function listKind(shape: Shape | undefined): IntegerKind | undefined {
+  return typeof shape === "object" && "list" in shape && typeof shape.list === "string"
+    ? shape.list
+    : undefined;
+}
+
+/**
+ * Capture `value` once, bounded by UTF-16 length and container depth. `shape` (from the prepared
+ * signature) marks WIT `u64`/`s64` positions; without one, the walk is the untyped capture.
+ */
+export function encode(value: unknown, limit = VALUE_LIMIT, shape?: Shape): Encoded {
   const ancestors: object[] = [];
   let size = 0;
 
@@ -76,7 +90,22 @@ export function encode(value: unknown, limit = VALUE_LIMIT): Encoded {
     return text;
   };
 
-  const visit = (value: unknown): string => {
+  const visit = (value: unknown, shape: Shape | undefined): string => {
+    if (typeof shape === "string") {
+      // A WIT 64-bit position accepts only an in-range bigint primitive.
+      if (!isInteger(shape, value))
+        refused(
+          typeof value === "bigint"
+            ? `${shape} value is out of range`
+            : `${shape} requires a bigint, not ${value === null ? "null" : typeof value}`,
+        );
+      return emit(`"${value}"`);
+    }
+    if (shape !== undefined && "option" in shape) {
+      if (value === null || value === undefined) return emit("null");
+      shape = shape.option;
+      if (typeof shape === "string") return visit(value, shape);
+    }
     switch (typeof value) {
       case "string":
         return emit(quote(value));
@@ -88,7 +117,7 @@ export function encode(value: unknown, limit = VALUE_LIMIT): Encoded {
         // The official bindings spell an absent option as `undefined`; JSON spells it `null`.
         return emit("null");
       case "bigint":
-        return refused("BigInt requires a dedicated 64-bit codec");
+        return refused("BigInt is portable only in a WIT u64/s64 position");
       case "symbol":
       case "function":
         return refused(`${typeof value} values are not portable data`);
@@ -99,35 +128,45 @@ export function encode(value: unknown, limit = VALUE_LIMIT): Encoded {
     if (ancestors.includes(object)) refused("cyclic values are not portable");
     ancestors.push(object);
     try {
-      if (isView(object)) return typed(object);
-      if (isArray(object)) return list(object as unknown[]);
-      return record(object);
+      if (isView(object)) return typed(object, listKind(shape));
+      if (isArray(object)) return list(object as unknown[], shape);
+      return record(object, shape);
     } finally {
       ancestors.pop();
     }
   };
 
-  /** Numeric typed arrays follow the official list binding; integer-indexed reads are fixed. */
-  const typed = (view: ArrayBufferView): string => {
+  /**
+   * Numeric typed arrays follow the official list binding; integer-indexed reads are fixed. A WIT
+   * `list<u64>` takes a `BigUint64Array` and `list<s64>` a `BigInt64Array`, each element written
+   * as canonical decimal text; 64-bit arrays are refused anywhere else.
+   */
+  const typed = (view: ArrayBufferView, kind: IntegerKind | undefined): string => {
     const tag = typedTag.call(view);
     if (tag === undefined) refused("DataView is not a portable list");
-    if (tag === "BigInt64Array" || tag === "BigUint64Array")
-      refused("64-bit integer lists require a dedicated codec");
-    const elements = view as unknown as ArrayLike<number>;
+    const wide = tag === "BigInt64Array" || tag === "BigUint64Array";
+    if (kind !== undefined && tag !== (kind === "u64" ? "BigUint64Array" : "BigInt64Array"))
+      refused(`list<${kind}> requires a ${kind === "u64" ? "BigUint64Array" : "BigInt64Array"}`);
+    if (kind === undefined && wide) refused("64-bit lists are portable only as WIT list<u64/s64>");
+    const elements = view as unknown as ArrayLike<number | bigint>;
     const length = typedLength.call(view);
     let text = emit("[");
     for (let index = 0; index < length; index++) {
       if (index) text += emit(",");
-      text += emit(number(elements[index]!));
+      const element = elements[index]!;
+      text += emit(typeof element === "bigint" ? `"${element}"` : number(element));
     }
     return text + emit("]");
   };
 
   /** Read each element once; a hole is refused instead of becoming `null`. */
-  const list = (array: unknown[]): string => {
+  const list = (array: unknown[], shape: Shape | undefined): string => {
     const length = array.length;
     if (!Number.isSafeInteger(length) || length < 0 || length > limit - size)
       refused("list length exceeds its size bound");
+    const items = typeof shape === "object" && "items" in shape ? shape.items : undefined;
+    if (items && items.length !== length) refused("tuple length differs from WIT");
+    const item = typeof shape === "object" && "list" in shape ? shape.list : undefined;
     let text = emit("[");
     for (let index = 0; index < length; index++) {
       if (index) text += emit(",");
@@ -135,7 +174,7 @@ export function encode(value: unknown, limit = VALUE_LIMIT): Encoded {
       if (!element) refused("sparse arrays are not portable");
       if (!element.enumerable || !hasOwn(element, "value"))
         refused("array accessors and non-enumerable elements are not portable");
-      text += visit(element.value);
+      text += visit(element.value, items ? items[index] : item);
     }
     if (prototypeOf(array) !== arrayPrototype) refused("array subclasses are not portable data");
     if (ownKeys(array).length !== length + 1)
@@ -143,19 +182,47 @@ export function encode(value: unknown, limit = VALUE_LIMIT): Encoded {
     return text + emit("]");
   };
 
-  /** Read each own data property once; accessors, symbols and hidden fields are refused. */
-  const record = (object: object): string => {
+  /**
+   * Read each own data property once; accessors, symbols and hidden fields are refused. With a
+   * record shape, a key WIT does not declare is refused. With a variant or result shape, the at
+   * most two descriptors are read first, so `tag` selects the type of `val` in any key order.
+   */
+  const record = (object: object, shape: Shape | undefined): string => {
     const prototype = prototypeOf(object);
     if (prototype !== objectPrototype && prototype !== null)
       refused("only plain objects, arrays and numeric typed arrays are portable");
+    const fields = typeof shape === "object" && "fields" in shape ? shape.fields : undefined;
+    const cases = typeof shape === "object" && "cases" in shape ? shape.cases : undefined;
+    const property = (key: string | symbol): unknown => {
+      if (typeof key !== "string") refused("symbol-keyed properties are not portable");
+      const found = descriptor(object, key);
+      if (found === undefined || !found.enumerable || !hasOwn(found, "value"))
+        refused("accessors and non-enumerable properties are not portable");
+      return found.value;
+    };
     let text = emit("{");
+    if (cases) {
+      const keys = ownKeys(object);
+      if (keys.length > 2) refused("WIT tagged values have only tag and val");
+      const entries = keys.map((key) => [key as string, property(key)] as const);
+      const tag = entries.find(([key]) => key === "tag")?.[1];
+      if (typeof tag !== "string" || !cases.has(tag)) refused("WIT tagged value needs a known tag");
+      entries.forEach(([key, value], index) => {
+        const type = key === "val" ? cases.get(tag) : undefined;
+        text += emit(index ? "," : "") + emit(quote(key)) + emit(":") + visit(value, type);
+      });
+      return text + emit("}");
+    }
     let first = true;
     for (const key of ownKeys(object)) {
-      if (typeof key !== "string") refused("symbol-keyed properties are not portable");
-      const property = descriptor(object, key);
-      if (property === undefined || !property.enumerable || !hasOwn(property, "value"))
-        refused("accessors and non-enumerable properties are not portable");
-      text += emit(first ? "" : ",") + emit(quote(key)) + emit(":") + visit(property.value);
+      const value = property(key);
+      if (fields && !fields.has(key as string))
+        refused(`record field ${quote(key)} is not declared by WIT`);
+      text +=
+        emit(first ? "" : ",") +
+        emit(quote(key)) +
+        emit(":") +
+        visit(value, fields?.get(key as string));
       first = false;
     }
     return text + emit("}");
@@ -163,7 +230,7 @@ export function encode(value: unknown, limit = VALUE_LIMIT): Encoded {
 
   let text: string;
   try {
-    text = visit(value);
+    text = visit(value, shape);
   } catch (error) {
     // Revoked proxies and throwing traps surface as ordinary value rejections.
     throw failure(error);

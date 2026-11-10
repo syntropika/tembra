@@ -35,11 +35,12 @@ use tokio::sync::oneshot;
 use wasmtime::{
     Store, StoreLimits, StoreLimitsBuilder,
     component::{
-        Accessor, Component, Func, Linker, ResourceTable, TaskGroupHook, TaskGroupId, Val,
-        types::ComponentFunc,
+        Accessor, Component, Func, Linker, Resource, ResourceTable, TaskGroupHook, TaskGroupId,
+        TypedFunc, Val, types::ComponentFunc,
     },
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi_http::p3::{self, bindings::http::types::ErrorCode};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 /// Default dependency object selected by a plain WIT import, which carries no object key.
@@ -53,6 +54,18 @@ pub(crate) struct Layout {
     pub imports: Vec<Import>,
     /// Checked contribution binding to its callback export; never an ordinary service.
     pub contributions: BTreeMap<String, (String, String)>,
+    /// The exact incoming HTTP handler export, served only through the ingress adapter.
+    pub ingress: Option<String>,
+}
+
+/// The standard handler's `handle`, typed against the host's own request and response
+/// resources. Typing it at instantiation checks the actual binary's signature.
+type Handler = TypedFunc<(Resource<p3::Request>,), (Result<Resource<p3::Response>, ErrorCode>,)>;
+
+/// Callable exports resolved once per Store.
+struct Exports {
+    functions: BTreeMap<(String, String), Func>,
+    handler: Option<Handler>,
 }
 
 pub(crate) struct Export {
@@ -325,6 +338,9 @@ enum Packet {
     Release {
         environment: u64,
     },
+    Ingress {
+        environment: u64,
+    },
     #[serde(other)]
     Unsupported,
 }
@@ -394,7 +410,7 @@ async fn live(
     };
     let _ = ready.send(Ok(()));
     let mut environments = Environments::default();
-    while let Ok(command) = commands.recv() {
+    while let Ok(mut command) = commands.recv() {
         let served = serve(
             &engine,
             &mut store,
@@ -402,7 +418,7 @@ async fn live(
             &layout,
             &mut environments,
             &groups,
-            &command,
+            &mut command,
         )
         .await;
         match served {
@@ -431,7 +447,7 @@ async fn instantiate(
     layout: &Layout,
     groups: &Arc<Mutex<Groups>>,
     transport: &crate::http::Transport,
-) -> wasmtime::Result<(Store<State>, BTreeMap<(String, String), Func>)> {
+) -> wasmtime::Result<(Store<State>, Exports)> {
     let mut linker = Linker::<State>::new(&engine.engine);
     link_wasi(&mut linker)?;
     // Linking grants nothing: installation requires an HTTP grant for each wasi:http import and
@@ -495,7 +511,35 @@ async fn instantiate(
             exports.insert((alias.clone(), spelling.clone()), function);
         }
     }
-    Ok((store, exports))
+    // The handler's actual binary type must be exactly the standard one; anything else refuses
+    // the installation here rather than failing a later request.
+    let handler = match &layout.ingress {
+        Some(handler) => {
+            let (_, interface) = instance
+                .get_export(&mut store, None, handler)
+                .ok_or_else(|| wasmtime::Error::msg("missing incoming HTTP handler"))?;
+            let (_, index) = instance
+                .get_export(&mut store, Some(&interface), crate::ingress::HANDLE)
+                .ok_or_else(|| wasmtime::Error::msg("missing incoming HTTP handle function"))?;
+            Some(
+                instance
+                    .get_typed_func(&mut store, index)
+                    .map_err(|error| {
+                        wasmtime::Error::msg(format!(
+                            "{handler}#handle differs from the standard signature: {error:#}"
+                        ))
+                    })?,
+            )
+        }
+        None => None,
+    };
+    Ok((
+        store,
+        Exports {
+            functions: exports,
+            handler,
+        },
+    ))
 }
 
 /// Define each selected dependency function; WASI imports remain the installation's grants.
@@ -641,11 +685,11 @@ async fn declaration(
 async fn serve(
     engine: &Engine,
     store: &mut Store<State>,
-    exports: &BTreeMap<(String, String), Func>,
+    exports: &Exports,
     layout: &Layout,
     environments: &mut Environments,
     groups: &Arc<Mutex<Groups>>,
-    command: &Command,
+    command: &mut Command,
 ) -> wasmtime::Result<std::result::Result<String, String>> {
     if !matches!(command.operation, Operation::Declare | Operation::Start) {
         return Ok(Err(
@@ -658,9 +702,10 @@ async fn serve(
     };
     let expected = match packet {
         Packet::Create { .. } => Operation::Declare,
-        Packet::Invoke { .. } | Packet::Contribute { .. } | Packet::Release { .. } => {
-            Operation::Start
-        }
+        Packet::Invoke { .. }
+        | Packet::Contribute { .. }
+        | Packet::Release { .. }
+        | Packet::Ingress { .. } => Operation::Start,
         Packet::Unsupported => return Ok(Err("unknown compiled command".into())),
     };
     if command.operation != expected {
@@ -711,31 +756,56 @@ async fn serve(
             service: Some(service),
             method,
             args,
-        } if command.operation == Operation::Start => {
-            let Some(function) = exports.get(&(service, method)).copied() else {
+        } if command.operation == Operation::Start && command.ingress.is_none() => {
+            let Some(function) = exports.functions.get(&(service, method)).copied() else {
                 return Ok(Err("unknown component export".into()));
             };
-            let root = environments
-                .parents
-                .get(&environment)
-                .copied()
-                .unwrap_or(environment);
-            let handles = match (environments.roots.get(&root), layout.imports.is_empty()) {
-                (Some(handles), _) => handles.clone(),
-                (None, true) => Arc::default(),
-                (None, false) => return Ok(Err("component environment is not declared".into())),
-            };
-            let authority = Authority {
-                events: command.events.clone(),
-                scope: root,
-                handles,
+            let authority = match authority(environment, layout, environments, command) {
+                Ok(authority) => authority,
+                Err(error) => return Ok(Err(error)),
             };
             invoke(engine, store, function, &args, authority, groups).await
+        }
+        Packet::Ingress { environment, .. } => {
+            // Without its typed payload (or handler) there is nothing to serve; dropping the
+            // payload closes its head channel, which the facade reports.
+            let (Some(handler), Some(call)) = (exports.handler, command.ingress.take()) else {
+                return Ok(Err("this revision serves no incoming HTTP request".into()));
+            };
+            let authority = match authority(environment, layout, environments, command) {
+                Ok(authority) => authority,
+                Err(error) => return Ok(Err(error)),
+            };
+            ingress(engine, store, handler, call, authority, groups).await
         }
         Packet::Invoke { .. } | Packet::Contribute { .. } | Packet::Unsupported => Ok(Err(
             "compiled components have no guest callbacks of this kind".into(),
         )),
     }
+}
+
+/// The admitted call's authority: its own event channel and its Orb root's dependency handles.
+fn authority(
+    environment: u64,
+    layout: &Layout,
+    environments: &Environments,
+    command: &Command,
+) -> std::result::Result<Authority, String> {
+    let root = environments
+        .parents
+        .get(&environment)
+        .copied()
+        .unwrap_or(environment);
+    let handles = match (environments.roots.get(&root), layout.imports.is_empty()) {
+        (Some(handles), _) => handles.clone(),
+        (None, true) => Arc::default(),
+        (None, false) => return Err("component environment is not declared".into()),
+    };
+    Ok(Authority {
+        events: command.events.clone(),
+        scope: root,
+        handles,
+    })
 }
 
 /// Acquire default-key dependency references for an Orb root; services record their root.
@@ -894,6 +964,145 @@ async fn invoke(
         return Ok(Err("component result exceeds the packet limit".into()));
     }
     Ok(Ok(text))
+}
+
+/// Serve one incoming HTTP request as a staged call of the standard handler.
+///
+/// The same rules as [`invoke`] apply: one `run_concurrent` under the call timeout, authority
+/// bound to the call's task group, the caller's cancellation ending its bodies, and completion
+/// only after physical settlement. The difference is the result: the response head is
+/// published on the call's own channel as soon as the guest returned it, while this Store keeps
+/// driving the guest's body producer. The call completes only when its task group has finished
+/// and the response body was delivered to its end, dropped by the application, or aborted.
+async fn ingress(
+    engine: &Engine,
+    store: &mut Store<State>,
+    handler: Handler,
+    call: crate::ingress::IngressCall,
+    authority: Authority,
+    groups: &Arc<Mutex<Groups>>,
+) -> wasmtime::Result<std::result::Result<String, String>> {
+    let crate::ingress::IngressCall {
+        request,
+        exchange,
+        head,
+    } = call;
+    store.set_fuel(engine.limits.fuel)?;
+    let (finished, settled) = futures::channel::oneshot::channel();
+    let call_work = crate::http::Ledger::default();
+    let cancelled = futures::FutureExt::shared(Box::pin(lock(groups)?.scope.cancelled())
+        as std::pin::Pin<Box<dyn Future<Output = ()> + Send>>);
+    let commands = store.data().transport.commands.clone();
+    let closing = store.data().adapter.closing.clone();
+    commands.begin(Some(call_work.clone()));
+    let watch = cancelled.clone();
+    let groups = groups.clone();
+    let failed = exchange.clone();
+    let call = store.run_concurrent(async move |accessor: &Accessor<State>| {
+        // The request becomes a resource of this Store; its body is read by upstream's host
+        // producer, which this call can close through the exchange.
+        let (request, received) = accessor.with(|mut access| {
+            let state = access.get();
+            let (request, received) = p3::Request::from_http(&mut state.hooks, request);
+            state.table.push(request).map(|request| (request, received))
+        })?;
+        lock(&groups)?.pending = Some(Bound {
+            authority,
+            finished: Some(finished),
+            call_work: call_work.clone(),
+            cancelled,
+        });
+        let staged =
+            accessor.with(|mut access| handler.start_call_concurrent(&mut access, (request,)));
+        let staged = match staged {
+            Ok(staged) => staged,
+            Err(error) => {
+                lock(&groups)?.pending = None;
+                return Err(error);
+            }
+        };
+        let group = staged.group();
+        {
+            let groups = lock(&groups)?;
+            if groups.pending.is_some() || !groups.bound.contains_key(&group) {
+                return Err(wasmtime::Error::msg(
+                    "component call authority was not bound to its task group",
+                ));
+            }
+        }
+        let respond = exchange.clone();
+        let work = async {
+            let (result,) = handler.finish_call_concurrent(accessor, staged).await?;
+            // The handler's own error refuses this request only; the Store stays usable.
+            let mut refused = None;
+            match result {
+                Ok(response) => {
+                    let response = accessor.with(|mut access| {
+                        let response = access.get().table.delete(response)?;
+                        response.into_http(&mut access, respond.transmission(received))
+                    })?;
+                    // The head leaves now; the call stays admitted and keeps its pin.
+                    crate::ingress::IngressCall::publish(&respond, head, response);
+                }
+                Err(code) => {
+                    respond.absent();
+                    let message = format!("the incoming HTTP handler returned {code:?}");
+                    let _ = head.send(Err(tembra::Error::new(
+                        tembra::core::Code::Unavailable,
+                        "wasi_http_handler",
+                        message.clone(),
+                    )));
+                    refused = Some(message);
+                }
+            }
+            // Physical completion: every task of the call exited and the body's delivery ended.
+            let delivered = respond.delivered();
+            let finished = async {
+                settled.await.map_err(|_| {
+                    wasmtime::Error::msg("component task group ended without finishing")
+                })
+            };
+            let (finished, _) = futures::future::join(finished, delivered).await;
+            finished.map(|()| refused)
+        };
+        let refused = {
+            let mut work = std::pin::pin!(work);
+            // Cancellation closes this call's bodies, including both ingress bodies, so a guest
+            // parked in a read or write gets its end and returns; the call finishes normally.
+            match futures::future::select(work.as_mut(), watch).await {
+                futures::future::Either::Left((done, _)) => done?,
+                futures::future::Either::Right(((), _)) => {
+                    commands.cancel();
+                    exchange.abort();
+                    work.await?
+                }
+            }
+        };
+        commands.end();
+        call_work.settled().await;
+        closing.settled().await;
+        accessor.with(|mut store| crate::worker::stream_adapter::release(store.data_mut()))?;
+        crate::worker::stream_adapter::sweep(accessor).await?;
+        Ok(refused)
+    });
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(engine.limits.timeout_ms),
+        call,
+    )
+    .await
+    .map_err(|_| wasmtime::Error::msg("component call timed out"))
+    .and_then(|result| result.and_then(|result| result));
+    // A terminal failure ends the response with an error before the Store, and the guest's
+    // stream with it, is dropped: a truncated body never reads as complete.
+    if outcome.is_err() {
+        failed.fail();
+    }
+    // A handler error completes the command with that error (after settlement); platform hosts
+    // read it from the completion, the native facade from its head channel.
+    Ok(match outcome? {
+        Some(refused) => Err(refused),
+        None => Ok("null".into()),
+    })
 }
 
 fn lock(groups: &Mutex<Groups>) -> wasmtime::Result<std::sync::MutexGuard<'_, Groups>> {

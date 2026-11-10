@@ -5,7 +5,8 @@ import { decodeAsyncHostRequest, decodeHostRequest, type HostRequest } from "./h
 import { combinedSignal } from "../runtime/signals.ts";
 import type { StandardHost } from "./standard-host.ts";
 import { DROP } from "./standard-codec.ts";
-import type { ExecutionScope, InterpreterPort } from "./types.ts";
+import type { ExecutionScope, IngressDispatch, InterpreterPort } from "./types.ts";
+import type { IngressExchange } from "./http-ingress.ts";
 
 /** Internal delivery journal; core ABI completion encoding ignores these host-owned identities. */
 interface Delivery extends Completion {
@@ -135,6 +136,31 @@ export class BrowserPort implements InterpreterPort {
     } finally {
       this.#scope = undefined;
       this.#running = false;
+    }
+  }
+
+  /**
+   * Serve one incoming HTTP request: issue its request handle, then run the handler callback.
+   * The callback (and so this call) lasts until the response delivery ended; whatever the
+   * delivery had not finished when it ends is aborted with the callback's failure.
+   */
+  async ingress(
+    dispatch: IngressDispatch,
+    exchange: IngressExchange,
+    scope: ExecutionScope,
+  ): Promise<void> {
+    if (this.#closed || this.#poisoned || this.#running)
+      throw new Error("Interpreter is closed or busy");
+    if (!this.standard) throw new Error("No standard WASI host");
+    const request = this.standard.beginIngress(exchange);
+    let failure: unknown = new Error("the HTTP handler callback ended");
+    try {
+      await this.execute(JSON.stringify({ kind: "ingress", ...dispatch, request }), scope);
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      this.standard.endIngress(failure);
     }
   }
 

@@ -7,7 +7,15 @@
     { packet: string | Uint8Array; resolve(value: any): void; reject(error: Error): void }
   >();
   const outbox: { id: number; packet: string | Uint8Array }[] = [];
+  /** Waiters for the moment no host operation of this callback is pending. */
+  let idle: (() => void)[] = [];
   let sequence = 0;
+  function settle(): void {
+    if (pending.size) return;
+    const waiters = idle;
+    idle = [];
+    for (const wake of waiters) wake();
+  }
   globalThis.__hostAsync = ((packet: string | Uint8Array) => {
     if (!active()) throw new Error("callback scope is closed");
     if (pending.size >= 128) throw new Error("host operation queue is full");
@@ -25,12 +33,26 @@
     pending.delete(id);
     if (ok) operation.resolve(value);
     else operation.reject(new Error(String(value)));
+    settle();
   };
   globalThis.__tembraStopEffects = () => {
     for (const operation of pending.values()) operation.reject(new Error("callback scope ended"));
     pending.clear();
     outbox.length = 0;
+    settle();
     delete globalThis.__tembraPendingDispatch;
     globalThis.__tembraAbandon?.();
   };
+  // Read by the incoming HTTP callback to end only once its own host work is finished.
+  globalThis.__tembraEffects = Object.freeze({
+    get pending() {
+      return pending.size;
+    },
+    get sequence() {
+      return sequence;
+    },
+    idle(): Promise<void> {
+      return pending.size ? new Promise<void>((resolve) => idle.push(resolve)) : Promise.resolve();
+    },
+  });
 })();

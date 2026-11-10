@@ -267,6 +267,10 @@ pub(crate) struct Prepared {
     ///
     /// Derived once from `model`, so value checks do not allocate names. Other kinds stay empty.
     pub spellings: Vec<Box<[Box<str>]>>,
+    /// Whether each type definition reaches a `u64` or `s64`, indexed by type.
+    ///
+    /// Derived once from `model`, so wire conversion skips every value without 64-bit integers.
+    pub wide: Vec<bool>,
 }
 
 impl PartialEq for PreparedContract {
@@ -302,10 +306,24 @@ impl PreparedContract {
             }
         }
         let spellings = model.types.iter().map(spellings).collect();
+        // `check` ordered references backwards, so one forward pass sees every child first.
+        let mut wide = Vec::with_capacity(model.types.len());
+        for kind in &model.types {
+            let mut reaches = false;
+            kind.children(|ty| {
+                reaches |= match ty {
+                    Ty::U64 | Ty::S64 => true,
+                    Ty::Ref(id) => wide[id as usize],
+                    _ => false,
+                };
+            });
+            wide.push(reaches);
+        }
         Ok(Self(Arc::new(Prepared {
             model,
             slots,
             spellings,
+            wide,
         })))
     }
 
@@ -349,6 +367,15 @@ impl PreparedContract {
     /// Read the cached JavaScript spellings of a record's fields or a flags type's flags.
     pub(crate) fn spellings(&self, id: u32) -> &[Box<str>] {
         &self.0.spellings[id as usize]
+    }
+
+    /// Whether a value of `ty` can contain a `u64` or `s64`.
+    pub(crate) fn wide(&self, ty: Ty) -> bool {
+        match ty {
+            Ty::U64 | Ty::S64 => true,
+            Ty::Ref(id) => self.0.wide[id as usize],
+            _ => false,
+        }
     }
 
     /// Follow aliases to the defining kind.

@@ -1,0 +1,12 @@
+package example:ingress@1.0.0;
+
+/// A compiled Orb that only serves incoming HTTP; it holds no outgoing authority.
+world handler {
+    export wasi:http/handler@0.3.0;
+}
+
+/// The same handler, additionally sending outgoing requests while it streams a response.
+world proxy {
+    import wasi:http/client@0.3.0;
+    export wasi:http/handler@0.3.0;
+}

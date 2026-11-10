@@ -1,9 +1,24 @@
 //! Validate the deliberately bounded JSON value profile used by interpreted callbacks.
+//!
+//! A portable value has two spellings that differ only in WIT `u64`/`s64` positions. The native
+//! kernel holds exact JSON numbers there ([`Form::Native`]), so ordinary Serde types keep their
+//! `u64`/`i64` fields. The executor packet protocol, which JavaScript reads and writes, carries
+//! canonical decimal strings there ([`Form::Wire`]), because `JSON.parse` rounds integers above
+//! 2^53. Every other position, including WIT strings that hold digits, is identical in both.
 use crate::{
     Error,
     model::{Function, Item, Kind, MAX_DEPTH, PreparedContract, Slot, Ty},
 };
 use serde_json::Value;
+
+/// How a portable value spells its WIT `u64`/`s64` positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Form {
+    /// Exact JSON numbers, as held by the native kernel and ordinary Serde.
+    Native,
+    /// Canonical decimal strings, as carried by the executor packet protocol.
+    Wire,
+}
 
 impl PreparedContract {
     /// Find the complete interface identity; method spelling alone never selects a contract.
@@ -54,23 +69,153 @@ impl PreparedContract {
             .ok_or_else(|| Error(format!("unknown WIT {} {binding}#{method}", side(exports))))
     }
 
-    /// Validate an argument tuple or result through a slot returned by `bind`.
+    /// Validate a native argument tuple or result through a slot returned by `bind`.
+    ///
+    /// WIT `u64`/`s64` positions must hold exact JSON numbers; the wire spelling is refused.
     pub fn validate_slot(&self, slot: u32, arguments: bool, value: &Value) -> Result<(), Error> {
+        self.check_slot(Form::Native, slot, arguments, value)
+            .map(drop)
+    }
+
+    /// Validate an executor-packet argument tuple or result, whose WIT `u64`/`s64` positions
+    /// must be canonical decimal strings; a JSON number there is refused.
+    pub(crate) fn validate_wire(
+        &self,
+        slot: u32,
+        arguments: bool,
+        value: &Value,
+    ) -> Result<(), Error> {
+        self.check_slot(Form::Wire, slot, arguments, value)
+            .map(drop)
+    }
+
+    /// Validate a native value and spell its WIT `u64`/`s64` positions as canonical decimal
+    /// strings for the executor packet protocol. Nothing else changes.
+    pub fn to_wire(&self, slot: u32, arguments: bool, value: Value) -> Result<Value, Error> {
+        self.convert(Form::Native, slot, arguments, value)
+    }
+
+    /// Validate an executor-packet value and turn its WIT `u64`/`s64` decimal strings into the
+    /// exact JSON numbers the native kernel holds. Nothing else changes.
+    pub fn from_wire(&self, slot: u32, arguments: bool, value: Value) -> Result<Value, Error> {
+        self.convert(Form::Wire, slot, arguments, value)
+    }
+
+    /// Check a value in `form` and return its function.
+    fn check_slot(
+        &self,
+        form: Form,
+        slot: u32,
+        arguments: bool,
+        value: &Value,
+    ) -> Result<&Function, Error> {
         let slot = *self
             .slots()
             .get(slot as usize)
             .ok_or_else(|| Error("unknown WIT method slot".into()))?;
         let function = self.function(slot);
         if arguments {
-            self.check_arguments(function, value)
+            self.check_arguments(form, function, value)?;
         } else {
-            self.check_result(function, value)
+            self.check_result(form, function, value)?;
+        }
+        Ok(function)
+    }
+
+    /// Check a value in `from`, then respell only its 64-bit leaves in the other form. A
+    /// signature without 64-bit integers returns the checked value untouched.
+    fn convert(
+        &self,
+        from: Form,
+        slot: u32,
+        arguments: bool,
+        mut value: Value,
+    ) -> Result<Value, Error> {
+        let function = self.check_slot(from, slot, arguments, &value)?;
+        if arguments {
+            let values = value.as_array_mut().ok_or_else(checked)?;
+            for (parameter, value) in function.params.iter().zip(values) {
+                self.respell(parameter.ty, value)?;
+            }
+        } else if let Some(ty) = function.result {
+            self.respell(ty, &mut value)?;
+        }
+        Ok(value)
+    }
+
+    /// Flip the spelling of every `u64`/`s64` leaf in an already checked value, descending only
+    /// into types that reach one (a per-type flag computed once at preparation). The check
+    /// guaranteed every shape seen here; a disagreement is reported, never papered over.
+    fn respell(&self, ty: Ty, value: &mut Value) -> Result<(), Error> {
+        if !self.wide(ty) {
+            return Ok(());
+        }
+        match ty {
+            Ty::U64 => *value = flip::<u64>(value, Value::as_u64)?,
+            Ty::S64 => *value = flip::<i64>(value, Value::as_i64)?,
+            Ty::Ref(id) => match self.kind(id) {
+                Kind::Alias(ty) => self.respell(*ty, value)?,
+                Kind::Option(ty) => {
+                    if !value.is_null() {
+                        self.respell(*ty, value)?;
+                    }
+                }
+                Kind::List(ty) => {
+                    for value in value.as_array_mut().ok_or_else(checked)? {
+                        self.respell(*ty, value)?;
+                    }
+                }
+                Kind::Record(fields) => {
+                    let object = value.as_object_mut().ok_or_else(checked)?;
+                    for (field, spelling) in fields.iter().zip(self.spellings(id)) {
+                        let value = object.get_mut(&**spelling).ok_or_else(checked)?;
+                        self.respell(field.ty, value)?;
+                    }
+                }
+                Kind::Tuple(types) => {
+                    let values = value.as_array_mut().ok_or_else(checked)?;
+                    for (ty, value) in types.iter().zip(values) {
+                        self.respell(*ty, value)?;
+                    }
+                }
+                Kind::Variant(cases) => {
+                    let tag = value["tag"].as_str().ok_or_else(checked)?;
+                    let case = cases.iter().find(|case| case.name == tag);
+                    self.respell_payload(case.ok_or_else(checked)?.ty, value)?;
+                }
+                Kind::Result { ok, err } => {
+                    let payload = match value["tag"].as_str() {
+                        Some("ok") => *ok,
+                        Some("err") => *err,
+                        _ => return Err(checked()),
+                    };
+                    self.respell_payload(payload, value)?;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Respell the `val` payload of a checked variant or result.
+    fn respell_payload(&self, ty: Option<Ty>, value: &mut Value) -> Result<(), Error> {
+        match (ty, value.get_mut("val")) {
+            (Some(ty), Some(payload)) => self.respell(ty, payload),
+            (Some(_), None) => Err(checked()),
+            (None, _) => Ok(()),
         }
     }
 
     /// Require every exported signature to use types supported by this portable profile.
+    ///
+    /// The incoming HTTP handler is not a portable export: its owned resources are served only
+    /// by the host-local ingress adapter, so it is outside this profile rather than admitted to it.
     pub fn check_value_profile(&self) -> Result<(), Error> {
         for entry in &self.model().exports {
+            if crate::lower::is_ingress(entry) {
+                continue;
+            }
             if let Item::Interface(interface) = &entry.item {
                 for function in &interface.functions {
                     self.supported_function(function)?;
@@ -115,8 +260,8 @@ impl PreparedContract {
             ));
         }
         match ty {
-            Ty::U64 | Ty::S64 | Ty::ErrorContext => Err(Error(
-                "64-bit integers and error contexts require a dedicated value codec".into(),
+            Ty::ErrorContext => Err(Error(
+                "error contexts require a dedicated value codec".into(),
             )),
             Ty::Ref(id) => match self.kind(id) {
                 Kind::Option(inner) => {
@@ -153,7 +298,12 @@ impl PreparedContract {
     }
 
     /// Validate tuple length and each named parameter before invoking user code.
-    fn check_arguments(&self, function: &Function, arguments: &Value) -> Result<(), Error> {
+    fn check_arguments(
+        &self,
+        form: Form,
+        function: &Function,
+        arguments: &Value,
+    ) -> Result<(), Error> {
         let method = &function.name;
         let values = arguments
             .as_array()
@@ -165,23 +315,23 @@ impl PreparedContract {
             )));
         }
         for (parameter, value) in function.params.iter().zip(values) {
-            self.validate(parameter.ty, value, 0)
+            self.validate(form, parameter.ty, value, 0)
                 .map_err(|error| Error(format!("{method} argument {}: {error}", parameter.name)))?;
         }
         Ok(())
     }
 
     /// Validate the single WIT result or the absence of a result.
-    fn check_result(&self, function: &Function, value: &Value) -> Result<(), Error> {
+    fn check_result(&self, form: Form, function: &Function, value: &Value) -> Result<(), Error> {
         match function.result {
-            Some(ty) => self.validate(ty, value, 0),
+            Some(ty) => self.validate(form, ty, value, 0),
             None if value.is_null() => Ok(()),
             None => Err(Error("WIT function has no result".into())),
         }
     }
 
     /// Check values recursively without silently truncating fields or numeric widths.
-    fn validate(&self, ty: Ty, value: &Value, depth: usize) -> Result<(), Error> {
+    fn validate(&self, form: Form, ty: Ty, value: &Value, depth: usize) -> Result<(), Error> {
         if depth > MAX_DEPTH {
             return Err(Error("WIT value nesting exceeds its limit".into()));
         }
@@ -212,8 +362,17 @@ impl PreparedContract {
             Ty::Char => value
                 .as_str()
                 .is_some_and(|value| value.chars().count() == 1),
-            Ty::Ref(id) => return self.validate_kind(id, value, depth),
-            Ty::U64 | Ty::S64 | Ty::ErrorContext => {
+            // Native values hold exact integer numbers; the packet wire holds canonical strings.
+            Ty::U64 => match form {
+                Form::Native => integral && value.as_u64().is_some(),
+                Form::Wire => canonical(value, false),
+            },
+            Ty::S64 => match form {
+                Form::Native => integral && value.as_i64().is_some(),
+                Form::Wire => canonical(value, true),
+            },
+            Ty::Ref(id) => return self.validate_kind(form, id, value, depth),
+            Ty::ErrorContext => {
                 return Err(Error("WIT type requires a dedicated value codec".into()));
             }
         };
@@ -225,16 +384,16 @@ impl PreparedContract {
     }
 
     /// Check a value against one type definition, using its cached member spellings.
-    fn validate_kind(&self, id: u32, value: &Value, depth: usize) -> Result<(), Error> {
+    fn validate_kind(&self, form: Form, id: u32, value: &Value, depth: usize) -> Result<(), Error> {
         let kind = self.kind(id);
         let valid = match kind {
-            Kind::Alias(ty) => return self.validate(*ty, value, depth + 1),
+            Kind::Alias(ty) => return self.validate(form, *ty, value, depth + 1),
             Kind::List(ty) => {
                 let values = value
                     .as_array()
                     .ok_or_else(|| Error("expected WIT list".into()))?;
                 for value in values {
-                    self.validate(*ty, value, depth + 1)?;
+                    self.validate(form, *ty, value, depth + 1)?;
                 }
                 true
             }
@@ -249,7 +408,7 @@ impl PreparedContract {
                     let field_value = object
                         .get(&**spelling)
                         .ok_or_else(|| Error(format!("missing WIT field {}", field.name)))?;
-                    self.validate(field.ty, field_value, depth + 1)?;
+                    self.validate(form, field.ty, field_value, depth + 1)?;
                 }
                 true
             }
@@ -259,13 +418,13 @@ impl PreparedContract {
                     .filter(|values| values.len() == types.len())
                     .ok_or_else(|| Error("WIT tuple length differs".into()))?;
                 for (ty, value) in types.iter().zip(values) {
-                    self.validate(*ty, value, depth + 1)?;
+                    self.validate(form, *ty, value, depth + 1)?;
                 }
                 true
             }
             Kind::Option(ty) => {
                 if !value.is_null() {
-                    self.validate(*ty, value, depth + 1)?;
+                    self.validate(form, *ty, value, depth + 1)?;
                 }
                 true
             }
@@ -286,7 +445,7 @@ impl PreparedContract {
                     .iter()
                     .find(|case| case.name == tag)
                     .ok_or_else(|| Error("unknown WIT variant case".into()))?;
-                self.tagged(value, case.ty, depth)?;
+                self.tagged(form, value, case.ty, depth)?;
                 true
             }
             Kind::Result { ok, err } => {
@@ -295,7 +454,7 @@ impl PreparedContract {
                     Some("err") => *err,
                     _ => return Err(Error("result needs an ok or err tag".into())),
                 };
-                self.tagged(value, ty, depth)?;
+                self.tagged(form, value, ty, depth)?;
                 true
             }
             other => return Err(Error(format!("unsupported WIT value {}", other.as_str()))),
@@ -308,7 +467,7 @@ impl PreparedContract {
     }
 
     /// Validate a tagged payload and refuse undeclared keys or missing payloads.
-    fn tagged(&self, value: &Value, ty: Option<Ty>, depth: usize) -> Result<(), Error> {
+    fn tagged(&self, form: Form, value: &Value, ty: Option<Ty>, depth: usize) -> Result<(), Error> {
         let object = value
             .as_object()
             .ok_or_else(|| Error("expected tagged WIT object".into()))?;
@@ -318,6 +477,7 @@ impl PreparedContract {
         }
         if let Some(ty) = ty {
             self.validate(
+                form,
                 ty,
                 object
                     .get("val")
@@ -332,6 +492,48 @@ impl PreparedContract {
 /// Name a contract side in diagnostics.
 fn side(exports: bool) -> &'static str {
     if exports { "export" } else { "import" }
+}
+
+/// Swap one checked 64-bit leaf between its exact JSON number and its canonical decimal string.
+fn flip<T>(value: &Value, number: fn(&Value) -> Option<T>) -> Result<Value, Error>
+where
+    T: std::str::FromStr + ToString + Into<Value>,
+{
+    match value {
+        Value::String(text) => text.parse::<T>().map(Into::into).map_err(|_| checked()),
+        value => number(value)
+            .map(|n| Value::String(n.to_string()))
+            .ok_or_else(checked),
+    }
+}
+
+/// A value disagreed with the shape its own check just admitted.
+fn checked() -> Error {
+    Error("a checked value changed shape during 64-bit conversion".into())
+}
+
+/// Whether `value` is the canonical decimal spelling of a 64-bit integer: no sign on `u64`, no
+/// `+`, no `-0`, no leading zeros, no whitespace or exponent, and within range.
+fn canonical(value: &Value, signed: bool) -> bool {
+    let Some(text) = value.as_str() else {
+        return false;
+    };
+    let digits = match text.strip_prefix('-') {
+        Some(digits) if signed => digits,
+        Some(_) => return false,
+        None => text,
+    };
+    let shaped = match digits.as_bytes() {
+        [b'0'] => digits.len() == text.len(),
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
+    };
+    shaped
+        && if signed {
+            text.parse::<i64>().is_ok()
+        } else {
+            text.parse::<u64>().is_ok()
+        }
 }
 
 /// JSON cannot preserve negative zero between the two heaps.

@@ -65,8 +65,103 @@ pub struct ServiceBinding {
     pub signature: Option<String>,
 }
 
+/// The checked host-local incoming HTTP handler of an implementation.
+///
+/// It is never a [`ServiceBinding`]: it has no portable slot and no signature, and adapters
+/// register it only as a host-local service that the host's ingress entry point calls.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngressBinding {
+    /// Host-local kernel service name, `<orb>::wasi:http/handler@0.3.0`.
+    pub name: String,
+    /// The exact handler identity, [`crate::HTTP_HANDLER`].
+    pub interface: String,
+    /// Guest-facing JavaScript service alias of the export.
+    pub alias: String,
+    /// Guest-facing JavaScript spelling of the WIT `handle` function.
+    pub method: String,
+    pub lifetime: Lifetime,
+    pub linger: u32,
+}
+
 impl PreparedContract {
+    /// Check the implementation of the incoming HTTP handler, if this world exports one.
+    ///
+    /// The implementation must declare exactly one service under the export's alias with exactly
+    /// the `handle` method, and no access policy (the handler is called only by the host). Its
+    /// alias may not collide with another export's. Worlds without the handler return `None`;
+    /// an implementation that still declares such a service is refused by
+    /// [`Self::check_implementation`] as a service absent from its world.
+    pub fn check_ingress(
+        &self,
+        name: &str,
+        implementation: &Implementation,
+    ) -> Result<Option<IngressBinding>, Error> {
+        let Some(entry) = self
+            .model()
+            .exports
+            .iter()
+            .find(|entry| crate::lower::is_ingress(entry))
+        else {
+            return Ok(None);
+        };
+        let Item::Interface(interface) = &entry.item else {
+            unreachable!("recognized as an interface")
+        };
+        let alias = javascript_name(interface.name.as_deref().unwrap_or_default());
+        let collision = self.model().exports.iter().any(|other| {
+            !std::ptr::eq(other, entry)
+                && matches!(&other.item, Item::Interface(other)
+                    if javascript_name(other.name.as_deref().unwrap_or_default()) == alias)
+        });
+        if collision {
+            return Err(Error(format!(
+                "{}: ambiguous JavaScript service {alias}",
+                crate::HTTP_HANDLER
+            )));
+        }
+        let method = javascript_name(&interface.functions[0].name);
+        let Some(service) = implementation.services.get(&alias) else {
+            return Err(Error(format!(
+                "{}: missing service implementation {alias}",
+                crate::HTTP_HANDLER
+            )));
+        };
+        if service.methods != BTreeSet::from([method.clone()]) {
+            return Err(Error(format!(
+                "{}: the handler implements exactly {method:?}, not {:?}",
+                crate::HTTP_HANDLER,
+                service.methods
+            )));
+        }
+        if service.access {
+            return Err(Error(format!(
+                "{}: the incoming HTTP handler has no access policy; only the host calls it",
+                crate::HTTP_HANDLER
+            )));
+        }
+        if implementation.hooks.contains_key(&alias)
+            || implementation.contributes.contains_key(crate::HTTP_HANDLER)
+        {
+            return Err(Error(format!(
+                "{}: the incoming HTTP handler cannot be a hook",
+                crate::HTTP_HANDLER
+            )));
+        }
+        Ok(Some(IngressBinding {
+            name: service_name(name, crate::HTTP_HANDLER),
+            interface: crate::HTTP_HANDLER.into(),
+            alias,
+            method,
+            lifetime: service.lifetime.unwrap_or_default(),
+            linger: service.linger.unwrap_or(0),
+        }))
+    }
+
     /// Require the exact identity, services and callbacks declared by the selected world.
+    ///
+    /// The incoming HTTP handler is checked by [`Self::check_ingress`] and is not returned as an
+    /// ordinary service.
     pub fn check_implementation(
         &self,
         name: &str,
@@ -90,7 +185,11 @@ impl PreparedContract {
             .into_iter()
             .map(|service| (service.name.clone(), service))
             .collect::<BTreeMap<_, _>>();
+        let ingress = self.check_ingress(name, &implementation)?;
         let mut provided = implementation.services;
+        if let Some(ingress) = ingress {
+            provided.remove(&ingress.alias);
+        }
         let hook_exports = self.hook_exports(&implementation.hooks, &implementation.contributes)?;
         let mut plan = Vec::new();
         for entry in &self.model().exports {

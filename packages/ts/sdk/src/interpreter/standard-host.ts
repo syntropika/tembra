@@ -28,6 +28,7 @@ import {
   FUTURE_READ,
   FUTURE_WRITE,
   type HandleCodec,
+  INGRESS_HEAD,
   Reader,
   STANDARD_PACKET,
   STREAM_CHUNK,
@@ -41,6 +42,9 @@ import {
 import { filesystemMethods, type StandardMount } from "./standard-filesystem.ts";
 import { StandardCli, type StdioStreams } from "./standard-cli.ts";
 import { httpMethods, type HttpClient } from "./standard-http.ts";
+import type { IngressExchange } from "./http-ingress.ts";
+import { IngressCall } from "./standard-ingress.ts";
+import type { HttpResponse } from "./standard-http-values.ts";
 import { socketMethods, type SocketBindings } from "./standard-sockets.ts";
 import type { CliOptions } from "../authoring/types.ts";
 import {
@@ -74,6 +78,11 @@ const HANDLE_LIMIT = 4096;
 const NONE = -1;
 /** The only qualified input stream type. */
 const BYTE_STREAM = TYPES.findIndex(([kind, item]) => kind === "stream" && item === "u8");
+/** `wasi:http/handler#handle`'s result, the same generated type `client.send` returns. */
+const HANDLER_RESULT = METHODS.find(
+  (method) => method.interface === "wasi:http/client@0.3.0" && method.name === "send",
+)!.result!;
+const HTTP_REQUEST = RESOURCES.indexOf("wasi:http/types@0.3.0#request");
 /** What an unwritten writable future resolves to; every writable payload has this error case. */
 const ABANDONED = { tag: "err", val: { tag: "internal-error", val: "callback ended" } } as const;
 
@@ -159,6 +168,8 @@ export class StandardHost implements StandardServices {
   readonly #inputs = new Set<number>();
   /** Accepted guest input across all of this revision's writers. */
   readonly #budget = new InputBudget();
+  /** The incoming HTTP request the current callback serves. */
+  #ingress: IngressCall | undefined;
   #closed = false;
 
   /**
@@ -682,6 +693,29 @@ export class StandardHost implements StandardServices {
         await entry.value.write(length, () => reader.raw(length), signal);
         return { bytes: new Uint8Array(), issued: [] };
       }
+      case INGRESS_HEAD: {
+        const call = this.#ingress;
+        if (!call) throw new Error("no incoming HTTP request is being served");
+        if (call.exchange.published) throw new Error("the response head was already published");
+        if (signal?.aborted) throw cancelled();
+        // The whole result validates before the response moves to the host.
+        const claims = this.#claims();
+        const result = decode(reader, HANDLER_RESULT, claims.codec) as
+          | { tag: "ok"; val: HttpResponse }
+          | { tag: "err"; val: import("wasi:http/types@0.3.0").ErrorCode };
+        reader.end();
+        claims.commit();
+        // The head leaves now; this operation completes only when the delivery ended, which
+        // keeps the handler's callback (and its context authority) alive while it streams.
+        const ended = call.respond(this, result);
+        try {
+          await abortable(ended, signal);
+        } catch (error) {
+          call.end(error);
+          throw error;
+        }
+        return { bytes: new Uint8Array(), issued: [] };
+      }
       case FUTURE_READ: {
         const handle = reader.handle();
         reader.end();
@@ -727,6 +761,32 @@ export class StandardHost implements StandardServices {
    * consumer reaches end of stream (streams) or the abandoned error (futures) instead of
    * waiting for a producer that is gone.
    */
+  /**
+   * Begin serving one incoming request in the next callback: issue its `own<request>` handle.
+   * Invalid input is refused before anything is issued.
+   */
+  beginIngress(exchange: IngressExchange): number {
+    if (this.#closed) throw new Error("Standard host is closed");
+    if (this.#ingress) throw new Error("an incoming HTTP request is already being served");
+    const call = new IngressCall(exchange, (operation) => this.cleanup(operation));
+    const request = call.resource();
+    try {
+      const handle = this.#issue({ kind: "own", resource: HTTP_REQUEST, value: request });
+      this.#ingress = call;
+      return handle;
+    } catch (error) {
+      request.release();
+      throw error;
+    }
+  }
+
+  /** The serving callback ended: whatever its delivery had not finished ends with `reason`. */
+  endIngress(reason: unknown): void {
+    const call = this.#ingress;
+    this.#ingress = undefined;
+    call?.end(reason);
+  }
+
   endCallback(): void {
     for (const handle of this.#inputs) {
       const entry = this.#entries.get(handle);
@@ -740,6 +800,7 @@ export class StandardHost implements StandardServices {
   /** Retire the revision: drop every handle after physical provider work has settled. */
   async dispose(): Promise<void> {
     this.#closed = true;
+    this.endIngress(new Error("Standard host is closed"));
     this.#cli.retire();
     // Producers first, so no consumer waits for a writer that can no longer run.
     for (const [handle, entry] of this.#entries)

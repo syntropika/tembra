@@ -78,6 +78,16 @@ pub enum GuestCommand<'a> {
     Release {
         environment: u64,
     },
+    /// Serve one incoming HTTP request through the handler service's method.
+    ///
+    /// The typed request travels beside the command, never in this packet. The source worker
+    /// issues it into the revision's standard handle table and adds its handle as `request`
+    /// before dispatching to the guest; compiled Stores pass it to the handler directly.
+    Ingress {
+        environment: u64,
+        service: Option<&'a str>,
+        method: &'a str,
+    },
 }
 
 /// Environment handle table selected by a guest request.

@@ -38,6 +38,8 @@ pub(crate) enum Event {
         reply: oneshot::Sender<std::result::Result<String, String>>,
     },
     Done(std::result::Result<String, String>),
+    /// Incoming HTTP carrier events of a platform exchange (`crate::ingress::IngressPort`).
+    Ingress(crate::ingress::IngressEvent),
 }
 
 /// One host-selected operation and the channel that carries its scoped requests and completion.
@@ -45,6 +47,8 @@ pub(crate) struct Command {
     pub(crate) operation: Operation,
     pub(crate) packet: String,
     pub(crate) events: Sender<Event>,
+    /// The typed request and head channel of an incoming HTTP call; never serialized.
+    pub(crate) ingress: Option<crate::ingress::IngressCall>,
 }
 
 /// Terminal completions that must wait until the Store and its runtime have stopped.
@@ -221,6 +225,7 @@ impl Session {
             packet: serde_json::to_string(&crate::protocol::GuestCommand::Release { environment })
                 .expect("serializable release"),
             events,
+            ingress: None,
         };
         if let Some(sender) = &self.0.commands {
             let _ = sender.send(command);
@@ -229,6 +234,40 @@ impl Session {
 
     /// Submit one callback, refusing reentry before it could deadlock on this Store.
     pub(crate) fn begin(&self, operation: Operation, packet: String) -> Result<Receiver<Event>> {
+        self.begin_with(operation, packet, None)
+    }
+
+    /// Submit an incoming HTTP callback for a platform port. The typed request travels beside
+    /// the command; the returned sender lets its carrier publish events on the same stream.
+    pub(crate) fn begin_ingress(
+        &self,
+        packet: String,
+        head: crate::ingress::IngressRequestHead,
+    ) -> Result<(Receiver<Event>, crate::ingress::IngressPort)> {
+        let (sender, events) = async_channel::bounded(128);
+        let (call, port) = crate::ingress::begin_carrier(head, sender.clone())?;
+        let receive = self.submit(Operation::Start, packet, Some(call), (sender, events))?;
+        Ok((receive, port))
+    }
+
+    /// Submit one callback with an optional typed incoming HTTP payload.
+    fn begin_with(
+        &self,
+        operation: Operation,
+        packet: String,
+        ingress: Option<crate::ingress::IngressCall>,
+    ) -> Result<Receiver<Event>> {
+        self.submit(operation, packet, ingress, async_channel::bounded(128))
+    }
+
+    /// Queue one callback on its own event channel, refusing reentry before it could deadlock.
+    fn submit(
+        &self,
+        operation: Operation,
+        packet: String,
+        ingress: Option<crate::ingress::IngressCall>,
+        (send, receive): (Sender<Event>, Receiver<Event>),
+    ) -> Result<Receiver<Event>> {
         if let Some(poison) = self.0.poison.lock().expect("poison state").as_ref() {
             return Err(tembra::Error::new(
                 tembra::core::Code::Unavailable,
@@ -244,11 +283,11 @@ impl Session {
                 "concurrent or reentrant calls to this interpreter are not supported",
             ));
         }
-        let (send, receive) = async_channel::bounded(128);
         let command = Command {
             operation,
             packet,
             events: send,
+            ingress,
         };
         // Transport streams opened by this callback belong to its epoch until it completes.
         self.0.io.scope().begin_callback();
@@ -295,6 +334,8 @@ impl Session {
         };
         loop {
             match events.recv_blocking().map_err(failure)? {
+                // Carrier events exist only on platform ingress exchanges.
+                Event::Ingress(_) => {}
                 Event::Done(result) => {
                     self.0.io.scope().end_callback();
                     guard.completed = true;
@@ -343,16 +384,21 @@ impl Session {
 
     /// Keep the callback physically owned until guest completion and requested host work settle.
     /// The admission permit keeps this Store serialized until the callback is physically settled.
+    ///
+    /// An incoming HTTP call carries its typed payload here; it publishes its response head on
+    /// its own channel and completes like any callback, only after physical settlement.
     pub(crate) async fn dispatch(
         &self,
         _admission: futures::lock::OwnedMutexGuard<()>,
         cancellation: Option<&tembra::Cancellation>,
         packet: impl serde::Serialize,
+        ingress: Option<crate::ingress::IngressCall>,
         host: impl AsyncFn(&str, bool) -> Result<Value>,
     ) -> Result<Value> {
-        let events = self.begin(
+        let events = self.begin_with(
             Operation::Start,
             serde_json::to_string(&packet).map_err(failure)?,
+            ingress,
         )?;
         let mut guard = Busy {
             owner: &self.0,
@@ -390,6 +436,9 @@ impl Session {
                 next.await
             };
             match event.map_err(failure)? {
+                // The native facade reads its response through the call's `Exchange`; carrier
+                // events exist only on platform ingress exchanges.
+                Event::Ingress(_) => {}
                 Event::Done(result) => {
                     // End this callback's epoch before waiting, so abandoned requests settle now;
                     // their completion is still awaited.

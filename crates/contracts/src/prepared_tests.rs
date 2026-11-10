@@ -327,10 +327,10 @@ fn runtime_artifacts_decode_source_without_a_parser_and_refuse_extra_content() {
     append_section(&mut duplicate, "tembra:source", b"other");
     assert!(Artifact::decode(&duplicate).is_err());
     // Source Orbs must satisfy the interpreter value profile on load.
-    let mut wide = model();
-    wide.types[1] = Kind::List(Ty::U64);
-    let wide = PreparedContract::new(wide).unwrap();
-    assert!(Artifact::decode(&source_artifact(&wide, "")).is_err());
+    let mut context = model();
+    context.types[1] = Kind::List(Ty::ErrorContext);
+    let context = PreparedContract::new(context).unwrap();
+    assert!(Artifact::decode(&source_artifact(&context, "")).is_err());
 }
 
 #[cfg(not(feature = "authoring"))]

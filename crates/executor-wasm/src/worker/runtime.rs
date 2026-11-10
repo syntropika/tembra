@@ -32,6 +32,82 @@ pub(super) struct State {
     pub(super) callback_scope: crate::io::CallbackScope,
     /// Whether the provider bound to `wasi:sockets/ip-name-lookup` grants name resolution.
     pub(super) resolve: bool,
+    /// The incoming HTTP request of the active ingress callback, if any.
+    pub(super) ingress: Option<Ingress>,
+}
+
+/// The upstream request body's processing result.
+pub(super) type Received = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = std::result::Result<(), wasmtime_wasi_http::Error>> + Send,
+    >,
+>;
+
+/// One source ingress callback: the call's exchange, its unpublished head and the request
+/// handle issued to the guest. Its response is published once, by `INGRESS_HEAD`.
+pub(super) struct Ingress {
+    pub(super) exchange: Arc<crate::ingress::Exchange>,
+    pub(super) head: Option<oneshot::Sender<crate::ingress::Head>>,
+    /// The request body's processing result, joined into the response's transmission result.
+    pub(super) received: Option<Received>,
+    pub(super) request: u64,
+    /// The handler's `error-code`, which completes the callback with an error (after
+    /// settlement) for hosts that read it from the completion.
+    pub(super) refused: Option<String>,
+}
+
+impl State {
+    /// Start an ingress callback: the request becomes an owned standard handle of this
+    /// revision, and the guest's dispatch packet names it as `request`.
+    fn begin_ingress(
+        &mut self,
+        packet: &str,
+        call: crate::ingress::IngressCall,
+    ) -> wasmtime::Result<std::result::Result<String, String>> {
+        let mut packet: serde_json::Value = match serde_json::from_str(packet) {
+            Ok(serde_json::Value::Object(packet))
+                if packet.get("kind") == Some(&"ingress".into()) =>
+            {
+                serde_json::Value::Object(packet)
+            }
+            _ => return Ok(Err("malformed ingress command".into())),
+        };
+        let crate::ingress::IngressCall {
+            request,
+            exchange,
+            head,
+        } = call;
+        let (request, received) =
+            wasmtime_wasi_http::p3::Request::from_http(&mut self.hooks, request);
+        let request = self.table.push(request)?;
+        let id = match super::standard::issue_request(self, request)? {
+            Ok(id) => id,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        packet["request"] = id.into();
+        self.ingress = Some(Ingress {
+            exchange,
+            head: Some(head),
+            received: Some(Box::pin(received)),
+            request: id,
+            refused: None,
+        });
+        Ok(Ok(packet.to_string()))
+    }
+
+    /// End an ingress callback. A body still being delivered after a failed or unsettled
+    /// callback ends with an error, never a truncated end; a request the guest never took is
+    /// released, since a request belongs to its callback.
+    fn end_ingress(&mut self, failed: bool) -> wasmtime::Result<Option<String>> {
+        let Some(ingress) = self.ingress.take() else {
+            return Ok(None);
+        };
+        if failed || !ingress.exchange.ended() {
+            ingress.exchange.fail();
+        }
+        super::standard::release_unclaimed(self, ingress.request)?;
+        Ok(ingress.refused)
+    }
 }
 
 impl crate::sockets::CallCancellation for State {
@@ -313,6 +389,7 @@ pub(super) async fn instantiate(
             ),
             callback_scope: scope,
             resolve,
+            ingress: None,
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -343,7 +420,18 @@ pub(super) async fn run(
     let outcome = async {
         let (mut store, driver) =
             instantiate(&engine, diagnostics, standard, transport.clone()).await?;
-        while let Ok(command) = commands.recv() {
+        while let Ok(mut command) = commands.recv() {
+            // An ingress command issues its request before the guest runs.
+            let mut packet = std::mem::take(&mut command.packet);
+            if let Some(call) = command.ingress.take() {
+                match store.data_mut().begin_ingress(&packet, call)? {
+                    Ok(named) => packet = named,
+                    Err(refusal) => {
+                        let _ = command.events.send(Event::Done(Err(refusal))).await;
+                        continue;
+                    }
+                }
+            }
             store.data_mut().events = Some(command.events.clone());
             store.data_mut().deadline = Some(
                 std::time::Instant::now()
@@ -352,7 +440,7 @@ pub(super) async fn run(
             store.set_fuel(engine.limits.fuel)?;
             let result = tokio::time::timeout(
                 std::time::Duration::from_millis(engine.limits.timeout_ms),
-                driver.call(command.operation, command.packet, &mut store),
+                driver.call(command.operation, packet, &mut store),
             )
             .await
             .map_err(|_| {
@@ -363,7 +451,24 @@ pub(super) async fn run(
             .and_then(|result| result)
             .map_err(|error| super::standard::attribute_trap(error, engine.interpreter.as_deref()));
             store.data_mut().events = None;
-            let trapped = result.as_ref().map_or(true, |outcome| outcome.interrupted);
+            let mut trapped = result.as_ref().map_or(true, |outcome| outcome.interrupted);
+            let mut result = result;
+            // Ending an ingress callback cannot fail unless the Store's tables are inconsistent;
+            // that quarantines it like a trap.
+            match store.data_mut().end_ingress(trapped) {
+                // A handler `error-code` completes the callback with that error.
+                Ok(Some(refused)) => {
+                    result = result.map(|outcome| super::steps::Outcome {
+                        value: outcome.value.and(Err(refused)),
+                        interrupted: outcome.interrupted,
+                    })
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    trapped = true;
+                    result = Err(error);
+                }
+            }
             let result = result
                 .map(|outcome| outcome.value)
                 .unwrap_or_else(|error| {
@@ -447,5 +552,6 @@ pub(super) fn test_state(ctx: wasmtime_wasi::WasiCtx) -> State {
         ),
         callback_scope: scope,
         resolve: false,
+        ingress: None,
     }
 }
