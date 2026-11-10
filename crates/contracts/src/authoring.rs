@@ -66,7 +66,7 @@ fn redefined(
         let name = &unresolved.name;
         if resolve.package_names.contains_key(name) {
             let owner = if standard.contains(name) {
-                "the standard WASI contracts bundled with Tembra"
+                "the standard contracts bundled with Tembra"
             } else {
                 "an encoded WIT dependency"
             };
