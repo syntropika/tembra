@@ -1,0 +1,19 @@
+package example:greeter@1.0.0;
+
+interface greeting {
+  record stats {
+    words: u32,
+    chars: u32,
+  }
+
+  hello: func(name: string) -> string;
+
+  count-words: func(text: string) -> u32;
+
+  measure: func(text: string) -> stats;
+}
+
+
+world greeter {
+  export greeting;
+}

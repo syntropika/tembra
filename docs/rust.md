@@ -84,7 +84,9 @@ host.install(vec![orb])?;
 `Engine::load` returns an ordinary `Orb`. It installs, reloads and closes like a native orb and can
 call or provide services through the same kernel. Each loaded orb runs in its own Wasm Store.
 See [Wasm orb execution](../crates/executor-wasm/README.md) and
-[the Wasm consumer example](../examples/rust/wasm.rs).
+[the Wasm consumer example](../examples/rust/wasm.rs). To write a compiled orb in Rust without a
+WIT file, see [the Rust orb example](../examples/rust-orb/README.md): `#[orb]` derives the
+contract from a module and `cargo tembra build` packages the artifact.
 
 ## Serve incoming HTTP
 
