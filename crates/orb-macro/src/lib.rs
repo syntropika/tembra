@@ -98,6 +98,33 @@ struct Contribution {
     result: Option<Type>,
 }
 
+/// A hook declaration: a unit struct marked `#[hook("ns:name/hook@version", composition = c)]`.
+/// The Orb exports the hook's interface, as the portable hook contract requires of a provider,
+/// and imports it as the typed entry to the plan the kernel runs.
+struct Declared {
+    hook: String,
+    composition: Composition,
+    ident: Ident,
+}
+
+/// How the kernel composes the contributions of a hook.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Composition {
+    Series,
+    Waterfall,
+    Bail,
+}
+
+impl Composition {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Series => "series",
+            Self::Waterfall => "waterfall",
+            Self::Bail => "bail",
+        }
+    }
+}
+
 /// A kernel-managed state: a struct with named fields marked `#[state]`, owned by the objects
 /// of one service.
 struct State {
@@ -141,6 +168,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let mut candidates: Vec<(Item, Shape)> = Vec::new();
     let mut services = Vec::new();
     let mut contributions = Vec::new();
+    let mut declared: Vec<Declared> = Vec::new();
     let mut states = Vec::new();
     let mut resources: Vec<Resource> = Vec::new();
     let mut passthrough = Vec::new();
@@ -148,7 +176,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     for item in items {
         match item {
             Item::Struct(mut s) => {
-                if let Some(attribute) = take(&mut s.attrs, "resource") {
+                if let Some(attribute) = take(&mut s.attrs, "hook") {
+                    declared.push(declaration(&s, &attribute)?);
+                    passthrough.push(Item::Struct(s));
+                } else if let Some(attribute) = take(&mut s.attrs, "resource") {
                     resources.push(resource(&s, &attribute)?);
                     // A resource enters the WIT only when a service method uses it.
                     if matches!(s.fields, Fields::Named(_)) {
@@ -263,10 +294,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 && matches!(function.sig.inputs.first(), Some(FnArg::Receiver(_)))
         });
     }
-    if services.is_empty() {
+    // An Orb exports services, declares hooks or contributes to them; a module doing none of
+    // those would be an empty world.
+    if services.is_empty() && contributions.is_empty() && declared.is_empty() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "no service found: mark a unit struct with #[service] and give it an impl block of pub fn",
+            "nothing to export: mark a unit struct with #[service] and give it an impl block of pub fn, or mark a hook with #[hook]",
         ));
     }
     if let Some(service) = services.iter().find(|service| service.functions.is_empty()) {
@@ -297,6 +330,28 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             Span::call_site(),
             "one contribution per hook",
         ));
+    }
+    // A declared hook is run by this Orb and answered by other Orbs' contributions.
+    let mut declarations: BTreeMap<String, &Declared> = BTreeMap::new();
+    for declaration in &declared {
+        if hooks.contains_key(&declaration.hook) {
+            return Err(syn::Error::new(
+                declaration.ident.span(),
+                format!(
+                    "`{}` declares the hook {}, which this module also contributes to; an Orb does one or the other",
+                    declaration.ident, declaration.hook
+                ),
+            ));
+        }
+        if declarations
+            .insert(declaration.hook.clone(), declaration)
+            .is_some()
+        {
+            return Err(syn::Error::new(
+                declaration.ident.span(),
+                "one declaration per hook",
+            ));
+        }
     }
     // Each state belongs to the objects of one service, and an object declares exactly one state.
     let mut owners = BTreeMap::new();
@@ -335,24 +390,46 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // the WIT.
     let shapes = reachable(candidates, &services, &states, &mut passthrough)?;
 
-    // Consumed packages: the hook callbacks are read from the provider's WIT.
+    // Consumed packages: the callback of every hook, contributed or declared, is read from its
+    // WIT package.
     let wit_dir = options.wit.as_deref().map(wit::absolute).transpose()?;
-    let callbacks = match (&wit_dir, hooks.is_empty()) {
+    let callbacks = match (&wit_dir, hooks.is_empty() && declarations.is_empty()) {
         (_, true) => Default::default(),
-        (Some(dir), false) => wit::callbacks(dir, hooks.keys())?,
+        (Some(dir), false) => wit::callbacks(dir, hooks.keys().chain(declarations.keys()))?,
         (None, false) => {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "contributions need wit = \"<dir>\", the directory with the provider's WIT package",
+                "hooks need wit = \"<dir>\", the directory with the hook's WIT package",
             ));
         }
     };
+    for declaration in declarations.values() {
+        let callback = &callbacks[&declaration.hook];
+        let (fits, rule) = match declaration.composition {
+            Composition::Series => (callback.series, "a series callback returns nothing"),
+            Composition::Waterfall => (
+                callback.waterfall,
+                "a waterfall callback returns its input type",
+            ),
+            Composition::Bail => (callback.bail, "a bail callback returns an option"),
+        };
+        if !fits {
+            return Err(syn::Error::new(
+                declaration.ident.span(),
+                format!(
+                    "the callback of {} does not fit a {} hook: {rule}",
+                    declaration.hook,
+                    declaration.composition.name()
+                ),
+            ));
+        }
+    }
     let wit = wit::render(
         &package,
         &world,
         &shapes,
         &services,
-        hooks.keys(),
+        hooks.keys().chain(declarations.keys()),
         wit::Kernel {
             state: !states.is_empty(),
             resources: !resources.is_empty(),
@@ -366,14 +443,16 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let attrs = module.attrs;
     let ns_ident = format_ident!("{}", namespace.to_snake_case());
     let name_ident = format_ident!("{}", name.to_snake_case());
-    let first_interface = format_ident!("{}", services[0].ident.to_string().to_snake_case());
     let shape_idents = shapes.iter().map(|shape| &shape.ident).collect::<Vec<_>>();
     // The generated types carry the author's names and public fields, so the author's functions
-    // and the generated traits speak about one type.
-    let reexports = if shapes.is_empty() {
-        quote! {}
-    } else {
-        quote! { pub use exports::#ns_ident::#name_ident::#first_interface::{#(#shape_idents),*}; }
+    // and the generated traits speak about one type. A shape is reached from a service, so a
+    // module with shapes has a first service.
+    let reexports = match services.first() {
+        Some(first) if !shapes.is_empty() => {
+            let first_interface = format_ident!("{}", first.ident.to_string().to_snake_case());
+            quote! { pub use exports::#ns_ident::#name_ident::#first_interface::{#(#shape_idents),*}; }
+        }
+        _ => quote! {},
     };
     let bridges = services.iter().map(|service| {
         let interface = format_ident!("{}", service.ident.to_string().to_snake_case());
@@ -400,15 +479,22 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     });
-    // Each hook's generated module is re-exported under its interface name, and its callback
-    // forwards to the author's function.
-    let hook_modules = hooks.keys().map(|hook| {
-        let [ns, package, interface] = hook_path(hook);
-        quote! { pub use exports::#ns::#package::#interface; }
-    });
+    // Each hook's generated module is re-exported under its interface name: the export module
+    // of a contributed hook, whose callback forwards to the author's function, and the import
+    // module of a declared hook, whose types `run` takes and returns.
+    let hook_modules = hooks
+        .keys()
+        .map(|hook| {
+            let [ns, package, interface] = hook_path(hook);
+            quote! { pub use exports::#ns::#package::#interface; }
+        })
+        .chain(declarations.keys().map(|hook| {
+            let [ns, package, interface] = hook_path(hook);
+            quote! { pub use self::#ns::#package::#interface; }
+        }));
     let contribution_bridges = contributions.iter().map(|contribution| {
         let [ns, package, interface] = hook_path(&contribution.hook);
-        let callback = format_ident!("{}", callbacks[&contribution.hook].to_snake_case());
+        let callback = format_ident!("{}", callbacks[&contribution.hook].name.to_snake_case());
         let target = &contribution.ident;
         let (param, ty) = &contribution.param;
         let result = contribution
@@ -422,18 +508,22 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     });
-    // The priorities travel with the component, like the WIT.
-    let hooks_section = if hooks.is_empty() {
+    // The hook roles travel with the component, like the WIT: the contributions with their
+    // priorities and the declarations with their composition.
+    let hooks_section = if hooks.is_empty() && declarations.is_empty() {
         quote! {}
     } else {
-        let json = format!(
-            "{{{}}}",
-            hooks
-                .iter()
-                .map(|(hook, priority)| format!("\"{hook}\":{priority}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+        let contributes = hooks
+            .iter()
+            .map(|(hook, priority)| format!("\"{hook}\":{priority}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let declares = declarations
+            .iter()
+            .map(|(hook, declaration)| format!("\"{hook}\":\"{}\"", declaration.composition.name()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!("{{\"contributes\":{{{contributes}}},\"declares\":{{{declares}}}}}");
         let bytes = LitByteStr::new(json.as_bytes(), Span::call_site());
         let len = proc_macro2::Literal::usize_unsuffixed(json.len());
         quote! {
@@ -445,6 +535,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     };
     let state_code = state_code(&states, &package, name, version);
     let resource_code = resource_code(&resources);
+    let declaration_code = declaration_code(&declared, &callbacks)?;
     let wit_literal = LitStr::new(&wit, Span::call_site());
     let wit_bytes = LitByteStr::new(wit.as_bytes(), Span::call_site());
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
@@ -513,6 +604,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             struct __TembraExports;
             #(#bridges)*
             #(#contribution_bridges)*
+            #declaration_code
             #state_code
             #resource_code
             export!(__TembraExports);
@@ -667,6 +759,115 @@ fn contribution(function: &ItemFn, attribute: &Attribute) -> syn::Result<Contrib
         ident: function.sig.ident.clone(),
         param: (pat.ident.clone(), (*typed.ty).clone()),
         result: result(&function.sig.output).cloned(),
+    })
+}
+
+/// Read a hook declaration: a unit struct, with the hook's name and its composition on the
+/// attribute.
+fn declaration(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Declared> {
+    if !matches!(item.fields, Fields::Unit) {
+        return Err(syn::Error::new(
+            attribute.span(),
+            "a hook declaration is a unit struct: #[hook(\"ns:name/hook@version\", composition = waterfall)] pub struct Name;",
+        ));
+    }
+    let (hook, composition) = attribute.parse_args_with(|input: syn::parse::ParseStream| {
+        let hook: LitStr = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let key: Ident = input.parse()?;
+        if key != "composition" {
+            return Err(syn::Error::new(
+                key.span(),
+                "unknown option; a declared hook names its composition: #[hook(\"ns:name/hook@version\", composition = series | waterfall | bail)]",
+            ));
+        }
+        input.parse::<Token![=]>()?;
+        let value: Ident = input.parse()?;
+        let composition = match value.to_string().as_str() {
+            "series" => Composition::Series,
+            "waterfall" => Composition::Waterfall,
+            "bail" => Composition::Bail,
+            _ => {
+                return Err(syn::Error::new(
+                    value.span(),
+                    "the composition is series, waterfall or bail",
+                ));
+            }
+        };
+        Ok((hook, composition))
+    })?;
+    let id = hook.value();
+    if !id.contains(':') || !id.contains('/') || id.contains(['"', '\\']) {
+        return Err(syn::Error::new(
+            hook.span(),
+            "a hook is named ns:name/interface@version",
+        ));
+    }
+    Ok(Declared {
+        hook: id,
+        composition,
+        ident: item.ident.clone(),
+    })
+}
+
+/// The code of the declared hooks: for each, the export the contract requires, which traps
+/// because the contributions answer the hook, and `run` on the author's struct, which calls the
+/// matching import so the kernel runs the plan.
+fn declaration_code(
+    declared: &[Declared],
+    callbacks: &BTreeMap<String, wit::Callback>,
+) -> syn::Result<proc_macro2::TokenStream> {
+    if declared.is_empty() {
+        return Ok(quote! {});
+    }
+    let items = declared
+        .iter()
+        .map(|declaration| {
+            let callback = &callbacks[&declaration.hook];
+            let [ns, package, interface] = hook_path(&declaration.hook);
+            let name = format_ident!("{}", callback.name.to_snake_case());
+            let export_input: Type = syn::parse_str(&callback.input.export)?;
+            let import_input: Type = syn::parse_str(&callback.input.import)?;
+            let output = |spelling: &str| -> syn::Result<proc_macro2::TokenStream> {
+                let ty: Type = syn::parse_str(spelling)?;
+                Ok(quote! { -> #ty })
+            };
+            let export_result = match &callback.result {
+                Some(spelled) => output(&spelled.export)?,
+                None => quote! {},
+            };
+            let import_result = match &callback.result {
+                Some(spelled) => output(&spelled.import)?,
+                None => quote! {},
+            };
+            let ident = &declaration.ident;
+            let message = format!(
+                "the hook {} is declared by this Orb: its contributions answer it, this export never does",
+                declaration.hook
+            );
+            let doc = format!(
+                " Run the hook `{}`: the kernel calls its contributions in plan order and returns the composed result.",
+                declaration.hook
+            );
+            Ok(quote! {
+                impl exports::#ns::#package::#interface::Guest for __TembraExports {
+                    fn #name(_input: #export_input) #export_result {
+                        ::core::panic!(#message)
+                    }
+                }
+                impl #ident {
+                    #[doc = #doc]
+                    pub fn run(input: #import_input) #import_result {
+                        self::#ns::#package::#interface::#name(input)
+                    }
+                }
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    // The bindings spell strings and lists from `alloc`; the module may not name that crate.
+    Ok(quote! {
+        extern crate alloc as __tembra_alloc;
+        #(#items)*
     })
 }
 
@@ -956,8 +1157,9 @@ fn result(output: &ReturnType) -> Option<&Type> {
     }
 }
 
-/// The generated module of a hook interface: `exports::<ns>::<package>::<interface>`.
-fn hook_path(hook: &str) -> [Ident; 3] {
+/// The generated module of a hook interface: `exports::<ns>::<package>::<interface>` for the
+/// export, `<ns>::<package>::<interface>` for the import.
+pub(crate) fn hook_path(hook: &str) -> [Ident; 3] {
     let (package, rest) = hook.split_once('/').unwrap_or((hook, ""));
     let (namespace, name) = package.split_once(':').unwrap_or((package, ""));
     let interface = rest.split('@').next().unwrap_or(rest);
