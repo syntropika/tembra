@@ -101,7 +101,10 @@ call or provide services through the same kernel. Each loaded orb runs in its ow
 See [Wasm orb execution](../crates/executor-wasm/README.md) and
 [the mixed native/Wasm consumer example](../examples/rust/wasm.rs). It installs a native counter,
 a source Orb and a compiled component in one host. Backend values are reexports of the same
-implementation types; the facade adds no serialization, wrapper runtime or dispatch step.
+implementation types; the facade adds no serialization, wrapper runtime or dispatch step. To write
+a compiled orb in Rust without a WIT file, see
+[the Rust orb example](../examples/rust-orb/README.md): `#[orb]` derives the
+contract from a module and `cargo tembra build` packages the artifact.
 
 ## Serve incoming HTTP
 
