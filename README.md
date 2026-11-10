@@ -46,6 +46,7 @@ the same lifecycle.
 | [examples/wasm-orb/](examples/wasm-orb/)                                     | A TypeScript orb and a compiled Rust orb built from one WIT file                               |
 | [examples/rust-orb-service/](examples/rust-orb-service/)                     | A compiled Rust orb exporting one service, written from its code and built with `cargo tembra` |
 | [examples/rust-orb-hook-contribution/](examples/rust-orb-hook-contribution/) | A compiled Rust orb contributing to a native orb's hook, counting in a root resource           |
+| [examples/rust-orb-hook-declaration/](examples/rust-orb-hook-declaration/)   | A compiled Rust orb declaring a hook, and another compiled Rust orb contributing to it         |
 | [examples/rust-orb-state/](examples/rust-orb-state/)                         | A compiled Rust orb whose state the kernel keeps, observed and reloaded by the host            |
 
 ## Development

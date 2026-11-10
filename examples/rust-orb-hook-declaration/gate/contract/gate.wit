@@ -1,0 +1,29 @@
+package example:gate@1.0.0;
+
+/// The gate's service.
+interface admissions {
+  /// What the gate decided for one value.
+  record decision {
+    value: s32,
+    blocked: bool,
+  }
+  /// Run the guard hook over a fresh admission and report what the contributors decided.
+  admit: func(value: s32) -> decision;
+}
+
+world gate {
+  import example:admission/guard@1.0.0;
+  export example:admission/guard@1.0.0;
+  export admissions;
+}
+
+package example:admission@1.0.0 {
+  interface guard {
+    record admission {
+      value: s32,
+      blocked: bool,
+    }
+
+    apply: func(input: admission) -> admission;
+  }
+}

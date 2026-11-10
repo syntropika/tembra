@@ -28,6 +28,9 @@ exclude = [
   "examples/rust-orb-hook-contribution/gate",
   "examples/rust-orb-hook-contribution/filter",
   "examples/rust-orb-hook-contribution/host",
+  "examples/rust-orb-hook-declaration/gate",
+  "examples/rust-orb-hook-declaration/blocker",
+  "examples/rust-orb-hook-declaration/host",
   "examples/rust-orb-state/counter",
   "examples/rust-orb-state/host",
 ]
