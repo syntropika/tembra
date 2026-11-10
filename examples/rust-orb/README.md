@@ -23,18 +23,18 @@ target.
 
 ```sh
 cargo install --path crates/cargo-tembra
-cargo tembra build --manifest-path examples/rust-orb/greeter/Cargo.toml --out examples/rust-orb/artifacts
+cargo tembra build --manifest-path examples/rust-orb/greeter/Cargo.toml
 ```
 
 `build` compiles the crate on stable with the component linker, derives the WIT from the component
 into `greeter/contract/greeter.wit`, checks the component against it and writes `greeter.wasm`,
-`greeter.orb.wasm` and `checksums.txt` into `--out`. The summary lists the services and the grants
+`greeter.orb.wasm` and `checksums.txt` into `greeter/artifacts/`, next to the contract. The summary lists the services and the grants
 an installer must give; this Orb imports nothing.
 
 ## Run
 
 ```sh
-cargo run --manifest-path examples/rust-orb/host/Cargo.toml -- examples/rust-orb/artifacts/greeter.orb.wasm
+cargo run --manifest-path examples/rust-orb/host/Cargo.toml -- examples/rust-orb/greeter/artifacts/greeter.orb.wasm
 ```
 
 The host prints `"Hello, Ada!"` and `{"chars":22,"words":5}`. It loads the artifact with

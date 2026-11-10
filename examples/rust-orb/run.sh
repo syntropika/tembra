@@ -8,9 +8,9 @@ tembra() {
     cargo run --quiet --locked --manifest-path "$root/Cargo.toml" -p cargo-tembra -- "$@"
   fi
 }
-tembra build --manifest-path greeter/Cargo.toml --out artifacts
+tembra build --manifest-path greeter/Cargo.toml
 echo
 echo "greeter/contract/greeter.wit, derived from the component:"
 cat greeter/contract/greeter.wit
 echo
-cargo run --quiet --manifest-path host/Cargo.toml --target-dir "$root/target" -- artifacts/greeter.orb.wasm
+cargo run --quiet --manifest-path host/Cargo.toml --target-dir "$root/target" -- greeter/artifacts/greeter.orb.wasm

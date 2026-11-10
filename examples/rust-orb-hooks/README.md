@@ -27,7 +27,7 @@ Run from the repository root.
 
 ```sh
 cargo install --path crates/cargo-tembra
-cargo tembra build --manifest-path examples/rust-orb-hooks/filter/Cargo.toml --out examples/rust-orb-hooks/artifacts
+cargo tembra build --manifest-path examples/rust-orb-hooks/filter/Cargo.toml
 ```
 
 The summary lists the contribution next to the service:
@@ -47,7 +47,7 @@ that contract into the component, and the linker is free to drop the unused impo
 ## Run
 
 ```sh
-cargo run --manifest-path examples/rust-orb-hooks/host/Cargo.toml -- examples/rust-orb-hooks/artifacts/filter.orb.wasm
+cargo run --manifest-path examples/rust-orb-hooks/host/Cargo.toml -- examples/rust-orb-hooks/filter/artifacts/filter.orb.wasm
 ```
 
 ```text
