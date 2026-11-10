@@ -16,6 +16,7 @@ heck = "0.5"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
+wit-parser = "=0.261.0"
 
 [lints]
 workspace = true

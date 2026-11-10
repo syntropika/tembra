@@ -1929,6 +1929,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+ "wit-parser 0.261.0",
 ]
 
 [[package]]
