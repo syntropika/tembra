@@ -1,5 +1,5 @@
 //! Resolve deployment choices without making a WIT import an implicit capability grant.
-use crate::{Binding, Grants, PreparedContract, model::Item};
+use crate::{Binding, Grants, PreparedContract, guest, model::Item};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use tembra_core::{Code, Error, Result};
@@ -28,6 +28,25 @@ impl PreparedContract {
                 continue;
             }
             let binding = entry.key.clone();
+            // The kernel's own interfaces are neither Orb dependencies nor host capabilities.
+            if let Some(contract) = interface
+                .contract
+                .as_deref()
+                .filter(|id| guest::reserved(id))
+            {
+                if contract != guest::STATE {
+                    return Err(Error::new(
+                        Code::Unsupported,
+                        "wit_binding",
+                        format!(
+                            "{binding}: the tembra namespace is reserved for kernel interfaces; this kernel serves {}",
+                            guest::STATE
+                        ),
+                    ));
+                }
+                bindings.insert(binding, Binding::Kernel);
+                continue;
+            }
             if let Some(requirement) = requires.get(&binding) {
                 if requirement.orb.trim().is_empty() || requirement.api_version == 0 {
                     return Err(Error::new(

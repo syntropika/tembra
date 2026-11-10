@@ -1,6 +1,6 @@
 //! Explicit provider bindings and lowering into the existing kernel metadata model.
 use crate::{
-    Error, HTTP_HANDLER,
+    Error, HTTP_HANDLER, guest,
     model::{Entry, FunctionKind, Interface, Item, PreparedContract},
     service_name,
 };
@@ -12,8 +12,15 @@ use tembra_core::{Orb, Requirement, Service};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Binding {
-    Orb { name: String, api_version: u32 },
-    Host { provider: String },
+    Orb {
+        name: String,
+        api_version: u32,
+    },
+    Host {
+        provider: String,
+    },
+    /// The kernel serves this import itself (`tembra:guest`): no provider and no grant.
+    Kernel,
 }
 
 /// A host capability to resolve against separately configured providers and grants.
@@ -168,6 +175,15 @@ impl PreparedContract {
                     let contract = interface.contract.clone().ok_or_else(|| {
                         Error("anonymous export needs an explicit service mapping".into())
                     })?;
+                    // Kernel callbacks are answered to the kernel, never offered as services.
+                    if guest::reserved(&contract) {
+                        if contract == guest::STATE_INIT {
+                            continue;
+                        }
+                        return Err(Error(format!(
+                            "{contract}: the tembra namespace is reserved for kernel interfaces"
+                        )));
+                    }
                     let alias =
                         crate::javascript_name(interface.name.as_deref().unwrap_or_default());
                     if let Some(previous) = aliases.insert(alias.clone(), contract.clone()) {
@@ -238,7 +254,20 @@ impl PreparedContract {
                 .get(binding)
                 .ok_or_else(|| Error(format!("missing provider for {binding}")))?;
             used.insert(binding.to_owned());
+            if guest::reserved(&contract) != matches!(selected, Binding::Kernel) {
+                return Err(Error(format!(
+                    "{binding}: kernel interfaces bind to the kernel and nothing else does"
+                )));
+            }
             match selected {
+                Binding::Kernel => {
+                    if contract != guest::STATE {
+                        return Err(Error(format!(
+                            "{binding}: the kernel serves only {}",
+                            guest::STATE
+                        )));
+                    }
+                }
                 Binding::Host { provider } => {
                     if provider.trim().is_empty() {
                         return Err(Error(format!("empty host provider for {binding}")));
@@ -295,6 +324,15 @@ impl PreparedContract {
         }
         if let Some(unused) = bindings.keys().find(|name| !used.contains(*name)) {
             return Err(Error(format!("unused provider binding {unused}")));
+        }
+        // State is declared through the export and used through the import: one without the
+        // other is a world that can never work.
+        if guest::imports_state(self.model()) != guest::exports_state_init(self.model()) {
+            return Err(Error(format!(
+                "a world importing {} exports {}, and the other way round",
+                guest::STATE,
+                guest::STATE_INIT
+            )));
         }
         orb.requires = requirements.into_values().collect();
         Ok(Plan {

@@ -8,6 +8,7 @@ mod artifact;
 mod authoring;
 mod codec;
 mod describe;
+pub mod guest;
 mod hooks;
 mod implementation;
 mod lower;

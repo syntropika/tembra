@@ -291,3 +291,75 @@ fn executable_export_comparison_checks_signatures_and_function_sets() {
     let other = Contract::from_source("other.wit", SOURCE, Some("consumer")).unwrap();
     assert!(expected.check_exports(&other).is_err());
 }
+
+const STATEFUL: &str = r#"
+package example:counter@1.0.0;
+interface counter { add: func(by: s64) -> s64; }
+world stateful {
+    import tembra:guest/state@1.0.0;
+    export tembra:guest/state-init@1.0.0;
+    export counter;
+}
+"#;
+
+#[test]
+fn kernel_interfaces_bind_to_the_kernel_without_a_provider_or_grant() {
+    let contract = Contract::from_source("counter.wit", STATEFUL, None).unwrap();
+    let bindings = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap();
+    assert_eq!(bindings.get(guest::STATE), Some(&Binding::Kernel));
+    let plan = contract.plan("counter", 1, &bindings).unwrap();
+    assert!(plan.host_imports.is_empty());
+    assert!(plan.orb.requires.is_empty());
+    // The state-init export answers the kernel; only the Orb's own interface is a service.
+    assert_eq!(
+        plan.orb
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        ["counter::example:counter/counter@1.0.0"]
+    );
+    // A kernel binding given by hand is checked like any other.
+    let wrong: BTreeMap<String, Binding> = [(
+        guest::STATE.to_owned(),
+        Binding::Orb {
+            name: "kernel".into(),
+            api_version: 1,
+        },
+    )]
+    .into();
+    assert!(contract.plan("counter", 1, &wrong).is_err());
+
+    // The import and the export come together.
+    let half = STATEFUL.replace("    export tembra:guest/state-init@1.0.0;\n", "");
+    let contract = Contract::from_source("half.wit", &half, None).unwrap();
+    let bindings = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap();
+    let error = contract.plan("counter", 1, &bindings).unwrap_err();
+    assert!(error.0.contains("state-init"), "{error}");
+
+    // The namespace is reserved: other kernel interfaces are refused, and the package cannot
+    // be redefined by an Orb.
+    let reversed = STATEFUL
+        .replace(
+            "import tembra:guest/state@1.0.0;",
+            "import tembra:guest/state-init@1.0.0;",
+        )
+        .replace("    export tembra:guest/state-init@1.0.0;\n", "");
+    let contract = Contract::from_source("reversed.wit", &reversed, None).unwrap();
+    let error = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap_err();
+    assert!(error.message.contains("reserved"), "{error}");
+    let Err(redefined) = Contract::from_source(
+        "guest.wit",
+        "package tembra:guest@1.0.0; interface state { read: func() -> string; } world w { import state; }",
+        None,
+    ) else {
+        panic!("an Orb redefined the kernel package");
+    };
+    assert!(redefined.0.contains("already provided"), "{redefined}");
+}

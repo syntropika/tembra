@@ -2,8 +2,9 @@
 use crate::Error;
 use wit_parser::{Resolve, UnresolvedPackage};
 
-/// Load the supported WASI release before resolving the caller's package graph. The unresolved
-/// packages are kept so explicit imports through `include wasi:...` keep their provenance.
+/// Load the supported WASI release and the kernel's guest interfaces before resolving the
+/// caller's package graph. The unresolved packages are kept so explicit imports through
+/// `include wasi:...` keep their provenance.
 pub(crate) fn resolve() -> Result<(Resolve, Vec<UnresolvedPackage>), Error> {
     let mut resolve = Resolve::default();
     let mut known = Vec::new();
@@ -20,6 +21,7 @@ pub(crate) fn resolve() -> Result<(Resolve, Vec<UnresolvedPackage>), Error> {
         ),
         ("wasi-cli.wit", include_str!("../wit/wasi03/cli.wit")),
         ("wasi-http.wit", include_str!("../wit/wasi03/http.wit")),
+        ("tembra-guest.wit", include_str!("../wit/tembra/guest.wit")),
     ] {
         let group = crate::authoring::parse_source(name, source)?;
         known.push(group.main.clone());
