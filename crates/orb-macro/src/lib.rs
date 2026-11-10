@@ -1,32 +1,33 @@
 //! `#[orb(package = "ns:name@1.0.0")]` turns a Rust module into a compiled Orb.
 //!
-//! The module is the source of truth. The macro reads it and derives the WIT contract: structs
-//! with named fields become `record`s, enums become `enum`s or `variant`s, and every unit struct
-//! with an `impl` block of `pub fn` becomes an exported interface whose functions are the Orb's
-//! methods. It then generates what a WIT-first crate writes by hand: the `wit_bindgen::generate!`
-//! invocation with the WIT inline, the `Guest` implementations forwarding to the author's
-//! functions, `export!`, and the `no_std` runtime prelude for the Wasm target.
+//! The module is the source of truth, and every exported thing is marked. A unit struct with
+//! `#[service]` and an `impl` block of `pub fn` becomes an exported interface whose functions are
+//! the Orb's methods. A free `pub fn` with `#[contributes("ns:name/hook@version")]` contributes
+//! to another Orb's hook. Structs with named fields and enums become `record`s, `enum`s and
+//! `variant`s only when a service method uses them, directly or through another type; the rest
+//! of the module stays ordinary Rust.
 //!
-//! A free `pub fn` marked `#[contributes("ns:name/hook@version")]` contributes to another Orb's
-//! hook. The hook interface comes from the provider's WIT, found in the directory named by
-//! `wit = "dir"` on the attribute, relative to the crate manifest. The macro imports and exports
-//! that interface, as the portable hook contract requires, and forwards its callback to the
-//! author's function; the generated module of the interface is re-exported under its own name,
-//! so the author writes its types as `guard::Admission`.
+//! The macro derives the WIT contract from those items and generates what a WIT-first crate
+//! writes by hand: the `wit_bindgen::generate!` invocation with the WIT inline, the `Guest`
+//! implementations forwarding to the author's functions, `export!`, and the `no_std` runtime
+//! prelude for the Wasm target. The hook interfaces come from the provider's WIT, found in the
+//! directory named by `wit = "dir"` on the attribute, relative to the crate manifest; their
+//! generated modules are re-exported under their own names, so the author writes
+//! `guard::Admission`.
 //!
 //! The crate using the macro must depend on `wit-bindgen` (features `macros` and `realloc`) and
 //! `dlmalloc` (feature `global`), because the generated code names them. `cargo tembra build`
-//! compiles the crate, extracts the same WIT from the component and packages the artifact.
+//! compiles the crate, reads the same WIT from the component and packages the artifact.
 mod wit;
 
 use heck::ToSnakeCase;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use syn::{
-    Fields, FnArg, Ident, Item, ItemFn, ItemMod, LitByteStr, LitStr, Pat, ReturnType, Type,
-    Visibility, parse_macro_input, spanned::Spanned,
+    Attribute, Fields, FnArg, Ident, Item, ItemFn, ItemMod, LitByteStr, LitStr, Pat, ReturnType,
+    Type, Visibility, parse_macro_input, spanned::Spanned,
 };
 
 /// Declare a compiled Orb from a module; the crate documentation lists the rules.
@@ -61,15 +62,17 @@ struct Options {
     wit: Option<String>,
 }
 
-/// A type declared in the module, with its WIT definition.
+/// A type declared in the module, with its WIT definition and the module types it refers to.
 struct Shape {
     ident: Ident,
     wit: String,
+    references: Vec<Ident>,
 }
 
-/// An exported interface: a unit struct with an `impl` block of public functions.
+/// An exported interface: a unit struct marked `#[service]` with an `impl` block of `pub fn`.
 struct Service {
     ident: Ident,
+    docs: Vec<String>,
     functions: Vec<Function>,
 }
 
@@ -105,36 +108,59 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         ));
     };
 
-    // Read the module: types, services, contributions, and everything else to copy through.
-    let mut shapes = Vec::new();
+    // Read the module: marked services and contributions, candidate types, and everything
+    // else to copy through unchanged.
+    let mut candidates: Vec<(Item, Shape)> = Vec::new();
     let mut services = Vec::new();
     let mut contributions = Vec::new();
     let mut passthrough = Vec::new();
     let mut impls = Vec::new();
     for item in items {
         match item {
-            Item::Struct(ref s) if matches!(s.fields, Fields::Named(_)) => {
-                shapes.push(wit::record(s)?);
+            Item::Struct(mut s) => {
+                if let Some(attribute) = take(&mut s.attrs, "state") {
+                    return Err(syn::Error::new(
+                        attribute.span(),
+                        "kernel-managed state is not available to compiled Orbs yet; keep state in statics",
+                    ));
+                }
+                if let Some(attribute) = take(&mut s.attrs, "service") {
+                    if !matches!(s.fields, Fields::Unit) {
+                        return Err(syn::Error::new(
+                            attribute.span(),
+                            "a service is a unit struct: its methods are the pub fn of its impl blocks",
+                        ));
+                    }
+                    services.push(Service {
+                        ident: s.ident.clone(),
+                        docs: wit::docs(&s.attrs),
+                        functions: Vec::new(),
+                    });
+                    passthrough.push(Item::Struct(s));
+                } else if matches!(s.fields, Fields::Named(_)) {
+                    let shape = wit::record(&s)?;
+                    candidates.push((Item::Struct(s), shape));
+                } else {
+                    passthrough.push(Item::Struct(s));
+                }
             }
-            Item::Struct(ref s) if matches!(s.fields, Fields::Unit) => {
-                services.push(Service {
-                    ident: s.ident.clone(),
-                    functions: Vec::new(),
-                });
-                passthrough.push(item);
+            Item::Enum(e) => {
+                let shape = wit::enumeration(&e)?;
+                candidates.push((Item::Enum(e), shape));
             }
-            Item::Enum(ref e) => shapes.push(wit::enumeration(e)?),
-            Item::Impl(ref i) if i.trait_.is_none() => {
+            Item::Impl(i) if i.trait_.is_none() => {
+                if let Some(attribute) = i.attrs.iter().find(|a| a.path().is_ident("service")) {
+                    return Err(syn::Error::new(
+                        attribute.span(),
+                        "put #[service] on the unit struct, not on its impl block",
+                    ));
+                }
                 impls.push(i.clone());
-                passthrough.push(item);
+                passthrough.push(Item::Impl(i));
             }
             Item::Fn(mut function) => {
-                let marker = function
-                    .attrs
-                    .iter()
-                    .position(|attr| attr.path().is_ident("contributes"));
-                if let Some(index) = marker {
-                    let hook: LitStr = function.attrs.remove(index).parse_args()?;
+                if let Some(attribute) = take(&mut function.attrs, "contributes") {
+                    let hook: LitStr = attribute.parse_args()?;
                     contributions.push(contribution(&function, &hook)?);
                 }
                 passthrough.push(Item::Fn(function));
@@ -161,11 +187,16 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     }
-    services.retain(|service| !service.functions.is_empty());
     if services.is_empty() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "no service found: declare a unit struct with an impl block of pub fn",
+            "no service found: mark a unit struct with #[service] and give it an impl block of pub fn",
+        ));
+    }
+    if let Some(service) = services.iter().find(|service| service.functions.is_empty()) {
+        return Err(syn::Error::new(
+            service.ident.span(),
+            "a service needs at least one pub fn in an impl block",
         ));
     }
     let hooks: BTreeSet<String> = contributions
@@ -178,6 +209,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             "one contribution per hook",
         ));
     }
+
+    // Only the types a service method uses, directly or through another type, enter the WIT.
+    let shapes = reachable(candidates, &services, &mut passthrough)?;
 
     // Consumed packages: the hook callbacks are read from the provider's WIT.
     let wit_dir = options.wit.as_deref().map(wit::absolute).transpose()?;
@@ -309,6 +343,60 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             export!(__TembraExports);
         }
     })
+}
+
+/// Remove and return the marker attribute with the given name, if present.
+fn take(attrs: &mut Vec<Attribute>, name: &str) -> Option<Attribute> {
+    let index = attrs.iter().position(|attr| attr.path().is_ident(name))?;
+    Some(attrs.remove(index))
+}
+
+/// Keep, in module order, the candidate types that a service method reaches; the others go back
+/// to the module as ordinary Rust. A reference to a type the module does not declare is an error.
+fn reachable(
+    candidates: Vec<(Item, Shape)>,
+    services: &[Service],
+    passthrough: &mut Vec<Item>,
+) -> syn::Result<Vec<Shape>> {
+    let declared: BTreeMap<String, usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, (_, shape))| (shape.ident.to_string(), index))
+        .collect();
+    let mut pending: Vec<Ident> = Vec::new();
+    for service in services {
+        for function in &service.functions {
+            for (_, ty, _) in &function.params {
+                wit::references(ty, &mut pending);
+            }
+            if let Some((ty, _)) = &function.result {
+                wit::references(ty, &mut pending);
+            }
+        }
+    }
+    let mut kept = BTreeSet::new();
+    while let Some(ident) = pending.pop() {
+        let Some(&index) = declared.get(&ident.to_string()) else {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{ident}` is used by a service method but is not a struct or enum of this module"
+                ),
+            ));
+        };
+        if kept.insert(index) {
+            pending.extend(candidates[index].1.references.iter().cloned());
+        }
+    }
+    let mut shapes = Vec::new();
+    for (index, (item, shape)) in candidates.into_iter().enumerate() {
+        if kept.contains(&index) {
+            shapes.push(shape);
+        } else {
+            passthrough.push(item);
+        }
+    }
+    Ok(shapes)
 }
 
 /// Read one public function of a service: a plain name for each owned parameter, no receiver.
