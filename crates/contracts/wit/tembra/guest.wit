@@ -22,3 +22,28 @@ interface state-init {
     /// The state of the service exporting the named interface, if it owns one.
     declare: func(service: string) -> option<declaration>;
 }
+
+/// The resources of a compiled Orb's root: values its component opens when the Orb is activated
+/// and closes when it is torn down, in the order the kernel decides. The kernel tracks each
+/// resource and the handle the component gave it; the value stays in the component, one per
+/// instance, because guest values cannot cross isolated heaps.
+interface resources {
+    /// The handle of the named open resource; fails before the resource is ready.
+    read: func(name: string) -> u32;
+}
+
+/// Exported by a compiled Orb whose root owns resources. The kernel asks for the declarations
+/// when it creates the root, opens each resource during activation and closes it at teardown.
+interface resources-init {
+    /// A resource of the root: its name and the version of its contract.
+    record declaration {
+        name: string,
+        version: u32,
+    }
+    /// The resources the root declares.
+    declare: func() -> list<declaration>;
+    /// Open the named resource and return the component's handle to its value.
+    open: func(name: string) -> u32;
+    /// Close the named resource's value.
+    close: func(name: string, handle: u32);
+}
