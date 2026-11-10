@@ -11,65 +11,75 @@ cargo tembra --help
 
 ## Commands
 
-| Command                                                              | Effect                                                                                                                                                                                                         |
-| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cargo tembra new <name> --package ns:name@1.0.0`                    | creates an Orb crate: `Cargo.toml` with `[package.metadata.tembra]`, `src/lib.rs` with an `#[orb]` module and a first method                                                                                   |
-| `cargo tembra build [--debug] [--out <dir>]`                         | compiles for `wasm32-unknown-unknown` with `wasm-component-ld`, derives the WIT from the component into `contract/`, verifies, packages into `artifacts/`, writes checksums and lists the grants the Orb needs |
-| `cargo tembra wit <component.wasm> [--emit <dir> --world <name>]`    | prints the WIT reconstructed from a component, or writes it as a `.wit` file                                                                                                                                   |
-| `cargo tembra inspect <component.wasm> [--wit <dir> --world <name>]` | core import sections, services and methods, required grants and, against a WIT, the verifier's verdict                                                                                                         |
+| Command                                                              | Effect                                                                                                                                                                                                                                     |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cargo tembra new <name> --package ns:name@1.0.0`                    | creates an Orb crate: `Cargo.toml` with `[package.metadata.tembra]`, `src/lib.rs` with an `#[orb]` module and a first method                                                                                                               |
+| `cargo tembra build [--debug] [--out <dir>]`                         | compiles for `wasm32-unknown-unknown` with `wasm-component-ld`, writes the contract to `contract/`, verifies the component against it, packages into `artifacts/`, writes checksums and summarizes services, hook contributions and grants |
+| `cargo tembra wit <component.wasm> [--emit <dir> --world <name>]`    | prints the WIT reconstructed from a component, or writes its contract as a `.wit` file                                                                                                                                                     |
+| `cargo tembra inspect <component.wasm> [--wit <dir> --world <name>]` | core import sections, services and methods, required grants and, against a WIT, hook contributions and the verifier's verdict                                                                                                              |
 
 `new` finds the tembra checkout by walking up from the current directory, because the created
 crate depends on the macro by path; outside the checkout, pass `--tembra <root>`.
+
+## Where the contract comes from
+
+A component built with the macro carries the module's WIT in a `tembra:wit` custom section.
+`build` takes the contract from there, so it is the text the macro derived: `///` comments
+included, and with the hook imports the linker drops because nothing calls them. The packages the
+Orb consumes, such as a provider's hook interface, are nested after it from the component's types.
+Any other component gets a contract derived from its types alone, with the world name from the
+metadata.
+
+The contract goes to `contract/`, not `wit/`: `wit-bindgen` loads a `wit` directory inside the
+crate on its own, even with an inline WIT, and finding the package twice it panics with
+"attempting to re-add package".
 
 ## Manifest metadata
 
 ```toml
 [package.metadata.tembra]
-name = "greeter"        # the Orb name; default: the crate name
+name = "filter"         # the Orb name; default: the crate name
 api-version = 1         # default 1
-world = "greeter"       # default: the Orb name in kebab-case, which the macro derives from the module name
-# contributes = { "example:hooks/guard@1.0.0" = -7 }   # hook contribution priorities
+contributes = { "example:admission/guard@1.0.0" = -7 }   # priorities of hook contributions; default 0
+world = "filter"        # only for a component without an embedded contract; default: the Orb name
 ```
 
 The name and the API version live here because the WIT does not carry them: they are the two
-arguments `Contract::component_artifact` takes.
+arguments `Contract::component_artifact` takes. Hook contributions are read from the contract, the
+interfaces its world both imports and exports; the metadata only sets their priorities.
 
 ## Build outputs
 
 ```text
 contract/
-  <world>.wit        the WIT derived from the component: the contract to commit
+  <world>.wit        the contract: the Orb's WIT, consumed packages nested after it; commit it
 artifacts/
   <name>.wasm        the compiled component
   <name>.orb.wasm    the Tembra artifact: the component plus the tembra:orb section
   checksums.txt      SHA-256 of both files
 ```
 
-and a summary, here for the example greeter:
+and a summary, here for the filter of the hooks example:
 
 ```text
-exports, the services of greeter:
-  greeter::example:greeter/greeting@1.0.0  methods: hello, count-words, measure
-imports: none; the installer grants nothing
+exports, the services of filter:
+  filter::example:filter/report@1.0.0  methods: read
+hook contributions, bound to the provider with Install::requires:
+  example:admission/guard@1.0.0  priority -7
+other imports: none; the installer grants nothing
 ```
 
 For an Orb that imports WASI, the last part names the grants an installer must give, for example
 `system: cli` and `system: clocks` for a std Orb that prints. Without it, those fourteen `wasi:cli`
 and `wasi:clocks` interfaces surface one at a time from `engine.load` errors.
 
-The WIT goes to `contract/`, not `wit/`: `wit-bindgen` loads a `wit` directory inside the crate on
-its own, even with an inline WIT, and finding the package twice it panics with "attempting to
-re-add package".
-
 ## Not yet
 
 - A `tembra-guest` crate re-exporting `wit-bindgen`, `dlmalloc` and the macro, so that `new` does
   not depend on a path inside this checkout, and publication on crates.io next to
   `tembra-contracts`.
-- Reading the WIT from a `tembra:wit` custom section written by the macro, which would keep the
-  `///` comments the binary format drops.
 - `run --call`, behind an optional feature, to install and call the Orb with the executor.
 - `wasm-opt`, once Binaryen handles components; today it works on core modules only.
-- Hooks: `contributes` already reaches `component_artifact`; the macro side, an attribute
-  generating the import, the export and the bridge, is missing.
+- Hook declaration from compiled Orbs, which the kernel does not accept yet; the macro and the
+  subcommand will follow it.
 - Reproducible builds in a container, like the optimizer, when a marketplace must trust a hash.
