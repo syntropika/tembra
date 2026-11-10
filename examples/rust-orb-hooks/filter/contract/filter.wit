@@ -1,5 +1,6 @@
 package example:filter@1.0.0;
 
+/// The contributor's own service.
 interface report {
   /// What this contributor observed.
   record counts {
