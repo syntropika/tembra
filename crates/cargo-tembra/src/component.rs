@@ -326,7 +326,7 @@ pub fn summary(
     contributions: &BTreeMap<String, i32>,
 ) {
     let world = &resolve.worlds[world];
-    let mut state = false;
+    let (mut state, mut resources) = (false, false);
     println!("exports, the services of {orb_name}:");
     for (key, item) in &world.exports {
         let id = world_key(resolve, key, None);
@@ -334,7 +334,9 @@ pub fn summary(
             continue; // a hook callback, not a service
         }
         if guest::reserved(&id) {
-            state = true; // the kernel's callback, answered to the kernel
+            // The kernel's callbacks, answered to the kernel.
+            state |= id == guest::STATE_INIT;
+            resources |= id == guest::RESOURCE_INIT;
             continue;
         }
         if let WorldItem::Interface { id: interface, .. } = item {
@@ -358,6 +360,12 @@ pub fn summary(
         println!(
             "kernel-managed state: the kernel keeps the state of this Orb's service objects ({})",
             guest::STATE
+        );
+    }
+    if resources {
+        println!(
+            "kernel-managed resources: the kernel opens and closes the resources of this Orb's root ({})",
+            guest::RESOURCE
         );
     }
     let mut requires = Vec::new();
