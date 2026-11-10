@@ -19,7 +19,8 @@ test(
     const uploads = [];
     const server = createServer((request, response) => {
       if (request.url === "/upload") {
-        const state = { bytes: 0, invalid: false, completed: false, closed: false };
+        const closed = new Promise((resolve) => request.once("close", resolve));
+        const state = { bytes: 0, invalid: false, completed: false, closed };
         uploads.push(state);
         request.on("data", (bytes) => {
           for (let index = 0; index < bytes.length; index++)
@@ -32,9 +33,6 @@ test(
           response.end(String(state.bytes));
         });
         request.on("error", () => {});
-        request.on("close", () => {
-          state.closed = true;
-        });
         return;
       }
       response.writeHead(200, {
@@ -89,7 +87,21 @@ test(
         false,
         "a throwing producer must not finish an HTTP upload",
       );
-      assert.equal(uploads[1].closed, true, "callback completion waits for the aborted peer");
+      // The transport awaits its local close; the peer observes it on a later event-loop turn.
+      let timer;
+      try {
+        await Promise.race([
+          uploads[1].closed,
+          new Promise((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("the aborted upload kept its peer open")),
+              2000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
       assert.ok(uploads[1].bytes < 4 * 65536);
       stage = "retained response";
       assert.equal(await requests.open(`${origin}/retained`), 200);

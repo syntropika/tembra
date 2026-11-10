@@ -38,7 +38,8 @@ jobs:
       - run: cargo install just --version 1.21.0 --locked
       - run: just install-tools
       - run: just install
-      - run: just build-node
+      # Exercise the optimized Node package used by published consumers.
+      - run: bun run --cwd packages/ts/engine-node build --features=hooks,subscriptions,views,telemetry
       - run: bun run --cwd packages/ts/engine-wasm build --features=hooks,subscriptions,views,telemetry
       - name: Build the pinned interpreter into both engine packages
         run: |
