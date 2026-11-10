@@ -90,6 +90,6 @@ zero. `run.sh` runs the three steps in order.
 
 A state belongs to one service object and is reached only by that service's methods: a call runs
 on one object, and the kernel refuses an update from any other context. The Orb's root is not an
-object, so a hook contribution has no kernel state; see
-[the hooks example](../rust-orb-hooks/README.md#why-the-counts-are-statics). The kernel stores
-the state as JSON written by `serde`, with the Rust field names.
+object, so a hook contribution has no kernel state; a root resource is what it can use, see
+[the hooks example](../rust-orb-hooks/README.md#why-the-counts-are-a-resource-not-a-state). The
+kernel stores the state as JSON written by `serde`, with the Rust field names.
