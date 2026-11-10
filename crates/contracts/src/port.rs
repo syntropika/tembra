@@ -142,6 +142,7 @@ impl PreparedContract {
                 value,
                 bindings,
             } => {
+                self.check_profiles(&bindings)?;
                 let services = self
                     .check_implementation(&name, api_version, value.clone())
                     .map_err(invalid)?;

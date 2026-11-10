@@ -10,6 +10,15 @@ export interface Context {
   readonly principal: string;
   check(): void;
   cancel(): void;
+  /**
+   * Acquire a selected WIT Orb import by key for this context's root and principal. The host
+   * applies the installed requirement and waits for readiness; the claim ends with the root, and
+   * the reference is refused in every other root.
+   */
+  get<Interface>(
+    binding: string,
+    key: string | readonly string[],
+  ): Promise<WitReference<Interface>>;
 }
 
 export interface Readable<T> {

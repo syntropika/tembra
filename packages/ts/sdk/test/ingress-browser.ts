@@ -97,9 +97,13 @@ export async function verifyIngressScenario(engine?: URL): Promise<string> {
   try {
     await host.install({ artifact: ledger });
     await host.install({ artifact: handler, requires });
+    let ledgerObject: number | undefined;
     const entries = async () => {
       const reference = await host.get(LEDGER, "main");
       try {
+        const object = host.session.handles.reference(reference).object;
+        ledgerObject ??= object;
+        same(object, ledgerObject, "the revision retains its shared ledger instance");
         return (await reference.entries()) as string[];
       } finally {
         reference.release();
@@ -179,6 +183,19 @@ export async function verifyIngressScenario(engine?: URL): Promise<string> {
     );
     await settled(host);
     report.push("binary request and response bodies, raw duplicate fields and trailers both ways");
+
+    // Releasing a host observer must not close the fixed import between transient requests.
+    for (let index = 0; index < 2; index++) {
+      same(
+        /^\d+$/.test(await text(await host.handleHttp(ORB, request("/revision")))),
+        true,
+        "sequential request after dependency observer release",
+      );
+      await entries();
+    }
+    report.push(
+      "sequential requests retain the revision-owned dependency across observer releases",
+    );
 
     // Errors before the head.
     const refused = await host.handleHttp(ORB, request("/error")).catch((error) => error);
@@ -265,8 +282,10 @@ export async function verifyIngressScenario(engine?: URL): Promise<string> {
       .catch((error) => String(error));
     same(String(cookie).includes("set-cookie"), true, "set-cookie refused by the browser");
     const trailed = await host.handleHttp(ORB, new Request("https://app.example.test/trailers"));
+    const contents = trailed.body!.getReader();
+    same(decoder.decode((await contents.read()).value), "body", "body precedes trailer refusal");
     same(
-      await trailed.text().then(
+      await contents.read().then(
         () => "read",
         (error) => String(error),
       ),

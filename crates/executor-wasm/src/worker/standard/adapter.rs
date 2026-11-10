@@ -1089,6 +1089,21 @@ fn compiled_exports<T: AdapterStore>(
         .ok_or_else(|| wasmtime::Error::msg("the private stream adapter was not instantiated"))
 }
 
+/// A guest reader over a bounded pipe the host fills, such as the delivered result of a stream
+/// import. Its call's cancellation closes the pipe, and dropping the reader closes it.
+pub(crate) fn guest_reader<T: AdapterStore>(
+    store: StoreContextMut<'_, T>,
+    pipe: Arc<Mutex<Pipe>>,
+) -> wasmtime::Result<StreamReader<u8>> {
+    StreamReader::new(
+        store,
+        GuestBytes(Guest {
+            pipe,
+            registered: None,
+        }),
+    )
+}
+
 /// A compiled `tcp-socket.receive` stream: upstream's reader goes to a pump and the guest reads a
 /// bounded pipe through a producer that its call's cancellation can end. The completion future is
 /// upstream's, except that a cancellation-forced close reports `other("call cancelled")`.

@@ -23,6 +23,8 @@ pub struct MobileField {
 }
 
 /// The incoming request head the host passes to `begin_ingress`.
+/// Supply scheme and authority together, or neither; an origin-form target can retain its
+/// `host` field without inventing a scheme.
 #[derive(uniffi::Record)]
 pub struct MobileRequestHead {
     pub method: String,
@@ -74,6 +76,10 @@ pub enum MobileIngressEvent {
     End,
     Error {
         message: String,
+    },
+    /// The handler's WIT `error-code` in the standard binary codec; never with a `Head`.
+    Refused {
+        code: Vec<u8>,
     },
 }
 
@@ -232,48 +238,47 @@ impl NativePort {
         Ok(())
     }
 
-    /// Suspend the foreign promise until an actual host request or physical completion arrives.
+    /// Receive from the exchange's single event loop. Dropping a pending receive leaves the
+    /// next event available to a later receive.
     pub async fn receive(&self) -> Result<String, MobileError> {
         let exchange = self.active()?;
-        super::delivery()?
-            .spawn(async move {
-                match exchange.events.receive_async().await.map_err(error)? {
-                    PortEvent::Host {
-                        packet,
+        super::deliver(async move {
+            match exchange.events.receive_async().await.map_err(error)? {
+                PortEvent::Host {
+                    packet,
+                    asynchronous,
+                    reply,
+                } => {
+                    let id = exchange
+                        .sequence
+                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                        .map_err(|_| error("Response identity space exhausted"))?
+                        + 1;
+                    let mut replies = exchange.replies.lock().map_err(error)?;
+                    if exchange.closed.load(Ordering::Acquire) {
+                        return Err(MobileError::Closed);
+                    }
+                    replies.insert(id, reply);
+                    Ok(serde_json::to_string(&Event::Host {
+                        id,
                         asynchronous,
-                        reply,
-                    } => {
-                        let id = exchange
-                            .sequence
-                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-                            .map_err(|_| error("Response identity space exhausted"))?
-                            + 1;
-                        let mut replies = exchange.replies.lock().map_err(error)?;
-                        if exchange.closed.load(Ordering::Acquire) {
-                            return Err(MobileError::Closed);
-                        }
-                        replies.insert(id, reply);
-                        Ok(serde_json::to_string(&Event::Host {
-                            id,
-                            asynchronous,
-                            packet,
-                        })
-                        .expect("serializable host event"))
-                    }
-                    PortEvent::Complete(value) => {
-                        exchange.replies.lock().map_err(error)?.clear();
-                        Ok(serde_json::to_string(&Event::Complete {
-                            result: Reply::from(value),
-                        })
-                        .expect("serializable completion"))
-                    }
-                    PortEvent::Ingress(_) => Err(error(
-                        "Incoming HTTP exchanges are received with receive_ingress",
-                    )),
+                        packet,
+                    })
+                    .expect("serializable host event"))
                 }
-            })
-            .await
-            .map_err(error)?
+                PortEvent::Complete(value) => {
+                    exchange.replies.lock().map_err(error)?.clear();
+                    Ok(serde_json::to_string(&Event::Complete {
+                        result: Reply::from(value),
+                    })
+                    .expect("serializable completion"))
+                }
+                PortEvent::Ingress(_) => Err(error(
+                    "Incoming HTTP exchanges are received with receive_ingress",
+                )),
+            }
+        })
+        .await?
     }
 
     /// Start an incoming HTTP exchange of this revision's host-local handler.
@@ -312,67 +317,65 @@ impl NativePort {
         Ok(())
     }
 
-    /// Suspend the foreign promise until the next event of the active incoming HTTP exchange.
+    /// Receive from the incoming exchange's single event loop. Dropping a pending receive
+    /// leaves the next event available to a later receive.
     pub async fn receive_ingress(&self) -> Result<MobileIngressEvent, MobileError> {
         let exchange = self.active()?;
-        super::delivery()?
-            .spawn(async move {
-                Ok(
-                    match exchange.events.receive_async().await.map_err(error)? {
-                        PortEvent::Host {
-                            packet,
+        super::deliver(async move {
+            Ok(
+                match exchange.events.receive_async().await.map_err(error)? {
+                    PortEvent::Host {
+                        packet,
+                        asynchronous,
+                        reply,
+                    } => {
+                        let id = exchange
+                            .sequence
+                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                            .map_err(|_| error("Response identity space exhausted"))?
+                            + 1;
+                        let mut replies = exchange.replies.lock().map_err(error)?;
+                        if exchange.closed.load(Ordering::Acquire) {
+                            return Err(MobileError::Closed);
+                        }
+                        replies.insert(id, reply);
+                        MobileIngressEvent::Host {
+                            id,
                             asynchronous,
-                            reply,
-                        } => {
-                            let id = exchange
-                                .sequence
-                                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                                    n.checked_add(1)
-                                })
-                                .map_err(|_| error("Response identity space exhausted"))?
-                                + 1;
-                            let mut replies = exchange.replies.lock().map_err(error)?;
-                            if exchange.closed.load(Ordering::Acquire) {
-                                return Err(MobileError::Closed);
-                            }
-                            replies.insert(id, reply);
-                            MobileIngressEvent::Host {
-                                id,
-                                asynchronous,
-                                packet,
-                            }
+                            packet,
                         }
-                        PortEvent::Complete(value) => {
-                            exchange.replies.lock().map_err(error)?.clear();
-                            MobileIngressEvent::Complete {
-                                result: serde_json::to_string(&Reply::from(value))
-                                    .expect("serializable completion"),
-                            }
+                    }
+                    PortEvent::Complete(value) => {
+                        exchange.replies.lock().map_err(error)?.clear();
+                        MobileIngressEvent::Complete {
+                            result: serde_json::to_string(&Reply::from(value))
+                                .expect("serializable completion"),
                         }
-                        PortEvent::Ingress(IngressEvent::Head(head)) => MobileIngressEvent::Head {
-                            status: head.status,
-                            fields: mobile_fields(head.fields),
-                        },
-                        PortEvent::Ingress(IngressEvent::RequestPull) => {
-                            MobileIngressEvent::RequestPull
-                        }
-                        PortEvent::Ingress(IngressEvent::Response(frame)) => match frame {
-                            IngressResponseFrame::Data(bytes) => MobileIngressEvent::Data { bytes },
-                            IngressResponseFrame::Trailers(fields) => {
-                                MobileIngressEvent::Trailers {
-                                    fields: mobile_fields(fields),
-                                }
-                            }
-                            IngressResponseFrame::End => MobileIngressEvent::End,
-                            IngressResponseFrame::Error(message) => {
-                                MobileIngressEvent::Error { message }
-                            }
-                        },
+                    }
+                    PortEvent::Ingress(IngressEvent::Head(head)) => MobileIngressEvent::Head {
+                        status: head.status,
+                        fields: mobile_fields(head.fields),
                     },
-                )
-            })
-            .await
-            .map_err(error)?
+                    PortEvent::Ingress(IngressEvent::RequestPull) => {
+                        MobileIngressEvent::RequestPull
+                    }
+                    PortEvent::Ingress(IngressEvent::Refused(code)) => {
+                        MobileIngressEvent::Refused { code }
+                    }
+                    PortEvent::Ingress(IngressEvent::Response(frame)) => match frame {
+                        IngressResponseFrame::Data(bytes) => MobileIngressEvent::Data { bytes },
+                        IngressResponseFrame::Trailers(fields) => MobileIngressEvent::Trailers {
+                            fields: mobile_fields(fields),
+                        },
+                        IngressResponseFrame::End => MobileIngressEvent::End,
+                        IngressResponseFrame::Error(message) => {
+                            MobileIngressEvent::Error { message }
+                        }
+                    },
+                },
+            )
+        })
+        .await?
     }
 
     /// Answer the pending `RequestPull`; `false` when the answer is no longer wanted.

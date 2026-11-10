@@ -17,6 +17,21 @@ export default orb({
           const path = request.getPathWithQuery() ?? "/";
           if (path === "/error")
             throw Object.assign(new Error("denied"), { payload: { tag: "HTTP-request-denied" } });
+          if (path.startsWith("/refuse/")) {
+            // The compiled handler's typed refusals, so both kinds encode the same WIT values.
+            const payloads: Record<string, unknown> = {
+              escaped: { tag: "internal-error", val: 'quote " slash \\ line\nend é🌍' },
+              record: {
+                tag: "HTTP-request-header-size",
+                val: { fieldName: "x-big", fieldSize: 4294967295 },
+              },
+              u64: { tag: "HTTP-response-body-size", val: 18446744073709551615n },
+              dns: { tag: "DNS-error", val: { rcode: "SERVFAIL", infoCode: 65535 } },
+            };
+            throw Object.assign(new Error("refused"), {
+              payload: payloads[path.slice("/refuse/".length)],
+            });
+          }
           const [body] = Request.consumeBody(request, ok);
           let settle!: (fields: Fields) => void;
           const trailers = new Promise<{ tag: "ok"; val: Fields }>((resolve) => {

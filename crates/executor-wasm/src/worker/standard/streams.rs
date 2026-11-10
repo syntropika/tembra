@@ -66,7 +66,7 @@ pub(super) const ABANDONED: &str = "stream read was abandoned";
 impl Pipe {
     /// The guest dropped its handle: stop the producer and settle any pending read now. Handles
     /// issued by unread items are released through the close queue.
-    pub(super) fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         if !self.closed
             && let Some(pump) = &self.pump
         {
@@ -140,7 +140,7 @@ impl Pipe {
     /// Pump side: room for the next chunk, or `None` once the stream is closed. Byte streams
     /// have room up to `PIPE_BYTES`; handle-bearing item streams take the next item only when
     /// the previous one was read, so at most one accepted handle waits for the guest.
-    pub(super) fn poll_room(
+    pub(crate) fn poll_room(
         &mut self,
         context: &mut Context<'_>,
         items: bool,
@@ -161,7 +161,7 @@ impl Pipe {
     }
 
     /// Pump side: ready once the stream is closed.
-    pub(super) fn poll_closed(&mut self, context: &mut Context<'_>) -> Poll<()> {
+    pub(crate) fn poll_closed(&mut self, context: &mut Context<'_>) -> Poll<()> {
         if self.closed {
             return Poll::Ready(());
         }
@@ -170,7 +170,7 @@ impl Pipe {
     }
 
     /// Pump side: buffer one chunk read from upstream.
-    pub(super) fn push_bytes(&mut self, bytes: &[u8]) {
+    pub(crate) fn push_bytes(&mut self, bytes: &[u8]) {
         if !self.closed {
             self.buffer.extend_from_slice(bytes);
             self.wake_head();
@@ -206,7 +206,7 @@ impl Pipe {
     }
 
     /// Compiled reader: take up to `max` buffered bytes; `None` at end of stream or once closed.
-    pub(super) fn poll_bytes(
+    pub(crate) fn poll_bytes(
         &mut self,
         context: &mut Context<'_>,
         max: usize,
@@ -250,9 +250,14 @@ impl Pipe {
     }
 
     /// Fail every later read with `message` and stop the producer like a DROP.
-    pub(super) fn fail(&mut self, message: String) {
+    pub(crate) fn fail(&mut self, message: String) {
         self.failure.get_or_insert(message);
         self.close();
+    }
+
+    /// Why every read fails, if the stream was failed or abandoned.
+    pub(crate) fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
     }
 
     /// Wake every queued reader so each observes DROP, poison or its turn.
@@ -294,6 +299,11 @@ impl Pipe {
         self.ended = true;
         self.wake_readers();
     }
+
+    /// Pump side: the upstream producer ended cleanly; the reader gets the end after the data.
+    pub(crate) fn finish(&mut self) {
+        self.end();
+    }
 }
 
 /// One admitted STREAM_READ's place in its stream's FIFO, claimed at admission so reads are
@@ -327,20 +337,29 @@ impl Drop for ReadTurn {
     }
 }
 
-/// Upstream consumer side of a byte [`Pipe`].
+/// Upstream consumer side of a byte [`Pipe`], for any Store: it accepts at most the pipe's free
+/// bytes, then parks the writer until a read makes room or the pipe is closed. Dropping it
+/// ends the stream.
 /// The permit is the stream's share of the open-file budget while upstream holds the file.
-pub(super) struct PipeConsumer(
+pub(crate) struct PipeConsumer(
     pub(super) Shared<Pipe>,
     #[allow(dead_code, reason = "held for its drop")] pub(super) Option<FilePermit>,
 );
 
-impl StreamConsumer<State> for PipeConsumer {
+impl PipeConsumer {
+    /// Consume a guest stream into `pipe`.
+    pub(crate) fn new(pipe: Shared<Pipe>) -> Self {
+        Self(pipe, None)
+    }
+}
+
+impl<D: 'static> StreamConsumer<D> for PipeConsumer {
     type Item = u8;
 
     fn poll_consume(
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
-        store: StoreContextMut<'_, State>,
+        store: StoreContextMut<'_, D>,
         source: Source<'_, u8>,
         finish: bool,
     ) -> Poll<wasmtime::Result<StreamResult>> {

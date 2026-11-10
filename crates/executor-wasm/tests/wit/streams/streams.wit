@@ -1,0 +1,47 @@
+package tembra-test:streams@1.0.0;
+
+/// A byte producer whose stream is written after the stream itself was returned.
+interface frames {
+    /// `count` chunks of `size` bytes; byte j of chunk i is (i + j) mod 256. A task spawned in
+    /// this call writes them after the stream was returned. `mode` selects how it ends:
+    /// 0: it drops its writer (a clean end);
+    /// 1: it traps after writing every chunk while still holding its writer;
+    /// 2: it traps after dropping its writer (a late trap after a complete body);
+    /// 3: it writes nothing and waits with zero-length writes until the reader is gone;
+    /// 4: it writes nothing and never observes the reader (an idle producer).
+    frames: async func(count: u32, size: u32, mode: u32) -> stream<u8>;
+    /// A scalar call, proving the revision still serves.
+    ping: func(value: u32) -> u32;
+}
+
+world producer {
+    export frames;
+}
+
+/// Reads `frames` streams through the import, in the consumer's own Store.
+interface digest {
+    /// Read the stream of `frames(count, size, mode)` in 4 KiB reads, at most `take` bytes,
+    /// then drop it. Returns the bytes read and an order-sensitive checksum.
+    sum: async func(count: u32, size: u32, mode: u32, take: u64) -> tuple<u64, u64>;
+    /// Start `frames`, poll it once and drop it: the import is abandoned.
+    abandon: async func(count: u32, size: u32) -> bool;
+    /// Keep the stream of `frames` in a global without reading it.
+    retain: async func(count: u32, size: u32) -> u32;
+    /// Read the retained stream to its end; returns the bytes read.
+    retained: async func() -> u64;
+    /// Read `take` bytes, then trap.
+    trap: async func(count: u32, size: u32, take: u64) -> u32;
+    /// Open `n` streams concurrently, then read each to its end; returns the total bytes.
+    many: async func(n: u32, count: u32, size: u32) -> u64;
+    /// Drop the reader of `frames(count, size, 0)` unread while this call goes on, then return
+    /// the imported `ping(1)`. The pump must close the import's stream from the reader's drop
+    /// alone: this call has not ended yet.
+    drop-then-ping: async func(count: u32, size: u32) -> u32;
+    /// A scalar call that imports nothing, proving the revision still serves.
+    ping: func(value: u32) -> u32;
+}
+
+world consumer {
+    import frames;
+    export digest;
+}

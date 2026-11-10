@@ -70,6 +70,8 @@ pub struct Engine {
     pub(crate) limits: Limits,
     pub(crate) providers: Providers,
     pub(crate) active_instances: Arc<AtomicUsize>,
+    /// Exported WIT resources held in compiled Stores on behalf of native owners.
+    pub(crate) live_resources: Arc<AtomicUsize>,
     pub(crate) logger: Option<LogSink>,
     /// Open host files shared by every source Orb in the process: owned descriptors plus
     /// upstream stream objects that keep a file open after their descriptor is dropped.
@@ -173,6 +175,7 @@ impl Engine {
             limits,
             providers: Providers::default(),
             active_instances: Arc::default(),
+            live_resources: Arc::default(),
             logger: None,
             open_files: open_files(),
             stream_adapter: Arc::default(),
@@ -182,6 +185,15 @@ impl Engine {
     /// Count live Wasm Stores retained by this engine's prepared or installed Orbs.
     pub fn instances(&self) -> usize {
         self.active_instances.load(Ordering::Acquire)
+    }
+
+    /// Count exported WIT resources that compiled Stores still hold in their tables for an
+    /// owner. An instance stops counting when it leaves its table, which happens before its
+    /// destructor runs, or when its Store is torn down. This is a leak diagnostic, not evidence
+    /// that destructors succeeded: a failed destructor quarantines its revision and is reported
+    /// through that cause and the engine's log.
+    pub fn resources(&self) -> usize {
+        self.live_resources.load(Ordering::Acquire)
     }
 
     /// Receive attributed guest diagnostics without allowing observer panics to interrupt execution.
@@ -304,7 +316,13 @@ impl Engine {
         let bindings = artifact
             .contract
             .providers(&install.requires, &install.grants)?;
-        let port = self.open(&artifact, &bindings, &install.grants, &install.cli)?;
+        let port = self.open(
+            &artifact,
+            &bindings,
+            &install.grants,
+            &install.cli,
+            crate::port::Transport::Capabilities,
+        )?;
         adapter::orb(
             port.metadata,
             port.session,
@@ -313,6 +331,7 @@ impl Engine {
             &bindings,
             port.hooks,
             port.ingress,
+            port.resources,
         )
     }
 }

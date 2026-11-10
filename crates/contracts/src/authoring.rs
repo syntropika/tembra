@@ -249,6 +249,7 @@ impl Contract {
         api_version: u32,
         contributions: &std::collections::BTreeMap<String, i32>,
     ) -> Result<Vec<u8>, Error> {
+        self.prepared.check_resource_profile()?;
         self.prepared.check_contribution_roles(contributions)?;
         let identity = Identity {
             name: name.into(),

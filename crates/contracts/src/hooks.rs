@@ -136,7 +136,7 @@ impl PreparedContract {
         if matches.next().is_some() {
             return Err(Error(format!("ambiguous hook export alias {alias}")));
         }
-        if interface.resources || interface.functions.len() != 1 {
+        if !interface.resources.is_empty() || interface.functions.len() != 1 {
             return Err(Error(format!(
                 "{alias}: a hook requires an interface with one plain callback"
             )));

@@ -137,7 +137,16 @@ fn resource_imports_require_a_provider_even_without_functions() {
     assert_eq!(plan.host_imports[0].provider, "storage");
     assert!(plan.orb.requires.is_empty());
     let output = Contract::from_source("resource.wit", source, Some("output")).unwrap();
-    assert!(output.plan("output", 1, &BTreeMap::new()).is_err());
+    // Type declarations can be prepared without inventing a callable service or lifetime.
+    assert!(
+        output
+            .plan("output", 1, &BTreeMap::new())
+            .unwrap()
+            .orb
+            .services
+            .is_empty()
+    );
+    assert!(output.check_value_profile().is_err());
 }
 
 #[test]

@@ -1,0 +1,25 @@
+package example:keyed@1.0.0;
+
+/// One counter per kernel address: each key and principal names its own instance.
+interface counter {
+    add: func(amount: u32) -> u32;
+    /// The key and principal this instance was activated for.
+    who: func() -> string;
+}
+
+/// Selects counter instances at runtime with `Context.get`.
+interface router {
+    /// Acquire `key` twice and `other` once in this root, add `amount` through each handle.
+    route: func(key: string, other: string, amount: u32) -> string;
+    /// Run one named boundary probe and report its outcome.
+    probe: func(name: string) -> string;
+}
+
+world provider {
+    export counter;
+}
+
+world consumer {
+    import counter;
+    export router;
+}

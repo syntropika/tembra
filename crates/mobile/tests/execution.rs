@@ -631,7 +631,7 @@ fn portable_compiled_handler_streams_through_the_typed_carrier() {
                 assert!(fields.iter().any(
                     |field| field.name == "content-type" && field.value == b"text/event-stream"
                 ));
-                port.pull_response().unwrap();
+                cancel_receive_before_next_poll(&port, &mut chunks);
             }
             MobileIngressEvent::RequestPull => {
                 assert!(port.supply_request(chunks.next().unwrap()).unwrap());
@@ -648,6 +648,7 @@ fn portable_compiled_handler_streams_through_the_typed_carrier() {
             MobileIngressEvent::End => {}
             MobileIngressEvent::Error { message } => panic!("response failed: {message}"),
             MobileIngressEvent::Host { packet, .. } => panic!("unexpected host request {packet}"),
+            MobileIngressEvent::Refused { .. } => panic!("a response is not a refusal"),
             MobileIngressEvent::Complete { result } => break result,
         }
     };
@@ -657,8 +658,90 @@ fn portable_compiled_handler_streams_through_the_typed_carrier() {
         frames,
         ["data: open\n\n", "data: alpha\n\n", "data: end\n\n"]
     );
+    // A handler `error-code` arrives typed (standard codec bytes) before the completion, with
+    // no head: `http-response-body-size(some(u64::MAX))`.
+    port.begin_ingress(
+        json!({"kind":"ingress","environment":2,"service":"handler","method":"handle"}).to_string(),
+        MobileRequestHead {
+            method: "GET".into(),
+            scheme: None,
+            authority: None,
+            path_with_query: Some("/refuse/u64".into()),
+            fields: vec![],
+        },
+    )
+    .unwrap();
+    let mut refused = None;
+    loop {
+        match block_on(port.receive_ingress()).unwrap() {
+            MobileIngressEvent::Refused { code } => {
+                assert!(refused.replace(code).is_none(), "one refusal");
+            }
+            MobileIngressEvent::Complete { result } => {
+                assert!(result.contains("\"error\""), "{result}");
+                break;
+            }
+            MobileIngressEvent::RequestPull => {
+                port.supply_request(MobileRequestChunk::End { trailers: vec![] })
+                    .unwrap();
+            }
+            _ => panic!("a refusal has no head or response frames"),
+        }
+    }
+    port.finish().unwrap();
+    let mut expected = 28u32.to_le_bytes().to_vec();
+    expected.push(1);
+    expected.extend_from_slice(&u64::MAX.to_le_bytes());
+    assert_eq!(refused.expect("refused before complete"), expected);
     port.release(2).unwrap();
     port.release(1).unwrap();
     port.shutdown().unwrap();
     assert_eq!(backend.instances(), 0);
+}
+
+/// The foreign future is cancelled after its wake, before it polls the queued event. A
+/// detached consuming task would lose that event; the following receive must still see it.
+fn cancel_receive_before_next_poll(
+    port: &Arc<NativePort>,
+    chunks: &mut impl Iterator<Item = tembra_mobile::MobileRequestChunk>,
+) {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Wake, Waker},
+        time::Duration,
+    };
+    use tembra_mobile::MobileIngressEvent;
+
+    struct RecordWake(std::sync::mpsc::SyncSender<String>);
+    impl Wake for RecordWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            let _ = self
+                .0
+                .try_send(std::thread::current().name().unwrap_or("").into());
+        }
+    }
+
+    let (send, woke) = std::sync::mpsc::sync_channel(1);
+    let waker = Waker::from(Arc::new(RecordWake(send)));
+    let mut context = Context::from_waker(&waker);
+    let receive = loop {
+        let mut receive = Box::pin(port.receive_ingress());
+        match receive.as_mut().poll(&mut context) {
+            Poll::Pending => break receive,
+            Poll::Ready(Ok(MobileIngressEvent::RequestPull)) => {
+                assert!(port.supply_request(chunks.next().unwrap()).unwrap());
+            }
+            _ => panic!("unexpected carrier event before the first response pull"),
+        }
+    };
+    port.pull_response().unwrap();
+    assert_eq!(
+        woke.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "tembra-mobile-events",
+        "foreign continuations must wake on the delivery runtime's OS thread"
+    );
+    drop(receive);
 }

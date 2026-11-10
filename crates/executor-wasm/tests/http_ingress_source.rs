@@ -239,7 +239,12 @@ fn entries(served: &mut Served) -> Vec<String> {
     let value: Value = served
         .pool
         .run_until(served.host.root("alice", move |context| {
-            async move { ledger.call_value(&context, "entries", json!([])).await }.boxed_local()
+            async move {
+                ledger
+                    .call_portable::<_, serde_json::Value>(&context, "entries", json!([]))
+                    .await
+            }
+            .boxed_local()
         }))
         .unwrap();
     serde_json::from_value(value).unwrap()

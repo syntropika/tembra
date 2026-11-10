@@ -5,6 +5,7 @@
 //! filesystem or network authority; generated WASI calls use its separately granted context.
 //! A compiled revision runs its component on the same owner and
 //! speaks the same private host protocol (see `component::worker`).
+use crate::protocol::GuestCommand;
 use crate::{Engine, abi::Operation, failure};
 use async_channel::{Receiver, Sender};
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -29,7 +30,7 @@ mod steps;
 pub(crate) mod wasi;
 
 pub(crate) use runtime::check;
-pub(crate) use standard::{StreamAdapter, adapter as stream_adapter};
+pub(crate) use standard::{Pipe, PipeConsumer, StreamAdapter, adapter as stream_adapter};
 
 pub(crate) enum Event {
     Host {
@@ -40,6 +41,39 @@ pub(crate) enum Event {
     Done(std::result::Result<String, String>),
     /// Incoming HTTP carrier events of a platform exchange (`crate::ingress::IngressPort`).
     Ingress(crate::ingress::IngressEvent),
+    /// A compiled guest's asynchronous import whose whole result is a `stream<u8>`. The Store
+    /// created `pipe` for the guest's reader; the host fills it from the delivered stream end.
+    /// It is never serialized, and no number in `packet` names it.
+    Stream {
+        packet: String,
+        reply: oneshot::Sender<std::result::Result<String, String>>,
+        pipe: Arc<Mutex<Pipe>>,
+    },
+}
+
+/// Stream imports one callback may have outstanding (requested, or delivered and being read).
+const STREAM_IMPORTS: usize = 16;
+
+/// One answer to a guest's host request.
+///
+/// Capabilities installed for the answer stay owned by its `delivery` until the worker has
+/// actually received the reply. Only then are they committed; otherwise dropping the delivery
+/// rolls them back and closes them.
+pub(crate) struct Reply {
+    pub(crate) value: Value,
+    pub(crate) delivery: Option<crate::bindings::Delivery>,
+    /// The delivered end of a stream import's result; it never leaves the host thread.
+    pub(crate) stream: Option<tembra::portable::ByteStream>,
+}
+
+impl From<Value> for Reply {
+    fn from(value: Value) -> Self {
+        Self {
+            value,
+            delivery: None,
+            stream: None,
+        }
+    }
 }
 
 /// One host-selected operation and the channel that carries its scoped requests and completion.
@@ -49,6 +83,27 @@ pub(crate) struct Command {
     pub(crate) events: Sender<Event>,
     /// The typed request and head channel of an incoming HTTP call; never serialized.
     pub(crate) ingress: Option<crate::ingress::IngressCall>,
+    /// The host-created end of a compiled call's byte-stream result; never serialized.
+    pub(crate) stream: Option<StreamCall>,
+}
+
+/// Typed values a callback carries beside its packet. They never cross as JSON, so a guest
+/// cannot name or forge them.
+#[derive(Default)]
+pub(crate) enum Carrier {
+    #[default]
+    None,
+    Ingress(Box<crate::ingress::IngressCall>),
+    Stream(StreamCall),
+}
+
+/// A compiled export's byte-stream result, created by the host before the call.
+///
+/// The Store pipes the guest's stream into `pipe` exactly once and then signals `head`; the
+/// call keeps running, under its admission, until its task group and the pipe have ended.
+pub(crate) struct StreamCall {
+    pub(crate) pipe: Arc<Mutex<Pipe>>,
+    pub(crate) head: futures::channel::oneshot::Sender<()>,
 }
 
 /// Terminal completions that must wait until the Store and its runtime have stopped.
@@ -140,6 +195,7 @@ impl Session {
             sink: engine.logger.clone(),
         };
         let worker_diagnostics = diagnostics.clone();
+        let terminal_diagnostics = diagnostics.clone();
         let admission_ms = engine.limits.timeout_ms / 2;
         let poison = Arc::new(Mutex::new(None));
         let worker_poison = poison.clone();
@@ -158,7 +214,13 @@ impl Session {
                 if let Ok(runtime) = runtime {
                     let terminal =
                         runtime.block_on(run(receive, worker_poison.clone(), worker_diagnostics));
-                    publish_after_shutdown(runtime, count, &worker_poison, terminal);
+                    publish_after_shutdown(
+                        runtime,
+                        count,
+                        &worker_poison,
+                        &terminal_diagnostics,
+                        terminal,
+                    );
                 }
             })
             .map_err(failure)?;
@@ -218,14 +280,71 @@ impl Session {
 
     /// Queue pure guest bookkeeping after the native scope's last owner is released.
     pub(crate) fn release_environment(&self, environment: u64) {
+        self.cleanup(GuestCommand::Release { environment }, None);
+    }
+
+    /// Release an environment whose revision holds imported resources; see [`Self::cleanup`].
+    pub(crate) fn release_environment_with(&self, environment: u64, release: &mut dyn FnMut(u32)) {
+        self.cleanup(GuestCommand::Release { environment }, Some(release));
+    }
+
+    /// Destroy one exported resource whose last owner was dropped; see [`Self::cleanup`].
+    pub(crate) fn destroy(
+        &self,
+        environment: u64,
+        instance: u32,
+        release: Option<&mut dyn FnMut(u32)>,
+    ) {
+        self.cleanup(
+            GuestCommand::Destroy {
+                environment,
+                instance,
+            },
+            release,
+        );
+    }
+
+    /// Run a host-initiated cleanup: an environment release or a resource destruction.
+    ///
+    /// It needs no admission and no caller. When the revision is idle and holds imported
+    /// resources (`release` is given), it runs now on this thread, and every imported slot its
+    /// destructors drop is passed to `release`. That only removes host table entries, and grants
+    /// the destructors nothing. Otherwise the command is queued behind the running callback; the
+    /// slots its destructors drop then wait for this revision's next call or its root's release.
+    /// A failure is reported, never passed off as a clean release.
+    fn cleanup(&self, packet: GuestCommand<'_>, release: Option<&mut dyn FnMut(u32)>) {
+        let packet = serde_json::to_string(&packet).expect("serializable cleanup");
+        let poisoned = self.0.poison.lock().expect("poison state").is_some();
+        if let Some(release) = release.filter(|_| !self.0.busy.get() && !poisoned) {
+            let outcome = self.blocking(Operation::Start, packet, |packet, _| {
+                match crate::protocol::Request::decode(packet) {
+                    Ok(crate::protocol::Request::ReferenceRelease { id, .. }) => {
+                        release(id);
+                        Ok(Value::Null)
+                    }
+                    _ => Err(failure("a cleanup performs no other host operation")),
+                }
+            });
+            if let Err(error) = outcome {
+                let cause = self.0.poison.lock().expect("poison state").clone();
+                let _ = self.0.diagnostics.emit(
+                    crate::protocol::LogLevel::Error,
+                    match cause {
+                        Some(cause) => format!("revision quarantined: {cause}"),
+                        None => format!("resource cleanup failed: {error}"),
+                    },
+                );
+            }
+            return;
+        }
         let (events, receive) = async_channel::bounded(1);
         drop(receive);
         let command = Command {
             operation: Operation::Start,
-            packet: serde_json::to_string(&crate::protocol::GuestCommand::Release { environment })
-                .expect("serializable release"),
+            packet,
             events,
             ingress: None,
+            stream: None,
         };
         if let Some(sender) = &self.0.commands {
             let _ = sender.send(command);
@@ -234,7 +353,7 @@ impl Session {
 
     /// Submit one callback, refusing reentry before it could deadlock on this Store.
     pub(crate) fn begin(&self, operation: Operation, packet: String) -> Result<Receiver<Event>> {
-        self.begin_with(operation, packet, None)
+        self.begin_with(operation, packet, Carrier::None)
     }
 
     /// Submit an incoming HTTP callback for a platform port. The typed request travels beside
@@ -246,18 +365,23 @@ impl Session {
     ) -> Result<(Receiver<Event>, crate::ingress::IngressPort)> {
         let (sender, events) = async_channel::bounded(128);
         let (call, port) = crate::ingress::begin_carrier(head, sender.clone())?;
-        let receive = self.submit(Operation::Start, packet, Some(call), (sender, events))?;
+        let receive = self.submit(
+            Operation::Start,
+            packet,
+            Carrier::Ingress(Box::new(call)),
+            (sender, events),
+        )?;
         Ok((receive, port))
     }
 
-    /// Submit one callback with an optional typed incoming HTTP payload.
+    /// Submit one callback with its typed carrier, if any.
     fn begin_with(
         &self,
         operation: Operation,
         packet: String,
-        ingress: Option<crate::ingress::IngressCall>,
+        carrier: Carrier,
     ) -> Result<Receiver<Event>> {
-        self.submit(operation, packet, ingress, async_channel::bounded(128))
+        self.submit(operation, packet, carrier, async_channel::bounded(128))
     }
 
     /// Queue one callback on its own event channel, refusing reentry before it could deadlock.
@@ -265,7 +389,7 @@ impl Session {
         &self,
         operation: Operation,
         packet: String,
-        ingress: Option<crate::ingress::IngressCall>,
+        carrier: Carrier,
         (send, receive): (Sender<Event>, Receiver<Event>),
     ) -> Result<Receiver<Event>> {
         if let Some(poison) = self.0.poison.lock().expect("poison state").as_ref() {
@@ -283,11 +407,17 @@ impl Session {
                 "concurrent or reentrant calls to this interpreter are not supported",
             ));
         }
+        let (ingress, stream) = match carrier {
+            Carrier::None => (None, None),
+            Carrier::Ingress(call) => (Some(*call), None),
+            Carrier::Stream(call) => (None, Some(call)),
+        };
         let command = Command {
             operation,
             packet,
             events: send,
             ingress,
+            stream,
         };
         // Transport streams opened by this callback belong to its epoch until it completes.
         self.0.io.scope().begin_callback();
@@ -358,6 +488,9 @@ impl Session {
                         self.0.packet_bytes,
                     ));
                 }
+                Event::Stream { reply, .. } => {
+                    let _ = reply.send(Err("declarations cannot import streams".into()));
+                }
             }
         }
     }
@@ -392,19 +525,22 @@ impl Session {
         _admission: futures::lock::OwnedMutexGuard<()>,
         cancellation: Option<&tembra::Cancellation>,
         packet: impl serde::Serialize,
-        ingress: Option<crate::ingress::IngressCall>,
-        host: impl AsyncFn(&str, bool) -> Result<Value>,
+        carrier: Carrier,
+        host: impl AsyncFn(&str, bool) -> Result<Reply>,
     ) -> Result<Value> {
         let events = self.begin_with(
             Operation::Start,
             serde_json::to_string(&packet).map_err(failure)?,
-            ingress,
+            carrier,
         )?;
         let mut guard = Busy {
             owner: &self.0,
             events: &events,
             completed: false,
         };
+        // Outstanding stream imports of this callback; a plain counter on this frame, so data
+        // requests pay nothing for it. Declared first: the pending answers borrow it.
+        let streams = Cell::new(0_usize);
         let mut pending = FuturesUnordered::new();
         let mut revoked = false;
         loop {
@@ -435,7 +571,18 @@ impl Session {
             } else {
                 next.await
             };
-            match event.map_err(failure)? {
+            let event = event.map_err(|error| {
+                // The revision stopped before this callback completed; report why it stopped.
+                match self.0.poison.lock().expect("poison state").as_ref() {
+                    Some(cause) => tembra::Error::new(
+                        tembra::core::Code::Unavailable,
+                        "wasm_executor_quarantined",
+                        cause,
+                    ),
+                    None => failure(error),
+                }
+            });
+            match event? {
                 // The native facade reads its response through the call's `Exchange`; carrier
                 // events exist only on platform ingress exchanges.
                 Event::Ingress(_) => {}
@@ -450,31 +597,90 @@ impl Session {
                 Event::Host {
                     packet,
                     asynchronous,
-                    mut reply,
+                    reply,
+                } => pending.push(self.answer(&host, packet, asynchronous, reply, None)),
+                Event::Stream {
+                    packet,
+                    reply,
+                    pipe,
                 } => {
-                    let host = &host;
-                    pending.push(
-                        async move {
-                            let result = {
-                                let operation = std::pin::pin!(host(&packet, asynchronous));
-                                let closed = std::pin::pin!(reply.closed());
-                                match futures::future::select(operation, closed).await {
-                                    futures::future::Either::Left((result, _)) => Some(result),
-                                    futures::future::Either::Right(_) => None,
-                                }
-                            };
-                            if let Some(result) = result {
-                                let _ = reply.send(encode(
-                                    result.map(|value| value.to_string()),
-                                    self.0.packet_bytes,
-                                ));
-                            }
-                        }
-                        .boxed_local(),
-                    );
+                    if streams.get() >= STREAM_IMPORTS {
+                        let _ = reply.send(Err(format!(
+                            "a callback may have at most {STREAM_IMPORTS} stream imports outstanding"
+                        )));
+                        continue;
+                    }
+                    let slot = StreamSlot::take(&streams);
+                    pending.push(self.answer(&host, packet, true, reply, Some((pipe, slot))));
                 }
             }
         }
+    }
+}
+
+impl Session {
+    /// Answer one host request of a callback. Capabilities installed for the answer are
+    /// committed only once the worker received it; anything else rolls back. A stream import's
+    /// delivered end is then pumped into its pipe, within this callback: the pump ends at the
+    /// stream's end, at a failure, when the guest closes its reader, or when the callback's
+    /// epoch ends.
+    fn answer<'a>(
+        &'a self,
+        host: &'a impl AsyncFn(&str, bool) -> Result<Reply>,
+        packet: String,
+        asynchronous: bool,
+        mut reply: oneshot::Sender<std::result::Result<String, String>>,
+        stream: Option<(Arc<Mutex<Pipe>>, StreamSlot<'a>)>,
+    ) -> futures::future::LocalBoxFuture<'a, ()> {
+        async move {
+            let result = {
+                let operation = std::pin::pin!(host(&packet, asynchronous));
+                let closed = std::pin::pin!(reply.closed());
+                match futures::future::select(operation, closed).await {
+                    futures::future::Either::Left((result, _)) => Some(result),
+                    futures::future::Either::Right(_) => None,
+                }
+            };
+            let Some(result) = result else { return };
+            let (text, delivery, end) = match result {
+                Ok(answer) => (Ok(answer.value.to_string()), answer.delivery, answer.stream),
+                Err(error) => (Err(error), None, None),
+            };
+            // A stream end is answered only to a stream import, and a stream import only with
+            // an end; a mismatch refuses, which drops (and so closes) any end.
+            let text = match (&end, &stream, text) {
+                (Some(_), Some(_), text) | (None, None, text) | (_, _, text @ Err(_)) => text,
+                _ => Err(failure("the import's stream result differs from its call")),
+            };
+            let text = encode(text, self.0.packet_bytes);
+            let accepted = text.is_ok();
+            if reply.send(text).is_err() || !accepted {
+                return;
+            }
+            if let Some(delivery) = delivery {
+                delivery.commit();
+            }
+            if let (Some(end), Some((pipe, _slot))) = (end, stream) {
+                crate::bindings::pump(end, pipe, self.0.io.scope().cancelled()).await;
+            }
+        }
+        .boxed_local()
+    }
+}
+
+/// One outstanding stream import of a callback, released when its answer and pump end.
+struct StreamSlot<'a>(&'a Cell<usize>);
+
+impl<'a> StreamSlot<'a> {
+    fn take(count: &'a Cell<usize>) -> Self {
+        count.set(count.get() + 1);
+        Self(count)
+    }
+}
+
+impl Drop for StreamSlot<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
     }
 }
 
@@ -505,6 +711,7 @@ fn publish_after_shutdown(
     runtime: tokio::runtime::Runtime,
     count: Count,
     poison: &Mutex<Option<String>>,
+    diagnostics: &diagnostics::Diagnostics,
     terminal: Terminal,
 ) {
     drop(runtime);
@@ -516,7 +723,17 @@ fn publish_after_shutdown(
             .get_or_insert_with(|| error.clone());
     }
     for (events, error) in terminal {
-        let _ = events.send_blocking(Event::Done(Err(error)));
+        // A command nobody awaits, such as a resource destruction or an environment release,
+        // has no caller to receive its failure; report it rather than letting it pass silently.
+        if events
+            .send_blocking(Event::Done(Err(error.clone())))
+            .is_err()
+        {
+            let _ = diagnostics.emit(
+                crate::protocol::LogLevel::Error,
+                format!("revision quarantined: {error}"),
+            );
+        }
     }
 }
 
@@ -577,6 +794,10 @@ mod tests {
                 runtime,
                 Count(instances),
                 &poison,
+                &diagnostics::Diagnostics {
+                    orb: "test".into(),
+                    sink: None,
+                },
                 vec![(events, "quarantined".into())],
             );
         });

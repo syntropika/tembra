@@ -138,25 +138,30 @@ impl Environment {
                 self.handles.references.borrow_mut().insert(
                     id,
                     ReferenceHandle {
-                        reference,
+                        claim: Claim::Declared(reference),
                         import: binding.clone(),
                     },
                 );
                 encode(&id)
             }
             Request::ReferenceRelease { scope: owner, id } => {
-                self.reference(owner, id)?.reference.release()?;
+                // A compiled guest's dropped import is an owned slot of the Orb root table. That
+                // table's ids are never reused, so an owned slot and a declared reference never
+                // share a number; only a source guest releases declared references this way.
+                if !self.release_owned(owner, id)? {
+                    self.reference(scope, owner, id)?.0.release()?;
+                }
                 Ok(Value::Null)
             }
             Request::ReferenceStatus { scope: owner, id } => {
-                encode(self.reference(owner, id)?.reference.status()?.as_str())
+                encode(self.reference(scope, owner, id)?.0.status()?.as_str())
             }
             Request::ReferenceState {
                 scope: owner,
                 id,
                 known,
             } => {
-                let (snapshot, value) = self.reference(owner, id)?.reference.state_snapshot()?;
+                let (snapshot, value) = self.reference(scope, owner, id)?.0.state_snapshot()?;
                 snapshot_reply(
                     snapshot.revision,
                     snapshot.version,
@@ -238,7 +243,7 @@ impl Environment {
                                 callback: open,
                                 value: None,
                             },
-                            None,
+                            Carrier::None,
                         )
                         .await?;
                     serde_json::from_value::<u32>(value).map_err(failure)
@@ -256,7 +261,7 @@ impl Environment {
                                 callback: close,
                                 value: Some(*value),
                             },
-                            None,
+                            Carrier::None,
                         )
                         .await?;
                     Ok(())
@@ -270,9 +275,23 @@ impl Environment {
     }
 
     /// Await portable references and cooperative timers under the active invocation's authority.
-    pub(super) async fn asynchronous(&self, scope: &Scope, packet: &str) -> Result<Value> {
+    pub(super) async fn asynchronous(
+        &self,
+        scope: &Scope,
+        packet: &str,
+    ) -> Result<crate::worker::Reply> {
         let request = AsyncRequest::decode(packet).map_err(failure)?;
-        match request {
+        // An import call may deliver owned resources, committed only once the worker has them.
+        if let AsyncRequest::ReferenceCall {
+            scope: owner,
+            id,
+            method,
+            args,
+        } = request
+        {
+            return self.call_import(scope, owner, id, &method, args).await;
+        }
+        let value = match request {
             AsyncRequest::HookRun {
                 scope: owner,
                 id,
@@ -302,7 +321,7 @@ impl Environment {
             }
             AsyncRequest::ReferenceReady { scope: owner, id } => {
                 let signal = Self::signal(scope, "readiness requires an active callback")?;
-                let reference = self.reference(owner, id)?.reference;
+                let (reference, _) = self.reference(scope, owner, id)?;
                 // Only the logical wait ends; activation stays owned by the kernel.
                 let ready = std::pin::pin!(reference.ready());
                 let cancelled = std::pin::pin!(signal.cancelled());
@@ -311,30 +330,11 @@ impl Environment {
                     futures::future::Either::Right(_) => Err(failure("operation cancelled")),
                 }
             }
-            AsyncRequest::ReferenceCall {
-                scope: owner,
-                id,
-                method,
-                args,
-            } => {
-                let context = Self::context(scope)?;
-                let ReferenceHandle {
-                    reference,
-                    import: binding,
-                } = self.reference(owner, id)?;
-                let method = binding
-                    .methods
-                    .get(&method)
-                    .ok_or_else(|| failure("unknown prepared import method"))?;
-                let args = self
-                    .contract
-                    .from_wire(method.slot, true, args)
-                    .map_err(failure)?;
-                let value = reference.call_value(context, &method.name, args).await?;
-                self.contract
-                    .to_wire(method.slot, false, value)
-                    .map_err(failure)
+            AsyncRequest::ReferenceAcquire { service, key } => {
+                self.acquire(scope, &service, key).await
             }
+            // Forwarded above, where its reply can carry installed resources.
+            AsyncRequest::ReferenceCall { .. } => Err(failure("import call was not forwarded")),
             AsyncRequest::Wait { milliseconds } => {
                 if milliseconds > WAIT_LIMIT_MILLISECONDS {
                     return Err(failure("timer exceeds the callback wait limit"));
@@ -350,7 +350,8 @@ impl Environment {
                 }
             }
             AsyncRequest::Unsupported => Err(failure("unsupported asynchronous host operation")),
-        }
+        };
+        value.map(Into::into)
     }
 
     /// Select the live cancellation that owns a cooperative wait in this callback.
@@ -377,15 +378,115 @@ impl Environment {
             .ok_or_else(|| failure("unknown state handle"))
     }
 
-    /// Resolve a reference handle and its WIT binding from this environment or its issued parent.
-    fn reference(&self, scope: Option<ScopeId>, id: u32) -> Result<ReferenceHandle> {
-        self.selected_handles(scope)?
+    /// `Context.get`: acquire a selected WIT Orb import for the active invocation.
+    ///
+    /// The host supplies the root principal, the provider service and the installed requirement's
+    /// API version and methods; the guest names only the binding and key. Native `Context::get`
+    /// files the claim under the root, which releases it when the root ends. Readiness is awaited
+    /// under this callback's cancellation, and a claim whose wait or authority fails is released
+    /// before the error returns, so no handle is ever published for it.
+    async fn acquire(&self, scope: &Scope, service: &str, key: Vec<String>) -> Result<Value> {
+        let context = Self::context(scope)?;
+        // Only an admitted method call selects instances. A cleanup context (a resource `close`)
+        // has no invocation; acquiring there would choose instances by the cleanup principal.
+        context
+            .invocation()
+            .map_err(|_| failure("reference acquisition requires an admitted invocation"))?;
+        let import = self
+            .imports
+            .get(service)
+            .cloned()
+            .ok_or_else(|| failure("reference is not a selected WIT Orb import"))?;
+        let requirement = import
+            .requirement
+            .clone()
+            .ok_or_else(|| failure("import has no installed Orb requirement"))?;
+        let signal = context.signal();
+        signal.check()?;
+        let reference = context.get(&import.service, key, requirement)?;
+        let ready = {
+            let ready = std::pin::pin!(reference.ready());
+            let cancelled = std::pin::pin!(signal.cancelled());
+            match futures::future::select(ready, cancelled).await {
+                futures::future::Either::Left((result, _)) => result,
+                futures::future::Either::Right(_) => Err(failure("operation cancelled")),
+            }
+        };
+        // The invocation or root may have ended while readiness was pending.
+        if let Err(error) = ready.and_then(|()| context.check()) {
+            return Err(abandon(&reference, error));
+        }
+        let id = self
+            .allocate()
+            .map_err(|error| abandon(&reference, error))?;
+        let mut references = self.handles.references.borrow_mut();
+        // Root claims are owned elsewhere; forget the names of those whose roots have ended.
+        references.retain(|_, handle| !handle.claim.expired());
+        references.insert(
+            id,
+            ReferenceHandle {
+                claim: Claim::Root {
+                    reference: Rc::downgrade(&reference),
+                    root: context.root,
+                },
+                import,
+            },
+        );
+        encode(&id)
+    }
+
+    /// Resolve a reference handle and its WIT binding for the current callback.
+    ///
+    /// Declared handles come from this environment or its issued parent. A root handle resolves
+    /// only in the table that issued it, for a callback of the root that owns its claim, and only
+    /// while that root lasts: another root, even of the same principal, cannot use it.
+    pub(super) fn reference(
+        &self,
+        scope: &Scope,
+        owner: Option<ScopeId>,
+        id: u32,
+    ) -> Result<(Rc<Reference>, Rc<Import>)> {
+        let handles = self.selected_handles(owner)?;
+        let handle = handles
             .references
             .borrow()
             .get(&id)
             .cloned()
-            .ok_or_else(|| failure("unknown reference handle"))
+            .ok_or_else(|| failure("unknown reference handle"))?;
+        let reference = match handle.claim {
+            Claim::Declared(reference) => reference,
+            Claim::Root { reference, root } => {
+                let current = match scope {
+                    Scope::Call(context) => Some(context.root),
+                    _ => None,
+                };
+                if !Rc::ptr_eq(handles, &self.handles) || current != Some(root) {
+                    return Err(failure("reference belongs to another root"));
+                }
+                reference
+                    .upgrade()
+                    .ok_or_else(|| failure("reference expired with its root"))?
+            }
+            Claim::Owned(_) => {
+                return Err(failure(
+                    "an owned resource handle is not a service reference",
+                ));
+            }
+        };
+        Ok((reference, handle.import))
     }
+}
+
+/// Release a claim that will never be published and return the failure that stopped it. A
+/// secondary release failure is appended to the message, keeping the original code and reason.
+fn abandon(reference: &Reference, mut error: tembra::Error) -> tembra::Error {
+    if let Err(release) = reference.release() {
+        error.message = format!(
+            "{}; releasing the claim also failed: {release}",
+            error.message
+        );
+    }
+    error
 }
 
 /// Encode a typed host reply for the guest transport.

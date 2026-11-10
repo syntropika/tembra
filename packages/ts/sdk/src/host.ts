@@ -265,4 +265,9 @@ export {
   type MobileArtifact,
   type MobilePort,
   type MobileExecutionOptions,
+  type MobileField,
+  type MobileIngressCarrier,
+  type MobileIngressEvent,
+  type MobileRequestChunk,
+  type MobileRequestHead,
 } from "./interpreter/mobile.ts";

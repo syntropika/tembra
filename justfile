@@ -68,6 +68,16 @@ build-probe target-dir toolchain=nightly:
 build-consumer target-dir toolchain=nightly:
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-consumer/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
 
+# Compile the resource provider and its independent importer against the same WIT contract.
+build-resources target-dir toolchain=nightly:
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-resource-provider/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-resource-consumer/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
+
+# Compile the byte-stream components used by native portable transport qualification.
+build-streams target-dir toolchain=nightly:
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-stream-producer/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-stream-consumer/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
+
 # Compile a component contributing to waterfall, series and bail hooks of another Orb.
 build-contributor target-dir toolchain=nightly:
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-contributor/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
@@ -95,10 +105,6 @@ build-stream-adapter target-dir toolchain=nightly:
 check-stream-adapter target-dir toolchain=nightly:
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/stream-adapter/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld -Clink-arg=-zstack-size=65536
     cmp "$1/wasm32-unknown-unknown/release/tembra_stream_adapter.wasm" crates/executor-wasm/src/worker/standard/stream_adapter.wasm
-
-# Run the ignored executor tests against a built interpreter and Orb artifacts; regular tests do not supply them.
-test-wasm-orb engine orb provider probe consumer contributor http-client sockets http-handler http-proxy scratch:
-    TEMBRA_WASM_ENGINE="{{engine}}" TEMBRA_WASM_ORB="{{orb}}" TEMBRA_WASM_PROVIDER="{{provider}}" TEMBRA_WASM_PROBE="{{probe}}" TEMBRA_WASM_CONSUMER="{{consumer}}" TEMBRA_WASM_CONTRIBUTOR="{{contributor}}" TEMBRA_WASM_HTTP_CLIENT="{{http-client}}" TEMBRA_WASM_SCRATCH="{{scratch}}" TEMBRA_WASM_SOCKETS="{{sockets}}" TEMBRA_WASM_HTTP_HANDLER="{{http-handler}}" TEMBRA_WASM_HTTP_PROXY="{{http-proxy}}" cargo test --locked -p tembra-executor-wasm --tests -- --include-ignored --nocapture
 
 # Execute isolated Orb acceptance on native Rust, Node and Chrome after the packaged interpreter build.
 test-wasm-acceptance *args:

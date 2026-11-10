@@ -1,3 +1,5 @@
+import type { Buffer } from "node:buffer";
+
 export class NodeKernel {
   check(root: number, call?: number): string | null;
   /** Execute one closed kernel operation on structured input; returns `{ ok }` or `{ error }`. */
@@ -36,6 +38,36 @@ export class NodeInterpreter {
   instances(): number;
 }
 
+/** One HTTP field, preserving value bytes, ordering and duplicate names. */
+export interface NodeField {
+  name: string;
+  value: Buffer;
+}
+
+/** Incoming request metadata; body chunks travel separately on demand.
+ * Native request targets supply scheme and authority together, or omit both.
+ */
+export interface NodeIngressHead {
+  method: string;
+  scheme?: string;
+  authority?: string;
+  pathWithQuery?: string;
+  fields: NodeField[];
+}
+
+/** Typed carrier events; JSON appears only in control requests and completion packets. */
+export type NodeIngressEvent =
+  | { kind: "host"; id: number; asynchronous: boolean; packet: string }
+  | { kind: "complete"; result: string }
+  | { kind: "head"; status: number; fields: NodeField[] }
+  | { kind: "request-pull" }
+  | { kind: "data"; data: Buffer }
+  | { kind: "trailers"; fields: NodeField[] }
+  | { kind: "end" }
+  | { kind: "error"; message: string }
+  /** One standard binary WIT `wasi:http/types.error-code` value. */
+  | { kind: "refused"; code: Buffer };
+
 /** Scoped source or compiled Orb transport; application consumers should use the SDK facade. */
 export class NodeInterpreterPort {
   /** Cancel the active callback after its caller was cancelled. */
@@ -44,6 +76,18 @@ export class NodeInterpreterPort {
   description(): string;
   declare(packet: string, callback: (packet: string) => string): string;
   dispatch(packet: string, callback: (packet: string) => void): void;
+  /** Start an incoming exchange; finish only after its complete event. */
+  ingress(packet: string, head: NodeIngressHead, callback: (event: NodeIngressEvent) => void): void;
+  /** Supply exactly one of a body chunk, trailers ([] for EOF), or an error. */
+  supplyRequest(
+    data: Uint8Array | null,
+    trailers: NodeField[] | null,
+    error: string | null,
+  ): boolean;
+  /** Pull one response frame, preserving backpressure. */
+  pullResponse(): void;
+  /** Close both bodies when the client disconnects. */
+  disconnect(): void;
   reply(id: number, packet: string): boolean;
   finish(): void;
   close(): void;

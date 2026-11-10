@@ -96,3 +96,20 @@ test("malformed and unsupported requests are distinguished", () => {
     outcome(decodeAsyncHostRequest, '{"operation":"reference.call","id":1,"method":"m"}'),
   ).toBe("malformed");
 });
+
+test("Context.get acquisition names only an import binding and a key list", () => {
+  expect(
+    decodeAsyncHostRequest('{"operation":"reference.acquire","service":"s","key":["a","b"]}'),
+  ).toEqual({ operation: "reference.acquire", service: "s", key: ["a", "b"] });
+  // Wrong key kinds, a table selector, and guest-chosen requirement or identity are refused.
+  for (const packet of [
+    '{"operation":"reference.acquire","service":"s","key":"main"}',
+    '{"operation":"reference.acquire","service":"s","key":[1]}',
+    '{"operation":"reference.acquire","service":"s"}',
+    '{"operation":"reference.acquire","scope":1,"service":"s","key":[]}',
+    '{"operation":"reference.acquire","service":"s","key":[],"apiVersion":2}',
+    '{"operation":"reference.acquire","service":"s","key":[],"methods":["m"]}',
+    '{"operation":"reference.acquire","service":"s","key":[],"principal":"p"}',
+  ])
+    expect(outcome(decodeAsyncHostRequest, packet)).toBe("malformed");
+});

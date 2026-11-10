@@ -17,6 +17,7 @@ use futures::{StreamExt, channel::mpsc};
 use http_body::{Body, Frame};
 use http_body_util::BodyExt;
 use std::{
+    future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
@@ -32,11 +33,17 @@ pub struct IngressField {
 }
 
 /// The request head a platform host supplies.
+///
+/// `scheme` and `authority` form the request target's absolute part and are supplied together
+/// or not at all: the guest's request carries an `http::Uri`, which has both or neither. A head
+/// with only one of them is refused when the exchange begins. A host that only knows the
+/// `Host` header supplies neither and leaves that header in `fields`.
 #[derive(Clone, Debug)]
 pub struct IngressRequestHead {
     pub method: String,
-    /// `http`, `https` or another scheme; absent when the request names none.
+    /// `http`, `https` or another scheme; present exactly when `authority` is.
     pub scheme: Option<String>,
+    /// `host[:port]`; present exactly when `scheme` is.
     pub authority: Option<String>,
     /// The raw origin-form target.
     pub path_with_query: Option<String>,
@@ -82,6 +89,10 @@ pub enum IngressEvent {
     RequestPull,
     /// The answer to one [`IngressPort::pull_response`].
     Response(IngressResponseFrame),
+    /// The guest returned its `error-code` instead of a response: the WIT value in the
+    /// standard binary codec (`wasi:http/client#send`'s error type). Sent at most once, never
+    /// with a `Head`, on the call's own event channel before the call completes.
+    Refused(Vec<u8>),
 }
 
 /// Fields as a header map; an invalid name or value is refused.
@@ -118,12 +129,16 @@ struct Supply {
     closed: bool,
 }
 
+/// Announcing one pull while the event queue is full: it completes when the queue has room.
+type Announcing = Pin<Box<dyn Future<Output = bool> + Send>>;
+
 /// The request body as the Store reads it: each read pulls one chunk from the platform.
 struct ForeignBody {
     supply: Arc<Mutex<Supply>>,
     events: async_channel::Sender<Event>,
-    /// Trailers to deliver before the end.
-    trailers: Option<http::HeaderMap>,
+    /// The current pull's announcement, delayed by a full event queue. The queue wakes this
+    /// read when it has room; nothing spins and nothing is buffered beyond this one event.
+    announcing: Option<Announcing>,
     ended: bool,
 }
 
@@ -135,11 +150,29 @@ impl Body for ForeignBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<std::result::Result<Frame<Bytes>, String>>> {
-        if let Some(trailers) = self.trailers.take() {
-            return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
-        }
         if self.ended {
             return Poll::Ready(None);
+        }
+        if let Some(announcing) = self.announcing.as_mut() {
+            match announcing.as_mut().poll(cx) {
+                // The platform has not seen this pull yet; the queue wakes us with room, and a
+                // disconnect wakes us through the supply.
+                Poll::Pending => {
+                    let closed = self.supply.lock().expect("ingress supply").closed;
+                    if !closed {
+                        return Poll::Pending;
+                    }
+                    self.announcing = None;
+                    self.ended = true;
+                    return Poll::Ready(Some(Err("the request body is no longer supplied".into())));
+                }
+                Poll::Ready(sent) => {
+                    self.announcing = None;
+                    if !sent {
+                        return self.stopped();
+                    }
+                }
+            }
         }
         let mut supply = self.supply.lock().expect("ingress supply");
         if let Some(answer) = supply.answer.take() {
@@ -171,20 +204,53 @@ impl Body for ForeignBody {
             return Poll::Ready(Some(Err("the request body is no longer supplied".into())));
         }
         if !supply.pulled {
+            // One announcement per requested chunk. A full queue only delays it; the supply
+            // lock is held until this read's waker is registered, so an answer that follows
+            // the announcement at once is never missed.
             supply.pulled = true;
-            if self
+            match self
                 .events
                 .try_send(Event::Ingress(IngressEvent::RequestPull))
-                .is_err()
             {
-                supply.closed = true;
-                drop(supply);
-                self.ended = true;
-                return Poll::Ready(Some(Err("the platform stopped reading events".into())));
+                Ok(()) => {}
+                Err(async_channel::TrySendError::Full(event)) => {
+                    let events = self.events.clone();
+                    let mut announcing: Announcing =
+                        Box::pin(async move { events.send(event).await.is_ok() });
+                    match announcing.as_mut().poll(cx) {
+                        Poll::Ready(true) => {}
+                        Poll::Ready(false) => {
+                            drop(supply);
+                            return self.stopped();
+                        }
+                        Poll::Pending => {
+                            supply.waker = Some(cx.waker().clone());
+                            drop(supply);
+                            self.announcing = Some(announcing);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+                Err(async_channel::TrySendError::Closed(_)) => {
+                    drop(supply);
+                    return self.stopped();
+                }
             }
         }
         supply.waker = Some(cx.waker().clone());
         Poll::Pending
+    }
+}
+
+impl ForeignBody {
+    /// The platform no longer reads events: the body fails and accepts no further answer.
+    fn stopped(&mut self) -> Poll<Option<std::result::Result<Frame<Bytes>, String>>> {
+        if let Ok(mut supply) = self.supply.lock() {
+            supply.closed = true;
+            supply.answer = None;
+        }
+        self.ended = true;
+        Poll::Ready(Some(Err("the platform stopped reading events".into())))
     }
 }
 
@@ -294,6 +360,11 @@ pub(crate) fn begin(
 ) -> Result<(IngressCall, IngressPort)> {
     let method = http::Method::from_bytes(head.method.as_bytes())
         .map_err(|_| crate::failure("invalid request method"))?;
+    if head.scheme.is_some() != head.authority.is_some() {
+        return Err(crate::failure(
+            "a request target names its scheme and authority together, or neither",
+        ));
+    }
     let mut uri = http::Uri::builder();
     if let Some(scheme) = &head.scheme {
         uri = uri.scheme(scheme.as_str());
@@ -311,7 +382,7 @@ pub(crate) fn begin(
     let body = ForeignBody {
         supply: supply.clone(),
         events: events.clone(),
-        trailers: None,
+        announcing: None,
         ended: false,
     };
     let mut request = http::Request::new(
@@ -431,7 +502,12 @@ mod tests {
 
     /// A port and the Store-side body it feeds, without a Store.
     fn pair() -> (IngressPort, ForeignBody, async_channel::Receiver<Event>) {
-        let (events, receive) = async_channel::bounded(4);
+        queued(4)
+    }
+
+    /// A pair whose event queue holds `capacity` events.
+    fn queued(capacity: usize) -> (IngressPort, ForeignBody, async_channel::Receiver<Event>) {
+        let (events, receive) = async_channel::bounded(capacity);
         let supply = Arc::new(Mutex::new(Supply::default()));
         let (pulls, _requested) = mpsc::unbounded();
         let port = IngressPort {
@@ -443,7 +519,7 @@ mod tests {
         let body = ForeignBody {
             supply,
             events,
-            trailers: None,
+            announcing: None,
             ended: false,
         };
         (port, body, receive)
@@ -599,6 +675,138 @@ mod tests {
                 "delivery did not end after {pending} pending polls"
             );
         }
+    }
+
+    /// Counts the wakes of the read that registered it.
+    #[derive(Default)]
+    struct Wakes(std::sync::atomic::AtomicUsize);
+    impl futures::task::ArcWake for Wakes {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn poll_with(
+        body: &mut ForeignBody,
+        wakes: &Arc<Wakes>,
+    ) -> Poll<Option<std::result::Result<Frame<Bytes>, String>>> {
+        let waker = futures::task::waker(wakes.clone());
+        Pin::new(body).poll_frame(&mut Context::from_waker(&waker))
+    }
+
+    /// An unrelated event that fills the queue.
+    fn filler() -> Event {
+        Event::Done(Ok("null".into()))
+    }
+
+    fn is_pull(event: Option<Event>) -> bool {
+        matches!(event, Some(Event::Ingress(IngressEvent::RequestPull)))
+    }
+
+    #[test]
+    fn a_full_event_queue_delays_the_pull_without_ending_the_body() {
+        let (port, mut body, events) = queued(1);
+        let (sender, wakes) = (body.events.clone(), Arc::new(Wakes::default()));
+        sender.try_send(filler()).unwrap();
+        // The pull waits for room instead of failing the body.
+        assert!(poll_with(&mut body, &wakes).is_pending());
+        assert!(poll_with(&mut body, &wakes).is_pending());
+        assert!(matches!(events.try_recv(), Ok(Event::Done(_))));
+        // Room wakes the read, which announces its one pull.
+        assert!(wakes.0.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        assert!(poll_with(&mut body, &wakes).is_pending());
+        assert!(is_pull(events.try_recv().ok()));
+        assert!(poll_with(&mut body, &wakes).is_pending());
+        assert!(events.try_recv().is_err(), "one announcement per pull");
+        assert!(
+            port.supply_request(IngressRequestChunk::Data(vec![7]))
+                .unwrap()
+        );
+        let Poll::Ready(Some(Ok(frame))) = poll_with(&mut body, &wakes) else {
+            panic!("expected data")
+        };
+        assert_eq!(frame.into_data().unwrap().as_ref(), &[7]);
+        // The next pull is announced at once while the queue has room.
+        assert!(poll_with(&mut body, &wakes).is_pending());
+        assert!(is_pull(events.try_recv().ok()));
+    }
+
+    #[test]
+    fn a_closed_event_queue_refuses_the_pull() {
+        let (port, mut body, events) = queued(1);
+        drop(events);
+        let Poll::Ready(Some(Err(message))) = poll(&mut body) else {
+            panic!("expected a refusal")
+        };
+        assert_eq!(message, "the platform stopped reading events");
+        assert!(matches!(poll(&mut body), Poll::Ready(None)));
+        assert!(
+            !port
+                .supply_request(IngressRequestChunk::Data(vec![1]))
+                .unwrap()
+        );
+        // A queue that closes while the pull waits for room is refused the same way.
+        let (_port, mut body, events) = queued(1);
+        let wakes = Arc::new(Wakes::default());
+        body.events.try_send(filler()).unwrap();
+        assert!(poll_with(&mut body, &wakes).is_pending());
+        drop(events);
+        assert!(wakes.0.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        let Poll::Ready(Some(Err(message))) = poll_with(&mut body, &wakes) else {
+            panic!("expected a refusal")
+        };
+        assert_eq!(message, "the platform stopped reading events");
+    }
+
+    #[test]
+    fn a_disconnect_ends_a_read_waiting_for_queue_room() {
+        let (port, mut body, _events) = queued(1);
+        let wakes = Arc::new(Wakes::default());
+        body.events.try_send(filler()).unwrap();
+        assert!(poll_with(&mut body, &wakes).is_pending());
+        port.disconnect();
+        assert!(wakes.0.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        assert!(matches!(
+            poll_with(&mut body, &wakes),
+            Poll::Ready(Some(Err(_)))
+        ));
+        assert!(matches!(poll(&mut body), Poll::Ready(None)));
+    }
+
+    fn head(scheme: Option<&str>, authority: Option<&str>) -> IngressRequestHead {
+        IngressRequestHead {
+            method: "GET".into(),
+            scheme: scheme.map(str::to_owned),
+            authority: authority.map(str::to_owned),
+            path_with_query: Some("/a?b".into()),
+            fields: vec![field("host", b"example.test")],
+        }
+    }
+
+    #[test]
+    fn scheme_and_authority_are_supplied_together_or_not_at_all() {
+        let (events, _receive) = async_channel::bounded(4);
+        for (scheme, authority) in [(Some("https"), None), (None, Some("example.test"))] {
+            let error = begin(head(scheme, authority), events.clone())
+                .err()
+                .expect("a one-sided request target is refused");
+            assert!(
+                error.message.contains("scheme and authority together"),
+                "{error}"
+            );
+        }
+        let (call, _port) = begin(
+            head(Some("https"), Some("example.test:8443")),
+            events.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            call.request.uri().to_string(),
+            "https://example.test:8443/a?b"
+        );
+        let (call, _port) = begin(head(None, None), events).unwrap();
+        assert_eq!(call.request.uri().to_string(), "/a?b");
+        assert_eq!(call.request.headers()["host"], "example.test");
     }
 
     #[test]

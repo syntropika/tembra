@@ -158,6 +158,41 @@ fn delivery() -> Result<&'static tokio::runtime::Runtime, MobileError> {
     DELIVERY.as_ref().map_err(error)
 }
 
+/// Poll in the foreign future so cancellation cannot strand a consumed event in a detached
+/// task. Only its wake is forwarded: channel senders may run on a Wasmtime fiber stack.
+async fn deliver<T>(future: impl std::future::Future<Output = T>) -> Result<T, MobileError> {
+    use std::task::{Context, Waker};
+    let forward = Arc::new(Forward {
+        caller: futures::task::AtomicWaker::new(),
+        runtime: delivery()?.handle().clone(),
+    });
+    let waker = Waker::from(forward.clone());
+    futures::pin_mut!(future);
+    Ok(futures::future::poll_fn(|context| {
+        forward.caller.register(context.waker());
+        future.as_mut().poll(&mut Context::from_waker(&waker))
+    })
+    .await)
+}
+
+struct Forward {
+    caller: futures::task::AtomicWaker,
+    runtime: tokio::runtime::Handle,
+}
+
+impl std::task::Wake for Forward {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let forward = self.clone();
+        // Always schedule, even when already on a delivery thread: never invoke a foreign
+        // continuation inline on the channel sender's stack.
+        self.runtime.spawn(async move { forward.caller.wake() });
+    }
+}
+
 /// Run thread-affine state behind a typed job queue; no foreign callback executes on this thread.
 type Job<T> = Box<dyn FnOnce(&mut T) + Send>;
 struct Owner<T> {

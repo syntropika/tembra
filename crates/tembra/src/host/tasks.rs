@@ -154,13 +154,33 @@ impl Host {
         call: core::Id,
         operation: impl Future<Output = Result<T>> + 'static,
     ) -> Result<oneshot::Receiver<Result<T>>> {
+        self.spawn_managed_settling(call, async move { (operation.await, None) })
+    }
+
+    /// Run an admitted call whose logical result may be published before its physical work
+    /// ends. The invocation stays admitted until that work ends: the call's one guard moves
+    /// into the remaining work, so `finish_call` runs exactly when it settles. An ordinary call
+    /// finishes before its result is sent, as always.
+    pub(crate) fn spawn_managed_settling<T: 'static>(
+        &self,
+        call: core::Id,
+        operation: impl Future<Output = (Result<T>, Option<Physical>)> + 'static,
+    ) -> Result<oneshot::Receiver<Result<T>>> {
         let guard = InvocationGuard {
             host: self.clone(),
             call,
         };
-        self.spawn(async move {
-            let _guard = guard;
-            operation.await
+        self.spawn_settling(async move {
+            let (result, physical) = operation.await;
+            let physical = physical.map(|physical| {
+                async move {
+                    let settled = physical.await;
+                    drop(guard);
+                    settled
+                }
+                .boxed_local()
+            });
+            (result, physical)
         })
     }
 }

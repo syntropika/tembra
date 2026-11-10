@@ -147,8 +147,9 @@ fn other_resource_exports_still_require_a_lifecycle_adapter() {
     let bindings = prepared
         .providers(&BTreeMap::new(), &Grants::default())
         .unwrap_or_default();
-    let error = prepared.plan("web", 1, &bindings).unwrap_err();
-    assert!(error.0.contains("lifecycle adapter"), "{error}");
+    assert!(prepared.plan("web", 1, &bindings).is_err());
+    let error = prepared.check_resource_profile().unwrap_err();
+    assert!(error.0.contains("defining interface"), "{error}");
 }
 
 #[test]

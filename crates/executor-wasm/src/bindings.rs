@@ -2,19 +2,24 @@
 use crate::{
     failure,
     protocol::{GuestCommand, ScopeId},
-    worker::Session,
+    worker::{Carrier, Session},
 };
 use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
-    rc::Rc,
+    rc::{Rc, Weak},
 };
 use tembra::{
-    Cancellation, Context, Declaration, Reference, Resource, ResourceSignal, Result, State,
+    AcquisitionOptions, Cancellation, Context, Declaration, Reference, Resource, ResourceSignal,
+    Result, State,
 };
 
 mod operations;
+mod resources;
+mod streams;
+pub(crate) use resources::{Delivery, Roles};
+pub(crate) use streams::pump;
 
 #[derive(Clone)]
 pub(crate) enum Scope {
@@ -27,21 +32,52 @@ pub(crate) enum Scope {
 pub(crate) struct Import {
     pub service: String,
     pub methods: BTreeMap<String, BoundMethod>,
+    /// The installed requirement's API version and methods, applied to runtime acquisition.
+    pub requirement: Option<AcquisitionOptions>,
 }
 pub(crate) struct BoundMethod {
     pub name: String,
     pub slot: u32,
+    /// Resource positions of this function; empty unless the capability transport is selected.
+    pub roles: Roles,
 }
 
 #[derive(Clone)]
 struct ReferenceHandle {
-    reference: Rc<Reference>,
+    claim: Claim,
     import: Rc<Import>,
+}
+
+/// Who owns the kernel claim behind a guest reference handle.
+#[derive(Clone)]
+enum Claim {
+    /// Declared by a factory: the environment owns the claim for its whole lifetime.
+    Declared(Rc<Reference>),
+    /// Acquired by `Context.get`: the root's native claim list owns it and releases it when the
+    /// root ends. The table only names it, so a long-lived environment never retains claims of
+    /// ended roots; only callbacks of the same root may use the handle.
+    Root {
+        reference: Weak<Reference>,
+        root: tembra::core::Id,
+    },
+    /// An imported WIT resource returned to this table: the slot owns the handle until the guest
+    /// drops it or the environment is released. Calls clone the `Rc` before awaiting, so a drop
+    /// during a call takes effect when that call has physically finished.
+    Owned(Rc<tembra::portable::Owned>),
+}
+
+impl Claim {
+    /// A root claim whose root has ended no longer names a reference.
+    fn expired(&self) -> bool {
+        matches!(self, Self::Root { reference, .. } if reference.strong_count() == 0)
+    }
 }
 
 struct Handles {
     session: Session,
     environment: u64,
+    /// The Orb root table of a service environment: it holds this revision's owned imports.
+    root: Option<Weak<Handles>>,
     next: Cell<u32>,
     states: RefCell<BTreeMap<u32, State<Value>>>,
     references: RefCell<BTreeMap<u32, ReferenceHandle>>,
@@ -52,7 +88,15 @@ struct Handles {
 impl Drop for Handles {
     /// Release guest closures only after the last physical native owner has settled.
     fn drop(&mut self) {
-        self.session.release_environment(self.environment);
+        match resources::holding(self.root.as_ref()) {
+            // Destructors of resources this environment issued may drop imported ones.
+            Some(root) => self
+                .session
+                .release_environment_with(self.environment, &mut |slot| {
+                    resources::release_slot(&root, slot);
+                }),
+            None => self.session.release_environment(self.environment),
+        }
     }
 }
 
@@ -88,6 +132,7 @@ impl Environment {
         let handles = Rc::new(Handles {
             session: session.clone(),
             environment: id,
+            root: parent.as_ref().map(Rc::downgrade),
             next: Cell::new(0),
             states: RefCell::default(),
             references: RefCell::default(),
@@ -131,9 +176,15 @@ impl Environment {
             service: self.service.as_deref(),
             method,
             args: &args,
+            receiver: None,
         };
-        self.execute(Scope::Call(context), Some(cancellation), packet, None)
-            .await
+        self.execute(
+            Scope::Call(context),
+            Some(cancellation),
+            packet,
+            Carrier::None,
+        )
+        .await
     }
 
     /// Serve one incoming HTTP request under an admitted native context.
@@ -158,7 +209,7 @@ impl Environment {
             Scope::Call(context),
             Some(cancellation),
             packet,
-            Some(ingress.0),
+            Carrier::Ingress(Box::new(ingress.0)),
         )
         .await
         .map(|_| ())
@@ -188,7 +239,7 @@ impl Environment {
                 Scope::Call(context.clone()),
                 Some(context.signal()),
                 packet,
-                None,
+                Carrier::None,
             )
             .await?;
         let value = self
@@ -209,7 +260,7 @@ impl Environment {
         scope: Scope,
         cancellation: Option<Cancellation>,
         packet: GuestCommand<'_>,
-        ingress: Option<crate::ingress::IngressCall>,
+        carrier: Carrier,
     ) -> Result<Value> {
         let admission = self.session.admit(cancellation.as_ref()).await?;
         if cancellation.is_some() {
@@ -221,12 +272,12 @@ impl Environment {
                 admission,
                 cancellation.as_ref(),
                 packet,
-                ingress,
+                carrier,
                 async |packet, asynchronous| {
                     if asynchronous {
                         self.asynchronous(&scope, packet).await
                     } else {
-                        self.sync(&scope, packet)
+                        self.sync(&scope, packet).map(Into::into)
                     }
                 },
             )

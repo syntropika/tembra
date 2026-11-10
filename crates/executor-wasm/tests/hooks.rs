@@ -213,7 +213,12 @@ fn run(engine: Engine, component: &[u8], native: bool) {
             .1
             .clone();
         pool.run_until(host.root("alice", move |context| {
-            async move { called.call_value(&context, method, input).await }.boxed_local()
+            async move {
+                called
+                    .call_portable::<_, serde_json::Value>(&context, method, input)
+                    .await
+            }
+            .boxed_local()
         }))
         .unwrap()
     };

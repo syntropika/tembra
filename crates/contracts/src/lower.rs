@@ -151,7 +151,7 @@ impl PreparedContract {
             .then_some(HTTP_HANDLER)
     }
 
-    /// Lower supported exported interfaces without inventing resource lifecycle semantics.
+    /// Lower named exported interfaces; executors check their supported transport separately.
     ///
     /// The incoming HTTP handler is skipped: it is served only through the host-local ingress
     /// adapter and never becomes portable service metadata.
@@ -189,16 +189,6 @@ impl PreparedContract {
                         return Err(Error(
                             "export aliases require an explicit service mapping".into(),
                         ));
-                    }
-                    if interface.resources
-                        || !interface
-                            .functions
-                            .iter()
-                            .all(|function| function.kind.freestanding())
-                    {
-                        return Err(Error(format!(
-                            "{contract}: resource exports require a lifecycle adapter"
-                        )));
                     }
                     if !interface.functions.is_empty() {
                         let mut service = Service::new(

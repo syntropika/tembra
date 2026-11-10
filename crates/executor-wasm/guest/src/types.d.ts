@@ -90,6 +90,8 @@ interface HostRequests {
 interface AsyncHostRequests {
   "hook.run": HostHandle & { value: unknown };
   "reference.ready": HostHandle;
+  /** `Context.get`: issued into the calling environment's own table, so it names no scope. */
+  "reference.acquire": { service: string; key: string[] };
   "reference.call": HostHandle & { method: string; args: unknown[] };
   wait: { milliseconds: number };
 }

@@ -336,7 +336,7 @@ fn call(
 }
 
 /// The portable entry every foreign caller uses: one JSON argument list, exact numbers.
-fn call_value(
+fn portable_call(
     pool: &mut LocalPool,
     host: &Host,
     reference: &Rc<Reference>,
@@ -345,7 +345,12 @@ fn call_value(
 ) -> tembra::Result<Value> {
     let reference = reference.clone();
     pool.run_until(host.root("alice", move |context| {
-        async move { reference.call_value(&context, method, arguments).await }.boxed_local()
+        async move {
+            reference
+                .call_portable::<_, serde_json::Value>(&context, method, arguments)
+                .await
+        }
+        .boxed_local()
     }))
 }
 
@@ -625,7 +630,7 @@ fn hooks(interpreted: bool) {
             ),
         ] {
             let arguments = serde_json::to_value((&input,)).unwrap();
-            let result = call_value(&mut pool, &host, &runner, "run", arguments)
+            let result = portable_call(&mut pool, &host, &runner, "run", arguments)
                 .unwrap_or_else(|error| panic!("source provider {source_provider}: {error}"));
             assert_eq!(
                 serde_json::from_value::<Entry>(result).unwrap(),
@@ -640,7 +645,7 @@ fn hooks(interpreted: bool) {
             note: String::new(),
         },))
         .unwrap();
-        assert!(call_value(&mut pool, &host, &runner, "run", below).is_err());
+        assert!(portable_call(&mut pool, &host, &runner, "run", below).is_err());
         runner.release().unwrap();
         pool.run_until(host.close()).unwrap();
         assert_eq!(engine.instances(), 0);

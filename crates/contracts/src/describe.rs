@@ -60,7 +60,12 @@ impl PreparedContract {
             "imports": side(&model.imports),
             "exports": side(&model.exports),
             "types": model.types.iter().enumerate().map(|(id, kind)| {
-                json!({"id": id, "definition": {"kind": describe_kind(kind)}})
+                let mut definition = json!({"kind": describe_kind(kind)});
+                if let Kind::Resource(resource) = kind {
+                    definition["name"] = json!(resource.name);
+                    definition["owner"] = json!(resource.interface);
+                }
+                json!({"id": id, "definition": definition})
             }).collect::<Vec<_>>(),
             "javascriptNames": names,
         })
@@ -153,7 +158,7 @@ fn describe_kind(kind: &Kind) -> Value {
         Kind::List(ty) => json!({"list": describe_ty(*ty)}),
         Kind::FixedList(ty, length) => json!({"fixed-length-list": [describe_ty(*ty), length]}),
         Kind::Map(key, value) => json!({"map": [describe_ty(*key), describe_ty(*value)]}),
-        Kind::Resource => json!("resource"),
+        Kind::Resource(_) => json!("resource"),
         Kind::Own(id) => json!({"handle": {"own": id}}),
         Kind::Borrow(id) => json!({"handle": {"borrow": id}}),
         Kind::Future(ty) => json!({"future": optional(*ty)}),

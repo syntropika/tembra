@@ -5,6 +5,7 @@ pub mod codec;
 mod hooks;
 mod host;
 mod orb;
+pub mod portable;
 mod state;
 pub use clock::Clock;
 #[cfg(feature = "subscriptions")]

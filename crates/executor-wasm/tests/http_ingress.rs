@@ -570,7 +570,11 @@ fn the_handler_is_host_local() {
         .run_until(served.host.root("alice", move |context| {
             async move {
                 reference
-                    .call_value(&context, "handle", serde_json::json!([null]))
+                    .call_portable::<_, serde_json::Value>(
+                        &context,
+                        "handle",
+                        serde_json::json!([null]),
+                    )
                     .await
             }
             .boxed_local()

@@ -3,11 +3,13 @@ use crate::{
     Error,
     model::{
         Case, Entry, Field, Function, FunctionKind, Interface, Item, Kind, MAX_DEPTH, Model,
-        PreparedContract, Ty,
+        PreparedContract, ResourceIdentity, Ty,
     },
 };
 use std::collections::HashMap;
-use wit_parser::{Handle, InterfaceId, Resolve, Type, TypeDefKind, TypeId, WorldId, WorldItem};
+use wit_parser::{
+    Handle, InterfaceId, Resolve, Type, TypeDefKind, TypeId, TypeOwner, WorldId, WorldItem,
+};
 
 /// Keep only definitions reachable from the selected world, dependencies first.
 struct Lowering<'a> {
@@ -69,11 +71,19 @@ impl Lowering<'_> {
     /// Lower an interface's functions and record whether it declares resources.
     fn interface(&mut self, id: InterfaceId, explicit: bool) -> Result<Interface, Error> {
         let interface = &self.resolve.interfaces[id];
+        // A resource-only interface can have no constructor or methods. Keep its declarations
+        // even when no function signature reaches them, so linkers can identify its types.
+        let mut resources = std::collections::BTreeMap::new();
+        for (name, id) in &interface.types {
+            if self.resource_type(*id) {
+                resources.insert(name.clone(), self.reference(*id)?);
+            }
+        }
         Ok(Interface {
             explicit,
             contract: self.resolve.id_of(id),
             name: interface.name.clone(),
-            resources: interface.types.values().any(|id| self.resource_type(*id)),
+            resources,
             functions: interface
                 .functions
                 .values()
@@ -159,7 +169,7 @@ impl Lowering<'_> {
                 if depth > MAX_DEPTH {
                     return Err(Error("WIT type nesting exceeds the contract limit".into()));
                 }
-                let kind = self.kind(&self.resolve.types[id].kind, depth + 1)?;
+                let kind = self.kind(id, depth + 1)?;
                 let index = u32::try_from(self.types.len())
                     .map_err(|_| Error("too many WIT types".into()))?;
                 self.types.push(kind);
@@ -169,7 +179,19 @@ impl Lowering<'_> {
         })
     }
 
-    fn kind(&mut self, kind: &TypeDefKind, depth: usize) -> Result<Kind, Error> {
+    fn kind(&mut self, id: TypeId, depth: usize) -> Result<Kind, Error> {
+        let definition = &self.resolve.types[id];
+        if matches!(definition.kind, TypeDefKind::Resource) {
+            return Ok(Kind::Resource(ResourceIdentity {
+                interface: match definition.owner {
+                    TypeOwner::Interface(owner) => self.resolve.id_of(owner),
+                    TypeOwner::World(_) | TypeOwner::None => None,
+                },
+                name: definition.name.clone(),
+            }));
+        }
+        let resolve = self.resolve;
+        let kind = &resolve.types[id].kind;
         let mut ty = |ty: Type| self.ty(ty, depth);
         Ok(match kind {
             TypeDefKind::Type(inner) => Kind::Alias(ty(*inner)?),
@@ -222,7 +244,7 @@ impl Lowering<'_> {
             TypeDefKind::List(inner) => Kind::List(ty(*inner)?),
             TypeDefKind::FixedLengthList(inner, length) => Kind::FixedList(ty(*inner)?, *length),
             TypeDefKind::Map(key, value) => Kind::Map(ty(*key)?, ty(*value)?),
-            TypeDefKind::Resource => Kind::Resource,
+            TypeDefKind::Resource => unreachable!("handled before lowering value types"),
             TypeDefKind::Handle(Handle::Own(id)) => match ty(Type::Id(*id))? {
                 Ty::Ref(index) => Kind::Own(index),
                 _ => unreachable!("type identifiers lower to references"),

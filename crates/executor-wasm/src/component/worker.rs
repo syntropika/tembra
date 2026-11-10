@@ -22,7 +22,7 @@ use super::values;
 use crate::{
     Engine,
     abi::Operation,
-    worker::{Command, Event, Terminal},
+    worker::{Command, Event, Pipe, PipeConsumer, StreamCall, Terminal},
 };
 use async_channel::Sender;
 use serde::Deserialize;
@@ -35,8 +35,8 @@ use tokio::sync::oneshot;
 use wasmtime::{
     Store, StoreLimits, StoreLimitsBuilder,
     component::{
-        Accessor, Component, Func, Linker, Resource, ResourceTable, TaskGroupHook, TaskGroupId,
-        TypedFunc, Val, types::ComponentFunc,
+        Accessor, Component, Func, Linker, Resource, ResourceTable, ResourceType, TaskGroupHook,
+        TaskGroupId, TypedFunc, Val, types::ComponentFunc,
     },
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -65,18 +65,37 @@ type Handler = TypedFunc<(Resource<p3::Request>,), (Result<Resource<p3::Response
 /// Callable exports resolved once per Store.
 struct Exports {
     functions: BTreeMap<(String, String), Func>,
+    /// The actual resource types of exports that lend `self` or return an owned resource.
+    roles: BTreeMap<(String, String), Resolved>,
     handler: Option<Handler>,
+}
+
+/// Resource positions of one export, as actual types of this Store.
+#[derive(Clone, Default)]
+struct Resolved {
+    receiver: Option<ResourceType>,
+    own_result: Option<ResourceType>,
 }
 
 pub(crate) struct Export {
     pub interface: String,
     /// JavaScript method spelling to original WIT function name.
     pub methods: BTreeMap<String, String>,
+    /// Resource positions by JavaScript spelling; absent for data-only functions.
+    pub roles: BTreeMap<String, Roles>,
+}
+
+/// Resource positions of one function, by the local name of the defining resource.
+pub(crate) struct Roles {
+    pub receiver: Option<String>,
+    pub own_result: Option<String>,
 }
 
 pub(crate) struct Import {
     /// World import key; the embedding adapter maps it to the selected provider service.
     pub binding: String,
+    /// Imported resource types and the dynamic host type each is linked as.
+    pub resources: Vec<(String, u32)>,
     pub functions: Vec<ImportFunction>,
     /// This import anchors a contribution's type and grants no callable service reference.
     pub contribution: bool,
@@ -88,13 +107,20 @@ pub(crate) struct ImportFunction {
     pub spelling: String,
     /// `async func` imports are linked as concurrent host functions.
     pub asynchronous: bool,
+    /// The dynamic type of the implicit `self` borrow, for resource methods.
+    pub receiver: Option<u32>,
+    /// The dynamic type of a whole owned result.
+    pub own_result: Option<u32>,
+    /// The whole result is a `stream<u8>`, read from a pipe the host fills.
+    pub stream: bool,
 }
 
 /// Immutable authority of one admitted call, shared by every thread of its task group.
 #[derive(Clone)]
 struct Authority {
     events: Sender<Event>,
-    /// Orb root environment whose handle table holds the dependency references.
+    /// Orb root environment whose handle table holds the dependency references and every
+    /// owned imported resource of this Store.
     scope: u64,
     handles: Arc<BTreeMap<String, u32>>,
 }
@@ -182,6 +208,10 @@ pub(crate) struct State {
     /// The private stream adapter of socket output streams; instantiated only for components
     /// that import `wasi:sockets/types`.
     adapter: crate::worker::stream_adapter::Adapter<State>,
+    /// Exported resources held for native owners, by issuing environment.
+    instances: super::resources::Instances,
+    /// Imported resource slots the guest dropped, released at the end of the current call.
+    dropped: Dropped,
 }
 
 impl crate::worker::stream_adapter::AdapterStore for State {
@@ -327,6 +357,9 @@ enum Packet {
         service: Option<String>,
         method: String,
         args: Value,
+        /// The host-issued id of the exported resource lent as implicit `self`.
+        #[serde(default)]
+        receiver: Option<u32>,
     },
     Contribute {
         environment: u64,
@@ -337,6 +370,10 @@ enum Packet {
     },
     Release {
         environment: u64,
+    },
+    Destroy {
+        environment: u64,
+        instance: u32,
     },
     Ingress {
         environment: u64,
@@ -361,8 +398,12 @@ pub(crate) async fn run(
     grants: Arc<crate::Grants>,
     layout: Layout,
     ready: mpsc::Sender<std::result::Result<(), String>>,
-    // The session's callback epochs travel with its command queue.
-    calls: (mpsc::Receiver<Command>, crate::io::CallbackScope),
+    // The session's callback epochs and quarantine cause travel with its command queue.
+    calls: (
+        mpsc::Receiver<Command>,
+        crate::io::CallbackScope,
+        Arc<Mutex<Option<String>>>,
+    ),
 ) -> Terminal {
     let transport = crate::http::Transport::default();
     let terminal = live(
@@ -390,7 +431,11 @@ async fn live(
         Layout,
     ),
     ready: mpsc::Sender<std::result::Result<(), String>>,
-    (commands, scope): (mpsc::Receiver<Command>, crate::io::CallbackScope),
+    (commands, scope, poison): (
+        mpsc::Receiver<Command>,
+        crate::io::CallbackScope,
+        Arc<Mutex<Option<String>>>,
+    ),
     transport: &crate::http::Transport,
 ) -> Terminal {
     let groups = Arc::new(Mutex::new(Groups {
@@ -431,6 +476,12 @@ async fn live(
                     Some(status) => format!("orb exited with status {status}; component retired"),
                     None => format!("component trap: {error:#}"),
                 };
+                // Record the cause before the queue closes: a command nobody awaits (a resource
+                // destruction or a release) has no caller to report it, and a call already
+                // queued behind it must see why the revision stopped.
+                if let Ok(mut poison) = poison.lock() {
+                    poison.get_or_insert_with(|| message.clone());
+                }
                 return vec![(command.events, message)];
             }
         }
@@ -475,6 +526,8 @@ async fn instantiate(
             adapter: crate::worker::stream_adapter::Adapter::new(Arc::clone(
                 &engine.stream_adapter,
             )),
+            instances: super::resources::Instances::new(engine.live_resources.clone()),
+            dropped: Dropped::default(),
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -497,10 +550,29 @@ async fn instantiate(
     .await
     .map_err(|_| wasmtime::Error::msg("component initialization timed out"))??;
     let mut exports = BTreeMap::new();
+    let mut roles = BTreeMap::new();
     for (alias, export) in &layout.exports {
         let (_, interface) = instance
             .get_export(&mut store, None, &export.interface)
             .ok_or_else(|| wasmtime::Error::msg("missing component interface"))?;
+        // The binary's own resource types: only handles of exactly these are ever kept or lent.
+        let mut resource = |name: &Option<String>| {
+            name.as_ref()
+                .map(|name| {
+                    instance
+                        .get_export(&mut store, Some(&interface), name)
+                        .and_then(|(_, index)| instance.get_resource(&mut store, index))
+                        .ok_or_else(|| wasmtime::Error::msg("missing component resource type"))
+                })
+                .transpose()
+        };
+        for (spelling, role) in &export.roles {
+            let resolved = Resolved {
+                receiver: resource(&role.receiver)?,
+                own_result: resource(&role.own_result)?,
+            };
+            roles.insert((alias.clone(), spelling.clone()), resolved);
+        }
         for (spelling, method) in &export.methods {
             let (_, index) = instance
                 .get_export(&mut store, Some(&interface), method)
@@ -537,15 +609,27 @@ async fn instantiate(
         store,
         Exports {
             functions: exports,
+            roles,
             handler,
         },
     ))
 }
 
 /// Define each selected dependency function; WASI imports remain the installation's grants.
+///
+/// An imported resource is a dynamic host type per import and resource. Its representation is
+/// a slot of the importer's own host handle table; dropping it queues the slot's release.
 fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result<()> {
     for import in &layout.imports {
         let mut instance = linker.instance(&import.binding)?;
+        for (name, payload) in &import.resources {
+            instance.resource(name, ResourceType::host_dynamic(*payload), |store, slot| {
+                if let Ok(mut dropped) = store.data().dropped.lock() {
+                    dropped.push(slot);
+                }
+                Ok(())
+            })?;
+        }
         for function in &import.functions {
             if import.contribution {
                 let message = format!(
@@ -558,33 +642,171 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                 continue;
             }
             let target = Arc::new((import.binding.clone(), function.spelling.clone()));
+            let (receiver, own_result) = (function.receiver, function.own_result);
+            if function.stream {
+                instance.func_new_concurrent(
+                    &function.name,
+                    move |accessor: &Accessor<State>, _, params, results| {
+                        // The pipe is this Store's own; the host only fills it. It crosses as a
+                        // typed value in the request event, never as a number.
+                        let request = accessor.with(|mut access| {
+                            let pipe = Arc::<Mutex<Pipe>>::default();
+                            request(access.data_mut(), &target, None, params, Some(pipe.clone()))
+                                .map(|receive| StreamReply {
+                                    reply: ImportReply::new(receive, None),
+                                    pipe,
+                                    held: false,
+                                })
+                        });
+                        Box::pin(async move {
+                            let mut reply = request?;
+                            if reply.reply.settle().await? != json!(0) {
+                                return Err(wasmtime::Error::msg(
+                                    "a stream import result names no stream",
+                                ));
+                            }
+                            let stream = accessor.with(|mut access| {
+                                let reader = crate::worker::stream_adapter::guest_reader(
+                                    wasmtime::AsContextMut::as_context_mut(&mut access),
+                                    reply.pipe.clone(),
+                                )?;
+                                wasmtime::component::StreamAny::try_from_stream_reader(
+                                    &mut access,
+                                    reader,
+                                )
+                            })?;
+                            reply.held = true;
+                            reply.reply.delivered();
+                            store_result(results, Some(Val::Stream(stream)))
+                        })
+                    },
+                )?;
+                continue;
+            }
             if function.asynchronous {
                 instance.func_new_concurrent(
                     &function.name,
                     move |accessor: &Accessor<State>, ty, params, results| {
                         // The first poll runs inside the issuing guest call, so the entered group
                         // is still the caller's when its authority is captured.
-                        let request =
-                            accessor.with(|mut access| request(access.data_mut(), &target, params));
-                        Box::pin(async move { settle(request?, ty, results).await })
+                        let request = accessor.with(|mut access| {
+                            let (selected, params) = select(&mut access, receiver, params)?;
+                            let dropped = own_result.map(|_| access.get().dropped.clone());
+                            request(access.data_mut(), &target, selected, params, None)
+                                .map(|receive| ImportReply::new(receive, dropped))
+                        });
+                        Box::pin(async move {
+                            // The guest may abandon this call at any await; the reply guard then
+                            // queues a committed owned slot for release instead of stranding it.
+                            let mut reply = request?;
+                            let value = reply.settle().await?;
+                            let value = match own_result {
+                                Some(payload) => accessor
+                                    .with(|mut access| owned(&mut access, &value, payload))?,
+                                None => lower_result(&ty, &value)?,
+                            };
+                            reply.delivered();
+                            store_result(results, value)
+                        })
                     },
                 )?;
             } else {
-                instance.func_new_async(&function.name, move |store, ty, params, results| {
-                    let request = request(store.data(), &target, params);
-                    Box::new(async move { settle(request?, ty, results).await })
-                })?;
+                instance.func_new_async(
+                    &function.name,
+                    move |mut store, ty, params, results| {
+                        let dropped = own_result.map(|_| store.data().dropped.clone());
+                        let request =
+                            select(&mut store, receiver, params).and_then(|(selected, params)| {
+                                request(store.data(), &target, selected, params, None)
+                                    .map(|receive| ImportReply::new(receive, dropped))
+                            });
+                        Box::new(async move {
+                            let mut reply = request?;
+                            let value = reply.settle().await?;
+                            let value = match own_result {
+                                Some(payload) => owned(&mut store, &value, payload)?,
+                                None => lower_result(&ty, &value)?,
+                            };
+                            reply.delivered();
+                            store_result(results, value)
+                        })
+                    },
+                )?;
             }
         }
     }
     Ok(())
 }
 
+/// Split a resource method's implicit `self` from its data arguments. The borrow names a slot
+/// of this importer's own table; nothing else can select an owned resource.
+fn select(
+    store: impl wasmtime::AsContextMut,
+    receiver: Option<u32>,
+    params: &[Val],
+) -> wasmtime::Result<(Option<u32>, &[Val])> {
+    match (receiver, params.split_first()) {
+        (Some(payload), Some((lent, rest))) => Ok((
+            Some(super::resources::lent_slot(store, lent, payload)?),
+            rest,
+        )),
+        (Some(_), None) => Err(wasmtime::Error::msg("resource method has no self")),
+        (None, _) => Ok((None, params)),
+    }
+}
+
+/// Give the guest its owned handle to the slot the host installed for this result.
+fn owned(
+    store: impl wasmtime::AsContextMut,
+    value: &Value,
+    payload: u32,
+) -> wasmtime::Result<Option<Val>> {
+    let slot = value
+        .as_u64()
+        .and_then(|slot| u32::try_from(slot).ok())
+        .ok_or_else(|| wasmtime::Error::msg("owned import result names no handle slot"))?;
+    Ok(Some(super::resources::owned_value(store, slot, payload)?))
+}
+
+/// Lower a checked data result with the import's actual type.
+fn lower_result(ty: &ComponentFunc, value: &Value) -> wasmtime::Result<Option<Val>> {
+    match ty.results().next() {
+        Some(ty) => {
+            Ok(Some(values::lower(ty, value).map_err(|error| {
+                wasmtime::Error::msg(error.to_string())
+            })?))
+        }
+        None if value.is_null() => Ok(None),
+        None => Err(wasmtime::Error::msg(
+            "dependency result differs from its import",
+        )),
+    }
+}
+
+/// Store the single result an import function returns, if it has one.
+fn store_result(results: &mut [Val], value: Option<Val>) -> wasmtime::Result<()> {
+    match (results.first_mut(), value) {
+        (Some(result), Some(value)) => *result = value,
+        (None, None) => {}
+        _ => {
+            return Err(wasmtime::Error::msg(
+                "dependency result differs from its import",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Capture the issuing task group's authority and publish one bounded `reference.call` request.
+///
+/// `selected` is the importer table slot a resource method's `self` named; every other function
+/// calls through the import's declared reference.
 fn request(
     state: &State,
     (binding, method): &(String, String),
+    selected: Option<u32>,
     params: &[Val],
+    stream: Option<Arc<Mutex<Pipe>>>,
 ) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
     let authority = {
         let groups = state
@@ -597,10 +819,13 @@ fn request(
             .map(|bound| bound.authority.clone())
             .ok_or_else(|| wasmtime::Error::msg("dependency import has no admitted invocation"))?
     };
-    let id = *authority
-        .handles
-        .get(binding)
-        .ok_or_else(|| wasmtime::Error::msg("dependency import has no declared reference"))?;
+    let id = match selected {
+        Some(slot) => slot,
+        None => *authority
+            .handles
+            .get(binding)
+            .ok_or_else(|| wasmtime::Error::msg("dependency import has no declared reference"))?,
+    };
     let args = params
         .iter()
         .cloned()
@@ -619,41 +844,121 @@ fn request(
         return Err(wasmtime::Error::msg("host packet limit exceeded"));
     }
     let (reply, receive) = oneshot::channel();
-    authority
-        .events
-        .try_send(Event::Host {
+    let event = match stream {
+        Some(pipe) => Event::Stream {
+            packet,
+            reply,
+            pipe,
+        },
+        None => Event::Host {
             packet,
             asynchronous: true,
             reply,
-        })
+        },
+    };
+    authority
+        .events
+        .try_send(event)
         .map_err(|_| wasmtime::Error::msg("host operation queue is full or closed"))?;
     Ok(receive)
 }
 
-/// Lower a checked dependency result; a refusal traps the importer, which quarantines its Store.
-async fn settle(
-    receive: oneshot::Receiver<std::result::Result<String, String>>,
-    ty: ComponentFunc,
-    results: &mut [Val],
-) -> wasmtime::Result<()> {
-    let text = receive
-        .await
-        .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
-        .map_err(|message| wasmtime::Error::msg(format!("dependency call failed: {message}")))?;
-    let value: Value = serde_json::from_str(&text)?;
-    match (ty.results().next(), results.first_mut()) {
-        (Some(ty), Some(result)) => {
-            *result = values::lower(ty, &value)
-                .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
-        }
-        (None, None) if value.is_null() => {}
-        _ => {
-            return Err(wasmtime::Error::msg(
-                "dependency result differs from its import",
-            ));
+/// The pending reply of one stream import, and the pipe its result will be read from.
+///
+/// Until the guest holds its reader, this guard owns the pipe: if the guest abandons the call
+/// or the reader cannot be made, dropping the guard closes the pipe, so the host's pump drops
+/// the delivered end and the producer is asked to stop exactly once. Afterwards the reader owns
+/// the pipe and closes it when the guest drops it.
+struct StreamReply {
+    reply: ImportReply,
+    pipe: Arc<Mutex<Pipe>>,
+    held: bool,
+}
+
+impl Drop for StreamReply {
+    fn drop(&mut self) {
+        if !self.held {
+            self.pipe.lock().expect("pipe").close();
         }
     }
-    Ok(())
+}
+
+/// Imported resource slots dropped by the guest, or abandoned before the guest held them,
+/// waiting to be released on a host channel.
+type Dropped = Arc<Mutex<Vec<u32>>>;
+
+/// The pending reply of one guest import call.
+///
+/// The host commits an owned result's slot once this Store has received the reply. Until the
+/// guest actually holds the handle, this guard owns the slot: if the guest abandons the call
+/// (an async import future dropped mid-call) or the handle cannot be made, dropping the guard
+/// queues the slot for release, exactly like a handle the guest dropped.
+struct ImportReply {
+    receive: oneshot::Receiver<std::result::Result<String, String>>,
+    /// The release queue, for an import whose result is an owned resource.
+    owned: Option<Dropped>,
+    /// The slot received but not yet held by the guest.
+    pending: Option<u32>,
+    delivered: bool,
+}
+
+impl ImportReply {
+    fn new(
+        receive: oneshot::Receiver<std::result::Result<String, String>>,
+        owned: Option<Dropped>,
+    ) -> Self {
+        Self {
+            receive,
+            owned,
+            pending: None,
+            delivered: false,
+        }
+    }
+
+    /// Await the checked result; a refusal traps the importer, which quarantines its Store.
+    async fn settle(&mut self) -> wasmtime::Result<Value> {
+        let text = (&mut self.receive)
+            .await
+            .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+            .map_err(|message| {
+                wasmtime::Error::msg(format!("dependency call failed: {message}"))
+            })?;
+        let value: Value = serde_json::from_str(&text)?;
+        if self.owned.is_some() {
+            self.pending = slot(&value);
+        }
+        Ok(value)
+    }
+
+    /// The guest now holds the result.
+    fn delivered(&mut self) {
+        self.pending = None;
+        self.delivered = true;
+    }
+}
+
+impl Drop for ImportReply {
+    fn drop(&mut self) {
+        let Some(dropped) = self.owned.as_ref().filter(|_| !self.delivered) else {
+            return;
+        };
+        // Received but never held, or accepted by the channel but never read.
+        let slot = self
+            .pending
+            .take()
+            .or_else(|| match self.receive.try_recv() {
+                Ok(Ok(text)) => serde_json::from_str(&text).ok().as_ref().and_then(slot),
+                _ => None,
+            });
+        if let (Some(slot), Ok(mut dropped)) = (slot, dropped.lock()) {
+            dropped.push(slot);
+        }
+    }
+}
+
+/// The importer table slot an owned import result names.
+fn slot(value: &Value) -> Option<u32> {
+    value.as_u64().and_then(|slot| u32::try_from(slot).ok())
 }
 
 /// Send one synchronous declaration request through the command's own channel.
@@ -705,6 +1010,7 @@ async fn serve(
         Packet::Invoke { .. }
         | Packet::Contribute { .. }
         | Packet::Release { .. }
+        | Packet::Destroy { .. }
         | Packet::Ingress { .. } => Operation::Start,
         Packet::Unsupported => return Ok(Err("unknown compiled command".into())),
     };
@@ -728,6 +1034,7 @@ async fn serve(
                 service: Some(service),
                 method,
                 args,
+                receiver: None,
             }
         }
         packet => packet,
@@ -748,7 +1055,39 @@ async fn serve(
         .map(|()| "null".to_owned())),
         Packet::Release { environment } => {
             environments.roots.remove(&environment);
-            environments.parents.remove(&environment);
+            let root = environments.parents.remove(&environment);
+            // Resources this environment issued are destroyed with it; entries leave the table
+            // first, so no owner can reach them afterwards.
+            let resources = store.data_mut().instances.take(environment);
+            super::resources::destroy(engine, store, resources).await?;
+            // Imports its destructors dropped belong to the Orb root, which outlives a service
+            // environment; a released root takes its whole table with it.
+            if let Some(root) = root {
+                let dropped = store.data().dropped.clone();
+                release_dropped(&dropped, &(command.events.clone(), root)).await;
+            }
+            Ok(Ok("null".into()))
+        }
+        Packet::Destroy {
+            environment,
+            instance,
+        } => {
+            let resources = store
+                .data_mut()
+                .instances
+                .remove(environment, instance)
+                .into_iter()
+                .collect();
+            super::resources::destroy(engine, store, resources).await?;
+            // Imports the destructor dropped are released on this command's channel when the
+            // host awaits it; otherwise they stay queued for the next call of this Store.
+            let root = environments
+                .parents
+                .get(&environment)
+                .copied()
+                .unwrap_or(environment);
+            let dropped = store.data().dropped.clone();
+            release_dropped(&dropped, &(command.events.clone(), root)).await;
             Ok(Ok("null".into()))
         }
         Packet::Invoke {
@@ -756,15 +1095,25 @@ async fn serve(
             service: Some(service),
             method,
             args,
+            receiver,
         } if command.operation == Operation::Start && command.ingress.is_none() => {
-            let Some(function) = exports.functions.get(&(service, method)).copied() else {
+            let key = (service, method);
+            let Some(function) = exports.functions.get(&key).copied() else {
                 return Ok(Err("unknown component export".into()));
             };
+            let roles = exports.roles.get(&key).cloned().unwrap_or_default();
             let authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
                 Err(error) => return Ok(Err(error)),
             };
-            invoke(engine, store, function, &args, authority, groups).await
+            let call = Call {
+                function,
+                roles,
+                environment,
+                receiver,
+                stream: command.stream.take(),
+            };
+            invoke(engine, store, call, &args, authority, groups).await
         }
         Packet::Ingress { environment, .. } => {
             // Without its typed payload (or handler) there is nothing to serve; dropping the
@@ -854,32 +1203,64 @@ async fn declare(
     Ok(())
 }
 
+/// One export call and the exported resource it lends as implicit `self`, if any.
+struct Call {
+    function: Func,
+    roles: Resolved,
+    environment: u64,
+    receiver: Option<u32>,
+    /// The host-created end of a whole byte-stream result.
+    stream: Option<StreamCall>,
+}
+
 /// Run one export as a staged concurrent call and settle it only after its task group finishes.
 async fn invoke(
     engine: &Engine,
     store: &mut Store<State>,
-    function: Func,
+    call: Call,
     arguments: &Value,
     authority: Authority,
     groups: &Arc<Mutex<Groups>>,
 ) -> wasmtime::Result<std::result::Result<String, String>> {
+    let Call {
+        function,
+        roles,
+        environment,
+        receiver,
+        stream,
+    } = call;
     let ty = function.ty(&*store);
     let Some(args) = arguments.as_array() else {
         return Ok(Err("component arguments require a tuple".into()));
     };
-    if args.len() != ty.params().len() || ty.results().len() > 1 {
+    let lent = usize::from(roles.receiver.is_some());
+    if args.len() + lent != ty.params().len() || ty.results().len() > 1 {
         return Ok(Err("component function arity differs".into()));
     }
-    let args = match ty
-        .params()
-        .zip(args)
-        .map(|((_, ty), value)| values::lower(ty, value))
-        .collect::<tembra::Result<Vec<_>>>()
-    {
-        Ok(args) => args,
-        Err(error) => return Ok(Err(error.to_string())),
-    };
+    let mut lowered = Vec::with_capacity(ty.params().len());
+    // The lent resource must still be held for this environment with exactly this type:
+    // lowering a destroyed handle would fail every call of the Store, not just this one.
+    match (&roles.receiver, receiver) {
+        (Some(expected), Some(id)) => {
+            match store.data().instances.receiver(environment, id, expected) {
+                Some(resource) => lowered.push(Val::Resource(resource)),
+                None => return Ok(Err("the resource instance is gone".into())),
+            }
+        }
+        (None, None) => {}
+        _ => return Ok(Err("the call's receiver differs from its export".into())),
+    }
+    for ((_, ty), value) in ty.params().skip(lent).zip(args) {
+        match values::lower(ty, value) {
+            Ok(value) => lowered.push(value),
+            Err(error) => return Ok(Err(error.to_string())),
+        }
+    }
+    let args = lowered;
     let count = ty.results().len();
+    let own_result = roles.own_result;
+    let releases = (authority.events.clone(), authority.scope);
+    let dropped = store.data().dropped.clone();
     store.set_fuel(engine.limits.fuel)?;
     let (finished, settled) = futures::channel::oneshot::channel();
     let call_work = crate::http::Ledger::default();
@@ -892,52 +1273,72 @@ async fn invoke(
     commands.begin(Some(call_work.clone()));
     let watch = cancelled.clone();
     let groups = groups.clone();
+    let stream_pipe = stream.as_ref().map(|stream| stream.pipe.clone());
     let call = store.run_concurrent(async move |accessor: &Accessor<State>| {
-        let mut results = vec![Val::Bool(false); count];
-        lock(&groups)?.pending = Some(Bound {
-            authority,
-            finished: Some(finished),
-            call_work: call_work.clone(),
-            cancelled,
-        });
-        let staged = accessor
-            .with(|mut access| function.start_call_concurrent(&mut access, &args, &mut results));
-        let staged = match staged {
-            Ok(staged) => staged,
-            Err(error) => {
-                lock(&groups)?.pending = None;
-                return Err(error);
-            }
-        };
-        let group = staged.group();
-        {
-            let groups = lock(&groups)?;
-            if groups.pending.is_some() || !groups.bound.contains_key(&group) {
-                return Err(wasmtime::Error::msg(
-                    "component call authority was not bound to its task group",
-                ));
-            }
-        }
         let work = async {
+            let mut results = vec![Val::Bool(false); count];
+            lock(&groups)?.pending = Some(Bound {
+                authority,
+                finished: Some(finished),
+                call_work: call_work.clone(),
+                cancelled,
+            });
+            let staged = accessor.with(|mut access| {
+                function.start_call_concurrent(&mut access, &args, &mut results)
+            });
+            let staged = match staged {
+                Ok(staged) => staged,
+                Err(error) => {
+                    lock(&groups)?.pending = None;
+                    return Err(error);
+                }
+            };
+            let group = staged.group();
+            {
+                let groups = lock(&groups)?;
+                if groups.pending.is_some() || !groups.bound.contains_key(&group) {
+                    return Err(wasmtime::Error::msg(
+                        "component call authority was not bound to its task group",
+                    ));
+                }
+            }
             function.finish_call_concurrent(accessor, staged).await?;
+            // A stream result is published now, as the head; its producer keeps running in this
+            // call's task group.
+            let consumer = match stream {
+                Some(stream) => Some(publish(accessor, results.pop(), stream)?),
+                None => None,
+            };
             // A published result is not physical completion: wait until every task and
             // subtask of this call has exited, so no continuation can outlive its authority.
-            settled
-                .await
-                .map_err(|_| wasmtime::Error::msg("component task group ended without finishing"))
+            settled.await.map_err(|_| {
+                wasmtime::Error::msg("component task group ended without finishing")
+            })?;
+            // A stream's call also ends only once its consumer is gone: the guest dropped its
+            // writer, or the reader closed and the writer saw it.
+            if let Some(consumer) = consumer {
+                let _ = consumer.await;
+            }
+            Ok::<_, wasmtime::Error>(results)
         };
-        {
+        let mut results = {
             let mut work = std::pin::pin!(work);
             // The caller's cancellation closes the bodies this call is reading at once, so a
             // guest parked in a body read gets its end and returns; the call finishes normally.
+            // A stream it writes is failed, so its next write is dropped and no reader sees an end.
             match futures::future::select(work.as_mut(), watch).await {
                 futures::future::Either::Left((done, _)) => done?,
                 futures::future::Either::Right(((), _)) => {
                     commands.cancel();
-                    work.await?;
+                    if let Some(pipe) = &stream_pipe {
+                        pipe.lock()
+                            .expect("pipe")
+                            .fail("the stream's call was cancelled".into());
+                    }
+                    work.await?
                 }
             }
-        }
+        };
         // Nor is a finished group: bodies it read close now, and a cancelled send may still own
         // a resolver lookup or a reactor connect. Release the call after they physically ended.
         commands.end();
@@ -947,23 +1348,133 @@ async fn invoke(
         closing.settled().await;
         accessor.with(|mut store| crate::worker::stream_adapter::release(store.data_mut()))?;
         crate::worker::stream_adapter::sweep(accessor).await?;
-        Ok(results)
+        // Imported resources the guest dropped are released before the call completes.
+        release_dropped(&dropped, &releases).await;
+        // An owned result stays in this Store; only its host-issued id leaves.
+        let instance = match own_result {
+            Some(expected) => Some(keep(accessor, results.pop(), &expected, environment).await?),
+            None => None,
+        };
+        Ok::<_, wasmtime::Error>((results, instance))
     });
-    let results = tokio::time::timeout(
+    let (results, instance) = tokio::time::timeout(
         std::time::Duration::from_millis(engine.limits.timeout_ms),
         call,
     )
     .await
     .map_err(|_| wasmtime::Error::msg("component call timed out"))???;
-    let value = match results.into_iter().next().map(values::lift).transpose() {
-        Ok(value) => value.unwrap_or(Value::Null),
-        Err(error) => return Ok(Err(error.to_string())),
+    let value = match instance {
+        Some(instance) => json!(instance),
+        None => match results.into_iter().next().map(values::lift).transpose() {
+            Ok(value) => value.unwrap_or(Value::Null),
+            Err(error) => return Ok(Err(error.to_string())),
+        },
     };
     let text = value.to_string();
     if text.len() > engine.limits.packet_bytes {
         return Ok(Err("component result exceeds the packet limit".into()));
     }
     Ok(Ok(text))
+}
+
+/// Publish a whole `stream<u8>` result: convert it exactly once, pipe it into the host-created
+/// pipe and signal the head. The returned receiver resolves once the pipe's consumer is gone.
+fn publish(
+    accessor: &Accessor<State>,
+    result: Option<Val>,
+    stream: StreamCall,
+) -> wasmtime::Result<oneshot::Receiver<()>> {
+    let Some(Val::Stream(result)) = result else {
+        return Err(wasmtime::Error::msg("export returned no stream"));
+    };
+    let reader = result.try_into_stream_reader::<u8>()?;
+    let (gone, consumer_gone) = oneshot::channel();
+    accessor.with(|mut access| {
+        reader.pipe(
+            &mut access,
+            Carried {
+                consumer: PipeConsumer::new(stream.pipe),
+                _gone: gone,
+            },
+        )
+    })?;
+    let _ = stream.head.send(());
+    Ok(consumer_gone)
+}
+
+/// A stream result's consumer; dropping it ends the pipe first, then reports that it is gone.
+struct Carried {
+    consumer: PipeConsumer,
+    _gone: oneshot::Sender<()>,
+}
+
+impl wasmtime::component::StreamConsumer<State> for Carried {
+    type Item = u8;
+
+    fn poll_consume(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        store: wasmtime::StoreContextMut<'_, State>,
+        source: wasmtime::component::Source<'_, u8>,
+        finish: bool,
+    ) -> std::task::Poll<wasmtime::Result<wasmtime::component::StreamResult>> {
+        std::pin::Pin::new(&mut self.get_mut().consumer)
+            .poll_consume(context, store, source, finish)
+    }
+}
+
+/// File an owned result of the export's actual resource type under the calling environment.
+async fn keep(
+    accessor: &Accessor<State>,
+    result: Option<Val>,
+    expected: &ResourceType,
+    environment: u64,
+) -> wasmtime::Result<u32> {
+    match result {
+        Some(Val::Resource(resource)) if resource.owned() && resource.ty() == *expected => {
+            accessor.with(|mut store| store.data_mut().instances.insert(environment, resource))
+        }
+        Some(Val::Resource(resource)) => {
+            if resource.owned() {
+                resource.resource_drop_concurrent(accessor).await?;
+            }
+            Err(wasmtime::Error::msg(
+                "export returned another resource type",
+            ))
+        }
+        _ => Err(wasmtime::Error::msg("export returned no owned resource")),
+    }
+}
+
+/// Release the imported resource slots the guest dropped, on `events`.
+///
+/// A refused release leaves the slot to its root environment's teardown; it never fails the
+/// Store. If the channel is gone, the slots not yet released stay queued for the next one.
+async fn release_dropped(dropped: &Dropped, (events, scope): &(Sender<Event>, u64)) {
+    let slots = dropped
+        .lock()
+        .map(|mut queue| std::mem::take(&mut *queue))
+        .unwrap_or_default();
+    for (index, slot) in slots.iter().enumerate() {
+        let (reply, receive) = oneshot::channel();
+        let packet = json!({"operation": "reference.release", "scope": scope, "id": slot});
+        let sent = events
+            .send(Event::Host {
+                packet: packet.to_string(),
+                asynchronous: false,
+                reply,
+            })
+            .await;
+        if sent.is_err() {
+            if let Ok(mut queue) = dropped.lock() {
+                let later = std::mem::take(&mut *queue);
+                queue.extend_from_slice(&slots[index..]);
+                queue.extend(later);
+            }
+            return;
+        }
+        let _ = receive.await;
+    }
 }
 
 /// Serve one incoming HTTP request as a staged call of the standard handler.
@@ -998,6 +1509,9 @@ async fn ingress(
     let watch = cancelled.clone();
     let groups = groups.clone();
     let failed = exchange.clone();
+    let releases = (authority.events.clone(), authority.scope);
+    let refusals = authority.events.clone();
+    let dropped = store.data().dropped.clone();
     let call = store.run_concurrent(async move |accessor: &Accessor<State>| {
         // The request becomes a resource of this Store; its body is read by upstream's host
         // producer, which this call can close through the exchange.
@@ -1053,6 +1567,9 @@ async fn ingress(
                         message.clone(),
                     )));
                     refused = Some(message);
+                    // Typed for platform carriers, on the call's own channel before its `Done`.
+                    let refusal = crate::ingress::IngressEvent::refused(code);
+                    let _ = refusals.send(Event::Ingress(refusal)).await;
                 }
             }
             // Physical completion: every task of the call exited and the body's delivery ended.
@@ -1083,6 +1600,8 @@ async fn ingress(
         closing.settled().await;
         accessor.with(|mut store| crate::worker::stream_adapter::release(store.data_mut()))?;
         crate::worker::stream_adapter::sweep(accessor).await?;
+        // Imported resources the handler dropped are released before the request completes.
+        release_dropped(&dropped, &releases).await;
         Ok(refused)
     });
     let outcome = tokio::time::timeout(
@@ -1189,5 +1708,58 @@ mod tests {
             );
             responder.join().unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod import_reply_tests {
+    use super::{Dropped, ImportReply};
+    use tokio::sync::oneshot;
+
+    fn queued(dropped: &Dropped) -> Vec<u32> {
+        dropped.lock().unwrap().clone()
+    }
+
+    /// The host committed slot 7: the reply reached this Store's channel.
+    fn committed() -> (ImportReply, Dropped) {
+        let dropped = Dropped::default();
+        let (reply, receive) = oneshot::channel();
+        reply.send(Ok("7".into())).unwrap();
+        (ImportReply::new(receive, Some(dropped.clone())), dropped)
+    }
+
+    #[test]
+    fn an_abandoned_committed_reply_queues_its_slot() {
+        let (reply, dropped) = committed();
+        drop(reply);
+        assert_eq!(queued(&dropped), [7]);
+    }
+
+    #[tokio::test]
+    async fn a_reply_read_but_never_held_queues_its_slot() {
+        let (mut reply, dropped) = committed();
+        assert_eq!(reply.settle().await.unwrap(), 7);
+        drop(reply);
+        assert_eq!(queued(&dropped), [7]);
+    }
+
+    #[tokio::test]
+    async fn a_delivered_reply_queues_nothing() {
+        let (mut reply, dropped) = committed();
+        reply.settle().await.unwrap();
+        reply.delivered();
+        drop(reply);
+        assert!(queued(&dropped).is_empty());
+    }
+
+    #[test]
+    fn data_replies_and_unanswered_calls_queue_nothing() {
+        let dropped = Dropped::default();
+        let (reply, receive) = oneshot::channel::<Result<String, String>>();
+        reply.send(Ok("7".into())).unwrap();
+        drop(ImportReply::new(receive, None));
+        let (_reply, receive) = oneshot::channel();
+        drop(ImportReply::new(receive, Some(dropped.clone())));
+        assert!(queued(&dropped).is_empty());
     }
 }

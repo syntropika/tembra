@@ -3,7 +3,7 @@
 //! Authoring tools lower a resolved WIT world into this typed model once. Runtimes decode it,
 //! re-check every bound and reference and never rely on hashes or flags supplied by the artifact.
 use crate::{Error, codec};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// Maximum type definitions retained for one selected world.
 pub(crate) const MAX_TYPES: usize = 4096;
@@ -58,7 +58,17 @@ pub struct Case {
     pub ty: Option<Ty>,
 }
 
-/// The structure of one type definition. Resource identity is the definition index itself.
+/// The declaring WIT name of a resource, before any `use` alias in another interface.
+///
+/// Anonymous interfaces have no package identity. Their types can still be inspected and
+/// compared within one component, but cannot name a resource contract between Orbs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ResourceIdentity {
+    pub interface: Option<String>,
+    pub name: Option<String>,
+}
+
+/// The structure of one type definition. Handles refer to the defining resource's index.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     Alias(Ty),
@@ -72,7 +82,7 @@ pub enum Kind {
     List(Ty),
     FixedList(Ty, u32),
     Map(Ty, Ty),
-    Resource,
+    Resource(ResourceIdentity),
     Own(u32),
     Borrow(u32),
     Future(Option<Ty>),
@@ -94,7 +104,7 @@ impl Kind {
             Self::List(_) => "list",
             Self::FixedList(..) => "fixed-length list",
             Self::Map(..) => "map",
-            Self::Resource => "resource",
+            Self::Resource(_) => "resource",
             Self::Own(_) => "own",
             Self::Borrow(_) => "borrow",
             Self::Future(_) => "future",
@@ -118,7 +128,7 @@ impl Kind {
             Self::Result { ok, err } => [*ok, *err].into_iter().flatten().for_each(visit),
             Self::Future(ty) | Self::Stream(ty) => ty.iter().copied().for_each(visit),
             Self::Own(id) | Self::Borrow(id) => visit(Ty::Ref(*id)),
-            Self::Enum(_) | Self::Flags(_) | Self::Resource => {}
+            Self::Enum(_) | Self::Flags(_) | Self::Resource(_) => {}
         }
     }
 }
@@ -199,8 +209,9 @@ pub struct Interface {
     pub contract: Option<String>,
     /// Declared interface name used for the JavaScript service alias.
     pub name: Option<String>,
-    /// Whether the interface owns or aliases a resource type.
-    pub resources: bool,
+    /// Resource types exported by this interface, keyed by their local WIT names. A `use`
+    /// alias keeps its own local name while its index resolves to the original definition.
+    pub resources: BTreeMap<String, u32>,
     /// Whether the world imports this interface itself (directly, through `include`, or under a
     /// named alias), rather than only because another item uses its types. Always true for
     /// exports. Contracts decoded without provenance mark every import explicit.
@@ -218,7 +229,8 @@ impl Interface {
     /// and each operation's own grant limits (connect/bind lists, mounts, origins) still bound
     /// what those calls can reach.
     pub fn callable(&self) -> bool {
-        (self.explicit || self.resources) && (self.resources || !self.functions.is_empty())
+        (self.explicit || !self.resources.is_empty())
+            && (!self.resources.is_empty() || !self.functions.is_empty())
     }
 }
 
@@ -364,6 +376,19 @@ impl PreparedContract {
         &self.0.model.types[id as usize]
     }
 
+    /// Resolve aliases to a resource's declaring WIT identity. Arena indexes are local to this
+    /// prepared contract and must never identify a resource type in another Orb's contract.
+    pub fn resource_identity(&self, mut ty: Ty) -> Option<&ResourceIdentity> {
+        while let Ty::Ref(id) = ty {
+            match self.0.model.types.get(id as usize)? {
+                Kind::Alias(next) => ty = *next,
+                Kind::Resource(identity) => return Some(identity),
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// Read the cached JavaScript spellings of a record's fields or a flags type's flags.
     pub(crate) fn spellings(&self, id: u32) -> &[Box<str>] {
         &self.0.spellings[id as usize]
@@ -404,7 +429,16 @@ impl Model {
         // expanded size are computed in one pass instead of by walking the shared graph.
         let mut depths = Vec::with_capacity(self.types.len());
         let mut sizes = Vec::with_capacity(self.types.len());
+        let mut nominal = std::collections::BTreeSet::new();
         for (index, kind) in self.types.iter().enumerate() {
+            if let Kind::Resource(ResourceIdentity {
+                interface: Some(interface),
+                name: Some(name),
+            }) = kind
+                && !nominal.insert((interface, name))
+            {
+                return Err(Error("duplicate nominal resource definition".into()));
+            }
             let mut depth = 0;
             let mut size = 1 + member_names(kind);
             let mut failure = None;
@@ -450,6 +484,21 @@ impl Model {
                         if let Some(name) = &interface.name {
                             self::name(name, false)?;
                         }
+                        bounded(interface.resources.len())?;
+                        for (name, ty) in &interface.resources {
+                            self::name(name, false)?;
+                            self.check_resource(*ty)?;
+                            // A direct definition belongs to this interface. `use` aliases have
+                            // their own Alias node and deliberately keep the foreign identity.
+                            if let Kind::Resource(resource) = &self.types[*ty as usize]
+                                && (resource.interface != interface.contract
+                                    || resource.name.as_deref() != Some(name))
+                            {
+                                return Err(Error(
+                                    "resource definition differs from its interface binding".into(),
+                                ));
+                            }
+                        }
                         bounded(interface.functions.len())?;
                         unique(
                             interface
@@ -459,6 +508,11 @@ impl Model {
                             "function",
                         )?;
                         let mut size = 0u64;
+                        for (name, ty) in &interface.resources {
+                            size = size
+                                .saturating_add(name.len() as u64)
+                                .saturating_add(self.check_ty(Ty::Ref(*ty), &sizes)?);
+                        }
                         for function in &interface.functions {
                             size = size.saturating_add(self.check_function(function, &sizes)?);
                         }
@@ -493,6 +547,20 @@ impl Model {
                 names.iter().try_for_each(|value| name(value, false))
             }
             Kind::Own(id) | Kind::Borrow(id) => self.check_resource(*id),
+            Kind::Resource(resource) => {
+                if let Some(interface) = &resource.interface {
+                    identity(interface)?;
+                    if resource.name.is_none() {
+                        return Err(Error(
+                            "a named resource interface requires its type name".into(),
+                        ));
+                    }
+                }
+                if let Some(resource) = &resource.name {
+                    name(resource, false)?;
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -536,7 +604,7 @@ impl Model {
     fn check_resource(&self, mut id: u32) -> Result<(), Error> {
         loop {
             match self.types.get(id as usize) {
-                Some(Kind::Resource) => return Ok(()),
+                Some(Kind::Resource(_)) => return Ok(()),
                 Some(Kind::Alias(Ty::Ref(next))) if *next < id => id = *next,
                 _ => return Err(Error("prepared handle does not name a resource".into())),
             }
@@ -566,6 +634,12 @@ fn member_names(kind: &Kind) -> u64 {
         Kind::Record(fields) => fields.iter().map(|field| bytes(&field.name)).sum(),
         Kind::Variant(cases) => cases.iter().map(|case| bytes(&case.name)).sum(),
         Kind::Enum(names) | Kind::Flags(names) => names.iter().map(bytes).sum(),
+        Kind::Resource(resource) => resource
+            .interface
+            .iter()
+            .chain(&resource.name)
+            .map(bytes)
+            .sum(),
         _ => 0,
     }
 }

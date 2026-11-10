@@ -1,8 +1,21 @@
+import { Buffer } from "node:buffer";
 import { reply } from "./codec.ts";
 import { failure as fault } from "../error.ts";
-import type { NodeInterpreterPort } from "@syntropika/tembra-engine-node";
+import type {
+  NodeField,
+  NodeIngressEvent,
+  NodeInterpreterPort,
+} from "@syntropika/tembra-engine-node";
 import { decodeAsyncHostRequest, decodeHostRequest } from "./host-protocol.ts";
-import { answer, type ExecutionScope, type InterpreterPort } from "./types.ts";
+import type { IngressExchange } from "./http-ingress.ts";
+import type { HttpField } from "./http-provider.ts";
+import { ingressPacket, NativeIngress, type CarrierEvent } from "./native-ingress.ts";
+import {
+  answer,
+  type ExecutionScope,
+  type IngressDispatch,
+  type InterpreterPort,
+} from "./types.ts";
 
 /** Native worker events cross a thread; browser execution uses the same scope directly. */
 export class NodePort implements InterpreterPort {
@@ -96,6 +109,63 @@ export class NodePort implements InterpreterPort {
     });
   }
 
+  /**
+   * Serve one incoming HTTP request through the typed NAPI carrier. Bytes cross as `Buffer`s;
+   * the head is published early and this resolves only after `complete`, the drain of admitted
+   * host work and `finish()`.
+   */
+  ingress(
+    dispatch: IngressDispatch,
+    exchange: IngressExchange,
+    scope: ExecutionScope,
+  ): Promise<void> {
+    const transport = this.transport;
+    const carrier = new NativeIngress(
+      {
+        supply: (answer) =>
+          answer.kind === "data"
+            ? transport.supplyRequest(answer.data, null, null)
+            : answer.kind === "end"
+              ? transport.supplyRequest(null, answer.trailers.map(nodeField), null)
+              : transport.supplyRequest(null, null, answer.message),
+        pull: () => transport.pullResponse(),
+        disconnect: () => transport.disconnect(),
+        cancel: () => transport.cancel(),
+        reply: (id, packet) => void transport.reply(id, packet),
+        finish: () => transport.finish(),
+      },
+      exchange,
+      scope,
+    );
+    const { method, scheme, authority, pathWithQuery, fields } = exchange.request;
+    try {
+      transport.ingress(
+        ingressPacket(dispatch),
+        {
+          method,
+          ...(scheme === undefined ? {} : { scheme }),
+          ...(authority === undefined ? {} : { authority }),
+          ...(pathWithQuery === undefined ? {} : { pathWithQuery }),
+          fields: fields.map(nodeField),
+        },
+        (event) => {
+          try {
+            carrier.event(carrierEvent(event));
+          } catch (error) {
+            // A malformed event cannot unwind the native callback; the call fails instead.
+            carrier.fail(error);
+          }
+        },
+      );
+    } catch (error) {
+      // Refused before admission (an invalid head, a closed port): nothing native began.
+      void carrier.abandon(error);
+      return carrier.settled;
+    }
+    carrier.begun();
+    return carrier.settled;
+  }
+
   /** Drop an idle native Store after the common lifecycle releases its scopes. */
   close(): void {
     this.transport.close();
@@ -108,5 +178,35 @@ function respond(operation: () => unknown): string {
     return `{ "ok":${reply(operation())}}`;
   } catch (error) {
     return JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+/** A field as a `Buffer` view of the same bytes; NAPI copies it. */
+function nodeField([name, value]: HttpField): NodeField {
+  return { name, value: Buffer.from(value.buffer, value.byteOffset, value.byteLength) };
+}
+
+/** A NAPI `Buffer` as a plain `Uint8Array` view, without copying. */
+function bytes(value: Uint8Array): Uint8Array {
+  return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+}
+
+function fields(value: readonly NodeField[]): readonly HttpField[] {
+  return value.map((field) => [field.name, bytes(field.value)] as const);
+}
+
+/** The NAPI event in the shared carrier form. */
+function carrierEvent(event: NodeIngressEvent): CarrierEvent {
+  switch (event.kind) {
+    case "refused":
+      return { kind: "refused", code: bytes(event.code) };
+    case "data":
+      return { kind: "data", data: bytes(event.data) };
+    case "head":
+      return { kind: "head", status: event.status, fields: fields(event.fields) };
+    case "trailers":
+      return { kind: "trailers", fields: fields(event.fields) };
+    default:
+      return event;
   }
 }

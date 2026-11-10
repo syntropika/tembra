@@ -71,8 +71,10 @@ export function toFetchResponse(response: HttpHandlerResponse): Response {
   } catch (error) {
     throw refuse(error instanceof Error ? error.message : String(error));
   }
-  const iterator = response.body[Symbol.asyncIterator]();
   const empty = NULL_BODY.has(response.status);
+  if (!empty && typeof ReadableStream !== "function")
+    throw refuse("WHATWG ReadableStream is unavailable on this host");
+  const iterator = response.body[Symbol.asyncIterator]();
   const body = empty
     ? null
     : new ReadableStream<Uint8Array>(

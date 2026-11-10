@@ -1,7 +1,10 @@
 //! Host-local methods accept only typed in-process calls; every portable path is refused.
 use futures::{FutureExt, executor::LocalPool};
 use std::{cell::Cell, rc::Rc};
-use tembra::{Host, Orb, Service};
+use tembra::{
+    Host, Orb, Service,
+    portable::{Delivered, Payload},
+};
 
 /// A value with no serde implementation, standing in for owned host resources.
 struct Owned(u32);
@@ -45,10 +48,16 @@ fn check(isolated: bool) {
                     .call_portable::<_, u32>(&context, "handle", (1_u32,))
                     .await
                     .unwrap_err(),
+                // The executor-style caller: an encoded payload and a payload result.
                 called
-                    .call_value(&context, "handle", serde_json::json!([1]))
+                    .call_portable::<_, Delivered>(
+                        &context,
+                        "handle",
+                        Payload::data(serde_json::json!([1])),
+                    )
                     .await
-                    .unwrap_err(),
+                    .err()
+                    .unwrap(),
             ] {
                 assert_eq!(error.reason, "local_value", "{error}");
                 assert!(error.message.contains("host-local"), "{error}");

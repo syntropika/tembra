@@ -16,7 +16,7 @@ fn contract() -> PreparedContract {
                 contract: Some("test:browser/values@1.0.0".into()),
                 explicit: true,
                 name: Some("values".into()),
-                resources: false,
+                resources: Default::default(),
                 functions: vec![Function {
                     name: "read-bytes".into(),
                     kind: FunctionKind::Freestanding,

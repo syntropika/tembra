@@ -3,6 +3,7 @@
 //! A component cannot describe itself at runtime, so its implementation description is derived
 //! from the prepared WIT contract and checked by the same `check_implementation` as a source
 //! bundle. Its Store then serves the same private host protocol as the interpreter.
+pub(crate) mod resources;
 mod values;
 pub(crate) mod worker;
 use crate::{Binding, Engine, Grants, failure, worker::Session};
@@ -60,22 +61,29 @@ fn layout(
     bindings: &BTreeMap<String, Binding>,
     hooks: &tembra_contracts::HookPlan,
 ) -> Result<worker::Layout> {
-    let mut exports: BTreeMap<_, _> = services
-        .iter()
-        .map(|service| {
-            (
-                service.alias.clone(),
-                worker::Export {
-                    interface: service.interface.clone(),
-                    methods: service
-                        .methods
-                        .iter()
-                        .map(|(method, spelling)| (spelling.clone(), method.clone()))
-                        .collect(),
-                },
-            )
-        })
-        .collect();
+    let mut exports = BTreeMap::new();
+    for service in services {
+        let mut methods = BTreeMap::new();
+        let mut roles = BTreeMap::new();
+        for (method, spelling) in &service.methods {
+            methods.insert(spelling.clone(), method.clone());
+            let slot = contract
+                .bind(&service.interface, method, true)
+                .map_err(failure)?;
+            let role = resource_roles(contract, slot)?;
+            if role.receiver.is_some() || role.own_result.is_some() {
+                roles.insert(spelling.clone(), role);
+            }
+        }
+        exports.insert(
+            service.alias.clone(),
+            worker::Export {
+                interface: service.interface.clone(),
+                methods,
+                roles,
+            },
+        );
+    }
     let mut contributions = BTreeMap::new();
     for contribution in &hooks.contributions {
         let function = contract
@@ -96,6 +104,7 @@ fn layout(
             worker::Export {
                 interface: contribution.name.clone(),
                 methods: [(contribution.method.clone(), function.name.clone())].into(),
+                roles: BTreeMap::new(),
             },
         );
         contributions.insert(
@@ -104,6 +113,9 @@ fn layout(
         );
     }
     let mut imports = Vec::new();
+    // One dynamic host type per defining resource: every alias of it, in any selected import,
+    // links the same type, and distinct resources (even with equal names) never share one.
+    let mut payloads = BTreeMap::<(String, String), u32>::new();
     for entry in &contract.model().imports {
         if !matches!(bindings.get(&entry.key), Some(Binding::Orb { .. })) {
             continue;
@@ -111,31 +123,65 @@ fn layout(
         let Item::Interface(interface) = &entry.item else {
             return Err(failure("Orb import must be an interface"));
         };
-        if interface.resources {
-            return Err(failure(format!(
-                "{}: resource imports require a lifecycle adapter",
-                entry.key
-            )));
+        // `open` admitted these shapes: resource imports only through the capability transport.
+        let mut resources = Vec::new();
+        for (name, ty) in &interface.resources {
+            let nominal = nominal(contract.resource_identity(tembra_contracts::Ty::Ref(*ty)))?;
+            let next = u32::try_from(payloads.len() + 1).map_err(failure)?;
+            let payload = *payloads.entry(nominal).or_insert(next);
+            resources.push((name.clone(), payload));
         }
+        let payload = |role: Option<&tembra_contracts::ResourceIdentity>| {
+            role.map(|identity| {
+                payloads
+                    .get(&nominal(Some(identity))?)
+                    .copied()
+                    .ok_or_else(|| failure("imported resource is not linked by its interface"))
+            })
+            .transpose()
+        };
         let functions = interface
             .functions
             .iter()
-            .map(|function| match function.kind {
-                FunctionKind::Freestanding | FunctionKind::AsyncFreestanding => {
-                    Ok(worker::ImportFunction {
-                        name: function.name.clone(),
-                        spelling: javascript_name(&function.name),
-                        asynchronous: function.kind == FunctionKind::AsyncFreestanding,
-                    })
+            .map(|function| {
+                let asynchronous = match function.kind {
+                    FunctionKind::Freestanding
+                    | FunctionKind::Constructor(_)
+                    | FunctionKind::Static(_)
+                    | FunctionKind::Method(_) => false,
+                    FunctionKind::AsyncFreestanding
+                    | FunctionKind::AsyncStatic(_)
+                    | FunctionKind::AsyncMethod(_) => true,
+                    _ => {
+                        return Err(failure(format!(
+                            "{}#{}: resource getters and setters are not supported",
+                            entry.key, function.name
+                        )));
+                    }
+                };
+                let slot = contract
+                    .bind(&entry.key, &function.name, false)
+                    .map_err(failure)?;
+                let signature = contract.resource_signature(slot).map_err(failure)?;
+                if signature.stream_result && !asynchronous {
+                    return Err(failure(format!(
+                        "{}#{}: a stream import must be asynchronous",
+                        entry.key, function.name
+                    )));
                 }
-                _ => Err(failure(format!(
-                    "{}#{}: only freestanding Orb import functions are supported",
-                    entry.key, function.name
-                ))),
+                Ok(worker::ImportFunction {
+                    name: function.name.clone(),
+                    spelling: javascript_name(&function.name),
+                    asynchronous,
+                    receiver: payload(signature.receiver)?,
+                    own_result: payload(signature.own_result)?,
+                    stream: signature.stream_result,
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         imports.push(worker::Import {
             binding: entry.key.clone(),
+            resources,
             functions,
             contribution: contributions.contains_key(&entry.key),
         });
@@ -145,6 +191,31 @@ fn layout(
         imports,
         contributions,
         ingress: contract.ingress().map(str::to_owned),
+    })
+}
+
+/// The defining identity of a resource; an anonymous resource cannot cross between Orbs.
+fn nominal(identity: Option<&tembra_contracts::ResourceIdentity>) -> Result<(String, String)> {
+    match identity {
+        Some(tembra_contracts::ResourceIdentity {
+            interface: Some(interface),
+            name: Some(name),
+        }) => Ok((interface.clone(), name.clone())),
+        _ => Err(failure(
+            "an imported resource has no portable type identity",
+        )),
+    }
+}
+
+/// Resource positions of one checked function, by the local name of the defining resource.
+fn resource_roles(contract: &PreparedContract, slot: u32) -> Result<worker::Roles> {
+    let signature = contract.resource_signature(slot).map_err(failure)?;
+    let name = |identity: Option<&tembra_contracts::ResourceIdentity>| {
+        identity.and_then(|identity| identity.name.clone())
+    };
+    Ok(worker::Roles {
+        receiver: name(signature.receiver),
+        own_result: name(signature.own_result),
     })
 }
 
@@ -223,7 +294,7 @@ impl Engine {
             self,
             artifact.identity.name.clone(),
             io,
-            move |commands, _poison, _diagnostics| {
+            move |commands, poison, _diagnostics| {
                 worker::run(
                     engine,
                     component,
@@ -231,7 +302,7 @@ impl Engine {
                     grants,
                     layout,
                     ready,
-                    (commands, scope),
+                    (commands, scope, poison),
                 )
             },
         )?;
@@ -324,5 +395,111 @@ mod admission_tests {
         let component = wasmtime::component::Component::from_file(&engine.engine, path).unwrap();
         check_component_imports(&engine.engine, &component, &grants(false, true)).unwrap();
         assert!(check_component_imports(&engine.engine, &component, &grants(true, false)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod resource_link_tests {
+    use super::layout;
+    use crate::{Binding, Contract, Limits};
+    use std::collections::BTreeMap;
+    use wasmtime::component::{Component, Linker, ResourceType};
+
+    const SESSIONS: &str = "tembra-test:resources/sessions@1.0.0";
+    const VIEWS: &str = "tembra-test:resources/views@1.0.0";
+
+    /// An importer that retains `views`' alias of `sessions`' resource, as a guest compiler
+    /// may; the fixture binary itself elides the unused alias.
+    const ALIASING: &str = r#"(component
+      (import "tembra-test:resources/sessions@1.0.0" (instance $sessions
+        (export "session" (type (sub resource)))))
+      (alias export $sessions "session" (type $session))
+      (import "tembra-test:resources/views@1.0.0" (instance
+        (alias outer 1 $session (type $s))
+        (export "session" (type (eq $s)))
+        (export "describe" (func (result string))))))"#;
+
+    fn orb() -> Binding {
+        Binding::Orb {
+            name: "store".into(),
+            api_version: 1,
+        }
+    }
+
+    /// The dynamic host type of each imported resource, by import and local name.
+    fn payloads(contract: &Contract, imports: &[&str]) -> BTreeMap<(String, String), u32> {
+        let bindings = imports
+            .iter()
+            .map(|import| ((*import).to_owned(), orb()))
+            .collect();
+        layout(contract, &[], &bindings, &Default::default())
+            .unwrap()
+            .imports
+            .into_iter()
+            .flat_map(|import| {
+                let binding = import.binding;
+                import
+                    .resources
+                    .into_iter()
+                    .map(move |(name, payload)| ((binding.clone(), name), payload))
+            })
+            .collect()
+    }
+
+    fn key(import: &str, name: &str) -> (String, String) {
+        (import.to_owned(), name.to_owned())
+    }
+
+    #[test]
+    fn aliases_of_one_resource_link_one_host_type() {
+        let contract = Contract::from_dir(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/wit/resources"),
+            Some("consumer"),
+        )
+        .unwrap();
+        let payloads = payloads(&contract, &[SESSIONS, VIEWS]);
+        let session = payloads[&key(SESSIONS, "session")];
+        assert_eq!(payloads[&key(VIEWS, "session")], session);
+        assert_ne!(payloads[&key(SESSIONS, "counter")], session);
+        // Wasmtime type-checks the retained alias against exactly the linked host types.
+        let engine = crate::Engine::new(Limits::default()).unwrap();
+        let component = Component::new(&engine.engine, wat::parse_str(ALIASING).unwrap()).unwrap();
+        let link = |alias: u32| {
+            let mut linker = Linker::<()>::new(&engine.engine);
+            linker.instance(SESSIONS)?.resource(
+                "session",
+                ResourceType::host_dynamic(session),
+                |_, _| Ok(()),
+            )?;
+            let mut views = linker.instance(VIEWS)?;
+            views.resource("session", ResourceType::host_dynamic(alias), |_, _| Ok(()))?;
+            views.func_new("describe", |_, _, _, _| Ok(()))?;
+            linker.instantiate_pre(&component).map(drop)
+        };
+        link(session).unwrap();
+        // A type split by local alias, as a per-interface numbering would produce, is refused.
+        assert!(link(session + 100).is_err());
+    }
+
+    #[test]
+    fn distinct_resources_with_one_name_keep_distinct_host_types() {
+        let contract = Contract::from_source(
+            "same.wit",
+            "package test:same@1.0.0;
+             interface a { resource session { constructor(); } }
+             interface b { resource session { constructor(); } }
+             interface c { use a.{session}; ping: func(); }
+             world app { import a; import b; import c; }",
+            Some("app"),
+        )
+        .unwrap();
+        let (a, b, c) = (
+            "test:same/a@1.0.0",
+            "test:same/b@1.0.0",
+            "test:same/c@1.0.0",
+        );
+        let payloads = payloads(&contract, &[a, b, c]);
+        assert_ne!(payloads[&key(a, "session")], payloads[&key(b, "session")]);
+        assert_eq!(payloads[&key(c, "session")], payloads[&key(a, "session")]);
     }
 }

@@ -1,0 +1,110 @@
+package tembra-test:resources@1.0.0;
+
+/// Host-paced suspension, provided by a native Orb.
+interface pace {
+  /// Resolve when the host allows it, with the host's answer.
+  wait: async func(n: u64) -> u64;
+  /// A synchronous call that a resource destructor attempts.
+  note: func(n: u64);
+}
+
+/// Exported guest resources: fresh constructors, an owned factory and borrowed methods.
+interface sessions {
+  resource session {
+    constructor(seed: u64);
+    /// Mutate this instance only and return its new total.
+    add: func(n: u64) -> u64;
+    total: func() -> u64;
+    /// Borrow this instance across a real suspension, then add the host's answer.
+    paced-add: async func(n: u64) -> u64;
+    /// The typed key this instance was opened with; constructed instances have empty keys.
+    key: func() -> tuple<string, string>;
+  }
+
+  /// A second resource type of the same interface, used to prove type checks.
+  resource counter {
+    constructor();
+    hits: func() -> u64;
+  }
+
+  /// Its destructor calls an import, for which a destructor holds no authority.
+  resource fragile {
+    constructor();
+  }
+
+  /// A freestanding factory: every call returns a fresh owned session.
+  open: func(seed: u64) -> session;
+  /// An async factory that suspends on the host before returning its owned session.
+  open-later: async func(seed: u64) -> session;
+  /// A keyed factory: every call returns a fresh, independent session, even for an equal key.
+  /// The key is ordinary typed data that the instance keeps; it selects no kernel object.
+  open-keyed: func(key: tuple<string, string>, seed: u64) -> session;
+  /// How many sessions this Store has destroyed.
+  closed: func() -> u64;
+  label: func() -> string;
+}
+
+/// Another interface naming the same defining resource through an alias.
+interface views {
+  use sessions.{session};
+  describe: func() -> string;
+}
+
+/// A compiled importer's service over imported sessions.
+interface relay {
+  /// One keyed session as the importer observed it before dropping it.
+  record keyed-session {
+    key: tuple<string, string>,
+    total: u64,
+  }
+
+  /// What `keyed` observed: every session, and the provider's destructor count read after the
+  /// importer dropped all of them but before its call settled.
+  record keyed-report {
+    sessions: list<keyed-session>,
+    closed-before-settlement: u64,
+  }
+  /// An exported resource whose guest state owns an imported session.
+  resource holder {
+    constructor(seed: u64);
+    total: func() -> u64;
+  }
+
+  /// Two sessions built with equal arguments plus one factory session, all dropped on return.
+  pair: func(seed: u64, n: u64) -> list<u64>;
+  /// Keep one owned session across calls.
+  keep: func(seed: u64) -> u64;
+  bump: func(n: u64) -> u64;
+  /// Drop the kept session.
+  discard: func();
+  closed: func() -> u64;
+  /// Await an async method of a session this call owns.
+  paced: async func(seed: u64, n: u64) -> u64;
+  /// Call through the interface that aliases the session type.
+  describe: func() -> string;
+  /// Start `open-later`, poll it once, then drop it: the guest cancels a pending owned import.
+  /// Answers whether the import had already completed.
+  abandon: async func(seed: u64) -> bool;
+  /// Open `first` twice and `second` once with one seed, add 1, 2 and 3 to them in that order,
+  /// then drop all three before reading the provider's destructor count.
+  keyed: func(first: tuple<string, string>, second: tuple<string, string>, seed: u64) -> keyed-report;
+}
+
+world provider {
+  import pace;
+  export sessions;
+  export views;
+}
+
+/// The signature source of the native `pace` provider.
+world pacer {
+  export pace;
+}
+
+world consumer {
+  import sessions;
+  import views;
+  export relay;
+  /// Each request constructs and drops one session.
+  export wasi:http/handler@0.3.0;
+}

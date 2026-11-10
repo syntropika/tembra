@@ -194,6 +194,77 @@ fn last_exit(port: &InterpreterPort) -> String {
     String::from_utf8(exit.value.clone()).unwrap()
 }
 
+/// A handler `error-code` through the carrier: one typed `Refused` before the completion, never
+/// a head. With `delay`, the platform reads its events late; the order must not change.
+fn refusal(port: &InterpreterPort, path: &str, delay: Duration) -> Vec<u8> {
+    let mut exchange = Exchange::begin(port, path);
+    thread::sleep(delay);
+    let Ev::Ingress(IngressEvent::Refused(code)) = exchange.next() else {
+        panic!("{path}: the refusal precedes the completion and has no head")
+    };
+    let Ev::Complete(result) = exchange.next() else {
+        panic!("{path}: one refusal, then the completion")
+    };
+    // The completion keeps reporting the refusal untyped; the typed value is the event.
+    assert!(result.is_err(), "{path}");
+    exchange.ticket.take().unwrap().finish().unwrap();
+    code
+}
+
+/// Standard-codec oracles for the fixtures' typed refusals (variant index, then payload).
+fn expected_refusals() -> Vec<(&'static str, Vec<u8>)> {
+    fn text(out: &mut Vec<u8>, value: &str) {
+        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(value.as_bytes());
+    }
+    let mut escaped = 38u32.to_le_bytes().to_vec();
+    escaped.push(1);
+    text(&mut escaped, "quote \" slash \\ line\nend é🌍");
+    let mut record = 22u32.to_le_bytes().to_vec();
+    record.extend_from_slice(&[1, 1]);
+    text(&mut record, "x-big");
+    record.push(1);
+    record.extend_from_slice(&u32::MAX.to_le_bytes());
+    let mut u64_max = 28u32.to_le_bytes().to_vec();
+    u64_max.push(1);
+    u64_max.extend_from_slice(&u64::MAX.to_le_bytes());
+    let mut dns = 1u32.to_le_bytes().to_vec();
+    dns.push(1);
+    text(&mut dns, "SERVFAIL");
+    dns.push(1);
+    dns.extend_from_slice(&u16::MAX.to_le_bytes());
+    vec![
+        ("/refuse/escaped", escaped),
+        ("/refuse/record", record),
+        ("/refuse/u64", u64_max),
+        ("/refuse/dns", dns),
+    ]
+}
+
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
+fn compiled_refusals_arrive_typed_before_completion() {
+    let Some(component) = fixture() else {
+        return;
+    };
+    for engine in engines() {
+        let port = open(&engine, &component);
+        for (index, (path, expected)) in expected_refusals().into_iter().enumerate() {
+            let delay = Duration::from_millis(if index == 0 { 300 } else { 0 });
+            assert_eq!(refusal(&port, path, delay), expected, "{path}");
+        }
+        let mut refused = 38u32.to_le_bytes().to_vec();
+        refused.push(1);
+        refused.extend_from_slice(&7u32.to_le_bytes());
+        refused.extend_from_slice(b"refused");
+        assert_eq!(refusal(&port, "/error", Duration::ZERO), refused);
+        // A refusal is the request's answer only: the Store keeps serving.
+        last_exit(&port);
+        drop(port);
+        assert_eq!(engine.instances(), 0);
+    }
+}
+
 #[test]
 #[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
 fn the_platform_carrier_streams_bytes_both_ways() {
@@ -364,14 +435,56 @@ fn cancellation_and_disconnect_end_the_carrier_and_late_answers_own_nothing() {
             "request-ended-then-write-dropped events=1"
         );
 
-        // A handler error has no head; completion carries it after settlement.
-        let mut exchange = Exchange::begin(&port, "/error");
-        let Ev::Complete(result) = exchange.next() else {
-            panic!("an error has no head")
+        // A handler error has no head: its typed refusal, then the completion after settlement.
+        assert!(!refusal(&port, "/error", Duration::ZERO).is_empty());
+        drop(port);
+        assert_eq!(engine.instances(), 0);
+    }
+}
+
+/// A client that goes away before the response head (the platform disconnects while the guest
+/// waits for request data) ends the call normally: no head, no quarantine, and the revision
+/// keeps serving with its Store intact.
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
+fn a_disconnect_before_the_head_ends_the_call_without_quarantine() {
+    let Some(component) = fixture() else {
+        return;
+    };
+    for engine in engines() {
+        let port = open(&engine, &component);
+        let mut exchange = Exchange::begin(&port, "/slow");
+        while exchange.pulls == 0 {
+            match exchange
+                .events
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+            {
+                Ev::Ingress(IngressEvent::RequestPull) => exchange.pulls += 1,
+                Ev::Host(packet, reply) => answer(&packet, reply),
+                _ => panic!("expected the guest's request-body pull before any head"),
+            }
+        }
+        exchange.port.disconnect();
+        assert!(
+            !exchange
+                .port
+                .supply_request(IngressRequestChunk::Data(b"late".to_vec()))
+                .unwrap()
+        );
+        let completion = loop {
+            match exchange.next() {
+                Ev::Complete(result) => break result,
+                Ev::Ingress(IngressEvent::Head(_)) => panic!("no head after a disconnect"),
+                _ => {}
+            }
         };
-        let error = result.unwrap_err();
-        assert!(error.message.contains("refused"), "{error}");
+        if let Err(error) = &completion {
+            assert_ne!(error.reason, "wasm_executor_quarantined", "{error}");
+        }
         exchange.ticket.take().unwrap().finish().unwrap();
+        assert_eq!(engine.instances(), 1);
+        assert!(last_exit(&port).starts_with("slow-request-ended"));
         drop(port);
         assert_eq!(engine.instances(), 0);
     }
@@ -438,13 +551,17 @@ fn source_handlers_stream_through_the_platform_carrier() {
         assert_eq!(exchange.frame(), IngressResponseFrame::End);
         assert_eq!(exchange.complete().unwrap(), "null");
 
-        // A handler error has no head; a disconnect ends the next stream; the port keeps serving.
-        let mut exchange = Exchange::begin(&port, "/error");
-        let Ev::Complete(result) = exchange.next() else {
-            panic!("an error has no head")
-        };
-        assert!(result.unwrap_err().message.contains("HttpRequestDenied"));
-        exchange.ticket.take().unwrap().finish().unwrap();
+        // A handler error has no head; its typed refusal is exactly what the compiled handler
+        // sends for the same WIT values; a disconnect ends the next stream; the port keeps
+        // serving.
+        assert_eq!(
+            refusal(&port, "/error", Duration::ZERO),
+            15u32.to_le_bytes(),
+            "http-request-denied"
+        );
+        for (path, expected) in expected_refusals() {
+            assert_eq!(refusal(&port, path, Duration::ZERO), expected, "{path}");
+        }
         let mut exchange = Exchange::begin(&port, "/sse");
         assert!(matches!(
             exchange.next(),
@@ -453,6 +570,72 @@ fn source_handlers_stream_through_the_platform_carrier() {
         assert_eq!(exchange.frame(), data("open"));
         exchange.port.disconnect();
         exchange.complete().unwrap();
+        drop(port);
+        assert_eq!(engine.instances(), 0);
+    }
+}
+
+/// A source bundle whose own code rebinds the writable ingress global, so its callback returns
+/// without ever publishing a response. No interpreter change is involved: this is user code.
+const SILENT_HANDLER: &str = r#"
+globalThis.__tembraIngress = Object.freeze({ async serve() {} });
+globalThis.__tembraOrb = {
+  name: "web",
+  apiVersion: 1,
+  services: { handler: { methods: { async handle() {} } } },
+};
+"#;
+
+/// A callback that ends without publishing a head completes with a clear error through the
+/// carrier, never `ok` without a response, and the revision keeps serving.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn a_source_callback_without_a_response_completes_with_an_error() {
+    let Some(interpreter) =
+        std::env::var_os("TEMBRA_WASM_ENGINE").map(|path| std::fs::read(path).unwrap())
+    else {
+        eprintln!("skipped: TEMBRA_WASM_ENGINE is not set");
+        return;
+    };
+    let contract = Contract::from_dir(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/wit/handler"),
+        Some("handler"),
+    )
+    .unwrap();
+    let bytes =
+        tembra_contracts::Artifact::package_source(ORB, 1, &contract, SILENT_HANDLER).unwrap();
+    for engine in engines() {
+        let engine = engine.interpreter(&interpreter).unwrap();
+        let artifact = tembra_contracts::Artifact::decode(&bytes).unwrap();
+        let bindings = artifact
+            .contract
+            .providers(&Default::default(), &Grants::default())
+            .unwrap();
+        let port = engine
+            .open_port(
+                &artifact,
+                &bindings,
+                &Grants::default(),
+                &Default::default(),
+            )
+            .unwrap();
+        for packet in [
+            serde_json::json!({"kind": "create", "environment": 1, "service": null}),
+            serde_json::json!({"kind": "create", "environment": 2, "service": "handler"}),
+        ] {
+            port.declare(packet, |_, _| Ok(serde_json::Value::Null))
+                .unwrap();
+        }
+        for _ in 0..2 {
+            let mut exchange = Exchange::begin(&port, "/");
+            let Ev::Complete(result) = exchange.next() else {
+                panic!("a callback without a response publishes no head")
+            };
+            let error = result.unwrap_err();
+            assert!(error.message.contains("returned no response"), "{error}");
+            assert_ne!(error.reason, "wasm_executor_quarantined", "{error}");
+            exchange.ticket.take().unwrap().finish().unwrap();
+        }
         drop(port);
         assert_eq!(engine.instances(), 0);
     }

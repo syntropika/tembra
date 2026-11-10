@@ -2,7 +2,8 @@
  * Transport lifetime of outgoing standard `wasi:http@0.3.0` in the browser: request and response
  * bodies, the upload handed to an `HttpProvider`, `client.send`, and the binding of every
  * generated `wasi:http` function. Value semantics (fields, options, targets) live in
- * `standard-http-values.ts`; the provider contract and its Fetch adapter in `http-provider.ts`.
+ * `standard-http-values.ts`; the provider contract lives in `http-provider.ts` and its Fetch
+ * adapter in `fetch-http-provider.ts`.
  *
  * Ownership: one exchange owns its `Upload` and its `ReceivedBody`. The host ends both itself,
  * whether or not the provider cooperates: a failed or cancelled send, a response released or

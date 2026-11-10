@@ -220,6 +220,31 @@ for (const [name, file, world] of [
     minify: false,
   };
 }
+// Context.get: keyed counters and the router selecting them at runtime under the caller's root.
+const keyedFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-keyed");
+for (const [name, file, world] of [
+  ["keyed", "provider.ts", "provider"],
+  ["keyed-router", "router.ts", "consumer"],
+] as const) {
+  await mkdir(path.join(sources, `keyed-${world}`), { recursive: true });
+  await writeFile(
+    path.join(sources, `keyed-${world}/contract.wit`),
+    await readFile(path.join(keyedFixture, "contract.wit")),
+  );
+  await writeFile(
+    path.join(sources, `keyed-${world}/${name}.ts`),
+    (await readFile(path.join(keyedFixture, file), "utf8")).replaceAll(
+      '"@syntropika/tembra-sdk"',
+      guest,
+    ),
+  );
+  builds[name] = {
+    entry: `keyed-${world}/${name}.ts`,
+    wit: `keyed-${world}/contract.wit`,
+    world,
+    minify: false,
+  };
+}
 // Standard WASI source Orbs: the example scenario and the acceptance-only boundary probes. Two
 // boundary revisions let acceptance pass one revision's handle number to the other.
 const standardFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-standard");

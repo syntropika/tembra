@@ -303,8 +303,8 @@ fn compiled_resource_only_imports_cannot_hide_their_provider_requirement() {
     let Item::Interface(interface) = &mut model.imports[0].item else {
         panic!("expected an interface");
     };
-    assert!(interface.resources);
-    interface.resources = false;
+    assert!(!interface.resources.is_empty());
+    interface.resources.clear();
     let forged = PreparedContract::new(model).unwrap();
     let identity = Identity {
         name: "forged".into(),
@@ -322,6 +322,102 @@ fn compiled_resource_only_imports_cannot_hide_their_provider_requirement() {
             .unwrap()
             .0
             .contains("import signatures differ")
+    );
+}
+
+#[test]
+fn compiled_resource_identity_cannot_be_relabelled_in_artifact_metadata() {
+    let contract = contract(
+        "package test:identity; interface handles { resource handle; } interface values { get: func() -> u32; } world run { import handles; export values; }",
+    );
+    let binary = component(&contract);
+    for change_owner in [false, true] {
+        let mut model = contract.prepared().model().clone();
+        let resource_id = model
+            .types
+            .iter()
+            .position(|kind| matches!(kind, Kind::Resource(_)))
+            .unwrap();
+        let Kind::Resource(resource) = &mut model.types[resource_id] else {
+            unreachable!("selected as a resource")
+        };
+        if change_owner {
+            resource.interface = Some("other:identity/handles".into());
+        } else {
+            resource.name = Some("counterfeit".into());
+        }
+        // Claim an alias instead of a direct definition. This remains a structurally valid
+        // model, so the binary verifier must reject its false nominal identity independently.
+        let alias = model.types.len() as u32;
+        model.types.push(Kind::Alias(Ty::Ref(resource_id as u32)));
+        let Item::Interface(interface) = &mut model.imports[0].item else {
+            panic!("expected the handles interface")
+        };
+        interface.resources.insert("handle".into(), alias);
+        let forged = PreparedContract::new(model).unwrap();
+        let mut bytes = binary.clone();
+        append(
+            &mut bytes,
+            "tembra:orb",
+            &crate::artifact::encode_orb(
+                &Identity {
+                    name: "forged".into(),
+                    api_version: 1,
+                    world: "run".into(),
+                },
+                &forged,
+            ),
+        );
+        assert!(
+            Artifact::decode(&bytes)
+                .err()
+                .unwrap()
+                .0
+                .contains("import signatures differ")
+        );
+    }
+}
+
+#[test]
+fn compiled_resource_aliases_preserve_the_original_definition() {
+    let contract = contract(
+        r#"
+            package test:aliases;
+            interface handles { resource handle; }
+            interface aliasing {
+                use handles.{handle as renamed};
+                inspect: func(value: borrow<renamed>) -> u32;
+            }
+            interface values { get: func() -> u32; }
+            world run { import aliasing; export values; }
+        "#,
+    );
+    let bytes = contract
+        .component_artifact(&component(&contract), "aliases", 1, &Default::default())
+        .unwrap();
+    let artifact = Artifact::decode(&bytes).unwrap();
+    let aliasing = artifact
+        .contract
+        .model()
+        .imports
+        .iter()
+        .find_map(|entry| match &entry.item {
+            Item::Interface(interface)
+                if interface.contract.as_deref() == Some("test:aliases/aliasing") =>
+            {
+                Some(interface)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        artifact
+            .contract
+            .resource_identity(Ty::Ref(aliasing.resources["renamed"])),
+        Some(&ResourceIdentity {
+            interface: Some("test:aliases/handles".into()),
+            name: Some("handle".into()),
+        })
     );
 }
 
@@ -386,13 +482,29 @@ fn compiled_imports_may_eliminate_unused_resource_types() {
 }
 
 #[test]
-fn compiled_resource_exports_are_refused_during_authoring() {
+fn compiled_resource_exports_are_verified_but_need_a_capability_transport() {
     let declared = contract(
         "package test:unsupported; interface handles { resource handle { read: func() -> u32; } } world run { export handles; }",
     );
+    let bytes = declared
+        .component_artifact(&component(&declared), "sessions", 1, &Default::default())
+        .unwrap();
+    let artifact = Artifact::decode(&bytes).unwrap();
+    artifact.contract.check_resource_profile().unwrap();
+    assert!(artifact.contract.check_value_profile().is_err());
     assert!(
         declared
-            .component_artifact(&component(&declared), "unsupported", 1, &Default::default())
+            .source_artifact("export default {}", "sessions", 1)
+            .is_err()
+    );
+
+    let nested = contract(
+        "package test:unsupported; interface handles { resource handle; \
+         open: func() -> option<own<handle>>; } world run { export handles; }",
+    );
+    assert!(
+        nested
+            .component_artifact(&component(&nested), "nested", 1, &Default::default())
             .is_err()
     );
 }

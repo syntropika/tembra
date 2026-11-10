@@ -191,6 +191,7 @@ fn network_grants_are_checked_against_the_selected_import_and_provider() {
 }
 
 #[test]
+#[cfg(feature = "authoring")]
 fn all_pinned_wasi_imports_resolve_and_require_explicit_capabilities() {
     let source = "package example:wasi; world app { include wasi:cli/imports@0.3.0; import wasi:http/client@0.3.0; }";
     let contract = Contract::from_source("wasi.wit", source, Some("app")).unwrap();
@@ -246,6 +247,7 @@ fn all_pinned_wasi_imports_resolve_and_require_explicit_capabilities() {
 }
 
 #[test]
+#[cfg(feature = "authoring")]
 fn a_dns_only_world_can_select_a_network_provider_without_a_tcp_grant() {
     let contract = Contract::from_source(
         "dns.wit",

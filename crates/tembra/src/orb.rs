@@ -1,7 +1,11 @@
 use crate::core::Reason;
-use crate::{Context, Declaration, Error, Result, core};
+use crate::{
+    Context, Declaration, Error, Result, core,
+    portable::{Outcome, Payload},
+};
 use futures::{FutureExt, future::LocalBoxFuture};
 use serde::{Serialize, de::DeserializeOwned};
+#[cfg(feature = "hooks")]
 use serde_json::Value;
 #[cfg(feature = "views")]
 use std::collections::BTreeSet;
@@ -12,7 +16,7 @@ pub(crate) type Factory = Rc<dyn Fn(Declaration) -> Result<Data>>;
 pub(crate) type LocalMethod =
     Rc<dyn Fn(Data, Context, Box<dyn Any>) -> LocalBoxFuture<'static, Result<Box<dyn Any>>>>;
 pub(crate) type PortableMethod =
-    Rc<dyn Fn(Data, Context, Value) -> LocalBoxFuture<'static, Result<Value>>>;
+    Rc<dyn Fn(Data, Context, Payload) -> LocalBoxFuture<'static, Result<Outcome>>>;
 pub(crate) type BeforeCreate = Rc<dyn Fn() -> LocalBoxFuture<'static, Result<Data>>>;
 #[cfg(feature = "views")]
 type Access = Rc<dyn Fn(&str) -> BTreeSet<String>>;
@@ -107,18 +111,21 @@ impl<E: 'static> Service<E> {
         );
         self.implementation.portable.insert(
             name.clone(),
-            Rc::new(move |environment, context, arguments| {
+            Rc::new(move |environment, context, arguments: Payload| {
                 let result = environment
                     .downcast::<E>()
                     .map_err(|_| type_error())
                     .and_then(|environment| {
-                        let arguments = serde_json::from_value(arguments).map_err(|error| {
-                            Error::invalid(Reason::Arguments, error.to_string())
-                        })?;
+                        // Serde methods take data only; capabilities are refused and closed.
+                        let arguments =
+                            serde_json::from_value(arguments.into_data()?).map_err(|error| {
+                                Error::invalid(Reason::Arguments, error.to_string())
+                            })?;
                         Ok(portable(environment, context, arguments))
                     });
                 async move {
                     serde_json::to_value(result?.await?)
+                        .map(|value| Payload::data(value).into())
                         .map_err(|error| Error::invalid(Reason::Result, error.to_string()))
                 }
                 .boxed_local()
@@ -134,7 +141,7 @@ impl<E: 'static> Service<E> {
     ///
     /// The method exists only for callers in this process that hold the exact argument type, such
     /// as an executor's lifecycle adapter carrying owned host resources. Every portable access
-    /// (`call_portable`, `call_value`, foreign hosts and isolated Orb references) is refused with
+    /// (`call_portable`, `Host::invoke_portable`, foreign hosts and isolated Orb references) is refused with
     /// [`Reason::LocalValue`] before the callback runs; no serde conversion is ever attempted.
     pub fn local_method<A, R, F, Fut>(mut self, name: impl Into<String>, handle: F) -> Self
     where
@@ -159,6 +166,37 @@ impl<E: 'static> Service<E> {
             }),
         );
         self.implementation.portable.remove(&name);
+        self.metadata.methods.insert(name);
+        self
+    }
+}
+
+impl<E: 'static> Service<E> {
+    /// Bind a portable-only callback that receives and returns the whole [`Payload`], including
+    /// host-issued capabilities. It is the entrypoint for executors that issue resources. It has
+    /// no typed local entrypoint, so [`crate::Reference::call`] refuses it.
+    ///
+    /// The callback returns a [`Payload`], or an [`Outcome`] when the call keeps physically
+    /// working after its result (a stream's producer, for example).
+    pub fn payload_method<F, Fut, R>(mut self, name: impl Into<String>, handle: F) -> Self
+    where
+        F: Fn(Rc<E>, Context, Payload) -> Fut + 'static,
+        Fut: Future<Output = Result<R>> + 'static,
+        R: Into<Outcome> + 'static,
+    {
+        let name = name.into();
+        let handle = Rc::new(handle);
+        self.implementation.portable.insert(
+            name.clone(),
+            Rc::new(move |environment, context, payload| {
+                let result = environment
+                    .downcast::<E>()
+                    .map_err(|_| type_error())
+                    .map(|environment| handle(environment, context, payload));
+                async move { result?.await.map(Into::into) }.boxed_local()
+            }),
+        );
+        self.implementation.local.remove(&name);
         self.metadata.methods.insert(name);
         self
     }

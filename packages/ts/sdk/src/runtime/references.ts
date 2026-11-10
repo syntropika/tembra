@@ -5,7 +5,7 @@ import type {
   DynamicReference,
   ServiceDefinition,
 } from "../authoring/types.ts";
-import { Code, Status } from "../bridge/identifiers.ts";
+import { Code, Reason, Status } from "../bridge/identifiers.ts";
 import type { Acquisition, KernelOrb } from "../bridge/kernel.ts";
 import { KernelOp } from "../bridge/protocol.ts";
 import { refuse, TembraError } from "../error.ts";
@@ -112,11 +112,7 @@ export class References {
     const session = this.session;
     if (ctx) context(ctx, session);
     session.kernel.command(KernelOp.Tick, { now: session.now() });
-    const address: Address = {
-      service,
-      key: typeof key === "string" ? [key] : [...key],
-      principal: options.principal ?? ctx?.principal ?? session.principal,
-    };
+    const address = this.address(service, key, options, ctx);
     const acquired = session.kernel.command(KernelOp.Acquire, {
       ...address,
       apiVersion: options.apiVersion ?? 0,
@@ -254,14 +250,105 @@ export class References {
     return proxy;
   }
 
-  /** Release the acquired claim if activation fails. */
+  /** The canonical service name and effective options of an acquisition. */
+  private service(
+    definition: string | ServiceDefinition,
+    options: AcquisitionOptions,
+  ): { service: string; options: AcquisitionOptions } {
+    if (typeof definition === "string") return { service: definition, options };
+    const acquisition = serviceAcquisition(definition, options);
+    return { service: acquisition.name, options: acquisition.options };
+  }
+
+  /** The address an acquisition targets; the principal defaults to the caller's root. */
+  private address(
+    service: string,
+    key: string | readonly string[],
+    options: AcquisitionOptions,
+    ctx?: Context,
+  ): Address {
+    return {
+      service,
+      key: typeof key === "string" ? [key] : [...key],
+      principal: options.principal ?? ctx?.principal ?? this.session.principal,
+    };
+  }
+
+  /**
+   * The physical disposal of the exact local instance a refusal names: the kernel refused
+   * because the previous instance at this address is still closing. Only a concrete matching
+   * object's `disposing` promise qualifies; anything else keeps the original refusal.
+   */
+  private closing(
+    error: unknown,
+    definition: string | ServiceDefinition,
+    key: string | readonly string[],
+    options: AcquisitionOptions,
+    ctx?: Context,
+  ): Promise<void> | undefined {
+    if (
+      !(error instanceof TembraError) ||
+      error.code !== Code.Unavailable ||
+      error.reason !== Reason.Disposing
+    )
+      return undefined;
+    let address: Address;
+    try {
+      const resolved = this.service(definition, options);
+      address = this.address(resolved.service, key, resolved.options, ctx);
+    } catch {
+      // An ended root has no address to wait for; the original refusal stands.
+      return undefined;
+    }
+    for (const object of this.session.objects.values()) {
+      const previous = object.address;
+      if (
+        object.disposing &&
+        previous.service === address.service &&
+        previous.principal === address.principal &&
+        previous.key.length === address.key.length &&
+        previous.key.every((part, index) => part === address.key[index])
+      )
+        return object.disposing;
+    }
+    return undefined;
+  }
+
+  /**
+   * Acquire and wait for activation; release the acquired claim if activation fails.
+   *
+   * Unlike the synchronous `hold`, an acquisition refused only because the previous instance
+   * at the same address is still closing waits for that instance's physical disposal, then
+   * acquires anew with every check repeated. The old instance is never revived or overlapped
+   * and no factory runs early. The caller's root cancellation ends the wait, never the
+   * teardown. A failed disposal is recorded and reported by the lifecycle that owns it; the
+   * caller then acquires a fresh instance. Every other refusal is returned at once.
+   */
   async get(
     service: string | ServiceDefinition,
     key: string | readonly string[],
     options: AcquisitionOptions = {},
     ctx?: Context,
   ): Promise<DynamicReference> {
-    const reference = this.hold(service, key, options, ctx);
+    let reference: DynamicReference;
+    let waited: Promise<void> | undefined;
+    for (;;) {
+      try {
+        reference = this.hold(service, key, options, ctx);
+        break;
+      } catch (error) {
+        const closing = this.closing(error, service, key, options, ctx);
+        // Each wait is for a new concrete disposal; nothing is retried without one.
+        if (!closing || closing === waited) throw error;
+        waited = closing;
+        const settled = closing.then(
+          () => {},
+          () => {},
+        );
+        if (ctx) await this.session.calls.observe(settled, ctx.signal);
+        else await settled;
+      }
+    }
     try {
       await reference.ready;
       return reference;

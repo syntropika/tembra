@@ -73,7 +73,7 @@ const sources = new Map([
 ]);
 // The full suite qualifies an alternate engine when one is supplied; the other path gets a smoke run.
 const page = `<!doctype html><body>running<script type="module">
-import { verifyBrowserInterpreter, verifyEngineSelection, verifyStandardScenario, verifyPrecisionBrowser } from "/fixture.js";
+import { verifyBrowserInterpreter, verifyEngineSelection, verifyStandardScenario, verifyPrecisionBrowser, verifyContextAcquireBrowser, verifyIngressScenario } from "/fixture.js";
 try {
   const override = new URL(${JSON.stringify(overrideEngine)}, location.href);
   const alternate = ${JSON.stringify(Boolean(alternate))};
@@ -81,14 +81,16 @@ try {
   await verifyEngineSelection(alternate ? undefined : override);
   const standard = await verifyStandardScenario(alternate ? override : undefined);
   await verifyPrecisionBrowser(alternate ? override : undefined);
-  await fetch("/report", { method: "POST", body: JSON.stringify(standard) });
+  await verifyContextAcquireBrowser(alternate ? override : undefined);
+  const ingress = await verifyIngressScenario(alternate ? override : undefined);
+  await fetch("/report", { method: "POST", body: JSON.stringify({ standard, ingress }) });
   document.body.textContent = "TEMBRA_WASM_PASS";
 } catch (error) {
   document.body.textContent = "TEMBRA_WASM_FAIL " + (error.stack ?? error);
 }
 </script>`;
 const requested = new Set<string>();
-/** Standard scenario evidence posted by the page: per provider timings and retirement counts. */
+/** Scenario evidence posted by the page, including actual incoming HTTP lifecycle checks. */
 let standardReport: unknown;
 const server = Bun.serve({
   hostname: "127.0.0.1",
@@ -139,7 +141,7 @@ try {
   await headless(server.url.href, "TEMBRA_WASM_PASS", "TEMBRA_WASM_FAIL");
   for (const engine of [defaultEngine, overrideEngine])
     if (!requested.has(engine)) throw new Error(`The browser did not request ${engine}`);
-  console.log(`Standard WASI scenario: ${JSON.stringify(standardReport)}`);
+  console.log(`Browser WASI and incoming HTTP scenarios: ${JSON.stringify(standardReport)}`);
   console.log(
     `Actual browser interpreter facade, memory filesystem and OPFS acceptance passed on the ${alternate ? "alternate" : "default packaged"} engine; the ${alternate ? "default packaged" : "explicit override"} engine path passed its smoke check`,
   );

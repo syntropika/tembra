@@ -3,12 +3,12 @@ use crate::{
     Error,
     model::{
         Case, Entry, Field, Function, FunctionKind, Interface, Item, Kind, MAX_ITEMS, MAX_MEMBERS,
-        MAX_NAME, MAX_TYPES, Model, Ty,
+        MAX_NAME, MAX_TYPES, Model, ResourceIdentity, Ty,
     },
 };
 
 /// Format version of the compact contract body.
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
 #[derive(Default)]
 pub(crate) struct Writer(Vec<u8>);
@@ -267,7 +267,11 @@ pub(crate) fn write_model(writer: &mut Writer, model: &Model) {
                     writer.byte(0);
                     writer.option_str(interface.contract.as_deref());
                     writer.option_str(interface.name.as_deref());
-                    writer.byte(u8::from(interface.resources));
+                    writer.len(interface.resources.len());
+                    for (name, ty) in &interface.resources {
+                        writer.str(name);
+                        writer.u32(*ty);
+                    }
                     writer.byte(u8::from(interface.explicit));
                     writer.len(interface.functions.len());
                     for function in &interface.functions {
@@ -345,7 +349,11 @@ fn write_kind(writer: &mut Writer, kind: &Kind) {
             writer.ty(*key);
             writer.ty(*value);
         }
-        Kind::Resource => writer.byte(11),
+        Kind::Resource(resource) => {
+            writer.byte(11);
+            writer.option_str(resource.interface.as_deref());
+            writer.option_str(resource.name.as_deref());
+        }
         Kind::Own(id) => {
             writer.byte(12);
             writer.u32(*id);
@@ -428,7 +436,7 @@ fn entry(reader: &mut Reader<'_>) -> Result<Entry, Error> {
         0 => Item::Interface(Interface {
             contract: reader.option_str()?,
             name: reader.option_str()?,
-            resources: reader.flag()?,
+            resources: resource_bindings(reader)?,
             explicit: reader.flag()?,
             functions: reader.list(MAX_MEMBERS, function)?,
         }),
@@ -446,6 +454,23 @@ fn fields(reader: &mut Reader<'_>) -> Result<Vec<Field>, Error> {
             ty: reader.ty()?,
         })
     })
+}
+
+/// Resource aliases must remain distinct names; a duplicate cannot silently replace a type.
+fn resource_bindings(
+    reader: &mut Reader<'_>,
+) -> Result<std::collections::BTreeMap<String, u32>, Error> {
+    let mut bindings = std::collections::BTreeMap::new();
+    for (name, ty) in reader.list(MAX_MEMBERS, |reader| Ok((reader.str()?, reader.u32()?)))? {
+        if bindings
+            .last_key_value()
+            .is_some_and(|(previous, _)| previous >= &name)
+        {
+            return Err(malformed());
+        }
+        bindings.insert(name, ty);
+    }
+    Ok(bindings)
 }
 
 fn function(reader: &mut Reader<'_>) -> Result<Function, Error> {
@@ -502,11 +527,35 @@ fn kind(reader: &mut Reader<'_>) -> Result<Kind, Error> {
         8 => Kind::List(reader.ty()?),
         9 => Kind::FixedList(reader.ty()?, reader.u32()?),
         10 => Kind::Map(reader.ty()?, reader.ty()?),
-        11 => Kind::Resource,
+        11 => Kind::Resource(ResourceIdentity {
+            interface: reader.option_str()?,
+            name: reader.option_str()?,
+        }),
         12 => Kind::Own(reader.u32()?),
         13 => Kind::Borrow(reader.u32()?),
         14 => Kind::Future(reader.option_ty()?),
         15 => Kind::Stream(reader.option_ty()?),
         _ => return Err(malformed()),
     })
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+
+    #[test]
+    fn resource_bindings_require_unique_canonically_ordered_names() {
+        for (names, accepted) in [(["a", "b"], true), (["b", "a"], false), (["a", "a"], false)] {
+            let mut writer = Writer::default();
+            writer.len(names.len());
+            for name in names {
+                writer.str(name);
+                writer.u32(0);
+            }
+            assert_eq!(
+                resource_bindings(&mut Reader::new(&writer.finish())).is_ok(),
+                accepted
+            );
+        }
+    }
 }

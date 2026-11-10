@@ -68,6 +68,16 @@ struct Object {
 }
 type Opener = Box<dyn FnOnce() -> LocalBoxFuture<'static, Result<()>>>;
 type Closer = Box<dyn FnOnce(Context) -> LocalBoxFuture<'static, Result<()>>>;
+/// Physical work a call keeps doing after its logical result was published.
+pub(crate) type Physical = LocalBoxFuture<'static, Result<()>>;
+
+/// What a root owns natively: claims acquired through [`Context::get`], which its end releases,
+/// and stream ends delivered to it, which its end closes and its cancellation cancels.
+#[derive(Default)]
+struct RootClaims {
+    references: Vec<Rc<Reference>>,
+    streams: Vec<std::rc::Weak<dyn crate::portable::RootStream>>,
+}
 
 struct Inner {
     #[cfg(feature = "hooks")]
@@ -83,7 +93,7 @@ struct Inner {
     orb_declaring: RefCell<BTreeSet<core::Id>>,
     orb_values: RefCell<BTreeMap<core::Id, Data>>,
     host_resources: RefCell<BTreeMap<String, ResourceKey>>,
-    root_references: RefCell<BTreeMap<core::Id, Vec<Rc<Reference>>>>,
+    root_references: RefCell<BTreeMap<core::Id, RootClaims>>,
     task_signals: RefCell<BTreeMap<core::Id, Cancellation>>,
     clock: Rc<dyn crate::Clock>,
     clock_offset: Cell<u64>,

@@ -15,7 +15,7 @@ pub(crate) type Side = std::collections::BTreeMap<String, InterfaceShape>;
 pub(crate) struct InterfaceShape {
     contract: Option<String>,
     name: Option<String>,
-    resources: bool,
+    resources: Vec<u8>,
     functions: Vec<u8>,
 }
 
@@ -57,9 +57,9 @@ impl PreparedContract {
                 (&mut entry.item, &retained.item)
             {
                 // An unused resource declaration may disappear; actual resources must stay declared.
-                if !actual.resources {
-                    expected.resources = false;
-                }
+                expected
+                    .resources
+                    .retain(|name, _| actual.resources.contains_key(name));
                 expected.functions.retain(|function| {
                     actual
                         .functions
@@ -81,7 +81,6 @@ impl PreparedContract {
         let mut entries = self.side(exports).iter().collect::<Vec<_>>();
         entries.sort_by(|left, right| left.key.cmp(&right.key));
         for entry in entries {
-            let ingress = exports && crate::lower::is_ingress(entry);
             let Entry { key, item } = entry;
             match item {
                 Item::Type(_) => {}
@@ -96,20 +95,32 @@ impl PreparedContract {
                         InterfaceShape {
                             contract: interface.contract.clone(),
                             name: interface.name.clone(),
-                            resources: interface.resources,
-                            // The incoming HTTP handler is compared like a standard import:
-                            // its resources are host types, never portable values.
-                            functions: if exports && !ingress {
-                                self.interface_shape(interface)?
-                            } else {
-                                self.component_shape(interface, &mut resources)?
-                            },
+                            resources: self.resource_shape(interface, &mut resources)?,
+                            // Verify actual component types independently of execution-profile
+                            // admission, including nominal resources and their equality graph.
+                            functions: self.component_shape(interface, &mut resources)?,
                         },
                     );
                 }
             }
         }
         Ok(side)
+    }
+
+    /// Include resource-only interfaces and local type aliases in executable verification.
+    #[cfg(feature = "authoring")]
+    fn resource_shape(
+        &self,
+        interface: &Interface,
+        resources: &mut std::collections::BTreeMap<u32, u32>,
+    ) -> Result<Vec<u8>, Error> {
+        let mut writer = Writer::default();
+        writer.len(interface.resources.len());
+        for (name, ty) in &interface.resources {
+            writer.str(name);
+            self.component_type(&mut writer, Ty::Ref(*ty), resources, 0)?;
+        }
+        Ok(writer.finish())
     }
 
     /// Compare host resource signatures without admitting those handles to the Orb value profile.
@@ -171,9 +182,18 @@ impl PreparedContract {
         writer.byte(0x40);
         writer.str(kind.as_str());
         match kind {
-            Kind::Resource => {
+            Kind::Resource(resource) => {
                 let next = resources.len() as u32;
                 writer.u32(*resources.entry(id).or_insert(next));
+                // Preserve both nominal WIT identity and within-component type equality. A
+                // forged owner/name must not relabel a binary's resource, while two distinct
+                // component resources must not collapse merely because their names coincide.
+                for name in [&resource.interface, &resource.name] {
+                    writer.byte(u8::from(name.is_some()));
+                    if let Some(name) = name {
+                        writer.str(name);
+                    }
+                }
             }
             Kind::Record(fields) => {
                 writer.len(fields.len());
@@ -229,14 +249,16 @@ impl PreparedContract {
         let mut writer = Writer::default();
         writer.len(functions.len());
         for function in functions {
-            if function.kind.resource().is_some() {
-                return Err(Error(format!(
-                    "{}: resource functions require a component value adapter",
-                    function.name
-                )));
-            }
             writer.str(&function.name);
-            write_function_kind(&mut writer, function.kind);
+            if let Some(resource) = function.kind.resource() {
+                // A scoped function's arena index is local to the prepared contract. Admission
+                // compares its declaring resource identity instead of encoding that index.
+                writer.byte(0xff);
+                writer.str(function.kind.as_str());
+                self.shape(&mut writer, Ty::Ref(resource), 0)?;
+            } else {
+                write_function_kind(&mut writer, function.kind);
+            }
             writer.len(function.params.len());
             for param in &function.params {
                 writer.str(&param.name);
@@ -260,7 +282,7 @@ impl PreparedContract {
         }
     }
 
-    /// Expand aliases so independently prepared graphs compare by their ABI structure.
+    /// Expand value aliases structurally and resource aliases by their declaring WIT identity.
     fn shape(&self, writer: &mut Writer, ty: Ty, depth: usize) -> Result<(), Error> {
         if depth > MAX_DEPTH {
             return Err(Error(
@@ -321,6 +343,29 @@ impl PreparedContract {
             Kind::Enum(cases) => {
                 writer.byte(0x47);
                 names(writer, cases);
+            }
+            Kind::Resource(resource) => {
+                let (Some(interface), Some(name)) = (&resource.interface, &resource.name) else {
+                    return Err(Error(
+                        "an anonymous resource has no portable type identity".into(),
+                    ));
+                };
+                writer.byte(0x48);
+                writer.str(interface);
+                writer.str(name);
+            }
+            Kind::Own(resource) | Kind::Borrow(resource) => {
+                writer.byte(if matches!(self.kind(id), Kind::Own(_)) {
+                    0x49
+                } else {
+                    0x4a
+                });
+                self.shape(writer, Ty::Ref(*resource), depth)?;
+            }
+            // Digests describe the shape; which streams execute is the profile's decision.
+            Kind::Stream(element) => {
+                writer.byte(0x4b);
+                self.option_shape(writer, *element, depth)?;
             }
             other => {
                 return Err(Error(format!(

@@ -2,9 +2,13 @@
 
 use super::*;
 
+use crate::portable::{FromPayload, IntoPayload, Origin, Payload};
+
+/// Encoding and decoding of one portable call. Arguments move by value so that capabilities
+/// can travel; decoding receives the calling claim to anchor owned results.
 type Boundary<A, R> = (
-    Box<dyn FnOnce(&A) -> Result<Value>>,
-    Box<dyn FnOnce(Value) -> Result<R>>,
+    Box<dyn FnOnce(A) -> Result<Payload>>,
+    Box<dyn FnOnce(Payload, &Origin) -> Result<R>>,
 );
 
 /// A claim is released on drop. A running callback has its own physical kernel pin.
@@ -94,52 +98,42 @@ impl Reference {
     }
 
     /// Execute a typed local Rust call without requiring portable value traits.
+    /// Arguments and results move as Rust values; nothing is serialized.
     pub async fn call<A: 'static, R: 'static>(
         &self,
         context: &Context,
         method: &str,
         arguments: A,
     ) -> Result<R> {
-        self.invoke(context, method, arguments, None, false).await
+        self.invoke(context, method, arguments, None).await
     }
 
-    /// Execute a local or foreign call, converting values only when crossing languages.
+    /// Call the provider's portable entrypoint, whatever language or isolation it has.
     /// JavaScript arguments use tuples or vectors to represent the method's argument list.
-    pub async fn call_portable<A: Serialize + 'static, R: serde::de::DeserializeOwned + 'static>(
+    /// Results are decoded inside the managed call, so an owned capability that cannot be
+    /// delivered is closed rather than leaked.
+    pub async fn call_portable<A: IntoPayload + 'static, R: FromPayload + 'static>(
         &self,
         context: &Context,
         method: &str,
         arguments: A,
     ) -> Result<R> {
-        let boundary: Boundary<A, R> = (
-            Box::new(|input| {
-                serde_json::to_value(input)
-                    .map_err(|error| Error::invalid(Reason::Arguments, error.to_string()))
-            }),
-            Box::new(|output| {
-                serde_json::from_value(output)
-                    .map_err(|error| Error::invalid(Reason::Result, error.to_string()))
-            }),
-        );
-        self.invoke(context, method, arguments, Some(boundary), false)
+        let boundary: Boundary<A, R> = (Box::new(A::into_payload), Box::new(R::from_payload));
+        self.invoke(context, method, arguments, Some(boundary))
             .await
     }
 
-    /// Dispatch an already encoded foreign value through the provider's portable entrypoint.
-    pub async fn call_value(
+    /// Only `Owned` can originate implicit self. Public payload arguments cannot forward a
+    /// provider's retained receiver into another call.
+    pub(crate) async fn call_borrowed<R: FromPayload + 'static>(
         &self,
         context: &Context,
         method: &str,
-        arguments: Value,
-    ) -> Result<Value> {
-        self.invoke(
-            context,
-            method,
-            arguments,
-            Some((Box::new(|value| Ok(value.clone())), Box::new(Ok))),
-            true,
-        )
-        .await
+        arguments: Payload,
+    ) -> Result<R> {
+        let boundary: Boundary<Payload, R> = (Box::new(Ok), Box::new(R::from_payload));
+        self.invoke(context, method, arguments, Some(boundary))
+            .await
     }
 
     async fn invoke<A: 'static, R: 'static>(
@@ -148,7 +142,6 @@ impl Reference {
         method: &str,
         arguments: A,
         boundary: Option<Boundary<A, R>>,
-        portable_input: bool,
     ) -> Result<R> {
         if !self.host.same(&context.host) {
             return Err(Error::invalid(Reason::Context, "foreign host context"));
@@ -162,85 +155,80 @@ impl Reference {
             method,
             context.frame(),
         )?;
-        let isolated = boundary.is_some()
-            && !portable_input
-            && self.host.kernel().orb(call.orb)?.declaration.isolated;
-        let portable = if isolated {
-            self.host
-                .0
-                .objects
-                .borrow()
-                .get(&call.object)
-                .and_then(|object| object.versions.get(&call.orb))
-                .and_then(|object| {
-                    object
-                        .implementation
-                        .portable
-                        .get(method)
-                        .map(|handle| (object.environment.clone(), handle.clone()))
-                })
-        } else {
-            None
-        };
-        let selected = {
-            let objects = self.host.0.objects.borrow();
-            objects
-                .get(&call.object)
-                .and_then(|object| object.versions.get(&call.orb))
-                .and_then(|object| {
-                    if portable_input {
-                        let portable = object.implementation.portable.get(method)?.clone();
-                        let handle: crate::orb::LocalMethod =
-                            Rc::new(move |environment, context, arguments| {
-                                let portable = portable.clone();
-                                async move {
-                                    let arguments =
-                                        arguments.downcast::<Value>().map_err(|_| type_error())?;
-                                    Ok(Box::new(portable(environment, context, *arguments).await?)
-                                        as Box<dyn std::any::Any>)
-                                }
-                                .boxed_local()
-                            });
-                        return Some((object.environment.clone(), handle));
-                    }
-                    object
-                        .implementation
-                        .local
-                        .get(method)
-                        .map(|handle| (object.environment.clone(), handle.clone()))
-                })
-        };
-        // A host-local method refuses every portable caller, whichever boundary it uses.
-        let local_only = boundary.is_some()
-            && self
-                .host
-                .0
-                .objects
-                .borrow()
-                .get(&call.object)
-                .and_then(|object| object.versions.get(&call.orb))
-                .is_some_and(|object| object.implementation.local_only(method));
+        let route = self.route(&call, method, boundary.is_some());
+        let foreign = matches!(route, Route::Foreign);
+        let origin = Origin::new(self.host.clone(), self.id, self.object, foreign, call.root);
         let method_name = method.to_owned();
         let host = self.host.clone();
         let entered = host.context(call.root, Some(call.clone()))?;
-        let receive = self.host.spawn_managed(call.id,async move {
-            if local_only {
-                return Err(Error::invalid(Reason::LocalValue, format!("{method_name} is a host-local method without a portable entrypoint")));
-            }
-            if let Some((environment, handle))=portable {
-                let (encode, decode) = boundary.ok_or_else(|| Error::invalid(Reason::LocalValue, "isolated calls require a portable boundary"))?;
-                let input = encode(&arguments)?;
-                let result = decode(handle(environment, entered, input).await?)?;
-                Ok(Box::new(result) as Box<dyn std::any::Any>)
-            } else if let Some((environment, handle))=selected {
-                handle(environment, entered, Box::new(arguments)).await
-            } else if !host.has_orb(call.orb) {
-                let (encode,decode)=boundary.ok_or_else(||Error::invalid(Reason::LocalValue,"use call_portable for a foreign service"))?;
-                let value=encode(&arguments)?;
-                let result=host.foreign(serde_json::json!({"kind":"invoke","call":call.id,"frame":call.context,"input":value})).await?;
-                let result=decode(result)?;
-                Ok(Box::new(result) as Box<dyn std::any::Any>)
-            } else { Err(Error::invalid(Reason::NativeMethod, method_name)) }
+        let receive = self.host.spawn_managed_settling(call.id, async move {
+            let result = match (route, boundary) {
+                (Route::Portable(environment, handle), Some((encode, decode))) => {
+                    let (arguments, receiver) = match encode(arguments).and_then(Payload::for_call)
+                    {
+                        Ok(prepared) => prepared,
+                        Err(error) => return (Err(error), None),
+                    };
+                    let (head, physical) = match handle(environment, entered, arguments).await {
+                        Ok(outcome) => outcome.into_parts(),
+                        Err(error) => return (Err(error), None),
+                    };
+                    // The head is bound and decoded here, before it is published. A refused
+                    // head is dropped, closing what it carries. Native decoding, or a refused
+                    // attachment's close, may panic: only that step is caught, so the physical
+                    // work and the receiver pin below are never lost with it.
+                    let head = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        head.and_then(|payload| {
+                            payload.bind_streams(&origin)?;
+                            decode(payload, &origin)
+                        })
+                        .map(|value| Box::new(value) as Box<dyn std::any::Any>)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(Error::new(
+                            core::Code::Unavailable,
+                            "callback",
+                            "native result decoding panicked",
+                        ))
+                    });
+                    // Implicit self stays pinned until the call has physically ended; without
+                    // remaining work the pin drops here, before the invocation finishes.
+                    let physical = physical.map(|physical| {
+                        async move {
+                            let settled = physical.await;
+                            drop(receiver);
+                            settled
+                        }
+                        .boxed_local()
+                    });
+                    return (head, physical);
+                }
+                (Route::Local(environment, handle), None) => {
+                    handle(environment, entered, Box::new(arguments)).await
+                }
+                (Route::Foreign, Some((encode, decode))) => {
+                    async {
+                        let value = encode(arguments)?.into_data()?;
+                        let result = host
+                            .foreign(serde_json::json!({
+                                "kind": "invoke", "call": call.id, "frame": call.context, "input": value,
+                            }))
+                            .await?;
+                        Ok(Box::new(decode(Payload::data(result), &origin)?) as Box<dyn std::any::Any>)
+                    }
+                    .await
+                }
+                (Route::Foreign, None) => Err(Error::invalid(
+                    Reason::LocalValue,
+                    "use call_portable for a foreign service",
+                )),
+                (Route::LocalOnly, _) => Err(Error::invalid(
+                    Reason::LocalValue,
+                    format!("{method_name} is a host-local method without a portable entrypoint"),
+                )),
+                _ => Err(Error::invalid(Reason::NativeMethod, method_name)),
+            };
+            (result, None)
         })?;
         let result = receive.await.map_err(|_| {
             Error::invalid(Reason::Executor, "executor stopped before callback settled")
@@ -249,6 +237,65 @@ impl Reference {
             .downcast::<R>()
             .map(|value| *value)
             .map_err(|_| type_error())
+    }
+
+    /// Select the admitted call's entrypoint. Portable calls always use the provider's portable
+    /// entrypoint, even for an in-process native provider; typed calls use its local one.
+    fn route(&self, call: &core::Invocation, method: &str, portable: bool) -> Route {
+        if !self.host.has_orb(call.orb) {
+            return Route::Foreign;
+        }
+        let objects = self.host.0.objects.borrow();
+        let Some(object) = objects
+            .get(&call.object)
+            .and_then(|object| object.versions.get(&call.orb))
+        else {
+            return Route::Missing;
+        };
+        let environment = object.environment.clone();
+        let implementation = &object.implementation;
+        if portable {
+            match implementation.portable.get(method) {
+                Some(handle) => Route::Portable(environment, handle.clone()),
+                // A host-local method refuses every portable caller.
+                None if implementation.local_only(method) => Route::LocalOnly,
+                None => Route::Missing,
+            }
+        } else {
+            implementation
+                .local
+                .get(method)
+                .map_or(Route::Missing, |handle| {
+                    Route::Local(environment, handle.clone())
+                })
+        }
+    }
+}
+
+/// The entrypoint an admitted call dispatches to.
+enum Route {
+    Portable(crate::orb::Data, crate::orb::PortableMethod),
+    Local(crate::orb::Data, crate::orb::LocalMethod),
+    Foreign,
+    LocalOnly,
+    Missing,
+}
+
+impl Host {
+    /// A second claim with exactly the same admission as `reference`, owned by the caller.
+    pub(crate) fn duplicate_reference(
+        &self,
+        reference: core::Id,
+        object: core::Id,
+    ) -> Result<Reference> {
+        let id = self.kernel().duplicate(reference)?;
+        Ok(Reference {
+            host: self.clone(),
+            id,
+            object,
+            foreign_ready: None,
+            released: Rc::new(crate::readable::ReadLifetime::default()),
+        })
     }
 }
 

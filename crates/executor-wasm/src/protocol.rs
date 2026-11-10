@@ -58,6 +58,10 @@ pub enum GuestCommand<'a> {
         service: Option<&'a str>,
         method: &'a str,
         args: &'a Value,
+        /// Compiled Stores only: the host-issued id of the resource lent as implicit `self`.
+        /// Absent otherwise, so the interpreter protocol is unchanged.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        receiver: Option<u32>,
     },
     Contribute {
         environment: u64,
@@ -77,6 +81,11 @@ pub enum GuestCommand<'a> {
     },
     Release {
         environment: u64,
+    },
+    /// Compiled Stores only: destroy one exported resource whose last owner was dropped.
+    Destroy {
+        environment: u64,
+        instance: u32,
     },
     /// Serve one incoming HTTP request through the handler service's method.
     ///
@@ -234,6 +243,12 @@ pub enum AsyncRequest {
         scope: Option<ScopeId>,
         id: u32,
     },
+    /// `Context.get`: acquire a root-scoped reference to a selected WIT Orb import. The host
+    /// supplies the active invocation, its root principal, the provider service and the installed
+    /// requirement; the guest names only the import binding and the instance key. The handle is
+    /// issued into the calling environment's own table, so the request carries no scope.
+    #[serde(rename = "reference.acquire")]
+    ReferenceAcquire { service: String, key: Vec<String> },
     #[serde(rename = "reference.call")]
     ReferenceCall {
         #[serde(default)]
@@ -404,12 +419,38 @@ mod tests {
             );
         }
         for packet in [
+            r#"{"operation":"reference.acquire","service":"s","key":"main"}"#,
+            r#"{"operation":"reference.acquire","service":"s","key":[1]}"#,
+            r#"{"operation":"reference.acquire","service":"s"}"#,
+            r#"{"operation":"reference.acquire","scope":1,"service":"s","key":[]}"#,
+            r#"{"operation":"reference.acquire","service":"s","key":[],"apiVersion":2}"#,
+            r#"{"operation":"reference.acquire","service":"s","key":[],"methods":["m"]}"#,
+            r#"{"operation":"reference.acquire","service":"s","key":[],"principal":"p"}"#,
             r#"{"operation":"wait","milliseconds":-1}"#,
             r#"{"operation":"reference.call","id":1,"method":"m"}"#,
             r#"{"operation":"reference.ready","id":1,"extra":true}"#,
         ] {
             assert!(AsyncRequest::decode(packet).is_err(), "{packet}");
         }
+    }
+
+    #[test]
+    fn acquisition_names_only_a_binding_and_key() {
+        assert_eq!(
+            AsyncRequest::decode(
+                r#"{"operation":"reference.acquire","service":"example:keyed/counter@1.0.0","key":["a","b"]}"#
+            )
+            .unwrap(),
+            AsyncRequest::ReferenceAcquire {
+                service: "example:keyed/counter@1.0.0".into(),
+                key: vec!["a".into(), "b".into()],
+            }
+        );
+        // Acquisition awaits readiness, so it is never a synchronous operation.
+        assert_eq!(
+            Request::decode(r#"{"operation":"reference.acquire","service":"s","key":[]}"#).unwrap(),
+            Request::Unsupported
+        );
     }
 
     #[test]

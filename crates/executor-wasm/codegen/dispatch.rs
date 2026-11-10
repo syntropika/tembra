@@ -361,6 +361,17 @@ impl<'a> Generator<'a> {
         let response = kind("wasi:http/types@0.3.0#response");
         let rust = self.rust_type(result);
         let decode = self.decode(result);
+        // The handler's `error-code` travels to platform hosts typed, with the same generated
+        // encoder `send`'s error branch already uses (no second schema).
+        let error = match self.peel(result) {
+            Type::Id(id) => match &self.resolve.types[id].kind {
+                TypeDefKind::Result(result) => result.err.expect("send's result has an error type"),
+                _ => panic!("wasi:http/client#send returns a result"),
+            },
+            _ => panic!("wasi:http/client#send returns a result"),
+        };
+        let error_rust = self.rust_type(error);
+        let encode_error = self.encode(error, "code");
         format!(
             "/// Resource kind of the request a source handler receives.\n\
              pub(super) const HTTP_REQUEST: u32 = {request};\n\
@@ -369,7 +380,9 @@ impl<'a> Generator<'a> {
              /// Decode a handler's published result (`client.send`'s result layout); owned handles\n\
              /// are claimed in `seen` and leave the table only once the caller commits them.\n\
              #[allow(unused_variables, unused_mut, clippy::all)]\n\
-             fn decode_ingress_result(r: &mut Reader<'_>, h: &Handles) -> wasmtime::Result<({rust}, Vec<u64>)> {{ let mut seen = Vec::new(); let value: {rust} = {decode}; r.end()?; Ok((value, seen)) }}\n"
+             fn decode_ingress_result(r: &mut Reader<'_>, h: &Handles) -> wasmtime::Result<({rust}, Vec<u64>)> {{ let mut seen = Vec::new(); let value: {rust} = {decode}; r.end()?; Ok((value, seen)) }}\n\
+             /// Encode a handler's `error-code` (`send`'s error branch) as standard binary bytes.\n\
+             fn encode_http_error(code: {error_rust}) -> Vec<u8> {{ let mut writer = Writer::default(); {{ let w = &mut writer; {encode_error} }} writer.0 }}\n"
         )
     }
 

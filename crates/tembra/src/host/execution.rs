@@ -9,21 +9,50 @@ impl Host {
         &self,
         operation: impl Future<Output = Result<T>> + 'static,
     ) -> Result<oneshot::Receiver<Result<T>>> {
+        self.spawn_settling(async move { (operation.await, None) })
+    }
+
+    /// Like [`Host::spawn`], but the operation may publish its result before its physical work
+    /// has ended. The result leaves on the same channel as soon as it exists; the task stays
+    /// tracked, so `Host::close` waits, until the remaining work ends. A failure of that work is
+    /// recorded in [`Host::errors`]; a receiver that is gone just drops the result.
+    pub(super) fn spawn_settling<T: 'static>(
+        &self,
+        operation: impl Future<Output = (Result<T>, Option<Physical>)> + 'static,
+    ) -> Result<oneshot::Receiver<Result<T>>> {
         let (send, receive) = oneshot::channel();
         let host = self.clone();
         self.0.active.set(self.0.active.get() + 1);
         if let Err(error) = self.0.executor.spawn_local(async move {
-            let result = std::panic::AssertUnwindSafe(operation)
+            let (result, physical) = std::panic::AssertUnwindSafe(operation)
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| {
-                    Err(Error::new(
-                        core::Code::Unavailable,
-                        "callback",
-                        "native callback panicked",
-                    ))
+                    (
+                        Err(Error::new(
+                            core::Code::Unavailable,
+                            "callback",
+                            "native callback panicked",
+                        )),
+                        None,
+                    )
                 });
             let _ = send.send(result);
+            if let Some(physical) = physical {
+                let settled = std::panic::AssertUnwindSafe(physical)
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(Error::new(
+                            core::Code::Unavailable,
+                            "callback",
+                            "native physical work panicked",
+                        ))
+                    });
+                if let Err(error) = settled {
+                    host.0.errors.borrow_mut().push(error);
+                }
+            }
             host.0.active.set(host.0.active.get() - 1);
             host.0.settled_waker.wake();
             for waiter in host.0.settled.take() {

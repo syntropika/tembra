@@ -42,9 +42,11 @@ function observe(
 export default orb({
   name: "ingress",
   apiVersion: 1,
+  // The fixed WIT dependency belongs to this revision and is shared by its request handlers.
+  create,
   services: {
     handler: {
-      create,
+      create: (self: Declaration) => self.orb as Environment,
       methods: {
         async handle(environment: Environment, _context: Context, request: Request) {
           const path = request.getPathWithQuery() ?? "/";
@@ -98,6 +100,21 @@ export default orb({
           }
           if (path === "/error")
             throw Object.assign(new Error("denied"), { payload: { tag: "HTTP-request-denied" } });
+          if (path.startsWith("/refuse/")) {
+            // Typed refusals with payloads: escaped/unicode text, a record, an exact u64.
+            const payloads: Record<string, unknown> = {
+              escaped: { tag: "internal-error", val: 'quote " slash \\ line\nend é🌍' },
+              record: {
+                tag: "HTTP-request-header-size",
+                val: { fieldName: "x-big", fieldSize: 4294967295 },
+              },
+              u64: { tag: "HTTP-response-body-size", val: 18446744073709551615n },
+              dns: { tag: "DNS-error", val: { rcode: "SERVFAIL", infoCode: 65535 } },
+            };
+            throw Object.assign(new Error("refused"), {
+              payload: payloads[path.slice("/refuse/".length)],
+            });
+          }
           if (path === "/trap") throw new Error("handler trap");
           if (path === "/idle") {
             // Idle in a request read after the head: only the host's disconnect signals end it.

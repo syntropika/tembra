@@ -11,9 +11,20 @@ import {
 import type { OrbArtifact } from "../src/authoring/types.ts";
 import { verifyHttpScenario, verifyRawHttpScenario } from "./http-browser.ts";
 import { verifySocketScenario } from "./sockets-browser.ts";
-// Incoming HTTP acceptance; enabled in the page once the contracts admit the handler export.
+// Incoming HTTP acceptance is invoked by the browser qualification page.
 export { verifyIngressScenario } from "./ingress-browser.ts";
 import { verifyPrecisionScenario } from "./precision-scenario.ts";
+import { verifyContextAcquireScenario } from "./context-acquire-scenario.ts";
+
+/** Chrome entry of the same keyed-acquisition scenario used by the packaged Node consumer. */
+export async function verifyContextAcquireBrowser(engine?: URL): Promise<string> {
+  const host = await createHost({ isolated: engine ? { engine } : {} });
+  try {
+    return await verifyContextAcquireScenario(host, source);
+  } finally {
+    await host.close();
+  }
+}
 
 /** Chrome entry of the exact u64/s64 scenario; called once the 64-bit fixtures are built. */
 export async function verifyPrecisionBrowser(engine?: URL): Promise<string> {

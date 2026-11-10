@@ -35,7 +35,7 @@ fn model() -> Model {
                 contract: Some("test:prepared/store@1.0.0".into()),
                 explicit: true,
                 name: Some("store".into()),
-                resources: false,
+                resources: Default::default(),
                 functions: vec![function(
                     "fetch",
                     vec![field("key", Ty::String)],
@@ -49,7 +49,7 @@ fn model() -> Model {
                 contract: Some("test:prepared/values@1.0.0".into()),
                 explicit: true,
                 name: Some("values".into()),
-                resources: false,
+                resources: Default::default(),
                 functions: vec![function(
                     "read-bytes",
                     vec![field("item", Ty::Ref(0))],
@@ -196,7 +196,7 @@ fn doubling(levels: u32, functions: usize, level: impl Fn(Ty) -> Kind) -> Model 
                 contract: Some("test:prepared/values@1.0.0".into()),
                 explicit: true,
                 name: Some("values".into()),
-                resources: false,
+                resources: Default::default(),
                 functions: (0..functions)
                     .map(|index| {
                         function(

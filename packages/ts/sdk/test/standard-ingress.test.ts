@@ -394,3 +394,56 @@ test("a handler-only revision has no outgoing HTTP: client.send is refused befor
   guest.drop(handle);
   await finish(host, exchange);
 });
+
+test("a body whose iterator factory throws is closed as tracked cleanup, never escaping (M-1)", async () => {
+  // A locked WHATWG stream throws from getReader() in its iterator factory.
+  const state = { factories: 0, returns: 0 };
+  const locked: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]() {
+      state.factories++;
+      throw new TypeError("ReadableStream is locked");
+    },
+  };
+  // Never read: the callback ends with an error code, then the host retires cleanly.
+  {
+    const { host, guest, exchange, handle } = serving(incoming({ body: locked }));
+    await host.async(head({ tag: "err", val: { tag: "HTTP-request-denied" } }));
+    guest.drop(handle);
+    await finish(host, exchange);
+    expect(state.factories).toBe(1);
+  }
+  // A throwing return() is the same: called once, tracked, settled.
+  const throwing: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]: () => ({
+      next: () => new Promise<IteratorResult<Uint8Array>>(() => {}),
+      return() {
+        state.returns++;
+        throw new Error("cleanup failed");
+      },
+    }),
+  };
+  {
+    const { host, exchange } = serving(incoming({ body: throwing }));
+    await finish(host, exchange, new Error("cancelled"));
+    expect(state.returns).toBe(1);
+  }
+});
+
+test("a request the browser host refuses at hand-off closes the body it took, once (L-1)", async () => {
+  for (const overrides of [
+    { fields: [["bad name", Uint8Array.of(0x41)] as const] },
+    { method: "BAD METHOD" },
+  ]) {
+    const body = source();
+    const { host } = standard();
+    const exchange = new IngressExchange(
+      checkedRequest(incoming({ ...overrides, body: body.body })),
+    );
+    expect(() => host.beginIngress(exchange)).toThrow(/invalid incoming/);
+    exchange.head.catch(() => {});
+    // The host owned the body; settlement does not open or close it a second time.
+    exchange.settle(new Error("refused"));
+    await retire(host);
+    expect(body.state.returned).toBe(1);
+  }
+});

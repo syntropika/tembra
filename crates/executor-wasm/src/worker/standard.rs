@@ -20,9 +20,10 @@ pub(crate) use adapter::{Compiled as StreamAdapter, attribute as attribute_trap}
 use codec::{Reader, Writer};
 use handles::{Close, Entry, Handles, Lease, Owned};
 use streams::{
-    ABANDONED_FUTURE, ItemConsumer, Pipe, Promise, Promised, ReadTurn, Slot, Writing, read_future,
+    ABANDONED_FUTURE, ItemConsumer, Promise, Promised, ReadTurn, Slot, Writing, read_future,
     read_stream,
 };
+pub(crate) use streams::{Pipe, PipeConsumer};
 
 use tokio::sync::oneshot;
 use wasmtime::{
@@ -246,6 +247,7 @@ fn publish_ingress(
     let received = ingress.received.take().expect("taken with the head");
     let exchange = Arc::clone(&ingress.exchange);
     store.data_mut().standard.handles.commit(seen);
+    let mut refusal = None;
     match value {
         Ok(response) => {
             use wasmtime_wasi_http::WasiHttpView;
@@ -265,9 +267,16 @@ fn publish_ingress(
                 "wasi_http_handler",
                 message,
             )));
+            refusal = Some(crate::ingress::IngressEvent::refused(code));
         }
     }
+    // The typed refusal leaves on this callback's own channel before the guest's publication
+    // completes, so the callback's `Done` can never overtake it.
+    let events = store.data().events.clone();
     store.spawn(async move |_: &wasmtime::component::Accessor<State>| {
+        if let (Some(refusal), Some(events)) = (refusal, events) {
+            let _ = events.send(super::Event::Ingress(refusal)).await;
+        }
         exchange.delivered().await;
         if let Some(reply) = reply {
             let _ = reply.send(Ok(Delivery {
@@ -278,6 +287,14 @@ fn publish_ingress(
         }
         Ok(())
     })
+}
+
+impl crate::ingress::IngressEvent {
+    /// A handler's `error-code` as the typed `Refused` event, encoded by the generated
+    /// standard codec; shared by source and compiled handlers.
+    pub(crate) fn refused(code: wasmtime_wasi_http::p3::bindings::http::types::ErrorCode) -> Self {
+        Self::Refused(encode_http_error(code))
+    }
 }
 
 /// Release handles whose reply never reached the guest, plus orphans of a refused reply.
@@ -876,6 +893,57 @@ mod tests {
         assert_ne!(replacement, id);
         assert!(first.borrow::<()>(0, id).is_err());
         assert_eq!(first.borrow::<()>(0, replacement).unwrap().rep(), 7);
+    }
+
+    /// A handler `error-code` crosses to platform hosts through the generated encoder; the
+    /// generated decoder of the same result layout reads every payload shape back exactly.
+    #[test]
+    fn typed_refusals_round_trip_through_the_generated_codec() {
+        use wasmtime_wasi_http::p3::bindings::http::types::{
+            DnsErrorPayload, ErrorCode, FieldSizePayload, TlsAlertReceivedPayload,
+        };
+        let size = |name: Option<&str>, size| FieldSizePayload {
+            field_name: name.map(Into::into),
+            field_size: size,
+        };
+        for code in [
+            ErrorCode::DnsTimeout,
+            ErrorCode::DnsError(DnsErrorPayload {
+                rcode: Some("q\"\n\\ é🌍\0".into()),
+                info_code: Some(u16::MAX),
+            }),
+            ErrorCode::TlsAlertReceived(TlsAlertReceivedPayload {
+                alert_id: Some(u8::MAX),
+                alert_message: None,
+            }),
+            ErrorCode::HttpRequestBodySize(Some(u64::MAX)),
+            ErrorCode::HttpRequestBodySize(None),
+            ErrorCode::HttpRequestHeaderSectionSize(Some(u32::MAX)),
+            ErrorCode::HttpRequestHeaderSize(Some(size(Some("x-big"), Some(u32::MAX)))),
+            ErrorCode::HttpRequestTrailerSize(size(None, None)),
+            ErrorCode::HttpResponseBodySize(Some(1 << 53 | 1)),
+            ErrorCode::HttpResponseContentCoding(Some("br".into())),
+            ErrorCode::HttpResponseTransferCoding(None),
+            ErrorCode::LoopDetected,
+            ErrorCode::InternalError(Some("quote \" newline \n é🌍".into())),
+            ErrorCode::InternalError(None),
+        ] {
+            let expected = format!("{code:?}");
+            let crate::ingress::IngressEvent::Refused(bytes) =
+                crate::ingress::IngressEvent::refused(code)
+            else {
+                panic!("a refusal event")
+            };
+            let mut packet = vec![1];
+            packet.extend(bytes);
+            let mut reader = Reader(&packet);
+            let (value, seen) = decode_ingress_result(&mut reader, &Handles::new()).unwrap();
+            assert!(seen.is_empty());
+            let Err(decoded) = value else {
+                panic!("an error branch")
+            };
+            assert_eq!(format!("{decoded:?}"), expected);
+        }
     }
 
     /// The browser and guest interpret the table generated with this dispatcher.

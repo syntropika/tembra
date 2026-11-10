@@ -27,7 +27,9 @@ use alloc::{
     vec::Vec,
 };
 use core::{cell::Cell, pin::pin};
-use wasi::http::types::{ErrorCode, Fields, Request, Response, Trailers};
+use wasi::http::types::{
+    DnsErrorPayload, ErrorCode, FieldSizePayload, Fields, Request, Response, Trailers,
+};
 use wit_bindgen::{FutureReader, FutureWriter, StreamReader, StreamResult, StreamWriter};
 
 #[global_allocator]
@@ -233,6 +235,25 @@ impl exports::wasi::http::handler::Guest for Handler {
             #[cfg(feature = "proxy")]
             "/proxy" => Mode::Proxy,
             "/error" => return Err(ErrorCode::InternalError(Some("refused".into()))),
+            // Typed refusals with payloads: escaped/unicode text, a record, an exact u64.
+            "/refuse/escaped" => {
+                return Err(ErrorCode::InternalError(Some(
+                    "quote \" slash \\ line\nend é🌍".into(),
+                )));
+            }
+            "/refuse/record" => {
+                return Err(ErrorCode::HttpRequestHeaderSize(Some(FieldSizePayload {
+                    field_name: Some("x-big".into()),
+                    field_size: Some(u32::MAX),
+                })));
+            }
+            "/refuse/u64" => return Err(ErrorCode::HttpResponseBodySize(Some(u64::MAX))),
+            "/refuse/dns" => {
+                return Err(ErrorCode::DnsError(DnsErrorPayload {
+                    rcode: Some("SERVFAIL".into()),
+                    info_code: Some(u16::MAX),
+                }));
+            }
             "/slow" => return slow(request).await,
             "/late-error" => {
                 let (_, consumed) = wit_future::new::<Result<(), ErrorCode>>(|| Ok(()));

@@ -98,15 +98,26 @@ impl State {
     /// End an ingress callback. A body still being delivered after a failed or unsettled
     /// callback ends with an error, never a truncated end; a request the guest never took is
     /// released, since a request belongs to its callback.
+    ///
+    /// Returns the error the callback completes with: the handler's `error-code`, or a
+    /// callback that ended without ever publishing its response. The caller applies it only
+    /// to a callback that otherwise succeeded, so a trap or the callback's own error wins.
     fn end_ingress(&mut self, failed: bool) -> wasmtime::Result<Option<String>> {
         let Some(ingress) = self.ingress.take() else {
             return Ok(None);
+        };
+        // Decided before cleanup: an unpublished head is a failed request, never `ok` without
+        // a response.
+        let refused = match (ingress.refused, ingress.head.is_some()) {
+            (Some(refused), _) => Some(refused),
+            (None, true) => Some("the incoming HTTP handler returned no response".to_owned()),
+            (None, false) => None,
         };
         if failed || !ingress.exchange.ended() {
             ingress.exchange.fail();
         }
         super::standard::release_unclaimed(self, ingress.request)?;
-        Ok(ingress.refused)
+        Ok(refused)
     }
 }
 

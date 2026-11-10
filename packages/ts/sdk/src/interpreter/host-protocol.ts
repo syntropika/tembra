@@ -63,6 +63,15 @@ export type HostRequest =
 export type AsyncHostRequest =
   | ({ readonly operation: "hook.run"; readonly value: unknown } & Handle)
   | ({ readonly operation: "reference.ready" } & Handle)
+  /**
+   * `Context.get`: the guest names only a selected import binding and key; the host supplies the
+   * invocation, principal and requirement and issues the handle into the caller's own table.
+   */
+  | {
+      readonly operation: "reference.acquire";
+      readonly service: string;
+      readonly key: readonly string[];
+    }
   | ({
       readonly operation: "reference.call";
       readonly method: string;
@@ -117,6 +126,7 @@ const SYNC = {
 const ASYNC = {
   "hook.run": { ...HANDLE, value: "json" },
   "reference.ready": HANDLE,
+  "reference.acquire": { service: "string", key: "keys" },
   "reference.call": { ...HANDLE, method: "string", args: "json" },
   wait: { milliseconds: "u32" },
 } as const satisfies Record<AsyncHostRequest["operation"], Schema>;

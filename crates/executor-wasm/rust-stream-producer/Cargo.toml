@@ -1,0 +1,26 @@
+[package]
+name = "tembra-wasm-stream-producer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# `async-spawn` keeps the writer running in the export's task after the stream was returned.
+wit-bindgen = { version = "=0.63.0", default-features = false, features = [
+  "macros",
+  "realloc",
+  "async",
+  "async-spawn",
+] }
+dlmalloc = { version = "0.2.12", features = ["global"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+strip = "symbols"

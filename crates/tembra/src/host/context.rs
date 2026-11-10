@@ -183,7 +183,8 @@ impl Host {
         signal
     }
 
-    /// Mirror a shared kernel cancellation action into native context signals.
+    /// Mirror a shared kernel cancellation action into native context signals, and cancel the
+    /// stream ends delivered to this root at once.
     pub fn cancel_context(&self, root: core::Id) {
         if let Some(signal) = self
             .0
@@ -194,6 +195,38 @@ impl Host {
         {
             Cancellation(signal).cancel();
         }
+        for stream in self.root_streams(root, false) {
+            stream.cancel_root();
+        }
+    }
+
+    /// Bind a delivered stream end to the root that received it.
+    pub(crate) fn bind_root_stream(
+        &self,
+        root: core::Id,
+        stream: std::rc::Weak<dyn crate::portable::RootStream>,
+    ) -> Result<()> {
+        self.kernel().check_root(root)?;
+        let mut claims = self.0.root_references.borrow_mut();
+        let streams = &mut claims.entry(root).or_default().streams;
+        streams.retain(|stream| stream.strong_count() != 0);
+        streams.push(stream);
+        Ok(())
+    }
+
+    /// The live stream ends of a root, taken out of the registry when the root ends. Collected
+    /// first, so a stream's close never runs while the registry is borrowed.
+    fn root_streams(&self, root: core::Id, take: bool) -> Vec<Rc<dyn crate::portable::RootStream>> {
+        let mut claims = self.0.root_references.borrow_mut();
+        let Some(claims) = claims.get_mut(&root) else {
+            return Vec::new();
+        };
+        let streams = if take {
+            std::mem::take(&mut claims.streams)
+        } else {
+            claims.streams.clone()
+        };
+        streams.iter().filter_map(std::rc::Weak::upgrade).collect()
     }
 }
 
@@ -217,6 +250,7 @@ impl Context {
             .borrow_mut()
             .entry(self.root)
             .or_default()
+            .references
             .push(reference.clone());
         Ok(reference)
     }
@@ -248,13 +282,19 @@ impl Context {
 impl Host {
     /// Revoke native claims acquired inside a root whose logical wait has ended.
     /// Shared drivers call this for roots they issue themselves.
+    /// Stream ends delivered to the root are closed first, so their producers stop before the
+    /// root's claims are revoked; a retained end then refuses every read.
     pub fn end_context(&self, root: core::Id) {
+        for stream in self.root_streams(root, true) {
+            stream.end_root();
+        }
         let references = self
             .0
             .root_references
             .borrow_mut()
             .remove(&root)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .references;
         for reference in references {
             if let Err(error) = reference.release() {
                 self.0.errors.borrow_mut().push(error);

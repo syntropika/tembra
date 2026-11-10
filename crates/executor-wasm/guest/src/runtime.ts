@@ -64,26 +64,67 @@ import "./builtins.ts";
     return id;
   }
 
+  /** Encode an operation on a handle issued by the `scope` environment's host table. */
+  function scoped<
+    O extends
+      | "state.read"
+      | "state.update"
+      | "reference.release"
+      | "reference.status"
+      | "reference.state"
+      | "resource.read",
+  >(scope: number, operation: O, input: Omit<HostRequests[O], "scope">): any {
+    return JSON.parse(__hostSync(JSON.stringify({ operation, scope, ...(input as object) })));
+  }
+
+  /** Normalize a key: the host protocol carries only lists, a string names a one-segment key. */
+  function keyList(key: string | readonly string[]): string[] {
+    if (typeof key === "string") return [key];
+    if (!Array.isArray(key)) throw new Error("A reference key is a string or a list of strings");
+    return [...key];
+  }
+
+  /**
+   * Proxy one host reference handle of a WIT import. Declared and `Context.get` handles share it;
+   * the host decides which callbacks may still use the handle.
+   */
+  function reference(scope: number, id: number, service: string) {
+    const state = stateValues.readable((known) =>
+      scoped(scope, "reference.state", known === undefined ? { id } : { id, known }),
+    );
+    return new Proxy(Object.create(null), {
+      get(_target, method) {
+        if (method === "then") return undefined;
+        if (method === "release") return () => scoped(scope, "reference.release", { id });
+        if (method === "ready") return call("reference.ready", { scope, id });
+        if (method === "status") return scoped(scope, "reference.status", { id });
+        if (method === "state") return state;
+        if (method === "opaque")
+          return () => {
+            throw new Error("Cross-heap opaque values require a resource adapter");
+          };
+        if (!wire.hasImportMethod(service, method))
+          throw new Error(`Unknown WIT import method ${service}#${String(method)}`);
+        if (typeof method !== "string") return undefined;
+        return (...args: any[]) => {
+          if (args.at(-1)?.[contextMarker] === true) args.pop();
+          return call("reference.call", {
+            scope,
+            id,
+            method,
+            args: wire.importArguments(service, method, args),
+          }).then((value) => wire.importResult(service, method, value));
+        };
+      },
+    });
+  }
+
   /** Create a declaration proxy whose operations are checked by the outer host. */
   function declaration(owner: number) {
     /** Avoid retaining callbacks after the factory's declaration pass has ended. */
     function checkFactory() {
       if (declaring !== owner) throw new Error("Declaration factory has ended");
     }
-    /** Bind every issued proxy to its actual environment identity. */
-    const scoped = <
-      O extends
-        | "state.read"
-        | "state.update"
-        | "reference.release"
-        | "reference.status"
-        | "reference.state"
-        | "resource.read",
-    >(
-      operation: O,
-      input: Omit<HostRequests[O], "scope">,
-    ): any =>
-      JSON.parse(__hostSync(JSON.stringify({ operation, scope: owner, ...(input as object) })));
     return Object.freeze({
       get key() {
         return sync("address").key;
@@ -121,7 +162,7 @@ import "./builtins.ts";
           validate: check,
         });
         const view = stateValues.readable((known) =>
-          scoped("state.read", known === undefined ? { id } : { id, known }),
+          scoped(owner, "state.read", known === undefined ? { id } : { id, known }),
         );
         if (check !== null) validate(view.value);
         return Object.freeze({
@@ -137,7 +178,7 @@ import "./builtins.ts";
           update(context: { check(): void }, change: (value: Json) => unknown) {
             context.check();
             const value = validate(change(view.value));
-            return view.adopt(scoped("state.update", { id, value }));
+            return view.adopt(scoped(owner, "state.update", { id, value }));
           },
         });
       },
@@ -166,39 +207,8 @@ import "./builtins.ts";
         checkFactory();
         if (options !== undefined)
           throw new Error("Acquisition options are unsupported by the isolated value profile");
-        // The host protocol carries only key lists; a single string names a one-segment key.
-        const id = sync("reference.declare", {
-          service,
-          key: typeof key === "string" ? [key] : [...key],
-        });
-        const state = stateValues.readable((known) =>
-          scoped("reference.state", known === undefined ? { id } : { id, known }),
-        );
-        return new Proxy(Object.create(null), {
-          get(_target, method) {
-            if (method === "then") return undefined;
-            if (method === "release") return () => scoped("reference.release", { id });
-            if (method === "ready") return call("reference.ready", { scope: owner, id });
-            if (method === "status") return scoped("reference.status", { id });
-            if (method === "state") return state;
-            if (method === "opaque")
-              return () => {
-                throw new Error("Cross-heap opaque values require a resource adapter");
-              };
-            if (!wire.hasImportMethod(service, method))
-              throw new Error(`Unknown WIT import method ${service}#${String(method)}`);
-            if (typeof method !== "string") return undefined;
-            return (...args: any[]) => {
-              if (args.at(-1)?.[contextMarker] === true) args.pop();
-              return call("reference.call", {
-                scope: owner,
-                id,
-                method,
-                args: wire.importArguments(service, method, args),
-              }).then((value) => wire.importResult(service, method, value));
-            };
-          },
-        });
+        const id = sync("reference.declare", { service, key: keyList(key) });
+        return reference(owner, id, service);
       },
       resource(
         name: string,
@@ -243,7 +253,7 @@ import "./builtins.ts";
         });
         const close = retain(async (id: number) => {
           const value = values.get(id);
-          await options.close?.(value, context());
+          await options.close?.(value, context(owner));
           values.delete(id);
           owners.delete(id);
         });
@@ -258,15 +268,19 @@ import "./builtins.ts";
           [resourceMarker]: Object.freeze({ scope: owner, id }),
           version: options.version ?? 1,
           get value() {
-            return values.get(scoped("resource.read", { id }));
+            return values.get(scoped(owner, "resource.read", { id }));
           },
         });
       },
     });
   }
 
-  /** Expose operations on the currently admitted context, never its numeric kernel handle. */
-  function context() {
+  /**
+   * Expose operations on the currently admitted context, never its numeric kernel handle.
+   * `environment` is the host environment running the callback; its table receives the handles
+   * acquired through this context.
+   */
+  function context(environment: number) {
     const callback = activeCallback;
     /** A retained guest proxy cannot inherit a later callback's native context. */
     function checkLifetime() {
@@ -286,6 +300,18 @@ import "./builtins.ts";
       cancel() {
         checkLifetime();
         sync("context.cancel");
+      },
+      /**
+       * Acquire a selected WIT Orb import by key for this context's root and principal. The host
+       * resolves the provider and its installed requirement, waits for readiness and releases
+       * the claim when the root ends; the handle is refused in every other root.
+       */
+      async get(service: string, key: string | readonly string[], options?: unknown) {
+        checkLifetime();
+        if (options !== undefined)
+          throw new Error("Acquisition options are unsupported by the isolated value profile");
+        const id = await call("reference.acquire", { service, key: keyList(key) });
+        return reference(environment, id, service);
       },
     });
   }
@@ -369,7 +395,7 @@ import "./builtins.ts";
           result = await wire.invoke(request.service, request.method, () =>
             orb.services[request.service]!.methods[request.method]!(
               environments.get(request.environment),
-              context(),
+              context(request.environment),
               ...wire.arguments(request.service, request.method, request.args),
             ),
           );
@@ -382,7 +408,7 @@ import "./builtins.ts";
           result = await wire.invoke(request.service, request.method, () =>
             handle(
               environments.get(request.environment),
-              context(),
+              context(request.environment),
               wire.arguments(request.service, request.method, request.args)[0],
             ),
           );
@@ -395,7 +421,7 @@ import "./builtins.ts";
           if (typeof handle !== "function") throw new Error("Unknown HTTP handler service");
           const environment = environments.get(request.environment);
           await globalThis.__tembraIngress!.serve(request.request, (incoming) =>
-            handle(environment, context(), incoming),
+            handle(environment, context(request.environment), incoming),
           );
           break;
         }

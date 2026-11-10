@@ -293,3 +293,85 @@ fn a_forgotten_dependency_cannot_block_provider_shutdown() {
     assert!(actions.contains(&Action::DisposeObject(provider.object)));
     assert!(actions.contains(&Action::DisposeObject(consumer.object)));
 }
+
+/// A live provider object with two declared methods and one claim requiring only `read`.
+fn narrowed_claim(host: &Host) -> Acquisition {
+    let mut orb = Orb::new("dup", 1);
+    orb.services.push(Service::new("dup", ["read", "write"]));
+    let reload = host.prepare(vec![orb], vec![]).unwrap();
+    host.commit(reload.id, vec![]).unwrap();
+    let claim = host
+        .acquire(
+            Address {
+                service: "dup".into(),
+                key: vec!["main".into()],
+                principal: "host".into(),
+            },
+            1,
+            BTreeSet::from(["read".to_owned()]),
+        )
+        .unwrap();
+    host.ready(claim.object).unwrap();
+    host.drain();
+    claim
+}
+
+#[test]
+fn duplicate_is_an_independent_claim_with_the_same_admission_and_no_activation() {
+    let host = Host::new();
+    let claim = narrowed_claim(&host);
+    let objects = host.diagnostics().objects;
+    let copy = host.duplicate(claim.reference).unwrap();
+    assert_ne!(copy, claim.reference);
+    // Same object, nothing activated, resolved or scheduled.
+    assert_eq!(host.diagnostics().objects, objects);
+    assert!(host.drain().is_empty());
+    assert_eq!(
+        host.reference_methods(copy).unwrap(),
+        host.reference_methods(claim.reference).unwrap()
+    );
+    // The copy outlives the original and keeps the object live.
+    host.release(claim.reference).unwrap();
+    host.forget_reference(claim.reference).unwrap();
+    assert!(host.drain().is_empty());
+    assert_eq!(host.status(copy).unwrap(), Status::Live);
+    let root = host.begin_root("host").unwrap();
+    let call = host.begin_call(copy, root, "read").unwrap();
+    // The required-method narrowing is copied, not re-derived from the service.
+    let refused = host.begin_call(copy, root, "write").unwrap_err();
+    assert_eq!(refused.code, Code::Forbidden);
+    host.finish_call(call.id).unwrap();
+    host.end_root(root).unwrap();
+    host.release(copy).unwrap();
+    assert!(host.drain().contains(&Action::DisposeObject(claim.object)));
+}
+
+#[cfg(feature = "views")]
+#[test]
+fn duplicate_copies_the_view_restriction() {
+    let host = Host::new();
+    let claim = narrowed_claim(&host);
+    host.restrict(claim.reference, BTreeSet::new()).unwrap();
+    let copy = host.duplicate(claim.reference).unwrap();
+    assert!(host.reference_methods(copy).unwrap().is_empty());
+    let root = host.begin_root("host").unwrap();
+    let refused = host.begin_call(copy, root, "read").unwrap_err();
+    assert_eq!(refused.code, Code::Forbidden);
+    host.end_root(root).unwrap();
+}
+
+#[test]
+fn duplicate_refuses_released_unknown_and_closing() {
+    let host = Host::new();
+    let claim = narrowed_claim(&host);
+    let copy = host.duplicate(claim.reference).unwrap();
+    host.release(claim.reference).unwrap();
+    assert_eq!(
+        host.duplicate(claim.reference).unwrap_err().code,
+        Code::Released
+    );
+    assert_eq!(host.duplicate(9_999).unwrap_err().code, Code::Gone);
+    // A closing host disposes live objects and admits no new claim, even from a live one.
+    host.close();
+    assert!(host.duplicate(copy).is_err());
+}

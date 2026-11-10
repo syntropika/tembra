@@ -22,9 +22,36 @@ impl Host {
             )
         };
         let entered = self.context(call.root, Some(call))?;
-        self.spawn(async move { handle(environment, entered, arguments).await })?
-            .await
-            .map_err(|_| Error::invalid(Reason::Executor, "native callback executor stopped"))?
+        // JSON and RPC callers are data-only: a capability-bearing result, including a stream
+        // end, is refused and closed. This boundary cannot hand out an early result, so it
+        // returns, with a value or an error, only after the call's physical work has ended.
+        let host = self.clone();
+        self.spawn(async move {
+            let (head, physical) = handle(
+                environment,
+                entered,
+                crate::portable::Payload::data(arguments),
+            )
+            .await?
+            .into_parts();
+            let value = head.and_then(crate::portable::Payload::into_data);
+            let settled = match physical {
+                Some(physical) => physical.await,
+                None => Ok(()),
+            };
+            match (value, settled) {
+                (Ok(value), settled) => settled.map(|()| value),
+                // The head's error is the one returned; a physical failure behind it would
+                // otherwise be lost, so it is recorded like any other late physical failure.
+                (Err(primary), Err(physical)) => {
+                    host.0.errors.borrow_mut().push(physical);
+                    Err(primary)
+                }
+                (Err(primary), Ok(())) => Err(primary),
+            }
+        })?
+        .await
+        .map_err(|_| Error::invalid(Reason::Executor, "native callback executor stopped"))?
     }
 
     /// Encode a value only if its declaration permits language crossing.

@@ -89,7 +89,12 @@ impl Orb {
     fn call(&mut self, method: &'static str, args: Value) -> tembra::Result<Value> {
         let reference = self.reference.clone();
         self.pool.run_until(self.host.root("alice", move |context| {
-            async move { reference.call_value(&context, method, args).await }.boxed_local()
+            async move {
+                reference
+                    .call_portable::<_, serde_json::Value>(&context, method, args)
+                    .await
+            }
+            .boxed_local()
         }))
     }
 
@@ -111,7 +116,9 @@ impl Orb {
                 .root("alice", move |context| {
                     async move {
                         let _ = issued.send(context.clone());
-                        reference.call_value(&context, method, args).await
+                        reference
+                            .call_portable::<_, serde_json::Value>(&context, method, args)
+                            .await
                     }
                     .boxed_local()
                 })

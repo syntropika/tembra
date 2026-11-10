@@ -146,7 +146,7 @@ impl PreparedContract {
     /// Flip the spelling of every `u64`/`s64` leaf in an already checked value, descending only
     /// into types that reach one (a per-type flag computed once at preparation). The check
     /// guaranteed every shape seen here; a disagreement is reported, never papered over.
-    fn respell(&self, ty: Ty, value: &mut Value) -> Result<(), Error> {
+    pub(crate) fn respell(&self, ty: Ty, value: &mut Value) -> Result<(), Error> {
         if !self.wide(ty) {
             return Ok(());
         }
@@ -217,6 +217,16 @@ impl PreparedContract {
                 continue;
             }
             if let Item::Interface(interface) = &entry.item {
+                if !interface.resources.is_empty()
+                    || interface
+                        .functions
+                        .iter()
+                        .any(|function| !function.kind.freestanding())
+                {
+                    return Err(Error(
+                        "resource exports require a capability transport".into(),
+                    ));
+                }
                 for function in &interface.functions {
                     self.supported_function(function)?;
                 }
@@ -236,6 +246,16 @@ impl PreparedContract {
         let Item::Interface(interface) = &entry.item else {
             return Err(Error("Orb import must be an interface".into()));
         };
+        if !interface.resources.is_empty()
+            || interface
+                .functions
+                .iter()
+                .any(|function| !function.kind.freestanding())
+        {
+            return Err(Error(
+                "resource imports require a capability transport".into(),
+            ));
+        }
         for function in &interface.functions {
             self.supported_function(function)?;
         }
@@ -253,7 +273,7 @@ impl PreparedContract {
     }
 
     /// Refuse lossy integer, native handle and asynchronous container coercions before execution.
-    fn supported(&self, ty: Ty, depth: usize) -> Result<(), Error> {
+    pub(crate) fn supported(&self, ty: Ty, depth: usize) -> Result<(), Error> {
         if depth > MAX_DEPTH {
             return Err(Error(
                 "WIT type nesting exceeds the value profile limit".into(),
@@ -322,7 +342,12 @@ impl PreparedContract {
     }
 
     /// Validate the single WIT result or the absence of a result.
-    fn check_result(&self, form: Form, function: &Function, value: &Value) -> Result<(), Error> {
+    pub(crate) fn check_result(
+        &self,
+        form: Form,
+        function: &Function,
+        value: &Value,
+    ) -> Result<(), Error> {
         match function.result {
             Some(ty) => self.validate(form, ty, value, 0),
             None if value.is_null() => Ok(()),
@@ -331,7 +356,13 @@ impl PreparedContract {
     }
 
     /// Check values recursively without silently truncating fields or numeric widths.
-    fn validate(&self, form: Form, ty: Ty, value: &Value, depth: usize) -> Result<(), Error> {
+    pub(crate) fn validate(
+        &self,
+        form: Form,
+        ty: Ty,
+        value: &Value,
+        depth: usize,
+    ) -> Result<(), Error> {
         if depth > MAX_DEPTH {
             return Err(Error("WIT value nesting exceeds its limit".into()));
         }

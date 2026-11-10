@@ -18,6 +18,7 @@ mod port;
 mod prepare;
 #[cfg(feature = "authoring")]
 mod provenance;
+mod resource_profile;
 mod selection;
 mod signatures;
 #[cfg(feature = "authoring")]
@@ -33,10 +34,12 @@ pub use implementation::{
 };
 pub use lower::{Binding, HostImport, Plan};
 pub use model::{
-    Case, Entry, Field, Function, FunctionKind, Interface, Item, Kind, Model, PreparedContract, Ty,
+    Case, Entry, Field, Function, FunctionKind, Interface, Item, Kind, Model, PreparedContract,
+    ResourceIdentity, Ty,
 };
 pub use permissions::{FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability};
 pub use port::envelope;
+pub use resource_profile::ResourceSignature;
 pub use selection::OrbProvider;
 pub use validate::javascript_name;
 
@@ -77,6 +80,10 @@ mod permission_tests;
 mod prepared_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod provenance_tests;
+#[cfg(all(test, feature = "authoring"))]
+mod resource_identity_tests;
+#[cfg(all(test, feature = "authoring"))]
+mod resource_profile_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod tests;
 #[cfg(all(test, feature = "authoring"))]

@@ -109,8 +109,9 @@ bind to its owned request/response resources through the portable value ABI.
 
 One streaming request holds the revision's single callback slot. `Limits.timeout_ms` covers the
 whole request, including its body; exceeding it quarantines that revision. A guest that ignores
-all disconnect signals also remains bounded by that timeout. This compiled Rust facade is the
-first incoming HTTP slice; source and foreign-host support are qualified separately.
+all disconnect signals also remains bounded by that timeout. Source handlers use the same
+standard handler contract. The SDK exposes its host-owned request entrypoint separately;
+see [WASI coverage](../crates/executor-wasm/README.md#wasi-coverage) for platform qualification.
 
 ## Native composition and ownership
 
@@ -135,10 +136,130 @@ acquisitions. References expose `status()` and retain normal deterministic `rele
 `Drop` behavior. Policy errors reject acquisition or revoke methods on existing claims.
 Enable matching `hooks`, `subscriptions` and `views` features on the native facade.
 
-`Reference::call` retains the existing Rust-only contract and does not require extra
-serialization traits. `call_portable` accepts serializable arguments and deserializable
-results and converts values only when the selected callback belongs to another adapter.
-It preserves the original root, frame, principal and code version.
+`Reference::call` moves typed native Rust values without
+serializing them and does not require extra serialization traits. `call_portable` always
+uses the provider's portable entrypoint, whatever its language or isolation, so a typed
+native provider receives the same encoded arguments as a dynamic caller. Its arguments are
+serializable values or a `tembra::portable::Payload`. Its results are deserializable values,
+which refuse host capabilities, or a type that implements `FromPayload`. It preserves the
+original root, frame, principal and code version.
+
+## Owned WIT resources
+
+Compiled Orbs installed with `Engine::load` can return a resource as the complete result and
+borrow that resource as a method's implicit `self`. For example, this WIT interface:
+
+```wit
+interface sessions {
+  resource session {
+    constructor(seed: u64);
+    add: func(n: u64) -> u64;
+  }
+}
+```
+
+After acquiring the compiled interface as `sessions`, native Rust uses a typed owned handle:
+
+```rust
+use futures::FutureExt;
+use tembra::portable::Owned;
+
+let session: Owned = host.root("alice", move |context| async move {
+    sessions.call_portable(&context, "[constructor]session", (4_u64,)).await
+}.boxed_local()).await?;
+
+let total: u64 = host.root("alice", move |context| async move {
+    let total = session.call_portable(&context, "[method]session.add", (2_u64,)).await?;
+    drop(session);
+    Ok(total)
+}.boxed_local()).await?;
+```
+
+Each construction creates a separate guest instance. `Owned` preserves the originating
+reference's API, method and view restrictions; it can outlive that reference and its root.
+Method calls still enter ordinary kernel admission. Its implicit borrow stays physically
+pinned until the call settles, even if the caller abandons its result. Dropping `Owned`
+requests destruction on the issuing Store's worker. Handles are neither cloneable nor
+serializable, and a numeric value cannot stand in for one.
+
+For decoder or session identity, declare a typed resource factory such as
+`open-keyed: func(key: tuple<string, string>, seed: u64) -> own<session>` and keep that key in
+the resource's state. The caller chooses it on each open; a resource method can return it.
+Equal keys still create independent instances. These keys do not select or deduplicate kernel
+objects: plain compiled WIT imports still bind the provider's `main` object. Each method keeps
+the originating claim's admission restrictions and uses the current call's root authority.
+
+One compiled revision owns one Store and serves one callback at a time, across all its
+sessions. A suspended method on one session therefore queues a call on another session of that
+revision. Guest drops are released after the importing callback settles; dropping a resource
+inside a long callback does not synchronously run its destructor in the provider.
+
+A guest resource belongs to its exporter revision. Reload does not recreate it in the new
+Store; stale methods return `Gone/resource`. Environment release and host close drain the
+issuing Store's remaining handles. `Engine::resources()` counts entries still held in those
+tables; `Engine::instances()` counts live Stores. A removed entry may still be completing
+its destructor.
+
+This transport currently covers compiled exporters with native or compiled callers through
+the Rust facade. Source Orbs and the Node/mobile JSON ports refuse inter-Orb resource contracts until
+their capability carriers are implemented. General resource arguments, nested resource
+results and futures remain outside this resource profile. Byte streams have a separate linear
+attachment described below.
+
+## Portable byte streams
+
+A compiled async freestanding export whose complete WIT result is `stream<u8>` can return
+bytes to a native Rust caller without buffering the full body:
+
+```rust,ignore
+use futures::{FutureExt, StreamExt};
+use tembra::portable::ByteStream;
+
+host.root("alice", move |context| async move {
+    let mut stream: ByteStream = frames
+        .call_portable(&context, "frames", (64_u32, 16_384_u32, 0_u32))
+        .await?;
+    while let Some(chunk) = stream.next().await {
+        consume(chunk?).await?;
+    }
+    stream.close().await?;
+    Ok(())
+}.boxed_local()).await?;
+```
+
+The end arrives while the producer still runs under its original admitted call. The executor
+uses a 64 KiB pipe and applies backpressure. `ByteStream` is neither cloneable nor serializable;
+its receiving root owns the right to read it. Ending or cancelling that root closes the end
+and refuses further reads. Keep the root alive while consuming it; use `Host::spawn_root` for
+a consumer that must outlive its initial caller.
+
+Dropping the end asks the producer to stop once. `close().await` additionally waits for physical
+settlement. Neither action kills an idle producer: its next stream operation observes the
+close, and the callback timeout bounds a producer that never performs another operation.
+The compiled executor reports clean EOF only after the producing call succeeds; a trap after
+the last byte is still an error. `Host::close` waits for physical settlement even if the
+consumer abandons its result.
+
+Compiled Orbs can import that same async `stream<u8>` signature from a compiled or native
+provider. The host pumps bytes into the importing Store with bounded backpressure and at most
+16 outstanding stream imports per callback, until their readers close or that callback ends.
+A compiled producer contributes at most 64 KiB in its pipe, 64 KiB in the pump's current chunk
+and 64 KiB in the importer pipe. A trusted native `ByteSource` controls its own chunk size;
+Tembra bounds the importer pipe, but does not split or bound that source's allocation.
+Consume an imported reader within the callback
+that received it; returning from that callback closes it, even if guest state retains it.
+Each compiled revision serves one callback at a time, so consume a stream before opening
+another against that same producer revision.
+
+A plain WIT `stream<u8>` has no error payload. A compiled consumer sees end/drop on producer
+failure; the host retains the cause and quarantines a trapped producer. The number of bytes
+delivered before failure can vary with scheduling. EOF alone therefore does not prove success
+for an imported stream. Model any required completion result explicitly in the application
+contract; this profile does not yet admit general WIT futures.
+
+Stream arguments, nested streams, non-byte elements, resource-method streams and futures are
+not admitted. Source Orbs and the Node/mobile data ports refuse these inter-Orb contracts.
+WASI HTTP body streams use their standard resources and host transport instead.
 
 ## Typed hooks (`hooks`)
 

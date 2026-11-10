@@ -41,7 +41,8 @@ pub struct NodeIngressHead {
 
 /// One event of an incoming HTTP exchange: an ordinary host request (`host`), its completion
 /// (`complete`), or a typed carrier event (`head`, `request-pull`, `data`, `trailers`, `end`,
-/// `error`). Bytes stay `Buffer`s; JSON is used only for host request and completion packets.
+/// `error`, `refused`). Bytes stay `Buffer`s; JSON is used only for host request and completion
+/// packets. `refused` carries the handler's WIT `error-code` in the standard binary codec.
 #[napi(object)]
 pub struct NodeIngressEvent {
     pub kind: String,
@@ -53,6 +54,8 @@ pub struct NodeIngressEvent {
     pub fields: Option<Vec<NodeField>>,
     pub data: Option<Buffer>,
     pub message: Option<String>,
+    /// `refused`: the `error-code` bytes.
+    pub code: Option<Buffer>,
 }
 
 fn ingress_fields(fields: Vec<NodeField>) -> Vec<IngressField> {

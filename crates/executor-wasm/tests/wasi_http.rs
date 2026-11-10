@@ -104,7 +104,12 @@ fn call_then(
     let called = reference.clone();
     let result = pool
         .run_until(host.root("alice", move |context| {
-            async move { called.call_value(&context, method, args).await }.boxed_local()
+            async move {
+                called
+                    .call_portable::<_, serde_json::Value>(&context, method, args)
+                    .await
+            }
+            .boxed_local()
         }))
         .unwrap();
     after();
@@ -279,7 +284,9 @@ fn start_method(
             .root("alice", move |context| {
                 async move {
                     let _ = issued.send(context.clone());
-                    reference.call_value(&context, method, args).await
+                    reference
+                        .call_portable::<_, serde_json::Value>(&context, method, args)
+                        .await
                 }
                 .boxed_local()
             })
@@ -399,7 +406,11 @@ fn compiled_sends_are_cancelled_with_their_call() {
         let args = json!(["http", address.to_string(), "/answer"]);
         let value = pool
             .run_until(host.root("alice", move |context| {
-                async move { live.call_value(&context, "fetch", args).await }.boxed_local()
+                async move {
+                    live.call_portable::<_, serde_json::Value>(&context, "fetch", args)
+                        .await
+                }
+                .boxed_local()
             }))
             .unwrap();
         assert_eq!(value, json!({"tag": "ok", "val": "200 ok"}));
@@ -451,7 +462,11 @@ fn compiled_retained_response_is_closed_by_a_later_call() {
         let mut call = |method: &'static str, args: Value| {
             let live = reference.clone();
             pool.run_until(host.root("alice", move |context| {
-                async move { live.call_value(&context, method, args).await }.boxed_local()
+                async move {
+                    live.call_portable::<_, serde_json::Value>(&context, method, args)
+                        .await
+                }
+                .boxed_local()
             }))
             .unwrap()
         };
@@ -546,7 +561,11 @@ fn invoke_on(
 ) -> Value {
     let live = reference.clone();
     pool.run_until(host.root("alice", move |context| {
-        async move { live.call_value(&context, method, args).await }.boxed_local()
+        async move {
+            live.call_portable::<_, serde_json::Value>(&context, method, args)
+                .await
+        }
+        .boxed_local()
     }))
     .unwrap()
 }

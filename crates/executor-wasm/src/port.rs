@@ -26,7 +26,19 @@ pub struct InterpreterPort {
     pub(crate) hooks: tembra_contracts::HookPlan,
     /// The checked host-local incoming HTTP handler, if this revision serves one.
     pub(crate) ingress: Option<tembra_contracts::IngressBinding>,
+    /// Whether this revision exchanges WIT resource capabilities (see [`Transport`]).
+    pub(crate) resources: bool,
     packet_bytes: usize,
+}
+
+/// What a revision may exchange with other Orbs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Transport {
+    /// JSON-compatible data only: platform ports and their foreign carriers.
+    Data,
+    /// Data plus host-issued WIT resources, for the native Rust facade. Only compiled
+    /// components serve resources; any other artifact still exchanges data only.
+    Capabilities,
 }
 
 impl Engine {
@@ -41,7 +53,7 @@ impl Engine {
         grants: &Grants,
         cli: &crate::Cli,
     ) -> Result<InterpreterPort> {
-        self.open(artifact, bindings, grants, cli)
+        self.open(artifact, bindings, grants, cli, Transport::Data)
     }
 
     /// Open a port for the native facade or a platform host.
@@ -54,6 +66,7 @@ impl Engine {
         bindings: &BTreeMap<String, Binding>,
         grants: &Grants,
         cli: &crate::Cli,
+        transport: Transport,
     ) -> Result<InterpreterPort> {
         let contract = &artifact.contract;
         let name = &artifact.identity.name;
@@ -61,10 +74,42 @@ impl Engine {
         let mut plan = contract
             .plan(name, api_version, bindings)
             .map_err(failure)?;
-        contract.check_value_profile().map_err(failure)?;
-        for (name, binding) in bindings {
-            if matches!(binding, Binding::Orb { .. }) {
-                contract.check_import_value_profile(name).map_err(failure)?;
+        let resources = transport == Transport::Capabilities
+            && matches!(
+                artifact.implementation,
+                tembra_contracts::ArtifactImplementation::Component(_)
+            );
+        let imports = bindings
+            .iter()
+            .filter(|(_, binding)| matches!(binding, Binding::Orb { .. }))
+            .map(|(name, _)| name);
+        if resources {
+            contract.check_resource_profile().map_err(failure)?;
+            for name in imports {
+                contract
+                    .check_import_resource_profile(name)
+                    .map_err(failure)?;
+            }
+        } else {
+            let data = contract.check_value_profile().and_then(|()| {
+                imports
+                    .clone()
+                    .try_for_each(|name| contract.check_import_value_profile(name))
+            });
+            if let Err(error) = data {
+                // Say so when only the resource transport is missing, not the shape itself.
+                let resource_shapes = contract.check_resource_profile().is_ok()
+                    && imports
+                        .clone()
+                        .all(|name| contract.check_import_resource_profile(name).is_ok());
+                return Err(failure(if resource_shapes {
+                    format!(
+                        "{error}: WIT resources are served only by compiled components installed \
+                         through the native Rust facade; this endpoint exchanges data only"
+                    )
+                } else {
+                    error.to_string()
+                }));
             }
         }
         let checked = |description: &Value| {
@@ -117,6 +162,7 @@ impl Engine {
             metadata: plan.orb,
             hooks,
             ingress,
+            resources,
             packet_bytes: self.limits.packet_bytes,
         })
     }
@@ -300,6 +346,12 @@ impl PortEvents {
                 Ok(PortEvent::Complete(result))
             }
             Event::Ingress(event) => Ok(PortEvent::Ingress(event)),
+            // Platform ports exchange data only, so stream imports are never admitted here.
+            Event::Stream { reply, .. } => {
+                let refusal = "byte streams are served only through the native facade";
+                let _ = reply.send(Err(refusal.into()));
+                Err(failure(refusal))
+            }
         }
     }
 }

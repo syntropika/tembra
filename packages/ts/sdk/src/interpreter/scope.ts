@@ -36,7 +36,14 @@ export class Scope {
   readonly parent: Scope | undefined;
   readonly validators: number[] = [];
   readonly states = new Map<number, State<unknown>>();
-  readonly references = new Map<number, { reference: DynamicReference; binding: string }>();
+  /**
+   * Declared references belong to this environment. A `root` marks a `Context.get` handle: the
+   * runtime's root claim list owns it and releases it when that root ends.
+   */
+  readonly references = new Map<
+    number,
+    { reference: DynamicReference; binding: string; root?: number }
+  >();
   readonly resources = new Map<number, Resource<number>>();
   readonly hooks = new Map<
     number,
@@ -108,6 +115,12 @@ export class Scope {
     return value;
   }
 
+  /** Match the native u32 handle space and never reuse an expired handle's identity. */
+  private allocate(): number {
+    if (this.#next >= 0xffff_ffff) throw new Error("Scope handle space exhausted");
+    return ++this.#next;
+  }
+
   /**
    * Return the kernel's snapshot revision rather than inventing guest state identities. When the
    * guest already retains the current revision, only the identity crosses back; the protected value
@@ -144,7 +157,7 @@ export class Scope {
         return this.parent?.id ?? null;
       case "state.declare": {
         const declaration = this.factory(authority);
-        const id = ++this.#next;
+        const id = this.allocate();
         const state = declaration.state(request.initial, { version: request.version });
         this.states.set(id, state);
         if (request.validate !== null) this.validators.push(request.validate);
@@ -169,7 +182,7 @@ export class Scope {
         const binding = this.revision.hooks.get(request.name);
         if (!binding) throw new Error("Hook is absent from the checked WIT declaration");
         const handle = this.factory(authority).hook(binding.name);
-        const id = ++this.#next;
+        const id = this.allocate();
         this.hooks.set(id, { handle, binding });
         return id;
       }
@@ -177,17 +190,17 @@ export class Scope {
         const service = this.revision.imports.get(request.service);
         if (!service) throw new Error("Reference is not a selected WIT Orb import");
         const reference = this.factory(authority).get(service, request.key);
-        const id = ++this.#next;
+        const id = this.allocate();
         this.references.set(id, { reference, binding: request.service });
         return id;
       }
       case "reference.release":
-        this.reference(request).reference.release();
+        this.reference(request, authority).reference.release();
         return null;
       case "reference.status":
-        return this.reference(request).reference.status;
+        return this.reference(request, authority).reference.status;
       case "reference.state": {
-        const reference = this.reference(request).reference;
+        const reference = this.reference(request, authority).reference;
         const record = this.declaration.session.handles.reference(reference);
         return this.snapshot(reference.state.value, record.object, request.known);
       }
@@ -216,7 +229,7 @@ export class Scope {
             ),
         };
         const resource = declaration.resource<number>(request.name, options);
-        const id = ++this.#next;
+        const id = this.allocate();
         this.resources.set(id, resource);
         return id;
       }
@@ -235,9 +248,81 @@ export class Scope {
     }
   }
 
-  /** Resolve a reference handle and its WIT binding from this table or the issued parent's. */
-  private reference(request: { scope?: number; id: number }) {
-    return this.handle(this.selected(request.scope).references, request.id, "reference");
+  /**
+   * Resolve a reference handle and its WIT binding for the current callback. Declared handles come
+   * from this table or the issued parent's. A `Context.get` handle resolves only in the table that
+   * issued it, for a callback of the root owning its claim, and only while that root lasts.
+   */
+  private reference(request: { scope?: number; id: number }, authority: Authority) {
+    const selected = this.selected(request.scope);
+    const slot = this.handle(selected.references, request.id, "reference");
+    if (slot.root === undefined) return slot;
+    const current = "context" in authority ? authority.context.root : undefined;
+    if (selected !== this || current !== slot.root)
+      throw new Error("Reference belongs to another root");
+    if (!this.declaration.session.rootReferences.has(slot.root))
+      throw new Error("Reference expired with its root");
+    return slot;
+  }
+
+  /**
+   * `Context.get`: acquire a selected WIT Orb import for the active invocation. The host resolves
+   * the provider and the installed requirement's API version and methods; the guest names only the
+   * binding and key, and the root's principal applies. Readiness is awaited under the callback's
+   * cancellation, and a claim whose wait or authority fails is released before any handle exists.
+   */
+  private async acquire(
+    request: { service: string; key: readonly string[] },
+    authority: Authority,
+    ended: AbortSignal,
+  ): Promise<number> {
+    const context = this.context(authority);
+    // Only an admitted method call selects instances. A cleanup context (a resource `close`) has
+    // no invocation; acquiring there would choose instances by the cleanup principal.
+    if (!context.invocation)
+      throw new Error("Reference acquisition requires an admitted invocation");
+    const binding = this.revision.imports.get(request.service);
+    if (!binding) throw new Error("Reference is not a selected WIT Orb import");
+    const session = this.declaration.session;
+    const requirement = session.scopes.requirement(this.declaration.environment, binding);
+    const reference = session.handles.hold(
+      requirement.service,
+      request.key,
+      {
+        ...(requirement.apiVersion ? { apiVersion: requirement.apiVersion } : {}),
+        ...(requirement.methods ? { methods: requirement.methods } : {}),
+      },
+      context,
+    );
+    let id: number;
+    try {
+      await session.calls.observe(reference.ready, combinedSignal(context.signal, ended));
+      // The invocation, root or callback may have ended while readiness was pending.
+      context.check();
+      checkSignal(ended);
+      id = this.allocate();
+    } catch (error) {
+      this.abandon(reference, error);
+    }
+    // Root claims are released by the runtime; forget the names of those whose roots have ended.
+    for (const [handle, slot] of this.references)
+      if (slot.root !== undefined && !session.rootReferences.has(slot.root))
+        this.references.delete(handle);
+    this.references.set(id, { reference, binding: request.service, root: context.root });
+    return id;
+  }
+
+  /**
+   * Release a claim that will never be published and rethrow the failure that stopped it; a
+   * secondary release failure is reported to the session instead of replacing it.
+   */
+  private abandon(reference: DynamicReference, error: unknown): never {
+    try {
+      reference.release();
+    } catch (release) {
+      this.declaration.session.report(release);
+    }
+    throw error;
   }
 
   /** Await only issued references and bounded cooperative timers. */
@@ -270,14 +355,16 @@ export class Scope {
       case "reference.ready": {
         const owner = authoritySignal(authority);
         await this.declaration.session.calls.observe(
-          this.reference(request).reference.ready,
+          this.reference(request, authority).reference.ready,
           owner ? combinedSignal(owner, ended) : ended,
         );
         return null;
       }
+      case "reference.acquire":
+        return this.acquire(request, authority, ended);
       case "reference.call": {
         const context = this.context(authority);
-        const { reference, binding } = this.reference(request);
+        const { reference, binding } = this.reference(request, authority);
         const bound = this.revision.importMethods.get(binding)?.get(request.method);
         if (!bound) throw new Error("Unknown prepared import method");
         const method = bound.name;

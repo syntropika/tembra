@@ -93,6 +93,7 @@ pub(super) fn spawn_ingress(
             fields: None,
             data: None,
             message: None,
+            code: None,
         }
     }
     thread::Builder::new()
@@ -145,6 +146,10 @@ pub(super) fn spawn_ingress(
                             ..event("head")
                         },
                         IngressEvent::RequestPull => event("request-pull"),
+                        IngressEvent::Refused(code) => NodeIngressEvent {
+                            code: Some(code.into()),
+                            ..event("refused")
+                        },
                         IngressEvent::Response(IngressResponseFrame::Data(bytes)) => {
                             NodeIngressEvent {
                                 data: Some(bytes.into()),

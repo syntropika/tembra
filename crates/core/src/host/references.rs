@@ -303,6 +303,49 @@ impl Host {
             .collect())
     }
 
+    /// Add a second claim on the same object with exactly the same API expectation, required
+    /// methods and view. Unlike [`Host::acquire`], it never resolves a service, applies a
+    /// current access policy, activates, or adds dependency edges, so it can never widen what
+    /// the original claim admits. A released claim and a disposing or gone object are refused.
+    pub fn duplicate(&self, reference: Id) -> Result<Id> {
+        let mut inner = self.inner.borrow_mut();
+        inner.open()?;
+        let claim = inner
+            .references
+            .get(&reference)
+            .ok_or_else(|| gone(Reason::Reference))?;
+        if claim.released {
+            return Err(Error::new(
+                Code::Released,
+                Reason::Reference,
+                "reference is released",
+            ));
+        }
+        let mut copy = claim.clone();
+        let object = copy.object;
+        let record = inner
+            .objects
+            .get(&object)
+            .ok_or_else(|| gone(Reason::Object))?;
+        if record.disposing || record.phase == Status::Gone {
+            return Err(Error::new(
+                Code::Unavailable,
+                Reason::Disposing,
+                "the instance is closing",
+            ));
+        }
+        let id = inner.id()?;
+        copy.released = false;
+        inner
+            .objects
+            .get_mut(&object)
+            .expect("checked object")
+            .references += 1;
+        inner.object_references.insert(object, id);
+        inner.references.insert(id, copy);
+        Ok(id)
+    }
+
     /// Release one claim and reconsider object retirement.
     pub fn release(&self, reference: Id) -> Result<()> {
         let mut inner = self.inner.borrow_mut();

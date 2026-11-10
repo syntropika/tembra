@@ -8,8 +8,33 @@ import path from "node:path";
 import { readFile, mkdtemp, writeFile, rm, readdir } from "node:fs/promises";
 import { createHost, directoryFilesystem } from "../dist/node.js";
 import { verifyPrecisionScenario } from "./precision-scenario.ts";
+import { verifyContextAcquireScenario } from "./context-acquire-scenario.ts";
+import {
+  COUNTERS as INGRESS_COUNTERS,
+  INGRESS_ORB,
+  replaced,
+  request,
+  settled,
+  source,
+  text,
+  verifyIngressScenario,
+} from "./ingress-scenario.ts";
 
 const fixtures = process.env.TEMBRA_WASM_FIXTURES;
+
+test("Node: source Orbs select keyed instances per request", { skip: !fixtures }, async () => {
+  const host = createHost();
+  try {
+    await verifyContextAcquireScenario(
+      host,
+      async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
+    );
+  } finally {
+    await host.close();
+  }
+  assert.equal(host.diagnostics().references, 0);
+  assert.equal(host.diagnostics().pendingJobs, 0);
+});
 
 test("Node: exact 64-bit values cross source Orbs without loss", { skip: !fixtures }, async () => {
   const host = createHost();
@@ -609,5 +634,401 @@ test(
     }
     assert.equal(host.diagnostics().values, 0);
     assert.equal(host.diagnostics().pendingJobs, 0);
+  },
+);
+
+/** Count actual native Stores of every interpreter backend the SDK creates during `run`. */
+async function countingStores(run) {
+  const binding = createRequire(import.meta.url)("@syntropika/tembra-engine-node");
+  const Original = binding.NodeInterpreter;
+  const engines = [];
+  binding.NodeInterpreter = class extends Original {
+    constructor(...args) {
+      super(...args);
+      engines.push(this);
+    }
+  };
+  try {
+    return { result: await run(), engines };
+  } finally {
+    binding.NodeInterpreter = Original;
+  }
+}
+
+/** Every kernel counter and every native Store is gone once the host closed. */
+function assertRetired(host, engines) {
+  const diagnostics = host.diagnostics();
+  for (const key of INGRESS_COUNTERS) assert.equal(diagnostics[key], 0, key);
+  assert.ok(engines.length > 0, "the native carrier was used");
+  for (const engine of engines) assert.equal(engine.instances(), 0, "native Stores");
+}
+
+const ingressHost = async (limits) => {
+  const engine = process.env.TEMBRA_WASM_ENGINE;
+  return createHost({
+    isolated: {
+      ...(engine ? { engine: new Uint8Array(await readFile(engine)) } : {}),
+      ...(limits ? { limits } : {}),
+    },
+  });
+};
+
+test(
+  "Node: Host.handleHttp serves a source handler through the native typed carrier",
+  { skip: !fixtures, timeout: 120000 },
+  async () => {
+    const hosts = [];
+    const { result, engines } = await countingStores(() =>
+      verifyIngressScenario({
+        open: async (limits) => {
+          const host = await ingressHost(limits);
+          hosts.push(host);
+          return host;
+        },
+        fixture: async (name) =>
+          new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
+        // Node's WHATWG Response keeps set-cookie; browsers hide it.
+        setCookie: "kept",
+      }),
+    );
+    assert.match(result, /reload drains the in-flight stream/);
+    for (const host of hosts) assertRetired(host, engines);
+  },
+);
+
+test(
+  "Node: native ingress never waits on the application's body and fails broken bodies",
+  { skip: !fixtures, timeout: 60000 },
+  async () => {
+    const bytes = async (name) =>
+      new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
+    let host;
+    const { engines } = await countingStores(async () => {
+      host = await ingressHost();
+      try {
+        await host.install({ artifact: await bytes("ledger") });
+        await host.install({
+          artifact: await bytes("ingress"),
+          requires: { "example:ingress/ledger@1.0.0": { orb: "ledger", apiVersion: 1 } },
+        });
+        // An application body whose next() and return() never settle: a disconnect still ends
+        // the call; nothing waits on the orphaned promises.
+        const orphan = { nexts: 0, returns: 0 };
+        const stalled = {
+          [Symbol.asyncIterator]: () => ({
+            next: () => (orphan.nexts++, new Promise(() => {})),
+            return: () => (orphan.returns++, new Promise(() => {})),
+          }),
+        };
+        const idle = await host.handleHttp(INGRESS_ORB, request("/idle", stalled));
+        const events = idle.body[Symbol.asyncIterator]();
+        await events.next();
+        await events.return();
+        await settled(host);
+        assert.deepEqual(orphan, { nexts: 1, returns: 1 });
+
+        // A handler that never reads its body: the body is returned once when the call ends.
+        const unread = source();
+        assert.match(
+          await text(await host.handleHttp(INGRESS_ORB, request("/revision", unread.body))),
+          /^\d+$/,
+        );
+        await settled(host);
+        assert.deepEqual(unread.state, { returned: 1, reads: 0 });
+
+        // A consumer that drops the body before reading it is a disconnect.
+        const dropped = source();
+        const early = await host.handleHttp(INGRESS_ORB, request("/sse", dropped.body));
+        await early.body[Symbol.asyncIterator]().return();
+        await settled(host);
+        assert.equal(dropped.state.returned, 1);
+
+        // A failing request body (a throwing iterator, a non-byte chunk, rejected or invalid
+        // trailers) reaches the handler as a body error; its echo fails, never ends truncated.
+        for (const [what, body, trailers] of [
+          [
+            "throwing iterator",
+            () =>
+              (async function* () {
+                yield Uint8Array.of(1, 2, 3);
+                throw new Error("upload failed");
+              })(),
+          ],
+          [
+            "non-byte chunk",
+            () =>
+              (async function* () {
+                yield [1, 2, 3];
+              })(),
+          ],
+          ["rejected trailers", () => null, () => Promise.reject(new Error("trailers failed"))],
+          // HTTP field values exclude control bytes: native validation fails the guest's body.
+          [
+            "invalid trailer bytes",
+            () => null,
+            () => Promise.resolve([["x-bad", Uint8Array.of(0)]]),
+          ],
+        ]) {
+          // Created only now, so no rejection exists before the host observes it.
+          const extra = trailers ? { trailers: trailers() } : {};
+          const echo = await host.handleHttp(INGRESS_ORB, request("/echo", body(), extra));
+          const outcome = await text(echo).then(
+            () => "ended",
+            (error) => `failed: ${error.name}`,
+          );
+          assert.equal(outcome, "failed: HttpHandlerError", what);
+          await assert.rejects(echo.trailers, what);
+          await settled(host);
+        }
+
+        // A head the native carrier refuses before admission fails the call and returns the body.
+        const refusedBody = source();
+        await assert.rejects(
+          host.handleHttp(INGRESS_ORB, request("/sse", refusedBody.body, { method: "BAD METHOD" })),
+          /method/,
+        );
+        await settled(host);
+        await replaced(host, INGRESS_ORB);
+        await assert.rejects(
+          host.handleHttp(INGRESS_ORB, request("/sse", null, { authority: undefined })),
+          /authority/,
+        );
+        await settled(host);
+        await replaced(host, INGRESS_ORB);
+        assert.equal(refusedBody.state.returned, 1);
+        // Handler error-codes with payloads arrive as exact WIT values (typed bytes, no text).
+        await assertTypedRefusals(host, INGRESS_ORB);
+        // The revision still serves after every failure above.
+        assert.match(await text(await host.handleHttp(INGRESS_ORB, request("/revision"))), /^\d+$/);
+      } finally {
+        await host.close();
+      }
+    });
+    assertRetired(host, engines);
+  },
+);
+
+test(
+  "Node: a request body that cannot be opened never strands the native call (M-1, L-1)",
+  { skip: !fixtures, timeout: 60000 },
+  async () => {
+    const bytes = async (name) =>
+      new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
+    const unhandled = [];
+    const record = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", record);
+    let host;
+    try {
+      const { engines } = await countingStores(async () => {
+        host = await ingressHost();
+        try {
+          await host.install({ artifact: await bytes("ledger") });
+          await host.install({
+            artifact: await bytes("ingress"),
+            requires: { "example:ingress/ledger@1.0.0": { orb: "ledger", apiVersion: 1 } },
+          });
+          // A locked stream throws from its iterator factory (`getReader()`), like a body that
+          // middleware already consumed.
+          const locked = () => {
+            const stream = new ReadableStream();
+            stream.getReader();
+            return {
+              [Symbol.asyncIterator]: () => {
+                stream.getReader();
+              },
+            };
+          };
+          // Unread completion: the call finishes and the revision serves the next request.
+          const empty = await host.handleHttp(INGRESS_ORB, request("/status/204", locked()));
+          assert.equal(empty.status, 204);
+          assert.equal((await empty.body[Symbol.asyncIterator]().next()).done, true);
+          await settled(host);
+          // A head refused before admission reports its own refusal.
+          await assert.rejects(
+            host.handleHttp(INGRESS_ORB, request("/sse", locked(), { method: "BAD METHOD" })),
+            /method/,
+          );
+          await settled(host);
+          await replaced(host, INGRESS_ORB);
+          // A consumer disconnect still reaches the writing guest.
+          const writing = await host.handleHttp(INGRESS_ORB, request("/write", locked()));
+          const events = writing.body[Symbol.asyncIterator]();
+          await events.next();
+          assert.deepEqual(await events.return(), { done: true, value: undefined });
+          await settled(host);
+          // The realistic WHATWG trigger: a Request whose body middleware already read.
+          const consumed = new Request("https://app.example.test/status/204", {
+            method: "POST",
+            body: "already read",
+          });
+          await consumed.text();
+          assert.equal((await host.handleHttp(INGRESS_ORB, consumed)).status, 204);
+          await settled(host);
+          // L-1: a call failing before any port took the request still closes its body once.
+          const body = source();
+          await assert.rejects(host.handleHttp("missing", request("/", body.body)));
+          await settled(host);
+          assert.equal(body.state.returned, 1);
+          await assert.rejects(host.handleHttp("missing", request("/", locked())));
+          await settled(host);
+          // Nothing was stranded: the revision still serves.
+          assert.match(
+            await text(await host.handleHttp(INGRESS_ORB, request("/revision"))),
+            /^\d+$/,
+          );
+        } finally {
+          await host.close();
+        }
+      });
+      assertRetired(host, engines);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.deepEqual(unhandled, []);
+    } finally {
+      process.off("unhandledRejection", record);
+    }
+  },
+);
+
+/** The fixtures' payload refusals (source `orb.ts` and compiled `rust-http-handler` alike). */
+const REFUSALS = [
+  ["/refuse/escaped", { tag: "internal-error", val: 'quote " slash \\ line\nend é🌍' }],
+  [
+    "/refuse/record",
+    { tag: "HTTP-request-header-size", val: { fieldName: "x-big", fieldSize: 4294967295 } },
+  ],
+  ["/refuse/u64", { tag: "HTTP-response-body-size", val: 18446744073709551615n }],
+  ["/refuse/dns", { tag: "DNS-error", val: { rcode: "SERVFAIL", infoCode: 65535 } }],
+];
+
+/** Each refusal is an `HttpHandlerError` carrying exactly the guest's WIT `error-code`. */
+async function assertTypedRefusals(host, orb, probe) {
+  for (const [route, code] of REFUSALS) {
+    const refused = await host.handleHttp(orb, request(route)).catch((error) => error);
+    assert.equal(refused?.name, "HttpHandlerError", `${route}: ${String(refused)}`);
+    assert.deepStrictEqual(refused.code, code, route);
+    await settled(host);
+    await replaced(host, orb, probe);
+  }
+}
+
+// The compiled Rust handler (`rust-http-handler`, raw component) behind the same SDK facade.
+const httpHandler = process.env.TEMBRA_WASM_HTTP_HANDLER;
+const handlerWit = path.resolve(
+  import.meta.dirname,
+  "../../../../crates/executor-wasm/tests/wit/handler",
+);
+
+test(
+  "Node: Host.handleHttp serves a compiled handler through the native typed carrier",
+  { skip: !httpHandler, timeout: 60000 },
+  async () => {
+    const binding = createRequire(import.meta.url)("@syntropika/tembra-engine-node");
+    const artifact = new Uint8Array(
+      new binding.NodeContract(handlerWit, "handler").componentArtifact(
+        new Uint8Array(await readFile(httpHandler)),
+        "web",
+        1,
+      ),
+    );
+    const decoder = new TextDecoder();
+    const hosts = [];
+    const { engines } = await countingStores(async () => {
+      const host = await ingressHost();
+      hosts.push(host);
+      try {
+        await host.install({ artifact });
+        const status = async () => {
+          const response = await host.handleHttp("web", request("/status"));
+          assert.equal((await response.body[Symbol.asyncIterator]().next()).done, true);
+          return Object.fromEntries(
+            response.fields.map(([name, value]) => [name, decoder.decode(value)]),
+          );
+        };
+
+        // Head and first event before the request EOF; raw binary chunks streamed one by one.
+        const body = source();
+        const sse = await host.handleHttp(
+          "web",
+          request("/sse", body.body, {
+            fields: [
+              ["x-raw", Uint8Array.of(0xff, 0x41, 0x80)],
+              ["x-raw", Uint8Array.of(0x21)],
+            ],
+          }),
+        );
+        assert.equal(sse.status, 200);
+        const events = sse.body[Symbol.asyncIterator]();
+        assert.equal(decoder.decode((await events.next()).value), "data: open\n\n");
+        body.push(new TextEncoder().encode("alpha"));
+        assert.equal(decoder.decode((await events.next()).value), "data: alpha\n\n");
+        body.push(Uint8Array.of(0x62, 0x65, 0x74, 0x61));
+        assert.equal(decoder.decode((await events.next()).value), "data: beta\n\n");
+        body.end();
+        assert.equal(decoder.decode((await events.next()).value), "data: end\n\n");
+        assert.equal((await events.next()).done, true);
+        assert.deepEqual(
+          (await sse.trailers).map(([name, value]) => [name, decoder.decode(value)]),
+          [["x-events", "4"]],
+        );
+        await settled(host);
+        assert.match((await status())["x-last-exit"], /^complete events=4 transmit=Ok/);
+
+        // Its error-code and trap are reported after settlement; the Store keeps serving.
+        const refused = await host.handleHttp("web", request("/error")).catch((error) => error);
+        assert.equal(refused.name, "HttpHandlerError", String(refused));
+        assert.deepEqual(refused.code, { tag: "internal-error", val: "refused" });
+        await settled(host);
+        await replaced(host, "web", "/status");
+        await assertTypedRefusals(host, "web", "/status");
+
+        // A consumer disconnect while the producer writes, and cancellation through a signal.
+        const stream = await host.handleHttp("web", request("/stream"));
+        const streamEvents = stream.body[Symbol.asyncIterator]();
+        await streamEvents.next();
+        await streamEvents.return();
+        await settled(host);
+        const cancel = new AbortController();
+        const cancelled = await host.handleHttp("web", request("/stream"), {
+          signal: cancel.signal,
+        });
+        const cancelledEvents = cancelled.body[Symbol.asyncIterator]();
+        await cancelledEvents.next();
+        cancel.abort();
+        await assert.rejects(async () => {
+          for (;;) if ((await cancelledEvents.next()).done) break;
+        });
+        await assert.rejects(cancelled.trailers);
+        await settled(host);
+        assert.match((await status())["x-requests"], /^\d+$/);
+
+        // A trap is terminal for the compiled revision: reported after settlement, then every
+        // later request is refused as quarantined until a reload.
+        await assert.rejects(host.handleHttp("web", request("/trap")), /trap/);
+        await settled(host);
+        await assert.rejects(host.handleHttp("web", request("/status")), (error) =>
+          /quarantined|closing/.test(`${error.reason} ${error.message}`),
+        );
+        await settled(host);
+      } finally {
+        await host.close();
+      }
+
+      // A head that never comes: the revision timeout fails the call before any head.
+      const limited = await ingressHost({ timeoutMs: 1000 });
+      hosts.push(limited);
+      try {
+        await limited.install({ artifact });
+        const stalled = source();
+        await assert.rejects(
+          limited.handleHttp("web", request("/slow", stalled.body)),
+          /timed out|wall time|quarantin/i,
+        );
+        await settled(limited);
+        assert.equal(stalled.state.returned, 1);
+      } finally {
+        await limited.close();
+      }
+    });
+    for (const host of hosts) assertRetired(host, engines);
   },
 );

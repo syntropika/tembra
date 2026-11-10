@@ -304,3 +304,72 @@ test("WHATWG convenience: a Request gets a Response; unrepresentable responses a
   }
   void CONNECTION_TERMINATED;
 });
+
+/** A request body that counts the host's factory and `return()` calls. */
+function counted(options: { locked?: boolean } = {}) {
+  const state = { factories: 0, returns: 0 };
+  const body: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]() {
+      state.factories++;
+      if (options.locked) throw new TypeError("ReadableStream is locked");
+      return {
+        next: () => new Promise<IteratorResult<Uint8Array>>(() => {}),
+        async return() {
+          state.returns++;
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+  return { state, body };
+}
+
+test("a request failing before any port took it gets its body closed once (L-1)", async () => {
+  const settled = async (served: Awaited<ReturnType<typeof host>>) => {
+    while (served.diagnostics().calls) await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  };
+  // No incoming HTTP on this port, and an unknown Orb: the call fails before any port.
+  const refusing = await host(port());
+  try {
+    for (const [orb, refusal] of [
+      ["edge", "does not serve incoming HTTP"],
+      ["missing", ""],
+    ] as const) {
+      const body = counted();
+      const error = await refusing
+        .handleHttp(orb, { ...request(), body: body.body })
+        .catch((reason) => reason);
+      expect(String(error)).toContain(refusal);
+      await settled(refusing);
+      expect(body.state).toEqual({ factories: 1, returns: 1 });
+      // A body that cannot even be opened keeps the original refusal and escapes nothing.
+      const locked = counted({ locked: true });
+      const lockedError = await refusing
+        .handleHttp(orb, { ...request(), body: locked.body })
+        .catch((reason) => reason);
+      expect(String(lockedError)).toContain(refusal);
+      await settled(refusing);
+      expect(locked.state.factories).toBe(1);
+    }
+  } finally {
+    await refusing.close();
+  }
+  // A port that took the request owns its body: settlement never opens or closes it again.
+  const owner = await host(
+    port(async (_dispatch, exchange) => {
+      exchange.own();
+      exchange.refuse({ tag: "HTTP-request-denied" });
+    }),
+  );
+  try {
+    const body = counted();
+    await expect(owner.handleHttp("edge", { ...request(), body: body.body })).rejects.toThrow(
+      HttpHandlerError,
+    );
+    await settled(owner);
+    expect(body.state).toEqual({ factories: 0, returns: 0 });
+  } finally {
+    await owner.close();
+  }
+});

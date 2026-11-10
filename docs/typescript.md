@@ -282,6 +282,63 @@ Source Orbs declare and contribute `series`, `waterfall` and `bail` hooks throug
 contracts. Compiled Orbs can contribute to those hooks. Tasks, listeners, state subscriptions
 and compiled hook providers are not yet available. See [extensions](extensions.md).
 
+Source methods can select a dependency instance for each request through `context.get`:
+
+```ts
+import type { Context } from "@syntropika/tembra-sdk";
+import type { ExampleKeyedCounter100 as Counter } from "./contract.wit";
+
+async function route(_environment: unknown, context: Context, sessionId: string) {
+  const counter = await context.get<typeof Counter>("example:keyed/counter@1.0.0", [sessionId]);
+  return counter.add(1);
+}
+```
+
+The binding must be a WIT Orb import with an installed provider. Tembra applies its required
+API version and methods, uses the admitted caller's principal, and waits for readiness.
+References acquired this way belong to that root and are released when it ends; retaining a
+JavaScript variable does not extend their authority. Calls from another root and acquisitions
+from cleanup callbacks are refused. A declared dependency has its factory scope's lifetime
+instead. Plain compiled WIT imports still select the default `main` instance.
+
+## Incoming HTTP
+
+An Orb exports `wasi:http/handler@0.3.0` in its WIT world. The application keeps its listener,
+authentication and routing, then invokes the installed Orb through `host.handleHttp`:
+
+```ts
+// `host` has installed the handler Orb. The application supplies the authenticated principal.
+const response = await host.handleHttp("web", new Request("https://app.example.test/events"), {
+  principal: "alice",
+  signal: controller.signal,
+});
+// Forward this streaming Response through the application's server or browser integration.
+```
+
+The response head arrives before the body ends. Tembra owns a root for the exchange until its
+physical work settles, so returning the response does not expire dependency-call authority.
+Cancelling the signal cancels that root. Cancelling the response body signals disconnect;
+an early return from a raw response body's `for await` loop does the same. The revision's
+`timeoutMs` covers the whole exchange, including streaming and backpressure. A timeout
+quarantines the revision; configure it for the expected SSE duration.
+
+For lossless transport, pass an `IncomingHttpRequest`: `method`, paired `scheme`/`authority`,
+`pathWithQuery`, ordered `fields: [string, Uint8Array][]`, an `AsyncIterable<Uint8Array>` body
+(or `null`), and optional trailers. The returned `HttpHandlerResponse` has `status`, `fields`,
+`body` and a `trailers` promise. Consume the body before awaiting trailers. This preserves raw
+bytes, duplicate fields and trailers without collecting the complete body.
+
+The WHATWG form returns a `Response`, joins duplicate headers according to that platform and
+normalizes request URLs. It refuses 1xx responses and hidden fields; nonempty trailers fail
+the body at its end because WHATWG `Response` cannot expose them. Use the raw form when these
+properties matter. A handler's standard refusal is an `HttpHandlerError` with its typed
+`wasi:http/types.error-code`; a trap or timeout remains an execution failure.
+
+Source handlers are exercised in Chrome and Node; Node also exercises compiled handlers.
+The SDK mobile carrier and the React Native bridge have separate qualification gates.
+Compiled components in the browser remain unsupported. A handler-only Orb needs no outgoing
+HTTP grant; an import of `wasi:http/client` still needs one.
+
 ## Browser and Worker
 
 Import `createHost` from `@syntropika/tembra-sdk/browser` and await it.

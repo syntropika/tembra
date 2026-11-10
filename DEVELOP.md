@@ -86,6 +86,8 @@ just build-interpreter <wasi-sdk> <cache-directory> [<dquickts-checkout>]
 just build-provider <provider-target-directory>
 just build-probe <provider-target-directory>
 just build-consumer <provider-target-directory>
+just build-resources <provider-target-directory>
+just build-streams <provider-target-directory>
 just build-contributor <provider-target-directory>
 just build-http-client <provider-target-directory>
 just build-sockets <provider-target-directory>
@@ -107,7 +109,11 @@ just test-wasm-acceptance --out <directory> \
   --http-client <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm \
   --sockets <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm \
   --http-handler <http-handler-target-directory>/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm \
-  --http-proxy <http-handler-target-directory>/proxy/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm
+  --http-proxy <http-handler-target-directory>/proxy/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm \
+  --resource-provider <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_resource_provider.wasm \
+  --resource-consumer <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_resource_consumer.wasm \
+  --stream-producer <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_stream_producer.wasm \
+  --stream-consumer <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_stream_consumer.wasm
 ```
 
 The runner builds the fixture orbs into `<directory>/fixtures`, or reuses `--fixtures <directory>`.
@@ -117,7 +123,7 @@ packed consumers in Node, Bun and Chrome, including a clean NodeNext typecheck. 
 component quarantine, physical WASI settlement, filesystem grants and calls with a one-thread libuv pool.
 Repeat `--suite native|sdk|node|browser|example|package` to run a subset. CI runs the same command in the
 `acceptance` job of the quality workflow. Incoming HTTP acceptance requires both the handler-only
-and outgoing-proxy fixtures through `--http-handler` and `--http-proxy`. `just test-wasm-orb` runs the Rust tests against supplied artifacts.
+and outgoing-proxy fixtures through `--http-handler` and `--http-proxy`. Use `--suite native` to run the Rust tests with the same complete artifact set.
 
 ## Native builds
 

@@ -28,8 +28,8 @@ export interface IncomingHttpRequest {
   readonly fields: readonly HttpField[];
   /**
    * The request contents, pulled as the handler reads, or `null` for none. The host calls its
-   * iterator's `return()` when the handler drops the body early, the client disconnects or the
-   * call ends.
+   * iterator's `return()` once, without awaiting it, when the handler drops the body early, the
+   * client disconnects, the call ends, or the call fails before the handler received it.
    */
   readonly body: AsyncIterable<Uint8Array> | null;
   /** Trailers, read after the body ended; absent means none. */
@@ -89,6 +89,8 @@ export class IngressExchange {
   #resolve!: (response: HttpHandlerResponse) => void;
   #reject!: (error: unknown) => void;
   #claimed = false;
+  /** A port took the request body; from then on only that port closes it. */
+  #owned = false;
   #published = false;
   #refusal: unknown;
 
@@ -119,8 +121,33 @@ export class IngressExchange {
     this.#refusal = new HttpHandlerError(code);
   }
 
-  /** The call physically settled; without a published response, report why. */
+  /**
+   * A port takes the request: from now on it alone pulls and closes the body. Called exactly
+   * where a port's own end-of-call cleanup starts to cover the body.
+   */
+  own(): IncomingHttpRequest {
+    this.#owned = true;
+    return this.request;
+  }
+
+  /**
+   * The call physically settled; without a published response, report why. A body no port
+   * ever took (the call failed before any port saw it) is closed here, once; its `return()` is
+   * not awaited and an application failure there cannot affect the report.
+   */
   settle(failure?: unknown): void {
+    if (!this.#owned) {
+      this.#owned = true;
+      try {
+        const done = this.request.body?.[Symbol.asyncIterator]().return?.();
+        if (typeof (done as PromiseLike<unknown> | undefined)?.then === "function")
+          Promise.resolve(done).catch(() => {});
+      } catch {
+        // A body that cannot be opened or closed (a locked stream) stays the application's.
+      }
+      if (typeof this.request.trailers?.then === "function")
+        Promise.resolve(this.request.trailers).catch(() => {});
+    }
     if (this.#refusal !== undefined) return this.#reject(this.#refusal);
     if (this.#published && this.#refusal === undefined) return;
     this.#reject(failure ?? new Error("the HTTP handler ended without a response"));

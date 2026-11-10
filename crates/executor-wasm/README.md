@@ -95,7 +95,8 @@ provide an import when it registers the matching service name and signature.
 - **Network.** `NetworkGrant` separately grants exact TCP `connect` peers, local
   `listen` addresses, explicit local `bind` addresses, UDP `datagrams` peers and
   `resolve` for DNS lookup. Standard compiled components use the upstream WASI
-  socket implementation. Source bindings currently expose outbound TCP only.
+  socket implementation. Source bindings expose TCP, UDP, accept streams and DNS lookup;
+  each operation still needs its corresponding grant and host provider.
 - **HTTP.** `HttpGrant { provider, origins }` grants exact normalized HTTP(S)
   origins. DNS and TLS are handled by the host HTTP sender. Raw socket grants
   never authorize HTTP, and HTTP grants never authorize raw sockets.
@@ -161,8 +162,12 @@ Guest result text is checked before decoding. Unchanged state reads transfer onl
 kernel revision, while still checking the handle and its owner's lifetime.
 
 Compiled components are checked against their full exported signatures and called
-through the Canonical ABI. They support plain interface functions and the WASI
-providers above. A compiled component can import selected Orbs:
+through the Canonical ABI. The native Rust facade additionally supports whole owned
+resource results, implicit borrowed method receivers and whole `stream<u8>` results of async
+freestanding exports and imports; see
+[owned WIT resources](../../docs/rust.md#owned-wit-resources) and
+[portable byte streams](../../docs/rust.md#portable-byte-streams). Source Orbs and public
+JSON ports still use the data profile. A compiled component can import selected Orbs:
 
 - Its Orb root acquires one reference per Orb import binding, for the default key
   `main`. A plain WIT import names no object key, so other keyed objects are not
@@ -183,6 +188,14 @@ providers above. A compiled component can import selected Orbs:
   not fabricate WIT error values. This includes an import issued after the caller was
   cancelled. Provider calls already in flight remain physically owned until they settle.
 
+Source methods can select a key per request using `await context.get(binding, key)`, where
+`binding` names a selected WIT Orb import and `key` is a string or string tuple. Acquisition
+uses the admitted caller's principal and the installed requirement's API version and method
+set. It waits for readiness and releases the claim on failure or cancellation. The root owns
+the claim: a retained guest handle cannot use it in another root or after expiry. Cleanup
+callbacks cannot acquire instances. Declared factory dependencies keep their existing scope
+ownership. This keyed-reference API does not transfer WIT resource handles or streams.
+
 ## WASI coverage
 
 The bundled WIT definitions contain all six packages of the pinned WASI 0.3
@@ -194,7 +207,7 @@ support. Native compiled components link `wasmtime-wasi` and `wasmtime-wasi-http
 | Package           | Native compiled components                                                        | Source TypeScript Orbs                                              | Browser source Orbs                                                                                  |
 | ----------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `wasi:filesystem` | Standard descriptors under granted preopens                                       | Generated binary read/write/append, metadata and directory bindings | Same bindings over memory, OPFS or custom descriptors; explicit platform limits                      |
-| `wasi:http`       | Standard outgoing request, response, body and trailer resources                   | The same generated resources; a TypeScript HTTP/SSE convenience     | The same resources over an injected host transport; Fetch has platform limits                        |
+| `wasi:http`       | Standard client and incoming handler, with streaming bodies and trailers          | The same generated resources; a TypeScript HTTP/SSE convenience     | The same resources over an injected host transport; Fetch has platform limits                        |
 | `wasi:sockets`    | Standard TCP, UDP and DNS, with separate grants                                   | Generated TCP, UDP, accept-stream and name-lookup bindings          | The same bindings over an injected partial provider; missing capabilities return standard errors     |
 | `wasi:clocks`     | System and monotonic clocks under an explicit grant                               | Generated system/monotonic clocks, resolutions and waits            | The same bindings over injected or browser clocks                                                    |
 | `wasi:random`     | Secure and non-cryptographic random interfaces under a grant                      | Generated secure/insecure bytes and u64, insecure seed              | The same bindings over injected or browser randomness                                                |
@@ -217,10 +230,15 @@ handler-only Orb needs no grant; `wasi:http/client` still requires an HTTP grant
 handler is host-local, never a portable Orb service. Each revision serves one request at
 a time, and the engine's `timeout_ms` bounds the whole request including its streamed
 body: a response streaming longer than that times out and quarantines the revision.
-Source handlers, Node, mobile and browser hosts refuse such Orbs before installation.
-Browser compiled components remain unsupported. Native/mobile share the native
-implementation, but host/Pulley tests do not establish iOS or Android device
-qualification.
+Source Orbs can export that same handler contract. The SDK's host-owned incoming HTTP
+entrypoint is exercised with source handlers in Chrome and with source and compiled handlers
+in Node. Its binary transport preserves ordered duplicate fields, body chunks and trailers;
+the application's listener and routing stay outside the Orb. The Fetch response adapter
+explicitly refuses trailers that its platform cannot expose.
+
+The SDK mobile adapter has a typed incoming HTTP carrier, but the React Native bridge and
+actual mobile runtime require separate qualification. Native/Pulley and adapter tests do not
+establish iOS or Android device support. Compiled components in the browser remain unsupported.
 
 ## Current scope
 
@@ -267,16 +285,25 @@ once, then runs every suite against them:
 just build-provider <target-directory>
 just build-probe <target-directory>
 just build-consumer <target-directory>
+just build-resources <target-directory>
+just build-streams <target-directory>
 just build-contributor <target-directory>
 just build-http-client <target-directory>
 just build-sockets <target-directory>
+just build-http-handler <http-handler-target-directory>
 just test-wasm-acceptance --out <directory> \
   --provider <target-directory>/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm \
   --probe <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm \
   --consumer <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm \
   --contributor <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm \
   --http-client <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm \
-  --sockets <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm
+  --sockets <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm \
+  --http-handler <http-handler-target-directory>/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm \
+  --http-proxy <http-handler-target-directory>/proxy/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm \
+  --resource-provider <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_resource_provider.wasm \
+  --resource-consumer <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_resource_consumer.wasm \
+  --stream-producer <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_stream_producer.wasm \
+  --stream-consumer <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_stream_consumer.wasm
 ```
 
 The runner builds the fixture Orbs with `scripts/test-wasm-fixtures.ts`, or reuses a
@@ -285,11 +312,11 @@ SDK Bun and Node suites, Chrome with the packaged default engine and with an ove
 engine directory, the [Wasm Orb example](../../examples/wasm-orb/README.md), and
 packed consumers in Node, Bun and Chrome with a clean NodeNext typecheck.
 Repeat `--suite native|sdk|node|browser|example|package` to select suites. The output
-directory must not contain the checkout. `just test-wasm-orb` runs the
+directory must not contain the checkout. `--suite native` selects the
 Rust tests against supplied artifacts.
 
 The interpreter is a `wasm32-wasip1` reactor core module behind a private
-fixed-buffer ABI, `tembra-interpreter-v9`. Its import namespace also carries the
+fixed-buffer ABI, `tembra-interpreter-v10`. Its import namespace also carries the
 digest of the generated WASI method and type table, so mismatched host/interpreter
 bindings are refused before execution. [`src/abi.rs`](src/abi.rs) is its only
 definition: the guest includes it, the native host compiles it, and the browser host

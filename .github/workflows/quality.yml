@@ -53,12 +53,28 @@ jobs:
       - run: just build-provider "$RUNNER_TEMP/provider"
       - run: just build-probe "$RUNNER_TEMP/provider"
       - run: just build-consumer "$RUNNER_TEMP/provider"
+      - run: just build-resources "$RUNNER_TEMP/provider"
+      - run: just build-streams "$RUNNER_TEMP/provider"
       - run: just build-contributor "$RUNNER_TEMP/provider"
       - run: just build-http-client "$RUNNER_TEMP/provider"
       - run: just build-sockets "$RUNNER_TEMP/provider"
       - run: just build-http-handler "$RUNNER_TEMP/http-handler"
       # The runner image provides Google Chrome; fail here if that changes.
       - run: google-chrome --version
-      - run: just test-wasm-acceptance --out "$RUNNER_TEMP/acceptance" --provider "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" --probe "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm" --consumer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm" --contributor "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm" --http-client "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm" --sockets "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm" --http-handler "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm" --http-proxy "$RUNNER_TEMP/http-handler/proxy/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm"
+      - name: Qualify all Orb artifacts
+        run: >-
+          just test-wasm-acceptance --out "$RUNNER_TEMP/acceptance"
+          --provider "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm"
+          --probe "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm"
+          --consumer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm"
+          --contributor "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm"
+          --http-client "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm"
+          --sockets "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm"
+          --http-handler "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm"
+          --http-proxy "$RUNNER_TEMP/http-handler/proxy/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm"
+          --resource-provider "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_resource_provider.wasm"
+          --resource-consumer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_resource_consumer.wasm"
+          --stream-producer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_stream_producer.wasm"
+          --stream-consumer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_stream_consumer.wasm"
       - name: Test portable mobile execution and foreign continuation delivery
         run: just test-mobile-wasm packages/ts/engine-node/dist/interpreter.wasm "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm" "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm"

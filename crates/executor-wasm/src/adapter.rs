@@ -1,6 +1,6 @@
 //! Install interpreter-backed callbacks through the existing native Orb facade.
 use crate::{
-    bindings::{BoundMethod, Environment, Import},
+    bindings::{BoundMethod, Environment, Import, Roles},
     failure,
     worker::Session,
 };
@@ -9,6 +9,10 @@ use std::{cell::Cell, collections::BTreeMap, rc::Rc};
 use tembra::{Orb, Result, Service, core};
 
 /// Install callbacks from the binding plan that `open_port` already checked against WIT.
+///
+/// `resources` is set only for a compiled revision admitted to the native capability
+/// transport; every other revision keeps data-only callbacks.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn orb(
     metadata: core::Orb,
     session: Session,
@@ -17,7 +21,15 @@ pub(crate) fn orb(
     bindings: &BTreeMap<String, tembra_contracts::Binding>,
     hooks: tembra_contracts::HookPlan,
     ingress: Option<tembra_contracts::IngressBinding>,
+    resources: bool,
 ) -> Result<Orb> {
+    let roles = |slot| {
+        if resources {
+            Roles::of(&contract, slot)
+        } else {
+            Ok(Roles::default())
+        }
+    };
     let mut orb = Orb::new(&metadata.name, metadata.api_version).isolated();
     let imports = contract
         .import_services(bindings)
@@ -46,14 +58,26 @@ pub(crate) fn orb(
                 if methods
                     .insert(
                         tembra_contracts::javascript_name(&name),
-                        BoundMethod { name, slot },
+                        BoundMethod {
+                            name,
+                            slot,
+                            roles: roles(slot)?,
+                        },
                     )
                     .is_some()
                 {
                     return Err(failure("ambiguous import method"));
                 }
             }
-            Ok((binding, Rc::new(Import { service, methods })))
+            let requirement = requirement(&metadata.requires, &service);
+            Ok((
+                binding,
+                Rc::new(Import {
+                    service,
+                    methods,
+                    requirement,
+                }),
+            ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let imports = Rc::new(imports);
@@ -146,6 +170,28 @@ pub(crate) fn orb(
             let slot = contract
                 .bind(&service.interface, &method, true)
                 .map_err(failure)?;
+            let roles = Rc::new(roles(slot)?);
+            if !roles.is_data() {
+                // Implicit `self`, owned results and stream ends travel as capabilities, never
+                // as data. A stream's call keeps working after its head.
+                implementation =
+                    implementation.payload_method(method, move |environment, context, payload| {
+                        let spelling = spelling.clone();
+                        let roles = roles.clone();
+                        async move {
+                            if roles.stream {
+                                return environment
+                                    .invoke_stream(context, &spelling, slot, payload)
+                                    .await;
+                            }
+                            environment
+                                .invoke_resource(context, &spelling, slot, &roles, payload)
+                                .await
+                                .map(tembra::portable::Outcome::from)
+                        }
+                    });
+                continue;
+            }
             let contract = contract.clone();
             implementation = implementation.method::<Value, Value, _, _>(
                 method,
@@ -217,6 +263,24 @@ fn handler(
     )
 }
 
+/// The installed requirement applied to runtime acquisition of an imported service.
+///
+/// It is the rule a declared reference uses (`Declaration::get`): the guest names only the import
+/// binding, never a version or method set. The planner records a requirement for every Orb
+/// binding, including one naming the importing Orb itself, so a planned import always has one.
+fn requirement(
+    requires: &[tembra::core::Requirement],
+    service: &str,
+) -> Option<tembra::AcquisitionOptions> {
+    requires
+        .iter()
+        .find(|requirement| requirement.methods.contains_key(service))
+        .map(|requirement| tembra::AcquisitionOptions {
+            api_version: requirement.api_version,
+            methods: requirement.methods[service].clone(),
+        })
+}
+
 /// Root and object redeclarations share an identity sequence and never overwrite an old heap slot.
 fn allocate_environment(next: &Cell<u64>) -> Result<u64> {
     let id = next
@@ -226,4 +290,39 @@ fn allocate_environment(next: &Cell<u64>) -> Result<u64> {
         .ok_or_else(|| failure("environment space exhausted"))?;
     next.set(id);
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Even an import bound to the importing Orb itself is planned as a requirement carrying the
+    /// binding's API version and the whole interface, so runtime acquisition never runs without
+    /// the installed requirement and the SDK's own-service resolution names the same methods.
+    #[test]
+    fn every_orb_binding_plans_the_requirement_runtime_acquisition_applies() {
+        let wit = "package example:keyed@1.0.0;
+interface counter { add: func(amount: u32) -> u32; who: func() -> string; }
+interface router { route: func(key: string) -> u32; }
+world consumer { import counter; export router; }";
+        let contract =
+            tembra_contracts::Contract::from_source("contract.wit", wit, Some("consumer")).unwrap();
+        for provider in ["router", "keyed"] {
+            let bindings = BTreeMap::from([(
+                "example:keyed/counter@1.0.0".to_owned(),
+                tembra_contracts::Binding::Orb {
+                    name: provider.into(),
+                    api_version: 3,
+                },
+            )]);
+            let plan = contract.plan("router", 1, &bindings).unwrap();
+            let service = format!("{provider}::example:keyed/counter@1.0.0");
+            let resolved = requirement(&plan.orb.requires, &service).expect(provider);
+            assert_eq!(resolved.api_version, 3);
+            assert_eq!(
+                resolved.methods,
+                ["add", "who"].map(str::to_owned).into_iter().collect()
+            );
+        }
+    }
 }

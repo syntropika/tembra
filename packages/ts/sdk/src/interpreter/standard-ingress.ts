@@ -123,13 +123,20 @@ class IncomingBody implements Body {
     }
   }
 
-  /** Stop the application's iterable once; its `return()` is tracked as physical cleanup. */
+  /**
+   * Stop the application's iterable once; its `return()` is tracked as physical cleanup. The
+   * application calls (the iterator factory of a never-read body, the `return` lookup and
+   * call) run inside that cleanup, so a body that cannot be opened (a locked stream) or closed
+   * fails only its own cleanup, never the guest call that dropped it.
+   */
   #release(): void {
     if (this.#stopped) return;
     this.#stopped = true;
-    const iterator = this.#iterator ?? this.source?.[Symbol.asyncIterator]();
+    const iterator = this.#iterator;
+    const source = this.source;
     this.#iterator = undefined;
-    if (iterator?.return) this.cleanup(() => iterator.return!());
+    if (iterator || source)
+      this.cleanup(() => (iterator ?? source![Symbol.asyncIterator]()).return?.());
   }
 
   /** The exchange ended: a pending or later read fails with `code`. */
@@ -278,14 +285,24 @@ export class IngressCall {
     readonly exchange: IngressExchange,
     cleanup: (operation: () => unknown) => void,
   ) {
-    const request = exchange.request;
+    const request = exchange.own();
     this.body = new IncomingBody(cleanup, request.body, request.trailers);
   }
 
-  /** The `own<request>` resource handed to the handler; invalid input is refused here. */
+  /**
+   * The `own<request>` resource handed to the handler; invalid input is refused here, and the
+   * body this call already owns is closed with it.
+   */
   resource(): HttpRequest {
     const parts = this.exchange.request;
-    const request = new HttpRequest(fields(parts.fields, "request"), undefined, this.body);
+    let headers: HttpFields;
+    try {
+      headers = fields(parts.fields, "request");
+    } catch (error) {
+      this.body.close();
+      throw error;
+    }
+    const request = new HttpRequest(headers, undefined, this.body);
     const refuse = (what: string) => {
       request.release();
       return new TypeError(`invalid incoming request ${what}`);
