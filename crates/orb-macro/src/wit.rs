@@ -1,6 +1,6 @@
 //! The WIT text derived from the module items, and the consumed packages it refers to.
 use crate::{Service, Shape};
-use heck::ToKebabCase;
+use heck::{ToKebabCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use std::{
     collections::BTreeMap,
@@ -9,6 +9,7 @@ use std::{
 use syn::{
     Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, Meta, Type, spanned::Spanned,
 };
+use wit_parser::{Resolve, TypeDefKind};
 
 /// WIT names are kebab-case; Rust identifiers map to them one by one.
 pub(crate) fn kebab(ident: &Ident) -> String {
@@ -120,12 +121,33 @@ pub(crate) fn absolute(dir: &str) -> syn::Result<PathBuf> {
     Ok(PathBuf::from(manifest).join(dir))
 }
 
+/// The callback of one hook, read from the consumed packages: its name, which compositions its
+/// shape admits, and how the bindings spell its input and result.
+pub(crate) struct Callback {
+    pub name: String,
+    /// The callback returns nothing.
+    pub series: bool,
+    /// The callback returns its input type.
+    pub waterfall: bool,
+    /// The callback returns an option.
+    pub bail: bool,
+    pub input: Spelled,
+    pub result: Option<Spelled>,
+}
+
+/// A WIT type as the generated bindings spell it in the hook's import module and in its export
+/// module, which are distinct Rust types.
+pub(crate) struct Spelled {
+    pub import: String,
+    pub export: String,
+}
+
 /// The callback of every hook: the single function of its interface in the consumed packages.
 pub(crate) fn callbacks<'a>(
     dir: &Path,
     hooks: impl Iterator<Item = &'a String>,
-) -> syn::Result<BTreeMap<String, String>> {
-    let mut resolve = wit_parser::Resolve::default();
+) -> syn::Result<BTreeMap<String, Callback>> {
+    let mut resolve = Resolve::default();
     resolve.push_dir(dir).map_err(|cause| {
         error(format!(
             "cannot read the WIT packages in {}: {cause:#}",
@@ -144,15 +166,114 @@ pub(crate) fn callbacks<'a>(
                         dir.display()
                     ))
                 })?;
-            let mut functions = interface.functions.keys();
-            match (functions.next(), functions.next()) {
-                (Some(callback), None) => Ok((hook.clone(), callback.clone())),
-                _ => Err(error(format!(
+            let mut functions = interface.functions.values();
+            let (Some(function), None) = (functions.next(), functions.next()) else {
+                return Err(error(format!(
                     "hook {hook} must declare exactly one callback"
-                ))),
-            }
+                )));
+            };
+            let [param] = function.params.as_slice() else {
+                return Err(error(format!(
+                    "the callback of hook {hook} takes exactly one input"
+                )));
+            };
+            let [namespace, package, interface] = crate::hook_path(hook);
+            let import = format!("self::{namespace}::{package}::{interface}");
+            let export = format!("exports::{namespace}::{package}::{interface}");
+            let spell = |ty: wit_parser::Type| -> syn::Result<Spelled> {
+                Ok(Spelled {
+                    import: rust_type(&resolve, ty, &import)?,
+                    export: rust_type(&resolve, ty, &export)?,
+                })
+            };
+            Ok((
+                hook.clone(),
+                Callback {
+                    name: function.name.clone(),
+                    series: function.result.is_none(),
+                    waterfall: function.result == Some(param.ty),
+                    bail: function.result.is_some_and(|ty| optional(&resolve, ty)),
+                    input: spell(param.ty)?,
+                    result: function.result.map(spell).transpose()?,
+                },
+            ))
         })
         .collect()
+}
+
+/// Whether a WIT type is an option, through aliases.
+fn optional(resolve: &Resolve, mut ty: wit_parser::Type) -> bool {
+    loop {
+        let wit_parser::Type::Id(id) = ty else {
+            return false;
+        };
+        match &resolve.types[id].kind {
+            TypeDefKind::Option(_) => return true,
+            TypeDefKind::Type(inner) => ty = *inner,
+            _ => return false,
+        }
+    }
+}
+
+/// Spell a WIT type the way `wit-bindgen` names it in `module`, the generated module of its
+/// interface: named types in UpperCamelCase, lists and strings from `alloc`, options, results and
+/// tuples structurally.
+fn rust_type(resolve: &Resolve, ty: wit_parser::Type, module: &str) -> syn::Result<String> {
+    use wit_parser::Type;
+    Ok(match ty {
+        Type::Bool => "bool".into(),
+        Type::U8 => "u8".into(),
+        Type::U16 => "u16".into(),
+        Type::U32 => "u32".into(),
+        Type::U64 => "u64".into(),
+        Type::S8 => "i8".into(),
+        Type::S16 => "i16".into(),
+        Type::S32 => "i32".into(),
+        Type::S64 => "i64".into(),
+        Type::F32 => "f32".into(),
+        Type::F64 => "f64".into(),
+        Type::Char => "char".into(),
+        Type::String => "__tembra_alloc::string::String".into(),
+        Type::ErrorContext => {
+            return Err(error("a hook callback cannot carry an error context"));
+        }
+        Type::Id(id) => {
+            let definition = &resolve.types[id];
+            if let Some(name) = &definition.name {
+                return Ok(format!("{module}::{}", name.to_upper_camel_case()));
+            }
+            match &definition.kind {
+                TypeDefKind::Option(inner) => {
+                    format!("Option<{}>", rust_type(resolve, *inner, module)?)
+                }
+                TypeDefKind::List(inner) => format!(
+                    "__tembra_alloc::vec::Vec<{}>",
+                    rust_type(resolve, *inner, module)?
+                ),
+                TypeDefKind::Result(result) => {
+                    let side = |ty: Option<wit_parser::Type>| match ty {
+                        Some(ty) => rust_type(resolve, ty, module),
+                        None => Ok("()".to_owned()),
+                    };
+                    format!("Result<{}, {}>", side(result.ok)?, side(result.err)?)
+                }
+                TypeDefKind::Tuple(tuple) => {
+                    let types = tuple
+                        .types
+                        .iter()
+                        .map(|ty| rust_type(resolve, *ty, module))
+                        .collect::<syn::Result<Vec<_>>>()?;
+                    format!("({},)", types.join(", "))
+                }
+                TypeDefKind::Type(inner) => rust_type(resolve, *inner, module)?,
+                _ => {
+                    return Err(error(
+                        "this type of the hook callback has no spelling the macro knows; use records, enums, variants, scalars, strings, lists, options, results and tuples",
+                    ));
+                }
+            }
+        }
+    })
 }
 
 fn error(message: impl std::fmt::Display) -> syn::Error {
