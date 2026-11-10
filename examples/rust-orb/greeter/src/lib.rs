@@ -13,7 +13,8 @@ mod greeter {
         pub chars: u32,
     }
 
-    /// The service: a unit struct with an impl block of public functions.
+    /// The service: a unit struct marked #[service], with an impl block of public functions.
+    #[service]
     pub struct Greeting;
 
     impl Greeting {

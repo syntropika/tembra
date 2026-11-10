@@ -31,6 +31,7 @@ mod filter {
     }
 
     /// The contributor's own service.
+    #[service]
     pub struct Report;
 
     impl Report {
