@@ -1,14 +1,18 @@
-//! Reading a component: its WIT, its core imports, and the grants its imports imply.
+//! Reading a component: its contract, its core imports, and the grants its imports imply.
 use anyhow::{Context, Result, bail};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
+use tembra_contracts::Contract;
 use wasmparser::{Parser, Payload};
 use wit_component::{DecodedWasm, WitPrinter};
-use wit_parser::{PackageId, Resolve, WorldId, WorldItem, WorldKey};
+use wit_parser::{InterfaceId, PackageId, Resolve, WorldId, WorldItem, WorldKey};
 
-/// `cargo tembra wit`: print the reconstructed WIT, or write the author's package and a world.
+/// The custom section in which the macro stores the WIT it derived from the module.
+const WIT_SECTION: &str = "tembra:wit";
+
+/// `cargo tembra wit`: print the reconstructed WIT, or write the contract with --emit.
 pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) -> Result<()> {
     let bytes = std::fs::read(component)?;
     let (resolve, world) = decode(&bytes)?;
@@ -31,7 +35,7 @@ pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) 
         }
         Some(directory) => {
             let name = world_name.context("--emit needs --world <name>")?;
-            let text = emit_wit(&resolve, world, &name)?;
+            let (text, name) = contract_text(&bytes, &resolve, world, &name)?;
             std::fs::create_dir_all(&directory)?;
             let file = directory.join(format!("{name}.wit"));
             std::fs::write(&file, &text)?;
@@ -42,21 +46,85 @@ pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) 
     Ok(())
 }
 
-/// The author's package as WIT text, plus a world with the given name listing what the component
-/// imports and exports.
-pub fn emit_wit(resolve: &Resolve, world: WorldId, name: &str) -> Result<String> {
+/// The contract of a component as WIT text, and the name of its world.
+///
+/// A component built with the macro carries the module's own WIT in a custom section; the
+/// packages it consumes are nested after it, taken from the component's types. Any other
+/// component gets the WIT derived from its types, with the given world name.
+pub fn contract_text(
+    bytes: &[u8],
+    resolve: &Resolve,
+    world: WorldId,
+    name: &str,
+) -> Result<(String, String)> {
     let root = resolve.worlds[world]
         .package
         .context("the world has no package")?;
-    let author: PackageId = resolve
-        .packages
-        .iter()
-        .find(|(id, package)| *id != root && package.name.namespace != "wasi")
-        .map(|(id, _)| id)
-        .context("no author package in the component")?;
+    match embedded_wit(bytes)? {
+        Some(text) => {
+            let package = text
+                .lines()
+                .find_map(|line| line.strip_prefix("package ")?.strip_suffix(';'))
+                .context("the tembra:wit section declares no package")?
+                .trim()
+                .to_owned();
+            let world_name = text
+                .lines()
+                .find_map(|line| line.trim_start().strip_prefix("world "))
+                .map(|rest| rest.trim_end_matches('{').trim().to_owned())
+                .context("the tembra:wit section declares no world")?;
+            let mut text = text;
+            for id in nested(resolve, root, |name| *name != package) {
+                let mut printer = WitPrinter::default();
+                printer
+                    .print_package(resolve, id, false)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                text.push('\n');
+                text.push_str(&String::from(printer.output));
+            }
+            Ok((text, world_name))
+        }
+        None => Ok((derived_wit(resolve, world, name)?, name.to_owned())),
+    }
+}
+
+/// The `tembra:wit` custom section of the component's core module, if the macro wrote one.
+fn embedded_wit(bytes: &[u8]) -> Result<Option<String>> {
+    for payload in Parser::new(0).parse_all(bytes) {
+        let Payload::ModuleSection {
+            unchecked_range, ..
+        } = payload?
+        else {
+            continue;
+        };
+        let module = &bytes[unchecked_range.start as usize..unchecked_range.end as usize];
+        for payload in Parser::new(0).parse_all(module) {
+            let Payload::CustomSection(section) = payload? else {
+                continue;
+            };
+            if section.name() == WIT_SECTION {
+                let text = String::from_utf8(section.data().to_vec())
+                    .context("the tembra:wit section is not UTF-8")?;
+                return Ok(Some(text));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The author's package as WIT text, the consumed packages nested in it, and a world with the
+/// given name listing what the component imports and exports.
+fn derived_wit(resolve: &Resolve, world: WorldId, name: &str) -> Result<String> {
+    let root = resolve.worlds[world]
+        .package
+        .context("the world has no package")?;
+    let author = author_package(resolve, world)?;
+    let consumed: Vec<PackageId> = nested(resolve, root, |_| true)
+        .filter(|id| *id != author)
+        .collect();
     let mut printer = WitPrinter::default();
     printer
-        .print(resolve, author, &[])
+        .print(resolve, author, &consumed)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut text = String::from(printer.output);
     text.push_str(&format!("\nworld {name} {{\n"));
@@ -73,6 +141,77 @@ pub fn emit_wit(resolve: &Resolve, world: WorldId, name: &str) -> Result<String>
     }
     text.push_str("}\n");
     Ok(text)
+}
+
+/// The packages a contract must carry along: not the synthesized root, not the standard WASI
+/// packages that ship with tembra-contracts, and only those accepted by the filter.
+fn nested<'a>(
+    resolve: &'a Resolve,
+    root: PackageId,
+    keep: impl Fn(&String) -> bool + 'a,
+) -> impl Iterator<Item = PackageId> + 'a {
+    resolve
+        .packages
+        .iter()
+        .filter(move |(id, package)| {
+            *id != root && package.name.namespace != "wasi" && keep(&package.name.to_string())
+        })
+        .map(|(id, _)| id)
+}
+
+/// The package the component defines: the one owning the interfaces it exports without importing.
+fn author_package(resolve: &Resolve, world: WorldId) -> Result<PackageId> {
+    let world = &resolve.worlds[world];
+    let imported: BTreeSet<InterfaceId> = world.imports.values().filter_map(interface).collect();
+    world
+        .exports
+        .values()
+        .filter_map(interface)
+        .filter(|id| !imported.contains(id))
+        .find_map(|id| resolve.interfaces[id].package)
+        .context(
+            "the component exports no interface of its own; an Orb declares at least one service",
+        )
+}
+
+fn interface(item: &WorldItem) -> Option<InterfaceId> {
+    match item {
+        WorldItem::Interface { id, .. } => Some(*id),
+        _ => None,
+    }
+}
+
+/// The hook contributions of a contract: the interfaces its world both imports and exports, with
+/// the given priorities or 0. A priority for an interface that is not a contribution is an error.
+pub fn contributions(
+    contract: &Contract,
+    priorities: &BTreeMap<String, i32>,
+) -> Result<BTreeMap<String, i32>> {
+    let model = contract.prepared().model();
+    let identities = |entries: &[tembra_contracts::Entry]| -> BTreeSet<String> {
+        entries
+            .iter()
+            .filter_map(|entry| match &entry.item {
+                tembra_contracts::Item::Interface(interface) => interface.contract.clone(),
+                _ => None,
+            })
+            .collect()
+    };
+    let exported = identities(&model.exports);
+    let mut contributions: BTreeMap<String, i32> = identities(&model.imports)
+        .into_iter()
+        .filter(|id| exported.contains(id))
+        .map(|id| (id, 0))
+        .collect();
+    for (id, priority) in priorities {
+        let slot = contributions.get_mut(id).with_context(|| {
+            format!(
+                "[package.metadata.tembra] contributes names {id}, but the contract does not import and export it"
+            )
+        })?;
+        *slot = *priority;
+    }
+    Ok(contributions)
 }
 
 /// `cargo tembra inspect`: core import sections, the summary and, against a WIT, the verdict.
@@ -114,13 +253,23 @@ pub fn inspect(
         }
     }
     let (resolve, world) = decode(&bytes)?;
-    summary(&resolve, world, "orb");
-    if let Some(wit_dir) = wit_dir {
-        let name = world_name.context("--wit needs --world <name>")?;
-        let contract = tembra_contracts::Contract::from_dir(&wit_dir, Some(&name))
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let contract = match wit_dir {
+        Some(wit_dir) => {
+            let name = world_name.context("--wit needs --world <name>")?;
+            let contract = Contract::from_dir(&wit_dir, Some(&name))
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            Some((contract, name, wit_dir))
+        }
+        None => None,
+    };
+    let contributions = match &contract {
+        Some((contract, ..)) => contributions(contract, &BTreeMap::new())?,
+        None => BTreeMap::new(),
+    };
+    summary(&resolve, world, "orb", &contributions);
+    if let Some((contract, name, wit_dir)) = contract {
         println!("checked against world {name} of {}:", wit_dir.display());
-        match contract.component_artifact(&bytes, "orb", 1, &Default::default()) {
+        match contract.component_artifact(&bytes, "orb", 1, &contributions) {
             Ok(artifact) => println!("  ACCEPTED, artifact of {} bytes", artifact.len()),
             Err(error) => println!("  REFUSED: {error}"),
         }
@@ -146,12 +295,21 @@ fn world_key(resolve: &Resolve, key: &WorldKey, local: Option<PackageId>) -> Str
     }
 }
 
-/// Exports as services and methods; imports with the grant they will need at installation.
-pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str) {
+/// Exports as services and methods, hook contributions, and imports with the grant they will
+/// need at installation.
+pub fn summary(
+    resolve: &Resolve,
+    world: WorldId,
+    orb_name: &str,
+    contributions: &BTreeMap<String, i32>,
+) {
     let world = &resolve.worlds[world];
     println!("exports, the services of {orb_name}:");
     for (key, item) in &world.exports {
         let id = world_key(resolve, key, None);
+        if contributions.contains_key(&id) {
+            continue; // a hook callback, not a service
+        }
         if let WorldItem::Interface { id: interface, .. } = item {
             let methods: Vec<_> = resolve.interfaces[*interface]
                 .functions
@@ -161,6 +319,12 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str) {
             println!("  {orb_name}::{id}  methods: {}", methods.join(", "));
         } else {
             println!("  {id}");
+        }
+    }
+    if !contributions.is_empty() {
+        println!("hook contributions, bound to the provider with Install::requires:");
+        for (id, priority) in contributions {
+            println!("  {id}  priority {priority}");
         }
     }
     let mut requires = Vec::new();
@@ -173,6 +337,9 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str) {
             continue; // types only: nothing to bind
         }
         let id = world_key(resolve, key, None);
+        if contributions.contains_key(&id) {
+            continue; // bound to the provider through the contribution
+        }
         let kind = match id.split('/').next().unwrap_or_default() {
             "wasi:filesystem" => "filesystem (FilesystemGrant)",
             "wasi:sockets" => "network (NetworkGrant)",
@@ -188,8 +355,12 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str) {
         };
         grants.entry(kind).or_default().push(id);
     }
-    if world.imports.is_empty() {
-        println!("imports: none; the installer grants nothing");
+    if requires.is_empty() && grants.is_empty() {
+        if contributions.is_empty() {
+            println!("imports: none; the installer grants nothing");
+        } else {
+            println!("other imports: none; the installer grants nothing");
+        }
     }
     if !requires.is_empty() {
         println!("imports of other Orbs, bound with Install::requires:");

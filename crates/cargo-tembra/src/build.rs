@@ -1,5 +1,5 @@
 //! `cargo tembra build`: compile, derive the WIT, verify, package, summarize.
-use crate::component::{decode, emit_wit, summary};
+use crate::component::{contract_text, contributions, decode, summary};
 use anyhow::{Context, Result, bail};
 use heck::{ToKebabCase, ToSnakeCase};
 use sha2::{Digest, Sha256};
@@ -17,10 +17,10 @@ struct Metadata {
     name: Option<String>,
     /// Default 1.
     api_version: Option<u32>,
-    /// The world name; default: the Orb name in kebab-case, which is what the macro derives
-    /// from the module name.
+    /// The world name of a component without an embedded contract; default: the Orb name in
+    /// kebab-case. A component built with the macro names its world itself.
     world: Option<String>,
-    /// Hook contributions and their priorities, passed to the packager.
+    /// Priorities of hook contributions; a contribution not listed here has priority 0.
     contributes: BTreeMap<String, i32>,
 }
 
@@ -84,20 +84,24 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .with_context(|| format!("missing {}", component_path.display()))?;
     let (resolve, world_id) = decode(&component)?;
 
-    // 2. The contract is an output: the WIT derived from the component, in contract/<world>.wit.
-    //    Not wit/: wit-bindgen loads a directory of that name on its own and finds the package twice.
+    // 2. The contract is an output: the WIT the macro embedded in the component, or the one
+    //    derived from its types, written to contract/<world>.wit. Not wit/: wit-bindgen loads a
+    //    directory of that name on its own and finds the package twice.
+    let (text, world) = contract_text(&component, &resolve, world_id, &world)?;
     let wit_dir = manifest_dir.join("contract");
     let wit_file = wit_dir.join(format!("{world}.wit"));
     std::fs::create_dir_all(&wit_dir)?;
-    std::fs::write(&wit_file, emit_wit(&resolve, world_id, &world)?)?;
-    println!("WIT derived from the component -> {}", wit_file.display());
+    std::fs::write(&wit_file, text)?;
+    println!("contract -> {}", wit_file.display());
     let contract = tembra_contracts::Contract::from_dir(&wit_dir, Some(&world))
         .map_err(|error| anyhow::anyhow!("{error}"))
         .with_context(|| format!("reading the WIT in {}", wit_dir.display()))?;
 
     // 3. Verify and package: the same component_artifact the SDK build uses for a provider.
+    //    Hook contributions are the interfaces the contract both imports and exports.
+    let contributions = contributions(&contract, &metadata.contributes)?;
     let artifact = contract
-        .component_artifact(&component, &orb_name, api_version, &metadata.contributes)
+        .component_artifact(&component, &orb_name, api_version, &contributions)
         .map_err(|error| anyhow::anyhow!("{error}"))
         .context("the component does not satisfy its contract")?;
     let artifacts = out.unwrap_or_else(|| manifest_dir.join("artifacts"));
@@ -125,6 +129,6 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         artifact.len()
     );
     println!("  checksums.txt");
-    summary(&resolve, world_id, &orb_name);
+    summary(&resolve, world_id, &orb_name, &contributions);
     Ok(())
 }
