@@ -38,7 +38,13 @@ for (const [name, source, world] of [
     calculator.replace("Expected guest failure", "Expected revised guest failure"),
     "calculator",
   ],
-  ["online", calculator.replace('name: "calculator"', 'name: "online"'), "online-calculator"],
+  [
+    "online",
+    (await readFile(path.join(fixture, "online.ts"), "utf8"))
+      .replaceAll('"@syntropika/tembra-sdk/http"', http)
+      .replaceAll('"@syntropika/tembra-sdk"', guest),
+    "online-calculator",
+  ],
 ] as const) {
   await mkdir(path.join(sources, world), { recursive: true });
   await writeFile(
@@ -50,7 +56,8 @@ for (const [name, source, world] of [
     entry: `${world}/${name}.ts`,
     wit: `${world}/contract.wit`,
     world,
-    minify: false,
+    // The reload regression edits its known source text; the HTTP fixture uses production minification.
+    minify: name === "online",
   };
 }
 const guard = `import {orb,type Declaration} from ${guest};
@@ -129,6 +136,20 @@ for (const world of ["provider", "extension"]) {
   );
   builds[target] = { entry: `${target}/orb.ts`, wit: `${target}/contract.wit`, world };
 }
+// HTTP uses the same source bundle and standard imports in native and browser hosts.
+const httpFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-http");
+await mkdir(path.join(sources, "http"), { recursive: true });
+await writeFile(
+  path.join(sources, "http/contract.wit"),
+  await readFile(path.join(httpFixture, "contract.wit")),
+);
+await writeFile(
+  path.join(sources, "http/orb.ts"),
+  (await readFile(path.join(httpFixture, "orb.ts"), "utf8"))
+    .replaceAll('"@syntropika/tembra-sdk/http"', http)
+    .replaceAll('"@syntropika/tembra-sdk"', guest),
+);
+builds.http = { entry: "http/orb.ts", wit: "http/contract.wit", world: "client" };
 // Standard WASI source Orbs: the example scenario and the acceptance-only boundary probes. Two
 // boundary revisions let acceptance pass one revision's handle number to the other.
 const standardFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-standard");

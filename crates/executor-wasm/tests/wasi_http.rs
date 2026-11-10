@@ -245,3 +245,483 @@ fn compiled_components_reach_public_https() {
         );
     }
 }
+
+/// Start one fetcher `fetch` call under its own root; returns its context and completion.
+fn start(
+    pool: &mut LocalPool,
+    host: &Host,
+    reference: &Rc<tembra::Reference>,
+    args: Value,
+) -> (
+    tembra::Context,
+    futures::channel::oneshot::Receiver<tembra::Result<Value>>,
+) {
+    start_method(pool, host, reference, "fetch", args)
+}
+
+/// Start one fetcher call under its own root; returns its context and completion.
+fn start_method(
+    pool: &mut LocalPool,
+    host: &Host,
+    reference: &Rc<tembra::Reference>,
+    method: &'static str,
+    args: Value,
+) -> (
+    tembra::Context,
+    futures::channel::oneshot::Receiver<tembra::Result<Value>>,
+) {
+    let (issued, context) = futures::channel::oneshot::channel();
+    let (finished, finish) = futures::channel::oneshot::channel();
+    let host = host.clone();
+    let reference = reference.clone();
+    futures::task::LocalSpawnExt::spawn_local(&pool.spawner(), async move {
+        let result = host
+            .root("alice", move |context| {
+                async move {
+                    let _ = issued.send(context.clone());
+                    reference.call_value(&context, method, args).await
+                }
+                .boxed_local()
+            })
+            .await;
+        let _ = finished.send(result);
+    })
+    .unwrap();
+    (pool.run_until(context).unwrap(), finish)
+}
+
+/// Keep the host adapter serving (context checks) until `ready` holds.
+fn serve_until(pool: &mut LocalPool, mut ready: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    pool.run_until(async {
+        while !ready() {
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            futures_timer::Delay::new(Duration::from_millis(2)).await;
+        }
+    });
+}
+
+/// A caller's cancellation drops its compiled call's in-flight send — before the request is
+/// sent, and while the response head is awaited — and the call completes only after the
+/// connection physically closed. The Store keeps serving later calls.
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_CLIENT"]
+fn compiled_sends_are_cancelled_with_their_call() {
+    if component().is_none() {
+        return;
+    }
+    for engine in engines() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (headed, head_seen) = mpsc::channel();
+        let (closed, observed) = mpsc::channel();
+        thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if socket.read(&mut byte).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8(head).unwrap();
+                if head.starts_with("GET /answer ") {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                        .unwrap();
+                    let _ = socket.read_to_end(&mut Vec::new());
+                    return;
+                }
+                let _ = headed.send(head);
+                // Never answer: only the host closing the connection ends this read.
+                let _ = socket.read_to_end(&mut Vec::new());
+                let _ = closed.send(std::time::Instant::now());
+            }
+        });
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let origin = format!("http://{address}");
+        host.install(vec![
+            engine
+                .load(
+                    &artifact(&component().unwrap()),
+                    install(std::slice::from_ref(&origin)),
+                )
+                .unwrap(),
+        ])
+        .unwrap();
+        let reference = Rc::new(host.get(SERVICE, vec!["main".into()], "alice").unwrap());
+        pool.run_until(reference.ready()).unwrap();
+
+        // Cancelled while the response head is awaited.
+        let (context, finish) = start(
+            &mut pool,
+            &host,
+            &reference,
+            json!(["http", address.to_string(), "/stalled"]),
+        );
+        let mut head = None;
+        serve_until(&mut pool, || {
+            head = head_seen.try_recv().ok();
+            head.is_some()
+        });
+        assert!(head.unwrap().starts_with("GET /stalled "));
+        let cancelled = std::time::Instant::now();
+        context.cancel().unwrap();
+        let result = pool.run_until(finish).unwrap();
+        let finished = std::time::Instant::now();
+        let closed_at = observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(finished - cancelled < Duration::from_secs(2), "{result:?}");
+        assert!(closed_at - cancelled < Duration::from_secs(2));
+        // The guest saw its send fail (or the call surfaced the cancellation itself).
+        match &result {
+            Ok(value) => assert_eq!(value["tag"], "err", "{value}"),
+            Err(error) => assert_eq!(error.code, tembra::Code::Cancelled, "{error}"),
+        }
+
+        // Cancelled before the guest ran: nothing is sent, or the connection closes at once.
+        let (context, finish) = start(
+            &mut pool,
+            &host,
+            &reference,
+            json!(["http", address.to_string(), "/early"]),
+        );
+        context.cancel().unwrap();
+        let _ = pool.run_until(finish).unwrap();
+
+        // The same Store still serves a later call: it was not quarantined.
+        let live = reference.clone();
+        let args = json!(["http", address.to_string(), "/answer"]);
+        let value = pool
+            .run_until(host.root("alice", move |context| {
+                async move { live.call_value(&context, "fetch", args).await }.boxed_local()
+            }))
+            .unwrap();
+        assert_eq!(value, json!({"tag": "ok", "val": "200 ok"}));
+        reference.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(engine.instances(), 0);
+    }
+}
+
+/// A response kept by one call stays open (revision-owned) while other calls run and complete,
+/// and a later call that consumes and closes it closes the connection while it runs.
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_CLIENT"]
+fn compiled_retained_response_is_closed_by_a_later_call() {
+    if component().is_none() {
+        return;
+    }
+    for engine in engines() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (closed, observed) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(20)))
+                .unwrap();
+            request(&mut socket);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nb\r\ndata: one\n\n\r\n")
+                .unwrap();
+            // Never end the stream: only the host closing the connection ends this read.
+            let _ = socket.read_to_end(&mut Vec::new());
+            let _ = closed.send(std::time::Instant::now());
+        });
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let origin = format!("http://{address}");
+        host.install(vec![
+            engine
+                .load(
+                    &artifact(&component().unwrap()),
+                    install(std::slice::from_ref(&origin)),
+                )
+                .unwrap(),
+        ])
+        .unwrap();
+        let reference = Rc::new(host.get(SERVICE, vec!["main".into()], "alice").unwrap());
+        pool.run_until(reference.ready()).unwrap();
+        let mut call = |method: &'static str, args: Value| {
+            let live = reference.clone();
+            pool.run_until(host.root("alice", move |context| {
+                async move { live.call_value(&context, method, args).await }.boxed_local()
+            }))
+            .unwrap()
+        };
+        let kept = call("keep", json!(["http", address.to_string(), "/events"]));
+        assert_eq!(kept, json!({"tag": "ok", "val": 200}));
+        // Another call completes without waiting for the idle retained driver.
+        let started = std::time::Instant::now();
+        let other = call("fetch", json!(["http", "127.0.0.1:9", "/"]));
+        assert_eq!(other["tag"], "err");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            observed.try_recv().is_err(),
+            "the kept response is still open"
+        );
+        // A later call consumes and closes it; the connection closes while that call runs.
+        let closed_value = call("close-kept", json!([]));
+        let returned = std::time::Instant::now();
+        assert_eq!(closed_value, json!({"tag": "ok", "val": "data: one\n\n"}));
+        let closed_at = observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            closed_at < returned + Duration::from_millis(200),
+            "closed {:?} after the closing call returned",
+            closed_at.saturating_duration_since(returned)
+        );
+        reference.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(engine.instances(), 0);
+    }
+}
+
+/// A peer that answers `/answer` with "ok" and every other path with an SSE head plus one
+/// event, then never ends that body; it reports each event write and each close by the host.
+fn sse_peer() -> (
+    SocketAddr,
+    mpsc::Receiver<()>,
+    mpsc::Receiver<std::time::Instant>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (evented, event_seen) = mpsc::channel();
+    let (closed, observed) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok((mut socket, _)) = listener.accept() {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            let head = request(&mut socket);
+            if head.starts_with("GET /answer ") {
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+                let _ = socket.read_to_end(&mut Vec::new());
+                continue;
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nb\r\ndata: one\n\n\r\n")
+                .unwrap();
+            let _ = evented.send(());
+            let _ = socket.read_to_end(&mut Vec::new());
+            let _ = closed.send(std::time::Instant::now());
+        }
+    });
+    (address, event_seen, observed)
+}
+
+/// Install the fixture, granted for `address`, and return a ready reference.
+fn installed(
+    engine: &Engine,
+    pool: &mut LocalPool,
+    address: SocketAddr,
+) -> (Host, Rc<tembra::Reference>) {
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        engine
+            .load(
+                &artifact(&component().unwrap()),
+                install(&[format!("http://{address}")]),
+            )
+            .unwrap(),
+    ])
+    .unwrap();
+    let reference = Rc::new(host.get(SERVICE, vec!["main".into()], "alice").unwrap());
+    pool.run_until(reference.ready()).unwrap();
+    (host, reference)
+}
+
+/// Call one method under its own root and wait for the result.
+fn invoke_on(
+    pool: &mut LocalPool,
+    host: &Host,
+    reference: &Rc<tembra::Reference>,
+    method: &'static str,
+    args: Value,
+) -> Value {
+    let live = reference.clone();
+    pool.run_until(host.root("alice", move |context| {
+        async move { live.call_value(&context, method, args).await }.boxed_local()
+    }))
+    .unwrap()
+}
+
+/// Cancelling a compiled call while its guest is parked in a body read (SSE head plus one
+/// event, then idle) closes the body at once: the call finishes promptly, the peer sees the
+/// close, and the same Store serves a later call. Covered with the response-handling future
+/// already resolved (`fetch`) and still pending (`stream-held`).
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_CLIENT"]
+fn compiled_active_body_reads_end_with_their_cancelled_call() {
+    if component().is_none() {
+        return;
+    }
+    for engine in engines() {
+        for method in ["fetch", "stream-held"] {
+            let (address, event_seen, observed) = sse_peer();
+            let mut pool = LocalPool::new();
+            let (host, reference) = installed(&engine, &mut pool, address);
+            let (context, finish) = start_method(
+                &mut pool,
+                &host,
+                &reference,
+                method,
+                json!(["http", address.to_string(), "/events"]),
+            );
+            serve_until(&mut pool, || event_seen.try_recv().is_ok());
+            // Let the guest take the head and the event and park in its next body read.
+            let settle = std::time::Instant::now() + Duration::from_millis(300);
+            serve_until(&mut pool, || std::time::Instant::now() >= settle);
+            let cancelled = std::time::Instant::now();
+            context.cancel().unwrap();
+            let result = pool.run_until(finish).unwrap();
+            let finished = cancelled.elapsed();
+            let closed = observed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the host closed the connection")
+                .saturating_duration_since(cancelled);
+            // A watchdog against waiting for the call deadline, not a performance bound.
+            assert!(
+                finished < Duration::from_secs(2),
+                "{method}: {finished:?} {result:?}"
+            );
+            assert!(closed < Duration::from_secs(2), "{method}: {closed:?}");
+            if let Err(error) = &result {
+                assert_eq!(error.code, tembra::Code::Cancelled, "{method}: {error}");
+            }
+            let later = invoke_on(
+                &mut pool,
+                &host,
+                &reference,
+                "fetch",
+                json!(["http", address.to_string(), "/answer"]),
+            );
+            assert_eq!(later, json!({"tag": "ok", "val": "200 ok"}), "{method}");
+            reference.release().unwrap();
+            pool.run_until(host.close()).unwrap();
+            assert_eq!(engine.instances(), 0);
+        }
+    }
+}
+
+/// A body the call read and left open is closed when that call returns normally, and the call
+/// returns only after the close; an `err` written to the response-handling future closes a body
+/// the guest still holds (no body drop involved).
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_CLIENT"]
+fn compiled_active_bodies_close_with_their_call_or_handling_error() {
+    if component().is_none() {
+        return;
+    }
+    for engine in engines() {
+        let (address, _event_seen, observed) = sse_peer();
+        let mut pool = LocalPool::new();
+        let (host, reference) = installed(&engine, &mut pool, address);
+        let args = json!(["http", address.to_string(), "/events"]);
+        let value = invoke_on(&mut pool, &host, &reference, "read-and-keep", args.clone());
+        assert_eq!(value, json!({"tag": "ok", "val": "data: one\n\n"}));
+        observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the kept active body closed with its call");
+        let value = invoke_on(&mut pool, &host, &reference, "hold-close", args);
+        assert_eq!(value, json!({"tag": "ok", "val": "data: one\n\n|0"}));
+        observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the handling error closed the held body");
+        let later = invoke_on(
+            &mut pool,
+            &host,
+            &reference,
+            "fetch",
+            json!(["http", address.to_string(), "/answer"]),
+        );
+        assert_eq!(later, json!({"tag": "ok", "val": "200 ok"}));
+        reference.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(engine.instances(), 0);
+    }
+}
+
+/// The cancellation window between a response head and the first body read, made deterministic:
+/// the guest takes the `/window` head, then waits on a `/barrier` request that the peer holds
+/// until the caller has cancelled, and only then reads the body. A body whose first read follows
+/// the cancellation must be closed when it registers; the cooperative reader then returns, the
+/// peer sees the close, and the Store keeps serving (no 10 s deadline, no quarantine).
+#[test]
+#[ignore = "requires TEMBRA_WASM_HTTP_CLIENT"]
+fn compiled_body_first_read_after_cancellation_is_closed() {
+    if component().is_none() {
+        return;
+    }
+    for engine in engines() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (barrier_seen, barrier) = mpsc::channel();
+        let (window_closed, closed) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok((mut socket, _)) = listener.accept() {
+                let (barrier_seen, window_closed) = (barrier_seen.clone(), window_closed.clone());
+                thread::spawn(move || {
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(30)))
+                        .unwrap();
+                    let head = request(&mut socket);
+                    if head.starts_with("GET /answer ") {
+                        let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+                    } else if head.starts_with("GET /barrier ") {
+                        // Held until the host drops this request (the cancelled send).
+                        let _ = barrier_seen.send(());
+                    } else {
+                        let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nb\r\ndata: one\n\n\r\n");
+                    }
+                    let _ = socket.read_to_end(&mut Vec::new());
+                    if head.starts_with("GET /window ") {
+                        let _ = window_closed.send(std::time::Instant::now());
+                    }
+                });
+            }
+        });
+        let mut pool = LocalPool::new();
+        let (host, reference) = installed(&engine, &mut pool, address);
+        let (context, finish) = start_method(
+            &mut pool,
+            &host,
+            &reference,
+            "read-after-barrier",
+            json!(["http", address.to_string(), "/window", "/barrier"]),
+        );
+        // The `/window` head was delivered and the guest now waits on the barrier, so it has not
+        // read the body yet.
+        serve_until(&mut pool, || barrier.try_recv().is_ok());
+        let cancelled = std::time::Instant::now();
+        context.cancel().unwrap();
+        let result = pool.run_until(finish).unwrap();
+        let finished = cancelled.elapsed();
+        let closed_after = closed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the window body's connection closed")
+            .saturating_duration_since(cancelled);
+        // A watchdog against waiting for the call deadline, not a performance bound.
+        assert!(finished < Duration::from_secs(2), "{finished:?} {result:?}");
+        assert!(closed_after < Duration::from_secs(2), "{closed_after:?}");
+        if let Err(error) = &result {
+            assert_eq!(error.code, tembra::Code::Cancelled, "{error}");
+        }
+        let later = invoke_on(
+            &mut pool,
+            &host,
+            &reference,
+            "fetch",
+            json!(["http", address.to_string(), "/answer"]),
+        );
+        assert_eq!(later, json!({"tag": "ok", "val": "200 ok"}));
+        reference.release().unwrap();
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(engine.instances(), 0);
+    }
+}

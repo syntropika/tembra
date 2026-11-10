@@ -31,6 +31,8 @@ const COMPLETE: &[&str] = &[
     "wasi:cli/terminal-stdin@0.3.0",
     "wasi:cli/terminal-stdout@0.3.0",
     "wasi:cli/terminal-stderr@0.3.0",
+    "wasi:http/types@0.3.0",
+    "wasi:http/client@0.3.0",
 ];
 
 /// Mirror of the upstream bindgen `store` entries (`wasmtime-wasi` `p3/bindings.rs`). If this
@@ -43,7 +45,28 @@ const STORE: &[&str] = &[
     "wasi:cli/stdin@0.3.0#read-via-stream",
     "wasi:cli/stdout@0.3.0#write-via-stream",
     "wasi:cli/stderr@0.3.0#write-via-stream",
+    "wasi:http/client@0.3.0#send",
+    "wasi:http/types@0.3.0#[static]request.new",
+    "wasi:http/types@0.3.0#[static]request.consume-body",
+    "wasi:http/types@0.3.0#[static]response.new",
+    "wasi:http/types@0.3.0#[static]response.consume-body",
 ];
+
+/// Resources whose upstream `drop` is a store function (`Host<R>WithStore::drop`); they close
+/// through the typed close queue wherever a Store is held.
+const STORE_DROPS: &[&str] = &[
+    "wasi:http/types@0.3.0#request",
+    "wasi:http/types@0.3.0#response",
+];
+
+/// Upstream bindings root per WASI package; HTTP lives in `wasmtime-wasi-http`.
+fn bindings(package: &str) -> &'static str {
+    if package == "http" {
+        "wasmtime_wasi_http::p3::bindings"
+    } else {
+        "p3::bindings"
+    }
+}
 
 /// Byte-list results bounded by a WIT `max-len` style parameter: `(interface, function,
 /// parameter, reply framing bytes)`. The parameter is capped so the encoded reply fits in one
@@ -59,16 +82,48 @@ const CAPPED: &[(&str, &str, &str, usize)] = &[
 ];
 
 /// Error types that upstream configures as `TrappableError`.
-const TRAPPABLE: &[&str] = &["wasi:filesystem/types@0.3.0#error-code"];
+const TRAPPABLE: &[&str] = &[
+    "wasi:filesystem/types@0.3.0#error-code",
+    "wasi:http/types@0.3.0#error-code",
+    "wasi:http/types@0.3.0#header-error",
+    "wasi:http/types@0.3.0#request-options-error",
+];
 
-/// Upstream host view per WASI package: `(package, Accessor data type, WasiView getter,
-/// blocking)`. Blocking packages hold a shared filesystem admission permit per task, and only
-/// their resources draw from the open-file budget.
+/// Upstream host view per WASI package: `(package, Accessor data type, fully qualified view
+/// getter, blocking)`. Blocking packages hold a shared filesystem admission permit per task, and
+/// only their resources draw from the open-file budget. Getters are fully qualified so the
+/// generated code needs no trait imports.
 const VIEWS: &[(&str, &str, &str, bool)] = &[
-    ("random", "WasiRandom", "random", false),
-    ("clocks", "WasiClocks", "clocks", false),
-    ("filesystem", "WasiFilesystem", "filesystem", true),
-    ("cli", "WasiCli", "cli", false),
+    (
+        "random",
+        "WasiRandom",
+        "<State as wasmtime_wasi::random::WasiRandomView>::random",
+        false,
+    ),
+    (
+        "clocks",
+        "WasiClocks",
+        "<State as wasmtime_wasi::clocks::WasiClocksView>::clocks",
+        false,
+    ),
+    (
+        "filesystem",
+        "WasiFilesystem",
+        "<State as wasmtime_wasi::filesystem::WasiFilesystemView>::filesystem",
+        true,
+    ),
+    (
+        "cli",
+        "WasiCli",
+        "<State as wasmtime_wasi::cli::WasiCliView>::cli",
+        false,
+    ),
+    (
+        "http",
+        "WasiHttp",
+        "<State as wasmtime_wasi_http::WasiHttpView>::http",
+        false,
+    ),
 ];
 
 /// Emit typed native dispatch and the identical guest/browser value metadata.
@@ -81,8 +136,8 @@ pub(super) fn generate(resolve: &Resolve) -> (String, String) {
         helpers: String::new(),
         helpers_seen: BTreeSet::new(),
     };
-    let (rust, methods) = generator.generate();
-    let typescript = generator.typescript(&methods);
+    let (rust, methods, writable) = generator.generate();
+    let typescript = generator.typescript(&methods, &writable);
     (rust, typescript)
 }
 
@@ -90,6 +145,8 @@ struct Method<'a> {
     interface: String,
     function: &'a Function,
     resource: Option<String>,
+    /// `static` or `constructor` for resource functions without `self`.
+    kind: Option<&'static str>,
     asynchronous: bool,
     params: Vec<usize>,
     result: Option<usize>,
@@ -108,7 +165,7 @@ struct Generator<'a> {
 
 /// Convert a WIT identifier to a Rust snake-case field or function name.
 fn snake(name: &str) -> String {
-    let name = name.replace('-', "_");
+    let name = name.replace('-', "_").to_ascii_lowercase();
     if matches!(name.as_str(), "type" | "self") {
         format!("{name}_")
     } else {
@@ -121,8 +178,9 @@ fn camel(name: &str) -> String {
     name.split('-')
         .map(|part| {
             let mut chars = part.chars();
+            // WIT words are all lowercase or all uppercase (`DNS`); bindgen spells both `Dns`.
             chars.next().map_or(String::new(), |first| {
-                first.to_ascii_uppercase().to_string() + chars.as_str()
+                first.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase()
             })
         })
         .collect()
@@ -148,7 +206,8 @@ impl<'a> Generator<'a> {
         let interface = &self.resolve.interfaces[id];
         let package = &self.resolve.packages[interface.package.expect("package")];
         format!(
-            "p3::bindings::{}::{}",
+            "{}::{}::{}",
+            bindings(&package.name.name),
             snake(&package.name.name),
             snake(interface.name.as_deref().expect("named interface"))
         )

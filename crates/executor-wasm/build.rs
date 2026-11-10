@@ -8,7 +8,7 @@ mod codegen;
 fn main() {
     let wit = PathBuf::from("../contracts/wit/wasi03");
     let mut resolve = Resolve::default();
-    for name in ["clocks", "random", "filesystem", "sockets", "cli"] {
+    for name in ["clocks", "random", "filesystem", "sockets", "cli", "http"] {
         let path = wit.join(format!("{name}.wit"));
         println!("cargo:rerun-if-changed={}", path.display());
         let source = std::fs::read_to_string(&path).expect("bundled WASI WIT");
@@ -21,7 +21,7 @@ fn main() {
     let (rust, typescript) = codegen::generate(&resolve);
     // The core import name binds both sides to this exact generated value/method schema.
     let identity = Sha256::digest(typescript.as_bytes());
-    println!("cargo:rustc-env=TEMBRA_INTERPRETER_IMPORT_MODULE=tembra-interpreter-v6-{identity:x}");
+    println!("cargo:rustc-env=TEMBRA_INTERPRETER_IMPORT_MODULE=tembra-interpreter-v7-{identity:x}");
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out.join("standard.rs"), rust).expect("write Rust bindings");
     std::fs::write(out.join("standard.ts"), typescript).expect("write TypeScript table");

@@ -208,6 +208,7 @@ impl Engine {
             &crate::Cli::default(),
         )?;
         let (ready, initialized) = mpsc::channel();
+        let scope = io.streams().clone();
         let engine = self.clone();
         let grants = std::sync::Arc::new(grants.clone());
         let session = Session::spawn(
@@ -215,7 +216,15 @@ impl Engine {
             artifact.identity.name.clone(),
             io,
             move |commands, _poison, _diagnostics| {
-                worker::run(engine, component, wasi, grants, layout, ready, commands)
+                worker::run(
+                    engine,
+                    component,
+                    wasi,
+                    grants,
+                    layout,
+                    ready,
+                    (commands, scope),
+                )
             },
         )?;
         match initialized.recv() {

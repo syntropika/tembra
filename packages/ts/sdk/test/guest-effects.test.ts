@@ -25,5 +25,5 @@ test("effect identities settle once, out of order, and pending effects reject at
   expect(await cancelled).toBe("callback scope ended");
   expect(context.__tembraTakeEffects().length).toBe(0);
   active = false;
-  await expect(context.__hostAsync("late")).rejects.toThrow("callback scope is closed");
+  expect(() => context.__hostAsync("late")).toThrow("callback scope is closed");
 });

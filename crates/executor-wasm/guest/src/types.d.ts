@@ -88,14 +88,6 @@ interface HostRequests {
 }
 /** Asynchronous host operations awaited by the outer driver. */
 interface AsyncHostRequests {
-  "http.send": {
-    url: string;
-    method: string;
-    headers: readonly (readonly [string, string])[];
-    body: number[];
-  };
-  "http.read": { id: number };
-  "http.close": { id: number };
   "hook.run": HostHandle & { value: unknown };
   "transport.connect": { ip: string; port: number };
   "transport.read": { id: number };
@@ -151,27 +143,11 @@ declare var __tembraDispatch: (packet: string) => Promise<string>;
 
 declare var tembra: {
   wait(milliseconds: number): Promise<void>;
-  http?: {
-    send(
-      url: string,
-      method: string,
-      headers: readonly (readonly [string, string])[],
-      body: Uint8Array,
-    ): Promise<HttpStream>;
-  };
   transport?: { connect(ip: string, port: number): Promise<TransportStream> };
 };
 /** One incremental byte stream; reads return at most 16 KiB and `null` at end of stream. */
 interface TransportStream {
   read(): Promise<Uint8Array | null>;
   write(bytes: Uint8Array): Promise<void>;
-  close(): Promise<void>;
-}
-
-/** Host-owned WASI HTTP response; the body is read incrementally under the originating callback. */
-interface HttpStream {
-  readonly status: number;
-  readonly headers: readonly (readonly [string, string])[];
-  read(): Promise<Uint8Array | null>;
   close(): Promise<void>;
 }

@@ -1,9 +1,20 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { witTypes } from "./src/tooling/wit.ts";
 
 const root = fileURLToPath(new URL("./", import.meta.url));
+// The library uses the same official declarations as authored Orbs. They are build output,
+// not hand-maintained copies of the standard's resource and future signatures.
+const standard = await witTypes(path.join(root, "wit/http.wit"), "http");
+for (const [file, contents] of standard.files) {
+  if (!file.includes(`${path.sep}interfaces${path.sep}`)) continue;
+  const destination = path.join(root, ".tembra/wasi/interfaces", path.basename(file));
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeFile(destination, contents);
+}
 const entrypoints = [
   "index",
   "guest",
@@ -29,7 +40,7 @@ const result = await Bun.build({
   naming: { entry: "[dir]/[name].js", chunk: "chunks/[name]-[hash].js" },
   target: "browser",
   packages: "external",
-  external: ["node:*", "bun:*"],
+  external: ["node:*", "bun:*", "wasi:*"],
   conditions: ["source"],
   plugins: [
     {
@@ -72,4 +83,28 @@ if (diagnostics.length)
       getNewLine: () => "\n",
     }),
   );
-if (declarations.emit().emitSkipped) throw new Error("Declaration output failed");
+// Keep standard types package-private in every public declaration, including provider errors.
+// Applications need no virtual WASI module resolution or authoring toolchain.
+const standardTypes = new Map<string, string>();
+for (const [file, contents] of standard.files) {
+  if (!file.includes(`${path.sep}interfaces${path.sep}`)) continue;
+  const destination = path.join(root, "dist/wasi", path.basename(file));
+  const name = /@module Interface ([^ ]+)/.exec(contents)?.[1];
+  if (name) standardTypes.set(name, destination.replace(/\.d\.ts$/, ".js"));
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeFile(destination, contents);
+}
+const emitted = declarations.emit(undefined, (file, contents) => {
+  const rewritten = contents.replace(
+    /(\bfrom\s+|\bimport\s*\(\s*)(["'])(wasi:[^"']+)\2/g,
+    (_match, prefix, quote, name) => {
+      const target = standardTypes.get(name);
+      if (!target) throw new Error(`No packaged declaration for ${name}`);
+      const relative = path.relative(path.dirname(file), target).split(path.sep).join("/");
+      return `${prefix}${quote}${relative.startsWith(".") ? relative : `./${relative}`}${quote}`;
+    },
+  );
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, rewritten);
+});
+if (emitted.emitSkipped) throw new Error("Declaration output failed");

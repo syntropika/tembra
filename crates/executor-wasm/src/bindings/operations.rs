@@ -381,10 +381,7 @@ impl Environment {
             AsyncRequest::TransportConnect { .. }
             | AsyncRequest::TransportRead { .. }
             | AsyncRequest::TransportWrite { .. }
-            | AsyncRequest::TransportClose { .. }
-            | AsyncRequest::HttpSend { .. }
-            | AsyncRequest::HttpRead { .. }
-            | AsyncRequest::HttpClose { .. } => {
+            | AsyncRequest::TransportClose { .. } => {
                 unreachable!("I/O was handled under callback authority")
             }
             AsyncRequest::Unsupported => Err(failure("unsupported asynchronous host operation")),

@@ -241,6 +241,20 @@ pub(crate) fn check_http_url(grants: &Grants, value: &str) -> Result<()> {
     ))
 }
 
+/// Check a canonical standard `wasi:http` origin (see `crate::http::Target`). The canonical
+/// form is a fixed point of URL normalization; anything the URL parser would reinterpret is
+/// refused rather than checked under a second interpretation.
+pub(crate) fn check_http_origin(grants: &Grants, origin: &str, host: &str) -> Result<()> {
+    let url = http_url(origin)?;
+    if url.host_str() != Some(host) {
+        return Err(tembra::Error::invalid(
+            "http_origin",
+            "HTTP request host is not in canonical form",
+        ));
+    }
+    check_http_url(grants, origin)
+}
+
 /// Exact socket authority from every network grant of one Orb.
 ///
 /// HTTP never uses these: `wasi:http` requests are checked against HTTP origin grants instead.

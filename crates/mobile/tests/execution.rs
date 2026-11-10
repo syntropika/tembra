@@ -304,13 +304,36 @@ fn portable_http_streams_through_the_host_provider() {
         assert_eq!(socket.read_to_end(&mut rest).unwrap(), 0);
         closed.send(()).unwrap();
     });
-    let contract = Contract::from_source("http.wit", "package test:mobile; interface web { first: async func(url: string) -> string; } world app { import wasi:http/client@0.3.0; export web; }", Some("app")).unwrap();
+    let contract = Contract::from_source("http.wit", "package test:mobile; interface web { first: async func(url: string) -> string; } world app { import wasi:http/types@0.3.0; import wasi:http/client@0.3.0; export web; }", Some("app")).unwrap();
     let source = r#"globalThis.__tembraOrb = { services: { web: { methods: {
         async first(_self, _context, url) {
-            const response = await tembra.http.send(url, 'GET', [], new Uint8Array());
-            const chunk = await response.read();
-            await response.close();
-            return String.fromCharCode(...chunk);
+            // Standard wasi:http only: build the request, send it, read the first event or
+            // the whole short body, then drop the stream.
+            const types = __tembraStandard['wasi:http/types@0.3.0'];
+            const client = __tembraStandard['wasi:http/client@0.3.0'];
+            const [, , authority, ...path] = url.split('/');
+            const done = Promise.resolve({ tag: 'ok', val: undefined });
+            const [request] = types.Request.new(new types.Fields(), undefined, done, undefined);
+            request.setScheme({ tag: 'HTTP' });
+            request.setAuthority(authority);
+            request.setPathWithQuery('/' + path.join('/'));
+            const response = await client.send(request);
+            // The response-handling future: resolved `err` on close, like the SDK's close().
+            let finish;
+            const handled = new Promise((resolve) => { finish = resolve; });
+            const [body, trailers] = types.Response.consumeBody(response, handled);
+            const bytes = [];
+            for await (const byte of body) {
+                bytes.push(byte);
+                if (bytes.length > 1 && bytes[bytes.length - 1] === 10 && bytes[bytes.length - 2] === 10) break;
+            }
+            // Release the whole response, like the SDK's close(): the stream (ended by the
+            // loop) and the trailers future, so the host may close the connection now.
+            const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
+            body[dispose]?.();
+            trailers[dispose]?.();
+            finish({ tag: 'err', val: { tag: 'internal-error', val: 'response closed' } });
+            return String.fromCharCode(...bytes);
         }
     } } } };"#;
     let artifact = NativeArtifact::new(
@@ -347,6 +370,8 @@ fn portable_http_streams_through_the_host_provider() {
         false,
     );
     assert_eq!(value, "data: hello\n\n");
+    // Closing the idle SSE response closed the connection before the callback completed,
+    // while the Orb is still installed.
     observed.recv_timeout(Duration::from_secs(5)).unwrap();
     port.release(2).unwrap();
     port.release(1).unwrap();
@@ -355,7 +380,8 @@ fn portable_http_streams_through_the_host_provider() {
     server.join().unwrap();
 }
 
-/// A cancelled caller revokes its callback's pending source HTTP send; the Store keeps serving.
+/// A cancelled caller revokes its callback's pending standard HTTP send (native, in-Store: no
+/// host packet is involved); the connection closes and the Store keeps serving.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn portable_cancel_io_interrupts_a_pending_http_send_without_quarantine() {
@@ -394,13 +420,36 @@ fn portable_cancel_io_interrupts_a_pending_http_send_without_quarantine() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
             .unwrap();
     });
-    let contract = Contract::from_source("http.wit", "package test:mobile; interface web { first: async func(url: string) -> string; } world app { import wasi:http/client@0.3.0; export web; }", Some("app")).unwrap();
+    let contract = Contract::from_source("http.wit", "package test:mobile; interface web { first: async func(url: string) -> string; } world app { import wasi:http/types@0.3.0; import wasi:http/client@0.3.0; export web; }", Some("app")).unwrap();
     let source = r#"globalThis.__tembraOrb = { services: { web: { methods: {
         async first(_self, _context, url) {
-            const response = await tembra.http.send(url, 'GET', [], new Uint8Array());
-            const chunk = await response.read();
-            await response.close();
-            return String.fromCharCode(...chunk);
+            // Standard wasi:http only: build the request, send it, read the first event or
+            // the whole short body, then drop the stream.
+            const types = __tembraStandard['wasi:http/types@0.3.0'];
+            const client = __tembraStandard['wasi:http/client@0.3.0'];
+            const [, , authority, ...path] = url.split('/');
+            const done = Promise.resolve({ tag: 'ok', val: undefined });
+            const [request] = types.Request.new(new types.Fields(), undefined, done, undefined);
+            request.setScheme({ tag: 'HTTP' });
+            request.setAuthority(authority);
+            request.setPathWithQuery('/' + path.join('/'));
+            const response = await client.send(request);
+            // The response-handling future: resolved `err` on close, like the SDK's close().
+            let finish;
+            const handled = new Promise((resolve) => { finish = resolve; });
+            const [body, trailers] = types.Response.consumeBody(response, handled);
+            const bytes = [];
+            for await (const byte of body) {
+                bytes.push(byte);
+                if (bytes.length > 1 && bytes[bytes.length - 1] === 10 && bytes[bytes.length - 2] === 10) break;
+            }
+            // Release the whole response, like the SDK's close(): the stream (ended by the
+            // loop) and the trailers future, so the host may close the connection now.
+            const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
+            body[dispose]?.();
+            trailers[dispose]?.();
+            finish({ tag: 'err', val: { tag: 'internal-error', val: 'response closed' } });
+            return String.fromCharCode(...bytes);
         }
     } } } };"#;
     let artifact = NativeArtifact::new(
@@ -433,10 +482,20 @@ fn portable_cancel_io_interrupts_a_pending_http_send_without_quarantine() {
     );
     let invoke = |path: &str| json!({"kind":"invoke","environment":2,"service":"web","method":"first","args":[format!("http://{address}/{path}")]});
 
-    // Drive the cancelled exchange like the SDK driver: its caller aborts while I/O is pending.
+    // The caller aborts once the peer holds the request head: standard HTTP is native, so the
+    // cancellation comes from another thread rather than from a host operation event.
     port.begin(invoke("stalled").to_string(), false).unwrap();
+    let canceller = {
+        let port = port.clone();
+        std::thread::spawn(move || {
+            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            let cancelled = Instant::now();
+            port.cancel_io().unwrap();
+            cancelled
+        })
+    };
     let mut pending = Vec::new();
-    let mut cancelled = None;
     let complete = loop {
         let event: Value = serde_json::from_str(&block_on(port.receive()).unwrap()).unwrap();
         if event["event"] == "complete" {
@@ -447,7 +506,6 @@ fn portable_cancel_io_interrupts_a_pending_http_send_without_quarantine() {
             event["asynchronous"], true,
             "unexpected host operation {packet}"
         );
-        let operation = packet["operation"].clone();
         let io = port.clone();
         let id = event["id"].as_u64().unwrap() as u32;
         pending.push(std::thread::spawn(move || {
@@ -457,14 +515,8 @@ fn portable_cancel_io_interrupts_a_pending_http_send_without_quarantine() {
             };
             let _ = io.reply(id, response);
         }));
-        if operation == "http.send" && cancelled.is_none() {
-            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
-            std::thread::sleep(Duration::from_millis(100));
-            cancelled = Some(Instant::now());
-            port.cancel_io().unwrap();
-        }
     };
-    let cancelled = cancelled.expect("the guest never sent its request");
+    let cancelled = canceller.join().unwrap();
     // Physical settlement: every admitted operation answered before the ticket finishes.
     for operation in pending {
         operation.join().unwrap();

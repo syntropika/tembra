@@ -1,157 +1,60 @@
 import { expect, test } from "bun:test";
-import { fetch } from "../src/http.ts";
-import type { HttpStream } from "../src/guest.ts";
-import { Utf8Decoder } from "../src/http/bytes.ts";
+import { decodeText, encodeText, Utf8Decoder } from "../src/http/bytes.ts";
+import { events } from "../src/http/events.ts";
 
 const encoder = new TextEncoder();
 
-/** Model the host's decoded response, never a second HTTP framing implementation. */
-async function host<T>(
-  chunks: Uint8Array[],
-  run: (state: { calls: unknown[]; reads: number; closes: number }) => Promise<T>,
-  options: {
-    headers?: [string, string][];
-    status?: number;
-    closeError?: Error;
-    readError?: Error;
-  } = {},
-): Promise<T> {
-  const previous = Object.getOwnPropertyDescriptor(globalThis, "tembra");
-  const state = { calls: [] as unknown[], reads: 0, closes: 0 };
-  Object.defineProperty(globalThis, "tembra", {
-    configurable: true,
-    value: {
-      http: {
-        async send(...args: unknown[]): Promise<HttpStream> {
-          state.calls.push(args);
-          return {
-            status: options.status ?? 200,
-            headers: options.headers ?? [["content-type", "application/json"]],
-            async read() {
-              state.reads++;
-              if (options.readError) throw options.readError;
-              return chunks.shift() ?? null;
-            },
-            async close() {
-              state.closes++;
-              if (options.closeError) throw options.closeError;
-            },
-          };
-        },
-      },
-    },
-  });
-  try {
-    return await run(state);
-  } finally {
-    if (previous) Object.defineProperty(globalThis, "tembra", previous);
-    else Reflect.deleteProperty(globalThis, "tembra");
-  }
+async function* bytes(parts: Uint8Array[]) {
+  yield* parts;
 }
 
-test("fetch forwards semantic request data and consumes a host-decoded response once", async () => {
-  await host([encoder.encode('"hé🌍"')], async (state) => {
-    const response = await fetch("https://example.test/path", {
-      method: "POST",
-      body: "hé🌍",
-      headers: { "Content-Type": "text/plain" },
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toBe("hé🌍");
-    expect(state.calls).toEqual([
-      [
-        "https://example.test/path",
-        "POST",
-        [["Content-Type", "text/plain"]],
-        encoder.encode("hé🌍"),
-      ],
-    ]);
-    expect(state.closes).toBe(1);
-    await expect(response.text()).rejects.toThrow("already been consumed");
-  });
-});
-
-test("HTTP bodies stream before EOF and early iteration closes the host handle", async () => {
-  await host([Uint8Array.of(1), Uint8Array.of(2)], async (state) => {
-    const response = await fetch("https://example.test/bytes");
-    for await (const bytes of response.body) {
-      expect(bytes).toEqual(Uint8Array.of(1));
-      break;
-    }
-    expect(state.reads).toBe(1);
-    expect(state.closes).toBe(1);
-    await response.close();
-    expect(state.closes).toBe(1);
-  });
-});
-
-test("fetch refuses browser-forbidden methods and GET/HEAD bodies before host I/O", async () => {
-  await host([], async (state) => {
-    for (const method of ["get", "HEAD"])
-      await expect(fetch("https://example.test/", { method, body: "" })).rejects.toThrow("body");
-    for (const method of ["CONNECT", "trace", "TRACK"])
-      await expect(fetch("https://example.test/", { method })).rejects.toThrow("forbidden");
-    expect(state.calls).toHaveLength(0);
-  });
-});
-
-test("host read failures retain their cause when close also fails", async () => {
-  const primary = new Error("read failed");
-  await host(
-    [],
-    async (state) => {
-      const response = await fetch("https://example.test/");
-      await expect(response.text()).rejects.toBe(primary);
-      expect(state.closes).toBe(1);
-    },
-    { readError: primary, closeError: new Error("close failed") },
-  );
-});
-
-test("maintained SSE parser handles split UTF-8, CRLF, IDs and incomplete EOF", async () => {
-  const bytes = encoder.encode(
+test("maintained SSE parser emits split UTF-8 events before EOF", async () => {
+  const input = encoder.encode(
     "\ufeff:heartbeat\r\nid: 42\r\nevent: token\r\ndata: hé🌍\r\ndata: second\r\n\r\nid: invalid\0id\ndata: third\n\ndata: incomplete",
   );
-  await host(
-    [...bytes].map((byte) => Uint8Array.of(byte)),
-    async (state) => {
-      const response = await fetch("https://example.test/events");
-      const iterator = response.events()[Symbol.asyncIterator]();
-      expect((await iterator.next()).value).toEqual({
-        event: "token",
-        data: "hé🌍\nsecond",
-        id: "42",
-      });
-      expect(state.reads).toBeLessThan(bytes.length);
-      expect((await iterator.next()).value).toEqual({ event: "message", data: "third", id: "42" });
-      expect((await iterator.next()).done).toBe(true);
-      expect(state.closes).toBe(1);
-    },
-    { headers: [["Content-Type", "text/event-stream; charset=utf-8"]] },
-  );
+  let reads = 0;
+  async function* source() {
+    for (const byte of input) {
+      reads++;
+      yield Uint8Array.of(byte);
+    }
+  }
+  const iterator = events(source())[Symbol.asyncIterator]();
+  expect((await iterator.next()).value).toEqual({ event: "token", data: "hé🌍\nsecond", id: "42" });
+  expect(reads).toBeLessThan(input.length);
+  expect((await iterator.next()).value).toEqual({ event: "message", data: "third", id: "42" });
+  expect((await iterator.next()).done).toBe(true);
 });
 
-test("early SSE return preserves success when close fails; wrong content types close too", async () => {
-  await host(
-    [encoder.encode("data: first\n\n"), encoder.encode("data: second\n\n")],
-    async (state) => {
-      const response = await fetch("https://example.test/events");
-      for await (const event of response.events()) {
-        expect(event.data).toBe("first");
-        break;
-      }
-      expect(state.reads).toBe(1);
-      expect(state.closes).toBe(1);
-    },
-    { headers: [["content-type", "text/event-stream"]], closeError: new Error("cleanup failed") },
+test("early SSE return closes the byte producer", async () => {
+  let closed = false;
+  async function* source() {
+    try {
+      yield encodeText("data: first\n\n");
+      yield encodeText("data: second\n\n");
+    } finally {
+      closed = true;
+    }
+  }
+  for await (const event of events(source())) {
+    expect(event.data).toBe("first");
+    break;
+  }
+  expect(closed).toBe(true);
+});
+
+test("text collection enforces its byte bound and preserves producer errors", async () => {
+  const input = encodeText("hé🌍");
+  expect(await decodeText(bytes([input.subarray(0, 3), input.subarray(3)]), input.length)).toBe(
+    "hé🌍",
   );
-  await host([], async (state) => {
-    const response = await fetch("https://example.test/");
-    await expect(response.events()[Symbol.asyncIterator]().next()).rejects.toThrow(
-      "text/event-stream",
-    );
-    expect(state.closes).toBe(1);
-  });
+  await expect(decodeText(bytes([input]), input.length - 1)).rejects.toThrow("limit");
+  const primary = new Error("read failed");
+  async function* broken() {
+    yield input;
+    throw primary;
+  }
+  await expect(decodeText(broken(), input.length)).rejects.toBe(primary);
 });
 
 test("UTF-8 decoding agrees with the platform decoder across scalar and invalid-byte boundaries", () => {

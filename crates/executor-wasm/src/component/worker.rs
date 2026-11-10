@@ -40,9 +40,7 @@ use wasmtime::{
     },
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
-use wasmtime_wasi_http::{
-    RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
-};
+use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 /// Default dependency object selected by a plain WIT import, which carries no object key.
 const DEFAULT_KEY: &str = "main";
@@ -91,6 +89,12 @@ struct Authority {
 struct Bound {
     authority: Authority,
     finished: Option<futures::channel::oneshot::Sender<()>>,
+    /// Physical HTTP work of this call (resolver, connect, closes and teardown of bodies it
+    /// reads or drops); the call completes only after it ends. Idle retained response drivers
+    /// are never counted here.
+    call_work: crate::http::Ledger,
+    /// Resolves when the call's callback epoch ends (cancellation, or completion).
+    cancelled: crate::http::Cancelled,
 }
 
 /// Task-group attribution shared between the Store's hook and its import functions.
@@ -101,6 +105,8 @@ struct Groups {
     /// Authority waiting for the next staged call's group to start.
     pending: Option<Bound>,
     bound: HashMap<TaskGroupId, Bound>,
+    /// The session's callback epochs; the caller's cancellation ends the call's epoch.
+    scope: crate::io::Streams,
 }
 
 struct Hook(Arc<Mutex<Groups>>);
@@ -151,7 +157,9 @@ impl TaskGroupHook for Hook {
 struct State {
     wasi: WasiCtx,
     http: WasiHttpCtx,
-    hooks: HttpHooks,
+    hooks: crate::http::Hooks,
+    /// The same transport the hooks use; calls mark its command boundary.
+    transport: crate::http::Transport,
     table: ResourceTable,
     limits: StoreLimits,
     groups: Arc<Mutex<Groups>>,
@@ -169,7 +177,7 @@ impl WasiView for State {
 }
 
 impl WasiHttpView for State {
-    /// Standard HTTP resources share the Store's table; sends pass through [`HttpHooks`].
+    /// Standard HTTP resources share the Store's table; sends pass through the shared hooks.
     fn http(&mut self) -> WasiHttpCtxView<'_> {
         WasiHttpCtxView {
             ctx: &mut self.http,
@@ -179,65 +187,35 @@ impl WasiHttpView for State {
     }
 }
 
-/// Outgoing `wasi:http` requests need call authority and a granted origin.
-struct HttpHooks {
-    groups: Arc<Mutex<Groups>>,
-    grants: Arc<crate::Grants>,
-}
+/// Compiled HTTP authority: the admitted invocation whose task group is running.
+struct GroupAuthority(Arc<Mutex<Groups>>);
 
-/// The future of one sent response and its connection, as upstream hooks return them.
-type Sent = Box<
-    dyn Future<
-            Output = Result<
-                (
-                    http::Response<WasiBody>,
-                    Box<dyn Future<Output = Result<(), wasmtime_wasi_http::Error>> + Send>,
-                ),
-                wasmtime_wasi_http::Error,
-            >,
-        > + Send,
->;
-
-impl HttpHooks {
-    /// Resolve the originating call's channel; runs synchronously inside the guest call.
-    fn admit(&self, request: &http::Request<WasiBody>) -> Result<Sender<Event>, String> {
-        let events = {
-            let groups = self
-                .groups
-                .lock()
-                .map_err(|_| "task-group attribution is poisoned".to_owned())?;
+impl crate::http::Authority for GroupAuthority {
+    /// Resolve the originating call's channel synchronously inside the guest call; the
+    /// returned confirmation asks that call's adapter whether its context is still admitted.
+    fn admit(&self) -> Result<crate::http::Admission, crate::http::Refusal> {
+        use crate::http::Refusal;
+        let (events, call_work, cancelled) = {
+            let groups = self.0.lock().map_err(|_| Refusal::Unattributed)?;
             groups
                 .current
                 .and_then(|group| groups.bound.get(&group))
-                .map(|bound| bound.authority.events.clone())
-                .ok_or("HTTP request has no admitted invocation")?
+                .map(|bound| {
+                    (
+                        bound.authority.events.clone(),
+                        bound.call_work.clone(),
+                        bound.cancelled.clone(),
+                    )
+                })
+                .ok_or(Refusal::Unattributed)?
         };
-        crate::providers::check_http_url(&self.grants, &request.uri().to_string())
-            .map_err(|error| error.to_string())?;
-        Ok(events)
-    }
-}
-
-impl WasiHttpHooks for HttpHooks {
-    fn send_request(
-        &mut self,
-        request: http::Request<WasiBody>,
-        options: Option<RequestOptions>,
-        _response: Box<dyn Future<Output = Result<(), wasmtime_wasi_http::Error>> + Send>,
-    ) -> Sent {
-        let admitted = self.admit(&request);
-        Box::new(async move {
-            // Refusals are standard error codes for the guest, never traps.
-            let denied = |_| wasmtime_wasi_http::Error::HttpRequestDenied;
-            let events = admitted.map_err(denied)?;
-            // The same context check a source binding performs, answered by the call's adapter.
-            check_context(&events).await.map_err(denied)?;
-            let (response, connection) =
-                wasmtime_wasi_http::default_send_request(request, options).await?;
-            Ok((
-                response.map(http_body_util::BodyExt::boxed_unsync),
-                Box::new(connection) as Box<dyn Future<Output = _> + Send>,
-            ))
+        Ok(crate::http::Admission {
+            // The adapter refusing (or gone) means the call was cancelled or has ended.
+            confirmation: Box::pin(
+                async move { check_context(&events).await.map_err(Refusal::Ended) },
+            ),
+            call: Some(call_work),
+            cancelled: Some(cancelled),
         })
     }
 }
@@ -302,10 +280,46 @@ pub(crate) async fn run(
     grants: Arc<crate::Grants>,
     layout: Layout,
     ready: mpsc::Sender<std::result::Result<(), String>>,
-    commands: mpsc::Receiver<Command>,
+    // The session's callback epochs travel with its command queue.
+    calls: (mpsc::Receiver<Command>, crate::io::Streams),
 ) -> Terminal {
-    let groups = Arc::new(Mutex::new(Groups::default()));
-    let instance = instantiate(&engine, &component, wasi, grants, &layout, &groups).await;
+    let transport = crate::http::Transport::default();
+    let terminal = live(
+        (engine, component, wasi, grants, layout),
+        ready,
+        calls,
+        &transport,
+    )
+    .await;
+    // The Store is gone: aborted connection drivers drop on the next runtime turn and close
+    // their sockets; resolver jobs end when their lookups return. Only then is the revision
+    // retired.
+    transport.store_work.settled().await;
+    transport.drivers.settled().await;
+    terminal
+}
+
+/// Serve commands with one Store; the Store is dropped when this returns.
+async fn live(
+    (engine, component, wasi, grants, layout): (
+        Engine,
+        Component,
+        WasiCtxBuilder,
+        Arc<crate::Grants>,
+        Layout,
+    ),
+    ready: mpsc::Sender<std::result::Result<(), String>>,
+    (commands, scope): (mpsc::Receiver<Command>, crate::io::Streams),
+    transport: &crate::http::Transport,
+) -> Terminal {
+    let groups = Arc::new(Mutex::new(Groups {
+        scope,
+        ..Groups::default()
+    }));
+    let instance = instantiate(
+        &engine, &component, wasi, grants, &layout, &groups, transport,
+    )
+    .await;
     let (mut store, exports) = match instance {
         Ok(instance) => instance,
         Err(error) => {
@@ -351,6 +365,7 @@ async fn instantiate(
     grants: Arc<crate::Grants>,
     layout: &Layout,
     groups: &Arc<Mutex<Groups>>,
+    transport: &crate::http::Transport,
 ) -> wasmtime::Result<(Store<State>, BTreeMap<(String, String), Func>)> {
     let mut linker = Linker::<State>::new(&engine.engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
@@ -363,10 +378,12 @@ async fn instantiate(
         State {
             wasi: wasi.build(),
             http: WasiHttpCtx::new(),
-            hooks: HttpHooks {
-                groups: groups.clone(),
+            hooks: crate::http::Hooks::new(
                 grants,
-            },
+                Arc::new(GroupAuthority(groups.clone())),
+                transport.clone(),
+            ),
+            transport: transport.clone(),
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new()
                 .memory_size(engine.limits.memory_bytes)
@@ -717,12 +734,22 @@ async fn invoke(
     let count = ty.results().len();
     store.set_fuel(engine.limits.fuel)?;
     let (finished, settled) = futures::channel::oneshot::channel();
+    let call_work = crate::http::Ledger::default();
+    // Captured at admission, while this call's epoch is the active one.
+    let cancelled = futures::FutureExt::shared(Box::pin(lock(groups)?.scope.cancelled())
+        as std::pin::Pin<Box<dyn Future<Output = ()> + Send>>);
+    let commands = store.data().transport.commands.clone();
+    // Bodies first read during this call are owned by it.
+    commands.begin(Some(call_work.clone()));
+    let watch = cancelled.clone();
     let groups = groups.clone();
     let call = store.run_concurrent(async move |accessor: &Accessor<State>| {
         let mut results = vec![Val::Bool(false); count];
         lock(&groups)?.pending = Some(Bound {
             authority,
             finished: Some(finished),
+            call_work: call_work.clone(),
+            cancelled,
         });
         let staged = accessor
             .with(|mut access| function.start_call_concurrent(&mut access, &args, &mut results));
@@ -742,12 +769,30 @@ async fn invoke(
                 ));
             }
         }
-        function.finish_call_concurrent(accessor, staged).await?;
-        // A published result is not physical completion: wait until every task and subtask of
-        // this call has exited, so no continuation can outlive the call's authority.
-        settled
-            .await
-            .map_err(|_| wasmtime::Error::msg("component task group ended without finishing"))?;
+        let work = async {
+            function.finish_call_concurrent(accessor, staged).await?;
+            // A published result is not physical completion: wait until every task and
+            // subtask of this call has exited, so no continuation can outlive its authority.
+            settled
+                .await
+                .map_err(|_| wasmtime::Error::msg("component task group ended without finishing"))
+        };
+        {
+            let mut work = std::pin::pin!(work);
+            // The caller's cancellation closes the bodies this call is reading at once, so a
+            // guest parked in a body read gets its end and returns; the call finishes normally.
+            match futures::future::select(work.as_mut(), watch).await {
+                futures::future::Either::Left((done, _)) => done?,
+                futures::future::Either::Right(((), _)) => {
+                    commands.cancel();
+                    work.await?;
+                }
+            }
+        }
+        // Nor is a finished group: bodies it read close now, and a cancelled send may still own
+        // a resolver lookup or a reactor connect. Release the call after they physically ended.
+        commands.end();
+        call_work.settled().await;
         Ok(results)
     });
     let results = tokio::time::timeout(
@@ -777,6 +822,7 @@ fn lock(groups: &Mutex<Groups>) -> wasmtime::Result<std::sync::MutexGuard<'_, Gr
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+    use wasmtime_wasi_http::{WasiBody, WasiHttpHooks};
 
     fn request(url: &str) -> http::Request<WasiBody> {
         http::Request::get(url)
@@ -788,17 +834,18 @@ mod tests {
             .unwrap()
     }
 
-    fn hooks() -> HttpHooks {
-        HttpHooks {
-            groups: Arc::default(),
-            grants: Arc::new(crate::Grants {
+    fn hooks() -> crate::http::Hooks {
+        crate::http::Hooks::new(
+            Arc::new(crate::Grants {
                 http: vec![tembra_contracts::HttpGrant {
                     provider: "web".into(),
                     origins: vec!["http://127.0.0.1:9".into()],
                 }],
                 ..Default::default()
             }),
-        }
+            Arc::new(GroupAuthority(Arc::default())),
+            crate::http::Transport::default(),
+        )
     }
 
     /// Requests from initializers or tasks outside an admitted call's group are denied.

@@ -6,6 +6,7 @@ mod adapter;
 mod bindings;
 mod component;
 mod engine;
+mod http;
 mod install;
 mod io;
 mod port;

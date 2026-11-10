@@ -1,14 +1,9 @@
 import { expect, test } from "bun:test";
+import { fetchHttpProvider } from "../src/interpreter/http-provider.ts";
+import { decodeAsyncHostRequest } from "../src/interpreter/host-protocol.ts";
 import { BrowserCapabilities } from "../src/interpreter/io.ts";
 
-const encoder = new TextEncoder();
-const request = {
-  operation: "http.send",
-  url: "https://api.example.test/events",
-  method: "GET",
-  headers: [],
-  body: [],
-} as const;
+const web = fetchHttpProvider(async () => new Response(null));
 
 test("HTTP grants validate exact normalized origins using the browser URL API", async () => {
   for (const origin of [
@@ -24,85 +19,25 @@ test("HTTP grants validate exact normalized origins using the browser URL API", 
     ).rejects.toThrow();
   const io = await BrowserCapabilities.open(
     { http: [{ provider: "web", origins: ["https://API.example.test:443"] }] },
-    {
-      http: { web: async () => new Response(null) },
-    },
+    { http: { web } },
   );
   try {
-    const callback = new AbortController();
-    const response = (await io.execute(request, callback.signal)) as { id: number };
-    await io.execute({ operation: "http.close", id: response.id });
-    await expect(
-      io.execute({ ...request, url: `${request.url}#` }, callback.signal),
-    ).rejects.toThrow();
-  } finally {
-    await io.dispose();
-  }
-});
-
-/** Install a Fetch-compatible test provider through the public host capability seam. */
-test("HTTP provider streams without EOF, honors callback cancellation and rejects ungranted origins", async () => {
-  let calls = 0;
-  let cancelled = false;
-  let sent!: ReadableStreamDefaultController<Uint8Array>;
-  const callback = new AbortController();
-  const io = await BrowserCapabilities.open(
-    { http: [{ provider: "mock", origins: ["https://api.example.test"] }] },
-    {
-      http: {
-        mock: async (_input, init) => {
-          calls++;
-          expect(init?.redirect).toBe("error");
-          expect(init?.credentials).toBe("omit");
-          return new Response(
-            new ReadableStream({
-              start(controller) {
-                sent = controller;
-              },
-              cancel() {
-                cancelled = true;
-              },
-            }),
-            { headers: { "content-type": "text/event-stream" } },
-          );
-        },
-      },
-    },
-  );
-  try {
-    for (const name of ["Host", "Transfer-Encoding", "Content-Length", "Connection"]) {
-      await expect(
-        io.execute({ ...request, headers: [[name, "forbidden"]] }, callback.signal),
-      ).rejects.toThrow("set by the host");
-    }
-    expect(calls).toBe(0);
-    for (const [name, value] of [
-      ["bad\r\nHost", "evil"],
-      ["x-test", "value\r\nHost: evil"],
+    // Standard `wasi:http` sends select a provider only for the exact granted origin.
+    expect(io.network.provider(new URL("https://api.example.test/events"))).toBe(web);
+    for (const url of [
+      "http://api.example.test/",
+      "https://api.example.test:8443/",
+      "https://other.example.test/",
+      "https://user@api.example.test/",
     ])
-      await expect(
-        io.execute({ ...request, headers: [[name!, value!]] }, callback.signal),
-      ).rejects.toThrow();
-    await expect(
-      io.execute({ ...request, url: "https://forbidden.example.test/" }, callback.signal),
-    ).rejects.toThrow("granted");
-    expect(calls).toBe(0);
-    const response = (await io.execute(request, callback.signal)) as { id: number; status: number };
-    expect(response.status).toBe(200);
-    const reading = io.execute({ operation: "http.read", id: response.id }, callback.signal);
-    sent.enqueue(encoder.encode("data: hello\n\n"));
-    expect(await reading).toEqual([...encoder.encode("data: hello\n\n")]);
-    const pending = io.execute({ operation: "http.read", id: response.id }, callback.signal);
-    callback.abort();
-    await pending;
-    expect(cancelled).toBe(true);
-    await expect(
-      io.execute({ operation: "http.read", id: response.id }, new AbortController().signal),
-    ).rejects.toThrow("Unknown");
-    await io.execute({ operation: "http.close", id: response.id });
-    await expect(io.execute({ operation: "http.close", id: response.id + 1 })).rejects.toThrow(
-      "Unknown",
-    );
+      expect(io.network.provider(new URL(url))).toBeUndefined();
+    // The legacy JSON HTTP operations no longer exist: a hostile packet is refused at decode.
+    for (const operation of ["http.send", "http.read", "http.close"])
+      expect(() =>
+        decodeAsyncHostRequest(
+          JSON.stringify({ operation, url: "https://api.example.test/", id: 1 }),
+        ),
+      ).toThrow(`Unsupported asynchronous host request operation ${operation}`);
   } finally {
     await io.dispose();
   }
@@ -157,7 +92,7 @@ test("HTTP and socket permissions remain independent for custom browser provider
     expect(
       ((await io.execute({ operation: "transport.read", id }, callback.signal)) as number[]).length,
     ).toBe(3616);
-    await expect(io.execute(request, callback.signal)).rejects.toThrow("granted");
+    expect(io.network.provider(new URL("https://api.example.test/"))).toBeUndefined();
     callback.abort();
     expect(closed).toBe(1);
   } finally {

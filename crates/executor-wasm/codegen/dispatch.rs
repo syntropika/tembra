@@ -27,7 +27,7 @@ impl<'a> Generator<'a> {
     }
 
     /// Generate the Rust dispatcher and collect the TypeScript method table.
-    pub(super) fn generate(&mut self) -> (String, Vec<Method<'a>>) {
+    pub(super) fn generate(&mut self) -> (String, Vec<Method<'a>>, Vec<usize>) {
         let mut methods = Vec::new();
         let mut arms = String::new();
         let mut names_list = Vec::new();
@@ -47,11 +47,18 @@ impl<'a> Generator<'a> {
                 .expect("host view for package");
             let asynchronous = matches!(
                 function.kind,
-                FunctionKind::AsyncFreestanding | FunctionKind::AsyncMethod(_)
+                FunctionKind::AsyncFreestanding
+                    | FunctionKind::AsyncMethod(_)
+                    | FunctionKind::AsyncStatic(_)
             );
-            let store = STORE.contains(&format!("{interface}#{name}").as_str());
+            // Async functions are always store functions; this marks WIT-synchronous ones.
+            let store = STORE.contains(&format!("{interface}#{name}").as_str()) && !asynchronous;
             let resource = match function.kind {
-                FunctionKind::Method(id) | FunctionKind::AsyncMethod(id) => {
+                FunctionKind::Method(id)
+                | FunctionKind::AsyncMethod(id)
+                | FunctionKind::Static(id)
+                | FunctionKind::AsyncStatic(id)
+                | FunctionKind::Constructor(id) => {
                     Some(self.resolve.types[id].name.clone().expect("resource name"))
                 }
                 FunctionKind::Freestanding | FunctionKind::AsyncFreestanding => None,
@@ -68,10 +75,19 @@ impl<'a> Generator<'a> {
                     )
                 }
             };
-            let method = snake(&function.item_name().replace('-', "_"));
-            let mut decode = String::new();
+            // Upstream bindgen names a constructor `new`.
+            let method = match function.kind {
+                FunctionKind::Constructor(_) => "new".to_owned(),
+                _ => snake(&function.item_name().replace('-', "_")),
+            };
+            // Every owned handle, input stream and writable future is claimed (validated,
+            // deduplicated) during decode and committed only after the whole packet validated
+            // and every refusal (budget, admission, table capacity) passed.
+            let mut decode = "let mut seen = Vec::new();".to_owned();
             let mut names = Vec::new();
             let mut lends = Vec::new();
+            let mut commits = "h.commit(seen);".to_owned();
+            let mut owned = Vec::new();
             let mut transfers = Vec::new();
             for param in &function.params {
                 let local = format!("p_{}", snake(&param.name));
@@ -88,8 +104,21 @@ impl<'a> Generator<'a> {
                         let _ = write!(decode, "let {local} = {};", self.decode(param.ty));
                     }
                 }
-                if self.byte_stream(param.ty) {
-                    transfers.push(local.clone());
+                match self.owned_param(param.ty).filter(|_| asynchronous) {
+                    // An async task takes its owned argument on its first poll; aborted before
+                    // that, the guard closes it through the close queue.
+                    Some(kind) => {
+                        let _ = write!(
+                            commits,
+                            "let {local} = Owned::new({kind}, {local}, &h.closing);"
+                        );
+                        owned.push(local.clone());
+                    }
+                    None => {
+                        if let Some(transfer) = self.transfer(param.ty, &local) {
+                            transfers.push(transfer);
+                        }
+                    }
                 }
                 if let Some((_, _, _, framing)) = CAPPED
                     .iter()
@@ -104,6 +133,10 @@ impl<'a> Generator<'a> {
             }
             let leases: Vec<String> = lends.iter().map(|l| format!("{l}.lease()")).collect();
             let leases = format!("vec![{}]", leases.join(", "));
+            let takes: String = owned
+                .iter()
+                .map(|o| format!("let {o} = {o}.take();"))
+                .collect();
             let lends = if lends.is_empty() {
                 "()".to_owned()
             } else {
@@ -118,7 +151,7 @@ impl<'a> Generator<'a> {
                     &trait_name,
                     (data, getter, *blocking),
                     &args,
-                    &transfers,
+                    (&commits, &transfers.concat()),
                 )
             } else if asynchronous {
                 let encode = self.encode_return(function.result);
@@ -129,19 +162,27 @@ impl<'a> Generator<'a> {
                 };
                 let owned = function.result.map_or(0, |ty| self.owned(ty));
                 let files = format!("let files = h.files({owned})?;");
+                assert!(
+                    transfers.is_empty(),
+                    "{interface}#{name}: async stream or future parameters have no transfer owner"
+                );
                 format!(
-                    "{files} {admit} let leases = {leases}; Ok(Call::Spawn(Box::new(move |store: StoreContextMut<'_, State>, reply: Reply| \
+                    "{files} {admit} {commits} let leases = {leases}; Ok(Call::Spawn(Box::new(move |store: StoreContextMut<'_, State>, reply: Reply| \
                      store.spawn(async move |access: &Accessor<State>| -> wasmtime::Result<()> {{ \
                      let _permit = permit; let _lends = {lends}; \
-                     let view = access.with_getter::<{data}>(State::{getter}); \
-                     let result = {trait_name}::{method}(&view, {args}).await; \
+                     let view = access.with_getter::<{data}>({getter}); \
+                     {takes} let result = {trait_name}::{method}(&view, {args}).await; \
                      let bytes = access.with(|mut store| -> wasmtime::Result<Vec<u8>> {{ let h = &mut store.data_mut().standard.handles; h.prepaid.extend(files); let mut out = Writer::default(); let w = &mut out; {encode} Ok(out.0) }}); \
                      settle(access, reply, bytes); Ok(()) }})), leases))"
                 )
             } else {
                 let encode = self.encode_return(function.result);
+                assert!(
+                    transfers.is_empty(),
+                    "{interface}#{name}: stream or future parameters need a store function"
+                );
                 format!(
-                    "{{ let result = {trait_name}::{method}(&mut state.{getter}(), {args}); \
+                    "{{ {commits} let result = {trait_name}::{method}(&mut {getter}(state), {args}); \
                      let h = &mut state.standard.handles; let mut out = Writer::default(); let w = &mut out; {encode} Ok(Call::Ready(out.0)) }}"
                 )
             };
@@ -154,6 +195,11 @@ impl<'a> Generator<'a> {
                 interface: interface.clone(),
                 function,
                 resource,
+                kind: match function.kind {
+                    FunctionKind::Static(_) | FunctionKind::AsyncStatic(_) => Some("static"),
+                    FunctionKind::Constructor(_) => Some("constructor"),
+                    _ => None,
+                },
                 asynchronous,
                 params,
                 result,
@@ -162,6 +208,7 @@ impl<'a> Generator<'a> {
         let mut rust = String::from(
             "// Generated by build.rs from the bundled WASI WIT. Do not edit.\n\
              use wasmtime_wasi::{p3, cli::WasiCli, clocks::WasiClocks, filesystem::WasiFilesystem};\n\
+             use wasmtime_wasi_http::WasiHttp;\n\
              use wasmtime::{AsContextMut, component::Accessor};\n",
         );
         let _ = writeln!(
@@ -195,6 +242,8 @@ impl<'a> Generator<'a> {
             interfaces.join(", "),
             asynchronous.join(", "),
         );
+        let (futures, writable) = self.writable_futures();
+        rust += &futures;
         rust += &self.helpers;
         let budgeted: Vec<String> = (0..self.resources.len())
             .map(|kind| self.budgeted_kind(kind).to_string())
@@ -206,28 +255,118 @@ impl<'a> Generator<'a> {
             budgeted.join(", ")
         );
         let mut drops = String::new();
-        for (kind, (_, path)) in self.resources.iter().enumerate() {
+        let mut store_drops = String::new();
+        let mut closing = Vec::new();
+        for (kind, (qualified, path)) in self.resources.iter().enumerate() {
             let module = path.rsplit_once("::").expect("type path").0;
             let resource = path.rsplit_once("::").expect("type path").1;
-            let getter = VIEWS
+            let (_, data, getter, _) = VIEWS
                 .iter()
-                .find(|(package, _, _, _)| {
-                    module.starts_with(&format!("p3::bindings::{package}::"))
-                })
-                .expect("view")
-                .2;
-            let _ = writeln!(
-                drops,
-                "        {kind} => {module}::Host{resource}::drop(&mut state.{getter}(), Resource::new_own(rep)),"
-            );
+                .find(|(package, _, _, _)| module.contains(&format!("p3::bindings::{package}::")))
+                .expect("view");
+            if STORE_DROPS.contains(&qualified.as_str()) {
+                // Queued; closed where a Store is held (`close_queued`).
+                let _ = writeln!(
+                    drops,
+                    "        {kind} => {{ state.standard.handles.close(Close::Resource(kind, rep)); Ok(()) }},"
+                );
+                let _ = writeln!(
+                    store_drops,
+                    "        {kind} => <{data} as {module}::Host{resource}WithStore<State>>::drop(wasmtime::component::Access::<State, {data}>::new(store, {getter}), Resource::new_own(rep)),"
+                );
+                closing.push("true");
+            } else {
+                let _ = writeln!(
+                    drops,
+                    "        {kind} => {module}::Host{resource}::drop(&mut {getter}(state), Resource::new_own(rep)),"
+                );
+                closing.push("false");
+            }
         }
+        let _ = writeln!(
+            rust,
+            "/// Per resource kind: whether upstream drops it through a store function.\n\
+             pub(super) const STORE_DROPPED: &[bool] = &[{}];",
+            closing.join(", ")
+        );
+        let _ = write!(
+            rust,
+            "/// Close one queued store-drop resource through its upstream `WithStore` drop.\n\
+             pub(super) fn drop_queued(kind: u32, rep: u32, store: StoreContextMut<'_, State>) -> wasmtime::Result<()> {{\n\
+             match kind {{\n{store_drops}        _ => Err(invalid(\"unknown store-drop resource kind\")),\n    }}\n}}\n"
+        );
         let _ = write!(
             rust,
             "/// Drop one owned resource through its upstream host implementation.\n\
              pub(super) fn drop_resource(kind: u32, rep: u32, state: &mut State) -> wasmtime::Result<()> {{\n\
              match kind {{\n{drops}        _ => Err(invalid(\"unknown resource kind\")),\n    }}\n}}\n"
         );
-        (rust, methods)
+        (rust, methods, writable)
+    }
+
+    /// Generated guest-writable future support: the admitted `TYPES` indices, their typed
+    /// promise constructors (with the abandonment value) and their one-shot write decoders.
+    fn writable_futures(&mut self) -> (String, Vec<usize>) {
+        let mut futures = BTreeMap::new();
+        for (_, function, _) in self.functions() {
+            for param in &function.params {
+                let ty = match self.peel(param.ty) {
+                    Type::Id(id) => match self.resolve.types[id].kind {
+                        TypeDefKind::Option(inner) => inner,
+                        _ => param.ty,
+                    },
+                    other => other,
+                };
+                if qualify::writable_future(self.resolve, ty) {
+                    let Type::Id(id) = self.peel(ty) else {
+                        unreachable!()
+                    };
+                    let TypeDefKind::Future(Some(payload)) = self.resolve.types[id].kind else {
+                        unreachable!()
+                    };
+                    futures.insert(self.ts(ty), payload);
+                }
+            }
+        }
+        let mut create = String::new();
+        let mut write = String::new();
+        for (index, payload) in &futures {
+            let rust = self.rust_type(*payload);
+            let Type::Id(id) = self.peel(*payload) else {
+                unreachable!()
+            };
+            let TypeDefKind::Result(result) = &self.resolve.types[id].kind else {
+                unreachable!()
+            };
+            let Some(Type::Id(error)) = result.err.map(|ty| self.peel(ty)) else {
+                unreachable!()
+            };
+            let error = self.rust_path(error);
+            let decode = self.decode(*payload);
+            let _ = writeln!(
+                create,
+                "        {index} => Some(Promise::<{rust}>::create(closing, || Err({error}::InternalError(Some(String::from(ABANDONED_FUTURE)))))),"
+            );
+            let _ = writeln!(
+                write,
+                "        {index} => {{ let promise = Promise::<{rust}>::of(promise)?; let mut seen = Vec::new(); let value: {rust} = {decode}; r.end()?; promise.lock().expect(\"promise\").writable()?; let owned = h.commit(seen); promise.lock().expect(\"promise\").write(value, owned); Ok(()) }}"
+            );
+        }
+        let indices: Vec<String> = futures.keys().map(usize::to_string).collect();
+        let source = format!(
+            "/// `TYPES` indices of the futures a guest may create and write (FUTURE_NEW).\n\
+             #[allow(dead_code)] pub(super) const WRITABLE_FUTURES: &[u32] = &[{}];\n\
+             /// Create the writer state of one writable future type.\n\
+             #[allow(unused_variables, clippy::all)]\n\
+             fn future_new(ty: u32, closing: &Shared<Vec<Close>>) -> Option<Arc<dyn Promised>> {{\n\
+             match ty {{\n{create}        _ => None,\n    }}\n}}\n\
+             /// Decode and accept the one value of a writable future (FUTURE_WRITE).\n\
+             #[allow(unused_variables, unused_mut, clippy::all)]\n\
+             fn write_future(ty: u32, promise: Arc<dyn Promised>, r: &mut Reader<'_>, h: &mut Handles) -> wasmtime::Result<()> {{\n\
+             match ty {{\n{write}        _ => Err(invalid(\"future type is not writable by the guest\")),\n    }}\n}}\n",
+            indices.join(", ")
+        );
+        (source, futures.into_keys().collect())
     }
 
     /// Invoke WIT-synchronous Store methods immediately, before their borrowed arguments drop.
@@ -239,7 +378,7 @@ impl<'a> Generator<'a> {
         trait_name: &str,
         (data, getter, blocking): (&str, &str, bool),
         args: &str,
-        transfers: &[String],
+        (commits, transfers): (&str, &str),
     ) -> String {
         let result = self.peel(function.result.expect("store methods return handles"));
         let Type::Id(id) = result else {
@@ -262,6 +401,10 @@ impl<'a> Generator<'a> {
                 streams += 1;
             }
             match self.resolve.types[inner].kind.clone() {
+                TypeDefKind::Handle(Handle::Own(resource)) => {
+                    let kind = self.resource(resource);
+                    let _ = write!(reserve, "w.u64(h.own({kind}, t{index}));");
+                }
                 TypeDefKind::Stream(Some(Type::U8)) => {
                     let _ = write!(
                         reserve,
@@ -288,7 +431,7 @@ impl<'a> Generator<'a> {
                     );
                     let _ = write!(
                         bind,
-                        "t{index}.pipe(store.as_context_mut(), Slot::new(slot{index}, |w: &mut Writer, value| {{ {encode} Ok(()) }}))?;"
+                        "t{index}.pipe(store.as_context_mut(), Slot::new(slot{index}, |w: &mut Writer, h: &mut Handles, value| {{ {encode} Ok(()) }}))?;"
                     );
                 }
                 other => panic!("store result {other:?} has no binding rule"),
@@ -300,27 +443,25 @@ impl<'a> Generator<'a> {
         } else {
             names.join(", ")
         };
-        let mut transfer = String::new();
-        for name in transfers {
-            let _ = write!(
-                transfer,
-                "let {name} = wasmtime::component::StreamReader::new(store.as_context_mut(), {name}.transfer(files.pop())?)?;"
-            );
-        }
+        // Owned claims commit, then input streams and futures transfer their readable ends.
+        let transfer = format!("{commits} {transfers}");
         // Capacity is reserved before upstream creates host stream/future state, so a full
         // table refuses the call instead of dropping freshly created transmit ends.
         format!(
-            "h.reserve({})?; let mut files = h.files({})?; {transfer} let {pattern} = {trait_name}::{}(wasmtime::component::Access::<State, {data}>::new(store.as_context_mut(), State::{getter}), {args})?; \
+            "h.reserve({})?; let mut files = h.files({})?; {transfer} let {pattern} = {trait_name}::{}(wasmtime::component::Access::<State, {data}>::new(store.as_context_mut(), {getter}), {args})?; \
              let h = &mut store.data_mut().standard.handles; let mut out = Writer::default(); let w = &mut out; {reserve} \
              {bind} Ok(Call::Ready(out.0))",
             elements.len(),
             // Only filesystem streams hold open files; stdio streams draw no budget.
             if blocking {
-                streams + transfers.len()
+                streams + transfers.matches("files.pop()").count()
             } else {
                 0
             },
-            snake(&function.item_name().replace('-', "_"))
+            match function.kind {
+                FunctionKind::Constructor(_) => "new".to_owned(),
+                _ => snake(&function.item_name().replace('-', "_")),
+            }
         )
     }
 }

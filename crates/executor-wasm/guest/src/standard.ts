@@ -5,17 +5,19 @@ import {
   CALL,
   DROP,
   FUTURE_READ,
+  FUTURE_WRITE,
   type HandleCodec,
   Reader,
   STANDARD_PACKET,
   STREAM_CHUNK,
-  STREAM_NEW,
   STREAM_READ,
-  STREAM_WRITE,
   Writer,
   decode,
   encode,
+  resourceClassName,
 } from "../../../../packages/ts/sdk/src/interpreter/standard-codec.ts";
+
+import { InputBindings } from "./standard-inputs.ts";
 
 (() => {
   const syncBytes = globalThis.__hostSyncBytes!;
@@ -41,13 +43,13 @@ import {
   const ITEM_BATCH = 256;
   /** Shared with the SDK's `readChunks`; jco's declared per-byte iterator stays standard. */
   const READ_CHUNK = Symbol.for("tembra.wasi.stream.read-chunk");
-  /** Shared with the SDK's `writeChunks`: a `stream<u8>` input that yields Uint8Array chunks. */
-  const WRITE_CHUNKS = Symbol.for("tembra.wasi.stream.write-chunks");
 
   /** jco's error shape for a top-level `result` error. */
   class ComponentError extends Error {
     constructor(readonly payload: unknown) {
-      super(`standard WASI call failed: ${JSON.stringify(payload)}`);
+      super(
+        `standard WASI call failed: ${JSON.stringify(payload, (_key, value) => (typeof value === "bigint" ? value.toString() : value))}`,
+      );
     }
   }
 
@@ -84,7 +86,7 @@ import {
    * writer, so no pump outlives the callback that started it.
    */
   function sweep(ending = false): void {
-    if (ending) for (const pump of [...pumps]) pump.close();
+    if (ending) inputs.close();
     for (const owner of collected) {
       if (owner.released) {
         collected.delete(owner);
@@ -102,16 +104,20 @@ import {
     }
   }
 
-  const classes = RESOURCES.map((name) => {
+  const classes = RESOURCES.map((name, index) => {
     const resource = class {
-      constructor() {
-        throw new TypeError(`${name} is issued by the host`);
+      constructor(...args: unknown[]) {
+        const constructor = METHODS.findIndex(
+          (method) => method.resource === index && method.kind === "constructor",
+        );
+        if (constructor < 0) throw new TypeError(`${name} is issued by the host`);
+        return invoke(constructor, args) as any;
       }
       [dispose]() {
         release(this);
       }
     };
-    Object.defineProperty(resource, "name", { value: name.split("#")[1] });
+    Object.defineProperty(resource, "name", { value: resourceClassName(name) });
     return resource;
   });
 
@@ -190,136 +196,6 @@ import {
     }
   }
 
-  /** A failed STREAM_WRITE: the consumer is gone and its future reports why. */
-  class WriteFailure extends Error {}
-
-  /** Callback-owned pumps of `stream<u8>` inputs; each ends with its writer's DROP. */
-  const pumps = new Set<Pump>();
-
-  /** Pump one guest iterable into a host input stream, one bounded chunk at a time. */
-  class Pump {
-    #closed = false;
-    #iterator: Iterator<unknown> | AsyncIterator<unknown> | undefined;
-    #chunked = true;
-
-    constructor(
-      readonly handle: number,
-      source: any,
-    ) {
-      if (source instanceof Uint8Array) {
-        const chunks = [source];
-        this.#iterator = chunks[Symbol.iterator]();
-      } else if (typeof source?.[WRITE_CHUNKS] === "function")
-        this.#iterator = source[WRITE_CHUNKS]();
-      else if (typeof source?.[READ_CHUNK] === "function")
-        this.#iterator = {
-          next: async () => {
-            try {
-              const value = await source[READ_CHUNK]();
-              return value ? { done: false, value } : { done: true, value: undefined };
-            } catch (error) {
-              source[dispose]?.();
-              throw error;
-            }
-          },
-          return: async () => {
-            source[dispose]?.();
-            return { done: true, value: undefined };
-          },
-        };
-      else {
-        this.#chunked = false;
-        this.#iterator = source[Symbol.asyncIterator]?.() ?? source[Symbol.iterator]();
-      }
-      pumps.add(this);
-    }
-
-    /** Run to end of input; resolve with the source's own failure, if any. */
-    async run(): Promise<unknown> {
-      let failure: unknown;
-      try {
-        const batch = new Uint8Array(this.#chunked ? 0 : STREAM_CHUNK);
-        let length = 0;
-        for (;;) {
-          let step: IteratorResult<unknown>;
-          try {
-            step = await this.#iterator!.next();
-          } catch (error) {
-            // A throwing iterator is finished; it is not returned.
-            this.#iterator = undefined;
-            throw error;
-          }
-          if (this.#closed) return undefined;
-          if (step.done) break;
-          if (this.#chunked) {
-            const chunk = step.value;
-            if (!(chunk instanceof Uint8Array))
-              throw new TypeError("stream<u8> chunk sources must yield Uint8Array");
-            for (let offset = 0; offset < chunk.length; offset += STREAM_CHUNK)
-              await this.#write(chunk.subarray(offset, offset + STREAM_CHUNK));
-          } else {
-            const byte = step.value;
-            if (typeof byte !== "number" || !Number.isInteger(byte) || byte < 0 || byte > 255)
-              throw new TypeError("stream<u8> items must be integers in 0..=255");
-            batch[length++] = byte;
-            if (length === STREAM_CHUNK) {
-              await this.#write(batch);
-              length = 0;
-            }
-          }
-          if (this.#closed) return undefined;
-        }
-        this.#iterator = undefined;
-        if (length) await this.#write(batch.subarray(0, length));
-      } catch (error) {
-        if (!(error instanceof WriteFailure)) failure = error;
-      } finally {
-        this.close();
-      }
-      return failure;
-    }
-
-    /** Write one chunk; the completion is the host's backpressure. */
-    async #write(chunk: Uint8Array): Promise<void> {
-      if (this.#closed) throw new WriteFailure("stream was closed");
-      const writer = packet(STREAM_WRITE);
-      writer.handle(this.handle);
-      writer.bytes(chunk);
-      try {
-        await __hostAsync(writer.finish());
-      } catch (error) {
-        throw new WriteFailure(String(error));
-      }
-    }
-
-    /** Return an unfinished iterator and drop the writer: the input reaches end of stream. */
-    close(): void {
-      if (this.#closed) return;
-      this.#closed = true;
-      pumps.delete(this);
-      const iterator = this.#iterator;
-      this.#iterator = undefined;
-      try {
-        const returned: any = iterator?.return?.();
-        if (typeof returned?.then === "function") returned.then(undefined, () => {});
-      } catch {
-        // The source's cleanup failure cannot reopen the stream.
-      }
-      try {
-        drop(this.handle);
-      } catch {
-        // Outside an active scope the host closes the writer at callback end.
-      }
-    }
-  }
-
-  /** DROP a host identity that the guest never published as an object. */
-  function drop(handle: number): void {
-    const writer = packet(DROP);
-    writer.handle(handle);
-    syncBytes(writer.finish());
-  }
-
   /** A one-shot standard future exposed as jco's PromiseLike. */
   class StandardFuture {
     #value: Promise<unknown> | undefined;
@@ -333,18 +209,34 @@ import {
       if (!this.#value) {
         const owner = owners.get(this);
         if (!owner) return Promise.reject(new Error("future was dropped")).then(resolve, reject);
-        owners.delete(this);
-        forget(owner);
         const writer = packet(FUTURE_READ);
         writer.handle(owner.handle);
-        this.#value = __hostAsync(writer.finish()).then(async (bytes) => {
-          const reader = new Reader(bytes);
-          const value = this.payload < 0 ? undefined : decode(reader, this.payload, handles);
-          reader.end();
-          for (const failure of await Promise.all(this.#pumps))
-            if (failure !== undefined) throw failure;
-          return value;
-        });
+        let pending: Promise<Uint8Array>;
+        try {
+          pending = __hostAsync(writer.finish());
+        } catch (error) {
+          return Promise.reject(error).then(resolve, reject);
+        }
+        owners.delete(this);
+        forget(owner);
+        this.#value = pending.then(
+          async (bytes) => {
+            const reader = new Reader(bytes);
+            const value = this.payload < 0 ? undefined : decode(reader, this.payload, handles);
+            reader.end();
+            for (const failure of await Promise.all(this.#pumps))
+              if (failure !== undefined) throw failure;
+            return value;
+          },
+          (error) => {
+            try {
+              inputs.drop(owner.handle);
+            } catch {
+              // A host refusal may leave an unread identity; consumed futures have none.
+            }
+            throw error;
+          },
+        );
       }
       return this.#value.then(resolve, reject);
     }
@@ -366,11 +258,6 @@ import {
       const owner = typeof value === "object" && value ? owners.get(value) : undefined;
       if (!owner || ((kind === "own" || kind === "borrow") && owner.resource !== detail))
         throw new TypeError(`expected a live ${RESOURCES[detail as number] ?? kind} handle`);
-      if (kind === "own") {
-        if (owner.borrows) throw new Error("resource has outstanding borrows");
-        owners.delete(value as object);
-        forget(owner);
-      }
       return owner.handle;
     },
     value(kind, detail, handle) {
@@ -395,12 +282,13 @@ import {
   };
 
   /** Decode a reply and unwrap a top-level result as jco does. */
-  function reply(index: number, bytes: Uint8Array): unknown {
+  function reply(index: number, bytes: Uint8Array, running: Promise<unknown>[]): unknown {
     const method = METHODS[index]!;
     if (method.result === undefined) return undefined;
     const reader = new Reader(bytes);
     const value = decode(reader, method.result, handles);
     reader.end();
+    link(method.result, value, running);
     if (TYPES[method.result]![0] === "result") {
       if (value.tag === "err") throw new ComponentError(value.val);
       return value.val;
@@ -408,26 +296,113 @@ import {
     return value;
   }
 
-  /** Create a host input stream for one `stream<u8>` argument. */
-  function input(detail: unknown, source: any): Pump {
-    if (
-      !(source instanceof Uint8Array) &&
-      typeof source?.[WRITE_CHUNKS] !== "function" &&
-      typeof source?.[READ_CHUNK] !== "function" &&
-      typeof source?.[Symbol.asyncIterator] !== "function" &&
-      typeof source?.[Symbol.iterator] !== "function"
-    )
-      throw new TypeError("stream<u8> arguments require an AsyncIterable<number>");
-    const type = TYPES.findIndex(([kind, item]) => kind === "stream" && item === detail);
-    const writer = packet(STREAM_NEW);
-    writer.u32(type);
-    const reader = new Reader(syncBytes(writer.finish()));
-    const handle = reader.handle();
-    reader.end();
-    return new Pump(handle, source);
+  /** Attach producer failures to futures, including futures nested in a result tuple. */
+  function link(type: number, value: any, running: Promise<unknown>[]): void {
+    if (type < 0 || value === undefined || value === null) return;
+    const [kind, a, b] = TYPES[type]!;
+    if (kind === "future") (value as StandardFuture).link(running);
+    else if (kind === "tuple")
+      (a as number[]).forEach((item, at) => link(item, value[at], running));
+    else if (kind === "record")
+      for (const [name, item] of a as [string, number][]) link(item, value[name], running);
+    else if (kind === "list") for (const item of value) link(a as number, item, running);
+    else if (kind === "option") link(a as number, value, running);
+    else if (kind === "result") link((value.tag === "ok" ? a : b) as number, value.val, running);
+    else if (kind === "variant") {
+      const item = (a as [string, number][]).find(([tag]) => tag === value.tag)?.[1];
+      if (item !== undefined) link(item, value.val, running);
+    }
   }
 
-  /** Encode arguments and preserve the WIT calling convention. */
+  /** Visit handle-bearing values without reaching into resource implementations. */
+  function discard(type: number, value: any): void {
+    if (type < 0 || value === undefined || value === null) return;
+    const [kind, a, b] = TYPES[type]!;
+    if (kind === "own") {
+      if (owners.has(value))
+        try {
+          release(value);
+        } catch {
+          // If the callback already ended, the host still owns the revision's table entry.
+        }
+    } else if (kind === "tuple") (a as number[]).forEach((item, at) => discard(item, value[at]));
+    else if (kind === "record")
+      for (const [name, item] of a as [string, number][]) discard(item, value[name]);
+    else if (kind === "list") for (const item of value) discard(a as number, item);
+    else if (kind === "option") discard(a as number, value);
+    else if (kind === "result") discard((value.tag === "ok" ? a : b) as number, value.val);
+    else if (kind === "variant") {
+      const item = (a as [string, number][]).find(([tag]) => tag === value.tag)?.[1];
+      if (item !== undefined) discard(item, value.val);
+    }
+  }
+
+  /** Validate an entire value before committing any owned-resource transfer. */
+  function claims() {
+    const owned = new Map<object, Owner>();
+    const borrowed = new Set<Owner>();
+    const codec: HandleCodec = {
+      ...handles,
+      handle(kind, detail, value) {
+        const id = handles.handle(kind, detail, value);
+        const owner = owners.get(value as object)!;
+        if (kind === "own") {
+          if (owner.borrows || borrowed.has(owner))
+            throw new Error("resource has outstanding borrows");
+          if (owned.has(value as object)) throw new Error("resource is transferred twice");
+          owned.set(value as object, owner);
+        } else if (kind === "borrow") {
+          if (owned.has(value as object)) throw new Error("resource is transferred and borrowed");
+          borrowed.add(owner);
+        }
+        return id;
+      },
+    };
+    return {
+      codec,
+      commit() {
+        for (const [target, owner] of owned) {
+          owners.delete(target);
+          forget(owner);
+        }
+      },
+      abandon() {
+        // A queued packet can still be refused by host admission before it takes ownership.
+        // Accepted resources have no table identity left; only untaken inputs can be dropped.
+        for (const owner of owned.values()) {
+          const writer = packet(DROP);
+          writer.handle(owner.handle);
+          try {
+            syncBytes(writer.finish());
+          } catch {
+            // Already taken, or the scope ended: the host owns its physical cleanup.
+          }
+        }
+      },
+      lend() {
+        for (const owner of borrowed) owner.borrows++;
+      },
+      release() {
+        for (const owner of borrowed) owner.borrows--;
+      },
+    };
+  }
+
+  const inputs = new InputBindings(
+    syncBytes,
+    (bytes) => __hostAsync(bytes),
+    (handle, payload, value) => {
+      const transaction = claims();
+      const writer = packet(FUTURE_WRITE);
+      writer.handle(handle);
+      encode(writer, payload, value, transaction.codec);
+      syncBytes(writer.finish());
+      transaction.commit();
+    },
+    discard,
+  );
+
+  /** Encode all arguments, then transfer ownership when the packet is accepted. */
   function invoke(index: number, args: unknown[]): unknown {
     sweep();
     const method = METHODS[index]!;
@@ -435,56 +410,44 @@ import {
       throw new TypeError(`${method.name} expects ${method.params.length} arguments`);
     const writer = packet(CALL);
     writer.u32(index);
-    const borrowed: Owner[] = [];
-    const inputs: Pump[] = [];
+    const transaction = claims();
+    const writers = inputs.call();
     const codec: HandleCodec = {
-      ...handles,
-      handle(kind, detail, value) {
-        if (kind === "stream") {
-          const pump = input(detail, value);
-          inputs.push(pump);
-          return pump.handle;
-        }
-        const id = handles.handle(kind, detail, value);
-        if (kind === "borrow" && method.asynchronous) {
-          const owner = owners.get(value as object)!;
-          owner.borrows++;
-          borrowed.push(owner);
-        }
-        return id;
-      },
-    };
-    const release = () => {
-      for (const owner of borrowed) owner.borrows--;
-    };
-    /** Start pumps once the host accepted the packet; a source failure rejects the future. */
-    const started = (value: unknown) => {
-      const running = inputs.map((pump) => pump.run());
-      if (value instanceof StandardFuture) value.link(running);
-      return value;
+      ...transaction.codec,
+      handle: (kind, detail, value) =>
+        kind === "stream" || kind === "future"
+          ? writers.handle(kind, detail, value)
+          : transaction.codec.handle(kind, detail, value),
     };
     let sent = false;
+    let lent = false;
     try {
-      method.params.forEach((type, position) => encode(writer, type, args[position], codec));
+      method.params.forEach((type, at) => encode(writer, type, args[at], codec));
       if (method.asynchronous) {
+        transaction.lend();
+        lent = true;
         const result = __hostAsync(writer.finish());
         sent = true;
-        const running = inputs.map((pump) => pump.run());
+        transaction.commit();
+        const running = writers.start();
         return result
-          .then((bytes) => {
-            const value = reply(index, bytes);
-            if (value instanceof StandardFuture) value.link(running);
-            return value;
-          })
-          .finally(release);
+          .then(
+            (bytes) => reply(index, bytes, running),
+            (error) => {
+              transaction.abandon();
+              writers.close();
+              throw error;
+            },
+          )
+          .finally(transaction.release);
       }
       const bytes = syncBytes(writer.finish());
       sent = true;
-      return started(reply(index, bytes));
+      transaction.commit();
+      return reply(index, bytes, writers.start());
     } catch (error) {
-      release();
-      // A refused call transferred nothing: discard its untransferred writers.
-      if (!sent) for (const pump of inputs) pump.close();
+      if (lent) transaction.release();
+      if (!sent) writers.close();
       throw error;
     }
   }
@@ -499,9 +462,10 @@ import {
     }
     const resource = classes[method.resource]!;
     module[resource.name] = resource;
-    Object.defineProperty(resource.prototype, method.name, {
+    if (method.kind === "constructor") continue;
+    Object.defineProperty(method.kind === "static" ? resource : resource.prototype, method.name, {
       value(this: object, ...args: unknown[]) {
-        return invoke(index, [this, ...args]);
+        return invoke(index, method.kind === "static" ? args : [this, ...args]);
       },
     });
   }

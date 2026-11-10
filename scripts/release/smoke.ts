@@ -248,6 +248,44 @@ execFileSync("node", [path.join(directory, "node_modules/typescript/bin/tsc"), "
   cwd: directory,
   stdio: "inherit",
 });
+// Browser consumers need only the platform libraries, without Node or virtual WASI modules.
+writeFileSync(
+  path.join(directory, "browser-types.ts"),
+  `
+import type * as Browser from "@syntropika/tembra-sdk/browser";
+import type * as Http from "@syntropika/tembra-sdk/http";
+export type Capabilities = [Browser.HttpProvider, Browser.HttpProviderError, Http.HttpRequest, Http.HttpResponse, Http.HttpError];
+`,
+);
+writeFileSync(
+  path.join(directory, "browser-tsconfig.json"),
+  JSON.stringify({
+    compilerOptions: {
+      target: "ES2023",
+      module: "ESNext",
+      moduleResolution: "Bundler",
+      lib: ["ES2023", "DOM", "DOM.Iterable"],
+      strict: true,
+      skipLibCheck: false,
+      noEmit: true,
+      allowImportingTsExtensions: true,
+      types: [],
+    },
+    files: ["browser-types.ts"],
+  }),
+);
+execFileSync(
+  "node",
+  [
+    path.join(directory, "node_modules/typescript/bin/tsc"),
+    "-p",
+    path.join(directory, "browser-tsconfig.json"),
+  ],
+  {
+    cwd: directory,
+    stdio: "inherit",
+  },
+);
 // Node runs the compiled JavaScript; Bun keeps its supported source condition.
 const inputs = [built.relay, built.arithmetic];
 execFileSync("node", [path.join(directory, "build/consumer.js"), ...inputs], {

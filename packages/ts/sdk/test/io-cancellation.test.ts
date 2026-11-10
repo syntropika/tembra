@@ -2,13 +2,7 @@ import { expect, test } from "bun:test";
 import { withIoCancellation } from "../src/interpreter/types.ts";
 import type { IORequest } from "../src/interpreter/host-protocol.ts";
 
-const send: IORequest = {
-  operation: "http.send",
-  url: "http://127.0.0.1/",
-  method: "GET",
-  headers: [],
-  body: [],
-};
+const connect: IORequest = { operation: "transport.connect", ip: "127.0.0.1", port: 8080 };
 
 /** A pending operation that settles only when told to. */
 function pending() {
@@ -25,9 +19,9 @@ test("native and mobile ports revoke source I/O only while an operation is pendi
   const controller = new AbortController();
   let cancels = 0;
   const { operation, fail } = pending();
-  const forwarded = withIoCancellation(operation, send, controller.signal, () => {
+  const forwarded = withIoCancellation(operation, connect, controller.signal, () => {
     cancels++;
-    fail(new Error("callback ended before the HTTP response arrived"));
+    fail(new Error("callback ended before the connection opened"));
   });
   controller.abort();
   await expect(forwarded).rejects.toThrow("callback ended");
@@ -36,7 +30,7 @@ test("native and mobile ports revoke source I/O only while an operation is pendi
   // A later abort of the same signal cannot reach another callback's operation.
   const later = new AbortController();
   const second = pending();
-  const result = withIoCancellation(second.operation, send, later.signal, () => cancels++);
+  const result = withIoCancellation(second.operation, connect, later.signal, () => cancels++);
   second.settle("{}");
   expect(await result).toBe("{}");
   later.abort();
@@ -46,17 +40,16 @@ test("native and mobile ports revoke source I/O only while an operation is pendi
 test("cleanup survives cancellation and an already aborted signal revokes at once", async () => {
   const aborted = AbortSignal.abort();
   let cancels = 0;
-  for (const request of [
-    { operation: "http.close", id: 1 },
-    { operation: "transport.close", id: 1 },
-  ] as const)
+  for (const request of [{ operation: "transport.close", id: 1 }] as const)
     expect(
       await withIoCancellation(Promise.resolve("null"), request, aborted, () => cancels++),
     ).toBe("null");
   expect(cancels).toBe(0);
-  expect(await withIoCancellation(Promise.resolve("1"), send, aborted, () => cancels++)).toBe("1");
+  expect(await withIoCancellation(Promise.resolve("1"), connect, aborted, () => cancels++)).toBe(
+    "1",
+  );
   expect(cancels).toBe(1);
-  expect(await withIoCancellation(Promise.resolve("1"), send, undefined, () => cancels++)).toBe(
+  expect(await withIoCancellation(Promise.resolve("1"), connect, undefined, () => cancels++)).toBe(
     "1",
   );
   expect(cancels).toBe(1);

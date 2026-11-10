@@ -43,7 +43,10 @@ export default orb({
         },
         async fetchAndSum(environment: Environment, context: Context, url: string) {
           const response = await fetch(url);
-          if (!response.ok) throw new Error(`HTTP request failed: ${response.status}`);
+          if (!response.ok) {
+            await response.close();
+            throw new Error(`HTTP request failed: ${response.status}`);
+          }
           const input = await response.json<{ values: number[] }>();
           const doubled: number = await environment.arithmetic.double(sum(input.values), context);
           environment.total.update(context, () => doubled);

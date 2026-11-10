@@ -20,8 +20,19 @@ export const DROP = 3;
 export const STREAM_NEW = 4;
 /** Write one chunk into a guest-writable input stream; completes once the host accepted it. */
 export const STREAM_WRITE = 5;
+/** Create a guest-writable future of a generated writable `TYPES` index. */
+export const FUTURE_NEW = 6;
+/** Resolve a guest-writable future with one typed payload. */
+export const FUTURE_WRITE = 7;
 /** Largest byte chunk either side moves through one stream read or write. */
 export const STREAM_CHUNK = 64 << 10;
+
+/** The resource class name jco exposes for a canonical `interface#resource-name`. */
+export function resourceClassName(name: string): string {
+  return name
+    .split("#")[1]!
+    .replace(/(^|-)(\w)/g, (_match, _separator, letter) => letter.toUpperCase());
+}
 
 /** Handle conversion supplied by the side that owns handle identities. */
 export interface HandleCodec {

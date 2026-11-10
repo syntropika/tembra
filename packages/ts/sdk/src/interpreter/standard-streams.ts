@@ -4,7 +4,19 @@
  * guest-to-host input streams. Nothing here knows a WASI interface; method implementations
  * (`standard-filesystem.ts`, `standard-system.ts`) compose these pieces.
  */
+import { RESOURCES, type WasiMethod } from "./standard.ts";
 import { STREAM_CHUNK, Writer } from "./standard-codec.ts";
+
+/**
+ * Implementation key of a generated method: resource functions are qualified by their resource
+ * (`<package>/<interface>#<resource>.<name>`), so `new`, `clone` or `consume-body` of different
+ * resources never collide. Free functions use `<interface>#<name>`.
+ */
+export function methodKey(method: WasiMethod): string {
+  return method.resource === undefined
+    ? `${method.interface}#${method.name}`
+    : `${RESOURCES[method.resource]}.${method.name}`;
+}
 
 /** Host services available to a method implementation. */
 export interface StandardServices {
@@ -48,7 +60,12 @@ export function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promi
   });
 }
 
-/** A one-shot WIT future. `cancel` runs when the reply that would publish it is never delivered. */
+/**
+ * A one-shot host-to-guest WIT future. `cancel` runs when the reply that would publish it, or
+ * the read that would deliver its value, can never reach the guest. A guest dropping the handle
+ * does not cancel the work behind it (as upstream `write-via-stream` results do not); the host
+ * only releases the value's owned resources when it arrives.
+ */
 export class HostFuture<T = unknown> {
   constructor(
     readonly value: Promise<T>,
@@ -61,18 +78,111 @@ export class HostFuture<T = unknown> {
   }
 }
 
-/** Producer of a `stream<u8>` output. `close` runs once, at end of stream or on drop. */
-export interface ByteProducer {
-  /** At most `limit` bytes; `undefined` is end of stream. A failure ends the stream. */
-  next(limit: number): Promise<Uint8Array | undefined>;
+/** The readable end of a guest-written future, held by the call it was passed to. */
+export interface FutureReader<T = unknown> {
+  /** The value once written; ownership of any resources inside it moves to the caller. */
+  take(): Promise<T>;
+  /** The consumer stopped: a written or later value is released, never delivered. */
   close(): void;
+}
+
+/**
+ * A guest-to-host one-shot future created by FUTURE_NEW. One handle names its writer end
+ * (FUTURE_WRITE, DROP) and, until it is passed once as a call parameter, its readable end. A
+ * writer that ends unwritten (dropped, or its callback ended) resolves to `abandoned`, so a
+ * consumer never mistakes a vanished producer for a completed one.
+ */
+export class WritableFuture<T = unknown> implements FutureReader<T> {
+  /** Set once the readable end was passed to a successful call. */
+  transferred = false;
+  #written = false;
+  #taken = false;
+  #closed = false;
+  #value: { readonly value: T } | undefined;
+  #deliver: ((value: T) => void) | undefined;
+
+  /**
+   * @param type the generated `TYPES` index of this future
+   * @param abandoned the value an unwritten writer resolves to; it carries no resources
+   * @param release releases the resources inside a value nobody will take
+   */
+  constructor(
+    readonly type: number,
+    readonly abandoned: T,
+    readonly release: (value: T) => void,
+  ) {}
+
+  /** Whether the writer end has ended (written or abandoned). */
+  get written(): boolean {
+    return this.#written;
+  }
+
+  /** Accept the one value; the caller has already claimed every resource inside it. */
+  write(value: T): void {
+    if (this.#written) throw new Error("future was already written");
+    this.#written = true;
+    this.#settle(value);
+  }
+
+  /** The writer ended without a value. */
+  abandon(): void {
+    if (this.#written) return;
+    this.#written = true;
+    this.#settle(this.abandoned);
+  }
+
+  #settle(value: T): void {
+    if (this.#closed) return this.release(value);
+    if (this.#deliver) {
+      const deliver = this.#deliver;
+      this.#deliver = undefined;
+      return deliver(value);
+    }
+    this.#value = { value };
+  }
+
+  take(): Promise<T> {
+    if (this.#taken || this.#closed) return Promise.reject(new Error("future was already read"));
+    this.#taken = true;
+    const stored = this.#value;
+    this.#value = undefined;
+    if (stored) return Promise.resolve(stored.value);
+    return new Promise<T>((resolve) => {
+      this.#deliver = resolve;
+    });
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#deliver = undefined;
+    const stored = this.#value;
+    this.#value = undefined;
+    if (stored) this.release(stored.value);
+  }
+}
+
+/**
+ * How a host-to-guest stream ended: its producer reached the end (`eof`), the guest or the
+ * retiring revision dropped it first (`dropped`), or production failed (`failed`).
+ */
+export type StreamEnd = "eof" | "dropped" | "failed";
+
+/** Producer of a `stream<u8>` output. `close` runs once, at the end with its reason. */
+export interface ByteProducer {
+  /**
+   * At most `limit` bytes. `undefined` or an empty chunk is end of stream, so a producer whose
+   * source may yield empty chunks must skip them. A failure ends the stream.
+   */
+  next(limit: number): Promise<Uint8Array | undefined>;
+  close(end?: StreamEnd): void;
 }
 
 /** Producer of a typed `stream<T>` output, one item at a time. */
 export interface ItemProducer {
   /** The next item, or `undefined` at end of stream. */
   next(): Promise<unknown>;
-  close(): void;
+  close(end?: StreamEnd): void;
 }
 
 /**
@@ -93,19 +203,19 @@ export class OutputStream {
 
   /**
    * @param producer a byte producer for `stream<u8>`, an item producer for typed streams
-   * @param settle reports end of stream (`undefined`) or the producer's failure to the future
+   * @param settle reports how the stream ended, with the producer's failure for `failed`
    */
   constructor(
     readonly producer: ByteProducer | ItemProducer,
-    readonly settle: (failure?: unknown) => void,
+    readonly settle: (failure: unknown, end: StreamEnd) => void,
   ) {}
 
-  /** End once: settle the paired future and release the producer. */
-  #end(failure?: unknown): void {
+  /** End once: settle the paired future and release the producer, both told why. */
+  #end(end: StreamEnd, failure?: unknown): void {
     if (this.#ended) return;
     this.#ended = true;
-    this.settle(failure);
-    this.producer.close();
+    this.settle(failure, end);
+    this.producer.close(end);
   }
 
   /** Drop by the guest or revision retirement. */
@@ -115,13 +225,13 @@ export class OutputStream {
     this.#dropped.abort();
     this.#stash = [];
     this.#inflight = undefined;
-    this.#end();
+    this.#end("dropped");
   }
 
   /** A produced read never reached its guest; later reads must not silently skip its data. */
   abandon(): void {
     this.#abandoned = true;
-    this.#end(new Error("stream read was abandoned"));
+    this.#end("failed", new Error("stream read was abandoned"));
     this.close();
   }
 
@@ -174,7 +284,7 @@ export class OutputStream {
         if (!item) break;
         if (size + item.byteLength > bound) {
           if (!items.length) {
-            this.#end(new Error("stream item exceeds the packet bound"));
+            this.#end("failed", new Error("stream item exceeds the packet bound"));
             throw new Error("stream item exceeds the packet bound");
           }
           this.#stash.unshift(item);
@@ -215,15 +325,15 @@ export class OutputStream {
           if (!encodeItem) {
             const chunk = await (this.producer as ByteProducer).next(limit);
             if (chunk?.byteLength) return chunk;
-            this.#end();
+            this.#end("eof");
             return undefined;
           }
           const item = await (this.producer as ItemProducer).next();
           if (item !== undefined) return encodeItem(item);
-          this.#end();
+          this.#end("eof");
           return undefined;
         } catch (error) {
-          this.#end(error);
+          this.#end("failed", error);
           return undefined;
         }
       })();
@@ -251,6 +361,8 @@ export const INPUT_BUDGET = 1 << 20;
  */
 export class InputBudget {
   #used = 0;
+  /** Streams that hold, or may still take, reservations of this budget. */
+  readonly #streams = new Set<InputStream>();
   readonly #waiters: { bytes: number; grant(): void }[] = [];
 
   constructor(readonly limit = INPUT_BUDGET) {}
@@ -305,6 +417,23 @@ export class InputBudget {
     this.#drain();
   }
 
+  /** Account `stream` until it finished; `discard` reaches it until then. */
+  attach(stream: InputStream): void {
+    this.#streams.add(stream);
+  }
+
+  detach(stream: InputStream): void {
+    this.#streams.delete(stream);
+  }
+
+  /**
+   * Revision retirement, after every consumer had its turn: cancel each stream that still
+   * holds bytes for a consumer that will never come, so the budget returns to zero.
+   */
+  discard(): void {
+    for (const stream of [...this.#streams]) stream.cancel();
+  }
+
   #drain(): void {
     while (this.#waiters.length && this.#used + this.#waiters[0]!.bytes <= this.limit) {
       const waiter = this.#waiters.shift()!;
@@ -330,12 +459,20 @@ export class InputStream {
   #writing: AbortController | undefined;
   #pending: { chunk: Uint8Array; resolve(): void } | undefined;
   #wake: (() => void) | undefined;
+  readonly #stopped = new AbortController();
 
   /** @param type the generated `TYPES` index of this stream */
   constructor(
     readonly type: number,
     readonly budget: InputBudget,
-  ) {}
+  ) {
+    budget.attach(this);
+  }
+
+  /** Aborts when the consumer stopped (`cancel`), including revision retirement. */
+  get stopped(): AbortSignal {
+    return this.#stopped.signal;
+  }
 
   /** Bytes accepted but not yet consumed; never above `STREAM_CHUNK`. */
   get buffered(): number {
@@ -412,7 +549,10 @@ export class InputStream {
     if (this.#eof) return;
     this.#eof = true;
     this.#writing?.abort(new Error("stream was dropped"));
-    if (!this.transferred) this.#discard();
+    if (!this.transferred) {
+      this.#discard();
+      this.budget.detach(this);
+    }
     this.#notify();
   }
 
@@ -422,6 +562,8 @@ export class InputStream {
     this.#cancelled = true;
     this.#writing?.abort(new Error("stream reader was dropped"));
     this.#discard();
+    this.budget.detach(this);
+    this.#stopped.abort();
     this.#notify();
   }
 
@@ -434,7 +576,10 @@ export class InputStream {
   /** Next buffered bytes (at most `STREAM_CHUNK`), or `undefined` at end of stream. */
   async read(): Promise<Uint8Array | undefined> {
     while (!this.#buffered) {
-      if (this.#eof || this.#cancelled) return undefined;
+      if (this.#eof || this.#cancelled) {
+        this.budget.detach(this);
+        return undefined;
+      }
       await new Promise<void>((resolve) => {
         this.#wake = resolve;
       });

@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 use tembra::Host;
-use tembra_executor_wasm::{Contract, Engine, Grants, HttpGrant, Install, Limits};
+use tembra_executor_wasm::{Engine, Grants, HttpGrant, Install, Limits};
 
 struct Server {
     stop: Arc<AtomicBool>,
@@ -101,9 +101,9 @@ impl Drop for Server {
     }
 }
 
-/// Combine a real HTTP request, npm calculation, native interop and managed state.
+/// Combine a real HTTP request, native interop and an SSE stream that closes before EOF.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_ORB"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
 fn typescript_owns_http_and_the_host_only_grants_transport() {
     for interpreted in [false, true] {
         run(interpreted);
@@ -114,15 +114,13 @@ fn run(interpreted: bool) {
     let server = Server::start();
     let component =
         std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
-    let bytes =
-        std::fs::read(std::env::var_os("TEMBRA_WASM_ORB").expect("TEMBRA_WASM_ORB")).unwrap();
-    let prepared = tembra_contracts::Artifact::decode(&bytes).unwrap();
-    let tembra_contracts::ArtifactImplementation::Source(source) = &prepared.implementation else {
-        panic!("expected source");
-    };
-    let source = format!(
-        "{source}\nglobalThis.__tembraOrb = {{...globalThis.__tembraOrb, name: 'online'}};"
-    );
+    let bytes = std::fs::read(
+        std::path::PathBuf::from(
+            std::env::var_os("TEMBRA_WASM_FIXTURES").expect("TEMBRA_WASM_FIXTURES"),
+        )
+        .join("online.wasm"),
+    )
+    .unwrap();
     let engine = if interpreted {
         Engine::interpreted(Limits::default())
     } else {
@@ -133,24 +131,9 @@ fn run(interpreted: bool) {
     .unwrap()
     .network("tcp")
     .unwrap();
-    let contract = Contract::from_dir(
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../packages/ts/sdk/test/fixtures/wasm-orb"
-        ),
-        Some("online-calculator"),
-    )
-    .unwrap();
     let install =
         || Install::default().requires("example:integrated/arithmetic@1.0.0", "native.math", 1);
-    assert!(
-        engine
-            .load(
-                &contract.source_artifact(&source, "online", 1).unwrap(),
-                install()
-            )
-            .is_err()
-    );
+    assert!(engine.load(&bytes, install()).is_err());
     let grants = Grants {
         http: vec![HttpGrant {
             provider: "tcp".into(),
@@ -160,19 +143,14 @@ fn run(interpreted: bool) {
     };
     let mut allowed = install();
     allowed.grants = grants;
-    let orb = engine
-        .load(
-            &contract.source_artifact(&source, "online", 1).unwrap(),
-            allowed,
-        )
-        .unwrap();
+    let orb = engine.load(&bytes, allowed).unwrap();
     let native = support::native_math("native.math");
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![native, orb]).unwrap();
     let reference = Rc::new(
         host.get(
-            "online::example:integrated/calculation@1.0.0",
+            "online::example:integrated/network@1.0.0",
             vec!["main".into()],
             "alice",
         )
@@ -188,10 +166,6 @@ fn run(interpreted: bool) {
                 called
                     .call::<_, Value>(&context, "fetch-and-sum", json!([url]))
                     .await?,
-                24
-            );
-            assert_eq!(
-                called.call::<_, Value>(&context, "read", json!([])).await?,
                 24
             );
             assert_eq!(

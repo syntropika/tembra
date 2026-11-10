@@ -23,6 +23,11 @@ pub(super) struct State {
     /// Standard WASI context and resources of this revision; dropped with the Store.
     ctx: wasmtime_wasi::WasiCtx,
     table: wasmtime::component::ResourceTable,
+    http: wasmtime_wasi_http::WasiHttpCtx,
+    hooks: crate::http::Hooks,
+    /// Physical HTTP work of this revision: active work (resolver, connect, closes, teardown)
+    /// and revision-owned connection drivers.
+    pub(super) transport: crate::http::Transport,
     pub(super) standard: super::standard::Standard,
     pub(super) callback_scope: crate::io::Streams,
 }
@@ -33,6 +38,48 @@ impl wasmtime_wasi::WasiView for State {
             ctx: &mut self.ctx,
             table: &mut self.table,
         }
+    }
+}
+
+impl wasmtime_wasi_http::WasiHttpView for State {
+    /// Standard HTTP resources share the Store's table; sends pass through Tembra hooks.
+    fn http(&mut self) -> wasmtime_wasi_http::WasiHttpCtxView<'_> {
+        wasmtime_wasi_http::WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.hooks,
+        }
+    }
+}
+
+#[cfg(test)]
+impl State {
+    /// Replace this test Store's HTTP grants and transport.
+    pub(super) fn grant_http(&mut self, grants: crate::Grants, transport: crate::http::Transport) {
+        self.hooks = crate::http::Hooks::new(
+            Arc::new(grants),
+            Arc::new(CallbackAuthority(self.callback_scope.clone())),
+            transport.clone(),
+        );
+        self.transport = transport;
+    }
+}
+
+/// Source HTTP authority: the guest callback that is active when upstream sends.
+struct CallbackAuthority(crate::io::Streams);
+
+impl crate::http::Authority for CallbackAuthority {
+    fn admit(&self) -> Result<crate::http::Admission, crate::http::Refusal> {
+        if !self.0.active() {
+            return Err(crate::http::Refusal::Ended("callback ended".into()));
+        }
+        // Source sends are callback-owned Store tasks: the Store ledger is their owner.
+        Ok(crate::http::Admission {
+            confirmation: Box::pin(std::future::ready(Ok(()))),
+            call: None,
+            // Source sends are aborted with their callback's Store tasks instead.
+            cancelled: None,
+        })
     }
 }
 
@@ -192,12 +239,14 @@ pub(super) async fn instantiate(
     engine: &Engine,
     diagnostics: super::diagnostics::Diagnostics,
     standard: crate::io::StandardContext,
+    transport: crate::http::Transport,
 ) -> wasmtime::Result<(Store<State>, super::steps::Driver)> {
     let crate::io::StandardContext {
         mut wasi,
         allowed,
         scope,
         clocks,
+        grants,
     } = standard;
     // Qualified source filesystem calls run inline during bounded Store polls. They cannot
     // leave detached spawn_blocking work behind when a callback future is revoked.
@@ -221,6 +270,13 @@ pub(super) async fn instantiate(
             reply: None,
             ctx: wasi.build(),
             table: wasmtime::component::ResourceTable::new(),
+            http: wasmtime_wasi_http::WasiHttpCtx::new(),
+            hooks: crate::http::Hooks::new(
+                grants,
+                Arc::new(CallbackAuthority(scope.clone())),
+                transport.clone(),
+            ),
+            transport,
             standard: super::standard::Standard::new(allowed, engine.open_files.clone()),
             callback_scope: scope,
         },
@@ -249,8 +305,10 @@ pub(super) async fn run(
     diagnostics: super::diagnostics::Diagnostics,
     standard: crate::io::StandardContext,
 ) -> super::Terminal {
+    let transport = crate::http::Transport::default();
     let outcome = async {
-        let (mut store, driver) = instantiate(&engine, diagnostics, standard).await?;
+        let (mut store, driver) =
+            instantiate(&engine, diagnostics, standard, transport.clone()).await?;
         while let Ok(command) = commands.recv() {
             store.data_mut().events = Some(command.events.clone());
             store.data_mut().deadline = Some(
@@ -301,6 +359,11 @@ pub(super) async fn run(
         Ok::<_, wasmtime::Error>(Vec::new())
     }
     .await;
+    // The Store is gone: upstream's connection driver tasks are aborted and drop on the next
+    // runtime turn, closing their sockets; resolver jobs end when their lookups return. The
+    // revision retires only after every unit physically ended.
+    transport.store_work.settled().await;
+    transport.drivers.settled().await;
     match outcome {
         Ok(terminal) => terminal,
         Err(error) => commands
@@ -318,6 +381,7 @@ pub(super) async fn run(
 /// Supply a real upstream context to focused binding tests without a guest module.
 #[cfg(test)]
 pub(super) fn test_state(ctx: wasmtime_wasi::WasiCtx) -> State {
+    let transport = crate::http::Transport::default();
     let scope = crate::io::Streams::default();
     scope.begin_callback();
     State {
@@ -334,6 +398,13 @@ pub(super) fn test_state(ctx: wasmtime_wasi::WasiCtx) -> State {
         reply: None,
         ctx,
         table: Default::default(),
+        http: wasmtime_wasi_http::WasiHttpCtx::new(),
+        hooks: crate::http::Hooks::new(
+            Arc::default(),
+            Arc::new(CallbackAuthority(scope.clone())),
+            transport.clone(),
+        ),
+        transport,
         standard: super::standard::Standard::new(
             Default::default(),
             crate::engine::FileBudget::new(crate::engine::OPEN_FILES),

@@ -42,7 +42,8 @@ pub(super) fn discard(
         super::standard::abandon(store.data_mut(), journal)?;
     }
     pending.clear();
-    Ok(())
+    // Released store-drop resources (requests, responses) close now, while the Store is held.
+    super::standard::close_queued(store.as_context_mut())
 }
 
 /// One logical callback result; `interrupted` quarantines the Store.

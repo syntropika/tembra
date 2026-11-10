@@ -1,6 +1,5 @@
-// Boundary tests of the browser standard WASI host (wire v5). They send raw packets that the
+// Boundary tests of the browser standard WASI host. They send raw packets that the
 // generated guest bindings never produce, so hostile handle numbers stay out of the example Orbs.
-// Tests of methods missing from the blessed table are skipped and reported by name.
 import { expect, test } from "bun:test";
 import {
   type Descriptor,
@@ -33,14 +32,6 @@ const CLOCK = "wasi:clocks/monotonic-clock@0.3.0";
 const RANDOM = "wasi:random/random@0.3.0";
 const ALL = new Set([FS, PREOPENS, CLOCK, RANDOM]);
 const BYTES = TYPES.findIndex(([kind, item]) => kind === "stream" && item === "u8");
-/** v5 methods; absent until the full native table is blessed. */
-const FULL = ["writeViaStream", "readDirectory", "renameAt", "metadataHash"].every((name) =>
-  METHODS.some((method) => method.name === name),
-);
-const v5 = FULL ? test : test.skip;
-if (!FULL)
-  console.warn("standard-host: v5 tests BLOCKED until the full generated table is blessed");
-
 /** A hostile guest names handles by raw number. */
 const raw: HandleCodec = {
   handle: (_kind, _detail, value) => value as number,
@@ -336,7 +327,7 @@ test("the codec is exact: no wrapping, unknown flag bits, enum cases or tags", (
     expect(() => utf8Decode(Uint8Array.from(invalid))).toThrow("invalid UTF-8");
 });
 
-v5("filesystem shapes roundtrip: new-timestamp, advice, signed instants, metadata hashes", () => {
+test("filesystem shapes roundtrip: new-timestamp, advice, signed instants, metadata hashes", () => {
   const types = (name: string) => METHODS[index(name)]!;
   const timestamp = types("setTimes").params[1]!;
   const advice = types("advise").params[3]!;
@@ -452,56 +443,52 @@ test("traversal and open authority are refused before the provider is called", a
   }
 });
 
-v5(
-  "read-only directories, files and both rename/link sides refuse before any provider call",
-  async () => {
-    const provider = memoryFilesystem({ "a/file": "x", "b/other": "y" });
-    const read = instrument(provider.open("/ro", false));
-    const write = instrument(provider.open("/rw", true));
-    const standard = new StandardHost(
-      ALL,
-      [mount(read.filesystem, "/ro"), mount(write.filesystem, "/rw")],
-      8 << 20,
-    );
-    const [ro, rw] = roots(standard) as [number, number];
-    const tag = async (name: string, ...args: unknown[]) =>
-      result(name, await asynchronous(standard, call(name, ...args))).val?.tag;
-    const nothing = { tag: "no-change" };
-    for (const [name, args] of [
-      ["createDirectoryAt", [ro, "c"]],
-      ["removeDirectoryAt", [ro, "a"]],
-      ["unlinkFileAt", [ro, "a/file"]],
-      ["renameAt", [ro, "a/file", rw, "moved"]],
-      ["renameAt", [rw, "b/other", ro, "moved"]],
-      ["linkAt", [ro, {}, "a/file", rw, "linked"]],
-      ["linkAt", [rw, {}, "b/other", ro, "linked"]],
-      ["symlinkAt", [ro, "a/file", "link"]],
-      ["setTimesAt", [ro, {}, "a/file", nothing, nothing]],
-      ["setTimes", [ro, { tag: "now" }, nothing]],
-    ] as [string, unknown[]][])
-      expect([name, await tag(name, ...args)]).toEqual([name, "not-permitted"]);
-    expect(read.stats.calls).toEqual([]);
-    expect(write.stats.calls).toEqual([]);
-    // A file opened without write right refuses writes and truncation as upstream does.
-    const file = (await openAt(standard, ro, "a/file")).val as number;
-    expect(await tag("setSize", file, 0n)).toBe("bad-descriptor");
-    expect(await write_(standard, file)).toEqual({ tag: "err", val: { tag: "bad-descriptor" } });
-    // Writable mounts report the browser's missing links as unsupported, after the checks.
-    expect(await tag("linkAt", rw, {}, "b/other", rw, "linked")).toBe("unsupported");
-    expect(await tag("symlinkAt", rw, "b/other", "link")).toBe("unsupported");
-    expect(await tag("setTimes", rw, { tag: "now" }, nothing)).toBe("unsupported");
-    expect(
-      result("setTimes", await asynchronous(standard, call("setTimes", rw, nothing, nothing))).tag,
-    ).toBe("ok");
-    expect(await tag("readlinkAt", ro, "a/file")).toBe("invalid");
-    expect(await tag("readlinkAt", ro, "missing")).toBe("no-entry");
-    expect(
-      result("advise", await asynchronous(standard, call("advise", file, 0n, 10n, "sequential")))
-        .tag,
-    ).toBe("ok");
-    await standard.dispose();
-  },
-);
+test("read-only directories, files and both rename/link sides refuse before any provider call", async () => {
+  const provider = memoryFilesystem({ "a/file": "x", "b/other": "y" });
+  const read = instrument(provider.open("/ro", false));
+  const write = instrument(provider.open("/rw", true));
+  const standard = new StandardHost(
+    ALL,
+    [mount(read.filesystem, "/ro"), mount(write.filesystem, "/rw")],
+    8 << 20,
+  );
+  const [ro, rw] = roots(standard) as [number, number];
+  const tag = async (name: string, ...args: unknown[]) =>
+    result(name, await asynchronous(standard, call(name, ...args))).val?.tag;
+  const nothing = { tag: "no-change" };
+  for (const [name, args] of [
+    ["createDirectoryAt", [ro, "c"]],
+    ["removeDirectoryAt", [ro, "a"]],
+    ["unlinkFileAt", [ro, "a/file"]],
+    ["renameAt", [ro, "a/file", rw, "moved"]],
+    ["renameAt", [rw, "b/other", ro, "moved"]],
+    ["linkAt", [ro, {}, "a/file", rw, "linked"]],
+    ["linkAt", [rw, {}, "b/other", ro, "linked"]],
+    ["symlinkAt", [ro, "a/file", "link"]],
+    ["setTimesAt", [ro, {}, "a/file", nothing, nothing]],
+    ["setTimes", [ro, { tag: "now" }, nothing]],
+  ] as [string, unknown[]][])
+    expect([name, await tag(name, ...args)]).toEqual([name, "not-permitted"]);
+  expect(read.stats.calls).toEqual([]);
+  expect(write.stats.calls).toEqual([]);
+  // A file opened without write right refuses writes and truncation as upstream does.
+  const file = (await openAt(standard, ro, "a/file")).val as number;
+  expect(await tag("setSize", file, 0n)).toBe("bad-descriptor");
+  expect(await write_(standard, file)).toEqual({ tag: "err", val: { tag: "bad-descriptor" } });
+  // Writable mounts report the browser's missing links as unsupported, after the checks.
+  expect(await tag("linkAt", rw, {}, "b/other", rw, "linked")).toBe("unsupported");
+  expect(await tag("symlinkAt", rw, "b/other", "link")).toBe("unsupported");
+  expect(await tag("setTimes", rw, { tag: "now" }, nothing)).toBe("unsupported");
+  expect(
+    result("setTimes", await asynchronous(standard, call("setTimes", rw, nothing, nothing))).tag,
+  ).toBe("ok");
+  expect(await tag("readlinkAt", ro, "a/file")).toBe("invalid");
+  expect(await tag("readlinkAt", ro, "missing")).toBe("no-entry");
+  expect(
+    result("advise", await asynchronous(standard, call("advise", file, 0n, 10n, "sequential"))).tag,
+  ).toBe("ok");
+  await standard.dispose();
+});
 
 /** A write into a read-only file through a fresh writer. */
 function write_(standard: StandardHost, file: number) {
@@ -521,7 +508,7 @@ test("a child directory descriptor cannot traverse to a sibling within its mount
   await standard.dispose();
 });
 
-v5("binary offset writes, appends, truncation and reads keep exact bytes", async () => {
+test("binary offset writes, appends, truncation and reads keep exact bytes", async () => {
   const standard = host(memoryFilesystem().open("/data", true));
   const file = await open(standard, "data.bin", { create: true }, { write: true });
   const binary = Uint8Array.from({ length: 150_000 }, (_, at) => (at * 7 + 0x80) % 256);
@@ -543,54 +530,51 @@ v5("binary offset writes, appends, truncation and reads keep exact bytes", async
   expect(standard.size).toBe(0);
 });
 
-v5(
-  "typed directory streams deliver whole entries in bounded batches and close on drop",
-  async () => {
-    const files: Record<string, string> = { "sub/x": "" };
-    for (let at = 0; at < 9; at++) files[`f${at}`] = "x";
-    const { filesystem, stats } = instrument(memoryFilesystem(files).open("/data", false));
-    const standard = host(filesystem);
-    const [root] = roots(standard);
-    const [stream, future] = result("readDirectory", standard.sync(call("readDirectory", root)));
-    const pair = TYPES[METHODS[index("readDirectory")]!.result!]![1] as number[];
-    const item = TYPES[pair[0]!]![1] as number;
-    const names: string[] = [];
-    let batches = 0;
-    for (;;) {
-      const reader = new Reader(await asynchronous(standard, operation(STREAM_READ, stream, 4)));
-      if (reader.u8() === 1) break;
-      const count = reader.u32();
-      expect(count).toBeLessThanOrEqual(4);
-      for (let at = 0; at < count; at++) {
-        const entry = decode(reader, item, raw);
-        names.push(`${entry.name}:${entry.type.tag}`);
-      }
-      reader.end();
-      batches++;
+test("typed directory streams deliver whole entries in bounded batches and close on drop", async () => {
+  const files: Record<string, string> = { "sub/x": "" };
+  for (let at = 0; at < 9; at++) files[`f${at}`] = "x";
+  const { filesystem, stats } = instrument(memoryFilesystem(files).open("/data", false));
+  const standard = host(filesystem);
+  const [root] = roots(standard);
+  const [stream, future] = result("readDirectory", standard.sync(call("readDirectory", root)));
+  const pair = TYPES[METHODS[index("readDirectory")]!.result!]![1] as number[];
+  const item = TYPES[pair[0]!]![1] as number;
+  const names: string[] = [];
+  let batches = 0;
+  for (;;) {
+    const reader = new Reader(await asynchronous(standard, operation(STREAM_READ, stream, 4)));
+    if (reader.u8() === 1) break;
+    const count = reader.u32();
+    expect(count).toBeLessThanOrEqual(4);
+    for (let at = 0; at < count; at++) {
+      const entry = decode(reader, item, raw);
+      names.push(`${entry.name}:${entry.type.tag}`);
     }
-    expect(batches).toBe(3);
-    expect(names.sort()).toContain("sub:directory");
-    expect(names).toContain("f0:regular-file");
-    expect(new Reader(await asynchronous(standard, operation(FUTURE_READ, future))).u8()).toBe(0);
-    standard.sync(operation(DROP, stream));
-    expect(stats.returns).toBe(0);
-    // A stream dropped mid-iteration returns the provider iterator and fails its pending read.
-    const [early] = result("readDirectory", standard.sync(call("readDirectory", root)));
-    await asynchronous(standard, operation(STREAM_READ, early, 1));
-    standard.sync(operation(DROP, early));
-    await standard.settled();
-    expect(stats.returns).toBe(1);
-    // A file is not a directory: the stream ends and the future reports it.
-    const file = (await openAt(standard, root!, "f0")).val;
-    const [none, failed] = result("readDirectory", standard.sync(call("readDirectory", file)));
-    expect(new Reader(await asynchronous(standard, operation(STREAM_READ, none, 1))).u8()).toBe(1);
-    const reader = new Reader(await asynchronous(standard, operation(FUTURE_READ, failed)));
-    expect([reader.u8(), reader.u32()]).toEqual([1, 23]);
-    await standard.dispose();
-  },
-);
+    reader.end();
+    batches++;
+  }
+  expect(batches).toBe(3);
+  expect(names.sort()).toContain("sub:directory");
+  expect(names).toContain("f0:regular-file");
+  expect(new Reader(await asynchronous(standard, operation(FUTURE_READ, future))).u8()).toBe(0);
+  standard.sync(operation(DROP, stream));
+  expect(stats.returns).toBe(0);
+  // A stream dropped mid-iteration returns the provider iterator and fails its pending read.
+  const [early] = result("readDirectory", standard.sync(call("readDirectory", root)));
+  await asynchronous(standard, operation(STREAM_READ, early, 1));
+  standard.sync(operation(DROP, early));
+  await standard.settled();
+  expect(stats.returns).toBe(1);
+  // A file is not a directory: the stream ends and the future reports it.
+  const file = (await openAt(standard, root!, "f0")).val;
+  const [none, failed] = result("readDirectory", standard.sync(call("readDirectory", file)));
+  expect(new Reader(await asynchronous(standard, operation(STREAM_READ, none, 1))).u8()).toBe(1);
+  const reader = new Reader(await asynchronous(standard, operation(FUTURE_READ, failed)));
+  expect([reader.u8(), reader.u32()]).toEqual([1, 23]);
+  await standard.dispose();
+});
 
-v5("directory create, rename, unlink, remove, same-object and metadata hashes", async () => {
+test("directory create, rename, unlink, remove, same-object and metadata hashes", async () => {
   const provider = memoryFilesystem({ "a.txt": "one" });
   const standard = host(provider.open("/data", true));
   const [root] = roots(standard) as [number];
@@ -617,7 +601,7 @@ v5("directory create, rename, unlink, remove, same-object and metadata hashes", 
   await standard.dispose();
 });
 
-v5("input streams bound host buffering at 64 KiB with whole-chunk backpressure", async () => {
+test("input streams bound host buffering at 64 KiB with whole-chunk backpressure", async () => {
   const gate = deferred();
   let writes = 0;
   const { filesystem } = instrument(memoryFilesystem().open("/data", true), async (method) => {
@@ -652,31 +636,25 @@ v5("input streams bound host buffering at 64 KiB with whole-chunk backpressure",
   await standard.dispose();
 });
 
-v5(
-  "a failed consumer drops its reader; later writes fail and the future reports the error",
-  async () => {
-    const { filesystem } = instrument(memoryFilesystem().open("/data", true), (method) => {
-      if (method === "write") throw new FilesystemError("insufficient-space");
-    });
-    const standard = host(filesystem);
-    const file = await open(standard, "full.bin", { create: true }, { write: true });
-    const writer = new Reader(standard.sync(streamNew())).handle();
-    const future = result(
-      "writeViaStream",
-      standard.sync(call("writeViaStream", file, writer, 0n)),
-    );
-    await asynchronous(standard, streamWrite(writer, Uint8Array.of(1, 2, 3)));
-    const reader = new Reader(await asynchronous(standard, operation(FUTURE_READ, future)));
-    expect([reader.u8(), reader.u32()]).toEqual([1, 22]);
-    await expect(asynchronous(standard, streamWrite(writer, Uint8Array.of(4)))).rejects.toThrow(
-      "stream reader was dropped",
-    );
-    standard.sync(operation(DROP, writer));
-    await standard.dispose();
-  },
-);
+test("a failed consumer drops its reader; later writes fail and the future reports the error", async () => {
+  const { filesystem } = instrument(memoryFilesystem().open("/data", true), (method) => {
+    if (method === "write") throw new FilesystemError("insufficient-space");
+  });
+  const standard = host(filesystem);
+  const file = await open(standard, "full.bin", { create: true }, { write: true });
+  const writer = new Reader(standard.sync(streamNew())).handle();
+  const future = result("writeViaStream", standard.sync(call("writeViaStream", file, writer, 0n)));
+  await asynchronous(standard, streamWrite(writer, Uint8Array.of(1, 2, 3)));
+  const reader = new Reader(await asynchronous(standard, operation(FUTURE_READ, future)));
+  expect([reader.u8(), reader.u32()]).toEqual([1, 22]);
+  await expect(asynchronous(standard, streamWrite(writer, Uint8Array.of(4)))).rejects.toThrow(
+    "stream reader was dropped",
+  );
+  standard.sync(operation(DROP, writer));
+  await standard.dispose();
+});
 
-v5("stream transfer is transactional; a refused call leaves the writer reusable", async () => {
+test("stream transfer is transactional; a refused call leaves the writer reusable", async () => {
   const standard = host(memoryFilesystem().open("/data", true));
   const file = await open(standard, "t.bin", { create: true }, { write: true });
   const [root] = roots(standard);
@@ -708,49 +686,43 @@ v5("stream transfer is transactional; a refused call leaves the writer reusable"
   await standard.dispose();
 });
 
-v5(
-  "callback end closes writers it left open; pending writes abort and are not delivered",
-  async () => {
-    const gate = deferred();
-    const entered = deferred();
-    const { filesystem } = instrument(memoryFilesystem().open("/data", true), async (method) => {
-      if (method === "write") {
-        entered.resolve();
-        await gate.promise;
-      }
-    });
-    const standard = host(filesystem);
-    const file = await open(standard, "c.bin", { create: true }, { write: true });
-    const writer = new Reader(standard.sync(streamNew())).handle();
-    const future = result(
-      "writeViaStream",
-      standard.sync(call("writeViaStream", file, writer, 0n)),
-    );
-    const controller = new AbortController();
-    const full = new Uint8Array(64 << 10).fill(1);
-    // The consumer holds the first chunk in a provider write; the buffer holds the second.
-    await asynchronous(standard, streamWrite(writer, full), controller.signal);
-    await entered.promise;
-    await asynchronous(standard, streamWrite(writer, full), controller.signal);
-    const pending = asynchronous(standard, streamWrite(writer, full), controller.signal);
-    controller.abort();
-    await expect(pending).rejects.toThrow("cancelled");
-    standard.endCallback();
-    expect(() => standard.sync(operation(DROP, writer))).toThrow("unknown or dropped");
-    let settled = false;
-    const physical = standard.settled().then(() => {
-      settled = true;
-    });
-    await tick();
-    expect(settled).toBe(false);
-    gate.resolve();
-    await physical;
-    expect(new Reader(await asynchronous(standard, operation(FUTURE_READ, future))).u8()).toBe(0);
-    const size = result("stat", await asynchronous(standard, call("stat", file))).val.size;
-    expect(size).toBe(2n * BigInt(64 << 10));
-    await standard.dispose();
-  },
-);
+test("callback end closes writers it left open; pending writes abort and are not delivered", async () => {
+  const gate = deferred();
+  const entered = deferred();
+  const { filesystem } = instrument(memoryFilesystem().open("/data", true), async (method) => {
+    if (method === "write") {
+      entered.resolve();
+      await gate.promise;
+    }
+  });
+  const standard = host(filesystem);
+  const file = await open(standard, "c.bin", { create: true }, { write: true });
+  const writer = new Reader(standard.sync(streamNew())).handle();
+  const future = result("writeViaStream", standard.sync(call("writeViaStream", file, writer, 0n)));
+  const controller = new AbortController();
+  const full = new Uint8Array(64 << 10).fill(1);
+  // The consumer holds the first chunk in a provider write; the buffer holds the second.
+  await asynchronous(standard, streamWrite(writer, full), controller.signal);
+  await entered.promise;
+  await asynchronous(standard, streamWrite(writer, full), controller.signal);
+  const pending = asynchronous(standard, streamWrite(writer, full), controller.signal);
+  controller.abort();
+  await expect(pending).rejects.toThrow("cancelled");
+  standard.endCallback();
+  expect(() => standard.sync(operation(DROP, writer))).toThrow("unknown or dropped");
+  let settled = false;
+  const physical = standard.settled().then(() => {
+    settled = true;
+  });
+  await tick();
+  expect(settled).toBe(false);
+  gate.resolve();
+  await physical;
+  expect(new Reader(await asynchronous(standard, operation(FUTURE_READ, future))).u8()).toBe(0);
+  const size = result("stat", await asynchronous(standard, call("stat", file))).val.size;
+  expect(size).toBe(2n * BigInt(64 << 10));
+  await standard.dispose();
+});
 
 test("cancellation settles pending reads, keeps descriptors and delivers the chunk later", async () => {
   const gate = deferred();
@@ -823,7 +795,7 @@ test("async borrows refuse drop until the physical call returns, including cance
   await standard.dispose();
 });
 
-v5("several borrows in one call are each lent and released", async () => {
+test("several borrows in one call are each lent and released", async () => {
   const gate = deferred();
   const { filesystem, stats } = instrument(
     memoryFilesystem({ a: "x" }).open("/data", true),

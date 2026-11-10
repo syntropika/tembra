@@ -6,6 +6,12 @@ import { parseArgs } from "node:util";
 import ts from "typescript";
 import { checkEngine, prepareBrowserEngine } from "./check-engine.ts";
 import * as abi from "../../../packages/ts/sdk/src/interpreter/abi.ts";
+import {
+  METHODS,
+  RESOURCES,
+  TYPES,
+  WRITABLE_FUTURES,
+} from "../../../packages/ts/sdk/src/interpreter/standard.ts";
 
 const revision = "b51e92c0c7ca3b0ae7afff1a1f2de8baf2e7a34a";
 const root = import.meta.dir;
@@ -68,6 +74,24 @@ const bundled = await Bun.build({
   outdir: bootstrap,
   format: "iife",
   target: "browser",
+  // Parse generated metadata as data. Compiling its object/array literals as JavaScript in
+  // every Orb spends fuel on bytecode that only reconstructs this immutable schema.
+  plugins: [
+    {
+      name: "standard-schema-data",
+      setup(builder) {
+        const table = path.resolve(root, "../../../packages/ts/sdk/src/interpreter/standard.ts");
+        builder.onResolve({ filter: /standard\.ts$/ }, (request) => {
+          if (path.resolve(request.resolveDir, request.path) === table)
+            return { path: "schema", namespace: "standard-schema-data" };
+        });
+        builder.onLoad({ filter: /.*/, namespace: "standard-schema-data" }, () => ({
+          contents: `export const {METHODS, RESOURCES, TYPES, WRITABLE_FUTURES} = JSON.parse(${JSON.stringify(JSON.stringify({ METHODS, RESOURCES, TYPES, WRITABLE_FUTURES }))});`,
+          loader: "js",
+        }));
+      },
+    },
+  ],
   minify: { whitespace: true, syntax: true, identifiers: true },
 });
 if (!bundled.success) throw new AggregateError(bundled.logs, "Guest bootstrap build failed");

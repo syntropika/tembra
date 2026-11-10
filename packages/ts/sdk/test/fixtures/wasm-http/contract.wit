@@ -1,0 +1,22 @@
+package example:http@1.0.0;
+
+interface requests {
+    record reply {
+        status: u16,
+        text: string,
+        duplicate-count: u32,
+        trailer: option<string>,
+    }
+    inspect: async func(url: string) -> reply;
+    exchange: async func(url: string) -> reply;
+    duplex: async func(url: string) -> string;
+    upload: async func(url: string, chunks: u32, fail: bool) -> string;
+    open: async func(url: string) -> u16;
+    read: async func() -> string;
+    close: async func();
+}
+
+world client {
+    import wasi:http/client@0.3.0;
+    export requests;
+}

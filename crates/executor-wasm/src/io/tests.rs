@@ -10,7 +10,6 @@ fn sockets(destinations: &[SocketAddr], _directory: Option<&std::path::Path>) ->
     SourceIo {
         builtins: Default::default(),
         destinations: Arc::new(destinations.iter().copied().collect()),
-        grants: Arc::default(),
         streams: Streams::default(),
         standard: Arc::default(),
         timeout: Duration::from_secs(5),

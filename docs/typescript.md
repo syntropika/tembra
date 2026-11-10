@@ -120,13 +120,46 @@ streams and mutations. The `readBytes` and `readText` conveniences collect at mo
 default; direct streams do not collect the whole file. `writeBytes` and `writeText` use the same
 standard byte streams. Filesystem grants do not authorize HTTP or sockets.
 
-The helper in `@syntropika/tembra-sdk/http` delegates HTTP framing, DNS and TLS to the host.
-Consume `response.body` for byte streaming, `response.events()` for SSE, or `text()`/`json()` to
-collect up to 1 MiB. Source request bodies are currently buffered up to 1 MiB. Responses close
-when iteration ends or stops, or when their callback completes or is cancelled. Native requests
-use the host sender; browser requests use Fetch with its CORS restrictions and may use an
-injected provider. Redirects and full WHATWG Fetch semantics are not implemented. The host's
-`timeoutMs` bounds the callback, so configure it for the expected duration of an SSE operation.
+The helper in `@syntropika/tembra-sdk/http` uses generated standard `wasi:http` resources.
+Declare `import wasi:http/client@0.3.0` in the Orb's WIT; TypeScript imports of the helper use
+that contract automatically. HTTP framing, DNS and TLS execute in the host. Request bodies
+can be text, bytes or an `AsyncIterable<Uint8Array>` and stream in bounded chunks. The same
+standard error/future boundary prevents a failed producer from committing a truncated upload.
+
+Consume `response.body` for bytes, `response.events()` for SSE, or `text()`/`json()` to collect
+up to 1 MiB. `headers.getAll(name)` and header iteration preserve raw duplicate fields where the
+host exposes them. `await response.trailers()` reads trailers after the body. Untouched responses
+can survive a callback boundary; call `close()` when a response is no longer needed. Iteration
+closes its active body on EOF or early return. Browser Fetch retains its platform restrictions;
+an injected host transport supplies the implementation. The convenience is not a complete
+WHATWG Fetch implementation. The host's `timeoutMs` bounds an active callback, so configure it
+for the expected duration of an SSE operation. A streamed upload and its trailers must finish
+within the callback that starts them; callback end abandons unfinished producers. Pass an already
+percent-encoded absolute URL. Request `timeouts` are nanoseconds; a transport may refuse an
+unsupported timeout. Standard failures throw `HttpError`, whose `code` preserves the HTTP,
+header or request-options error, or is `undefined` for a payload-free request refusal.
+
+For browser hosts, select the Fetch adapter through Tembra:
+
+```ts
+import { createHost, fetchHttpProvider } from "@syntropika/tembra-sdk/browser";
+
+const host = await createHost({
+  isolated: { providers: { http: { outbound: fetchHttpProvider() } } },
+});
+await host.load("online.wasm", {
+  grants: { http: [{ provider: "outbound", origins: ["https://api.example.com"] }] },
+});
+```
+
+The default Fetch adapter buffers request bodies up to 8 MiB, combines duplicate response
+headers and cannot supply trailers or a separate connect timeout. An application-owned
+`HttpProvider.send` can expose raw byte fields, pull-based request and response streams and
+trailers. Its request includes the validated raw `pathWithQuery`; `url` is the normalized URL
+used by Fetch. Tembra checks the Orb's origin grant before invoking either implementation.
+Providers, including mocks, must consume or cancel each request body. Returning a canned
+response while ignoring an upload leaves `text()`/`json()` waiting for that upload until the
+callback timeout. A clean response EOF permits a duplex upload to continue; it does not cancel it.
 
 Source Orbs import standard interfaces by WIT name: `wasi:random/{random,insecure,insecure-seed}`,
 `wasi:clocks/{system-clock,monotonic-clock}`, `wasi:cli` interfaces and

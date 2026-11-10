@@ -80,16 +80,7 @@ export type IORequest =
       readonly id: number;
       readonly bytes: readonly number[];
     }
-  | { readonly operation: "transport.close"; readonly id: number }
-  | {
-      readonly operation: "http.send";
-      readonly url: string;
-      readonly method: string;
-      readonly headers: readonly (readonly [string, string])[];
-      readonly body: readonly number[];
-    }
-  | { readonly operation: "http.read"; readonly id: number }
-  | { readonly operation: "http.close"; readonly id: number };
+  | { readonly operation: "transport.close"; readonly id: number };
 
 /** Longest cooperative timer a callback may request. */
 export const WAIT_LIMIT_MILLISECONDS = 5000;
@@ -110,9 +101,7 @@ type Kind =
   | "scope?"
   | "revision?"
   | "handles?"
-  | "bytes"
-  | "headers"
-  | "body";
+  | "bytes";
 type Schema = Readonly<Record<string, Kind>>;
 
 const HANDLE = { scope: "scope?", id: "u32" } as const satisfies Schema;
@@ -147,9 +136,6 @@ const ASYNC = {
   "transport.read": { id: "u32" },
   "transport.write": { id: "u32", bytes: "bytes" },
   "transport.close": { id: "u32" },
-  "http.send": { url: "string", method: "string", headers: "headers", body: "body" },
-  "http.read": { id: "u32" },
-  "http.close": { id: "u32" },
   "hook.run": { ...HANDLE, value: "json" },
   "reference.ready": HANDLE,
   "reference.call": { ...HANDLE, method: "string", args: "json" },
@@ -185,7 +171,7 @@ export function survivesCancellation(request: HostRequest): boolean {
 
 /** Closing an issued transport stream is cleanup and stays permitted after cancellation. */
 export function asyncSurvivesCancellation(request: AsyncHostRequest): boolean {
-  return request.operation === "transport.close" || request.operation === "http.close";
+  return request.operation === "transport.close";
 }
 
 /** Validate a packet against the schema for its operation, filling defaults for optional fields. */
@@ -251,24 +237,10 @@ function field(value: unknown, kind: Kind, invalid: () => Error): unknown {
       if (absent) return undefined;
       if (!Number.isSafeInteger(value) || (value as number) < 0) throw invalid();
       return value;
-    case "headers":
-      if (
-        !Array.isArray(value) ||
-        value.length > 1024 ||
-        !value.every(
-          (entry) =>
-            Array.isArray(entry) &&
-            entry.length === 2 &&
-            entry.every((item) => typeof item === "string"),
-        )
-      )
-        throw invalid();
-      return value;
-    case "body":
     case "bytes":
       if (
         !Array.isArray(value) ||
-        value.length > (kind === "body" ? 1 << 20 : TRANSPORT_CHUNK_BYTES) ||
+        value.length > TRANSPORT_CHUNK_BYTES ||
         !value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)
       )
         throw invalid();

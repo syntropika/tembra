@@ -3,8 +3,8 @@
 //! The guest supplies only typed requests. Filesystem access is standard WASI dispatched inside
 //! the Orb's own Store (see `worker::standard`) under the shared active filesystem budget;
 //! sockets are incremental, nonblocking streams on one shared reactor, so a slow reader never
-//! occupies the embedding runtime's thread pool. HTTP runs the host's standard WASI HTTP client
-//! on the same reactor; its response bodies are streams too.
+//! occupies the embedding runtime's thread pool. HTTP is standard `wasi:http` only (see
+//! `crate::http`), whose resolver and connect work also runs on this reactor.
 use crate::{failure, protocol::AsyncRequest, protocol::TRANSPORT_CHUNK_BYTES};
 use serde_json::Value;
 use std::{
@@ -15,7 +15,6 @@ use std::{
 };
 use tembra::Result;
 
-mod http;
 mod reactor;
 mod streams;
 
@@ -24,6 +23,34 @@ pub(crate) use streams::Streams;
 /// Reserve one slot of the process-wide bounded filesystem admission.
 pub(crate) fn admit_file() -> Result<tokio::sync::OwnedSemaphorePermit> {
     reactor::reactor()?.admit_file()
+}
+
+/// Resolve a host name on the reactor's bounded DNS workers; `held` stays inside the blocking
+/// lookup until it physically returns.
+pub(crate) fn resolve<H: Send + 'static>(
+    host: String,
+    port: u16,
+    held: H,
+) -> Result<tokio::task::JoinHandle<std::io::Result<Vec<std::net::SocketAddr>>>> {
+    reactor::reactor()?.resolve(host, port, held)
+}
+
+/// Run an arbitrary blocking job through the resolver admission path (tests only).
+#[cfg(test)]
+pub(crate) fn dns_job<H: Send + 'static, T: Send + 'static>(
+    held: H,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Result<tokio::task::JoinHandle<T>> {
+    reactor::reactor()?.dns_job(held, job)
+}
+
+/// Run nonblocking socket work on the reactor thread.
+pub(crate) fn spawn_joined<F>(task: F) -> Result<tokio::task::JoinHandle<F::Output>>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    Ok(reactor::reactor()?.spawn_joined(task))
 }
 
 /// Bound inline upstream filesystem work without holding a worker across an async wait.
@@ -38,6 +65,8 @@ pub(crate) struct StandardContext {
     pub allowed: BTreeSet<String>,
     /// The existing callback epoch also revokes pending standard WASI calls.
     pub scope: Streams,
+    /// HTTP origin grants checked by standard `wasi:http` sends.
+    pub grants: Arc<crate::Grants>,
     /// Clocks for the interpreter's own WASIp1 `clock_time_get`, only with the clocks grant.
     pub clocks: Option<crate::worker::wasi::Clocks>,
 }
@@ -46,8 +75,6 @@ pub(crate) struct StandardContext {
 #[derive(Clone)]
 pub(crate) struct SourceIo {
     destinations: Arc<BTreeSet<SocketAddr>>,
-    /// HTTP origins are checked against these grants; raw socket grants never authorize HTTP.
-    grants: Arc<crate::Grants>,
     streams: Streams,
     timeout: Duration,
     /// Taken by the Session that owns the Store; never shared between Stores.
@@ -74,6 +101,7 @@ impl SourceIo {
             wasi: prepared.wasi,
             clocks: prepared.clocks,
             scope: streams.clone(),
+            grants: Arc::new(grants.clone()),
             allowed: imports
                 .iter()
                 .map(|import| import.contract.clone())
@@ -87,7 +115,6 @@ impl SourceIo {
                     .flat_map(|grant| grant.connect.iter().copied())
                     .collect(),
             ),
-            grants: Arc::new(grants.clone()),
             streams,
             timeout,
             standard: Arc::new(std::sync::Mutex::new(Some(standard))),
@@ -148,29 +175,6 @@ impl SourceIo {
                 streams: self.streams.clone(),
                 id,
             },
-            AsyncRequest::HttpSend {
-                url,
-                method,
-                headers,
-                body,
-            } => Operation::HttpSend {
-                request: Box::new(http::Outgoing::new(
-                    &self.grants,
-                    &url,
-                    &method,
-                    headers,
-                    body,
-                )?),
-                reservation: self.streams.reserve()?,
-            },
-            AsyncRequest::HttpRead { id } => {
-                let (body, reader) = self.streams.http_body(id)?;
-                Operation::HttpRead { body, reader }
-            }
-            AsyncRequest::HttpClose { id } => Operation::HttpClose {
-                streams: self.streams.clone(),
-                id,
-            },
             _ => return Err(failure("expected an I/O operation")),
         };
         Ok(IoOperation {
@@ -196,18 +200,6 @@ enum Operation {
         bytes: Vec<u8>,
     },
     Close {
-        streams: Streams,
-        id: u32,
-    },
-    HttpSend {
-        request: Box<http::Outgoing>,
-        reservation: streams::Reservation,
-    },
-    HttpRead {
-        body: Arc<http::Body>,
-        reader: tokio::sync::OwnedMutexGuard<http::Reader>,
-    },
-    HttpClose {
         streams: Streams,
         id: u32,
     },
@@ -246,16 +238,6 @@ impl IoOperation {
                 complete(stream.write(writer, bytes, deadline).await);
             }),
             Operation::Close { streams, id } => complete(streams.close(id)),
-            Operation::HttpSend {
-                request,
-                reservation,
-            } => reactor.spawn(async move {
-                complete(request.send(reservation, deadline).await);
-            }),
-            Operation::HttpRead { body, reader } => reactor.spawn(async move {
-                complete(body.read(reader, deadline).await);
-            }),
-            Operation::HttpClose { streams, id } => complete(streams.close_body(id)),
         }
     }
 
@@ -268,7 +250,5 @@ impl IoOperation {
     }
 }
 
-#[cfg(test)]
-mod http_tests;
 #[cfg(test)]
 mod tests;

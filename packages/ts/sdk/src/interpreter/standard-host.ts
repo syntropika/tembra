@@ -1,25 +1,32 @@
 /**
- * Browser host of the generated standard WASI calls (private wire v5).
+ * Browser host of the generated standard WASI calls (private binary wire).
  *
  * Packets come from the same generated table and codec that the guest bindings and the native
  * dispatcher use. One instance belongs to one Orb revision: it admits only the interfaces that
  * revision imported, issues opaque handle numbers and validates every incoming handle for
  * identity, liveness and type before any implementation sees it. This module owns transport
- * and ownership only; method semantics live in `standard-filesystem.ts` and
- * `standard-system.ts`, keyed by the generated method names.
+ * and ownership only; method semantics live in `standard-filesystem.ts`, `standard-system.ts`,
+ * `standard-cli.ts` and `standard-http.ts`, keyed by the generated method names.
  *
- * Ownership rules: owned descriptors, streams and futures belong to the revision. Asynchronous
- * calls lend their borrowed descriptors until they settle. A stream parameter is transferred
- * only after the whole packet decoded and validated. Input writers created during a callback
- * are closed when that callback ends, so no consumer outlives its producer's callback.
+ * Ownership rules: owned resources, streams and futures belong to the revision. Every handle a
+ * packet names (owned, borrowed, stream or future) is claimed and checked for aliasing while
+ * the packet decodes; nothing is transferred until the whole packet validated, so a refused
+ * packet consumes nothing. An owned parameter moves the table's reference to the call: the
+ * implementation retains what it keeps, and the host releases the transfer reference once the
+ * implementation was invoked. Asynchronous calls lend their borrowed resources until they
+ * settle. Input writers (streams and futures) created during a callback end with it: an
+ * unfinished stream reaches end of stream and an unwritten future resolves to its abandoned
+ * error, so no consumer outlives its producer's callback or mistakes it for completion.
  * Callback cancellation settles pending calls but never kills a provider promise: physical
  * work stays tracked until the provider returns.
  */
-import { METHODS, RESOURCES, TYPES } from "./standard.ts";
+import { METHODS, RESOURCES, TYPES, WRITABLE_FUTURES } from "./standard.ts";
 import {
   CALL,
   DROP,
+  FUTURE_NEW,
   FUTURE_READ,
+  FUTURE_WRITE,
   type HandleCodec,
   Reader,
   STANDARD_PACKET,
@@ -33,16 +40,20 @@ import {
 } from "./standard-codec.ts";
 import { filesystemMethods, type StandardMount } from "./standard-filesystem.ts";
 import { StandardCli, type StdioStreams } from "./standard-cli.ts";
+import { httpMethods, type HttpClient } from "./standard-http.ts";
 import type { CliOptions } from "../authoring/types.ts";
 import {
+  abortable,
   cancelled,
   HostFuture,
   type Implementation,
   InputBudget,
   InputStream,
+  methodKey,
   OutputStream,
   type StandardResource,
   type StandardServices,
+  WritableFuture,
 } from "./standard-streams.ts";
 import {
   browserClocks,
@@ -62,6 +73,8 @@ const HANDLE_LIMIT = 4096;
 const NONE = -1;
 /** The only qualified input stream type. */
 const BYTE_STREAM = TYPES.findIndex(([kind, item]) => kind === "stream" && item === "u8");
+/** What an unwritten writable future resolves to; every writable payload has this error case. */
+const ABANDONED = { tag: "err", val: { tag: "internal-error", val: "callback ended" } } as const;
 
 /**
  * Handle numbers are issued once per realm and never reused, so a number taken from another
@@ -73,7 +86,8 @@ type Entry =
   | { kind: "own"; resource: number; value: StandardResource }
   | { kind: "output"; item: number | undefined; value: OutputStream }
   | { kind: "input"; value: InputStream }
-  | { kind: "future"; payload: number; value: HostFuture };
+  | { kind: "future"; payload: number; value: HostFuture }
+  | { kind: "writable"; value: WritableFuture };
 
 /** Fixed handle slots a value of `type` publishes; lists are bounded by rollback instead. */
 function slots(type: number): number {
@@ -111,6 +125,16 @@ const HANDLE_FREE: HandleCodec = {
   },
 };
 
+/** Handles named by one packet, checked while it decodes and committed only once it is valid. */
+interface Claims {
+  readonly codec: HandleCodec;
+  /** Resources whose table reference moves to the receiver on commit. */
+  readonly owned: StandardResource[];
+  /** Resources borrowed by the packet. */
+  readonly borrowed: StandardResource[];
+  commit(): void;
+}
+
 /** Encoded result and the handles it publishes only when resumed into the guest. */
 export interface StandardDelivery {
   readonly bytes: Uint8Array;
@@ -128,7 +152,7 @@ export class StandardHost implements StandardServices {
   readonly #work = new Set<Promise<unknown>>();
   readonly #implementations: (Implementation | undefined)[];
   readonly #allowed: boolean[];
-  /** Input writers created during the current callback. */
+  /** Input writers (streams and futures) created during the current callback. */
   readonly #inputs = new Set<number>();
   /** Accepted guest input across all of this revision's writers. */
   readonly #budget = new InputBudget();
@@ -145,6 +169,8 @@ export class StandardHost implements StandardServices {
     providers: SystemProviders & {
       cli?: CliOptions | undefined;
       stdio?: StdioStreams | undefined;
+      /** Granted outgoing HTTP; absent means every `wasi:http/client#send` is denied. */
+      http?: HttpClient | undefined;
     } = {},
   ) {
     this.clocks = checkedClocks(providers.clocks ?? browserClocks());
@@ -154,10 +180,14 @@ export class StandardHost implements StandardServices {
       ...systemMethods(this.clocks, this.random),
       ...filesystemMethods(() => this.mounts),
       ...this.#cli.methods,
+      ...httpMethods(providers.http),
     };
     this.#allowed = METHODS.map((method) => allowed.has(method.interface));
     this.#implementations = METHODS.map((method, index) =>
-      this.#allowed[index] ? implementations[`${method.interface}#${method.name}`] : undefined,
+      this.#allowed[index]
+        ? (implementations[methodKey(method)] ??
+          implementations[`${method.interface}#${method.name}`])
+        : undefined,
     );
   }
 
@@ -174,6 +204,11 @@ export class StandardHost implements StandardServices {
   /** Accepted, unconsumed guest input bytes; bounded by `INPUT_BUDGET`. */
   get inputBytes(): number {
     return this.#budget.used;
+  }
+
+  /** Physical operations and destructors still running; zero once retirement settled. */
+  get pending(): number {
+    return this.#work.size;
   }
 
   /** Retain physical work even when the caller no longer accepts its result. */
@@ -211,10 +246,33 @@ export class StandardHost implements StandardServices {
     return issued;
   }
 
-  /** Release whatever an entry holds. */
-  #release(entry: Entry): void {
-    if (entry.kind === "own") entry.value.release();
-    else if (entry.kind === "output" || entry.kind === "input") entry.value.close();
+  /** Release a value of a host future whenever it arrives; nobody will read it. */
+  #orphan(future: HostFuture, payload: number): void {
+    future.value.then(
+      (value) => this.#releaseValue(payload, value),
+      () => {},
+    );
+  }
+
+  /**
+   * Release whatever an entry holds. `undelivered` marks a handle whose publishing reply never
+   * reached the guest (or a retiring revision): its future work is cancelled, not just orphaned.
+   */
+  #release(entry: Entry, undelivered = false): void {
+    switch (entry.kind) {
+      case "own":
+        return entry.value.release();
+      case "output":
+      case "input":
+        return entry.value.close();
+      case "future":
+        if (undelivered) entry.value.cancel?.();
+        return this.#orphan(entry.value, entry.payload);
+      case "writable":
+        entry.value.abandon();
+        if (!entry.value.transferred) entry.value.close();
+        return;
+    }
   }
 
   /** Release host values of `type` that were never issued as handles. */
@@ -227,8 +285,10 @@ export class StandardHost implements StandardServices {
       case "future":
         if (issued?.has(value)) return;
         if (value instanceof OutputStream || value instanceof InputStream) value.close();
-        else if (value instanceof HostFuture) value.cancel?.();
-        else (value as StandardResource).release();
+        else if (value instanceof HostFuture) {
+          value.cancel?.();
+          this.#orphan(value, a as number);
+        } else (value as StandardResource).release();
         return;
       case "list":
         for (const item of value) this.#releaseValue(a as number, item, issued);
@@ -272,6 +332,72 @@ export class StandardHost implements StandardServices {
     },
   };
 
+  /**
+   * Claim every handle one packet names. An owned handle may appear once and never alongside a
+   * borrow of itself, and it cannot move while a pending call has it lent; an input stream or
+   * writable future readable end moves once. Nothing changes until `commit`.
+   */
+  #claims(): Claims {
+    const commits: (() => void)[] = [];
+    const owned: StandardResource[] = [];
+    const borrowed: StandardResource[] = [];
+    const moved = new Set<number>();
+    const lent = new Set<number>();
+    const codec: HandleCodec = {
+      handle: this.#handles.handle,
+      value: (kind, detail, handle) => {
+        const entry = this.#entries.get(handle);
+        if (!entry) throw new Error("unknown or dropped handle");
+        if (moved.has(handle)) throw new Error("handle is passed more than once");
+        switch (kind) {
+          case "own":
+          case "borrow":
+            if (entry.kind !== "own" || entry.resource !== detail)
+              throw new Error("handle has a different type");
+            if (kind === "borrow") {
+              lent.add(handle);
+              borrowed.push(entry.value);
+              return entry.value;
+            }
+            if (lent.has(handle)) throw new Error("handle is passed more than once");
+            if (entry.value.borrows) throw new Error("handle is borrowed by a pending call");
+            moved.add(handle);
+            owned.push(entry.value);
+            commits.push(() => this.#entries.delete(handle));
+            return entry.value;
+          case "stream":
+            if (entry.kind !== "input" || TYPES[entry.value.type]![1] !== detail)
+              throw new Error("handle has a different type");
+            if (entry.value.transferred) throw new Error("stream was already transferred");
+            moved.add(handle);
+            commits.push(() => {
+              entry.value.transferred = true;
+            });
+            return entry.value;
+          case "future":
+            if (entry.kind !== "writable" || TYPES[entry.value.type]![1] !== detail)
+              throw new Error("handle has a different type");
+            if (entry.value.transferred) throw new Error("future was already transferred");
+            moved.add(handle);
+            commits.push(() => {
+              entry.value.transferred = true;
+            });
+            return entry.value;
+          default:
+            throw new Error(`standard ${kind} parameters are unsupported`);
+        }
+      },
+    };
+    return {
+      codec,
+      owned,
+      borrowed,
+      commit: () => {
+        for (const commit of commits) commit();
+      },
+    };
+  }
+
   /** Decode a call header and refuse methods this revision may not use. */
   #method(reader: Reader, asynchronous: boolean): number {
     const index = reader.u32();
@@ -287,51 +413,28 @@ export class StandardHost implements StandardServices {
 
   /**
    * Decode and validate every argument, then commit transfers and loans together. A refused
-   * packet (bad handle, trailing bytes, full table) consumes nothing.
+   * packet (bad or aliased handle, trailing bytes, full table) consumes nothing. Returns the
+   * owned parameters whose transfer reference the caller releases after invoking the method.
    */
-  #arguments(index: number, reader: Reader, lent?: StandardResource[]): unknown[] {
-    const commits: (() => void)[] = [];
-    const borrowed: StandardResource[] = [];
-    const streams = new Set<number>();
-    const codec: HandleCodec = {
-      handle: this.#handles.handle,
-      value: (kind, detail, handle) => {
-        const entry = this.#entries.get(handle);
-        if (!entry) throw new Error("unknown or dropped handle");
-        if (kind === "own" || kind === "borrow") {
-          if (entry.kind !== "own" || entry.resource !== detail)
-            throw new Error("handle has a different type");
-          if (kind === "own") commits.push(() => this.#entries.delete(handle));
-          else borrowed.push(entry.value);
-          return entry.value;
-        }
-        if (kind === "stream") {
-          if (entry.kind !== "input" || TYPES[entry.value.type]![1] !== detail)
-            throw new Error("handle has a different type");
-          if (entry.value.transferred || streams.has(handle))
-            throw new Error("stream was already transferred");
-          streams.add(handle);
-          commits.push(() => {
-            entry.value.transferred = true;
-          });
-          return entry.value;
-        }
-        throw new Error(`standard ${kind} parameters are unsupported`);
-      },
-    };
+  #arguments(
+    index: number,
+    reader: Reader,
+    lent?: StandardResource[],
+  ): { args: unknown[]; owned: StandardResource[] } {
+    const claims = this.#claims();
     const method = METHODS[index]!;
-    const args = method.params.map((type) => decode(reader, type, codec));
+    const args = method.params.map((type) => decode(reader, type, claims.codec));
     reader.end();
     const needed = method.result === undefined ? 0 : slots(method.result);
     if (this.#entries.size + needed > HANDLE_LIMIT)
       throw new Error("standard handle table is full");
-    for (const commit of commits) commit();
-    for (const resource of lent ? borrowed : []) {
+    claims.commit();
+    for (const resource of lent ? claims.borrowed : []) {
       resource.borrows++;
       resource.retain();
       lent!.push(resource);
     }
-    return args;
+    return { args, owned: claims.owned };
   }
 
   /** Encode a delivery; on failure roll back its new handles and release unissued values. */
@@ -369,8 +472,13 @@ export class StandardHost implements StandardServices {
     switch (reader.u8()) {
       case CALL: {
         const index = this.#method(reader, false);
-        const args = this.#arguments(index, reader);
-        const value = this.#implementations[index]!({ host: this }, args);
+        const { args, owned } = this.#arguments(index, reader);
+        let value: unknown;
+        try {
+          value = this.#implementations[index]!({ host: this }, args);
+        } finally {
+          for (const resource of owned) resource.release();
+        }
         return this.#deliver(METHODS[index]!.result, value).bytes;
       }
       case DROP: {
@@ -396,6 +504,34 @@ export class StandardHost implements StandardServices {
         writer.handle(handle);
         return writer.finish();
       }
+      case FUTURE_NEW: {
+        const type = reader.u32();
+        reader.end();
+        if (!WRITABLE_FUTURES.includes(type)) throw new Error("unsupported writable future type");
+        const payload = TYPES[type]![1] as number;
+        const future = new WritableFuture<unknown>(type, ABANDONED, (value) =>
+          this.#releaseValue(payload, value),
+        );
+        const handle = this.#issue({ kind: "writable", value: future });
+        this.#inputs.add(handle);
+        const writer = new Writer();
+        writer.handle(handle);
+        return writer.finish();
+      }
+      case FUTURE_WRITE: {
+        const handle = reader.handle();
+        const entry = this.#entries.get(handle);
+        if (entry?.kind !== "writable") throw new Error("handle is not a live writable future");
+        if (entry.value.written) throw new Error("future was already written");
+        // The whole payload, including every owned handle inside it, validates first.
+        const claims = this.#claims();
+        const value = decode(reader, TYPES[entry.value.type]![1] as number, claims.codec);
+        reader.end();
+        if (claims.borrowed.length) throw new Error("future payloads cannot borrow");
+        claims.commit();
+        entry.value.write(value);
+        return new Uint8Array();
+      }
       default:
         throw new Error("unknown standard operation");
     }
@@ -409,8 +545,10 @@ export class StandardHost implements StandardServices {
     switch (reader.u8()) {
       case CALL: {
         const index = this.#method(reader, true);
+        // A cancelled callback starts nothing and transfers nothing.
+        if (signal?.aborted) throw cancelled();
         const lent: StandardResource[] = [];
-        const args = this.#arguments(index, reader, lent);
+        const { args, owned } = this.#arguments(index, reader, lent);
         let release = () => {};
         // A loan is physical ownership: retirement waits until the call's provider work settles.
         if (lent.length)
@@ -436,7 +574,14 @@ export class StandardHost implements StandardServices {
           cleanup: (operation) => this.cleanup(operation),
         };
         try {
-          const value = await this.#implementations[index]!({ host: services, signal }, args);
+          let started: unknown;
+          try {
+            started = this.#implementations[index]!({ host: services, signal }, args);
+          } finally {
+            // The implementation's first turn has run: it adopted what it keeps.
+            for (const resource of owned) resource.release();
+          }
+          const value = await started;
           if (signal?.aborted || this.#closed) {
             this.#releaseValue(METHODS[index]!.result, value);
             throw cancelled();
@@ -499,16 +644,20 @@ export class StandardHost implements StandardServices {
         reader.end();
         const entry = this.#entries.get(handle);
         if (entry?.kind !== "future") throw new Error("handle is not a live future");
-        // A future value is read once; the handle is consumed now.
+        // A future value is read once; the handle is consumed now. A value that arrives after
+        // this read was cancelled is released, never issued.
         this.#entries.delete(handle);
-        const value = await new Promise((resolve, reject) => {
-          if (signal?.aborted) return reject(cancelled());
-          const abort = () => reject(cancelled());
-          signal?.addEventListener("abort", abort, { once: true });
-          entry.value.value.then(resolve, reject).finally(() => {
-            signal?.removeEventListener("abort", abort);
-          });
-        });
+        let value: unknown;
+        try {
+          value = await abortable(entry.value.value, signal);
+        } catch (error) {
+          if (signal?.aborted) this.#orphan(entry.value, entry.payload);
+          throw error;
+        }
+        if (signal?.aborted || this.#closed) {
+          this.#releaseValue(entry.payload, value);
+          throw cancelled();
+        }
         return this.#deliver(entry.payload, value);
       }
       default:
@@ -526,20 +675,21 @@ export class StandardHost implements StandardServices {
       const entry = this.#entries.get(handle);
       if (!entry) continue;
       this.#entries.delete(handle);
-      this.#release(entry);
+      this.#release(entry, true);
     }
   }
 
   /**
-   * End of the current callback: close every input writer it created and did not drop, so
-   * their consumers reach end of stream instead of waiting for a producer that is gone.
+   * End of the current callback: every input writer it created and did not drop ends, so its
+   * consumer reaches end of stream (streams) or the abandoned error (futures) instead of
+   * waiting for a producer that is gone.
    */
   endCallback(): void {
     for (const handle of this.#inputs) {
       const entry = this.#entries.get(handle);
-      if (entry?.kind !== "input") continue;
+      if (entry?.kind !== "input" && entry?.kind !== "writable") continue;
       this.#entries.delete(handle);
-      entry.value.close();
+      this.#release(entry);
     }
     this.#inputs.clear();
   }
@@ -550,18 +700,20 @@ export class StandardHost implements StandardServices {
     this.#cli.retire();
     // Producers first, so no consumer waits for a writer that can no longer run.
     for (const [handle, entry] of this.#entries)
-      if (entry.kind === "input") {
+      if (entry.kind === "input" || entry.kind === "writable") {
         this.#entries.delete(handle);
-        entry.value.close();
+        this.#release(entry);
       }
     this.#inputs.clear();
     await this.settled();
     const entries = [...this.#entries.values()];
     this.#entries.clear();
-    for (const entry of entries) this.#release(entry);
+    for (const entry of entries) this.#release(entry, true);
     await this.settled();
     this.#cli.close(this);
     await this.settled();
+    // Every consumer had its turn; input nobody will read returns to the budget.
+    this.#budget.discard();
   }
 }
 

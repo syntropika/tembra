@@ -47,9 +47,14 @@ import "./builtins.ts";
     operation: O,
     input: AsyncHostRequests[O],
   ): Promise<any> {
-    return __hostAsync(JSON.stringify({ operation, ...(input as object) })).then((value) =>
-      JSON.parse(value),
-    );
+    try {
+      return __hostAsync(JSON.stringify({ operation, ...(input as object) })).then((value) =>
+        JSON.parse(value),
+      );
+    } catch (error) {
+      // Value-only operations promise a result even when admission refuses them immediately.
+      return Promise.reject(error);
+    }
   }
 
   /** Retain a guest callback without transferring executable code to the host. */
@@ -447,32 +452,6 @@ import "./builtins.ts";
     wait(milliseconds: number) {
       return call("wait", { milliseconds });
     },
-    ...(imports.has("wasi:http/client@0.3.0")
-      ? {
-          http: Object.freeze({
-            async send(
-              url: string,
-              method: string,
-              headers: readonly (readonly [string, string])[],
-              body: Uint8Array,
-            ): Promise<HttpStream> {
-              const response: { id: number; status: number; headers: [string, string][] } =
-                await call("http.send", { url, method, headers, body: Array.from(body) });
-              return Object.freeze({
-                status: response.status,
-                headers: response.headers,
-                async read() {
-                  const bytes: number[] | null = await call("http.read", { id: response.id });
-                  return bytes === null ? null : Uint8Array.from(bytes);
-                },
-                async close() {
-                  await call("http.close", { id: response.id });
-                },
-              });
-            },
-          }),
-        }
-      : {}),
     ...(imports.has("wasi:sockets/types@0.3.0")
       ? {
           transport: Object.freeze({

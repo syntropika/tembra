@@ -17,6 +17,9 @@ interface calculation {
     race: async func() -> s32;
     fanout: async func() -> s32;
     pending: async func() -> s32;
+}
+
+interface network {
     fetch-and-sum: async func(url: string) -> s32;
     first-event: async func(url: string) -> string;
 }
@@ -30,5 +33,5 @@ world calculator {
 world online-calculator {
     import arithmetic;
     import wasi:http/client@0.3.0;
-    export calculation;
+    export network;
 }

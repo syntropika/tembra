@@ -184,27 +184,29 @@ are different capabilities; bundled definitions alone do not establish execution
 support. Native compiled components link `wasmtime-wasi` and `wasmtime-wasi-http`
 51.0.0-rc.1. Upstream labels its P3 HTTP implementation experimental and incomplete.
 
-| Package           | Native compiled components                                   | Source TypeScript Orbs                                              | Browser source Orbs                                                             |
-| ----------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `wasi:filesystem` | Standard descriptors under granted preopens                  | Generated binary read/write/append, metadata and directory bindings | Same bindings over memory, OPFS or custom descriptors; explicit platform limits |
-| `wasi:http`       | Standard outgoing requests, response bodies and trailers     | Fetch facade, streamed responses and SSE; buffered uploads          | Same facade through an injectable Fetch provider                                |
-| `wasi:sockets`    | Standard TCP, UDP and DNS, with separate grants              | Outbound TCP helper                                                 | Outbound TCP only through an explicitly supplied adapter                        |
-| `wasi:clocks`     | System and monotonic clocks under an explicit grant          | Generated monotonic `now` / `wait-for`                              | Generated monotonic `now` / `wait-for`                                          |
-| `wasi:random`     | Secure and non-cryptographic random interfaces under a grant | Generated secure random bytes / u64                                 | Generated secure random bytes / u64                                             |
-| `wasi:cli`        | Upstream interfaces with an empty process context            | Console diagnostics only; no general CLI binding                    | Console diagnostics only; no general CLI binding                                |
+| Package           | Native compiled components                                                        | Source TypeScript Orbs                                              | Browser source Orbs                                                                                  |
+| ----------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `wasi:filesystem` | Standard descriptors under granted preopens                                       | Generated binary read/write/append, metadata and directory bindings | Same bindings over memory, OPFS or custom descriptors; explicit platform limits                      |
+| `wasi:http`       | Standard outgoing request, response, body and trailer resources                   | The same generated resources; a TypeScript HTTP/SSE convenience     | The same resources over an injected host transport; Fetch has platform limits                        |
+| `wasi:sockets`    | Standard TCP, UDP and DNS, with separate grants                                   | Outbound TCP helper                                                 | Outbound TCP only through an explicitly supplied adapter                                             |
+| `wasi:clocks`     | System and monotonic clocks under an explicit grant                               | Generated system/monotonic clocks, resolutions and waits            | The same bindings over injected or browser clocks                                                    |
+| `wasi:random`     | Secure and non-cryptographic random interfaces under a grant                      | Generated secure/insecure bytes and u64, insecure seed              | The same bindings over injected or browser randomness                                                |
+| `wasi:cli`        | Explicit arguments, environment, initial directory and byte stdio; contained exit | The same generated bindings and per-revision configuration          | Injected byte stdio, explicit process configuration and contained exit; terminal getters return none |
 
 Compiled fixtures currently exercise filesystem preopens/open/create/remove-directory operations and outgoing HTTP request/body streaming. The remaining native operations are linked from upstream but still require operation-level qualification.
 
 System grants govern declared standard imports for source and compiled Orbs.
-Source JavaScript's `Date` and `Math.random` built-ins are not governed by them;
-secure randomness uses the separately granted generated binding. The experimental `wasi:clocks/timezone` interface is not linked by
+Source JavaScript's ambient `Date`/`Date.now`/`performance.now` require a clocks grant,
+and `Math.random` requires a random grant. Pure date parsing and arithmetic remain available.
+The host supplies the clock and initial non-cryptographic seed; secure random bytes use the
+standard random interface and never fall back to `Math.random`. The experimental `wasi:clocks/timezone` interface is not linked by
 the pinned upstream runtime.
 
 Incoming `wasi:http/handler` serving is not integrated. Its resource-valued
 exports cannot currently be exposed as ordinary portable Orb services. Browser
 compiled components remain unsupported. Native/mobile share the native
 implementation, but host/Pulley tests do not establish iOS or Android device
-qualification. Full source WASI bindings and incoming HTTP remain work to do.
+qualification. Source sockets/DNS bindings and incoming HTTP remain work to do.
 
 ## Current scope
 
@@ -317,27 +319,44 @@ and OS limits; it is not a complete process-wide file-descriptor guarantee.
 them and close on completion, abandonment or cancellation; an old handle cannot
 be used by the next callback. A slow socket read does not occupy a filesystem turn.
 
-`@syntropika/tembra-sdk/http` adapts requests to the host's WASI HTTP sender.
-HTTP framing, DNS and TLS run in the host. A maintained `eventsource-parser`
-parser handles SSE through `response.events()`. Iteration applies backpressure and
-closes the response on an early return. `text()` and `json()` collect at most 1 MiB;
-byte iteration does not collect the whole body. Source uploads are buffered up to
-1 MiB. The facade does not implement complete WHATWG Fetch semantics.
+`@syntropika/tembra-sdk/http` imports standard `wasi:http/client` and `wasi:http/types`.
+Authors declare the client import in WIT and write `await fetch(url)`; HTTP framing, DNS and
+TLS execute in the host. The same generated binary resource, stream and future bindings carry
+raw headers, request/response bodies, trailers and request options. There is no source HTTP JSON
+protocol. The convenience accepts text, bytes or an `AsyncIterable<Uint8Array>` request body;
+native uploads stream with bounded chunks and backpressure. A failed producer fails its trailers
+future, so the host does not commit a truncated upload.
+
+A maintained `eventsource-parser` handles SSE through `response.events()`. `text()` and `json()`
+collect at most 1 MiB; `response.body` streams without that collection limit. `response.headers`
+is a snapshot: `get(name)` reads text, `getAll(name)` and iteration preserve raw bytes and
+duplicates exposed by the host. `await response.trailers()` reads trailing fields after body
+consumption. An untouched response may be retained between callbacks; iteration owns the active
+body read and closes it on EOF or early return. Call `response.close()` when it is no longer
+needed. The facade accepts absolute HTTP(S) URLs and does not implement complete WHATWG Fetch
+semantics; pass an already percent-encoded URL. `HttpError.code` preserves the standard HTTP,
+header or request-options failure (or is `undefined` for a payload-free refusal). Uploads and
+their trailers must finish in their originating callback. WIT resources and streams remain
+outside the portable inter-Orb value profile.
 
 Compiled components import real `wasi:http/client@0.3.0` resources from
 `wasmtime-wasi-http`. Their bodies, streams and trailers use the upstream
 implementation, without the source facade's collection limits. Each send requires
-an admitted originating call and a granted origin. Compiled connection tasks progress
-while the Store is executing a call; a body retained between calls resumes when
-the Store runs again. New sends after cancellation
-are refused; a compiled request already in flight remains physically owned until
-it settles or reaches the callback deadline.
+an admitted originating call and a granted origin. An untouched response resource belongs to its Orb revision and may survive calls. An active
+body read belongs to the consuming call: an unfinished body closes when that call returns or
+is cancelled, and call completion waits for physical connection cleanup. Keep the response
+resource until the call that will consume it. Source input futures that remain unwritten at
+callback end are abandoned with a standard error. Guest code must handle a closed stream;
+code that ignores it or blocks elsewhere remains subject to the execution deadline.
 
 The pinned native sender supports HTTP/1 with `webpki_roots` trust anchors. It
 does not follow redirects, use proxy settings, or load custom/system CA stores.
-The browser provider delegates to Fetch, preserving CORS and other platform rules;
-a consumer may inject a mock, proxy or alternate Fetch-compatible provider.
-Browser redirects are refused. Raw TCP has a separate optional socket-provider
+The browser host accepts a typed `HttpProvider.send` adapter with raw byte fields, pull-based
+bodies and trailers. `fetchHttpProvider()` adapts Fetch to that contract, preserving CORS and
+other platform rules. The Fetch adapter buffers uploads up to 8 MiB, combines duplicate
+response fields, cannot provide trailers or a separate connect timeout, and normalizes the URL
+path. A custom provider also receives the validated raw `pathWithQuery`.
+Fetch redirects are refused. Raw TCP has a separate optional socket-provider
 interface and no ambient browser implementation.
 
 SSE stays within its admitted callback and the configured callback/read deadlines.

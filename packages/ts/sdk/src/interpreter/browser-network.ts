@@ -2,9 +2,8 @@ import type { Grants } from "../authoring/types.ts";
 import type { TransportStream } from "../guest.ts";
 import type { IORequest } from "./host-protocol.ts";
 import { checkSignal } from "../runtime/signals.ts";
-
-/** Standard Fetch implementations can be replaced by application-owned mocks or proxies. */
-export type HttpProvider = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+import type { HttpProvider } from "./http-provider.ts";
+import type { HttpClient } from "./standard-http.ts";
 
 /** Browsers have no ambient TCP provider; an embedding may explicitly supply one. */
 export interface SocketProvider {
@@ -16,22 +15,8 @@ export interface BrowserNetworkProviders {
   network?: Readonly<Record<string, SocketProvider>>;
 }
 
-// Match wasmtime-wasi-http's default forbidden fields; the host also owns content length.
-const framingHeaders = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "proxy-connection",
-  "transfer-encoding",
-  "upgrade",
-  "host",
-  "http2-settings",
-  "content-length",
-]);
-
+/** A raw socket issued to one callback (Phase 4b keeps this legacy carrier). */
 type Stream = {
-  kind: "http" | "socket";
   signal: AbortSignal;
   detach(): void;
   read(): Promise<Uint8Array | null>;
@@ -42,8 +27,12 @@ type Stream = {
   pending: Uint8Array;
 };
 
-/** Own only this Orb's issued response/socket handles and granted provider selections. */
-export class BrowserNetwork {
+/**
+ * Granted network selections of one Orb. HTTP is served only through standard `wasi:http`
+ * (`provider`, checked by the standard host before any provider call); raw sockets remain the
+ * legacy source carrier until Phase 4b.
+ */
+export class BrowserNetwork implements HttpClient {
   readonly #streams = new Map<number, Stream>();
   #issued = 0;
   #connecting = 0;
@@ -66,40 +55,55 @@ export class BrowserNetwork {
           url.href.includes("#") ||
           url.pathname !== "/" ||
           url.href.includes("?") ||
-          url.hostname.includes("*")
+          url.hostname.includes("*") ||
+          url.port === "0"
         )
           throw new Error(
-            "HTTP grants require exact http(s) origins without credentials, paths, queries or wildcards",
+            "HTTP grants require exact http(s) origins without credentials, paths, queries, wildcards or port 0",
           );
       }
     }
   }
 
-  /** Check grants before calling a host provider and keep every operation bound to its callback. */
+  /**
+   * The provider granted for exactly `url`'s origin. Standard `wasi:http` sends call this before
+   * any provider work; HTTP grants never follow raw socket grants or the reverse.
+   */
+  provider(url: URL): HttpProvider | undefined {
+    if (
+      this.#disposed ||
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username ||
+      url.password
+    )
+      return undefined;
+    const grant = this.grants.http?.find((grant) =>
+      grant.origins.some((origin) => new URL(origin).origin === url.origin),
+    );
+    return grant && this.providers.http?.[grant.provider];
+  }
+
+  /** Check socket grants before calling a provider and keep every operation bound to its callback. */
   async execute(request: IORequest, signal?: AbortSignal): Promise<unknown> {
-    if (request.operation === "http.close" || request.operation === "transport.close")
-      return this.close(request.id, request.operation === "http.close" ? "http" : "socket");
+    if (request.operation === "transport.close") return this.close(request.id);
     if (!signal) throw new Error("Network I/O requires an active callback");
     checkSignal(signal);
     if (this.#disposed) throw new Error("Network providers are closed");
-    if (request.operation === "http.send" || request.operation === "transport.connect") {
+    if (request.operation === "transport.connect") {
       if (this.#streams.size + this.#connecting >= 16)
         throw new Error("Network stream limit reached");
       this.#connecting++;
       try {
-        return request.operation === "http.send"
-          ? await this.send(request, signal)
-          : await this.connect(request.ip, request.port, signal);
+        return await this.connect(request.ip, request.port, signal);
       } finally {
         this.#connecting--;
       }
     }
-    const kind = request.operation.startsWith("http.") ? "http" : "socket";
-    if (!("id" in request)) throw new Error("Expected a network operation");
+    if (request.operation !== "transport.read" && request.operation !== "transport.write")
+      throw new Error("Expected a network operation");
     const stream = this.#streams.get(request.id);
-    if (!stream || stream.kind !== kind || stream.signal.aborted)
-      throw new Error("Unknown network stream");
-    if (request.operation === "http.read" || request.operation === "transport.read") {
+    if (!stream || stream.signal.aborted) throw new Error("Unknown network stream");
+    if (request.operation === "transport.read") {
       if (stream.reading) throw new Error("Network stream already has a reader");
       stream.reading = true;
       try {
@@ -146,7 +150,7 @@ export class BrowserNetwork {
     }
     const id = ++this.#issued;
     const abort = () => {
-      void this.close(id, stream.kind).catch(() => {});
+      void this.close(id).catch(() => {});
     };
     this.#streams.set(id, {
       ...stream,
@@ -159,69 +163,6 @@ export class BrowserNetwork {
     return id;
   }
 
-  /** Delegate HTTP framing, DNS and TLS to the selected standard Fetch implementation. */
-  private async send(request: Extract<IORequest, { operation: "http.send" }>, signal: AbortSignal) {
-    const url = new URL(request.url);
-    if (
-      !["http:", "https:"].includes(url.protocol) ||
-      url.username ||
-      url.password ||
-      url.href.includes("#")
-    )
-      throw new Error("HTTP requires an http(s) URL without credentials or fragments");
-    const grant = this.grants.http?.find((grant) =>
-      grant.origins.some((origin) => new URL(origin).origin === url.origin),
-    );
-    const provider = grant && this.providers.http?.[grant.provider];
-    if (!provider) throw new Error("HTTP origin has no granted host provider");
-    const headers = new Headers(request.headers as [string, string][]);
-    for (const name of headers.keys())
-      if (framingHeaders.has(name)) throw new Error(`HTTP header ${name} is set by the host`);
-    const controller = new AbortController();
-    const abort = () => controller.abort(signal.reason);
-    signal.addEventListener("abort", abort, { once: true });
-    let response: Response;
-    try {
-      response = await provider(url, {
-        method: request.method,
-        headers,
-        ...(request.body.length ? { body: Uint8Array.from(request.body) } : {}),
-        credentials: "omit",
-        redirect: "error",
-        signal: controller.signal,
-      });
-    } catch (error) {
-      signal.removeEventListener("abort", abort);
-      throw error;
-    }
-    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-    try {
-      reader = response.body?.getReader();
-    } catch (error) {
-      signal.removeEventListener("abort", abort);
-      controller.abort();
-      throw error;
-    }
-    const id = await this.register({
-      kind: "http",
-      signal,
-      async read() {
-        const next = await reader?.read();
-        return !next || next.done ? null : next.value;
-      },
-      async close() {
-        signal.removeEventListener("abort", abort);
-        controller.abort();
-        try {
-          await reader?.cancel();
-        } finally {
-          reader?.releaseLock();
-        }
-      },
-    });
-    return { id, status: response.status, headers: [...response.headers] };
-  }
-
   /** Resolve an explicitly provided socket adapter; raw network authority never follows HTTP grants. */
   private async connect(ip: string, port: number, signal: AbortSignal) {
     const address = `${ip.includes(":") ? `[${ip}]` : ip}:${port}`;
@@ -230,7 +171,6 @@ export class BrowserNetwork {
     if (!provider) throw new Error("This browser host has no raw TCP provider for this grant");
     const stream = await provider.connect(ip, port, signal);
     return this.register({
-      kind: "socket",
       signal,
       read: () => stream.read(),
       write: (bytes) => stream.write(bytes),
@@ -239,11 +179,10 @@ export class BrowserNetwork {
   }
 
   /** Closing issued handles is idempotent, including cancellation cleanup. */
-  private async close(id: number, kind: Stream["kind"]): Promise<null> {
+  private async close(id: number): Promise<null> {
     if (id <= 0 || id > this.#issued) throw new Error("Unknown network stream");
     const stream = this.#streams.get(id);
     if (stream) {
-      if (stream.kind !== kind) throw new Error("Unknown network stream");
       this.#streams.delete(id);
       stream.detach();
       await stream.close();
@@ -254,9 +193,7 @@ export class BrowserNetwork {
   /** Retire all handles after the guest's physical work has drained. */
   async dispose(): Promise<void> {
     this.#disposed = true;
-    const results = await Promise.allSettled(
-      [...this.#streams].map(([id, stream]) => this.close(id, stream.kind)),
-    );
+    const results = await Promise.allSettled([...this.#streams.keys()].map((id) => this.close(id)));
     const failures = results.filter((result) => result.status === "rejected");
     if (failures.length)
       throw new AggregateError(

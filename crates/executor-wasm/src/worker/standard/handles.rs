@@ -1,7 +1,7 @@
 //! Issue non-reusing revision-owned handles before exposing native resources.
 use super::{
     HANDLE_LIMIT, Shared, invalid,
-    streams::{Feed, Inbox, InputBudget, Pending, Pipe, PipeConsumer},
+    streams::{Feed, Inbox, InputBudget, Pending, Pipe, PipeConsumer, Promised},
 };
 use crate::abi::IDENTITY_LIMIT;
 use std::{
@@ -28,6 +28,12 @@ pub(super) enum Entry {
     Future(Shared<Pending>),
     /// A guest-writable input byte stream; its readable end transfers once to upstream.
     Writer(Shared<Inbox>),
+    /// The writer end of a guest-writable future of `TYPES` index `ty`; its readable end
+    /// transfers once to upstream and its value is written once.
+    Promise {
+        ty: u32,
+        state: Arc<dyn Promised>,
+    },
     /// A stream or future the guest no longer names whose upstream producer or reader may still
     /// hold host transmit state. It keeps counting toward the limit until only this table holds
     /// it, so synchronous create/drop loops cannot grow host state before the next Store turn.
@@ -38,6 +44,51 @@ impl Entry {
     /// A detached entry whose producer and readers have all released their state.
     fn finished(&self) -> bool {
         matches!(self, Entry::Detached(state) if Arc::strong_count(state) == 1)
+    }
+}
+
+/// Upstream work that needs the Store (or a handle release) and is queued where only part of
+/// the state is reachable: drained by `close_queued` wherever a Store is held.
+pub(in crate::worker) enum Close {
+    /// An owned upstream resource of a kind; store-drop kinds close through `WithStore`.
+    Resource(u32, u32),
+    /// A handle issued into a reply or future value nobody will receive.
+    Handle(u64),
+}
+
+/// An owned argument of a pending Store task, taken by the task on its first poll. A task
+/// aborted before that never transferred it, so the guard queues it for upstream's drop.
+pub(super) struct Owned<T: 'static> {
+    resource: Option<(u32, u32)>,
+    closing: Shared<Vec<Close>>,
+    _type: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: 'static> Owned<T> {
+    /// Guard a committed owned argument until its task takes it.
+    pub(super) fn new(kind: u32, resource: Resource<T>, closing: &Shared<Vec<Close>>) -> Self {
+        Self {
+            resource: Some((kind, resource.rep())),
+            closing: Arc::clone(closing),
+            _type: std::marker::PhantomData,
+        }
+    }
+
+    /// Hand the resource to the upstream call; from now on upstream owns it.
+    pub(super) fn take(mut self) -> Resource<T> {
+        let (_, rep) = self.resource.take().expect("owned argument taken once");
+        Resource::new_own(rep)
+    }
+}
+
+impl<T: 'static> Drop for Owned<T> {
+    fn drop(&mut self) {
+        if let Some((kind, rep)) = self.resource.take() {
+            self.closing
+                .lock()
+                .expect("closing")
+                .push(Close::Resource(kind, rep));
+        }
     }
 }
 
@@ -114,6 +165,13 @@ pub(super) struct Handles {
     pub(super) orphans: Vec<(u32, u32)>,
     /// First refusal while encoding the current reply.
     pub(super) refusal: Option<String>,
+    /// Typed close queue: store-drop resources and unpublished handles, drained wherever a
+    /// Store is held (`close_queued`).
+    pub(super) closing: Shared<Vec<Close>>,
+    /// Detached future slots that made no progress through one whole bounded settle window:
+    /// idle upstream state (e.g. the `sent` future of a retained request). They keep counting
+    /// toward the limit but no later retirement polls for them again.
+    stalled: std::collections::HashSet<u64>,
 }
 
 impl Handles {
@@ -134,6 +192,8 @@ impl Handles {
             issued: Vec::new(),
             orphans: Vec::new(),
             refusal: None,
+            closing: Shared::default(),
+            stalled: Default::default(),
         }
     }
 
@@ -155,28 +215,59 @@ impl Handles {
         Ok(())
     }
 
-    /// Forget detached state whose producers and readers are gone; `true` while some remains.
-    pub(super) fn purge(&mut self) -> bool {
-        self.entries.retain(|_, entry| !entry.finished());
-        self.entries
-            .values()
-            .any(|entry| matches!(entry, Entry::Detached(_)))
+    /// Queue upstream work that needs the Store.
+    pub(super) fn close(&self, close: Close) {
+        self.closing.lock().expect("closing").push(close);
     }
 
-    /// Remaining settlement work: detached entries upstream still holds plus accepted input
-    /// bytes it has not consumed; `None` once no detached state remains.
+    /// Forget detached state whose producers and readers are gone; `true` while settlement work
+    /// remains (see [`Self::unsettled`]).
+    pub(super) fn purge(&mut self) -> bool {
+        self.unsettled().is_some()
+    }
+
+    /// Remaining settlement work: queued closes, detached streams whose upstream side still
+    /// holds them, and accepted input bytes upstream has not consumed; `None` when there is
+    /// none. A detached guest-writable future endpoint (already written or abandoned) is
+    /// passive: it holds no physical work, only upstream's reference. A future slot that already
+    /// stalled through a whole settle window is idle upstream state and is not polled for again.
+    /// Both keep counting toward the handle limit until upstream drops them.
     pub(super) fn unsettled(&mut self) -> Option<usize> {
         self.entries.retain(|_, entry| !entry.finished());
-        let mut remaining = None;
-        for entry in self.entries.values() {
+        let entries = &self.entries;
+        self.stalled.retain(|id| entries.contains_key(id));
+        let queued = self.closing.lock().expect("closing").len();
+        let mut remaining = (queued > 0).then_some(queued);
+        for (id, entry) in &self.entries {
             if let Entry::Detached(state) = entry {
-                let bytes = state
-                    .downcast_ref::<std::sync::Mutex<Inbox>>()
-                    .map_or(0, |inbox| inbox.lock().expect("inbox").buffered());
-                *remaining.get_or_insert(0) += 1 + bytes;
+                if self.stalled.contains(id) {
+                    continue;
+                }
+                let work = if let Some(inbox) = state.downcast_ref::<std::sync::Mutex<Inbox>>() {
+                    1 + inbox.lock().expect("inbox").buffered()
+                } else if state.is::<std::sync::Mutex<Pipe>>()
+                    || state.is::<std::sync::Mutex<Pending>>()
+                {
+                    1
+                } else {
+                    continue;
+                };
+                *remaining.get_or_insert(0) += work;
             }
         }
         remaining
+    }
+
+    /// A settle window ended without progress: detached future slots still waiting are idle
+    /// upstream state. Streams and accepted input bytes are physical work and stay polled.
+    pub(super) fn mark_stalled(&mut self) {
+        for (id, entry) in &self.entries {
+            if let Entry::Detached(state) = entry
+                && state.is::<std::sync::Mutex<Pending>>()
+            {
+                self.stalled.insert(*id);
+            }
+        }
     }
 
     /// Issue a globally fresh identity and journal it for the reply being encoded.
@@ -226,7 +317,11 @@ impl Handles {
                 kind: actual, rep, ..
             }) if *actual == kind => Ok(Resource::new_borrow(*rep)),
             Some(
-                Entry::Resource { .. } | Entry::Stream(_) | Entry::Future(_) | Entry::Writer(_),
+                Entry::Resource { .. }
+                | Entry::Stream(_)
+                | Entry::Future(_)
+                | Entry::Writer(_)
+                | Entry::Promise { .. },
             ) => Err(invalid("handle has a different type")),
             Some(Entry::Detached(_)) | None => Err(invalid("unknown or dropped handle")),
         }
@@ -273,13 +368,54 @@ impl Handles {
     }
 
     /// Transfer ownership of a live handle back to upstream.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn take<T: 'static>(&mut self, kind: u32, id: u64) -> wasmtime::Result<Resource<T>> {
-        self.borrow::<T>(kind, id)?;
-        match self.remove(id)? {
-            Entry::Resource { rep, .. } => Ok(Resource::new_own(rep)),
-            _ => unreachable!("checked above"),
+        let mut seen = Vec::new();
+        let resource = self.claim_own(kind, id, &mut seen)?;
+        self.commit(seen);
+        Ok(resource)
+    }
+
+    /// Refuse a handle named twice by one packet: a claim or transfer happens at most once.
+    fn once(id: u64, seen: &mut Vec<u64>) -> wasmtime::Result<()> {
+        if seen.contains(&id) {
+            return Err(invalid("handle is transferred twice by one call"));
         }
+        seen.push(id);
+        Ok(())
+    }
+
+    /// Validate an owned parameter without removing it: live, of this type, not lent and not
+    /// named twice. `commit` removes it once the whole packet validated.
+    pub(super) fn claim_own<T: 'static>(
+        &self,
+        kind: u32,
+        id: u64,
+        seen: &mut Vec<u64>,
+    ) -> wasmtime::Result<Resource<T>> {
+        let resource = self.borrow::<T>(kind, id)?;
+        if let Some(Entry::Resource { lent, .. }) = self.entries.get(&id)
+            && lent.load(Ordering::Acquire) != 0
+        {
+            return Err(invalid("handle is borrowed by a pending call"));
+        }
+        Self::once(id, seen)?;
+        Ok(Resource::new_own(resource.rep()))
+    }
+
+    /// Commit a validated packet's claims: owned resources leave the table (the guest no longer
+    /// names them) and are returned as `(kind, rep)`. Stream and future claims transfer their
+    /// readable ends separately. Infallible: every claim was checked and nothing ran since.
+    pub(super) fn commit(&mut self, seen: Vec<u64>) -> Vec<(u32, u32)> {
+        let mut owned = Vec::new();
+        for id in seen {
+            if matches!(self.entries.get(&id), Some(Entry::Resource { .. }))
+                && let Some(Entry::Resource { kind, rep, .. }) = self.entries.remove(&id)
+            {
+                owned.push((kind, rep));
+            }
+        }
+        owned
     }
 
     /// Take one unit of the open-file budget, refusing (never waiting) when either this
@@ -338,10 +474,50 @@ impl Handles {
         }
     }
 
+    /// Close every guest-writable future still unwritten: its value resolves to the
+    /// abandonment error, so upstream fails the body instead of committing it truncated.
+    pub(super) fn close_promises(&mut self) {
+        for entry in self.entries.values_mut() {
+            if let Entry::Promise { state, .. } = entry {
+                state.abandon();
+                let state: Arc<dyn Any + Send + Sync> = Arc::clone(state) as _;
+                *entry = Entry::Detached(state);
+            }
+        }
+    }
+
+    /// Create the writer state of a guest-writable future of `TYPES` index `ty`.
+    pub(super) fn promise(&mut self, ty: u32) -> wasmtime::Result<u64> {
+        let state = super::future_new(ty, &self.closing)
+            .ok_or_else(|| invalid("future type is not writable by the guest"))?;
+        self.issue(Entry::Promise { ty, state })
+    }
+
+    /// Validate a writable future parameter of `TYPES` index `ty` without transferring it yet.
+    pub(super) fn claim_future(
+        &self,
+        ty: u32,
+        id: u64,
+        seen: &mut Vec<u64>,
+    ) -> wasmtime::Result<Readable> {
+        match self.entries.get(&id) {
+            Some(Entry::Promise { ty: actual, state }) if *actual == ty => {
+                if state.transferred() {
+                    return Err(invalid("future was already transferred"));
+                }
+                Self::once(id, seen)?;
+                Ok(Readable(Arc::clone(state)))
+            }
+            Some(Entry::Detached(_)) | None => Err(invalid("unknown or dropped handle")),
+            Some(_) => Err(invalid("handle has a different type")),
+        }
+    }
+
     /// Validate an input stream parameter without transferring it yet.
-    pub(super) fn claim(&self, id: u64) -> wasmtime::Result<Claim> {
+    pub(super) fn claim(&self, id: u64, seen: &mut Vec<u64>) -> wasmtime::Result<Claim> {
         match self.entries.get(&id) {
             Some(Entry::Writer(inbox)) if !inbox.lock().expect("inbox").transferred => {
+                Self::once(id, seen)?;
                 Ok(Claim(Arc::clone(inbox)))
             }
             Some(Entry::Writer(_)) => Err(invalid("stream was already transferred")),
@@ -352,7 +528,7 @@ impl Handles {
 
     /// Reserve a future handle whose producer binds later.
     pub(super) fn future(&mut self) -> wasmtime::Result<(u64, Shared<Pending>)> {
-        let pending = Shared::default();
+        let pending = Arc::new(std::sync::Mutex::new(Pending::new(&self.closing)));
         let id = self.issue(Entry::Future(Arc::clone(&pending)))?;
         Ok((id, pending))
     }
@@ -371,5 +547,22 @@ impl Claim {
         inbox.transferred = true;
         drop(inbox);
         Ok(Feed(self.0, file))
+    }
+}
+
+/// A validated, not yet transferred writable future parameter.
+pub(super) struct Readable(Arc<dyn Promised>);
+
+impl Readable {
+    /// Hand the readable end to upstream; called only after the whole packet validated.
+    pub(super) fn reader<T>(
+        self,
+        store: wasmtime::StoreContextMut<'_, super::State>,
+    ) -> wasmtime::Result<wasmtime::component::FutureReader<T>>
+    where
+        T: wasmtime::component::Lower + wasmtime::component::Lift + Send + Sync + 'static,
+    {
+        let producer = super::streams::Promise::<T>::producer(self.0)?;
+        wasmtime::component::FutureReader::new(store, producer)
     }
 }

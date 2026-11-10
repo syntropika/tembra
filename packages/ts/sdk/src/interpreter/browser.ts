@@ -173,6 +173,8 @@ export class BrowserExecution {
         {
           clocks: this.options.providers?.clocks,
           random: this.options.providers?.random,
+          // Standard `wasi:http` sends reach only providers granted for an exact origin.
+          http: capabilities.network,
           ...(options.grants?.system?.includes("cli")
             ? {
                 cli: installation.cli,

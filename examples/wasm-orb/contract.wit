@@ -15,11 +15,6 @@ interface calculation {
 world arithmetic-provider { export arithmetic; }
 world calculator {
     import arithmetic;
-    export calculation;
-}
-
-world online-calculator {
-    import arithmetic;
     import wasi:http/client@0.3.0;
     export calculation;
 }

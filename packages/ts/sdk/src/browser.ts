@@ -96,7 +96,17 @@ export {
 export type { BrowserInterpreterOptions as IsolatedOptions } from "./interpreter/browser.ts";
 export type { Grants, CliOptions } from "./authoring/types.ts";
 
-export type { HttpProvider, SocketProvider } from "./interpreter/browser-network.ts";
+export {
+  fetchHttpProvider,
+  FETCH_BODY_BYTES,
+  HttpProviderError,
+  type HttpField,
+  type HttpProvider,
+  type HttpProviderRequest,
+  type HttpProviderResponse,
+  type HttpTimeouts,
+} from "./interpreter/http-provider.ts";
+export type { SocketProvider } from "./interpreter/browser-network.ts";
 export type { ClockProvider, ClockInstant, RandomProvider } from "./interpreter/standard-system.ts";
 export type {
   StdioProvider,

@@ -173,7 +173,12 @@ for (const suite of selected) {
     if (consumer.error) throw consumer.error;
     process.stdout.write(consumer.stdout);
     const lines = consumer.stdout.trim().split("\n");
-    if (consumer.status !== 0 || lines[0] !== "24" || !/resource: 42\b/.test(consumer.stdout))
+    if (
+      consumer.status !== 0 ||
+      lines[0] !== "24" ||
+      !/resource: 42\b/.test(consumer.stdout) ||
+      !/fetched: 120\b/.test(consumer.stdout)
+    )
       throw new Error("The Wasm Orb example did not print its documented results");
   } else {
     const output = fresh("packed");

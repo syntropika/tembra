@@ -51,7 +51,10 @@ bun examples/wasm-orb/consumer.ts <calculator.wasm> <arithmetic.wasm>
 ```
 
 The consumer prints `24`: `[3, 4, 5]` sums to 12 and the Rust provider doubles it.
-It then prints the stored state and the resource value `42`.
+It then prints the stored state and the resource value `42`. The consumer starts a local JSON
+API, grants its exact origin, calls `fetchAndSum` inside the TypeScript Wasm Orb and prints
+`{ fetched: 120 }` from the API's distinct `[10, 20, 30]` payload. The consumer also checks that
+the API received exactly one request. The local API and host close when the example ends.
 
 The calculator artifact declares a WIT import, not a provider. The installer maps
 `example:integrated/arithmetic@1.0.0` to the installed `arithmetic` Orb. The
@@ -64,9 +67,9 @@ installation choices, for example `host.reload([{ artifact, requires }])`.
 
 ## Network access
 
-The `calculator` world has no HTTP import, so `fetchAndSum` cannot send requests.
-Build with `world: "online-calculator"` to import `wasi:http/client@0.3.0`, then
-register a host provider and grant exact origins at installation:
+The `calculator` world imports `wasi:http/client@0.3.0` because its implementation imports the
+HTTP helper. Register a host provider and grant exact origins at installation. The included
+consumer obtains the origin from its ephemeral local API; applications can select their own:
 
 ```ts
 const host = createHost({ isolated: { providers: { network: ["outbound"] } } });
@@ -76,21 +79,26 @@ await host.load(calculatorFile, {
 });
 ```
 
-The native host uses Wasmtime's WASI HTTP sender for HTTP framing, DNS and TLS.
-TypeScript adapts the request and consumes the streamed body; a maintained SSE
-parser powers `response.events()`. `text()` and `json()` collect at most 1 MiB.
-Ending iteration early closes the response; callback completion and cancellation
-also close source response handles. Raw sockets require separate network grants.
-The facade does not implement complete WHATWG Fetch semantics.
+TypeScript calls standard WASI HTTP resource, stream and future bindings through the helper.
+HTTP framing, DNS and TLS run in the host. Text, bytes and async byte-chunk request sources are
+supported. `response.body` streams bytes and `response.events()` parses SSE; `text()` and
+`json()` collect at most 1 MiB. Untouched responses can survive callbacks. Close them when they
+are no longer needed; an active upload must finish within its callback. The facade accepts
+already percent-encoded absolute URLs and does not implement full WHATWG Fetch semantics.
 
-In a browser, register a Fetch-compatible provider through the same installation
-contract. The consumer may replace it with a mock, proxy or another implementation:
+In a browser, select the Fetch adapter through the Tembra facade:
 
 ```ts
+import { createHost, fetchHttpProvider } from "@syntropika/tembra-sdk/browser";
+
 const host = await createHost({
-  isolated: { providers: { http: { outbound: globalThis.fetch } } },
+  isolated: { providers: { http: { outbound: fetchHttpProvider() } } },
 });
 ```
+
+An application-owned `HttpProvider.send` can instead provide raw byte fields, streaming bodies
+and trailers. The default Fetch adapter preserves Fetch's platform limits, including buffered
+uploads and unavailable trailers.
 
 Browser Fetch retains platform restrictions such as CORS. Redirects are refused
 so a request cannot silently leave its granted origin. No browser TCP implementation

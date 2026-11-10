@@ -16,18 +16,16 @@ mod handles;
 mod streams;
 
 use codec::{Reader, Writer};
-use handles::{Entry, Handles, Lease};
-use streams::{ItemConsumer, Pipe, ReadTurn, Slot, Writing, read_future, read_stream};
+use handles::{Close, Entry, Handles, Lease, Owned};
+use streams::{
+    ABANDONED_FUTURE, ItemConsumer, Pipe, Promise, Promised, ReadTurn, Slot, Writing, read_future,
+    read_stream,
+};
 
 use tokio::sync::oneshot;
 use wasmtime::{
     StoreContextMut,
     component::{JoinHandle, Resource},
-};
-#[allow(unused_imports)]
-use wasmtime_wasi::{
-    cli::WasiCliView, clocks::WasiClocksView, filesystem::WasiFilesystemView,
-    random::WasiRandomView,
 };
 
 include!(concat!(env!("OUT_DIR"), "/standard.rs"));
@@ -40,6 +38,8 @@ const FUTURE_READ: u8 = 2;
 const DROP: u8 = 3;
 const STREAM_NEW: u8 = 4;
 const STREAM_WRITE: u8 = 5;
+const FUTURE_NEW: u8 = 6;
+const FUTURE_WRITE: u8 = 7;
 /// Bytes buffered per stream before the upstream producer is paused.
 const PIPE_BYTES: usize = 64 << 10;
 /// Live handles per revision.
@@ -205,7 +205,14 @@ fn release(state: &mut State, id: u64) -> wasmtime::Result<()> {
             Ok(())
         }
         Entry::Future(pending) => {
+            pending.lock().expect("future").close();
             state.standard.handles.detach(id, pending);
+            Ok(())
+        }
+        // An unwritten future resolves to the abandonment error for its upstream reader.
+        Entry::Promise { state: promise, .. } => {
+            promise.abandon();
+            state.standard.handles.detach(id, promise);
             Ok(())
         }
         // Closing the writer ends the input stream after its buffered bytes are delivered.
@@ -215,6 +222,38 @@ fn release(state: &mut State, id: u64) -> wasmtime::Result<()> {
             Ok(())
         }
         Entry::Detached(_) => unreachable!("refused by remove"),
+    }
+}
+
+/// Drain the typed close queue: store-drop resources close through upstream `WithStore` drops,
+/// other resources through their `Host` drop, and unpublished handles are released. Closing may
+/// queue more work (a released request handle), so this runs until the queue is empty.
+pub(super) fn close_queued(mut store: StoreContextMut<'_, State>) -> wasmtime::Result<()> {
+    loop {
+        let queued = std::mem::take(
+            &mut *store
+                .data()
+                .standard
+                .handles
+                .closing
+                .lock()
+                .expect("closing"),
+        );
+        if queued.is_empty() {
+            return Ok(());
+        }
+        for close in queued {
+            match close {
+                Close::Resource(kind, rep) if STORE_DROPPED[kind as usize] => {
+                    drop_queued(kind, rep, store.as_context_mut())?
+                }
+                Close::Resource(kind, rep) => drop_resource(kind, rep, store.data_mut())?,
+                Close::Handle(id) => match release(store.data_mut(), id) {
+                    Err(error) if error.is::<Refused>() => {}
+                    other => other?,
+                },
+            }
+        }
     }
 }
 
@@ -243,6 +282,9 @@ fn settle(
         {
             state.standard.trapped = Some(format!("{error:#}"));
         }
+        if let Err(error) = close_queued(store.as_context_mut()) {
+            store.data_mut().standard.trapped = Some(format!("{error:#}"));
+        }
     });
 }
 
@@ -261,6 +303,32 @@ fn bounded(
             read: read.map(Arc::downgrade),
         }),
         Err(error) => Err(error),
+    }
+}
+
+/// Deliver one future value with the handles it issues; a value that cannot be delivered
+/// (oversized, or its callback owner is gone) releases them through the close queue.
+fn deliver_future(
+    reply: Reply,
+    (value, issued): (Result<Vec<u8>, String>, Vec<u64>),
+    limit: usize,
+    closing: &Shared<Vec<Close>>,
+) {
+    let delivery = bounded(value, limit, None).map(|mut delivery| {
+        delivery.issued = issued.clone();
+        delivery
+    });
+    let delivered = match (reply, delivery) {
+        (Some(reply), Ok(delivery)) => reply.send(Ok(delivery)).is_ok(),
+        (Some(reply), Err(error)) => {
+            let _ = reply.send(Err(error));
+            false
+        }
+        (None, _) => false,
+    };
+    if !delivered && !issued.is_empty() {
+        let mut closing = closing.lock().expect("closing");
+        closing.extend(issued.into_iter().map(Close::Handle));
     }
 }
 
@@ -335,9 +403,40 @@ pub(super) fn synchronous(
                     .map(|delivery| delivery.bytes)
                     .map_err(|refusal| invalid(&refusal))
             }
+            FUTURE_NEW => {
+                if !store.data().callback_scope.active() {
+                    return Err(invalid("callback scope ended"));
+                }
+                let ty = reader.u32()?;
+                reader.end()?;
+                let state = store.data_mut();
+                let id = state.standard.handles.promise(ty);
+                let mut writer = Writer::default();
+                writer.u64(*id.as_ref().unwrap_or(&0));
+                commit(state, id.map(|_| writer.0))?
+                    .map(|delivery| delivery.bytes)
+                    .map_err(|refusal| invalid(&refusal))
+            }
+            FUTURE_WRITE => {
+                if !store.data().callback_scope.active() {
+                    return Err(invalid("callback scope ended"));
+                }
+                let id = reader.u64()?;
+                let handles = &mut store.data_mut().standard.handles;
+                let Some(Entry::Promise { ty, state }) = handles.entries.get(&id) else {
+                    return Err(invalid("handle is not a live writable future"));
+                };
+                let (ty, state) = (*ty, Arc::clone(state));
+                // Fully decoded and validated before acceptance; owned handles in the value
+                // transfer only then. The id keeps naming the readable end (a write may come
+                // before the transfer) until DROP or callback retire; a second write is refused.
+                write_future(ty, state, &mut reader, handles)?;
+                Ok(Vec::new())
+            }
             _ => Err(invalid("unknown standard operation")),
         }
     })();
+    close_queued(store.as_context_mut())?;
     match result {
         Ok(bytes) => Ok(Ok(bytes)),
         Err(error) if error.is::<Refused>() => Ok(Err(error.to_string())),
@@ -384,16 +483,19 @@ pub(super) fn spawn(
                 // Queued at admission, so concurrent reads of one stream are served in guest
                 // order and an aborted, never polled read still leaves the queue.
                 let turn = ReadTurn::begin(Arc::clone(&pipe));
-                store.spawn(async move |_: &wasmtime::component::Accessor<State>| {
-                    let value = read_stream(turn, limit, packet_bytes).await;
-                    if let Some(reply) = reply
-                        && let Err(Ok(_)) = reply.send(bounded(value, packet_bytes, Some(&pipe)))
-                    {
-                        // The callback owner is gone: the drained data can never be delivered.
-                        pipe.lock().expect("pipe").abandon();
-                    }
-                    Ok(())
-                })?
+                store.as_context_mut().spawn(
+                    async move |_: &wasmtime::component::Accessor<State>| {
+                        let value = read_stream(turn, limit, packet_bytes).await;
+                        if let Some(reply) = reply
+                            && let Err(Ok(_)) =
+                                reply.send(bounded(value, packet_bytes, Some(&pipe)))
+                        {
+                            // The callback owner is gone: the drained data can never be delivered.
+                            pipe.lock().expect("pipe").abandon();
+                        }
+                        Ok(())
+                    },
+                )?
             }
             STREAM_WRITE => {
                 let id = reader.u64()?;
@@ -410,13 +512,15 @@ pub(super) fn spawn(
                 };
                 // Claimed before the task exists, so an aborted task still frees the slot.
                 let writing = Writing::begin(Arc::clone(inbox)).map_err(invalid)?;
-                store.spawn(async move |_: &wasmtime::component::Accessor<State>| {
-                    let value = writing.write(chunk).await;
-                    if let Some(reply) = reply {
-                        let _ = reply.send(bounded(value, packet_bytes, None));
-                    }
-                    Ok(())
-                })?
+                store.as_context_mut().spawn(
+                    async move |_: &wasmtime::component::Accessor<State>| {
+                        let value = writing.write(chunk).await;
+                        if let Some(reply) = reply {
+                            let _ = reply.send(bounded(value, packet_bytes, None));
+                        }
+                        Ok(())
+                    },
+                )?
             }
             FUTURE_READ => {
                 let id = reader.u64()?;
@@ -428,19 +532,21 @@ pub(super) fn spawn(
                 // A future value is read once; the guest name is consumed now, while the entry
                 // stays counted until the producer and this reader release it.
                 let pending = Arc::clone(pending);
+                let closing = Arc::clone(&handles.closing);
                 handles.detach(id, pending.clone());
-                store.spawn(async move |_: &wasmtime::component::Accessor<State>| {
-                    let value = read_future(pending).await;
-                    if let Some(reply) = reply {
-                        let _ = reply.send(bounded(value, packet_bytes, None));
-                    }
-                    Ok(())
-                })?
+                store.as_context_mut().spawn(
+                    async move |_: &wasmtime::component::Accessor<State>| {
+                        let value = read_future(pending).await;
+                        deliver_future(reply, value, packet_bytes, &closing);
+                        Ok(())
+                    },
+                )?
             }
             _ => return Err(invalid("unknown standard operation")),
         };
         Ok((handle, leases, receive))
     })();
+    close_queued(store.as_context_mut())?;
     match result {
         Ok(value) => Ok(Ok(value)),
         Err(error) if error.is::<Refused>() => Ok(Err(error.to_string())),
@@ -513,8 +619,16 @@ pub(super) async fn retire(
     let handles = tasks.revoke();
     // Aborted writes never accepted their chunk; open writers of the ending callback close now,
     // so accepted bytes reach upstream in this turn instead of waiting for a later callback.
+    // Unwritten futures resolve to the abandonment error, so no upload commits truncated.
     store.data_mut().standard.handles.close_writers();
+    store.data_mut().standard.handles.close_promises();
+    // Bodies this callback read and did not finish close now. That close, and the resolver and
+    // connect work of this callback's send tasks, end physically (sockets closed, lookups
+    // returned, reactor connect futures dropped) before the callback retires.
+    store.data().transport.commands.end();
+    let store_work = store.data().transport.store_work.clone();
     if handles.is_empty() && !store.data_mut().standard.handles.purge() {
+        store_work.settled().await;
         return Ok(());
     }
     let files = uses_filesystem(store.data());
@@ -526,15 +640,19 @@ pub(super) async fn retire(
         // progress; the callback deadline still bounds it in wall time.
         let mut least = usize::MAX;
         let mut stalled = 0;
-        while let Some(remaining) =
-            access.with(|mut store| store.data_mut().standard.handles.unsettled())
-        {
+        while let Some(remaining) = access.with(|mut store| {
+            // Aborted tasks dropped their untaken owned arguments into the close queue.
+            close_queued(store.as_context_mut())?;
+            wasmtime::Result::<_>::Ok(store.data_mut().standard.handles.unsettled())
+        })? {
             if remaining < least {
                 least = remaining;
                 stalled = 0;
             } else {
                 stalled += 1;
                 if stalled >= SETTLE_POLLS {
+                    // Idle upstream state: never poll a later retirement for it again.
+                    access.with(|mut store| store.data_mut().standard.handles.mark_stalled());
                     break;
                 }
             }
@@ -549,19 +667,24 @@ pub(super) async fn retire(
             })
             .await;
         }
+        wasmtime::Result::<()>::Ok(())
     });
     if files {
         // Woken producers may run qualified inline filesystem work in this turn.
         crate::io::file_turn(turn)
             .await
-            .map_err(|error| wasmtime::Error::msg(error.to_string()))?
+            .map_err(|error| wasmtime::Error::msg(error.to_string()))???;
     } else {
-        turn.await
+        turn.await??;
     }
+    store_work.settled().await;
+    Ok(())
 }
 
 #[cfg(test)]
 mod filesystem_qualification;
+#[cfg(test)]
+mod http_qualification;
 #[cfg(test)]
 mod qualification;
 #[cfg(test)]

@@ -1,5 +1,6 @@
 import {
   createHost,
+  fetchHttpProvider,
   memoryFilesystem,
   opfsFilesystem,
   type FilesystemProvider,
@@ -8,6 +9,7 @@ import {
   type FileDescriptor,
 } from "../src/browser.ts";
 import type { OrbArtifact } from "../src/authoring/types.ts";
+import { verifyHttpScenario, verifyRawHttpScenario } from "./http-browser.ts";
 
 /** Fetch one prepared qualification artifact from the test server. */
 async function source(name: string): Promise<Uint8Array> {
@@ -67,7 +69,7 @@ export async function verifyBrowserInterpreter(engine?: URL): Promise<void> {
       providers: {
         filesystem: { memory: tracked(memory), durable: tracked(durable) },
         http: {
-          mock: async (input, init) => {
+          mock: fetchHttpProvider(async (input, init) => {
             requests++;
             if (new URL(String(input)).origin === location.origin)
               return globalThis.fetch(input, init);
@@ -84,7 +86,7 @@ export async function verifyBrowserInterpreter(engine?: URL): Promise<void> {
               }),
               { headers: { "content-type": "text/event-stream" } },
             );
-          },
+          }),
         },
       },
       limits: { timeoutMs: 1000 },
@@ -177,7 +179,7 @@ export async function verifyBrowserInterpreter(engine?: URL): Promise<void> {
     equal(await calculation.recover(), 42);
     equal(await calculation.fanout(), 24);
     stage = "WASI HTTP provider";
-    const online = await host.get("online::example:integrated/calculation@1.0.0", "main");
+    const online = await host.get("online::example:integrated/network@1.0.0", "main");
     try {
       equal(await online["fetch-and-sum"]("https://api.example.test/values"), 24);
       equal(await online["first-event"]("https://api.example.test/events"), "streamed before EOF");
@@ -394,6 +396,11 @@ function counted(provider: FilesystemProvider) {
  * denied grants, forged/foreign handles and cleanup on revision retirement.
  */
 export async function verifyStandardScenario(engine?: URL): Promise<string[]> {
+  const report = [
+    await systemOn(engine),
+    await verifyHttpScenario(engine),
+    await verifyRawHttpScenario(engine),
+  ];
   const pattern = Uint8Array.from({ length: 4100 }, (_, index) => index % 256);
   const root = await navigator.storage.getDirectory();
   const directoryName = `tembra-standard-${crypto.randomUUID()}`;
@@ -409,8 +416,6 @@ export async function verifyStandardScenario(engine?: URL): Promise<string[]> {
   ).createWritable();
   await largeWriter.write(large);
   await largeWriter.close();
-  const report: string[] = [];
-  report.push(await systemOn(engine));
   try {
     for (const [kind, base] of [
       ["memory", memoryFilesystem({ "bytes.bin": pattern, "large.bin": large })],

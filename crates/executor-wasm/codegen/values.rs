@@ -194,6 +194,12 @@ impl<'a> Generator<'a> {
             Type::String => "r.string()?".into(),
             Type::Id(id) => match self.resolve.types[id].kind.clone() {
                 TypeDefKind::List(Type::U8) => "r.bytes()?.to_vec()".into(),
+                // Every element encodes at least one byte, so the count is bounded by the
+                // packet before anything is allocated.
+                TypeDefKind::List(element) => format!(
+                    "{{ let count = r.u32()? as usize; if count > r.0.len() {{ return Err(invalid(\"list length exceeds the packet\")); }} let mut items = Vec::with_capacity(count); for _ in 0..count {{ items.push({}); }} items }}",
+                    self.decode(element)
+                ),
                 TypeDefKind::Flags(flags) => {
                     let path = self.rust_path(id);
                     let mut out = format!(
@@ -268,15 +274,102 @@ impl<'a> Generator<'a> {
                     let kind = self.resource(resource);
                     format!("h.borrow({kind}, r.u64()?)?")
                 }
+                // Claimed now; removed from the table only by `h.commit` after validation.
                 TypeDefKind::Handle(Handle::Own(resource)) => {
                     let kind = self.resource(resource);
-                    format!("h.take({kind}, r.u64()?)?")
+                    let path = self.resources[kind].1.clone();
+                    format!("h.claim_own::<{path}>({kind}, r.u64()?, &mut seen)?")
                 }
                 // Claimed now, transferred only after the whole packet validated.
-                TypeDefKind::Stream(Some(Type::U8)) => "h.claim(r.u64()?)?".into(),
+                TypeDefKind::Stream(Some(Type::U8)) => "h.claim(r.u64()?, &mut seen)?".into(),
+                TypeDefKind::Future(Some(_)) if qualify::writable_future(self.resolve, ty) => {
+                    let index = self.ts(ty);
+                    format!("h.claim_future({index}, r.u64()?, &mut seen)?")
+                }
                 other => panic!("WIT parameter type {other:?} has no decode rule"),
             },
             other => panic!("WIT parameter type {other:?} has no decode rule"),
+        }
+    }
+
+    /// Resource kind of a direct owned handle parameter, if `ty` is one.
+    pub(super) fn owned_param(&mut self, ty: Type) -> Option<usize> {
+        let Type::Id(id) = self.peel(ty) else {
+            return None;
+        };
+        match self.resolve.types[id].kind {
+            TypeDefKind::Handle(Handle::Own(resource)) => Some(self.resource(resource)),
+            _ => None,
+        }
+    }
+
+    /// Statements handing a committed stream or writable future claim (possibly optional) to
+    /// upstream as its readable end; `None` for parameters that transfer nothing.
+    pub(super) fn transfer(&self, ty: Type, local: &str) -> Option<String> {
+        let Type::Id(id) = self.peel(ty) else {
+            return None;
+        };
+        let (inner, optional) = match self.resolve.types[id].kind {
+            TypeDefKind::Option(inner) => (self.peel(inner), true),
+            _ => (Type::Id(id), false),
+        };
+        let Type::Id(inner) = inner else {
+            return None;
+        };
+        let make = match self.resolve.types[inner].kind {
+            TypeDefKind::Stream(Some(Type::U8)) => {
+                "wasmtime::component::StreamReader::new(store.as_context_mut(), claim.transfer(files.pop())?)"
+            }
+            TypeDefKind::Future(Some(_)) => "claim.reader(store.as_context_mut())",
+            _ => return None,
+        };
+        Some(if optional {
+            format!("let {local} = match {local} {{ Some(claim) => Some({make}?), None => None }};")
+        } else {
+            format!("let {local} = {{ let claim = {local}; {make}? }};")
+        })
+    }
+
+    /// Rust type of a WIT value as upstream bindgen spells it.
+    pub(super) fn rust_type(&mut self, ty: Type) -> String {
+        match self.peel(ty) {
+            Type::Bool => "bool".into(),
+            Type::U8 => "u8".into(),
+            Type::U16 => "u16".into(),
+            Type::U32 => "u32".into(),
+            Type::U64 => "u64".into(),
+            Type::S8 => "i8".into(),
+            Type::S16 => "i16".into(),
+            Type::S32 => "i32".into(),
+            Type::S64 => "i64".into(),
+            Type::F32 => "f32".into(),
+            Type::F64 => "f64".into(),
+            Type::Char => "char".into(),
+            Type::String => "String".into(),
+            Type::ErrorContext => unreachable!(),
+            Type::Id(id) => match self.resolve.types[id].kind.clone() {
+                TypeDefKind::List(element) => format!("Vec<{}>", self.rust_type(element)),
+                TypeDefKind::Tuple(tuple) => {
+                    let types: Vec<String> =
+                        tuple.types.iter().map(|ty| self.rust_type(*ty)).collect();
+                    format!("({},)", types.join(", "))
+                }
+                TypeDefKind::Option(inner) => format!("Option<{}>", self.rust_type(inner)),
+                TypeDefKind::Result(result) => format!(
+                    "Result<{}, {}>",
+                    result.ok.map_or("()".into(), |ty| self.rust_type(ty)),
+                    result.err.map_or("()".into(), |ty| self.rust_type(ty))
+                ),
+                TypeDefKind::Handle(Handle::Own(resource)) => {
+                    let kind = self.resource(resource);
+                    format!("Resource<{}>", self.resources[kind].1)
+                }
+                TypeDefKind::Record(_)
+                | TypeDefKind::Variant(_)
+                | TypeDefKind::Enum(_)
+                | TypeDefKind::Flags(_) => self.rust_path(id),
+                other => panic!("WIT type {other:?} has no Rust type rule"),
+            },
         }
     }
 
@@ -330,14 +423,8 @@ impl<'a> Generator<'a> {
     pub(super) fn budgeted_kind(&self, kind: usize) -> bool {
         let path = &self.resources[kind].1;
         VIEWS.iter().any(|(view, _, _, blocking)| {
-            *blocking && path.starts_with(&format!("p3::bindings::{view}::"))
+            *blocking && path.contains(&format!("p3::bindings::{view}::"))
         })
-    }
-
-    /// Whether `ty` is a `stream<u8>` parameter transferred to upstream.
-    pub(super) fn byte_stream(&self, ty: Type) -> bool {
-        matches!(self.peel(ty), Type::Id(id)
-            if matches!(self.resolve.types[id].kind, TypeDefKind::Stream(Some(Type::U8))))
     }
 
     /// Statements encoding a top-level result with upstream trappable error handling.

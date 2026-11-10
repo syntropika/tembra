@@ -244,23 +244,6 @@ pub enum AsyncRequest {
     /// Close a stream issued to this Orb and settle its pending reads and writes.
     #[serde(rename = "transport.close")]
     TransportClose { id: u32 },
-    /// Send one HTTP request to a granted origin; the host replies with an [`HttpResponse`].
-    ///
-    /// DNS, TLS and HTTP framing run in the host's standard WASI HTTP client. The request body
-    /// is bounded by `HTTP_BODY_BYTES`; the response body stays incremental.
-    #[serde(rename = "http.send")]
-    HttpSend {
-        url: String,
-        method: String,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-    },
-    /// Read at most `TRANSPORT_CHUNK_BYTES` of a response body; `null` at its end.
-    #[serde(rename = "http.read")]
-    HttpRead { id: u32 },
-    /// Close a response body issued to this Orb; idempotent for issued identities.
-    #[serde(rename = "http.close")]
-    HttpClose { id: u32 },
     #[serde(rename = "wait")]
     Wait { milliseconds: u32 },
     /// Any operation name outside this vocabulary.
@@ -289,19 +272,6 @@ pub const WAIT_LIMIT_MILLISECONDS: u32 = 5000;
 
 /// Largest byte chunk carried by one transport read or write request.
 pub const TRANSPORT_CHUNK_BYTES: usize = 16 * 1024;
-
-/// Largest request body a source `http.send` carries in one packet.
-pub const HTTP_BODY_BYTES: usize = 1 << 20;
-/// Largest header list carried by one source request.
-pub const HTTP_HEADER_LIMIT: usize = 1024;
-
-/// Response head returned by `http.send`; the body is read through the issued stream `id`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct HttpResponse {
-    pub id: u32,
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-}
 
 impl Request {
     /// Decode one synchronous packet, labelling structural failures as malformed.
@@ -339,13 +309,10 @@ impl AsyncRequest {
                 | Self::TransportRead { .. }
                 | Self::TransportWrite { .. }
                 | Self::TransportClose { .. }
-                | Self::HttpSend { .. }
-                | Self::HttpRead { .. }
-                | Self::HttpClose { .. }
         )
     }
 
-    /// Socket and HTTP stream operations, whose lifetime ends with their callback or its
+    /// Socket stream operations, whose lifetime ends with their callback or its
     /// cancellation.
     pub fn is_transport(&self) -> bool {
         matches!(
@@ -354,15 +321,12 @@ impl AsyncRequest {
                 | Self::TransportRead { .. }
                 | Self::TransportWrite { .. }
                 | Self::TransportClose { .. }
-                | Self::HttpSend { .. }
-                | Self::HttpRead { .. }
-                | Self::HttpClose { .. }
         )
     }
 
     /// Closing an already issued stream is cleanup and stays permitted after cancellation.
     pub fn survives_cancellation(&self) -> bool {
-        matches!(self, Self::TransportClose { .. } | Self::HttpClose { .. })
+        matches!(self, Self::TransportClose { .. })
     }
 
     /// Decode one asynchronous packet, labelling structural failures as malformed.

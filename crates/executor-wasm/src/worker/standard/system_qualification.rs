@@ -740,7 +740,7 @@ fn terminals_are_honestly_absent_and_never_spend_file_budget() {
         [0]
     );
     // Per-kind budgeting: descriptors (kind 0) hold a permit, terminal handles never do.
-    assert_eq!(BUDGETED, &[true, false, false]);
+    assert_eq!(BUDGETED, &[true, false, false, false, false, false, false]);
     let handles = &mut store.data_mut().standard.handles;
     let terminal = handles.own(1, wasmtime::component::Resource::<()>::new_own(5));
     assert_ne!(terminal, 0);

@@ -11,7 +11,11 @@
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "customConditions": ["source"]
+    "customConditions": ["source"],
+    "paths": {
+      "wasi:http/client@0.3.0": ["./sdk/.tembra/wasi/interfaces/wasi-http-client.d.ts"],
+      "wasi:http/types@0.3.0": ["./sdk/.tembra/wasi/interfaces/wasi-http-types.d.ts"]
+    }
   },
   "include": [
     "sdk/src/**/*.ts",

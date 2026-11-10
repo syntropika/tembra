@@ -206,7 +206,7 @@ test(
           ...online,
           grants: { http: [{ provider: "outbound", origins: [`http://127.0.0.1:${port}`] }] },
         });
-        const network = await host.get("online::example:integrated/calculation@1.0.0", "main");
+        const network = await host.get("online::example:integrated/network@1.0.0", "main");
         assert.equal(await network["fetch-and-sum"](`http://127.0.0.1:${port}/values`), 12);
         assert.equal(await network["first-event"](`http://127.0.0.1:${port}/events`), "hé🌍");
         await sseClosed;
@@ -327,7 +327,7 @@ test(
           grants: { http: [{ provider: "outbound", origins: [origin] }] },
         },
       ]);
-      const network = await host.get("online::example:integrated/calculation@1.0.0", "main");
+      const network = await host.get("online::example:integrated/network@1.0.0", "main");
       let cancelledAt;
       const started = performance.now();
       await assert.rejects(

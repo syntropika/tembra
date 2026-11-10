@@ -93,48 +93,137 @@ fn direct_handle(resolve: &Resolve, ty: Type) -> Option<Handle> {
     }
 }
 
-/// Accept only resource flows with a complete owner: direct borrows (lent to an async task until
-/// it settles or aborts), direct owned inputs and `stream<u8>` inputs of synchronous calls
-/// (transferred only after the whole packet validated, before return), and results journaled
-/// with their reply.
+/// Whether `ty` is a future the guest may write: `future<result<_, E>>` whose error variant has
+/// an `internal-error(option<string>)` case, the value an abandoned writer resolves to.
+pub(super) fn writable_future(resolve: &Resolve, ty: Type) -> bool {
+    let Type::Id(id) = peel(resolve, ty) else {
+        return false;
+    };
+    let TypeDefKind::Future(Some(payload)) = &resolve.types[id].kind else {
+        return false;
+    };
+    let Type::Id(payload) = peel(resolve, *payload) else {
+        return false;
+    };
+    let TypeDefKind::Result(result) = &resolve.types[payload].kind else {
+        return false;
+    };
+    let Some(Type::Id(error)) = result.err.map(|ty| peel(resolve, ty)) else {
+        return false;
+    };
+    matches!(&resolve.types[error].kind, TypeDefKind::Variant(variant)
+        if variant.cases.iter().any(|case| case.name == "internal-error"
+            && case.ty.is_some_and(|ty| matches!(peel(resolve, ty), Type::Id(inner)
+                if matches!(resolve.types[inner].kind, TypeDefKind::Option(Type::String))))))
+}
+
+/// A parameter whose ownership transfers after the packet validated: a direct owned resource,
+/// a `stream<u8>`, a writable future, or `option<..>` of one of these.
+fn transferable(resolve: &Resolve, ty: Type, optional: bool) -> bool {
+    if byte_stream(resolve, ty) || writable_future(resolve, ty) {
+        return true;
+    }
+    if let Some(Handle::Own(_)) = direct_handle(resolve, ty) {
+        return true;
+    }
+    if optional
+        && let Type::Id(id) = peel(resolve, ty)
+        && let TypeDefKind::Option(inner) = resolve.types[id].kind
+    {
+        return transferable(resolve, inner, false);
+    }
+    false
+}
+
+/// Whether every handle a future/stream payload carries is an owned resource (journaled with
+/// the read that publishes it); streams, futures and borrows inside payloads have no owner.
+fn owned_only(resolve: &Resolve, ty: Type) -> bool {
+    let Type::Id(id) = peel(resolve, ty) else {
+        return true;
+    };
+    match &resolve.types[id].kind {
+        TypeDefKind::Handle(Handle::Own(_)) | TypeDefKind::Resource => true,
+        TypeDefKind::Handle(Handle::Borrow(_))
+        | TypeDefKind::Future(_)
+        | TypeDefKind::Stream(_)
+        | TypeDefKind::Unknown => false,
+        TypeDefKind::Record(record) => record.fields.iter().all(|f| owned_only(resolve, f.ty)),
+        TypeDefKind::Tuple(tuple) => tuple.types.iter().all(|ty| owned_only(resolve, *ty)),
+        TypeDefKind::Variant(variant) => variant
+            .cases
+            .iter()
+            .filter_map(|case| case.ty)
+            .all(|ty| owned_only(resolve, ty)),
+        TypeDefKind::Result(result) => result
+            .ok
+            .into_iter()
+            .chain(result.err)
+            .all(|ty| owned_only(resolve, ty)),
+        TypeDefKind::Option(inner)
+        | TypeDefKind::List(inner)
+        | TypeDefKind::FixedLengthList(inner, _) => owned_only(resolve, *inner),
+        TypeDefKind::Map(key, value) => owned_only(resolve, *key) && owned_only(resolve, *value),
+        TypeDefKind::Flags(_) | TypeDefKind::Enum(_) | TypeDefKind::Type(_) => true,
+    }
+}
+
+/// Whether a result exposes a future/stream payload whose handles no read could publish.
+fn unpublishable(resolve: &Resolve, ty: Type) -> bool {
+    let Type::Id(id) = peel(resolve, ty) else {
+        return false;
+    };
+    match &resolve.types[id].kind {
+        TypeDefKind::Future(Some(payload)) => !owned_only(resolve, *payload),
+        TypeDefKind::Stream(Some(payload)) => carries_handle(resolve, *payload),
+        TypeDefKind::Tuple(tuple) => tuple.types.iter().any(|ty| unpublishable(resolve, *ty)),
+        TypeDefKind::Result(result) => result
+            .ok
+            .into_iter()
+            .chain(result.err)
+            .any(|ty| unpublishable(resolve, ty)),
+        TypeDefKind::Option(inner) => unpublishable(resolve, *inner),
+        _ => unowned_payload(resolve, Type::Id(id)),
+    }
+}
+
+/// Accept only resource flows with a complete owner:
+/// - direct borrows (async: lent until the task settles or aborts);
+/// - synchronous transferable parameters (direct owned, `stream<u8>`, writable future, or an
+///   `option` of one), transferred only after the whole packet validated;
+/// - async direct owned parameters, transferred on the task's first poll (an aborted task
+///   leaves them to retire, which drops them through upstream);
+/// - results whose handles are journaled with their reply, including owned handles inside
+///   future payloads (journaled with the FUTURE_READ that delivers them).
 pub(super) fn qualify(resolve: &Resolve, function: &Function) -> Result<(), String> {
     let asynchronous = matches!(
         function.kind,
         FunctionKind::AsyncFreestanding | FunctionKind::AsyncMethod(_)
     );
     for param in &function.params {
-        if byte_stream(resolve, param.ty) {
-            if asynchronous {
-                return Err(format!(
-                    "stream parameter `{}` of an async func has no transfer owner if its task is \
-                     aborted",
-                    param.name
-                ));
-            }
+        if let Some(Handle::Borrow(_)) = direct_handle(resolve, param.ty) {
             continue;
         }
-        match direct_handle(resolve, param.ty) {
-            Some(Handle::Borrow(_)) => {}
-            Some(Handle::Own(_)) if asynchronous => {
-                return Err(format!(
-                    "owned parameter `{}` of an async func would be dropped without upstream \
-                     cleanup if its task is aborted",
-                    param.name
-                ));
-            }
-            Some(Handle::Own(_)) => {}
-            None if carries_handle(resolve, param.ty) => {
-                return Err(format!(
-                    "parameter `{}` nests a resource, stream or future handle; only direct \
-                     handle parameters are lent or transferred",
-                    param.name
-                ));
-            }
-            None => {}
+        let direct_own = matches!(direct_handle(resolve, param.ty), Some(Handle::Own(_)));
+        if asynchronous && !direct_own && transferable(resolve, param.ty, true) {
+            return Err(format!(
+                "stream or future parameter `{}` of an async func has no transfer owner if its \
+                 task is aborted",
+                param.name
+            ));
+        }
+        if transferable(resolve, param.ty, true) {
+            continue;
+        }
+        if carries_handle(resolve, param.ty) {
+            return Err(format!(
+                "parameter `{}` nests a resource, stream or future handle; only direct or \
+                 optional transferable handles are lent or transferred",
+                param.name
+            ));
         }
     }
     if let Some(result) = function.result
-        && unowned_payload(resolve, result)
+        && unpublishable(resolve, result)
     {
         return Err(
             "result has a future or stream payload carrying handles, which no reply publishes"
@@ -198,6 +287,9 @@ interface t {
             "bytes",
             "sync-bytes",
             "entries",
+            "owned",
+            "owned-alias",
+            "handle-future",
         ] {
             assert_eq!(check(name), Ok(()), "{name}");
         }
@@ -205,16 +297,10 @@ interface t {
 
     #[test]
     fn async_owned_inputs_and_nested_handles_are_refused() {
-        for name in ["owned", "owned-alias"] {
-            assert!(
-                check(name).unwrap_err().contains("owned parameter `x`"),
-                "{name}"
-            );
-        }
         assert!(
             check("async-bytes")
                 .unwrap_err()
-                .contains("stream parameter `data`")
+                .contains("stream or future parameter `data`")
         );
         for name in ["nested", "optional", "listed", "handle-input"] {
             assert!(
@@ -225,14 +311,13 @@ interface t {
     }
 
     #[test]
-    fn handle_bearing_future_and_stream_payloads_are_refused() {
-        for name in ["handle-future", "handle-stream"] {
-            assert!(
-                check(name)
-                    .unwrap_err()
-                    .contains("payload carrying handles"),
-                "{name}"
-            );
-        }
+    fn handle_bearing_stream_payloads_are_refused() {
+        // Owned handles in a future payload are published with the FUTURE_READ reply; a
+        // stream item has no single reply to publish them with.
+        assert!(
+            check("handle-stream")
+                .unwrap_err()
+                .contains("payload carrying handles")
+        );
     }
 }

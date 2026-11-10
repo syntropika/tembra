@@ -251,10 +251,7 @@ export class Scope {
       case "transport.connect":
       case "transport.read":
       case "transport.write":
-      case "transport.close":
-      case "http.send":
-      case "http.read":
-      case "http.close": {
+      case "transport.close": {
         if (!("context" in authority) && !("signal" in authority))
           throw new Error("I/O requires an active callback");
         // Closing an owned stream is cleanup; it still needs a callback but survives cancellation.
@@ -266,18 +263,15 @@ export class Scope {
         const owner = asyncSurvivesCancellation(request) ? undefined : authoritySignal(authority);
         const ioSignal = owner ? combinedSignal(owner, ended) : ended;
         const result = await this.revision.io(request, ioSignal);
-        if (request.operation === "transport.connect" || request.operation === "http.send") {
+        if (request.operation === "transport.connect") {
           // Cancellation ends the stream's authority; closing it settles pending socket work.
           const owner = ioSignal;
           const close = () =>
             void this.revision
               .io(
                 {
-                  operation: request.operation === "http.send" ? "http.close" : "transport.close",
-                  id:
-                    request.operation === "http.send"
-                      ? (result as { id: number }).id
-                      : (result as number),
+                  operation: "transport.close",
+                  id: result as number,
                 },
                 ioSignal,
               )

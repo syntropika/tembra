@@ -141,14 +141,6 @@ declare global {
   var console: Console;
   const tembra: {
     wait(milliseconds: number): Promise<void>;
-    http?: {
-      send(
-        url: string,
-        method: string,
-        headers: readonly (readonly [string, string])[],
-        body: Uint8Array,
-      ): Promise<HttpStream>;
-    };
     transport?: {
       /** Open one byte stream to an exactly granted literal IP address and port. */
       connect(ip: string, port: number): Promise<TransportStream>;
@@ -164,14 +156,6 @@ declare global {
 export interface TransportStream {
   read(): Promise<Uint8Array | null>;
   write(bytes: Uint8Array): Promise<void>;
-  close(): Promise<void>;
-}
-
-/** Host-owned WASI HTTP response; the body is read incrementally under the originating callback. */
-export interface HttpStream {
-  readonly status: number;
-  readonly headers: readonly (readonly [string, string])[];
-  read(): Promise<Uint8Array | null>;
   close(): Promise<void>;
 }
 

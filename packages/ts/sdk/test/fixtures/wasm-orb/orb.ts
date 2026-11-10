@@ -2,7 +2,6 @@ import { orb } from "@syntropika/tembra-sdk";
 import type { calculation, ExampleIntegratedArithmetic100 as Arithmetic } from "./contract.wit";
 import type { Context, Declaration, WitMethods } from "@syntropika/tembra-sdk";
 const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0);
-import { fetch } from "@syntropika/tembra-sdk/http";
 
 console.log("module log");
 
@@ -81,19 +80,6 @@ export default orb({
         async pending() {
           await tembra.wait(5000);
           return 1;
-        },
-        async fetchAndSum(environment: Environment, context: Context, url: string) {
-          const response = await fetch(url);
-          if (!response.ok) throw new Error(`HTTP request failed: ${response.status}`);
-          const input = await response.json<{ values: number[] }>();
-          const doubled: number = await environment.arithmetic.double(sum(input.values), context);
-          environment.total.update(context, () => doubled);
-          return environment.total.value;
-        },
-        async firstEvent(_environment: Environment, _context: Context, url: string) {
-          const response = await fetch(url);
-          for await (const event of response.events()) return event.data;
-          throw new Error("SSE ended without an event");
         },
       } satisfies WitMethods<typeof calculation, Environment>,
     },

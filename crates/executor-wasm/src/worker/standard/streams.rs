@@ -3,7 +3,11 @@
 //! Output streams buffer raw bytes (`stream<u8>`) or whole encoded items (typed streams) up to
 //! `PIPE_BYTES`; the upstream producer pauses while the guest has not read. Input byte streams
 //! buffer guest chunks in an [`Inbox`] drained by a [`Feed`] producer that upstream consumes.
-use super::{PIPE_BYTES, Shared, State, Writer, handles::FilePermit};
+use super::{
+    PIPE_BYTES, Shared, State, Writer,
+    handles::{Close, FilePermit, Handles},
+    invalid,
+};
 use std::{
     collections::VecDeque,
     io::Read,
@@ -14,7 +18,8 @@ use std::{
 use wasmtime::{
     AsContextMut, StoreContextMut,
     component::{
-        Destination, FutureConsumer, Source, StreamConsumer, StreamProducer, StreamResult,
+        Destination, FutureConsumer, FutureProducer, Source, StreamConsumer, StreamProducer,
+        StreamResult,
     },
 };
 
@@ -238,11 +243,47 @@ impl<T, F> Drop for ItemConsumer<T, F> {
     }
 }
 
-/// An encoded future value waiting for the guest reader.
-#[derive(Default)]
+/// An encoded future value waiting for the guest reader, with the handles it issues.
 pub(super) struct Pending {
     value: Option<Result<Vec<u8>, String>>,
+    /// Handles named only by `value`; published by the FUTURE_READ reply, else released.
+    issued: Vec<u64>,
+    /// The guest dropped the future: a value produced later releases its handles at once.
+    pub(super) closed: bool,
     reader: Option<Waker>,
+    closing: Shared<Vec<Close>>,
+}
+
+impl Pending {
+    pub(super) fn new(closing: &Shared<Vec<Close>>) -> Self {
+        Self {
+            value: None,
+            issued: Vec::new(),
+            closed: false,
+            reader: None,
+            closing: Arc::clone(closing),
+        }
+    }
+
+    /// The guest dropped its future handle: release handles of a value it never read.
+    pub(super) fn close(&mut self) {
+        self.closed = true;
+        self.release();
+    }
+
+    fn release(&mut self) {
+        let issued = std::mem::take(&mut self.issued);
+        if !issued.is_empty() {
+            let mut closing = self.closing.lock().expect("closing");
+            closing.extend(issued.into_iter().map(Close::Handle));
+        }
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 /// Upstream consumer that encodes the single future value with its generated WIT encoder.
@@ -266,7 +307,7 @@ impl<T, F> Slot<T, F> {
 impl<T, F> FutureConsumer<State> for Slot<T, F>
 where
     T: wasmtime::component::Lift + Send + Sync + 'static,
-    F: FnMut(&mut Writer, T) -> wasmtime::Result<()> + Send + Unpin + 'static,
+    F: FnMut(&mut Writer, &mut Handles, T) -> wasmtime::Result<()> + Send + Unpin + 'static,
 {
     type Item = T;
 
@@ -281,16 +322,35 @@ where
         source.read(store.as_context_mut(), &mut value)?;
         if let Some(value) = value {
             let mut writer = Writer::default();
-            let encoded = (self.encode)(&mut writer, value).map(|()| writer.0);
-            debug_assert!(
-                store.data().standard.handles.issued.is_empty(),
-                "future payload handles need a publication owner"
-            );
-            if let Err(error) = &encoded {
-                store.data_mut().standard.trapped = Some(format!("{error:#}"));
-            }
+            let state = store.data_mut();
+            // Handles in the value are journaled with it: published by the FUTURE_READ reply,
+            // released if the reply, the read or the future is abandoned.
+            debug_assert!(state.standard.handles.issued.is_empty());
+            let encoded =
+                (self.encode)(&mut writer, &mut state.standard.handles, value).map(|()| writer.0);
+            let mut issued = std::mem::take(&mut state.standard.handles.issued);
+            let refusal = state.standard.handles.refusal.take();
+            let encoded = match (encoded, refusal) {
+                (Ok(_), Some(refusal)) => Err(refusal),
+                (Ok(bytes), None) => Ok(bytes),
+                (Err(error), _) => {
+                    state.standard.trapped = Some(format!("{error:#}"));
+                    Err(format!("{error:#}"))
+                }
+            };
             let mut pending = self.pending.lock().expect("future");
-            pending.value = Some(encoded.map_err(|error| format!("{error:#}")));
+            if encoded.is_err() || pending.closed {
+                let orphans = std::mem::take(&mut state.standard.handles.orphans);
+                let mut closing = pending.closing.lock().expect("closing");
+                closing.extend(issued.drain(..).map(Close::Handle));
+                closing.extend(
+                    orphans
+                        .into_iter()
+                        .map(|(kind, rep)| Close::Resource(kind, rep)),
+                );
+            }
+            pending.issued = issued;
+            pending.value = Some(encoded);
             if let Some(reader) = pending.reader.take() {
                 reader.wake();
             }
@@ -590,12 +650,12 @@ impl Drop for Writing {
     }
 }
 
-/// Wait for the encoded future value.
-pub(super) async fn read_future(pending: Shared<Pending>) -> Result<Vec<u8>, String> {
+/// Wait for the encoded future value and take the handles it issues.
+pub(super) async fn read_future(pending: Shared<Pending>) -> (Result<Vec<u8>, String>, Vec<u64>) {
     std::future::poll_fn(|context| {
         let mut pending = pending.lock().expect("future");
         match pending.value.take() {
-            Some(value) => Poll::Ready(value),
+            Some(value) => Poll::Ready((value, std::mem::take(&mut pending.issued))),
             None => {
                 pending.reader = Some(context.waker().clone());
                 Poll::Pending
@@ -603,4 +663,147 @@ pub(super) async fn read_future(pending: Shared<Pending>) -> Result<Vec<u8>, Str
         }
     })
     .await
+}
+
+/// Value of a guest-writable future abandoned unwritten by its callback.
+pub(super) const ABANDONED_FUTURE: &str = "callback ended";
+
+/// Type-erased writer state of one guest-writable future.
+pub(in crate::worker) trait Promised: std::any::Any + Send + Sync {
+    /// The writer is gone unwritten: resolve to the abandonment value.
+    fn abandon(&self);
+    /// Whether the readable end was handed to upstream.
+    fn transferred(&self) -> bool;
+}
+
+/// One guest-writable future: written once by FUTURE_WRITE, read once by upstream.
+pub(super) struct Promise<T> {
+    value: Option<T>,
+    /// Owned upstream resources inside `value`, closed if upstream never takes it.
+    owned: Vec<(u32, u32)>,
+    written: bool,
+    abandoned: bool,
+    transferred: bool,
+    /// The value an abandoned writer resolves to (`internal-error("callback ended")`).
+    abandonment: fn() -> T,
+    producer: Option<Waker>,
+    closing: Shared<Vec<Close>>,
+}
+
+impl<T: Send + 'static> Promise<T> {
+    /// Writer state of a new future whose abandonment resolves to `abandonment()`.
+    pub(super) fn create(
+        closing: &Shared<Vec<Close>>,
+        abandonment: fn() -> T,
+    ) -> Arc<dyn Promised> {
+        Arc::new(std::sync::Mutex::new(Self {
+            value: None,
+            owned: Vec::new(),
+            written: false,
+            abandoned: false,
+            transferred: false,
+            abandonment,
+            producer: None,
+            closing: Arc::clone(closing),
+        }))
+    }
+
+    /// Recover the typed state of a writable future entry.
+    pub(super) fn of(state: Arc<dyn Promised>) -> wasmtime::Result<Shared<Self>> {
+        let state: Arc<dyn std::any::Any + Send + Sync> = state;
+        state
+            .downcast()
+            .map_err(|_| invalid("future has a different type"))
+    }
+
+    /// The readable end as an upstream future producer; transferred once.
+    pub(super) fn producer(state: Arc<dyn Promised>) -> wasmtime::Result<Writable<T>> {
+        let state = Self::of(state)?;
+        let mut promise = state.lock().expect("promise");
+        if promise.transferred {
+            return Err(invalid("future was already transferred"));
+        }
+        promise.transferred = true;
+        drop(promise);
+        Ok(Writable(state))
+    }
+
+    /// Refuse a second write or a write after abandonment, before anything is committed.
+    pub(super) fn writable(&self) -> wasmtime::Result<()> {
+        if self.written || self.abandoned {
+            return Err(invalid("future was already written"));
+        }
+        Ok(())
+    }
+
+    /// Accept the one value and the owned resources it carries.
+    pub(super) fn write(&mut self, value: T, owned: Vec<(u32, u32)>) {
+        self.written = true;
+        self.value = Some(value);
+        self.owned = owned;
+        if let Some(producer) = self.producer.take() {
+            producer.wake();
+        }
+    }
+}
+
+impl<T: Send + 'static> Promised for std::sync::Mutex<Promise<T>> {
+    fn abandon(&self) {
+        let mut promise = self.lock().expect("promise");
+        if !promise.written {
+            promise.abandoned = true;
+            if let Some(producer) = promise.producer.take() {
+                producer.wake();
+            }
+        }
+    }
+
+    fn transferred(&self) -> bool {
+        self.lock().expect("promise").transferred
+    }
+}
+
+impl<T> Drop for Promise<T> {
+    fn drop(&mut self) {
+        // A written value upstream never took still owns its resources.
+        if self.value.take().is_some() && !self.owned.is_empty() {
+            let mut closing = self.closing.lock().expect("closing");
+            closing.extend(
+                self.owned
+                    .drain(..)
+                    .map(|(kind, rep)| Close::Resource(kind, rep)),
+            );
+        }
+    }
+}
+
+/// Upstream-facing producer of a guest-writable future.
+pub(super) struct Writable<T>(Shared<Promise<T>>);
+
+impl<T: Send + 'static> FutureProducer<State> for Writable<T> {
+    type Item = T;
+
+    fn poll_produce(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        _: StoreContextMut<State>,
+        finish: bool,
+    ) -> Poll<wasmtime::Result<Option<T>>> {
+        let mut promise = self.0.lock().expect("promise");
+        if let Some(value) = promise.value.take() {
+            // Upstream owns the value and every resource in it from here on.
+            promise.owned.clear();
+            return Poll::Ready(Ok(Some(value)));
+        }
+        if promise.abandoned {
+            promise.abandoned = false;
+            promise.written = true;
+            return Poll::Ready(Ok(Some((promise.abandonment)())));
+        }
+        if finish {
+            return Poll::Ready(Ok(None));
+        }
+        promise.producer = Some(context.waker().clone());
+        Poll::Pending
+    }
 }

@@ -661,7 +661,9 @@ mod tests {
                         scope.begin_callback();
                         scope
                     },
+                    grants: Default::default(),
                 },
+                Default::default(),
             )
             .await
             .unwrap();
@@ -701,7 +703,9 @@ mod tests {
                     wasi: wasmtime_wasi::WasiCtxBuilder::new(),
                     allowed: Default::default(),
                     scope: { let scope = crate::io::Streams::default(); scope.begin_callback(); scope },
+                    grants: Default::default(),
                 },
+                Default::default()
             )
             .await
             .unwrap();

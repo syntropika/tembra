@@ -6,6 +6,7 @@ import path from "node:path";
 import ts from "typescript";
 
 import { METHODS, RESOURCES } from "../interpreter/standard.ts";
+import { resourceClassName } from "../interpreter/standard-codec.ts";
 import type { BuildTarget } from "./types.ts";
 
 /** Interfaces with generated standard WASI source bindings. */
@@ -22,8 +23,7 @@ function standardModule(contract: string): string {
     ),
   );
   for (const name of RESOURCES)
-    if (name.startsWith(`${contract}#`))
-      names.add(name.split("#")[1]!.replace(/(^|-)(\w)/g, (_, __, letter) => letter.toUpperCase()));
+    if (name.startsWith(`${contract}#`)) names.add(resourceClassName(name));
   return [
     `const module = globalThis.__tembraStandard[${JSON.stringify(contract)}];`,
     `if (!module) throw new Error(${JSON.stringify(`The Orb contract does not import ${contract}`)});`,

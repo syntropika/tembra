@@ -9,8 +9,8 @@
   const outbox: { id: number; packet: string | Uint8Array }[] = [];
   let sequence = 0;
   globalThis.__hostAsync = ((packet: string | Uint8Array) => {
-    if (!active()) return Promise.reject(new Error("callback scope is closed"));
-    if (pending.size >= 128) return Promise.reject(new Error("host operation queue is full"));
+    if (!active()) throw new Error("callback scope is closed");
+    if (pending.size >= 128) throw new Error("host operation queue is full");
     if (!Number.isSafeInteger(sequence + 1)) throw new Error("effect identity space exhausted");
     const id = ++sequence;
     return new Promise((resolve, reject) => {

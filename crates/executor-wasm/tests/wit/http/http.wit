@@ -6,6 +6,21 @@ interface fetcher {
     fetch: async func(scheme: string, authority: string, path: string) -> result<string, string>;
     /// GET and return only the first body chunk, then drop the body before its end.
     first: async func(scheme: string, authority: string, path: string) -> result<string, string>;
+    /// GET and keep the unconsumed response across calls; returns its status.
+    keep: async func(scheme: string, authority: string, path: string) -> result<u16, string>;
+    /// In a later call: consume the kept response, return its first chunk, then close it by
+    /// resolving the response-handling future with an error (as an SDK `close()` does).
+    close-kept: async func() -> result<string, string>;
+    /// Read one chunk, close the response with an error while the body is still held, then
+    /// read again; returns `"<first>|<bytes read after the close>"`.
+    hold-close: async func(scheme: string, authority: string, path: string) -> result<string, string>;
+    /// Read one chunk and return while the body is still open (kept in the component).
+    read-and-keep: async func(scheme: string, authority: string, path: string) -> result<string, string>;
+    /// Read the whole body while the response-handling future stays pending (unwritten).
+    stream-held: async func(scheme: string, authority: string, path: string) -> result<string, string>;
+    /// GET `path` and take its head; then GET `barrier` (its result is ignored) and only after
+    /// it returns read the first response's whole body.
+    read-after-barrier: async func(scheme: string, authority: string, path: string, barrier: string) -> result<string, string>;
 }
 
 world client {

@@ -43,7 +43,13 @@ export async function witTypes(file: string, world?: string): Promise<WitTypes> 
       return [
         name,
         disposable.length
-          ? new TextEncoder().encode(text + "\n" + disposable.join("\n") + "\n")
+          ? new TextEncoder().encode(
+              '/// <reference lib="esnext.disposable" />\n' +
+                text +
+                "\n" +
+                disposable.join("\n") +
+                "\n",
+            )
           : bytes,
       ];
     })
