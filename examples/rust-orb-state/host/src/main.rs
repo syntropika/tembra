@@ -82,6 +82,6 @@ fn call(
 ) -> tembra::Result<Value> {
     let counter = counter.clone();
     pool.run_until(host.root("alice", move |context| {
-        Box::pin(async move { counter.call_value(&context, method, arguments).await })
+        Box::pin(async move { counter.call_portable(&context, method, arguments).await })
     }))
 }

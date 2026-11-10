@@ -135,6 +135,6 @@ fn call(
 ) -> tembra::Result<Value> {
     let reference = reference.clone();
     pool.run_until(host.root("alice", move |context| {
-        Box::pin(async move { reference.call_value(&context, method, arguments).await })
+        Box::pin(async move { reference.call_portable(&context, method, arguments).await })
     }))
 }
