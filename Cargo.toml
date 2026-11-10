@@ -10,6 +10,7 @@ members = [
   "crates/node-binding",
   "crates/executor-wasm",
   "crates/mobile",
+  "crates/orb-macro",
 ]
 resolver = "2"
 exclude = [
