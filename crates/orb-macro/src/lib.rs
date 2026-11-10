@@ -2,10 +2,11 @@
 //!
 //! The module is the source of truth, and every exported thing is marked. A unit struct with
 //! `#[service]` and an `impl` block of `pub fn` becomes an exported interface whose functions are
-//! the Orb's methods. A free `pub fn` with `#[contributes("ns:name/hook@version")]` contributes
-//! to another Orb's hook. Structs with named fields and enums become `record`s, `enum`s and
-//! `variant`s only when a service method uses them, directly or through another type; the rest
-//! of the module stays ordinary Rust.
+//! the Orb's methods. A free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`
+//! participates in another Orb's hook. A struct with named fields and `#[state]` is the
+//! kernel-managed state of a service's objects. Structs with named fields and enums become
+//! `record`s, `enum`s and `variant`s only when a service method or a state uses them, directly
+//! or through another type; the rest of the module stays ordinary Rust.
 //!
 //! The macro derives the WIT contract from those items and generates what a WIT-first crate
 //! writes by hand: the `wit_bindgen::generate!` invocation with the WIT inline, the `Guest`
@@ -13,11 +14,13 @@
 //! prelude for the Wasm target. The hook interfaces come from the provider's WIT, found in the
 //! directory named by `wit = "dir"` on the attribute, relative to the crate manifest; their
 //! generated modules are re-exported under their own names, so the author writes
-//! `guard::Admission`.
+//! `guard::Admission`. The kernel's `tembra:guest` package is bundled with the macro.
 //!
 //! The crate using the macro must depend on `wit-bindgen` (features `macros` and `realloc`) and
-//! `dlmalloc` (feature `global`), because the generated code names them. `cargo tembra build`
-//! compiles the crate, reads the same WIT from the component and packages the artifact.
+//! `dlmalloc` (feature `global`), because the generated code names them; a crate with a state
+//! also depends on `serde` (`derive`, `alloc`) and `serde_json` (`alloc`). `cargo tembra build`
+//! compiles the crate, reads the same WIT and the hook priorities from the component and
+//! packages the artifact.
 mod wit;
 
 use heck::ToSnakeCase;
@@ -26,8 +29,8 @@ use proc_macro2::Span;
 use quote::{format_ident, quote};
 use std::collections::{BTreeMap, BTreeSet};
 use syn::{
-    Attribute, Fields, FnArg, Ident, Item, ItemFn, ItemMod, LitByteStr, LitStr, Pat, ReturnType,
-    Type, Visibility, parse_macro_input, spanned::Spanned,
+    Attribute, Fields, FnArg, Ident, Item, ItemFn, ItemMod, LitByteStr, LitInt, LitStr, Pat,
+    ReturnType, Token, Type, Visibility, parse_macro_input, spanned::Spanned,
 };
 
 /// Declare a compiled Orb from a module; the crate documentation lists the rules.
@@ -84,12 +87,23 @@ struct Function {
     result: Option<(Type, String)>,
 }
 
-/// A hook contribution: a free `pub fn` marked `#[contributes("ns:name/hook@version")]`.
+/// A hook contribution: a free `pub fn` marked `#[hook("ns:name/hook@version", priority = n)]`.
 struct Contribution {
     hook: String,
+    priority: i32,
     ident: Ident,
     param: (Ident, Type),
     result: Option<Type>,
+}
+
+/// A kernel-managed state: a struct with named fields marked `#[state]`, owned by the objects
+/// of one service.
+struct State {
+    ident: Ident,
+    fields: Vec<Ident>,
+    /// The owning service, as named by `service = ...` or resolved to the module's only one.
+    service: Option<Ident>,
+    version: u32,
 }
 
 fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenStream> {
@@ -99,7 +113,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let (namespace, rest) = package
         .split_once(':')
         .ok_or_else(|| syn::Error::new(module.span(), "package must be ns:name@version"))?;
-    let name = rest.split('@').next().unwrap_or(rest);
+    let (name, version) = match rest.split_once('@') {
+        Some((name, version)) => (name, Some(version)),
+        None => (rest, None),
+    };
     let world = wit::kebab(&module.ident);
     let Some((_, items)) = module.content else {
         return Err(syn::Error::new(
@@ -108,23 +125,22 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         ));
     };
 
-    // Read the module: marked services and contributions, candidate types, and everything
-    // else to copy through unchanged.
+    // Read the module: marked services, contributions and states, candidate types, and
+    // everything else to copy through unchanged.
     let mut candidates: Vec<(Item, Shape)> = Vec::new();
     let mut services = Vec::new();
     let mut contributions = Vec::new();
+    let mut states = Vec::new();
     let mut passthrough = Vec::new();
     let mut impls = Vec::new();
     for item in items {
         match item {
             Item::Struct(mut s) => {
                 if let Some(attribute) = take(&mut s.attrs, "state") {
-                    return Err(syn::Error::new(
-                        attribute.span(),
-                        "kernel-managed state is not available to compiled Orbs yet; keep state in statics",
-                    ));
-                }
-                if let Some(attribute) = take(&mut s.attrs, "service") {
+                    states.push(state(&s, &attribute)?);
+                    let shape = wit::record(&s)?;
+                    candidates.push((Item::Struct(s), shape));
+                } else if let Some(attribute) = take(&mut s.attrs, "service") {
                     if !matches!(s.fields, Fields::Unit) {
                         return Err(syn::Error::new(
                             attribute.span(),
@@ -160,8 +176,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
             Item::Fn(mut function) => {
                 if let Some(attribute) = take(&mut function.attrs, "contributes") {
-                    let hook: LitStr = attribute.parse_args()?;
-                    contributions.push(contribution(&function, &hook)?);
+                    return Err(syn::Error::new(
+                        attribute.span(),
+                        "#[contributes] is now #[hook(\"ns:name/hook@version\", priority = n)]",
+                    ));
+                }
+                if let Some(attribute) = take(&mut function.attrs, "hook") {
+                    contributions.push(contribution(&function, &attribute)?);
                 }
                 passthrough.push(Item::Fn(function));
             }
@@ -199,9 +220,22 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             "a service needs at least one pub fn in an impl block",
         ));
     }
-    let hooks: BTreeSet<String> = contributions
+    // The module names the world; WIT refuses a world and an interface with one name.
+    if let Some(service) = services
         .iter()
-        .map(|contribution| contribution.hook.clone())
+        .find(|service| wit::kebab(&service.ident) == world)
+    {
+        return Err(syn::Error::new(
+            service.ident.span(),
+            format!(
+                "`{}` is also the name of the world, taken from the module; rename one of them",
+                service.ident
+            ),
+        ));
+    }
+    let hooks: BTreeMap<String, i32> = contributions
+        .iter()
+        .map(|contribution| (contribution.hook.clone(), contribution.priority))
         .collect();
     if hooks.len() != contributions.len() {
         return Err(syn::Error::new(
@@ -209,15 +243,48 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             "one contribution per hook",
         ));
     }
+    // Each state belongs to the objects of one service, and an object declares exactly one state.
+    let mut owners = BTreeMap::new();
+    for state in &mut states {
+        let owner = match &state.service {
+            Some(ident) => services
+                .iter()
+                .find(|service| &service.ident == ident)
+                .ok_or_else(|| {
+                    syn::Error::new(
+                        ident.span(),
+                        format!("`{ident}` is not a #[service] of this module"),
+                    )
+                })?,
+            None if services.len() == 1 => &services[0],
+            None => {
+                return Err(syn::Error::new(
+                    state.ident.span(),
+                    "name the service whose objects own this state: #[state(service = Name)]",
+                ));
+            }
+        };
+        if let Some(previous) = owners.insert(owner.ident.to_string(), state.ident.to_string()) {
+            return Err(syn::Error::new(
+                state.ident.span(),
+                format!(
+                    "`{}` already owns the state `{previous}`; an object declares exactly one state, so group the fields in one struct",
+                    owner.ident
+                ),
+            ));
+        }
+        state.service = Some(owner.ident.clone());
+    }
 
-    // Only the types a service method uses, directly or through another type, enter the WIT.
-    let shapes = reachable(candidates, &services, &mut passthrough)?;
+    // Only the types a service method or a state uses, directly or through another type, enter
+    // the WIT.
+    let shapes = reachable(candidates, &services, &states, &mut passthrough)?;
 
     // Consumed packages: the hook callbacks are read from the provider's WIT.
     let wit_dir = options.wit.as_deref().map(wit::absolute).transpose()?;
     let callbacks = match (&wit_dir, hooks.is_empty()) {
         (_, true) => Default::default(),
-        (Some(dir), false) => wit::callbacks(dir, &hooks)?,
+        (Some(dir), false) => wit::callbacks(dir, hooks.keys())?,
         (None, false) => {
             return Err(syn::Error::new(
                 Span::call_site(),
@@ -225,7 +292,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             ));
         }
     };
-    let wit = wit::render(&package, &world, &shapes, &services, &hooks);
+    let wit = wit::render(
+        &package,
+        &world,
+        &shapes,
+        &services,
+        hooks.keys(),
+        !states.is_empty(),
+    );
 
     // Generate the Rust side: the bindings from the inline WIT, the author's types replaced by
     // the generated ones, the bridges to the author's functions, and the no_std prelude.
@@ -270,7 +344,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     });
     // Each hook's generated module is re-exported under its interface name, and its callback
     // forwards to the author's function.
-    let hook_modules = hooks.iter().map(|hook| {
+    let hook_modules = hooks.keys().map(|hook| {
         let [ns, package, interface] = hook_path(hook);
         quote! { pub use exports::#ns::#package::#interface; }
     });
@@ -290,19 +364,56 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     });
+    // The priorities travel with the component, like the WIT.
+    let hooks_section = if hooks.is_empty() {
+        quote! {}
+    } else {
+        let json = format!(
+            "{{{}}}",
+            hooks
+                .iter()
+                .map(|(hook, priority)| format!("\"{hook}\":{priority}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let bytes = LitByteStr::new(json.as_bytes(), Span::call_site());
+        let len = proc_macro2::Literal::usize_unsuffixed(json.len());
+        quote! {
+            #[cfg(target_arch = "wasm32")]
+            #[unsafe(link_section = "tembra:hooks")]
+            #[used]
+            static __TEMBRA_HOOKS: [u8; #len] = *#bytes;
+        }
+    };
+    let state_code = state_code(&states, &package, name, version);
     let wit_literal = LitStr::new(&wit, Span::call_site());
     let wit_bytes = LitByteStr::new(wit.as_bytes(), Span::call_site());
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
     let world_literal = LitStr::new(&world, Span::call_site());
-    let generate = match &wit_dir {
-        Some(dir) => {
-            let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
-            // Foreign interfaces need `generate_all`, or wit-bindgen asks for a `with` mapping.
-            quote! { ::wit_bindgen::generate!({ path: #dir, inline: #wit_literal, world: #world_literal, generate_all }); }
-        }
-        None => {
-            quote! { ::wit_bindgen::generate!({ inline: #wit_literal, world: #world_literal }); }
-        }
+    // The bindings read the author's WIT and, nested in it, the kernel package a state uses; the
+    // hook packages come from the consumed directory. Foreign interfaces need `generate_all`.
+    let inline = if states.is_empty() {
+        wit_literal.clone()
+    } else {
+        LitStr::new(
+            &format!("{wit}\n{}", wit::guest_package()),
+            Span::call_site(),
+        )
+    };
+    let path = wit_dir.as_ref().map(|dir| {
+        let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
+        quote! { path: #dir, }
+    });
+    let derives = (!states.is_empty())
+        .then(|| quote! { additional_derives: [::serde::Serialize, ::serde::Deserialize], });
+    let generate = quote! {
+        ::wit_bindgen::generate!({
+            #path
+            inline: #inline,
+            world: #world_literal,
+            generate_all,
+            #derives
+        });
     };
     Ok(quote! {
         #(#attrs)*
@@ -330,6 +441,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             #[used]
             static __TEMBRA_WIT: [u8; #wit_len] = *#wit_bytes;
 
+            #hooks_section
+
             #generate
 
             #reexports
@@ -340,6 +453,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             struct __TembraExports;
             #(#bridges)*
             #(#contribution_bridges)*
+            #state_code
             export!(__TembraExports);
         }
     })
@@ -351,11 +465,13 @@ fn take(attrs: &mut Vec<Attribute>, name: &str) -> Option<Attribute> {
     Some(attrs.remove(index))
 }
 
-/// Keep, in module order, the candidate types that a service method reaches; the others go back
-/// to the module as ordinary Rust. A reference to a type the module does not declare is an error.
+/// Keep, in module order, the candidate types that a service method or a state reaches; the
+/// others go back to the module as ordinary Rust. A reference to a type the module does not
+/// declare is an error.
 fn reachable(
     candidates: Vec<(Item, Shape)>,
     services: &[Service],
+    states: &[State],
     passthrough: &mut Vec<Item>,
 ) -> syn::Result<Vec<Shape>> {
     let declared: BTreeMap<String, usize> = candidates
@@ -363,7 +479,7 @@ fn reachable(
         .enumerate()
         .map(|(index, (_, shape))| (shape.ident.to_string(), index))
         .collect();
-    let mut pending: Vec<Ident> = Vec::new();
+    let mut pending: Vec<Ident> = states.iter().map(|state| state.ident.clone()).collect();
     for service in services {
         for function in &service.functions {
             for (_, ty, _) in &function.params {
@@ -436,10 +552,30 @@ fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
     })
 }
 
-/// Read a hook contribution: a `pub fn` taking the hook input and returning its output.
-fn contribution(function: &ItemFn, hook: &LitStr) -> syn::Result<Contribution> {
+/// Read a hook contribution: a `pub fn` taking the hook input and returning its output, with the
+/// hook's name and an optional priority (default 0) on the attribute.
+fn contribution(function: &ItemFn, attribute: &Attribute) -> syn::Result<Contribution> {
+    let (hook, priority) = attribute.parse_args_with(|input: syn::parse::ParseStream| {
+        let hook: LitStr = input.parse()?;
+        let mut priority = 0;
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            let key: Ident = input.parse()?;
+            if key != "priority" {
+                return Err(syn::Error::new(
+                    key.span(),
+                    "unknown option; use #[hook(\"ns:name/hook@version\", priority = n)]",
+                ));
+            }
+            input.parse::<Token![=]>()?;
+            let negative = input.parse::<Option<Token![-]>>()?.is_some();
+            let value: i32 = input.parse::<LitInt>()?.base10_parse()?;
+            priority = if negative { -value } else { value };
+        }
+        Ok((hook, priority))
+    })?;
     let id = hook.value();
-    if !id.contains(':') || !id.contains('/') {
+    if !id.contains(':') || !id.contains('/') || id.contains(['"', '\\']) {
         return Err(syn::Error::new(
             hook.span(),
             "a hook is named ns:name/interface@version",
@@ -466,10 +602,146 @@ fn contribution(function: &ItemFn, hook: &LitStr) -> syn::Result<Contribution> {
     };
     Ok(Contribution {
         hook: id,
+        priority,
         ident: function.sig.ident.clone(),
         param: (pat.ident.clone(), (*typed.ty).clone()),
         result: result(&function.sig.output).cloned(),
     })
+}
+
+/// Read a state: a struct with named fields, the owning service and the version (default 1).
+fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
+    let Fields::Named(fields) = &item.fields else {
+        return Err(syn::Error::new(
+            attribute.span(),
+            "a state is a struct with named fields",
+        ));
+    };
+    let mut service = None;
+    let mut version = 1;
+    if !matches!(attribute.meta, syn::Meta::Path(_)) {
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("service") {
+                service = Some(meta.value()?.parse::<Ident>()?);
+            } else if meta.path.is_ident("version") {
+                let literal: LitInt = meta.value()?.parse()?;
+                version = literal.base10_parse::<u32>()?;
+                if version == 0 {
+                    return Err(syn::Error::new(literal.span(), "versions start at 1"));
+                }
+            } else {
+                return Err(meta.error("unknown option; use #[state(service = Name, version = n)]"));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(State {
+        ident: item.ident.clone(),
+        fields: fields
+            .named
+            .iter()
+            .filter_map(|field| field.ident.clone())
+            .collect(),
+        service,
+        version,
+    })
+}
+
+/// The Rust side of the states: the kernel's `state-init` callback answering one declaration per
+/// owning service, the accessors on each state type, and the JSON helpers they share.
+fn state_code(
+    states: &[State],
+    package: &str,
+    name: &str,
+    version: Option<&str>,
+) -> proc_macro2::TokenStream {
+    if states.is_empty() {
+        return quote! {};
+    }
+    let package_name = package.split('@').next().unwrap_or(package);
+    let _ = name;
+    let declarations = states.iter().map(|state| {
+        let service = state.service.as_ref().expect("resolved owner");
+        let identity = match version {
+            Some(version) => format!("{package_name}/{}@{version}", wit::kebab(service)),
+            None => format!("{package_name}/{}", wit::kebab(service)),
+        };
+        let identity = LitStr::new(&identity, Span::call_site());
+        let ident = &state.ident;
+        let version = state.version;
+        quote! {
+            #identity => Some(exports::tembra::guest::state_init::Declaration {
+                initial: __tembra_state::to_json(&<#ident as ::core::default::Default>::default()),
+                version: #version,
+            }),
+        }
+    });
+    let accessors = states.iter().map(|state| {
+        let ident = &state.ident;
+        let fields = &state.fields;
+        let service = state.service.as_ref().expect("resolved owner").to_string();
+        let read_doc = format!(
+            " The state of the `{service}` object running the current call, read from the kernel."
+        );
+        let update_doc = format!(
+            " Change the state of the `{service}` object running the current call and store it in the kernel; returns the stored value."
+        );
+        quote! {
+            impl ::core::default::Default for #ident {
+                fn default() -> Self {
+                    Self { #(#fields: ::core::default::Default::default()),* }
+                }
+            }
+            impl #ident {
+                #[doc = #read_doc]
+                pub fn read() -> Self {
+                    __tembra_state::read()
+                }
+                #[doc = #update_doc]
+                pub fn update(change: impl FnOnce(&mut Self)) -> Self {
+                    let mut value = Self::read();
+                    change(&mut value);
+                    __tembra_state::update(&value)
+                }
+            }
+        }
+    });
+    quote! {
+        // The kernel asks for each service object's state when it creates the object.
+        impl exports::tembra::guest::state_init::Guest for __TembraExports {
+            fn declare(
+                service: __tembra_state::String,
+            ) -> Option<exports::tembra::guest::state_init::Declaration> {
+                match service.as_str() {
+                    #(#declarations)*
+                    _ => None,
+                }
+            }
+        }
+        #(#accessors)*
+        /// The kernel keeps a state as JSON; serde maps it to the state type and back.
+        #[doc(hidden)]
+        pub mod __tembra_state {
+            extern crate alloc;
+            pub use alloc::string::String;
+
+            pub fn read<T: ::serde::de::DeserializeOwned>() -> T {
+                parse(&super::tembra::guest::state::read())
+            }
+
+            pub fn update<T: ::serde::Serialize + ::serde::de::DeserializeOwned>(value: &T) -> T {
+                parse(&super::tembra::guest::state::update(&to_json(value)))
+            }
+
+            pub fn to_json<T: ::serde::Serialize>(value: &T) -> String {
+                ::serde_json::to_string(value).expect("a state serializes to JSON")
+            }
+
+            fn parse<T: ::serde::de::DeserializeOwned>(text: &str) -> T {
+                ::serde_json::from_str(text).expect("the kernel state has the shape of this type")
+            }
+        }
+    }
 }
 
 /// The declared result type, with `()` read as no result.
