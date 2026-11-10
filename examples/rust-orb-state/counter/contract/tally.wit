@@ -4,11 +4,11 @@ package example:counter@1.0.0;
 interface counter {
   /// The state of one counter object: its total and the number of additions made.
   record count {
-    total: s32,
+    total: s64,
     steps: u32,
   }
   /// Add `by` to the count and return the new count.
-  add: func(by: s32) -> count;
+  add: func(by: s64) -> count;
   /// The count so far.
   read: func() -> count;
 }

@@ -35,9 +35,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })?;
 
+    // Five billion does not fit in 32 bits: the boundary carries 64-bit integers exactly.
+    let five_billion = json!([5_000_000_000_i64]);
     println!(
-        "add(5)           -> {}",
-        call(&mut pool, &host, &counter, "add", json!([5]))?
+        "add(5000000000)  -> {}",
+        call(&mut pool, &host, &counter, "add", five_billion)?
     );
     println!(
         "add(-2)          -> {}",
