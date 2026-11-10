@@ -9,11 +9,11 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
-# Read by `cargo tembra build`: the Orb name and API version, and the priority of its contribution.
+# Read by `cargo tembra build`: the Orb name and API version, which the WIT does not carry. The
+# priority of the hook contribution is on the #[hook] attribute and travels in the component.
 [package.metadata.tembra]
 name = "filter"
 api-version = 1
-contributes = { "example:admission/guard@1.0.0" = -7 }
 
 [dependencies]
 tembra-orb-macro = { path = "../../../crates/orb-macro" }

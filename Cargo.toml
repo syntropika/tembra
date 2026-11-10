@@ -26,6 +26,8 @@ exclude = [
   "examples/rust-orb/host",
   "examples/rust-orb-hooks/filter",
   "examples/rust-orb-hooks/host",
+  "examples/rust-orb-state/counter",
+  "examples/rust-orb-state/host",
 ]
 
 [workspace.package]
