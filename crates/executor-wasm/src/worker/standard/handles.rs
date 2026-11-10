@@ -142,7 +142,7 @@ pub(super) fn next_identity(counter: &AtomicU64) -> wasmtime::Result<u64> {
 
 /// One unit of the open-file budget: a unit of this revision's private share and a unit of the
 /// process-wide pool, released together when the descriptor or stream object drops.
-pub(super) struct FilePermit {
+pub(crate) struct FilePermit {
     _revision: tokio::sync::OwnedSemaphorePermit,
     _process: tokio::sync::OwnedSemaphorePermit,
 }
@@ -431,6 +431,23 @@ impl Handles {
             _revision: revision,
             _process: process,
         })
+    }
+
+    /// Wait for one unit of the open-file budget (an adapter pump reserving it before it pulls
+    /// the next accepted socket); the OS backlog queues peers meanwhile.
+    pub(super) fn file_waiter(
+        &self,
+    ) -> impl std::future::Future<Output = FilePermit> + Send + use<> {
+        let share = Arc::clone(&self.share);
+        let files = Arc::clone(&self.files);
+        async move {
+            let revision = share.acquire_owned().await.expect("budget is never closed");
+            let process = files.acquire_owned().await.expect("budget is never closed");
+            FilePermit {
+                _revision: revision,
+                _process: process,
+            }
+        }
     }
 
     /// Budget for upstream stream objects of one Store-method call, taken before upstream

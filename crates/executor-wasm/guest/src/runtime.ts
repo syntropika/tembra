@@ -13,7 +13,6 @@ import "./builtins.ts";
   const resourceMarker = Symbol("tembra-resource");
   const wire = globalThis.__tembraValues;
   const stateValues = globalThis.__tembraState;
-  const imports = new Set(globalThis.__tembraContract.imports.map((item) => item.contract));
   const sweepStandard = globalThis.__tembraSweepStandard!;
   delete globalThis.__tembraSweepStandard;
   const writeLog = globalThis.__writeLog!;
@@ -412,32 +411,6 @@ import "./builtins.ts";
     }
   };
 
-  /** Largest byte chunk carried by one transport read or write. */
-  const TRANSPORT_CHUNK_BYTES = 16 * 1024;
-
-  /**
-   * Wrap a host-issued stream identity. The identity selects only this Orb's streams of the
-   * active callback; the host closes every stream when that callback completes.
-   */
-  function transportStream(id: number): TransportStream {
-    return Object.freeze({
-      async read() {
-        const bytes: number[] | null = await call("transport.read", { id });
-        return bytes === null ? null : Uint8Array.from(bytes);
-      },
-      async write(bytes: Uint8Array) {
-        if (!(bytes instanceof Uint8Array))
-          throw new TypeError("Transport writes require a Uint8Array");
-        if (bytes.length > TRANSPORT_CHUNK_BYTES)
-          throw new RangeError("Transport writes are limited to 16 KiB per call");
-        await call("transport.write", { id, bytes: Array.from(bytes) });
-      },
-      async close() {
-        await call("transport.close", { id });
-      },
-    });
-  }
-
   globalThis.__tembraAbandon = () => {
     activeCallback = null;
     // An abandoned callback's pumps end too; the host closes any writer this cannot reach.
@@ -452,15 +425,5 @@ import "./builtins.ts";
     wait(milliseconds: number) {
       return call("wait", { milliseconds });
     },
-    ...(imports.has("wasi:sockets/types@0.3.0")
-      ? {
-          transport: Object.freeze({
-            /** Open one incremental byte stream to an exactly granted literal address. */
-            async connect(ip: string, port: number): Promise<TransportStream> {
-              return transportStream(await call("transport.connect", { ip, port }));
-            },
-          }),
-        }
-      : {}),
   });
 })();

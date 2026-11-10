@@ -10,6 +10,7 @@ import {
 } from "../src/browser.ts";
 import type { OrbArtifact } from "../src/authoring/types.ts";
 import { verifyHttpScenario, verifyRawHttpScenario } from "./http-browser.ts";
+import { verifySocketScenario } from "./sockets-browser.ts";
 
 /** Fetch one prepared qualification artifact from the test server. */
 async function source(name: string): Promise<Uint8Array> {
@@ -400,6 +401,7 @@ export async function verifyStandardScenario(engine?: URL): Promise<string[]> {
     await systemOn(engine),
     await verifyHttpScenario(engine),
     await verifyRawHttpScenario(engine),
+    await verifySocketScenario(engine),
   ];
   const pattern = Uint8Array.from({ length: 4100 }, (_, index) => index % 256);
   const root = await navigator.storage.getDirectory();

@@ -43,13 +43,13 @@ final class Execution: @unchecked Sendable {
     func releaseArtifact(_ id: String) throws { _ = try live { artifacts.removeValue(forKey: id) } }
 
     /** Open one fresh source or compiled Store after checking installation authority. */
-    func open(_ id: String, bindings: String, grants: String) throws -> String {
+    func open(_ id: String, bindings: String, grants: String, cli: String) throws -> String {
         let (engine, artifact) = try live { () throws -> (NativeInterpreter, NativeArtifact) in
             guard let engine, let artifact = artifacts[id] else { throw MobileError.Closed }
             return (engine, artifact)
         }
         let id = UUID().uuidString
-        let port = try engine.open(artifact: artifact, bindings: bindings, grants: grants)
+        let port = try engine.open(artifact: artifact, bindings: bindings, grants: grants, cli: cli)
         try live { ports[id] = port }
         return id
     }

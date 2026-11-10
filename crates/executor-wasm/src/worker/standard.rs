@@ -11,10 +11,12 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+pub(crate) mod adapter;
 mod codec;
 mod handles;
 mod streams;
 
+pub(crate) use adapter::{Compiled as StreamAdapter, attribute as attribute_trap};
 use codec::{Reader, Writer};
 use handles::{Close, Entry, Handles, Lease, Owned};
 use streams::{
@@ -93,10 +95,17 @@ pub(super) type Spawn =
 /// One admitted asynchronous packet: its Store task, the borrows it holds, and its reply.
 pub(super) type Admitted = (JoinHandle, Vec<Arc<Lease>>, Completion);
 
+/// The encoded reply of a WIT-synchronous call whose upstream implementation is Rust-`async`.
+pub(super) type Awaited<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = wasmtime::Result<Vec<u8>>> + Send + 'a>>;
+
 /// Result of decoding and validating one generated call.
-pub(super) enum Call {
+pub(super) enum Call<'a> {
     /// A WIT-synchronous result.
     Ready(Vec<u8>),
+    /// A WIT-synchronous result awaited while the guest stays suspended on the synchronous
+    /// import (upstream awaits address checks, socket readiness or a listener).
+    Await(Awaited<'a>),
     /// A WIT `async func` that completes on a later Store turn, with the borrows it holds.
     Spawn(Spawn, Vec<Arc<Lease>>),
 }
@@ -104,6 +113,8 @@ pub(super) enum Call {
 /// Per-Store standard WASI state.
 pub(crate) struct Standard {
     handles: Handles,
+    /// The private stream adapter of socket output streams (lazily instantiated).
+    adapter: adapter::Adapter<State>,
     /// Interfaces imported by this Orb's checked contract; everything else is refused.
     allowed: BTreeSet<String>,
     /// An upstream trap quarantines this revision even if guest code catches its reply.
@@ -112,9 +123,14 @@ pub(crate) struct Standard {
 
 impl Standard {
     /// Admit only interfaces the Orb imported and was granted at installation.
-    pub(crate) fn new(allowed: BTreeSet<String>, files: crate::engine::FileBudget) -> Self {
+    pub(crate) fn new(
+        allowed: BTreeSet<String>,
+        files: crate::engine::FileBudget,
+        adapter: Arc<StreamAdapter>,
+    ) -> Self {
         Self {
             handles: Handles::with_files(files),
+            adapter: adapter::Adapter::new(adapter),
             allowed,
             trapped: None,
         }
@@ -229,6 +245,7 @@ fn release(state: &mut State, id: u64) -> wasmtime::Result<()> {
 /// other resources through their `Host` drop, and unpublished handles are released. Closing may
 /// queue more work (a released request handle), so this runs until the queue is empty.
 pub(super) fn close_queued(mut store: StoreContextMut<'_, State>) -> wasmtime::Result<()> {
+    adapter::close_unopened(store.as_context_mut())?;
     loop {
         let queued = std::mem::take(
             &mut *store
@@ -357,12 +374,14 @@ fn method(state: &State, reader: &mut Reader<'_>, asynchronous: bool) -> wasmtim
     Ok(method)
 }
 
-/// Serve one WIT-synchronous standard packet while the guest stack waits.
-pub(super) fn synchronous(
+/// Serve one WIT-synchronous standard packet while the guest stack waits. Almost every call
+/// completes in its first poll; Rust-`async` upstream functions keep the guest suspended on its
+/// fiber until they finish, which preserves WIT synchronous semantics.
+pub(super) async fn synchronous(
     mut store: StoreContextMut<'_, State>,
     packet: &[u8],
 ) -> wasmtime::Result<Result<Vec<u8>, String>> {
-    let result = (|| -> wasmtime::Result<Vec<u8>> {
+    let result = async {
         let mut reader = Reader(packet.get(1..).unwrap_or_default());
         match reader.u8()? {
             CALL => {
@@ -372,6 +391,7 @@ pub(super) fn synchronous(
                 let index = method(store.data(), &mut reader, false)?;
                 let bytes = match dispatch(index, &mut reader, store.as_context_mut()) {
                     Ok(Call::Ready(bytes)) => Ok(bytes),
+                    Ok(Call::Await(reply)) => reply.await,
                     Ok(Call::Spawn(..)) => Err(invalid("asynchronous call reached the sync path")),
                     Err(error) => Err(error),
                 };
@@ -435,13 +455,25 @@ pub(super) fn synchronous(
             }
             _ => Err(invalid("unknown standard operation")),
         }
-    })();
+    }
+    .await;
     close_queued(store.as_context_mut())?;
     match result {
         Ok(bytes) => Ok(Ok(bytes)),
         Err(error) if error.is::<Refused>() => Ok(Err(error.to_string())),
         Err(error) => Err(error),
     }
+}
+
+/// Serve a synchronous packet that must complete in its first poll (tests of calls that never
+/// suspend).
+#[cfg(test)]
+pub(super) fn synchronous_now(
+    store: StoreContextMut<'_, State>,
+    packet: &[u8],
+) -> wasmtime::Result<Result<Vec<u8>, String>> {
+    futures::FutureExt::now_or_never(synchronous(store, packet))
+        .expect("synchronous standard call completes in its first poll")
 }
 
 /// Admit one asynchronous standard packet as a Store task owned by the current callback.
@@ -461,13 +493,12 @@ pub(super) fn spawn(
         let handle = match reader.u8()? {
             CALL => {
                 let index = method(store.data(), &mut reader, true)?;
-                match dispatch(index, &mut reader, store.as_context_mut())? {
-                    Call::Spawn(spawn, lent) => {
-                        leases = lent;
-                        spawn(store.as_context_mut(), reply)?
-                    }
+                let (spawn, lent) = match dispatch(index, &mut reader, store.as_context_mut())? {
+                    Call::Spawn(spawn, lent) => (spawn, lent),
                     _ => return Err(invalid("synchronous call reached the async path")),
-                }
+                };
+                leases = lent;
+                spawn(store.as_context_mut(), reply)?
             }
             STREAM_READ => {
                 let id = reader.u64()?;
@@ -480,18 +511,38 @@ pub(super) fn spawn(
                     return Err(invalid("handle is not a live readable stream"));
                 };
                 let pipe = Arc::clone(pipe);
+                let closing = Arc::clone(&store.data().standard.handles.closing);
                 // Queued at admission, so concurrent reads of one stream are served in guest
                 // order and an aborted, never polled read still leaves the queue.
                 let turn = ReadTurn::begin(Arc::clone(&pipe));
                 store.as_context_mut().spawn(
                     async move |_: &wasmtime::component::Accessor<State>| {
-                        let value = read_stream(turn, limit, packet_bytes).await;
-                        if let Some(reply) = reply
-                            && let Err(Ok(_)) =
-                                reply.send(bounded(value, packet_bytes, Some(&pipe)))
-                        {
-                            // The callback owner is gone: the drained data can never be delivered.
-                            pipe.lock().expect("pipe").abandon();
+                        let (value, issued) = read_stream(turn, limit, packet_bytes).await;
+                        // Handles of drained items are published with this reply; a reply that
+                        // cannot be delivered releases them, and an undelivered drain poisons
+                        // the stream instead of skipping its data.
+                        let delivery =
+                            bounded(value, packet_bytes, Some(&pipe)).map(|mut delivery| {
+                                delivery.issued = issued.clone();
+                                delivery
+                            });
+                        let delivered = match (reply, delivery) {
+                            (Some(reply), Ok(delivery)) => {
+                                let sent = reply.send(Ok(delivery)).is_ok();
+                                if !sent {
+                                    pipe.lock().expect("pipe").abandon();
+                                }
+                                sent
+                            }
+                            (Some(reply), Err(error)) => {
+                                let _ = reply.send(Err(error));
+                                false
+                            }
+                            (None, _) => false,
+                        };
+                        if !delivered && !issued.is_empty() {
+                            let mut closing = closing.lock().expect("closing");
+                            closing.extend(issued.into_iter().map(Close::Handle));
                         }
                         Ok(())
                     },
@@ -552,6 +603,25 @@ pub(super) fn spawn(
         Err(error) if error.is::<Refused>() => Ok(Err(error.to_string())),
         Err(error) => Err(error),
     }
+}
+
+/// Start the adapter pumps of socket output streams bound since the last Store turn, so the turn
+/// that serves their reads also feeds them.
+pub(super) async fn start_streams(store: &mut wasmtime::Store<State>) -> wasmtime::Result<()> {
+    if adapter::pending(store.data()) {
+        adapter::start(store).await?;
+    }
+    // A socket that connects in this turn prepares its send writer in the adapter, so Orbs that
+    // import sockets have it before their first turn; other Orbs never instantiate it.
+    if uses_sockets(store.data()) {
+        adapter::instantiate(store).await?;
+    }
+    Ok(())
+}
+
+/// Whether this revision imports TCP sockets (and so may send through the stream adapter).
+fn uses_sockets(state: &State) -> bool {
+    state.standard.allowed.contains("wasi:sockets/types@0.3.0")
 }
 
 /// Callback-owned Store tasks that may still be running; dropping the owner aborts them and ends
@@ -627,13 +697,25 @@ pub(super) async fn retire(
     // returned, reactor connect futures dropped) before the callback retires.
     store.data().transport.commands.end();
     let store_work = store.data().transport.store_work.clone();
-    if handles.is_empty() && !store.data_mut().standard.handles.purge() {
+    // Streams this callback dropped whose pump has not finished closing them. Pumps of streams
+    // the guest retains are revision resources and are not waited for.
+    let closing = store.data().standard.adapter.closing.clone();
+    if handles.is_empty()
+        && !store.data_mut().standard.handles.purge()
+        && closing.live() == 0
+        && !adapter::stale(store.data_mut())
+    {
         store_work.settled().await;
         return Ok(());
     }
     let files = uses_filesystem(store.data());
     let turn = store.run_concurrent(async |access| {
         futures::future::join_all(handles).await;
+        // Each closing pump finishes inside this turn: its adapter `close`, its in-flight read
+        // and the pump itself. The callback deadline bounds the wait.
+        closing.settled().await;
+        // Send writers prepared for sockets the guest dropped without sending close now.
+        adapter::sweep(access).await?;
         // Settle until no detached host state remains. The remaining work (detached entries
         // plus accepted input bytes upstream has not consumed) never grows here, because no
         // guest code runs, so the loop ends after at most SETTLE_POLLS polls per unit of
@@ -687,6 +769,8 @@ mod filesystem_qualification;
 mod http_qualification;
 #[cfg(test)]
 mod qualification;
+#[cfg(test)]
+mod sockets_qualification;
 #[cfg(test)]
 mod system_qualification;
 

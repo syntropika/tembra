@@ -5,6 +5,7 @@ mod abi;
 mod adapter;
 mod bindings;
 mod component;
+mod dns;
 mod engine;
 mod http;
 mod install;
@@ -12,6 +13,7 @@ mod io;
 mod port;
 mod protocol;
 mod providers;
+mod sockets;
 mod stdio;
 mod worker;
 // The build script's generator qualification rules are unit-tested with the host.
@@ -22,8 +24,6 @@ mod codegen;
 
 pub use engine::{Engine, Limits, LogRecord};
 pub use install::{Cli, Input, Install, Output, ReaderFactory, WriterFactory};
-#[doc(hidden)]
-pub use io::IoOperation;
 #[doc(hidden)]
 pub use port::{InterpreterPort, PortEvent, PortEvents, PortReply, PortTicket};
 pub use providers::{

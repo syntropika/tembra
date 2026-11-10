@@ -106,7 +106,7 @@ struct Groups {
     pending: Option<Bound>,
     bound: HashMap<TaskGroupId, Bound>,
     /// The session's callback epochs; the caller's cancellation ends the call's epoch.
-    scope: crate::io::Streams,
+    scope: crate::io::CallbackScope,
 }
 
 struct Hook(Arc<Mutex<Groups>>);
@@ -154,7 +154,7 @@ impl TaskGroupHook for Hook {
     }
 }
 
-struct State {
+pub(crate) struct State {
     wasi: WasiCtx,
     http: WasiHttpCtx,
     hooks: crate::http::Hooks,
@@ -164,6 +164,71 @@ struct State {
     limits: StoreLimits,
     groups: Arc<Mutex<Groups>>,
     packet_bytes: usize,
+    /// Whether the provider bound to `wasi:sockets/ip-name-lookup` grants name resolution.
+    resolve: bool,
+    /// The private stream adapter of socket output streams; instantiated only for components
+    /// that import `wasi:sockets/types`.
+    adapter: crate::worker::stream_adapter::Adapter<State>,
+}
+
+impl crate::worker::stream_adapter::AdapterStore for State {
+    type Permit = ();
+
+    const GUEST_STREAMS: bool = true;
+
+    /// Socket streams and sends belong to the call that uses them, at the same boundary as HTTP
+    /// bodies.
+    fn commands(&self) -> &crate::http::Commands {
+        &self.transport.commands
+    }
+
+    fn adapter(&mut self) -> &mut crate::worker::stream_adapter::Adapter<Self> {
+        &mut self.adapter
+    }
+
+    fn linked(
+        compiled: &crate::worker::StreamAdapter,
+    ) -> &std::sync::OnceLock<Result<wasmtime::component::InstancePre<Self>, String>> {
+        &compiled.compiled
+    }
+}
+
+impl crate::dns::DnsView for State {
+    fn dns(&mut self) -> crate::dns::Lookup<'_> {
+        crate::dns::Lookup {
+            allowed: self.resolve,
+            transport: &self.transport,
+        }
+    }
+}
+
+impl crate::sockets::CallCancellation for State {
+    /// The cancellation of the call whose task group is running, exactly as HTTP admits it.
+    fn cancellation(&mut self) -> Option<crate::http::Cancelled> {
+        crate::http::Authority::admit(&GroupAuthority(self.groups.clone()))
+            .ok()
+            .and_then(|admission| admission.cancelled)
+    }
+}
+
+/// Link upstream WASI interface by interface, with name lookup served by Tembra's tracked
+/// resolver instead of upstream's untracked lookup jobs, and socket waits released by the
+/// caller's cancellation.
+fn link_wasi(linker: &mut Linker<State>) -> wasmtime::Result<()> {
+    use wasmtime_wasi::p3;
+    p3::clocks::add_to_linker(linker)?;
+    p3::random::add_to_linker(linker)?;
+    p3::cli::add_to_linker(linker)?;
+    p3::filesystem::add_to_linker(linker)?;
+    // Upstream sockets, with pending operations released by the caller's cancellation.
+    p3::bindings::sockets::types::add_to_linker::<State, crate::sockets::CallSockets>(
+        linker,
+        <State as wasmtime_wasi::sockets::WasiSocketsView>::sockets,
+    )?;
+    p3::bindings::sockets::ip_name_lookup::add_to_linker::<State, crate::dns::Dns>(
+        linker,
+        <State as crate::dns::DnsView>::dns,
+    )
 }
 
 impl WasiView for State {
@@ -276,12 +341,12 @@ struct Environments {
 pub(crate) async fn run(
     engine: Engine,
     component: Component,
-    wasi: WasiCtxBuilder,
+    wasi: (WasiCtxBuilder, bool),
     grants: Arc<crate::Grants>,
     layout: Layout,
     ready: mpsc::Sender<std::result::Result<(), String>>,
     // The session's callback epochs travel with its command queue.
-    calls: (mpsc::Receiver<Command>, crate::io::Streams),
+    calls: (mpsc::Receiver<Command>, crate::io::CallbackScope),
 ) -> Terminal {
     let transport = crate::http::Transport::default();
     let terminal = live(
@@ -304,12 +369,12 @@ async fn live(
     (engine, component, wasi, grants, layout): (
         Engine,
         Component,
-        WasiCtxBuilder,
+        (WasiCtxBuilder, bool),
         Arc<crate::Grants>,
         Layout,
     ),
     ready: mpsc::Sender<std::result::Result<(), String>>,
-    (commands, scope): (mpsc::Receiver<Command>, crate::io::Streams),
+    (commands, scope): (mpsc::Receiver<Command>, crate::io::CallbackScope),
     transport: &crate::http::Transport,
 ) -> Terminal {
     let groups = Arc::new(Mutex::new(Groups {
@@ -361,14 +426,14 @@ async fn live(
 async fn instantiate(
     engine: &Engine,
     component: &Component,
-    mut wasi: WasiCtxBuilder,
+    (mut wasi, resolve): (WasiCtxBuilder, bool),
     grants: Arc<crate::Grants>,
     layout: &Layout,
     groups: &Arc<Mutex<Groups>>,
     transport: &crate::http::Transport,
 ) -> wasmtime::Result<(Store<State>, BTreeMap<(String, String), Func>)> {
     let mut linker = Linker::<State>::new(&engine.engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    link_wasi(&mut linker)?;
     // Linking grants nothing: installation requires an HTTP grant for each wasi:http import and
     // every request is checked against its granted origins.
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
@@ -390,12 +455,25 @@ async fn instantiate(
                 .build(),
             groups: groups.clone(),
             packet_bytes: engine.limits.packet_bytes,
+            resolve,
+            adapter: crate::worker::stream_adapter::Adapter::new(Arc::clone(
+                &engine.stream_adapter,
+            )),
         },
     );
     store.limiter(|state| &mut state.limits);
     store.set_fuel(engine.limits.fuel)?;
     store.fuel_async_yield_interval(Some(10_000))?;
     store.task_group_hook(Hook(groups.clone()));
+    // Components that import sockets get the stream adapter before they are instantiated, so
+    // socket streams opened or sent while the component initializes take the same route.
+    let sockets = component
+        .component_type()
+        .imports(&engine.engine)
+        .any(|(name, _)| name.starts_with("wasi:sockets/types@"));
+    if sockets {
+        crate::worker::stream_adapter::instantiate(&mut store).await?;
+    }
     let instance = tokio::time::timeout(
         std::time::Duration::from_millis(engine.limits.timeout_ms),
         linker.instantiate_async(&mut store, component),
@@ -739,6 +817,7 @@ async fn invoke(
     let cancelled = futures::FutureExt::shared(Box::pin(lock(groups)?.scope.cancelled())
         as std::pin::Pin<Box<dyn Future<Output = ()> + Send>>);
     let commands = store.data().transport.commands.clone();
+    let closing = store.data().adapter.closing.clone();
     // Bodies first read during this call are owned by it.
     commands.begin(Some(call_work.clone()));
     let watch = cancelled.clone();
@@ -793,6 +872,11 @@ async fn invoke(
         // a resolver lookup or a reactor connect. Release the call after they physically ended.
         commands.end();
         call_work.settled().await;
+        // Socket streams the guest dropped during this call close physically before it ends,
+        // and accepted sockets nobody will read are closed through upstream.
+        closing.settled().await;
+        accessor.with(|mut store| crate::worker::stream_adapter::release(store.data_mut()))?;
+        crate::worker::stream_adapter::sweep(accessor).await?;
         Ok(results)
     });
     let results = tokio::time::timeout(

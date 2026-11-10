@@ -53,12 +53,6 @@ export class Revision {
     readonly port: InterpreterPort,
     readonly contract: ContractPort,
     readonly timeout: number,
-    readonly io: (
-      request: import("./host-protocol.ts").IORequest,
-      signal?: AbortSignal,
-    ) => Promise<unknown> = async () => {
-      throw new Error("No I/O provider is attached");
-    },
   ) {}
 
   /** Run pure synchronous guest work only while its enclosing factory owns admission. */

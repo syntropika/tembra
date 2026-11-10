@@ -84,7 +84,7 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn sync(access: &Access, packet: &P) -> Result<Vec<u8>, String> {
-    access.with(|mut store| synchronous(store.as_context_mut(), &packet.0).unwrap())
+    access.with(|mut store| synchronous_now(store.as_context_mut(), &packet.0).unwrap())
 }
 
 fn id(bytes: &[u8]) -> u64 {
@@ -1074,7 +1074,7 @@ fn retained_idle_requests_do_not_keep_retirement_polling() {
     assert_eq!(detached(&store.data().standard.handles), 2);
     assert!(store.data_mut().standard.check_trap().is_ok());
     // A later callback drops the request through upstream's store drop; the endpoints finish.
-    synchronous(store.as_context_mut(), &P::op(DROP).u64(request).0)
+    synchronous_now(store.as_context_mut(), &P::op(DROP).u64(request).0)
         .unwrap()
         .unwrap();
     // Upstream resolves and releases the `sent` slot over the Store's next polls.

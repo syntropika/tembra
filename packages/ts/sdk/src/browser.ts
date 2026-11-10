@@ -106,7 +106,18 @@ export {
   type HttpProviderResponse,
   type HttpTimeouts,
 } from "./interpreter/http-provider.ts";
-export type { SocketProvider } from "./interpreter/browser-network.ts";
+export {
+  NameLookupError,
+  SocketProviderError,
+  type SocketOptions,
+  type SocketProvider,
+  type TcpBackend,
+  type TcpConnection,
+  type TcpListener,
+  type TcpOptions,
+  type UdpBackend,
+  type UdpOptions,
+} from "./interpreter/socket-provider.ts";
 export type { ClockProvider, ClockInstant, RandomProvider } from "./interpreter/standard-system.ts";
 export type {
   StdioProvider,

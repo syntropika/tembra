@@ -40,10 +40,10 @@ internal class Execution : AutoCloseable {
     fun releaseArtifact(id: String) { live { artifacts.remove(id)?.close() } }
 
     /** Create a new isolated source or compiled Store and retain it only while its host remains live. */
-    fun open(id: String, bindings: String, grants: String): String {
+    fun open(id: String, bindings: String, grants: String, cli: String): String {
         val (engine, artifact) = live { checkNotNull(engine) to checkNotNull(artifacts[id]) }
         val handle = UUID.randomUUID().toString()
-        val port = engine.open(artifact, bindings, grants)
+        val port = engine.open(artifact, bindings, grants, cli)
         try { live { ports[handle] = port } }
         catch (error: Throwable) { port.close(); throw error }
         return handle

@@ -1,0 +1,42 @@
+package example:sockets@1.0.0;
+
+/// Compiled `wasi:sockets` qualification fixture (`rust-sockets`).
+interface probe {
+    /// Read the first bytes of a connection, then drop the stream and socket while the peer idles.
+    read-drop: async func(port: u16) -> result<string, string>;
+    /// Send one datagram to 127.0.0.1:port and return the reply's text.
+    udp-echo: async func(port: u16, message: string) -> result<string, string>;
+    /// Listen on 127.0.0.1:port, accept `clients` connections and read each to its end.
+    serve: async func(port: u16, clients: u32) -> result<list<string>, string>;
+    /// Resolve a name through `wasi:sockets/ip-name-lookup`.
+    resolve: async func(name: string) -> result<list<string>, string>;
+    /// Connect to 127.0.0.1:port and report the outcome.
+    connect: async func(port: u16) -> result<string, string>;
+    /// Connect, then read until bytes arrive or the stream ends ("end"); drop everything.
+    read-pending: async func(port: u16) -> result<string, string>;
+    /// Listen on 127.0.0.1:port and read the accept stream once ("accepted" or "end").
+    accept-pending: async func(port: u16) -> result<string, string>;
+    /// Connect and keep the socket and its unread receive stream for a later call.
+    retain-receive: async func(port: u16) -> result<_, string>;
+    /// Read `count` bytes (or to the end) from the retained receive stream.
+    read-retained: async func(count: u32) -> result<string, string>;
+    /// Listen on 127.0.0.1:port and keep the socket and its unread accept stream.
+    retain-listen: async func(port: u16) -> result<_, string>;
+    /// Drop every retained socket and stream.
+    drop-retained: func();
+    /// Await the retained receive stream's completion ("ok" or the error), after dropping the
+    /// stream itself when `drop-stream` is set.
+    retained-completion: async func(drop-stream: bool) -> result<string, string>;
+    /// What the component's initializer observed: it created a socket and called `receive` on it
+    /// unconnected; read that stream to its end and await its completion.
+    initialized: async func() -> result<string, string>;
+    /// Connect and send `size` bytes through `tcp-socket.send` ("sent" once complete, or
+    /// "unsent N: <send result>" once the write was released).
+    send-blocked: async func(port: u16, size: u32) -> result<string, string>;
+}
+
+world sockets {
+    import wasi:sockets/types@0.3.0;
+    import wasi:sockets/ip-name-lookup@0.3.0;
+    export probe;
+}

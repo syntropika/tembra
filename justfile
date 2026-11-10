@@ -76,9 +76,23 @@ build-contributor target-dir toolchain=nightly:
 build-http-client target-dir toolchain=nightly:
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-http-client/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
 
+# Compile a component using standard WASI sockets: TCP, UDP, listen/accept and name lookup.
+build-sockets target-dir toolchain=nightly:
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-sockets/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
+
+# Rebuild the private source-path stream adapter the executor embeds (64 KiB shadow stack).
+build-stream-adapter target-dir toolchain=nightly:
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/stream-adapter/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld -Clink-arg=-zstack-size=65536
+    cp "$1/wasm32-unknown-unknown/release/tembra_stream_adapter.wasm" crates/executor-wasm/src/worker/standard/stream_adapter.wasm
+
+# Verify the embedded stream adapter is byte-identical to a fresh build of its source.
+check-stream-adapter target-dir toolchain=nightly:
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/stream-adapter/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld -Clink-arg=-zstack-size=65536
+    cmp "$1/wasm32-unknown-unknown/release/tembra_stream_adapter.wasm" crates/executor-wasm/src/worker/standard/stream_adapter.wasm
+
 # Run the ignored executor tests against a built interpreter and Orb artifacts; regular tests do not supply them.
-test-wasm-orb engine orb provider probe consumer contributor http-client scratch:
-    TEMBRA_WASM_ENGINE="{{engine}}" TEMBRA_WASM_ORB="{{orb}}" TEMBRA_WASM_PROVIDER="{{provider}}" TEMBRA_WASM_PROBE="{{probe}}" TEMBRA_WASM_CONSUMER="{{consumer}}" TEMBRA_WASM_CONTRIBUTOR="{{contributor}}" TEMBRA_WASM_HTTP_CLIENT="{{http-client}}" TEMBRA_WASM_SCRATCH="{{scratch}}" cargo test --locked -p tembra-executor-wasm --tests -- --include-ignored --nocapture
+test-wasm-orb engine orb provider probe consumer contributor http-client sockets scratch:
+    TEMBRA_WASM_ENGINE="{{engine}}" TEMBRA_WASM_ORB="{{orb}}" TEMBRA_WASM_PROVIDER="{{provider}}" TEMBRA_WASM_PROBE="{{probe}}" TEMBRA_WASM_CONSUMER="{{consumer}}" TEMBRA_WASM_CONTRIBUTOR="{{contributor}}" TEMBRA_WASM_HTTP_CLIENT="{{http-client}}" TEMBRA_WASM_SCRATCH="{{scratch}}" TEMBRA_WASM_SOCKETS="{{sockets}}" cargo test --locked -p tembra-executor-wasm --tests -- --include-ignored --nocapture
 
 # Execute isolated Orb acceptance on native Rust, Node and Chrome after the packaged interpreter build.
 test-wasm-acceptance *args:

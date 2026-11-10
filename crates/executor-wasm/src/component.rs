@@ -12,6 +12,7 @@ use tembra::Result;
 use tembra_contracts::{
     FunctionKind, Item, Plan, PreparedContract, ServiceBinding, javascript_name,
 };
+pub(crate) use worker::State as ComponentState;
 
 /// Describe the plain interface exports a compiled artifact implements.
 ///
@@ -195,20 +196,18 @@ impl Engine {
         // installation opens no CLI file and invokes no configured factory.
         let component = self.compiled(bytes)?.as_ref().clone();
         check_component_imports(&self.engine, &component, grants)?;
-        let wasi = self
-            .providers
-            .context(&plan.host_imports, grants, cli)?
-            .wasi;
+        let prepared = self.providers.context(&plan.host_imports, grants, cli)?;
+        // The WASI context and whether the bound name-lookup provider grants resolution.
+        let wasi = (prepared.wasi, prepared.resolve);
         // Compiled Orbs use their WASI preopens and sockets; the source I/O helpers stay empty.
         let io = crate::io::SourceIo::new(
             &self.providers,
             &[],
             &Grants::default(),
-            std::time::Duration::from_millis(self.limits.timeout_ms),
             &crate::Cli::default(),
         )?;
         let (ready, initialized) = mpsc::channel();
-        let scope = io.streams().clone();
+        let scope = io.scope().clone();
         let engine = self.clone();
         let grants = std::sync::Arc::new(grants.clone());
         let session = Session::spawn(

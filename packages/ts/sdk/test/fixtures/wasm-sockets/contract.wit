@@ -1,0 +1,25 @@
+package example:sockets@1.0.0;
+
+/// Browser socket acceptance probes. Every network value comes from the host's injected,
+/// typed socket provider; the browser itself has no raw sockets.
+interface probes {
+    /// Listen on the granted port, connect to it, and move `size` bytes each way through the
+    /// accepted owned socket, half-closing the client's send direction.
+    exchange: async func(port: u16, size: u32) -> string;
+    /// Leave a connect pending when the callback ends.
+    abandon: async func(port: u16) -> string;
+    /// Drop a receive stream while a read is pending.
+    idle: async func(port: u16) -> string;
+    /// Datagrams to a granted peer, connected and unconnected, and the standard refusals.
+    datagrams: async func(port: u16, peer: u16, denied: u16) -> string;
+    /// Resolve each name and report the addresses or the standard error code.
+    lookup: async func(names: list<string>) -> string;
+    /// Each operation's outcome, so per-Orb grants and provider capabilities can be compared.
+    refusals: async func(port: u16) -> string;
+}
+
+world sockets {
+    import wasi:sockets/types@0.3.0;
+    import wasi:sockets/ip-name-lookup@0.3.0;
+    export probes;
+}

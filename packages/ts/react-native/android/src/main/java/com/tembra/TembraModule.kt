@@ -123,10 +123,8 @@ class TembraModule(private val context: ReactApplicationContext) : NativeTembraS
     override fun abortPort(handle: String, port: String, promise: Promise) = promise(promise) { execution(handle).port(port).invalidate(); null }
     /** Drop drained guest environment bookkeeping. */
     override fun portRelease(handle: String, port: String, environment: Double): Boolean = nativeCall { execution(handle).port(port).release(environment.toULong()); true }
-    /** Execute capability-bound filesystem and network operations. */
-    override fun portIo(handle: String, port: String, packet: String, promise: Promise) = promise(promise) { execution(handle).port(port).io(packet) }
-    /** Revoke the active callback's source I/O after its caller was cancelled. */
-    override fun portCancelIo(handle: String, port: String): Boolean = nativeCall { execution(handle).port(port).cancelIo(); true }
+    /** Cancel standard WASI work owned by the active callback. */
+    override fun portCancel(handle: String, port: String): Boolean = nativeCall { execution(handle).port(port).cancel(); true }
     /** Close a revision after shared lifecycle cleanup. */
     override fun closePort(handle: String, port: String): Boolean = nativeCall { execution(handle).closePort(port); true }
 

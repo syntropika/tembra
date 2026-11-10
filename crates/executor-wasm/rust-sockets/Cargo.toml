@@ -1,0 +1,31 @@
+[package]
+name = "tembra-wasm-sockets"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "=0.63.0", default-features = false, features = [
+  "macros",
+  "realloc",
+  "async",
+] }
+dlmalloc = { version = "0.2.12", features = ["global"] }
+
+[build-dependencies]
+tembra-contracts = { path = "../../contracts" }
+
+# The official macro invocation is generated into OUT_DIR by the build script.
+[package.metadata.cargo-machete]
+ignored = ["wit-bindgen"]
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+strip = "symbols"

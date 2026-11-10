@@ -21,7 +21,7 @@ import {
   type HttpProviderRequest,
   type HttpProviderResponse,
 } from "./http-provider.ts";
-import { METHODS, RESOURCES, TYPES } from "./standard.ts";
+import { METHODS, TYPES } from "./standard.ts";
 import { encode, type HandleCodec, Writer } from "./standard-codec.ts";
 import {
   type Body,
@@ -39,13 +39,13 @@ import {
   type Trailers,
 } from "./standard-http-values.ts";
 import {
+  bindResource,
   type ByteProducer,
   cancelled,
   type FutureReader,
   HostFuture,
   type Implementation,
   type InputStream,
-  methodKey,
   OutputStream,
   type StandardCall,
   type StandardServices,
@@ -576,38 +576,6 @@ async function send(
 // ---------------------------------------------------------------------------------------------
 // binding
 
-/** A WIT constructor or static function: decoded parameters after the call. */
-type Static = (call: StandardCall, ...args: any[]) => unknown;
-
-/**
- * Bind every generated function of one `wasi:http/types` resource: constructors and statics to
- * `statics` by generated name, methods to the same-named method of the borrowed `self`.
- * A generated method without an implementation fails construction instead of a later call.
- */
-function bind(
-  resource: string,
-  prototype: object,
-  statics: Readonly<Record<string, Static>>,
-): Record<string, Implementation> {
-  const implementations: Record<string, Implementation> = {};
-  const qualified = `${TYPES_INTERFACE}#${resource}`;
-  for (const method of METHODS) {
-    if (method.resource === undefined || RESOURCES[method.resource] !== qualified) continue;
-    const name = method.name;
-    if (method.kind !== undefined) {
-      if (!Object.hasOwn(statics, name)) throw new Error(`${qualified}.${name} is unbound`);
-      const implementation = statics[name]!;
-      implementations[methodKey(method)] = (call, args: unknown[]) => implementation(call, ...args);
-    } else {
-      if (typeof (prototype as Record<string, unknown>)[name] !== "function")
-        throw new Error(`${qualified}.${name} is unbound`);
-      implementations[methodKey(method)] = (_call, [self, ...args]: unknown[]) =>
-        (self as Record<string, (...values: unknown[]) => unknown>)[name]!(...args);
-    }
-  }
-  return implementations;
-}
-
 /** Every generated `wasi:http` function, keyed for the standard host. */
 export function httpMethods(client: HttpClient | undefined): Record<string, Implementation> {
   const consume = (
@@ -616,14 +584,14 @@ export function httpMethods(client: HttpClient | undefined): Record<string, Impl
     res: FutureReader<Outcome>,
   ): [OutputStream, HostFuture] => message.take().consume(call.host, res);
   return {
-    ...bind("fields", HttpFields.prototype, {
+    ...bindResource(TYPES_INTERFACE, "fields", HttpFields.prototype, {
       constructor: () => HttpFields.create(),
       fromList: (_call, entries: [string, Uint8Array][]) => HttpFields.fromList(entries),
     }),
-    ...bind("request-options", HttpRequestOptions.prototype, {
+    ...bindResource(TYPES_INTERFACE, "request-options", HttpRequestOptions.prototype, {
       constructor: () => new HttpRequestOptions(),
     }),
-    ...bind("request", HttpRequest.prototype, {
+    ...bindResource(TYPES_INTERFACE, "request", HttpRequest.prototype, {
       new: (
         _call,
         headers: HttpFields,
@@ -636,7 +604,7 @@ export function httpMethods(client: HttpClient | undefined): Record<string, Impl
       },
       consumeBody: consume,
     }),
-    ...bind("response", HttpResponse.prototype, {
+    ...bindResource(TYPES_INTERFACE, "response", HttpResponse.prototype, {
       new: (
         _call,
         headers: HttpFields,

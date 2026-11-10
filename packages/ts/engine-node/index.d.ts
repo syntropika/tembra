@@ -38,9 +38,8 @@ export class NodeInterpreter {
 
 /** Scoped source or compiled Orb transport; application consumers should use the SDK facade. */
 export class NodeInterpreterPort {
-  io(packet: string): Promise<string>;
-  /** Revoke the active callback's source I/O after its caller was cancelled. */
-  cancelIo(): void;
+  /** Cancel the active callback after its caller was cancelled. */
+  cancel(): void;
   release(environment: number): void;
   description(): string;
   declare(packet: string, callback: (packet: string) => string): string;

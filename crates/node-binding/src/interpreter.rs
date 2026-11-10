@@ -116,34 +116,14 @@ pub struct NodeInterpreterPort {
 
 #[napi]
 impl NodeInterpreterPort {
-    /// Settle host I/O through a threadsafe deferred, without borrowing libuv worker threads.
-    #[napi(ts_return_type = "Promise<string>")]
-    pub fn io<'env>(
-        &self,
-        env: &'env napi::Env,
-        packet: String,
-    ) -> napi::Result<napi::bindgen_prelude::Object<'env>> {
-        if self.ticket.borrow().is_none() {
-            return Err(js_error("I/O requires an active exchange"));
-        }
-        let operation = self.port()?.io_operation(&packet).map_err(js_error)?;
-        let (deferred, promise) = env.create_deferred::<String, _>()?;
-        operation.submit(move |result| {
-            let result = result.map(|value| value.to_string());
-            deferred.resolve(move |_| result.map_err(js_error));
-        });
-        Ok(promise)
-    }
-
-    /// Revoke the active callback's source I/O after its caller was cancelled.
+    /// Cancel the active callback after its caller was cancelled.
     ///
-    /// Internal transport plumbing for the SDK: pending requests settle with an error and the
-    /// exchange still finishes only after physical completion. Without an active exchange this
-    /// does nothing.
+    /// Pending standard WASI calls settle with an error and the exchange still finishes only
+    /// after physical completion. Without an active exchange this does nothing.
     #[napi]
-    pub fn cancel_io(&self) {
+    pub fn cancel(&self) {
         if let Some(ticket) = self.ticket.borrow().as_ref() {
-            ticket.cancel_io();
+            ticket.cancel();
         }
     }
 

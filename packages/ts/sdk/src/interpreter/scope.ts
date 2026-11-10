@@ -10,7 +10,6 @@ import {
   type HostRequest,
   WAIT_LIMIT_MILLISECONDS,
   survivesCancellation,
-  asyncSurvivesCancellation,
 } from "./host-protocol.ts";
 import type { Revision } from "./revision.ts";
 import { check, encode } from "./codec.ts";
@@ -248,39 +247,6 @@ export class Scope {
   ): Promise<unknown> {
     checkSignal(ended);
     switch (request.operation) {
-      case "transport.connect":
-      case "transport.read":
-      case "transport.write":
-      case "transport.close": {
-        if (!("context" in authority) && !("signal" in authority))
-          throw new Error("I/O requires an active callback");
-        // Closing an owned stream is cleanup; it still needs a callback but survives cancellation.
-        if (!asyncSurvivesCancellation(request)) {
-          if ("context" in authority) authority.context.check();
-          else checkSignal(authority.signal);
-        }
-        // Cleanup may outlive the root's admission; inspecting its Context would refuse cleanup.
-        const owner = asyncSurvivesCancellation(request) ? undefined : authoritySignal(authority);
-        const ioSignal = owner ? combinedSignal(owner, ended) : ended;
-        const result = await this.revision.io(request, ioSignal);
-        if (request.operation === "transport.connect") {
-          // Cancellation ends the stream's authority; closing it settles pending socket work.
-          const owner = ioSignal;
-          const close = () =>
-            void this.revision
-              .io(
-                {
-                  operation: "transport.close",
-                  id: result as number,
-                },
-                ioSignal,
-              )
-              .catch(() => {});
-          if (owner.aborted) close();
-          else owner.addEventListener("abort", close, { once: true });
-        }
-        return result;
-      }
       case "hook.run": {
         const context = this.context(authority);
         const { handle, binding } = this.handle(

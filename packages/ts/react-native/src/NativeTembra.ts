@@ -43,8 +43,7 @@ export interface Spec extends TurboModule {
   portFinish(handle: string, port: string): boolean;
   abortPort(handle: string, port: string): Promise<void>;
   portRelease(handle: string, port: string, environment: number): boolean;
-  portIo(handle: string, port: string, packet: string): Promise<string>;
-  portCancelIo(handle: string, port: string): boolean;
+  portCancel(handle: string, port: string): boolean;
   closePort(handle: string, port: string): boolean;
 }
 

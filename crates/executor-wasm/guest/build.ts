@@ -67,6 +67,12 @@ if (diagnostics.length)
       getNewLine: () => "\n",
     }),
   );
+// The VM loads immutable metadata as data, avoiding JavaScript source parsing of escaped JSON.
+await mkdir(bootstrap, { recursive: true });
+await writeFile(
+  path.join(bootstrap, "standard-schema.json"),
+  JSON.stringify({ METHODS, RESOURCES, TYPES, WRITABLE_FUTURES }),
+);
 const bundled = await Bun.build({
   entrypoints: ["bridge", "state", "values", "standard", "runtime"].map((name) =>
     path.join(root, "src", `${name}.ts`),
@@ -86,7 +92,10 @@ const bundled = await Bun.build({
             return { path: "schema", namespace: "standard-schema-data" };
         });
         builder.onLoad({ filter: /.*/, namespace: "standard-schema-data" }, () => ({
-          contents: `export const {METHODS, RESOURCES, TYPES, WRITABLE_FUTURES} = JSON.parse(${JSON.stringify(JSON.stringify({ METHODS, RESOURCES, TYPES, WRITABLE_FUTURES }))});`,
+          contents: `
+            export const {METHODS, RESOURCES, TYPES, WRITABLE_FUTURES} = globalThis.__tembraStandardSchema;
+            delete globalThis.__tembraStandardSchema;
+          `,
           loader: "js",
         }));
       },

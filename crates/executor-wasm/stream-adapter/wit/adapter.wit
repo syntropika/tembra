@@ -1,0 +1,45 @@
+package tembra:stream-adapter@0.1.0;
+
+/// Byte output streams (`tcp-socket.receive`). The host hands over the readable end, reads it
+/// one bounded chunk at a time from a single pump, and closes it. Closing cancels an in-progress
+/// read and drops the readable end, which is the standard component-model reader drop, so the
+/// upstream producer closes even while the peer is idle.
+interface bytes {
+    /// Take ownership of the readable end; returns its slot.
+    open: func(data: stream<u8>) -> u32;
+    /// Read up to `max` bytes; `none` at the end of the stream or after `close`.
+    read: async func(id: u32, max: u32) -> option<list<u8>>;
+    /// Drop the readable end now, cancelling an in-progress `read` (which then returns `none`).
+    close: async func(id: u32);
+    /// The cross-task close signal: a component-model future, because a task cannot wake
+    /// another task's waker. Never called; it only makes `future` part of the bindings.
+    signal: func(signal: future);
+}
+
+/// The same lifecycle for `tcp-socket.listen` streams of owned sockets.
+interface sockets {
+    use wasi:sockets/types@0.3.0.{tcp-socket};
+
+    open: func(sockets: stream<tcp-socket>) -> u32;
+    /// Accept up to `max` sockets; ownership moves to the caller with the reply.
+    accept: async func(id: u32, max: u32) -> option<list<tcp-socket>>;
+    close: async func(id: u32);
+}
+
+/// Byte input streams of `tcp-socket.send`: the adapter keeps the writable end of a stream whose
+/// readable end the host hands to upstream, so closing it cancels an in-progress write and drops
+/// the writer, which ends upstream's consumer even while the peer does not read.
+interface writes {
+    /// Create a stream; the host takes the readable end, the adapter keeps the writer.
+    open: func() -> tuple<u32, stream<u8>>;
+    /// Write all of `data`; `false` once the reader is gone or the stream was closed.
+    write: async func(id: u32, data: list<u8>) -> bool;
+    /// Drop the writable end now, cancelling an in-progress `write` (which then returns `false`).
+    close: async func(id: u32);
+}
+
+world adapter {
+    export bytes;
+    export sockets;
+    export writes;
+}

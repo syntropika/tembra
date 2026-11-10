@@ -29,6 +29,7 @@ mod steps;
 pub(crate) mod wasi;
 
 pub(crate) use runtime::check;
+pub(crate) use standard::{StreamAdapter, adapter as stream_adapter};
 
 pub(crate) enum Event {
     Host {
@@ -64,9 +65,9 @@ struct Owner {
 
 impl Owner {
     /// Release buffered replies and refuse future calls; the first recorded reason wins.
-    /// Streams of the abandoned callback close first, so its pending socket work settles.
+    /// The abandoned callback's epoch ends first, so its pending standard work is revoked.
     fn abandon(&self, events: &Receiver<Event>, reason: &str) {
-        self.io.streams().end_callback();
+        self.io.scope().end_callback();
         close_replies(events);
         self.poison
             .lock()
@@ -77,9 +78,8 @@ impl Owner {
 
 impl Drop for Owner {
     /// Close the command stream and join only this interpreter's worker.
-    /// No transport stream survives its Orb's host.
     fn drop(&mut self) {
-        self.io.streams().end_callback();
+        self.io.scope().end_callback();
         self.commands.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -92,16 +92,9 @@ impl Drop for Owner {
 pub(crate) struct Session(Rc<Owner>);
 
 impl Session {
-    /// Share the transport table so a foreign event receiver can end the callback's epoch.
-    pub(crate) fn streams(&self) -> crate::io::Streams {
-        self.0.io.streams().clone()
-    }
-
-    pub(crate) fn io_operation(&self, packet: &str) -> Result<crate::IoOperation> {
-        if packet.len() > self.0.packet_bytes {
-            return Err(failure("host packet limit exceeded"));
-        }
-        self.0.io.operation(packet)
+    /// Share the callback epoch so a foreign event receiver can end the callback.
+    pub(crate) fn scope(&self) -> crate::io::CallbackScope {
+        self.0.io.scope().clone()
     }
 
     /// Start one source Store with this installation's checked standard context.
@@ -258,7 +251,7 @@ impl Session {
             events: send,
         };
         // Transport streams opened by this callback belong to its epoch until it completes.
-        self.0.io.streams().begin_callback();
+        self.0.io.scope().begin_callback();
         if self
             .0
             .commands
@@ -267,7 +260,7 @@ impl Session {
             .send(command)
             .is_err()
         {
-            self.0.io.streams().end_callback();
+            self.0.io.scope().end_callback();
             self.0.busy.set(false);
             return Err(failure("interpreter worker has stopped"));
         }
@@ -303,7 +296,7 @@ impl Session {
         loop {
             match events.recv_blocking().map_err(failure)? {
                 Event::Done(result) => {
-                    self.0.io.streams().end_callback();
+                    self.0.io.scope().end_callback();
                     guard.completed = true;
                     return decode(result);
                 }
@@ -388,7 +381,7 @@ impl Session {
                 match futures::future::select(next, cancelled).await {
                     futures::future::Either::Left((event, _)) => event,
                     futures::future::Either::Right(_) => {
-                        self.0.io.streams().end_callback();
+                        self.0.io.scope().end_callback();
                         revoked = true;
                         continue;
                     }
@@ -398,9 +391,9 @@ impl Session {
             };
             match event.map_err(failure)? {
                 Event::Done(result) => {
-                    // Close this callback's streams before waiting, so abandoned reads wake now
-                    // instead of at their deadline; physical settlement is still awaited.
-                    self.0.io.streams().end_callback();
+                    // End this callback's epoch before waiting, so abandoned requests settle now;
+                    // their completion is still awaited.
+                    self.0.io.scope().end_callback();
                     while pending.next().await.is_some() {}
                     guard.completed = true;
                     return decode(result);
@@ -414,18 +407,11 @@ impl Session {
                     pending.push(
                         async move {
                             let result = {
-                                let physical_io = asynchronous
-                                    && crate::protocol::AsyncRequest::decode(&packet)
-                                        .is_ok_and(|request| request.is_io());
                                 let operation = std::pin::pin!(host(&packet, asynchronous));
-                                if physical_io {
-                                    Some(operation.await)
-                                } else {
-                                    let closed = std::pin::pin!(reply.closed());
-                                    match futures::future::select(operation, closed).await {
-                                        futures::future::Either::Left((result, _)) => Some(result),
-                                        futures::future::Either::Right(_) => None,
-                                    }
+                                let closed = std::pin::pin!(reply.closed());
+                                match futures::future::select(operation, closed).await {
+                                    futures::future::Either::Left((result, _)) => Some(result),
+                                    futures::future::Either::Right(_) => None,
                                 }
                             };
                             if let Some(result) = result {
@@ -584,7 +570,6 @@ mod tests {
                 &engine.providers,
                 &[],
                 &crate::Grants::default(),
-                Duration::from_secs(1),
                 &crate::Cli::default(),
             )
             .unwrap(),
@@ -654,10 +639,11 @@ mod tests {
                 diagnostics,
                 crate::io::StandardContext {
                     clocks: None,
+                    resolve: false,
                     wasi: wasmtime_wasi::WasiCtxBuilder::new(),
                     allowed: Default::default(),
                     scope: {
-                        let scope = crate::io::Streams::default();
+                        let scope = crate::io::CallbackScope::default();
                         scope.begin_callback();
                         scope
                     },
@@ -700,9 +686,10 @@ mod tests {
                 diagnostics,
                 crate::io::StandardContext {
                     clocks: None,
+                    resolve: false,
                     wasi: wasmtime_wasi::WasiCtxBuilder::new(),
                     allowed: Default::default(),
-                    scope: { let scope = crate::io::Streams::default(); scope.begin_callback(); scope },
+                    scope: { let scope = crate::io::CallbackScope::default(); scope.begin_callback(); scope },
                     grants: Default::default(),
                 },
                 Default::default()
@@ -743,7 +730,6 @@ mod tests {
                 &engine.providers,
                 &[],
                 &crate::Grants::default(),
-                Duration::from_secs(1),
                 &crate::Cli::default(),
             )
             .unwrap(),

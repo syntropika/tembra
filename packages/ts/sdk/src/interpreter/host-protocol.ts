@@ -61,7 +61,6 @@ export type HostRequest =
 
 /** Asynchronous host operations, awaited outside the guest heap. */
 export type AsyncHostRequest =
-  | IORequest
   | ({ readonly operation: "hook.run"; readonly value: unknown } & Handle)
   | ({ readonly operation: "reference.ready" } & Handle)
   | ({
@@ -71,27 +70,12 @@ export type AsyncHostRequest =
     } & Handle)
   | { readonly operation: "wait"; readonly milliseconds: number };
 
-/** Legacy source network I/O, authorized and executed by the host until standard WASI replaces it. */
-export type IORequest =
-  | { readonly operation: "transport.connect"; readonly ip: string; readonly port: number }
-  | { readonly operation: "transport.read"; readonly id: number }
-  | {
-      readonly operation: "transport.write";
-      readonly id: number;
-      readonly bytes: readonly number[];
-    }
-  | { readonly operation: "transport.close"; readonly id: number };
-
 /** Longest cooperative timer a callback may request. */
 export const WAIT_LIMIT_MILLISECONDS = 5000;
-
-/** Largest byte chunk carried by one transport read or write request. */
-export const TRANSPORT_CHUNK_BYTES = 16 * 1024;
 
 /** Field kinds; a trailing `?` marks a field that may be absent (or null) and takes a default. */
 type Kind =
   | "u32"
-  | "u16"
   | "string"
   | "keys"
   | "level"
@@ -100,8 +84,7 @@ type Kind =
   | "callback?"
   | "scope?"
   | "revision?"
-  | "handles?"
-  | "bytes";
+  | "handles?";
 type Schema = Readonly<Record<string, Kind>>;
 
 const HANDLE = { scope: "scope?", id: "u32" } as const satisfies Schema;
@@ -132,10 +115,6 @@ const SYNC = {
   "hook.declare": { name: "string" },
 } as const satisfies Record<HostRequest["operation"], Schema>;
 const ASYNC = {
-  "transport.connect": { ip: "string", port: "u16" },
-  "transport.read": { id: "u32" },
-  "transport.write": { id: "u32", bytes: "bytes" },
-  "transport.close": { id: "u32" },
   "hook.run": { ...HANDLE, value: "json" },
   "reference.ready": HANDLE,
   "reference.call": { ...HANDLE, method: "string", args: "json" },
@@ -169,11 +148,6 @@ export function survivesCancellation(request: HostRequest): boolean {
   }
 }
 
-/** Closing an issued transport stream is cleanup and stays permitted after cancellation. */
-export function asyncSurvivesCancellation(request: AsyncHostRequest): boolean {
-  return request.operation === "transport.close";
-}
-
 /** Validate a packet against the schema for its operation, filling defaults for optional fields. */
 function decode(packet: string, schemas: Readonly<Record<string, Schema>>, label: string): unknown {
   const malformed = (reason: string) => new Error(`Malformed ${label}: ${reason}`);
@@ -203,9 +177,6 @@ function decode(packet: string, schemas: Readonly<Record<string, Schema>>, label
 function field(value: unknown, kind: Kind, invalid: () => Error): unknown {
   const absent = value === undefined || value === null;
   switch (kind) {
-    case "u16":
-      if (!isU32(value) || value > 65535) throw invalid();
-      return value;
     case "u32":
       if (!isU32(value)) throw invalid();
       return value;
@@ -236,14 +207,6 @@ function field(value: unknown, kind: Kind, invalid: () => Error): unknown {
     case "scope?":
       if (absent) return undefined;
       if (!Number.isSafeInteger(value) || (value as number) < 0) throw invalid();
-      return value;
-    case "bytes":
-      if (
-        !Array.isArray(value) ||
-        value.length > TRANSPORT_CHUNK_BYTES ||
-        !value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)
-      )
-        throw invalid();
       return value;
     case "handles?":
       if (absent) return [];

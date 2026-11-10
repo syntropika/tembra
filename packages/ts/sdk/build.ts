@@ -8,7 +8,10 @@ import { witTypes } from "./src/tooling/wit.ts";
 const root = fileURLToPath(new URL("./", import.meta.url));
 // The library uses the same official declarations as authored Orbs. They are build output,
 // not hand-maintained copies of the standard's resource and future signatures.
-const standard = await witTypes(path.join(root, "wit/http.wit"), "http");
+const standard = { files: new Map<string, string>() };
+for (const world of ["http", "sockets"])
+  for (const [file, contents] of (await witTypes(path.join(root, `wit/${world}.wit`), world)).files)
+    standard.files.set(file, contents);
 for (const [file, contents] of standard.files) {
   if (!file.includes(`${path.sep}interfaces${path.sep}`)) continue;
   const destination = path.join(root, ".tembra/wasi/interfaces", path.basename(file));

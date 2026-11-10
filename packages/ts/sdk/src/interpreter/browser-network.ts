@@ -1,41 +1,110 @@
 import type { Grants } from "../authoring/types.ts";
-import type { TransportStream } from "../guest.ts";
-import type { IORequest } from "./host-protocol.ts";
-import { checkSignal } from "../runtime/signals.ts";
 import type { HttpProvider } from "./http-provider.ts";
+import { type Address, isImplicit, key, parseSocketAddress } from "./socket-addresses.ts";
+import type { SocketProvider } from "./socket-provider.ts";
 import type { HttpClient } from "./standard-http.ts";
-
-/** Browsers have no ambient TCP provider; an embedding may explicitly supply one. */
-export interface SocketProvider {
-  connect(ip: string, port: number, signal: AbortSignal): Promise<TransportStream>;
-}
 
 export interface BrowserNetworkProviders {
   http?: Readonly<Record<string, HttpProvider>>;
   network?: Readonly<Record<string, SocketProvider>>;
 }
 
-/** A raw socket issued to one callback (Phase 4b keeps this legacy carrier). */
-type Stream = {
-  signal: AbortSignal;
-  detach(): void;
-  read(): Promise<Uint8Array | null>;
-  write?: (bytes: Uint8Array) => Promise<void>;
-  close(): Promise<void>;
-  reading: boolean;
-  writing: boolean;
-  pending: Uint8Array;
-};
+/** Address uses checked before a socket side effect, as upstream `SocketAddrUse`. */
+export type SocketUse =
+  | "tcp-bind"
+  | "tcp-listen"
+  | "tcp-accept"
+  | "tcp-connect"
+  | "udp-bind"
+  | "udp-send"
+  | "udp-receive";
 
 /**
- * Granted network selections of one Orb. HTTP is served only through standard `wasi:http`
- * (`provider`, checked by the standard host before any provider call); raw sockets remain the
- * legacy source carrier until Phase 4b.
+ * The socket and lookup authority of exactly one provider: the grants naming that provider,
+ * never another provider's. Rules mirror native `Sockets::allows`.
+ */
+export class SocketGrants {
+  readonly #connect = new Set<string>();
+  readonly #listen: Address[] = [];
+  readonly #listenKeys = new Set<string>();
+  readonly #bind = new Set<string>();
+  readonly #datagrams = new Set<string>();
+  readonly resolve: boolean;
+
+  constructor(grants: Grants, provider: string) {
+    let resolve = false;
+    const parse = (text: string) => {
+      const address = parseSocketAddress(text);
+      if (!address) throw new Error(`Invalid network grant address ${text}`);
+      return address;
+    };
+    for (const grant of grants.network ?? []) {
+      if (grant.provider !== provider) continue;
+      for (const text of grant.connect ?? []) this.#connect.add(key(parse(text)));
+      for (const text of grant.listen ?? []) {
+        const address = parse(text);
+        this.#listen.push(address);
+        this.#listenKeys.add(key(address));
+      }
+      for (const text of grant.bind ?? []) this.#bind.add(key(parse(text)));
+      for (const text of grant.datagrams ?? []) this.#datagrams.add(key(parse(text)));
+      resolve ||= grant.resolve === true;
+    }
+    this.resolve = resolve;
+  }
+
+  /** Any TCP authority (`allow_tcp`). */
+  get tcp(): boolean {
+    return this.#connect.size > 0 || this.#listen.length > 0 || this.#bind.size > 0;
+  }
+
+  /** Any UDP authority (`allow_udp`). */
+  get udp(): boolean {
+    return this.#datagrams.size > 0 || this.#bind.size > 0;
+  }
+
+  allows(address: Address, use: SocketUse): boolean {
+    const exact = key(address);
+    switch (use) {
+      case "tcp-connect":
+        return this.#connect.has(exact);
+      case "tcp-bind":
+        return (
+          (isImplicit(address) && this.tcp) || this.#bind.has(exact) || this.#listenKeys.has(exact)
+        );
+      case "tcp-listen":
+        // Rust compares `IpAddr` here, so flow information and scope do not participate.
+        return this.#listen.some(
+          (granted) =>
+            granted.family === address.family &&
+            granted.ip.every((part, index) => part === address.ip[index]) &&
+            (granted.port === 0 || granted.port === address.port),
+        );
+      case "tcp-accept":
+        return this.#listen.length > 0;
+      case "udp-bind":
+        return (isImplicit(address) && this.#datagrams.size > 0) || this.#bind.has(exact);
+      case "udp-send":
+      case "udp-receive":
+        return this.#datagrams.has(exact);
+    }
+  }
+}
+
+/** The provider and authority behind one Orb's `wasi:sockets` import. */
+export interface SocketAccess {
+  /** `undefined` when the bound provider name has no registered socket provider. */
+  readonly provider: SocketProvider | undefined;
+  readonly grants: SocketGrants;
+}
+
+/**
+ * Granted network selections of one Orb:
+ * - HTTP is served only through standard `wasi:http` (`provider`, checked by the standard host
+ *   before any provider call);
+ * - sockets and name lookup use the providers bound to the Orb's exact WIT imports (`sockets`).
  */
 export class BrowserNetwork implements HttpClient {
-  readonly #streams = new Map<number, Stream>();
-  #issued = 0;
-  #connecting = 0;
   #disposed = false;
 
   constructor(
@@ -63,6 +132,8 @@ export class BrowserNetwork implements HttpClient {
           );
       }
     }
+    // Native checks these addresses at installation too; refuse a malformed grant early here.
+    for (const grant of grants.network ?? []) new SocketGrants(grants, grant.provider);
   }
 
   /**
@@ -83,122 +154,17 @@ export class BrowserNetwork implements HttpClient {
     return grant && this.providers.http?.[grant.provider];
   }
 
-  /** Check socket grants before calling a provider and keep every operation bound to its callback. */
-  async execute(request: IORequest, signal?: AbortSignal): Promise<unknown> {
-    if (request.operation === "transport.close") return this.close(request.id);
-    if (!signal) throw new Error("Network I/O requires an active callback");
-    checkSignal(signal);
-    if (this.#disposed) throw new Error("Network providers are closed");
-    if (request.operation === "transport.connect") {
-      if (this.#streams.size + this.#connecting >= 16)
-        throw new Error("Network stream limit reached");
-      this.#connecting++;
-      try {
-        return await this.connect(request.ip, request.port, signal);
-      } finally {
-        this.#connecting--;
-      }
-    }
-    if (request.operation !== "transport.read" && request.operation !== "transport.write")
-      throw new Error("Expected a network operation");
-    const stream = this.#streams.get(request.id);
-    if (!stream || stream.signal.aborted) throw new Error("Unknown network stream");
-    if (request.operation === "transport.read") {
-      if (stream.reading) throw new Error("Network stream already has a reader");
-      stream.reading = true;
-      try {
-        let bytes = stream.pending;
-        while (bytes.length === 0) {
-          const next = await stream.read();
-          if (next === null) return null;
-          if (!(next instanceof Uint8Array))
-            throw new Error("Network provider returned invalid bytes");
-          checkSignal(stream.signal);
-          bytes = next;
-        }
-        stream.pending = bytes.subarray(16384);
-        return Array.from(bytes.subarray(0, 16384));
-      } finally {
-        stream.reading = false;
-      }
-    }
-    if (request.operation === "transport.write") {
-      if (!stream.write || stream.writing) throw new Error("Network stream writer is unavailable");
-      stream.writing = true;
-      try {
-        await stream.write(Uint8Array.from(request.bytes));
-        return null;
-      } finally {
-        stream.writing = false;
-      }
-    }
-    throw new Error("Expected a network operation");
-  }
-
-  /** Register a handle only while its originating callback still owns it. */
-  private async register(
-    stream: Omit<Stream, "detach" | "reading" | "writing" | "pending">,
-  ): Promise<number> {
-    if (this.#disposed || stream.signal.aborted) {
-      await stream.close();
-      checkSignal(stream.signal);
-      throw new Error("Network providers are closed");
-    }
-    if (this.#issued === 0xffffffff) {
-      await stream.close();
-      throw new Error("Network identities exhausted");
-    }
-    const id = ++this.#issued;
-    const abort = () => {
-      void this.close(id).catch(() => {});
+  /** The socket provider and authority for the provider name an import binding selected. */
+  sockets(provider: string | undefined): SocketAccess | undefined {
+    if (provider === undefined) return undefined;
+    return {
+      provider: this.providers.network?.[provider],
+      grants: new SocketGrants(this.grants, provider),
     };
-    this.#streams.set(id, {
-      ...stream,
-      detach: () => stream.signal.removeEventListener("abort", abort),
-      reading: false,
-      writing: false,
-      pending: new Uint8Array(),
-    });
-    stream.signal.addEventListener("abort", abort, { once: true });
-    return id;
   }
 
-  /** Resolve an explicitly provided socket adapter; raw network authority never follows HTTP grants. */
-  private async connect(ip: string, port: number, signal: AbortSignal) {
-    const address = `${ip.includes(":") ? `[${ip}]` : ip}:${port}`;
-    const grant = this.grants.network?.find((grant) => grant.connect?.includes(address));
-    const provider = grant && this.providers.network?.[grant.provider];
-    if (!provider) throw new Error("This browser host has no raw TCP provider for this grant");
-    const stream = await provider.connect(ip, port, signal);
-    return this.register({
-      signal,
-      read: () => stream.read(),
-      write: (bytes) => stream.write(bytes),
-      close: () => stream.close(),
-    });
-  }
-
-  /** Closing issued handles is idempotent, including cancellation cleanup. */
-  private async close(id: number): Promise<null> {
-    if (id <= 0 || id > this.#issued) throw new Error("Unknown network stream");
-    const stream = this.#streams.get(id);
-    if (stream) {
-      this.#streams.delete(id);
-      stream.detach();
-      await stream.close();
-    }
-    return null;
-  }
-
-  /** Retire all handles after the guest's physical work has drained. */
-  async dispose(): Promise<void> {
+  /** Physical sockets are owned and closed by the revision's standard host. */
+  dispose(): void {
     this.#disposed = true;
-    const results = await Promise.allSettled([...this.#streams.keys()].map((id) => this.close(id)));
-    const failures = results.filter((result) => result.status === "rejected");
-    if (failures.length)
-      throw new AggregateError(
-        failures.map((result) => result.reason),
-        "Network cleanup failed",
-      );
   }
 }

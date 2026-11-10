@@ -141,22 +141,7 @@ declare global {
   var console: Console;
   const tembra: {
     wait(milliseconds: number): Promise<void>;
-    transport?: {
-      /** Open one byte stream to an exactly granted literal IP address and port. */
-      connect(ip: string, port: number): Promise<TransportStream>;
-    };
   };
-}
-
-/**
- * One incremental byte stream issued to the active callback. It closes when that callback
- * completes. Reads return at most 16 KiB, or `null` at end of stream; writes accept at most
- * 16 KiB per call.
- */
-export interface TransportStream {
-  read(): Promise<Uint8Array | null>;
-  write(bytes: Uint8Array): Promise<void>;
-  close(): Promise<void>;
 }
 
 /** Chunk reader the interpreter attaches to every standard `stream<u8>` it issues. */

@@ -102,9 +102,8 @@ export class MobileExecution implements MobileBackend {
       finish: () => native.portFinish(host, id),
       abort: () => native.abortPort(host, id),
       release: (environment: number) => native.portRelease(host, id, environment),
-      io: (packet: string) => native.portIo(host, id, packet),
-      cancelIo: () => {
-        native.portCancelIo(host, id);
+      cancel: () => {
+        native.portCancel(host, id);
       },
       close: () => native.closePort(host, id),
     };

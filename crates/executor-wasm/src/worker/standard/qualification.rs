@@ -59,7 +59,7 @@ fn open_at(root: u64, path: &str) -> Vec<u8> {
 
 fn sync(store: impl AsContextMut<Data = State>, bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut store = store;
-    synchronous(store.as_context_mut(), bytes).unwrap()
+    synchronous_now(store.as_context_mut(), bytes).unwrap()
 }
 
 /// A Store with one read-only preopen and every Phase 1 interface imported.
@@ -120,7 +120,7 @@ fn upstream_traps_are_distinct_from_refused_packets() {
         .standard
         .handles
         .own(0, Resource::<()>::new_own(u32::MAX));
-    assert!(synchronous(store.as_context_mut(), &release_packet(id)).is_err());
+    assert!(synchronous_now(store.as_context_mut(), &release_packet(id)).is_err());
 }
 
 #[test]

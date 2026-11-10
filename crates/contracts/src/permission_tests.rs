@@ -21,6 +21,7 @@ fn declared_imports_never_supply_their_own_authority() {
                 &[import(contract, provider)],
                 &BTreeSet::new(),
                 &BTreeSet::new(),
+                &BTreeSet::new(),
             )
             .unwrap_err();
         assert_eq!(error.code, tembra_core::Code::Forbidden);
@@ -34,6 +35,7 @@ fn declared_imports_never_supply_their_own_authority() {
         .check(
             &[import("wasi:clocks/system-clock@0.3.0", "clocks")],
             &BTreeSet::new(),
+            &BTreeSet::new(),
             &BTreeSet::new()
         )
         .is_ok()
@@ -41,6 +43,7 @@ fn declared_imports_never_supply_their_own_authority() {
     let error = Grants::default()
         .check(
             &[import("wasi:http/types@0.3.0", "http")],
+            &BTreeSet::new(),
             &BTreeSet::new(),
             &BTreeSet::new(),
         )
@@ -62,17 +65,26 @@ fn filesystem_grants_require_real_providers_imports_and_distinct_normalized_moun
         filesystem: vec![grant.clone()],
         ..Grants::default()
     };
-    assert!(grants.check(&imports, &providers, &BTreeSet::new()).is_ok());
+    assert!(
+        grants
+            .check(&imports, &providers, &BTreeSet::new(), &BTreeSet::new())
+            .is_ok()
+    );
     assert_eq!(
         grants
-            .check(&imports, &BTreeSet::new(), &BTreeSet::new())
+            .check(
+                &imports,
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &BTreeSet::new()
+            )
             .unwrap_err()
             .reason,
         "host_provider"
     );
     assert_eq!(
         grants
-            .check(&[], &providers, &BTreeSet::new())
+            .check(&[], &providers, &BTreeSet::new(), &BTreeSet::new())
             .unwrap_err()
             .reason,
         "wit_import"
@@ -88,7 +100,7 @@ fn filesystem_grants_require_real_providers_imports_and_distinct_normalized_moun
         grants.filesystem[0].mount = mount.into();
         assert_eq!(
             grants
-                .check(&imports, &providers, &BTreeSet::new())
+                .check(&imports, &providers, &BTreeSet::new(), &BTreeSet::new())
                 .unwrap_err()
                 .reason,
             "filesystem_mount",
@@ -98,7 +110,7 @@ fn filesystem_grants_require_real_providers_imports_and_distinct_normalized_moun
     grants.filesystem = vec![grant.clone(), grant];
     assert_eq!(
         grants
-            .check(&imports, &providers, &BTreeSet::new())
+            .check(&imports, &providers, &BTreeSet::new(), &BTreeSet::new())
             .unwrap_err()
             .reason,
         "filesystem_mount"
@@ -117,17 +129,26 @@ fn network_grants_are_checked_against_the_selected_import_and_provider() {
         }],
         ..Grants::default()
     };
-    assert!(grants.check(&imports, &BTreeSet::new(), &providers).is_ok());
+    assert!(
+        grants
+            .check(&imports, &BTreeSet::new(), &providers, &BTreeSet::new())
+            .is_ok()
+    );
     assert_eq!(
         grants
-            .check(&imports, &BTreeSet::new(), &BTreeSet::new())
+            .check(
+                &imports,
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &BTreeSet::new()
+            )
             .unwrap_err()
             .reason,
         "host_provider"
     );
     assert_eq!(
         grants
-            .check(&[], &BTreeSet::new(), &providers)
+            .check(&[], &BTreeSet::new(), &providers, &BTreeSet::new())
             .unwrap_err()
             .reason,
         "wit_import"
@@ -165,7 +186,7 @@ fn all_pinned_wasi_imports_resolve_and_require_explicit_capabilities() {
     let filesystem = ["files".into()].into();
     let network = ["net".into(), "web".into()].into();
     grants
-        .check(&plan.host_imports, &filesystem, &network)
+        .check(&plan.host_imports, &filesystem, &network, &network)
         .unwrap();
     for category in [
         SystemCapability::Clocks,
@@ -175,7 +196,7 @@ fn all_pinned_wasi_imports_resolve_and_require_explicit_capabilities() {
         let mut restricted = grants.clone();
         restricted.system.remove(&category);
         let error = restricted
-            .check(&plan.host_imports, &filesystem, &network)
+            .check(&plan.host_imports, &filesystem, &network, &network)
             .unwrap_err();
         assert_eq!(error.code, tembra_core::Code::Forbidden, "{category:?}");
     }
@@ -212,6 +233,7 @@ fn a_dns_only_world_can_select_a_network_provider_without_a_tcp_grant() {
             &plan.host_imports,
             &Default::default(),
             &["net".into()].into(),
+            &BTreeSet::new(),
         )
         .unwrap();
 }
@@ -255,21 +277,27 @@ fn http_grants_require_host_providers_without_granting_raw_sockets() {
         import("wasi:http/client@0.3.0", "web"),
         import("wasi:http/types@0.3.0", "web"),
     ];
+    let web = BTreeSet::from(["web".to_owned()]);
     grants
-        .check(&imports, &BTreeSet::new(), &["web".into()].into())
+        .check(&imports, &BTreeSet::new(), &BTreeSet::new(), &web)
         .unwrap();
+    // A socket import is authorized by network grants only, never by an HTTP grant.
     assert!(
         grants
             .check(
                 &[import("wasi:sockets/types@0.3.0", "web")],
                 &BTreeSet::new(),
-                &["web".into()].into()
+                &web,
+                &web,
             )
             .is_err()
     );
-    assert!(
+    // HTTP grants name the HTTP registry; a network provider of the same name is not one.
+    assert_eq!(
         grants
-            .check(&imports, &BTreeSet::new(), &BTreeSet::new())
-            .is_err()
+            .check(&imports, &BTreeSet::new(), &web, &BTreeSet::new())
+            .unwrap_err()
+            .reason,
+        "host_provider"
     );
 }

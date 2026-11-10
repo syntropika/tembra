@@ -29,7 +29,26 @@ pub(super) struct State {
     /// and revision-owned connection drivers.
     pub(super) transport: crate::http::Transport,
     pub(super) standard: super::standard::Standard,
-    pub(super) callback_scope: crate::io::Streams,
+    pub(super) callback_scope: crate::io::CallbackScope,
+    /// Whether the provider bound to `wasi:sockets/ip-name-lookup` grants name resolution.
+    pub(super) resolve: bool,
+}
+
+impl crate::sockets::CallCancellation for State {
+    /// Source callbacks cancel by aborting their Store tasks, which drops a pending connect or
+    /// UDP operation; there is no call signal to race.
+    fn cancellation(&mut self) -> Option<crate::http::Cancelled> {
+        None
+    }
+}
+
+impl crate::dns::DnsView for State {
+    fn dns(&mut self) -> crate::dns::Lookup<'_> {
+        crate::dns::Lookup {
+            allowed: self.resolve,
+            transport: &self.transport,
+        }
+    }
 }
 
 impl wasmtime_wasi::WasiView for State {
@@ -66,7 +85,7 @@ impl State {
 }
 
 /// Source HTTP authority: the guest callback that is active when upstream sends.
-struct CallbackAuthority(crate::io::Streams);
+struct CallbackAuthority(crate::io::CallbackScope);
 
 impl crate::http::Authority for CallbackAuthority {
     fn admit(&self) -> Result<crate::http::Admission, crate::http::Refusal> {
@@ -167,53 +186,62 @@ fn synchronous(state: &State, packet: String) -> std::result::Result<String, Str
 fn linker(engine: &wasmtime::Engine) -> wasmtime::Result<Linker<State>> {
     let mut linker = Linker::<State>::new(engine);
     super::wasi::add(&mut linker)?;
-    linker.func_wrap(
+    // The one synchronous import is async-capable: almost every call is ready in its first
+    // poll, while WIT-synchronous calls whose upstream is Rust-`async` keep the guest suspended
+    // on its fiber until they finish. Same import name and signature as before.
+    linker.func_wrap_async(
         abi::IMPORT_MODULE,
         abi::SYNC_IMPORT,
-        |mut caller: Caller<'_, State>, pointer: u32, length: u32| -> wasmtime::Result<u32> {
-            let memory = caller.data().memory.expect("memory is defined");
-            if caller.data().reply.is_some() {
-                return Err(wasmtime::Error::msg("synchronous reply was not read"));
-            }
-            let reply = if length as usize > caller.data().packet_bytes {
-                Err("host packet limit exceeded".to_owned())
-            } else if length > 0
-                && memory.data(&caller).get(pointer as usize).copied()
-                    == Some(super::standard::PACKET_TAG)
-            {
-                // Generated standard WASI calls run in this Store without a foreign carrier.
-                let start = pointer as usize;
-                let packet = memory
-                    .data(&caller)
-                    .get(start..start + length as usize)
-                    .ok_or_else(|| wasmtime::Error::msg("host packet is outside guest memory"))?
-                    .to_vec();
-                if caller.data().events.is_none() {
-                    Err("no active invocation".to_owned())
-                } else {
-                    super::standard::synchronous(caller.as_context_mut(), &packet)?
+        |mut caller: Caller<'_, State>, (pointer, length): (u32, u32)| {
+            Box::new(async move {
+                let memory = caller.data().memory.expect("memory is defined");
+                if caller.data().reply.is_some() {
+                    return Err(wasmtime::Error::msg("synchronous reply was not read"));
                 }
-            } else {
-                let start = pointer as usize;
-                let packet = memory
-                    .data(&caller)
-                    .get(start..start + length as usize)
-                    .ok_or_else(|| wasmtime::Error::msg("host packet is outside guest memory"))?;
-                let packet = std::str::from_utf8(packet)
-                    .map_err(|_| wasmtime::Error::msg("host packet is not UTF-8"))?
-                    .to_owned();
-                synchronous(caller.data(), packet).map(String::into_bytes)
-            };
-            let (flag, reply) = match reply {
-                Ok(value) => (0, value),
-                Err(message) => (abi::SYNC_ERROR, message.into_bytes()),
-            };
-            let length = u32::try_from(reply.len())
-                .ok()
-                .filter(|length| *length <= abi::LENGTH_LIMIT)
-                .ok_or_else(|| wasmtime::Error::msg("host reply exceeds the ABI length limit"))?;
-            caller.data_mut().reply = Some(reply);
-            Ok(flag | length)
+                let reply = if length as usize > caller.data().packet_bytes {
+                    Err("host packet limit exceeded".to_owned())
+                } else if length > 0
+                    && memory.data(&caller).get(pointer as usize).copied()
+                        == Some(super::standard::PACKET_TAG)
+                {
+                    // Generated standard WASI calls run in this Store without a foreign carrier.
+                    let start = pointer as usize;
+                    let packet = memory
+                        .data(&caller)
+                        .get(start..start + length as usize)
+                        .ok_or_else(|| wasmtime::Error::msg("host packet is outside guest memory"))?
+                        .to_vec();
+                    if caller.data().events.is_none() {
+                        Err("no active invocation".to_owned())
+                    } else {
+                        super::standard::synchronous(caller.as_context_mut(), &packet).await?
+                    }
+                } else {
+                    let start = pointer as usize;
+                    let packet = memory
+                        .data(&caller)
+                        .get(start..start + length as usize)
+                        .ok_or_else(|| {
+                            wasmtime::Error::msg("host packet is outside guest memory")
+                        })?;
+                    let packet = std::str::from_utf8(packet)
+                        .map_err(|_| wasmtime::Error::msg("host packet is not UTF-8"))?
+                        .to_owned();
+                    synchronous(caller.data(), packet).map(String::into_bytes)
+                };
+                let (flag, reply) = match reply {
+                    Ok(value) => (0, value),
+                    Err(message) => (abi::SYNC_ERROR, message.into_bytes()),
+                };
+                let length = u32::try_from(reply.len())
+                    .ok()
+                    .filter(|length| *length <= abi::LENGTH_LIMIT)
+                    .ok_or_else(|| {
+                        wasmtime::Error::msg("host reply exceeds the ABI length limit")
+                    })?;
+                caller.data_mut().reply = Some(reply);
+                Ok(flag | length)
+            })
         },
     )?;
     linker.func_wrap(
@@ -247,6 +275,7 @@ pub(super) async fn instantiate(
         scope,
         clocks,
         grants,
+        resolve,
     } = standard;
     // Qualified source filesystem calls run inline during bounded Store polls. They cannot
     // leave detached spawn_blocking work behind when a callback future is revoked.
@@ -277,8 +306,13 @@ pub(super) async fn instantiate(
                 transport.clone(),
             ),
             transport,
-            standard: super::standard::Standard::new(allowed, engine.open_files.clone()),
+            standard: super::standard::Standard::new(
+                allowed,
+                engine.open_files.clone(),
+                Arc::clone(&engine.stream_adapter),
+            ),
             callback_scope: scope,
+            resolve,
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -326,7 +360,8 @@ pub(super) async fn run(
                     "interpreter callback exceeded its wall time limit; Store quarantined",
                 )
             })
-            .and_then(|result| result);
+            .and_then(|result| result)
+            .map_err(|error| super::standard::attribute_trap(error, engine.interpreter.as_deref()));
             store.data_mut().events = None;
             let trapped = result.as_ref().map_or(true, |outcome| outcome.interrupted);
             let result = result
@@ -382,7 +417,7 @@ pub(super) async fn run(
 #[cfg(test)]
 pub(super) fn test_state(ctx: wasmtime_wasi::WasiCtx) -> State {
     let transport = crate::http::Transport::default();
-    let scope = crate::io::Streams::default();
+    let scope = crate::io::CallbackScope::default();
     scope.begin_callback();
     State {
         diagnostics: super::diagnostics::Diagnostics {
@@ -408,7 +443,9 @@ pub(super) fn test_state(ctx: wasmtime_wasi::WasiCtx) -> State {
         standard: super::standard::Standard::new(
             Default::default(),
             crate::engine::FileBudget::new(crate::engine::OPEN_FILES),
+            Arc::default(),
         ),
         callback_scope: scope,
+        resolve: false,
     }
 }

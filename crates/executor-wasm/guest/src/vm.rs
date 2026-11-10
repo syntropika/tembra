@@ -99,6 +99,17 @@ impl Vm {
                     "/values.js"
                 )))?;
                 if imports_wasi(&configuration.contract) {
+                    // Match the owned configuration JSON to share its parser instantiation in Wasm.
+                    ctx.globals().set(
+                        "__tembraStandardSchema",
+                        ctx.json_parse(
+                            include_str!(concat!(
+                                env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
+                                "/standard-schema.json"
+                            ))
+                            .to_owned(),
+                        )?,
+                    )?;
                     ctx.eval::<(), _>(include_str!(concat!(
                         env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
                         "/standard.js"

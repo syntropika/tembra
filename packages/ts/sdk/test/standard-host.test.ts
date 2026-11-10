@@ -407,7 +407,11 @@ test("forged, dropped, foreign, mistyped and unimported handles never reach a pr
   expect(() => standard.sync(operation(DROP, file))).toThrow("unknown or dropped");
   await expect(asynchronous(standard, call("stat", file))).rejects.toThrow("unknown or dropped");
   expect(() => standard.sync(call("stat", foreign))).toThrow("wrong calling convention");
-  expect(() => standard.sync(new Uint8Array([0, CALL, 99, 0, 0, 0]))).toThrow("unknown standard");
+  const unknown = new Writer();
+  unknown.u8(0);
+  unknown.u8(CALL);
+  unknown.u32(METHODS.length);
+  expect(() => standard.sync(unknown.finish())).toThrow("unknown standard");
   const trailing = new Uint8Array([...call("getRandomU64"), 0]);
   expect(() => standard.sync(trailing)).toThrow("trailing");
   expect(stats.calls.length).toBe(before);

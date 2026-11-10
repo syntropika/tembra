@@ -59,7 +59,6 @@ impl Ledger {
     }
 
     /// Physical work units still alive.
-    #[cfg(test)]
     pub(crate) fn live(&self) -> usize {
         *self.0.borrow()
     }
@@ -124,6 +123,12 @@ pub(crate) struct Exchange {
 #[derive(Clone)]
 pub(crate) struct Commands(Shared<Current>, Ledger);
 
+/// A compiled socket stream the current call reads. Cancelling the call closes it; `held`
+/// counts the close as the call's physical work until the stream's pump finished it.
+pub(crate) trait CallOwned: Send + Sync {
+    fn cancel(&self, held: Held);
+}
+
 #[derive(Default)]
 struct Current {
     /// The current compiled call's work ledger (`None`: only the Store's work ledger).
@@ -134,6 +139,11 @@ struct Current {
     /// cancellation (the response head arrived, the guest had not read yet) is closed when it
     /// registers, so no window exists between head and first read.
     cancelled: bool,
+    /// Socket streams read during the current command. Cancellation closes them; a normal end
+    /// only forgets them, since a guest may keep reading a retained stream in a later call.
+    reading: Vec<Weak<dyn CallOwned>>,
+    /// Identity of the current command, so a stream registers once per command.
+    generation: u64,
 }
 
 impl Commands {
@@ -143,17 +153,26 @@ impl Commands {
         current.call = call;
         current.owned.clear();
         current.cancelled = false;
+        current.reading.clear();
+        current.generation += 1;
     }
 
     /// The caller cancelled the current command: close its unfinished bodies now. The hold is
     /// taken here, synchronously, and released by each driver after its socket closed.
     pub(crate) fn cancel(&self) {
-        let (owned, call) = {
+        let (owned, reading, call) = {
             let mut current = self.0.lock().expect("commands");
             current.cancelled = true;
-            (current.owned.clone(), current.call.clone())
+            (
+                current.owned.clone(),
+                std::mem::take(&mut current.reading),
+                current.call.clone(),
+            )
         };
         self.close(owned, call.as_ref());
+        for stream in reading.iter().filter_map(Weak::upgrade) {
+            stream.cancel(self.1.hold().and(call.as_ref()));
+        }
     }
 
     /// The current command ends (normally or cancelled): close its unfinished bodies, charged
@@ -162,9 +181,34 @@ impl Commands {
         let (owned, call) = {
             let mut current = self.0.lock().expect("commands");
             current.cancelled = false;
+            current.reading.clear();
             (std::mem::take(&mut current.owned), current.call.take())
         };
         self.close(owned, call.as_ref());
+    }
+
+    /// The current command's identity.
+    pub(crate) fn generation(&self) -> u64 {
+        self.0.lock().expect("commands").generation
+    }
+
+    /// The current command reads `stream`: it owns it until it ends. A first read after the
+    /// command was cancelled closes the stream at once, charged to that command.
+    pub(crate) fn read(&self, stream: Weak<dyn CallOwned>) {
+        let cancelled = {
+            let mut current = self.0.lock().expect("commands");
+            if current.cancelled {
+                Some(current.call.clone())
+            } else {
+                current.reading.push(stream.clone());
+                None
+            }
+        };
+        if let Some(call) = cancelled
+            && let Some(stream) = stream.upgrade()
+        {
+            stream.cancel(self.1.hold().and(call.as_ref()));
+        }
     }
 
     fn close(&self, owned: Vec<Weak<Mutex<Link>>>, call: Option<&Ledger>) {
@@ -180,7 +224,7 @@ impl Commands {
     }
 
     /// Hold one unit for the Store and the current command.
-    fn hold_current(&self) -> Held {
+    pub(crate) fn hold_current(&self) -> Held {
         let call = self.0.lock().expect("commands").call.clone();
         self.1.hold().and(call.as_ref())
     }

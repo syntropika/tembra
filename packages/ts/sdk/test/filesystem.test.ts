@@ -94,29 +94,31 @@ test("mount disposal drains every provider even when one destructor fails", asyn
 });
 
 test("filesystem grants do not authorize network providers", async () => {
-  let connects = 0;
+  let creates = 0;
   const io = await BrowserCapabilities.open(
     { filesystem: [{ provider: "data", mount: "/data", writable: true }] },
     {
       filesystem: { data: memoryFilesystem() },
       network: {
         socket: {
-          async connect() {
-            connects++;
-            throw new Error("must not be called");
+          tcp: {
+            create() {
+              creates++;
+              throw new Error("must not be called");
+            },
           },
         },
       },
     },
   );
   try {
-    await expect(
-      io.execute(
-        { operation: "transport.connect", ip: "127.0.0.1", port: 80 },
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow();
-    expect(connects).toBe(0);
+    const access = io.network.sockets("socket")!;
+    expect([access.grants.tcp, access.grants.udp, access.grants.resolve]).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    expect(creates).toBe(0);
   } finally {
     await io.dispose();
   }

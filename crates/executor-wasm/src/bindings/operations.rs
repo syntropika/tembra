@@ -270,42 +270,6 @@ impl Environment {
     /// Await portable references and cooperative timers under the active invocation's authority.
     pub(super) async fn asynchronous(&self, scope: &Scope, packet: &str) -> Result<Value> {
         let request = AsyncRequest::decode(packet).map_err(failure)?;
-        if request.is_io() {
-            // Closing an owned stream is cleanup; it needs a callback but survives cancellation.
-            let cleanup = request.survives_cancellation();
-            let signal = match scope {
-                Scope::Call(context) => {
-                    if !cleanup {
-                        context.check()?;
-                    }
-                    context.signal()
-                }
-                Scope::Open(signal) => {
-                    if !cleanup {
-                        signal.check()?;
-                    }
-                    signal.clone()
-                }
-                Scope::Declaration(_) | Scope::Validation => {
-                    return Err(failure("I/O requires an active callback"));
-                }
-            };
-            let operation = self.session.io_operation(packet)?.execute();
-            if !request.is_transport() {
-                return operation.await;
-            }
-            // Cancellation ends this callback's transport authority: its streams close, so the
-            // pending socket work settles now; it is still awaited to physical completion.
-            let mut operation = std::pin::pin!(operation);
-            let cancelled = std::pin::pin!(signal.cancelled());
-            return match futures::future::select(operation.as_mut(), cancelled).await {
-                futures::future::Either::Left((result, _)) => result,
-                futures::future::Either::Right(_) => {
-                    self.session.streams().end_callback();
-                    operation.await
-                }
-            };
-        }
         match request {
             AsyncRequest::HookRun {
                 scope: owner,
@@ -377,12 +341,6 @@ impl Environment {
                     futures::future::Either::Left(_) => Ok(Value::Null),
                     futures::future::Either::Right(_) => Err(failure("operation cancelled")),
                 }
-            }
-            AsyncRequest::TransportConnect { .. }
-            | AsyncRequest::TransportRead { .. }
-            | AsyncRequest::TransportWrite { .. }
-            | AsyncRequest::TransportClose { .. } => {
-                unreachable!("I/O was handled under callback authority")
             }
             AsyncRequest::Unsupported => Err(failure("unsupported asynchronous host operation")),
         }

@@ -6,7 +6,7 @@
 use std::{future::Future, net::IpAddr, pin::Pin, sync::Arc};
 
 mod transport;
-pub(crate) use transport::{Exchange, Ledger, Transport};
+pub(crate) use transport::{CallOwned, Commands, Exchange, Held, Ledger, Transport};
 use wasmtime_wasi_http::{RequestOptions, WasiBody, WasiHttpHooks};
 
 /// The one canonical interpretation of an outgoing request target. The grant is checked against

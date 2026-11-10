@@ -161,6 +161,9 @@ impl Driver {
                 .outcome(store, operation, Some(packet.as_bytes()))
                 .await;
         }
+        // This callback is the command that owns the socket sends and streams it uses; its
+        // cancellation aborts them (a normal end only releases that ownership).
+        store.data().transport.commands.begin(None);
         let mut bytes = self
             .invoke(&mut *store, Operation::Start, Some(packet.as_bytes()))
             .await?;
@@ -219,6 +222,8 @@ impl Driver {
                     .boxed(),
                 );
             }
+            // Socket output streams bound by this step get their adapter pumps before the turn.
+            super::standard::start_streams(store).await?;
             // Qualified upstream filesystem calls block only inside this bounded poll. Pending
             // clocks and readers release the worker budget before awaiting another wakeup.
             let files = super::standard::uses_filesystem(store.data());
@@ -247,6 +252,8 @@ impl Driver {
                 // Subsequent standard calls lose authority; resource drops remain cleanup.
                 // A reply that completed in the same turn is unpublished: release its handles.
                 revoked = true;
+                // Sends this callback feeds are aborted; retirement waits for their close.
+                store.data().transport.commands.cancel();
                 super::standard::retire(store, &mut tasks).await?;
                 discard(store, &mut pending)?;
                 if outstanding.is_empty() {

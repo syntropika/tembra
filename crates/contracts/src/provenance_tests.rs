@@ -36,6 +36,7 @@ fn admit(contract: &Contract, grants: &Grants) -> Result<Vec<String>, String> {
             &plan.host_imports,
             &["data".to_owned()].into(),
             &["net".to_owned()].into(),
+            &BTreeSet::new(),
         )
         .map_err(|e| e.to_string())?;
     Ok(plan

@@ -41,10 +41,19 @@ impl<'a> Generator<'a> {
             let package = &self.resolve.packages[self.resolve.interfaces[interface_id]
                 .package
                 .expect("package")];
-            let (_, data, getter, blocking) = VIEWS
+            let (_, data, getter, blocking, budgeted) = VIEWS
                 .iter()
-                .find(|(package_name, _, _, _)| *package_name == package.name.name)
+                .find(|(package_name, ..)| *package_name == package.name.name)
                 .expect("host view for package");
+            // A Tembra implementation of the same standard trait replaces the package view.
+            let (data, getter) = OVERRIDES
+                .iter()
+                .find(|(overridden, _, _)| *overridden == interface)
+                .map_or((*data, *getter), |(_, data, getter)| (*data, *getter));
+            let qualified_name = format!("{interface}#{name}");
+            // Rust-async upstream implementation of a WIT-synchronous function.
+            let awaited = AWAITED.contains(&qualified_name.as_str());
+            let adapted = ADAPTED.contains(&qualified_name.as_str());
             let asynchronous = matches!(
                 function.kind,
                 FunctionKind::AsyncFreestanding
@@ -52,7 +61,7 @@ impl<'a> Generator<'a> {
                     | FunctionKind::AsyncStatic(_)
             );
             // Async functions are always store functions; this marks WIT-synchronous ones.
-            let store = STORE.contains(&format!("{interface}#{name}").as_str()) && !asynchronous;
+            let store = STORE.contains(&qualified_name.as_str()) && !asynchronous;
             let resource = match function.kind {
                 FunctionKind::Method(id)
                 | FunctionKind::AsyncMethod(id)
@@ -149,9 +158,30 @@ impl<'a> Generator<'a> {
                 self.store_arm(
                     function,
                     &trait_name,
-                    (data, getter, *blocking),
+                    (data, getter, *budgeted),
                     &args,
                     (&commits, &transfers.concat()),
+                    (awaited, adapted),
+                )
+            } else if awaited {
+                // The guest stays suspended on the synchronous import until upstream finishes;
+                // owned results are prepaid from the open-file budget before any side effect.
+                let encode = self.encode_return(function.result);
+                let owned = function.result.map_or(0, |ty| self.owned(ty));
+                let owned_params = function
+                    .params
+                    .iter()
+                    .any(|param| self.owned_param(param.ty).is_some());
+                // An awaited call may be dropped with its Store mid-flight; only borrows and
+                // plain values may cross that suspension.
+                assert!(
+                    transfers.is_empty() && !owned_params,
+                    "{interface}#{name}: awaited functions transfer no streams or owned arguments"
+                );
+                format!(
+                    "{commits} let files = h.files({owned})?; Ok(Call::Await(Box::pin(async move {{ \
+                     let result = {trait_name}::{method}(&mut {getter}(store.data_mut()), {args}).await; \
+                     let h = &mut store.data_mut().standard.handles; h.prepaid.extend(files); let mut out = Writer::default(); let w = &mut out; {encode} Ok(out.0) }})))"
                 )
             } else if asynchronous {
                 let encode = self.encode_return(function.result);
@@ -236,8 +266,8 @@ impl<'a> Generator<'a> {
              pub(super) const BYTE_STREAM: u32 = {byte_stream};\n\
 \n\
              /// Decode, validate and call one generated method.\n\
-             #[allow(unused_variables, unused_mut, clippy::all)]\n\
-             fn dispatch(method: u32, r: &mut Reader<'_>, mut store: StoreContextMut<'_, State>) -> wasmtime::Result<Call> {{ let state = store.data_mut();\n\
+             #[allow(unused_variables, unused_mut, unused_parens, clippy::all)]\n\
+             fn dispatch<'a>(method: u32, r: &mut Reader<'_>, mut store: StoreContextMut<'a, State>) -> wasmtime::Result<Call<'a>> {{ let state = store.data_mut();\n\
              match method {{\n{arms}        _ => Err(invalid(\"unknown standard method\")),\n    }}\n}}\n\n",
             interfaces.join(", "),
             asynchronous.join(", "),
@@ -260,9 +290,9 @@ impl<'a> Generator<'a> {
         for (kind, (qualified, path)) in self.resources.iter().enumerate() {
             let module = path.rsplit_once("::").expect("type path").0;
             let resource = path.rsplit_once("::").expect("type path").1;
-            let (_, data, getter, _) = VIEWS
+            let (_, data, getter, ..) = VIEWS
                 .iter()
-                .find(|(package, _, _, _)| module.contains(&format!("p3::bindings::{package}::")))
+                .find(|(package, ..)| module.contains(&format!("p3::bindings::{package}::")))
                 .expect("view");
             if STORE_DROPS.contains(&qualified.as_str()) {
                 // Queued; closed where a Store is held (`close_queued`).
@@ -276,9 +306,14 @@ impl<'a> Generator<'a> {
                 );
                 closing.push("true");
             } else {
+                let forget = if PREPARED_SENDS.contains(&qualified.as_str()) {
+                    "adapter::forget(state, rep); "
+                } else {
+                    ""
+                };
                 let _ = writeln!(
                     drops,
-                    "        {kind} => {module}::Host{resource}::drop(&mut {getter}(state), Resource::new_own(rep)),"
+                    "        {kind} => {{ {forget}{module}::Host{resource}::drop(&mut {getter}(state), Resource::new_own(rep)) }},"
                 );
                 closing.push("false");
             }
@@ -369,24 +404,46 @@ impl<'a> Generator<'a> {
         (source, futures.into_keys().collect())
     }
 
-    /// Invoke WIT-synchronous Store methods immediately, before their borrowed arguments drop.
-    /// Input byte streams transfer only after the whole packet validated and capacity for the
-    /// result handles is reserved; outputs bind to bounded host pipes.
+    /// Invoke WIT-synchronous Store methods before their borrowed arguments drop: immediately,
+    /// or awaited on the synchronous import when upstream is Rust-`async` (the guest stays
+    /// suspended). Input byte streams transfer only after the whole packet validated and
+    /// capacity for the result handles is reserved; outputs bind to bounded host pipes, or to the
+    /// private stream adapter for adapted outputs and streams of owned handles. A
+    /// `result<handles, error>` reserves the same capacity and binds only on `ok`.
     pub(super) fn store_arm(
         &mut self,
         function: &Function,
         trait_name: &str,
-        (data, getter, blocking): (&str, &str, bool),
+        (data, getter, budgeted): (&str, &str, bool),
         args: &str,
         (commits, transfers): (&str, &str),
+        (awaited, adapted): (bool, bool),
     ) -> String {
         let result = self.peel(function.result.expect("store methods return handles"));
         let Type::Id(id) = result else {
             panic!("store result")
         };
-        let (elements, tupled) = match self.resolve.types[id].kind.clone() {
+        let (payload, error) = match self.resolve.types[id].kind.clone() {
+            TypeDefKind::Result(result) => {
+                let error = result.err.map(|ty| self.peel(ty));
+                let Some(Type::Id(error)) = error.filter(|error| {
+                    matches!(error, Type::Id(error) if TRAPPABLE.contains(&self.qualified(*error).as_str()))
+                }) else {
+                    panic!("store result errors must be trappable")
+                };
+                (
+                    self.peel(result.ok.expect("store result carries handles")),
+                    Some(error),
+                )
+            }
+            _ => (result, None),
+        };
+        let Type::Id(payload_id) = payload else {
+            panic!("store result")
+        };
+        let (elements, tupled) = match self.resolve.types[payload_id].kind.clone() {
             TypeDefKind::Tuple(tuple) => (tuple.types, true),
-            TypeDefKind::Future(_) | TypeDefKind::Stream(_) => (vec![result], false),
+            TypeDefKind::Future(_) | TypeDefKind::Stream(_) => (vec![payload], false),
             other => panic!("store result {other:?} has no binding rule"),
         };
         let mut reserve = String::new();
@@ -405,12 +462,45 @@ impl<'a> Generator<'a> {
                     let kind = self.resource(resource);
                     let _ = write!(reserve, "w.u64(h.own({kind}, t{index}));");
                 }
+                TypeDefKind::Stream(Some(Type::U8)) if adapted => {
+                    let _ = write!(
+                        reserve,
+                        "let (s{index}, pipe{index}) = h.stream(files.pop())?; w.u64(s{index});"
+                    );
+                    let _ = write!(
+                        bind,
+                        "adapter::bytes(store.as_context_mut(), t{index}, pipe{index});"
+                    );
+                }
                 TypeDefKind::Stream(Some(Type::U8)) => {
                     let _ = write!(
                         reserve,
                         "let (s{index}, pipe{index}) = h.stream(files.pop())?; w.u64(s{index});"
                     );
                     let _ = write!(bind, "t{index}.pipe(store.as_context_mut(), pipe{index})?;");
+                }
+                // Owned handles inside items are issued by the adapter pump with each item and
+                // journaled with the STREAM_READ reply that delivers them.
+                TypeDefKind::Stream(Some(item)) if qualify::carries_handle(self.resolve, item) => {
+                    let kind = match self.peel(item) {
+                        Type::Id(item) => match self.resolve.types[item].kind {
+                            TypeDefKind::Handle(Handle::Own(resource)) => self.resource(resource),
+                            _ => panic!("stream items carry exactly one owned handle"),
+                        },
+                        _ => unreachable!("carries a handle"),
+                    };
+                    assert_eq!(
+                        self.resources[kind].0, "wasi:sockets/types@0.3.0#tcp-socket",
+                        "the stream adapter accepts only tcp-socket items"
+                    );
+                    let _ = write!(
+                        reserve,
+                        "let (s{index}, pipe{index}) = h.items()?; w.u64(s{index});"
+                    );
+                    let _ = write!(
+                        bind,
+                        "adapter::sockets(store.as_context_mut(), t{index}, streams::PipeConsumer(pipe{index}, files.pop()), {kind});"
+                    );
                 }
                 TypeDefKind::Stream(Some(item)) => {
                     let encode = self.encode(item, "value");
@@ -445,23 +535,47 @@ impl<'a> Generator<'a> {
         };
         // Owned claims commit, then input streams and futures transfer their readable ends.
         let transfer = format!("{commits} {transfers}");
+        let method = match function.kind {
+            FunctionKind::Constructor(_) => "new".to_owned(),
+            _ => snake(&function.item_name().replace('-', "_")),
+        };
+        let call = format!(
+            "{trait_name}::{method}(wasmtime::component::Access::<State, {data}>::new(store.as_context_mut(), {getter}), {args}){}",
+            if awaited { ".await" } else { "" }
+        );
+        let encode = match error {
+            None => format!(
+                "let {pattern} = {call}?; let h = &mut store.data_mut().standard.handles; \
+                 let mut out = Writer::default(); let w = &mut out; {reserve} {bind} out.0"
+            ),
+            Some(error) => {
+                let err = self.encode(Type::Id(error), "err");
+                format!(
+                    "let result = {call}; let h = &mut store.data_mut().standard.handles; \
+                     let mut out = Writer::default(); let w = &mut out; \
+                     match result {{ Ok({pattern}) => {{ w.u8(0); {reserve} {bind} }} \
+                     Err(error) => {{ let err = error.downcast()?; w.u8(1); {err} }} }} out.0"
+                )
+            }
+        };
         // Capacity is reserved before upstream creates host stream/future state, so a full
-        // table refuses the call instead of dropping freshly created transmit ends.
-        format!(
-            "h.reserve({})?; let mut files = h.files({})?; {transfer} let {pattern} = {trait_name}::{}(wasmtime::component::Access::<State, {data}>::new(store.as_context_mut(), {getter}), {args})?; \
-             let h = &mut store.data_mut().standard.handles; let mut out = Writer::default(); let w = &mut out; {reserve} \
-             {bind} Ok(Call::Ready(out.0))",
+        // table refuses the call instead of dropping freshly created transmit ends. Only
+        // budgeted packages' streams hold open files; stdio and HTTP streams draw no budget.
+        let prologue = format!(
+            "h.reserve({})?; let mut files = h.files({})?; {transfer}",
             elements.len(),
-            // Only filesystem streams hold open files; stdio streams draw no budget.
-            if blocking {
+            if budgeted {
                 streams + transfers.matches("files.pop()").count()
             } else {
                 0
             },
-            match function.kind {
-                FunctionKind::Constructor(_) => "new".to_owned(),
-                _ => snake(&function.item_name().replace('-', "_")),
-            }
-        )
+        );
+        if awaited {
+            format!(
+                "{prologue} Ok(Call::Await(Box::pin(async move {{ Ok::<_, wasmtime::Error>({{ {encode} }}) }})))"
+            )
+        } else {
+            format!("{prologue} let out = {{ {encode} }}; Ok(Call::Ready(out))")
+        }
     }
 }

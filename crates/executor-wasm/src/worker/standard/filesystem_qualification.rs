@@ -79,7 +79,7 @@ fn store(rw: &Path, ro: &Path) -> (Store, u64, u64) {
 }
 
 fn sync(store: &mut Store, packet: &[u8]) -> Result<Vec<u8>, String> {
-    synchronous(store.as_context_mut(), packet).unwrap()
+    synchronous_now(store.as_context_mut(), packet).unwrap()
 }
 
 /// Run one asynchronous packet to completion in its own Store turn.
@@ -321,12 +321,14 @@ fn input_streams_apply_backpressure_and_serialize_writes() {
         assert!(refused.err().unwrap().contains("already pending"));
         // Transferring the readable end lets upstream drain the buffer.
         let done = access
-            .with(|mut store| synchronous(store.as_context_mut(), &call.0))
+            .with(|mut store| synchronous_now(store.as_context_mut(), &call.0))
             .unwrap()
             .unwrap();
         waiting.await.unwrap().unwrap();
         access
-            .with(|mut store| synchronous(store.as_context_mut(), &Packet::op(DROP).u64(input).0))
+            .with(|mut store| {
+                synchronous_now(store.as_context_mut(), &Packet::op(DROP).u64(input).0)
+            })
             .unwrap()
             .unwrap();
         u64::from_le_bytes(done.try_into().unwrap())
@@ -710,7 +712,7 @@ fn oversized_and_malicious_stream_writes_are_refused_and_buffers_stay_bounded() 
         // Closing an untransferred writer discards its bytes and wakes the waiter.
         access
             .with(|mut store| {
-                synchronous(store.as_context_mut(), &Packet::op(DROP).u64(writers[0]).0)
+                synchronous_now(store.as_context_mut(), &Packet::op(DROP).u64(writers[0]).0)
             })
             .unwrap()
             .unwrap();

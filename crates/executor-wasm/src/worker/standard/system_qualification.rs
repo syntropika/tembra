@@ -86,7 +86,7 @@ fn granted() -> crate::Grants {
 }
 
 fn sync(store: &mut Store, packet: &[u8]) -> Result<Vec<u8>, String> {
-    synchronous(store.as_context_mut(), packet).unwrap()
+    synchronous_now(store.as_context_mut(), packet).unwrap()
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -716,7 +716,7 @@ fn exit_is_a_contained_failure_with_its_exact_status() {
         (Packet::call(EXIT, "exit").u8(1), 1),
         (Packet::call(EXIT, "exit").u8(0), 0),
     ] {
-        let error = synchronous(store.as_context_mut(), &packet.0).unwrap_err();
+        let error = synchronous_now(store.as_context_mut(), &packet.0).unwrap_err();
         assert_eq!(crate::providers::exit_status(&error), Some(status));
     }
     // An unknown result tag is an ordinary refusal, not an exit.
@@ -739,8 +739,12 @@ fn terminals_are_honestly_absent_and_never_spend_file_budget() {
         sync(&mut store, &Packet::call(TERMINAL, "get-terminal-stdin").0).unwrap(),
         [0]
     );
-    // Per-kind budgeting: descriptors (kind 0) hold a permit, terminal handles never do.
-    assert_eq!(BUDGETED, &[true, false, false, false, false, false, false]);
+    // Per-kind budgeting: descriptors (kind 0) and sockets (kinds 7, 8) hold a permit,
+    // terminal and HTTP handles never do.
+    assert_eq!(
+        BUDGETED,
+        &[true, false, false, false, false, false, false, true, true]
+    );
     let handles = &mut store.data_mut().standard.handles;
     let terminal = handles.own(1, wasmtime::component::Resource::<()>::new_own(5));
     assert_ne!(terminal, 0);

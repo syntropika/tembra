@@ -74,6 +74,8 @@ pub struct Engine {
     /// Open host files shared by every source Orb in the process: owned descriptors plus
     /// upstream stream objects that keep a file open after their descriptor is dropped.
     pub(crate) open_files: FileBudget,
+    /// The private socket stream adapter of source Orbs, compiled on first use.
+    pub(crate) stream_adapter: Arc<crate::worker::StreamAdapter>,
 }
 
 /// The process-wide open-file pool and the private share each source revision may hold of it.
@@ -173,6 +175,7 @@ impl Engine {
             active_instances: Arc::default(),
             logger: None,
             open_files: open_files(),
+            stream_adapter: Arc::default(),
         })
     }
 

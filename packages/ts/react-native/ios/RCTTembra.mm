@@ -135,9 +135,9 @@ RCT_EXPORT_MODULE(NativeTembra)
 }
 
 /** Forward one host-owned execution operation to the Swift storage. */
-- (NSNumber *)portCancelIo:(NSString *)handle port:(NSString *)port {
+- (NSNumber *)portCancel:(NSString *)handle port:(NSString *)port {
   NSError *error = nil;
-  NSNumber *result = [_storage portCancelIo:handle port:port error:&error];
+  NSNumber *result = [_storage portCancel:handle port:port error:&error];
   if (error) { @throw [NSException exceptionWithName:@"TembraError" reason:error.localizedDescription userInfo:nil]; }
   return result;
 }
@@ -163,11 +163,6 @@ RCT_EXPORT_MODULE(NativeTembra)
 /** Forward one host-owned execution operation to the Swift storage. */
 - (void)portReceive:(NSString *)handle port:(NSString *)port resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
   [_storage portReceive:handle port:port resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
-}
-
-/** Forward one host-owned execution operation to the Swift storage. */
-- (void)portIo:(NSString *)handle port:(NSString *)port packet:(NSString *)packet resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
-  [_storage portIo:handle port:port packet:packet resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
 }
 
 /** Transfer bounded guest diagnostics without changing execution authority. */

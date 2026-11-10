@@ -60,6 +60,8 @@ pub(crate) struct Prepared {
     pub clocks: Option<crate::worker::wasi::Clocks>,
     /// Built-in authority for a source Load; the seed equals `wasi`'s insecure seed.
     pub builtins: crate::protocol::Builtins,
+    /// Whether the provider bound to `wasi:sockets/ip-name-lookup` grants name resolution.
+    pub resolve: bool,
 }
 
 /// The per-Store clocks for WASIp1 and the Load built-ins.
@@ -149,9 +151,11 @@ impl Providers {
         grants: &Grants,
         cli: &crate::install::Cli,
     ) -> Result<Prepared> {
+        // The built-in network provider implements both sockets and HTTP.
         grants.check(
             imports,
             &self.filesystem.keys().cloned().collect(),
+            &self.network,
             &self.network,
         )?;
         for grant in &grants.http {
@@ -161,11 +165,19 @@ impl Providers {
         }
         let mut context = WasiCtxBuilder::new();
         let (clocks, builtins) = self.system.prepare(grants, cli, &mut context)?;
-        let sockets = Sockets::from(grants);
+        // Each interface carries only the authority of the provider it is bound to.
+        let sockets = Sockets::scoped(grants, bound(imports, "wasi:sockets/types@0.3.0"));
+        let resolve = bound(imports, "wasi:sockets/ip-name-lookup@0.3.0").is_some_and(|provider| {
+            grants
+                .network
+                .iter()
+                .any(|grant| grant.provider == provider && grant.resolve)
+        });
+        // Name lookup is served only by `crate::dns`, never by upstream's untracked resolver.
         context
             .allow_tcp(sockets.tcp())
             .allow_udp(!sockets.datagrams.is_empty() || !sockets.bind.is_empty())
-            .allow_ip_name_lookup(sockets.resolve);
+            .allow_ip_name_lookup(false);
         let sockets = std::sync::Arc::new(sockets);
         context.socket_addr_check(move |address, use_| {
             let allowed = sockets.allows(address, use_);
@@ -188,6 +200,7 @@ impl Providers {
             wasi: context,
             clocks,
             builtins,
+            resolve,
         })
     }
 }
@@ -255,7 +268,15 @@ pub(crate) fn check_http_origin(grants: &Grants, origin: &str, host: &str) -> Re
     check_http_url(grants, origin)
 }
 
-/// Exact socket authority from every network grant of one Orb.
+/// The provider an Orb bound to a standard interface, if it imports it.
+fn bound<'a>(imports: &'a [HostImport], contract: &str) -> Option<&'a str> {
+    imports
+        .iter()
+        .find(|import| import.contract == contract)
+        .map(|import| import.provider.as_str())
+}
+
+/// Exact socket authority of the network grants of the provider bound to `wasi:sockets/types`.
 ///
 /// HTTP never uses these: `wasi:http` requests are checked against HTTP origin grants instead.
 #[derive(Default)]
@@ -268,25 +289,25 @@ struct Sockets {
     bind: BTreeSet<SocketAddr>,
     /// Remote UDP peers for sending and receiving datagrams.
     datagrams: BTreeSet<SocketAddr>,
-    /// Name resolution through `wasi:sockets/ip-name-lookup`.
-    resolve: bool,
 }
 
-impl From<&Grants> for Sockets {
-    fn from(grants: &Grants) -> Self {
+impl Sockets {
+    /// Authority of `provider`'s grants only; other providers' grants are never merged in.
+    fn scoped(grants: &Grants, provider: Option<&str>) -> Self {
         let mut sockets = Self::default();
-        for grant in &grants.network {
+        for grant in grants
+            .network
+            .iter()
+            .filter(|grant| Some(grant.provider.as_str()) == provider)
+        {
             sockets.connect.extend(grant.connect.iter().copied());
             sockets.listen.extend(grant.listen.iter().copied());
             sockets.bind.extend(grant.bind.iter().copied());
             sockets.datagrams.extend(grant.datagrams.iter().copied());
-            sockets.resolve |= grant.resolve;
         }
         sockets
     }
-}
 
-impl Sockets {
     fn tcp(&self) -> bool {
         !(self.connect.is_empty() && self.listen.is_empty() && self.bind.is_empty())
     }
@@ -388,8 +409,7 @@ mod tests {
             }],
             ..Grants::default()
         };
-        let sockets = Sockets::from(&grants);
-        assert!(!sockets.resolve);
+        let sockets = Sockets::scoped(&grants, Some("net"));
         for (text, use_, allowed) in [
             ("10.0.0.1:443", SocketAddrUse::TcpConnect, true),
             ("10.0.0.1:80", SocketAddrUse::TcpConnect, false),
@@ -406,8 +426,12 @@ mod tests {
         ] {
             assert_eq!(sockets.allows(address(text), use_), allowed, "{text}");
         }
+        // Another provider's grants are never merged into the bound provider's authority.
+        let other = Sockets::scoped(&grants, Some("other"));
+        assert!(!other.tcp() && !other.allows(address("10.0.0.1:443"), SocketAddrUse::TcpConnect));
+        assert!(!Sockets::scoped(&grants, None).tcp());
         // Without grants nothing is admitted, not even implicit binds.
-        let none = Sockets::from(&Grants::default());
+        let none = Sockets::scoped(&Grants::default(), Some("net"));
         assert!(!none.tcp() && !none.allows(address("0.0.0.0:0"), SocketAddrUse::TcpBind));
         assert!(!none.allows(address("0.0.0.0:0"), SocketAddrUse::UdpBind));
         assert!(!none.allows(address("1.2.3.4:5"), SocketAddrUse::TcpAccept));

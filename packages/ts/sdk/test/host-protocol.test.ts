@@ -27,14 +27,6 @@ test("the SDK and the native executor share one host-operation vocabulary", () =
   const sync = operations("Request");
   const asynchronous = operations("AsyncRequest");
   expect(sync).not.toContain("io.check");
-  expect(asynchronous).toEqual(
-    expect.arrayContaining([
-      "transport.connect",
-      "transport.read",
-      "transport.write",
-      "transport.close",
-    ]),
-  );
   expect(sync).not.toContain("filesystem");
   expect(sync).not.toContain("network");
   for (const operation of sync) {
@@ -103,26 +95,4 @@ test("malformed and unsupported requests are distinguished", () => {
   expect(
     outcome(decodeAsyncHostRequest, '{"operation":"reference.call","id":1,"method":"m"}'),
   ).toBe("malformed");
-});
-
-test("host I/O packets reject forged context, invalid ports and non-byte chunks", () => {
-  for (const packet of [
-    { operation: "transport.read", id: 1, context: 1 },
-    { operation: "transport.write", id: 1 },
-    { operation: "transport.connect", ip: "127.0.0.1", port: 65536 },
-    { operation: "transport.connect", ip: "127.0.0.1", port: -1 },
-    { operation: "transport.read", id: -1 },
-    { operation: "transport.read", id: 1, scope: 2 },
-    { operation: "transport.write", id: 1, bytes: [256] },
-    { operation: "transport.write", id: 1, bytes: [-1] },
-    { operation: "transport.write", id: 1, bytes: [1.5] },
-    { operation: "transport.write", id: 1, bytes: "ab" },
-    { operation: "transport.write", id: 1, bytes: Array.from({ length: 16 * 1024 + 1 }, () => 0) },
-  ])
-    expect(outcome(decodeAsyncHostRequest, JSON.stringify(packet))).toBe("malformed");
-  expect(
-    decodeAsyncHostRequest(
-      JSON.stringify({ operation: "transport.write", id: 1, bytes: [0, 255] }),
-    ),
-  ).toEqual({ operation: "transport.write", id: 1, bytes: [0, 255] });
 });

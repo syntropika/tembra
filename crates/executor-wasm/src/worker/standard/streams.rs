@@ -1,8 +1,10 @@
 //! Adapt upstream streams and futures with bounded backpressure.
 //!
 //! Output streams buffer raw bytes (`stream<u8>`) or whole encoded items (typed streams) up to
-//! `PIPE_BYTES`; the upstream producer pauses while the guest has not read. Input byte streams
-//! buffer guest chunks in an [`Inbox`] drained by a [`Feed`] producer that upstream consumes.
+//! `PIPE_BYTES`; the upstream producer pauses while the guest has not read. Items carrying owned
+//! handles are bounded to one buffered item and keep the handles they issued, published with the
+//! STREAM_READ reply that delivers them. Input byte streams buffer guest chunks in an [`Inbox`]
+//! drained by a [`Feed`] producer that upstream consumes.
 use super::{
     PIPE_BYTES, Shared, State, Writer,
     handles::{Close, FilePermit, Handles},
@@ -25,12 +27,27 @@ use wasmtime::{
 
 /// Output moved from an upstream stream to the guest reader with bounded buffering.
 #[derive(Default)]
-pub(super) struct Pipe {
+pub(crate) struct Pipe {
     /// Raw bytes of a `stream<u8>`.
     buffer: Vec<u8>,
-    /// Encoded items of a typed stream, and their total size.
-    items: VecDeque<Vec<u8>>,
+    /// Encoded items of a typed stream, each with what releases it if nobody reads it (the
+    /// handles it issued, or the upstream resource it carries), and their total size.
+    items: VecDeque<(Vec<u8>, Vec<Close>)>,
     item_bytes: usize,
+    /// Close queue for unread items' handles or resources; set for item streams whose items
+    /// carry owned handles.
+    closing: Option<Shared<Vec<Close>>>,
+    /// The revision's closing-pump ledger, while an adapter pump feeds this stream.
+    pump: Option<crate::http::Ledger>,
+    /// Held from the close of a pumped stream until its pump physically finished: the adapter's
+    /// `close`, any in-flight read, and the pump itself. A cancelled call's unit is held here
+    /// too, so the call completes only after that physical close.
+    closing_pump: Vec<crate::http::Held>,
+    /// The single guest reader of a compiled stream (its host producer), parked for data.
+    guest: Option<Waker>,
+    /// The owning call's cancellation closed this stream before it was fully delivered, so its
+    /// completion reports the cancellation rather than a clean end.
+    cancelled: bool,
     ended: bool,
     /// Set when a read drained data the guest never received: every later read fails rather
     /// than silently skipping the lost bytes or items.
@@ -47,11 +64,22 @@ pub(super) struct Pipe {
 pub(super) const ABANDONED: &str = "stream read was abandoned";
 
 impl Pipe {
-    /// The guest dropped its handle: stop the producer and settle any pending read now.
+    /// The guest dropped its handle: stop the producer and settle any pending read now. Handles
+    /// issued by unread items are released through the close queue.
     pub(super) fn close(&mut self) {
+        if !self.closed
+            && let Some(pump) = &self.pump
+        {
+            self.closing_pump.push(pump.hold());
+        }
         self.closed = true;
         self.buffer.clear();
-        self.items.clear();
+        let unread: Vec<Close> = self
+            .items
+            .drain(..)
+            .flat_map(|(_, release)| release)
+            .collect();
+        self.release(unread);
         self.item_bytes = 0;
         if let Some(producer) = self.producer.take() {
             producer.wake();
@@ -67,6 +95,166 @@ impl Pipe {
         self.close();
     }
 
+    /// Queue handles or resources nobody will receive for release where the Store is held.
+    fn release(&self, release: Vec<Close>) {
+        if release.is_empty() {
+            return;
+        }
+        let closing = self
+            .closing
+            .as_ref()
+            .expect("handle-bearing items have a close queue");
+        closing.lock().expect("closing").extend(release);
+    }
+
+    /// Route handles of unread items to `closing`.
+    pub(super) fn release_into(&mut self, closing: Shared<Vec<Close>>) {
+        self.closing = Some(closing);
+    }
+
+    /// An adapter pump starts feeding this stream; a close from now on is counted in `ledger`
+    /// until [`Self::pump_finished`].
+    pub(super) fn attach_pump(&mut self, ledger: &crate::http::Ledger) {
+        self.pump = Some(ledger.clone());
+        if self.closed {
+            self.closing_pump.push(ledger.hold());
+        }
+    }
+
+    /// The pump physically finished; the returned units (if closing) are the acknowledgement.
+    pub(super) fn pump_finished(&mut self) -> Vec<crate::http::Held> {
+        self.pump = None;
+        std::mem::take(&mut self.closing_pump)
+    }
+
+    /// Whether the owning call's cancellation cut this stream short.
+    pub(super) fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    /// Whether the guest dropped (or abandoned) the stream.
+    pub(super) fn closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Pump side: room for the next chunk, or `None` once the stream is closed. Byte streams
+    /// have room up to `PIPE_BYTES`; handle-bearing item streams take the next item only when
+    /// the previous one was read, so at most one accepted handle waits for the guest.
+    pub(super) fn poll_room(
+        &mut self,
+        context: &mut Context<'_>,
+        items: bool,
+    ) -> Poll<Option<usize>> {
+        if self.closed {
+            return Poll::Ready(None);
+        }
+        let room = if items {
+            usize::from(self.items.is_empty())
+        } else {
+            PIPE_BYTES.saturating_sub(self.buffer.len())
+        };
+        if room > 0 {
+            return Poll::Ready(Some(room));
+        }
+        self.producer = Some(context.waker().clone());
+        Poll::Pending
+    }
+
+    /// Pump side: ready once the stream is closed.
+    pub(super) fn poll_closed(&mut self, context: &mut Context<'_>) -> Poll<()> {
+        if self.closed {
+            return Poll::Ready(());
+        }
+        self.producer = Some(context.waker().clone());
+        Poll::Pending
+    }
+
+    /// Pump side: buffer one chunk read from upstream.
+    pub(super) fn push_bytes(&mut self, bytes: &[u8]) {
+        if !self.closed {
+            self.buffer.extend_from_slice(bytes);
+            self.wake_head();
+        }
+    }
+
+    /// Pump side: buffer one encoded item and the handles it issued. If the guest closed the
+    /// stream meanwhile, nobody can read it and its handles are released at once.
+    pub(super) fn push_item(&mut self, bytes: Vec<u8>, issued: Vec<u64>) {
+        self.push_owned(bytes, issued.into_iter().map(Close::Handle).collect());
+    }
+
+    /// Pump side: buffer one item with what releases it if nobody reads it; released at once
+    /// if the stream is already closed.
+    pub(super) fn push_owned(&mut self, bytes: Vec<u8>, release: Vec<Close>) {
+        if self.closed {
+            self.release(release);
+            return;
+        }
+        self.item_bytes += bytes.len();
+        self.items.push_back((bytes, release));
+        self.wake_head();
+    }
+
+    /// Compiled reader: wake the guest reader when a read could complete.
+    pub(super) fn park_guest(&mut self, context: &mut Context<'_>) {
+        self.guest = Some(context.waker().clone());
+    }
+
+    /// Compiled reader: whether a read would complete now (data, an item, end or close).
+    pub(super) fn readable(&self) -> bool {
+        self.closed || self.ended || !self.buffer.is_empty() || !self.items.is_empty()
+    }
+
+    /// Compiled reader: take up to `max` buffered bytes; `None` at end of stream or once closed.
+    pub(super) fn poll_bytes(
+        &mut self,
+        context: &mut Context<'_>,
+        max: usize,
+    ) -> Poll<Option<Vec<u8>>> {
+        if self.closed {
+            return Poll::Ready(None);
+        }
+        if !self.buffer.is_empty() {
+            let count = self.buffer.len().min(max.max(1));
+            let chunk = self.buffer.drain(..count).collect();
+            if let Some(producer) = self.producer.take() {
+                producer.wake();
+            }
+            return Poll::Ready(Some(chunk));
+        }
+        if self.ended {
+            return Poll::Ready(None);
+        }
+        self.guest = Some(context.waker().clone());
+        Poll::Pending
+    }
+
+    /// Compiled reader: take the next item; the caller now owns what its release would close.
+    /// `None` at end of stream or once closed.
+    pub(super) fn poll_item(&mut self, context: &mut Context<'_>) -> Poll<Option<Vec<u8>>> {
+        if self.closed {
+            return Poll::Ready(None);
+        }
+        if let Some((item, _)) = self.items.pop_front() {
+            self.item_bytes -= item.len();
+            if let Some(producer) = self.producer.take() {
+                producer.wake();
+            }
+            return Poll::Ready(Some(item));
+        }
+        if self.ended {
+            return Poll::Ready(None);
+        }
+        self.guest = Some(context.waker().clone());
+        Poll::Pending
+    }
+
+    /// Fail every later read with `message` and stop the producer like a DROP.
+    pub(super) fn fail(&mut self, message: String) {
+        self.failure.get_or_insert(message);
+        self.close();
+    }
+
     /// Wake every queued reader so each observes DROP, poison or its turn.
     fn wake_readers(&mut self) {
         for (_, waker) in &mut self.readers {
@@ -74,12 +262,18 @@ impl Pipe {
                 waker.wake();
             }
         }
+        if let Some(guest) = self.guest.take() {
+            guest.wake();
+        }
     }
 
     /// Wake the read at the front of the queue, the only one that may drain new data.
     fn wake_head(&mut self) {
         if let Some(waker) = self.readers.front_mut().and_then(|(_, waker)| waker.take()) {
             waker.wake();
+        }
+        if let Some(guest) = self.guest.take() {
+            guest.wake();
         }
     }
 
@@ -224,7 +418,7 @@ where
                 let mut writer = Writer::default();
                 (this.encode)(&mut writer, value)?;
                 pipe.item_bytes += writer.0.len();
-                pipe.items.push_back(writer.0);
+                pipe.items.push_back((writer.0, Vec::new()));
                 pipe.wake_head();
                 return Poll::Ready(Ok(StreamResult::Completed));
             }
@@ -377,14 +571,16 @@ impl<T, F> Drop for Slot<T, F> {
 
 /// Read one reply: `u8 0` + chunk, or `u8 1` at end of stream. A byte chunk is `u32 length` +
 /// up to `limit` bytes; a typed chunk is `u32 count` + up to `limit` whole encoded items whose
-/// reply fits `room` bytes.
+/// reply fits `room` bytes. Also returns the handles the drained items issued, which the reply
+/// publishes.
 /// Reads of one stream are served FIFO by their [`ReadTurn`]; no lock is held across a wait.
 pub(super) async fn read_stream(
     turn: ReadTurn,
     limit: usize,
     room: usize,
-) -> Result<Vec<u8>, String> {
-    std::future::poll_fn(|context| {
+) -> (Result<Vec<u8>, String>, Vec<u64>) {
+    let mut issued = Vec::new();
+    let value = std::future::poll_fn(|context| {
         let mut pipe = turn.pipe.lock().expect("pipe");
         if let Some(failure) = &pipe.failure {
             return Poll::Ready(Err(failure.clone()));
@@ -410,19 +606,24 @@ pub(super) async fn read_stream(
             writer.bytes(&pipe.buffer[..count]);
             pipe.buffer.drain(..count);
         } else if let Some(first) = pipe.items.front() {
-            if 5 + first.len() > room {
+            if 5 + first.0.len() > room {
                 return Poll::Ready(Err("stream item exceeds the packet limit".into()));
             }
             writer.u8(0);
             writer.u32(0);
             let mut count = 0u32;
             while (count as usize) < limit
-                && let Some(item) = pipe.items.front()
+                && let Some((item, _)) = pipe.items.front()
                 && writer.0.len() + item.len() <= room
             {
-                let item = pipe.items.pop_front().expect("front");
+                let (item, release) = pipe.items.pop_front().expect("front");
                 pipe.item_bytes -= item.len();
                 writer.raw(&item);
+                // Source items release only the handles they issued; the reply publishes them.
+                issued.extend(release.into_iter().filter_map(|close| match close {
+                    Close::Handle(id) => Some(id),
+                    Close::Resource(..) => None,
+                }));
                 count += 1;
             }
             writer.0[1..5].copy_from_slice(&count.to_le_bytes());
@@ -439,7 +640,8 @@ pub(super) async fn read_stream(
         }
         Poll::Ready(Ok(writer.0))
     })
-    .await
+    .await;
+    (value, issued)
 }
 
 /// Accepted-but-unconsumed input bytes of one revision, across all its input streams.
@@ -805,5 +1007,23 @@ impl<T: Send + 'static> FutureProducer<State> for Writable<T> {
         }
         promise.producer = Some(context.waker().clone());
         Poll::Pending
+    }
+}
+
+/// A compiled stream read by a call: the call's cancellation closes it, and the call's unit is
+/// held until the stream's pump physically finished (or released now if no pump runs).
+impl crate::http::CallOwned for std::sync::Mutex<Pipe> {
+    fn cancel(&self, held: crate::http::Held) {
+        let mut pipe = self.lock().expect("pipe");
+        // Only a close that cuts the stream short is reported; a fully delivered stream keeps
+        // its own completion.
+        let delivered = pipe.ended && pipe.buffer.is_empty() && pipe.items.is_empty();
+        if !pipe.closed && !delivered {
+            pipe.cancelled = true;
+        }
+        pipe.close();
+        if pipe.pump.is_some() {
+            pipe.closing_pump.push(held);
+        }
     }
 }

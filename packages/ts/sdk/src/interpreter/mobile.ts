@@ -7,7 +7,6 @@ import { reply } from "./codec.ts";
 import { cliPacket } from "./cli.ts";
 import {
   answer,
-  withIoCancellation,
   query,
   type ContractPort,
   type DirectoryFilesystem,
@@ -29,9 +28,8 @@ export interface MobilePort {
   finish(): void;
   abort(): Promise<void>;
   release(environment: number): void;
-  io(packet: string): Promise<string>;
-  /** Revoke the active callback's source I/O after its caller was cancelled. */
-  cancelIo(): void;
+  /** Cancel standard WASI work owned by the active callback. */
+  cancel(): void;
   close(): void;
 }
 export interface MobileBackend {
@@ -94,10 +92,17 @@ export class MobileDriver implements InterpreterPort {
     const pending = new Set<Promise<void>>();
     let failure: unknown;
     let finished = false;
+    const signal = scope.signal;
+    const cancel = () => this.port.cancel();
+    const detach = () => signal?.removeEventListener("abort", cancel);
     try {
+      // Standard WASI calls stay inside native execution and emit no SDK host request.
+      if (signal?.aborted) cancel();
+      else signal?.addEventListener("abort", cancel, { once: true });
       for (;;) {
         const event = JSON.parse(await this.port.receive());
         if (event.event === "complete") {
+          detach();
           scope.cancel();
           await Promise.allSettled([...pending]);
           this.port.finish();
@@ -143,12 +148,15 @@ export class MobileDriver implements InterpreterPort {
       }
     } catch (error) {
       if (finished) throw error;
+      detach();
       scope.cancel();
       const results = await Promise.allSettled([this.port.abort(), ...pending]);
       const abort = results[0];
       if (abort?.status === "rejected")
         throw new AggregateError([error, abort.reason], "Mobile exchange and cleanup failed");
       throw error;
+    } finally {
+      detach();
     }
   }
 }
@@ -177,23 +185,17 @@ export function createMobileHost(
           grants: definition.grants ?? {},
           filesystem: Object.keys(isolated.providers?.filesystem ?? {}),
           network: isolated.providers?.network ?? [],
+          http: isolated.providers?.network ?? [],
         });
         const bindings = JSON.stringify(installation.bindings),
           grants = JSON.stringify(definition.grants ?? {});
         const port = await backend.open(artifact, bindings, grants, cliPacket(definition.cli));
         const driver = new MobileDriver(port, () => artifact.free());
         try {
-          return new Revision(
-            driver,
-            artifact,
-            isolated.limits?.timeoutMs ?? 10000,
-            async (request, signal) =>
-              JSON.parse(
-                await withIoCancellation(port.io(JSON.stringify(request)), request, signal, () =>
-                  port.cancelIo(),
-                ),
-              ),
-          ).definition(identity, installation);
+          return new Revision(driver, artifact, isolated.limits?.timeoutMs ?? 10000).definition(
+            identity,
+            installation,
+          );
         } catch (error) {
           driver.close();
           throw error;

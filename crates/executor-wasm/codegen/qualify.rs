@@ -136,7 +136,8 @@ fn transferable(resolve: &Resolve, ty: Type, optional: bool) -> bool {
 }
 
 /// Whether every handle a future/stream payload carries is an owned resource (journaled with
-/// the read that publishes it); streams, futures and borrows inside payloads have no owner.
+/// the FUTURE_READ or STREAM_READ that publishes it); streams, futures and borrows inside
+/// payloads have no owner.
 fn owned_only(resolve: &Resolve, ty: Type) -> bool {
     let Type::Id(id) = peel(resolve, ty) else {
         return true;
@@ -173,8 +174,9 @@ fn unpublishable(resolve: &Resolve, ty: Type) -> bool {
         return false;
     };
     match &resolve.types[id].kind {
-        TypeDefKind::Future(Some(payload)) => !owned_only(resolve, *payload),
-        TypeDefKind::Stream(Some(payload)) => carries_handle(resolve, *payload),
+        TypeDefKind::Future(Some(payload)) | TypeDefKind::Stream(Some(payload)) => {
+            !owned_only(resolve, *payload)
+        }
         TypeDefKind::Tuple(tuple) => tuple.types.iter().any(|ty| unpublishable(resolve, *ty)),
         TypeDefKind::Result(result) => result
             .ok
@@ -193,7 +195,8 @@ fn unpublishable(resolve: &Resolve, ty: Type) -> bool {
 /// - async direct owned parameters, transferred on the task's first poll (an aborted task
 ///   leaves them to retire, which drops them through upstream);
 /// - results whose handles are journaled with their reply, including owned handles inside
-///   future payloads (journaled with the FUTURE_READ that delivers them).
+///   future payloads and stream items (journaled with the FUTURE_READ or STREAM_READ reply that
+///   delivers them).
 pub(super) fn qualify(resolve: &Resolve, function: &Function) -> Result<(), String> {
     let asynchronous = matches!(
         function.kind,
@@ -258,6 +261,9 @@ interface t {
   bytes: func() -> tuple<stream<u8>, future<result<_, u32>>>;
   handle-future: func() -> tuple<stream<u8>, future<result<own-alias, u32>>>;
   handle-stream: func() -> stream<r>;
+  listen: func() -> result<stream<r>, u32>;
+  future-stream: func() -> stream<future<u32>>;
+  stream-stream: func() -> stream<stream<u8>>;
   sync-bytes: func(data: stream<u8>, offset: u64) -> future<result<_, u32>>;
   async-bytes: async func(data: stream<u8>);
   handle-input: func(data: stream<r>);
@@ -290,6 +296,8 @@ interface t {
             "owned",
             "owned-alias",
             "handle-future",
+            "handle-stream",
+            "listen",
         ] {
             assert_eq!(check(name), Ok(()), "{name}");
         }
@@ -311,13 +319,16 @@ interface t {
     }
 
     #[test]
-    fn handle_bearing_stream_payloads_are_refused() {
-        // Owned handles in a future payload are published with the FUTURE_READ reply; a
-        // stream item has no single reply to publish them with.
-        assert!(
-            check("handle-stream")
-                .unwrap_err()
-                .contains("payload carrying handles")
-        );
+    fn unowned_stream_payloads_are_refused() {
+        // Owned handles in a stream item are published with the STREAM_READ reply; streams and
+        // futures nested inside items have no owner.
+        for name in ["future-stream", "stream-stream"] {
+            assert!(
+                check(name)
+                    .unwrap_err()
+                    .contains("payload carrying handles"),
+                "{name}"
+            );
+        }
     }
 }

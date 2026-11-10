@@ -208,30 +208,17 @@ impl NativePort {
         Ok(())
     }
 
-    /// Revoke the active callback's source I/O after its caller was cancelled.
+    /// Cancel the active callback after its caller was cancelled.
     ///
-    /// Internal transport plumbing for the SDK driver: pending requests settle with an error and
-    /// the exchange still finishes only after physical completion. Without an active exchange
-    /// this does nothing.
-    pub fn cancel_io(&self) -> Result<(), MobileError> {
+    /// Pending standard WASI calls settle with an error and the exchange still finishes only
+    /// after physical completion. Without an active exchange this does nothing.
+    pub fn cancel(&self) -> Result<(), MobileError> {
         self.command(|state| {
             if let Some(ticket) = &state.ticket {
-                ticket.cancel_io();
+                ticket.cancel();
             }
             Ok(())
         })
-    }
-
-    /// Execute admitted filesystem and socket operations using the original installation grants.
-    pub async fn io(&self, packet: String) -> Result<String, MobileError> {
-        self.active()?;
-        let operation =
-            self.command(move |state| state.port.io_operation(&packet).map_err(error))?;
-        let (send, receive) = futures::channel::oneshot::channel();
-        operation.submit(move |result| {
-            let _ = send.send(result.map(|value| value.to_string()).map_err(error));
-        });
-        receive.await.map_err(error)?
     }
 
     /// Release guest closures after their owning environment has physically drained.

@@ -20,8 +20,7 @@ function fixture(events: unknown[]) {
     },
     abort: async () => {},
     release() {},
-    io: async () => "null",
-    cancelIo() {},
+    cancel() {},
     close() {},
   };
   const scope: ExecutionScope = {
@@ -63,7 +62,7 @@ test("mobile interruption retains physical ownership until admitted host work se
       event: "host",
       id: 1,
       asynchronous: true,
-      packet: '{"operation":"transport.read","id":1}',
+      packet: '{"operation":"reference.ready","id":1}',
     },
     { event: "complete", result: { error: "interrupted" } },
   ]);
@@ -116,4 +115,28 @@ test("mobile receive failures quarantine the native exchange before rejecting", 
   await expect(f.driver.execute("{}", f.scope)).rejects.toThrow("Transport failed");
   expect(aborted).toBe(true);
   expect(f.cancelled()).toBe(true);
+});
+
+test("mobile cancellation reaches native standard calls during their active exchange", async () => {
+  for (const alreadyCancelled of [false, true]) {
+    const controller = new AbortController();
+    if (alreadyCancelled) controller.abort();
+    const f = fixture([{ event: "complete", result: { ok: "null" } }]);
+    let cancellations = 0;
+    f.port.cancel = () => cancellations++;
+    const result = f.driver.execute("{}", { ...f.scope, signal: controller.signal });
+    if (!alreadyCancelled) controller.abort();
+    await result;
+    expect(cancellations).toBe(1);
+  }
+});
+
+test("mobile completion detaches native cancellation before ending its scope", async () => {
+  const controller = new AbortController();
+  const f = fixture([{ event: "complete", result: { ok: "null" } }]);
+  let cancellations = 0;
+  f.port.cancel = () => cancellations++;
+  f.scope.cancel = () => controller.abort();
+  await f.driver.execute("{}", { ...f.scope, signal: controller.signal });
+  expect(cancellations).toBe(0);
 });

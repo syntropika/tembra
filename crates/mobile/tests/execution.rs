@@ -5,17 +5,13 @@ use std::sync::Arc;
 use tembra_contracts::{Artifact, Contract};
 use tembra_mobile::{NativeArtifact, NativeInterpreter, NativePort};
 
-/// Drive one exchange like the SDK mobile driver: host I/O runs concurrently with event
-/// delivery, and the ticket finishes only after every admitted operation has settled.
+/// Drive one exchange like the SDK mobile driver: host requests are answered as they arrive and
+/// the ticket finishes after the guest completed.
 fn exchange(port: &Arc<NativePort>, command: Value, declaration: bool) -> Value {
     port.begin(command.to_string(), declaration).unwrap();
-    let mut pending = Vec::new();
     loop {
         let event: Value = serde_json::from_str(&block_on(port.receive()).unwrap()).unwrap();
         if event["event"] == "complete" {
-            for operation in pending {
-                std::thread::JoinHandle::join(operation).unwrap();
-            }
             port.finish().unwrap();
             assert!(
                 event["result"].get("error").is_none(),
@@ -24,19 +20,11 @@ fn exchange(port: &Arc<NativePort>, command: Value, declaration: bool) -> Value 
             return serde_json::from_str(event["result"]["ok"].as_str().unwrap()).unwrap();
         }
         let packet: Value = serde_json::from_str(event["packet"].as_str().unwrap()).unwrap();
-        if event["asynchronous"] == true {
-            let port = port.clone();
-            let id = event["id"].as_u64().unwrap() as u32;
-            pending.push(std::thread::spawn(move || {
-                let response = match block_on(port.io(packet.to_string())) {
-                    Ok(value) => format!("{{\"ok\":{value}}}"),
-                    Err(error) => json!({"error":error.to_string()}).to_string(),
-                };
-                // A reply after completion is ignored, as for a late platform observer.
-                let _ = port.reply(id, response);
-            }));
-            continue;
-        }
+        // Standard WASI runs inside the Store; these Orbs issue no asynchronous host request.
+        assert_ne!(
+            event["asynchronous"], true,
+            "unexpected host operation {packet}"
+        );
         let value = match packet["operation"].as_str().unwrap() {
             "orb" => Value::Null,
             "address" => json!({"key":[],"principal":"test"}),
@@ -194,22 +182,36 @@ fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
     const mount = (path) => { const [[root]] = preopens.getDirectories(); if (!path.startsWith('/data/')) throw new Error('outside the granted mount'); return [root, path.slice(6)]; };
     const readText = async (path) => { const [root, relative] = mount(path); const fd = await root.openAt({}, relative, {}, {read: true}); const [stream, done] = fd.readViaStream(0n); let text = ''; for await (const byte of stream) text += String.fromCharCode(byte); await done; return text; };
     const ascii = (text) => Uint8Array.from(text, (character) => character.charCodeAt(0));
+    const sockets = __tembraStandard['wasi:sockets/types@0.3.0'];
+    const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
+    const connect = async (port) => {
+        const socket = sockets.TcpSocket.create('ipv4');
+        await socket.connect({ tag: 'ipv4', val: { port, address: [127, 0, 0, 1] } });
+        return socket;
+    };
     globalThis.__tembraOrb = { services: { files: { methods: {
         async read() { return await readText('/data/input'); },
         async denied() { try { const [root, relative] = mount('/data/input'); await root.openAt({}, relative, {truncate: true}, {write: true}); return false; } catch { return true; } },
         async escape() { try { const [[root]] = preopens.getDirectories(); await root.openAt({}, '../secret', {}, {read: true}); return false; } catch { return true; } },
         async request(self, context, port) {
-            const stream = await tembra.transport.connect('127.0.0.1', port);
-            await stream.write(ascii('GET /mobile HTTP/1.0\r\n\r\n'));
+            const socket = await connect(port);
+            const sent = socket.send(ascii('GET /mobile HTTP/1.0\r\n\r\n'));
+            const [stream, done] = socket.receive();
             let text = '';
-            for (let chunk = await stream.read(); chunk !== null; chunk = await stream.read())
-                text += String.fromCharCode(...chunk);
-            await stream.close();
+            for await (const byte of stream) text += String.fromCharCode(byte);
+            await sent;
+            await done;
             return text;
         },
         async abandon(self, context, port) {
-            const stream = await tembra.transport.connect('127.0.0.1', port);
-            stream.read().catch(() => {});
+            // A read is pending when the guest drops its stream and socket: dropping the last
+            // references closes the connection although the peer never sent anything.
+            const socket = await connect(port);
+            const [stream, done] = socket.receive();
+            stream[Symbol.asyncIterator]().next().catch(() => {});
+            stream[dispose]?.();
+            done[dispose]?.();
+            socket[dispose]?.();
             return true;
         }
     } } } };"#;
@@ -258,7 +260,7 @@ fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
         call("request", json!([address.port()])),
         "HTTP/1.0 200 OK\r\n\r\nmobile"
     );
-    // An abandoned read settles when its callback completes, well before its I/O deadline.
+    // Dropping an idle stream and its socket closes the connection promptly.
     let started = Instant::now();
     assert_eq!(call("abandon", json!([address.port()])), true);
     let closed = observed.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -341,7 +343,7 @@ fn portable_http_streams_through_the_host_provider() {
     )
     .unwrap();
     let grants = json!({"http":[{"provider":"outbound","origins":[format!("http://{address}")]}]});
-    let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"web","apiVersion":1,"requires":{},"grants":grants,"filesystem":[],"network":["outbound"]}).to_string())).unwrap();
+    let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"web","apiVersion":1,"requires":{},"grants":grants,"filesystem":[],"network":["outbound"],"http":["outbound"]}).to_string())).unwrap();
     assert!(installation.get("error").is_none(), "{installation}");
     let engine = std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").unwrap()).unwrap();
     let backend =
@@ -384,7 +386,7 @@ fn portable_http_streams_through_the_host_provider() {
 /// host packet is involved); the connection closes and the Store keeps serving.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ENGINE"]
-fn portable_cancel_io_interrupts_a_pending_http_send_without_quarantine() {
+fn portable_cancel_interrupts_a_pending_http_send_without_quarantine() {
     use std::{
         io::{Read, Write},
         net::{TcpListener, TcpStream},
@@ -457,7 +459,7 @@ fn portable_cancel_io_interrupts_a_pending_http_send_without_quarantine() {
     )
     .unwrap();
     let grants = json!({"http":[{"provider":"outbound","origins":[format!("http://{address}")]}]});
-    let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"web","apiVersion":1,"requires":{},"grants":grants,"filesystem":[],"network":["outbound"]}).to_string())).unwrap();
+    let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"web","apiVersion":1,"requires":{},"grants":grants,"filesystem":[],"network":["outbound"],"http":["outbound"]}).to_string())).unwrap();
     assert!(installation.get("error").is_none(), "{installation}");
     let engine = std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").unwrap()).unwrap();
     let backend =
@@ -491,36 +493,17 @@ fn portable_cancel_io_interrupts_a_pending_http_send_without_quarantine() {
             waiting.recv_timeout(Duration::from_secs(5)).unwrap();
             std::thread::sleep(Duration::from_millis(100));
             let cancelled = Instant::now();
-            port.cancel_io().unwrap();
+            port.cancel().unwrap();
             cancelled
         })
     };
-    let mut pending = Vec::new();
-    let complete = loop {
-        let event: Value = serde_json::from_str(&block_on(port.receive()).unwrap()).unwrap();
-        if event["event"] == "complete" {
-            break event;
-        }
-        let packet: Value = serde_json::from_str(event["packet"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            event["asynchronous"], true,
-            "unexpected host operation {packet}"
-        );
-        let io = port.clone();
-        let id = event["id"].as_u64().unwrap() as u32;
-        pending.push(std::thread::spawn(move || {
-            let response = match block_on(io.io(packet.to_string())) {
-                Ok(value) => format!("{{\"ok\":{value}}}"),
-                Err(error) => json!({"error":error.to_string()}).to_string(),
-            };
-            let _ = io.reply(id, response);
-        }));
-    };
+    // Standard HTTP is native: the only event is the callback's completion.
+    let complete: Value = serde_json::from_str(&block_on(port.receive()).unwrap()).unwrap();
+    assert_eq!(
+        complete["event"], "complete",
+        "unexpected host operation {complete}"
+    );
     let cancelled = canceller.join().unwrap();
-    // Physical settlement: every admitted operation answered before the ticket finishes.
-    for operation in pending {
-        operation.join().unwrap();
-    }
     port.finish().unwrap();
     let settled = cancelled.elapsed();
     assert!(
@@ -535,7 +518,7 @@ fn portable_cancel_io_interrupts_a_pending_http_send_without_quarantine() {
     assert!(closed.duration_since(cancelled) < Duration::from_secs(2));
 
     // A stale cancellation outside any exchange does nothing, and the Store is not quarantined.
-    port.cancel_io().unwrap();
+    port.cancel().unwrap();
     let started = Instant::now();
     assert_eq!(exchange(&port, invoke("values"), false), "hello");
     assert!(started.elapsed() < Duration::from_secs(5));

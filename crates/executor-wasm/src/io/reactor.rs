@@ -88,11 +88,6 @@ impl Reactor {
         self.runtime.spawn(task)
     }
 
-    /// Run nonblocking socket work; the task owns its capabilities until it settles.
-    pub(super) fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
-        drop(self.runtime.spawn(task));
-    }
-
     /// Reserve a bounded filesystem slot before any work is queued.
     pub(super) fn admit_file(&self) -> Result<OwnedSemaphorePermit> {
         self.files
@@ -204,12 +199,12 @@ mod tests {
             observed.recv_timeout(Duration::from_secs(5)).unwrap();
         }
         let (resolved, result) = mpsc::channel();
-        reactor.spawn(async move {
+        drop(reactor.spawn_joined(async move {
             let addresses = tokio::net::lookup_host("localhost:80")
                 .await
                 .map(|addresses| addresses.collect::<Vec<_>>());
             let _ = resolved.send(addresses);
-        });
+        }));
         let outcome = result.recv_timeout(Duration::from_secs(2));
         // Release every job before reporting a failed assertion or dropping the runtimes.
         drop(release);

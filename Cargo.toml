@@ -17,7 +17,9 @@ exclude = [
   "crates/executor-wasm/rust-consumer",
   "crates/executor-wasm/rust-contributor",
   "crates/executor-wasm/rust-http-client",
+  "crates/executor-wasm/rust-sockets",
   "crates/executor-wasm/probe-provider",
+  "crates/executor-wasm/stream-adapter",
 ]
 
 [workspace.package]

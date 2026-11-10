@@ -150,6 +150,25 @@ await writeFile(
     .replaceAll('"@syntropika/tembra-sdk"', guest),
 );
 builds.http = { entry: "http/orb.ts", wit: "http/contract.wit", world: "client" };
+// Sockets: one authored source under two Orb names, so acceptance can install them with different
+// providers and grants.
+const socketsFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-sockets");
+await mkdir(path.join(sources, "sockets"), { recursive: true });
+await writeFile(
+  path.join(sources, "sockets/contract.wit"),
+  await readFile(path.join(socketsFixture, "contract.wit")),
+);
+const sockets = (await readFile(path.join(socketsFixture, "orb.ts"), "utf8")).replaceAll(
+  '"@syntropika/tembra-sdk"',
+  guest,
+);
+for (const [name, source] of [
+  ["sockets", sockets],
+  ["sockets-peer", sockets.replace('name: "sockets"', 'name: "sockets-peer"')],
+] as const) {
+  await writeFile(path.join(sources, "sockets", `${name}.ts`), source);
+  builds[name] = { entry: `sockets/${name}.ts`, wit: "sockets/contract.wit", world: "sockets" };
+}
 // Standard WASI source Orbs: the example scenario and the acceptance-only boundary probes. Two
 // boundary revisions let acceptance pass one revision's handle number to the other.
 const standardFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-standard");

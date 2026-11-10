@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { BrowserNetwork } from "../src/interpreter/browser-network.ts";
 import { fetchHttpProvider } from "../src/interpreter/http-provider.ts";
 import { decodeAsyncHostRequest } from "../src/interpreter/host-protocol.ts";
 import { BrowserCapabilities } from "../src/interpreter/io.ts";
@@ -43,100 +44,67 @@ test("HTTP grants validate exact normalized origins using the browser URL API", 
   }
 });
 
-test("HTTP and socket permissions remain independent for custom browser providers", async () => {
-  let connections = 0;
-  let closed = 0;
-  const callback = new AbortController();
-  const providers = {
-    network: {
-      mock: {
-        async connect() {
-          connections++;
-          return {
-            async read() {
-              return Uint8Array.from({ length: 20000 }, () => 7);
-            },
-            async write() {},
-            async close() {
-              closed++;
-            },
-          };
-        },
-      },
-    },
-  };
-  const httpOnly = await BrowserCapabilities.open(
-    { http: [{ provider: "mock", origins: ["https://api.example.test"] }] },
-    providers,
-  );
-  await expect(
-    httpOnly.execute(
-      { operation: "transport.connect", ip: "127.0.0.1", port: 80 },
-      callback.signal,
-    ),
-  ).rejects.toThrow("TCP");
-  expect(connections).toBe(0);
-  await httpOnly.dispose();
-  const io = await BrowserCapabilities.open(
-    { network: [{ provider: "mock", connect: ["127.0.0.1:80"] }] },
-    providers,
-  );
-  try {
-    const id = (await io.execute(
-      { operation: "transport.connect", ip: "127.0.0.1", port: 80 },
-      callback.signal,
-    )) as number;
-    expect(
-      ((await io.execute({ operation: "transport.read", id }, callback.signal)) as number[]).length,
-    ).toBe(16384);
-    expect(
-      ((await io.execute({ operation: "transport.read", id }, callback.signal)) as number[]).length,
-    ).toBe(3616);
-    expect(io.network.provider(new URL("https://api.example.test/"))).toBeUndefined();
-    callback.abort();
-    expect(closed).toBe(1);
-  } finally {
-    await io.dispose();
-  }
-});
-
-test("a host provider resolving after cancellation cannot publish a live handle", async () => {
-  let release!: () => void;
-  let closed = 0;
-  const callback = new AbortController();
-  const io = await BrowserCapabilities.open(
-    { network: [{ provider: "mock", connect: ["127.0.0.1:80"] }] },
+test("socket authority is exactly the bound provider's grants, with native address rules", () => {
+  const network = new BrowserNetwork(
     {
-      network: {
-        mock: {
-          async connect() {
-            await new Promise<void>((resolve) => {
-              release = resolve;
-            });
-            return {
-              async read() {
-                return null;
-              },
-              async write() {},
-              async close() {
-                closed++;
-              },
-            };
-          },
+      network: [
+        {
+          provider: "types",
+          connect: ["127.0.0.1:80", "[::1]:443"],
+          listen: ["0.0.0.0:0", "[::1%3]:8080"],
+          datagrams: ["10.0.0.2:53"],
         },
-      },
+        { provider: "lookup", connect: ["127.0.0.1:81"], resolve: true },
+      ],
+      http: [{ provider: "web", origins: ["https://api.example.test"] }],
     },
+    {},
   );
-  try {
-    const connection = io.execute(
-      { operation: "transport.connect", ip: "127.0.0.1", port: 80 },
-      callback.signal,
+  const types = network.sockets("types")!;
+  const lookup = network.sockets("lookup")!;
+  const v4 = (ip: number[], port: number) => ({
+    family: "ipv4" as const,
+    ip,
+    port,
+    flowInfo: 0,
+    scopeId: 0,
+  });
+  const v6 = (ip: number[], port: number, flowInfo = 0, scopeId = 0) => ({
+    family: "ipv6" as const,
+    ip,
+    port,
+    flowInfo,
+    scopeId,
+  });
+  const loopback6 = [0, 0, 0, 0, 0, 0, 0, 1];
+  // N1: no merging across the two bound providers.
+  expect(types.grants.allows(v4([127, 0, 0, 1], 81), "tcp-connect")).toBe(false);
+  expect(lookup.grants.allows(v4([127, 0, 0, 1], 80), "tcp-connect")).toBe(false);
+  expect(types.grants.resolve).toBe(false);
+  expect(lookup.grants.resolve).toBe(true);
+  expect(lookup.grants.tcp).toBe(true);
+  // Exact SocketAddr identity: IPv6 spellings compare numerically; flow info and scope count.
+  expect(types.grants.allows(v6(loopback6, 443), "tcp-connect")).toBe(true);
+  expect(types.grants.allows(v6(loopback6, 443, 1), "tcp-connect")).toBe(false);
+  expect(types.grants.allows(v6(loopback6, 443, 0, 1), "tcp-connect")).toBe(false);
+  // Listen compares the IP only, with port 0 meaning any port; bind accepts listen addresses.
+  expect(types.grants.allows(v4([0, 0, 0, 0], 9000), "tcp-listen")).toBe(true);
+  expect(types.grants.allows(v6(loopback6, 8080, 7, 0), "tcp-listen")).toBe(true);
+  expect(types.grants.allows(v6(loopback6, 8081), "tcp-listen")).toBe(false);
+  expect(types.grants.allows(v6(loopback6, 8080, 0, 3), "tcp-bind")).toBe(true);
+  expect(types.grants.allows(v4([0, 0, 0, 0], 0), "tcp-bind")).toBe(true);
+  expect(types.grants.allows(v4([127, 0, 0, 1], 7), "tcp-bind")).toBe(false);
+  expect(types.grants.allows(v4([1, 2, 3, 4], 5), "tcp-accept")).toBe(true);
+  // UDP: implicit bind only with datagrams; peers are exact.
+  expect(types.grants.allows(v4([0, 0, 0, 0], 0), "udp-bind")).toBe(true);
+  expect(types.grants.allows(v4([10, 0, 0, 2], 53), "udp-send")).toBe(true);
+  expect(types.grants.allows(v4([10, 0, 0, 2], 54), "udp-receive")).toBe(false);
+  expect(lookup.grants.udp).toBe(false);
+  // HTTP grants authorize no socket provider, and an unbound name has no access at all.
+  expect(network.sockets("web")!.grants.tcp).toBe(false);
+  expect(network.sockets(undefined)).toBeUndefined();
+  for (const bad of ["127.0.0.1", "01.2.3.4:5", "[::1]", "[::1%x]:1", "1.2.3.4:65536"])
+    expect(() => new BrowserNetwork({ network: [{ provider: "p", connect: [bad] }] }, {})).toThrow(
+      "Invalid network grant address",
     );
-    callback.abort();
-    release();
-    await expect(connection).rejects.toThrow();
-    expect(closed).toBe(1);
-  } finally {
-    await io.dispose();
-  }
 });

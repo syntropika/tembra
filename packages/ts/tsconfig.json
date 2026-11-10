@@ -14,7 +14,11 @@
     "customConditions": ["source"],
     "paths": {
       "wasi:http/client@0.3.0": ["./sdk/.tembra/wasi/interfaces/wasi-http-client.d.ts"],
-      "wasi:http/types@0.3.0": ["./sdk/.tembra/wasi/interfaces/wasi-http-types.d.ts"]
+      "wasi:http/types@0.3.0": ["./sdk/.tembra/wasi/interfaces/wasi-http-types.d.ts"],
+      "wasi:sockets/types@0.3.0": ["./sdk/.tembra/wasi/interfaces/wasi-sockets-types.d.ts"],
+      "wasi:sockets/ip-name-lookup@0.3.0": [
+        "./sdk/.tembra/wasi/interfaces/wasi-sockets-ip-name-lookup.d.ts"
+      ]
     }
   },
   "include": [

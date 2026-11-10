@@ -1,0 +1,7 @@
+package tembra:stdlib;
+
+// Build-time types for the browser socket provider contract. Orbs declare their own imports.
+world sockets {
+    import wasi:sockets/types@0.3.0;
+    import wasi:sockets/ip-name-lookup@0.3.0;
+}

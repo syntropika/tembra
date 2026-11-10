@@ -114,11 +114,15 @@ impl Grants {
     }
 
     /// Require declared imports, configured providers and normalized mounts before attaching I/O.
+    /// Each grant kind names providers of its own registry: socket grants `network`, HTTP grants
+    /// `http`. A host whose provider implements both passes the same keys twice; the grants stay
+    /// independent either way.
     pub fn check(
         &self,
         imports: &[HostImport],
         filesystem: &BTreeSet<String>,
         network: &BTreeSet<String>,
+        http: &BTreeSet<String>,
     ) -> Result<()> {
         for import in imports {
             let granted = match import.contract.as_str() {
@@ -233,7 +237,7 @@ impl Grants {
                     "HTTP grants require a provider and at least one origin",
                 ));
             }
-            if !network.contains(&grant.provider) {
+            if !http.contains(&grant.provider) {
                 return Err(Error::new(
                     Code::Invalid,
                     "host_provider",

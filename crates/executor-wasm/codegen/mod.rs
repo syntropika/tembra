@@ -33,6 +33,8 @@ const COMPLETE: &[&str] = &[
     "wasi:cli/terminal-stderr@0.3.0",
     "wasi:http/types@0.3.0",
     "wasi:http/client@0.3.0",
+    "wasi:sockets/types@0.3.0",
+    "wasi:sockets/ip-name-lookup@0.3.0",
 ];
 
 /// Mirror of the upstream bindgen `store` entries (`wasmtime-wasi` `p3/bindings.rs`). If this
@@ -50,7 +52,26 @@ const STORE: &[&str] = &[
     "wasi:http/types@0.3.0#[static]request.consume-body",
     "wasi:http/types@0.3.0#[static]response.new",
     "wasi:http/types@0.3.0#[static]response.consume-body",
+    "wasi:sockets/types@0.3.0#[method]tcp-socket.listen",
+    "wasi:sockets/types@0.3.0#[method]tcp-socket.send",
+    "wasi:sockets/types@0.3.0#[method]tcp-socket.receive",
 ];
+
+/// WIT-synchronous functions whose upstream implementation is Rust-`async` (the bindgen `async`
+/// flag): the generated call is awaited on the synchronous import, so the guest stays suspended
+/// on its fiber until upstream finishes, and WIT calling conventions are unchanged.
+const AWAITED: &[&str] = &[
+    "wasi:sockets/types@0.3.0#[method]tcp-socket.bind",
+    "wasi:sockets/types@0.3.0#[method]tcp-socket.listen",
+    "wasi:sockets/types@0.3.0#[static]udp-socket.create",
+    "wasi:sockets/types@0.3.0#[method]udp-socket.bind",
+    "wasi:sockets/types@0.3.0#[method]udp-socket.connect",
+];
+
+/// Store functions whose output streams the source path reads through the private stream
+/// adapter, so dropping the guest's stream closes the upstream producer even while it is idle.
+/// Streams of owned handles are always adapted (they are only produced by `listen`).
+const ADAPTED: &[&str] = &["wasi:sockets/types@0.3.0#[method]tcp-socket.receive"];
 
 /// Resources whose upstream `drop` is a store function (`Host<R>WithStore::drop`); they close
 /// through the typed close queue wherever a Store is held.
@@ -58,6 +79,10 @@ const STORE_DROPS: &[&str] = &[
     "wasi:http/types@0.3.0#request",
     "wasi:http/types@0.3.0#response",
 ];
+
+/// Resources whose drop also forgets the send writer the stream adapter prepared for them, so a
+/// dropped socket's writer is closed and never published under a reused rep.
+const PREPARED_SENDS: &[&str] = &["wasi:sockets/types@0.3.0#tcp-socket"];
 
 /// Upstream bindings root per WASI package; HTTP lives in `wasmtime-wasi-http`.
 fn bindings(package: &str) -> &'static str {
@@ -87,17 +112,20 @@ const TRAPPABLE: &[&str] = &[
     "wasi:http/types@0.3.0#error-code",
     "wasi:http/types@0.3.0#header-error",
     "wasi:http/types@0.3.0#request-options-error",
+    "wasi:sockets/types@0.3.0#error-code",
 ];
 
 /// Upstream host view per WASI package: `(package, Accessor data type, fully qualified view
-/// getter, blocking)`. Blocking packages hold a shared filesystem admission permit per task, and
-/// only their resources draw from the open-file budget. Getters are fully qualified so the
-/// generated code needs no trait imports.
-const VIEWS: &[(&str, &str, &str, bool)] = &[
+/// getter, blocking, budgeted)`. Blocking packages hold a shared filesystem admission permit per
+/// task. Budgeted packages' resources and streams hold file descriptors, so each draws one unit
+/// of the open-file budget. Getters are fully qualified so the generated code needs no trait
+/// imports.
+const VIEWS: &[(&str, &str, &str, bool, bool)] = &[
     (
         "random",
         "WasiRandom",
         "<State as wasmtime_wasi::random::WasiRandomView>::random",
+        false,
         false,
     ),
     (
@@ -105,11 +133,13 @@ const VIEWS: &[(&str, &str, &str, bool)] = &[
         "WasiClocks",
         "<State as wasmtime_wasi::clocks::WasiClocksView>::clocks",
         false,
+        false,
     ),
     (
         "filesystem",
         "WasiFilesystem",
         "<State as wasmtime_wasi::filesystem::WasiFilesystemView>::filesystem",
+        true,
         true,
     ),
     (
@@ -117,14 +147,32 @@ const VIEWS: &[(&str, &str, &str, bool)] = &[
         "WasiCli",
         "<State as wasmtime_wasi::cli::WasiCliView>::cli",
         false,
+        false,
     ),
     (
         "http",
         "WasiHttp",
         "<State as wasmtime_wasi_http::WasiHttpView>::http",
         false,
+        false,
+    ),
+    (
+        "sockets",
+        "crate::sockets::CallSockets",
+        "<State as wasmtime_wasi::sockets::WasiSocketsView>::sockets",
+        false,
+        true,
     ),
 ];
+
+/// Interfaces served by a Tembra implementation of the standard upstream trait instead of the
+/// package view: `(interface, Accessor data type, view getter)`. Name lookup runs on Tembra's
+/// bounded, tracked resolver (see `crate::dns`), never on untracked upstream lookup jobs.
+const OVERRIDES: &[(&str, &str, &str)] = &[(
+    "wasi:sockets/ip-name-lookup@0.3.0",
+    "crate::dns::Dns",
+    "<State as crate::dns::DnsView>::dns",
+)];
 
 /// Emit typed native dispatch and the identical guest/browser value metadata.
 pub(super) fn generate(resolve: &Resolve) -> (String, String) {

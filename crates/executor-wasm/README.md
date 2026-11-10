@@ -188,7 +188,7 @@ support. Native compiled components link `wasmtime-wasi` and `wasmtime-wasi-http
 | ----------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `wasi:filesystem` | Standard descriptors under granted preopens                                       | Generated binary read/write/append, metadata and directory bindings | Same bindings over memory, OPFS or custom descriptors; explicit platform limits                      |
 | `wasi:http`       | Standard outgoing request, response, body and trailer resources                   | The same generated resources; a TypeScript HTTP/SSE convenience     | The same resources over an injected host transport; Fetch has platform limits                        |
-| `wasi:sockets`    | Standard TCP, UDP and DNS, with separate grants                                   | Outbound TCP helper                                                 | Outbound TCP only through an explicitly supplied adapter                                             |
+| `wasi:sockets`    | Standard TCP, UDP and DNS, with separate grants                                   | Generated TCP, UDP, accept-stream and name-lookup bindings          | The same bindings over an injected partial provider; missing capabilities return standard errors     |
 | `wasi:clocks`     | System and monotonic clocks under an explicit grant                               | Generated system/monotonic clocks, resolutions and waits            | The same bindings over injected or browser clocks                                                    |
 | `wasi:random`     | Secure and non-cryptographic random interfaces under a grant                      | Generated secure/insecure bytes and u64, insecure seed              | The same bindings over injected or browser randomness                                                |
 | `wasi:cli`        | Explicit arguments, environment, initial directory and byte stdio; contained exit | The same generated bindings and per-revision configuration          | Injected byte stdio, explicit process configuration and contained exit; terminal getters return none |
@@ -206,13 +206,13 @@ Incoming `wasi:http/handler` serving is not integrated. Its resource-valued
 exports cannot currently be exposed as ordinary portable Orb services. Browser
 compiled components remain unsupported. Native/mobile share the native
 implementation, but host/Pulley tests do not establish iOS or Android device
-qualification. Source sockets/DNS bindings and incoming HTTP remain work to do.
+qualification. Incoming HTTP remains work to do.
 
 ## Current scope
 
 Guests can use state reads, updates and selections, selected dependency
 references, resource dependencies, internal cooperative waits, console output,
-the granted filesystem, the granted TCP transport and WIT-checked hook contributions.
+the granted filesystem, standard sockets and HTTP, and WIT-checked hook contributions.
 Source Orbs can also declare `series`, `waterfall` and `bail` hooks. See
 [portable hook contracts](../../docs/extensions.md#portable-hook-contracts).
 
@@ -255,12 +255,14 @@ just build-probe <target-directory>
 just build-consumer <target-directory>
 just build-contributor <target-directory>
 just build-http-client <target-directory>
+just build-sockets <target-directory>
 just test-wasm-acceptance --out <directory> \
   --provider <target-directory>/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm \
   --probe <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm \
   --consumer <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm \
   --contributor <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm \
-  --http-client <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm
+  --http-client <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm \
+  --sockets <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm
 ```
 
 The runner builds the fixture Orbs with `scripts/test-wasm-fixtures.ts`, or reuses a
@@ -314,10 +316,29 @@ streams conservatively, including repeated preopen handles; it is not an exact O
 census. The budget does not cover compiled components, which currently rely on upstream resource handling
 and OS limits; it is not a complete process-wide file-descriptor guarantee.
 
-`tembra.transport.connect(ip, port)` returns a byte stream with `read`, `write` and
-`close`. Each chunk is at most 16 KiB. Streams belong to the callback that opened
-them and close on completion, abandonment or cancellation; an old handle cannot
-be used by the next callback. A slow socket read does not occupy a filesystem turn.
+Socket authors import `TcpSocket` or `UdpSocket` from `wasi:sockets/types@0.3.0`
+and name lookup from `wasi:sockets/ip-name-lookup@0.3.0`. The same generated binary
+bindings carry socket resources, byte streams, accepted sockets and standard errors.
+`readChunks` and `writeChunks` transfer bytes in bounded chunks up to 64 KiB.
+Socket resources and their streams have independent lifetimes: dropping a socket
+alone does not close its receive, send or listen stream. Drop each retained resource
+when finished. An accepted socket belongs to its receiving Orb and cannot cross
+portable inter-Orb calls.
+
+Cancellation closes a compiled stream read by that call; untouched retained streams
+remain usable. Source cancellation revokes the pending read and leaves cleanup to
+the guest. Both paths abort a blocked send and await its physical close. A forced
+cancellation reports `other("call cancelled")` through the completion future; it can
+win until the send's final close is acknowledged, even after its bytes reached the
+OS. A real EOF or an explicit non-cancelled DROP keeps upstream's result. Socket
+Orbs use a shared, lazy native stream adapter; its internal tables bound each stream
+element type to 4,096 live entries per instance.
+
+A browser host registers a typed `SocketProvider` under `isolated.providers.network`.
+TCP, UDP, DNS and individual options are optional capabilities. An unavailable
+operation returns its standard unsupported error; Tembra does not emulate browser
+raw sockets. Network and HTTP provider registries are independent. Grants are checked
+against the provider bound to each exact WIT import before any provider work begins.
 
 `@syntropika/tembra-sdk/http` imports standard `wasi:http/client` and `wasi:http/types`.
 Authors declare the client import in WIT and write `await fetch(url)`; HTTP framing, DNS and

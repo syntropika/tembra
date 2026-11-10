@@ -41,6 +41,7 @@ import {
 import { filesystemMethods, type StandardMount } from "./standard-filesystem.ts";
 import { StandardCli, type StdioStreams } from "./standard-cli.ts";
 import { httpMethods, type HttpClient } from "./standard-http.ts";
+import { socketMethods, type SocketBindings } from "./standard-sockets.ts";
 import type { CliOptions } from "../authoring/types.ts";
 import {
   abortable,
@@ -149,6 +150,8 @@ export class StandardHost implements StandardServices {
   readonly random: RandomProvider;
   readonly #cli: StandardCli;
   readonly #entries = new Map<number, Entry>();
+  /** Handle slots held by owned-item reads whose pull is still running. */
+  #reserved = 0;
   readonly #work = new Set<Promise<unknown>>();
   readonly #implementations: (Implementation | undefined)[];
   readonly #allowed: boolean[];
@@ -171,6 +174,8 @@ export class StandardHost implements StandardServices {
       stdio?: StdioStreams | undefined;
       /** Granted outgoing HTTP; absent means every `wasi:http/client#send` is denied. */
       http?: HttpClient | undefined;
+      /** Providers and grants bound to this revision's `wasi:sockets` imports. */
+      sockets?: SocketBindings | undefined;
     } = {},
   ) {
     this.clocks = checkedClocks(providers.clocks ?? browserClocks());
@@ -181,6 +186,7 @@ export class StandardHost implements StandardServices {
       ...filesystemMethods(() => this.mounts),
       ...this.#cli.methods,
       ...httpMethods(providers.http),
+      ...socketMethods(providers.sockets ?? {}),
     };
     this.#allowed = METHODS.map((method) => allowed.has(method.interface));
     this.#implementations = METHODS.map((method, index) =>
@@ -236,11 +242,10 @@ export class StandardHost implements StandardServices {
 
   /** Issue a fresh handle for an outgoing resource, stream or future. */
   #issue(entry: Entry): number {
-    if (this.#entries.size >= HANDLE_LIMIT || issued >= Number.MAX_SAFE_INTEGER)
+    const full = this.#entries.size + this.#reserved >= HANDLE_LIMIT;
+    if (full || issued >= Number.MAX_SAFE_INTEGER)
       throw new Error(
-        this.#entries.size >= HANDLE_LIMIT
-          ? "standard handle table is full"
-          : "standard handle space is exhausted",
+        full ? "standard handle table is full" : "standard handle space is exhausted",
       );
     this.#entries.set(++issued, entry);
     return issued;
@@ -426,7 +431,7 @@ export class StandardHost implements StandardServices {
     const args = method.params.map((type) => decode(reader, type, claims.codec));
     reader.end();
     const needed = method.result === undefined ? 0 : slots(method.result);
-    if (this.#entries.size + needed > HANDLE_LIMIT)
+    if (this.#entries.size + this.#reserved + needed > HANDLE_LIMIT)
       throw new Error("standard handle table is full");
     claims.commit();
     for (const resource of lent ? claims.borrowed : []) {
@@ -438,7 +443,11 @@ export class StandardHost implements StandardServices {
   }
 
   /** Encode a delivery; on failure roll back its new handles and release unissued values. */
-  #deliver(type: number | undefined, value: unknown): StandardDelivery {
+  #deliver(
+    type: number | undefined,
+    value: unknown,
+    head?: (writer: Writer) => void,
+  ): StandardDelivery {
     const issued: number[] = [];
     const values = new Set<unknown>();
     const codec: HandleCodec = {
@@ -452,6 +461,7 @@ export class StandardHost implements StandardServices {
     };
     try {
       const writer = new Writer();
+      head?.(writer);
       if (type !== undefined && type !== NONE) encode(writer, type, value, codec);
       const bytes = writer.finish();
       if (bytes.length > this.packetBytes)
@@ -604,6 +614,39 @@ export class StandardHost implements StandardServices {
         const entry = this.#entries.get(handle);
         if (entry?.kind !== "output") throw new Error("handle is not a live output stream");
         const item = entry.item;
+        if (item !== undefined && slots(item) > 0) {
+          // Owned items: the item's handle slots are reserved before the pull, so no concurrent
+          // read or issue can take them. The reservation is returned on every outcome, and on
+          // success it becomes the handles this reply issues, with no await in between. Those
+          // handles are journaled with the read, so an undelivered reply rolls them back and
+          // poisons the stream, as every stream read does.
+          let reserved = slots(item);
+          if (this.#entries.size + this.#reserved + reserved > HANDLE_LIMIT)
+            throw new Error("standard handle table is full");
+          this.#reserved += reserved;
+          const unreserve = () => {
+            this.#reserved -= reserved;
+            reserved = 0;
+          };
+          try {
+            const taken = await this.#track(entry.value.take(signal));
+            unreserve();
+            if (!taken) return { bytes: Uint8Array.of(1), issued: [], reads: [handle] };
+            // The value is this read's alone now; a drop or retirement since the pull means
+            // nobody will receive it, so it is released here instead of being issued.
+            if (this.#closed || entry.value.closed) {
+              this.#releaseValue(item, taken.value);
+              throw new Error(this.#closed ? "Standard host is closed" : "stream was dropped");
+            }
+            const delivery = this.#deliver(item, taken.value, (writer) => {
+              writer.u8(0);
+              writer.u32(1);
+            });
+            return { ...delivery, reads: [handle] };
+          } finally {
+            unreserve();
+          }
+        }
         const limit =
           item === undefined
             ? Math.min(Math.max(requested, 1), STREAM_CHUNK, this.packetBytes - 5)

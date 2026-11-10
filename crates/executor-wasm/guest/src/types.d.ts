@@ -89,10 +89,6 @@ interface HostRequests {
 /** Asynchronous host operations awaited by the outer driver. */
 interface AsyncHostRequests {
   "hook.run": HostHandle & { value: unknown };
-  "transport.connect": { ip: string; port: number };
-  "transport.read": { id: number };
-  "transport.write": { id: number; bytes: number[] };
-  "transport.close": { id: number };
   "reference.ready": HostHandle;
   "reference.call": HostHandle & { method: string; args: unknown[] };
   wait: { milliseconds: number };
@@ -143,11 +139,4 @@ declare var __tembraDispatch: (packet: string) => Promise<string>;
 
 declare var tembra: {
   wait(milliseconds: number): Promise<void>;
-  transport?: { connect(ip: string, port: number): Promise<TransportStream> };
 };
-/** One incremental byte stream; reads return at most 16 KiB and `null` at end of stream. */
-interface TransportStream {
-  read(): Promise<Uint8Array | null>;
-  write(bytes: Uint8Array): Promise<void>;
-  close(): Promise<void>;
-}

@@ -64,13 +64,8 @@ impl Engine {
         };
         let (session, description, services, hooks) = match &artifact.implementation {
             tembra_contracts::ArtifactImplementation::Source(source) => {
-                let io = crate::io::SourceIo::new(
-                    &self.providers,
-                    &plan.host_imports,
-                    grants,
-                    std::time::Duration::from_millis(self.limits.timeout_ms),
-                    cli,
-                )?;
+                let io =
+                    crate::io::SourceIo::new(&self.providers, &plan.host_imports, grants, cli)?;
                 let session = Session::start(self.clone(), name.into(), io)?;
                 let description = session.load(source, contract.describe())?;
                 let (services, hooks) = checked(&description)?;
@@ -108,11 +103,6 @@ impl Engine {
 }
 
 impl InterpreterPort {
-    /// Prepare host I/O after the embedding scope has checked callback authority.
-    pub fn io_operation(&self, packet: &str) -> Result<crate::IoOperation> {
-        self.session.io_operation(packet)
-    }
-
     /// Queue pure guest-map cleanup after the kernel releases the environment's physical owners.
     pub fn release(&self, environment: u64) {
         self.session.release_environment(environment);
@@ -162,7 +152,7 @@ impl InterpreterPort {
                 events,
                 done,
                 packet_bytes: self.packet_bytes,
-                streams: self.session.streams(),
+                scope: self.session.scope(),
             },
         ))
     }
@@ -176,14 +166,15 @@ pub struct PortTicket {
     finished: bool,
 }
 impl PortTicket {
-    /// Revoke the source I/O of this exchange's callback after its caller was cancelled.
+    /// Cancel this exchange's callback after its caller was cancelled.
     ///
-    /// Its streams close and pending connects and requests settle with an error, so the callback
-    /// can observe the cancellation; the Store is not quarantined. After the exchange has
-    /// physically completed this does nothing, so a stale ticket never reaches a later callback.
-    pub fn cancel_io(&self) {
+    /// Its epoch ends: pending standard WASI calls are revoked and settle with an error, so the
+    /// callback can observe the cancellation; the Store is not quarantined. After the exchange
+    /// has physically completed this does nothing, so a stale ticket never reaches a later
+    /// callback.
+    pub fn cancel(&self) {
         if !self.finished && !self.done.load(Ordering::Acquire) {
-            self.session.streams().end_callback();
+            self.session.scope().end_callback();
         }
     }
 
@@ -211,13 +202,13 @@ pub struct PortEvents {
     events: async_channel::Receiver<Event>,
     done: Arc<AtomicBool>,
     packet_bytes: usize,
-    /// The callback's transport epoch ends here, before the embedding awaits pending I/O.
-    streams: crate::io::Streams,
+    /// The callback's epoch ends here, before the embedding awaits pending host requests.
+    scope: crate::io::CallbackScope,
 }
 impl PortEvents {
     /// Revoke pending requests when the embedding JavaScript runtime is invalidated.
     pub fn close(&self) {
-        self.streams.end_callback();
+        self.scope.end_callback();
         self.events.close();
         worker::close_replies(&self.events);
     }
@@ -248,8 +239,8 @@ impl PortEvents {
                 },
             }),
             Event::Done(result) => {
-                // Close this callback's streams before the embedding drains its pending I/O.
-                self.streams.end_callback();
+                // End this callback's epoch before the embedding drains its pending requests.
+                self.scope.end_callback();
                 self.done.store(true, Ordering::Release);
                 let result = result.map_err(failure);
                 Ok(PortEvent::Complete(result))
@@ -262,7 +253,7 @@ impl Drop for PortEvents {
     /// Release buffered response senders if the embedding event loop stops consuming requests.
     fn drop(&mut self) {
         if !self.done.load(Ordering::Acquire) {
-            self.streams.end_callback();
+            self.scope.end_callback();
             worker::close_replies(&self.events);
         }
     }

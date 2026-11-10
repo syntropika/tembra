@@ -4,7 +4,7 @@
  * guest-to-host input streams. Nothing here knows a WASI interface; method implementations
  * (`standard-filesystem.ts`, `standard-system.ts`) compose these pieces.
  */
-import { RESOURCES, type WasiMethod } from "./standard.ts";
+import { METHODS, RESOURCES, type WasiMethod } from "./standard.ts";
 import { STREAM_CHUNK, Writer } from "./standard-codec.ts";
 
 /**
@@ -16,6 +16,40 @@ export function methodKey(method: WasiMethod): string {
   return method.resource === undefined
     ? `${method.interface}#${method.name}`
     : `${RESOURCES[method.resource]}.${method.name}`;
+}
+
+/** A WIT constructor or static function: the call, then its decoded parameters. */
+export type StaticImplementation = (call: StandardCall, ...args: any[]) => unknown;
+
+/**
+ * Bind every generated function of one resource: constructors and statics to `statics` by
+ * generated name, methods to the same-named method of the borrowed `self`, which receives the
+ * decoded parameters followed by the call. A generated function without an implementation
+ * fails construction instead of a later call.
+ */
+export function bindResource(
+  contract: string,
+  resource: string,
+  prototype: object,
+  statics: Readonly<Record<string, StaticImplementation>>,
+): Record<string, Implementation> {
+  const implementations: Record<string, Implementation> = {};
+  const qualified = `${contract}#${resource}`;
+  for (const method of METHODS) {
+    if (method.resource === undefined || RESOURCES[method.resource] !== qualified) continue;
+    const name = method.name;
+    if (method.kind !== undefined) {
+      if (!Object.hasOwn(statics, name)) throw new Error(`${qualified}.${name} is unbound`);
+      const implementation = statics[name]!;
+      implementations[methodKey(method)] = (call, args: unknown[]) => implementation(call, ...args);
+    } else {
+      if (typeof (prototype as Record<string, unknown>)[name] !== "function")
+        throw new Error(`${qualified}.${name} is unbound`);
+      implementations[methodKey(method)] = (call, [self, ...args]: unknown[]) =>
+        (self as Record<string, (...values: unknown[]) => unknown>)[name]!(...args, call);
+    }
+  }
+  return implementations;
 }
 
 /** Host services available to a method implementation. */
@@ -200,14 +234,21 @@ export class OutputStream {
   #stash: Uint8Array[] = [];
   /** The producer call whose reader was cancelled; the next read takes its result. */
   #inflight: Promise<Uint8Array | undefined> | undefined;
+  /**
+   * Owned-item mode: the one producer call in flight, or its result held for the next read. It
+   * belongs to the stream (the revision), not to the read that started it.
+   */
+  #pending: Promise<{ value: unknown } | undefined> | undefined;
 
   /**
    * @param producer a byte producer for `stream<u8>`, an item producer for typed streams
    * @param settle reports how the stream ended, with the producer's failure for `failed`
+   * @param release owned-item streams only: releases a produced value no read will deliver
    */
   constructor(
     readonly producer: ByteProducer | ItemProducer,
     readonly settle: (failure: unknown, end: StreamEnd) => void,
+    readonly release?: (value: unknown) => void,
   ) {}
 
   /** End once: settle the paired future and release the producer, both told why. */
@@ -225,7 +266,19 @@ export class OutputStream {
     this.#dropped.abort();
     this.#stash = [];
     this.#inflight = undefined;
+    // A held or late owned value has no reader any more; it is released when it exists.
+    const pending = this.#pending;
+    this.#pending = undefined;
+    pending?.then(
+      (taken) => taken && this.release?.(taken.value),
+      () => {},
+    );
     this.#end("dropped");
+  }
+
+  /** Whether the guest dropped the stream or the revision retired it. */
+  get closed(): boolean {
+    return this.#closed;
   }
 
   /** A produced read never reached its guest; later reads must not silently skip its data. */
@@ -233,6 +286,52 @@ export class OutputStream {
     this.#abandoned = true;
     this.#end("failed", new Error("stream read was abandoned"));
     this.close();
+  }
+
+  /**
+   * Owned-item mode: serve one STREAM_READ with exactly one produced value, or `undefined` at
+   * end of stream. The value is not encoded and owns no handle yet: the host encodes and issues
+   * it in the reply. A read cancelled while the producer call runs leaves that call to the
+   * stream, and the next read takes its value, so a value is neither lost nor taken twice.
+   */
+  take(signal?: AbortSignal): Promise<{ value: unknown } | undefined> {
+    const next = this.#queue.then(async () => {
+      if (this.#abandoned) throw new Error("stream read was abandoned");
+      if (this.#closed) throw new Error("stream was dropped");
+      if (signal?.aborted) throw cancelled();
+      if (!this.#pending) {
+        if (this.#ended) return undefined;
+        this.#pending = (async () => {
+          try {
+            const value = await (this.producer as ItemProducer).next();
+            if (value !== undefined) return { value };
+            this.#end("eof");
+          } catch (error) {
+            this.#end("failed", error);
+          }
+          return undefined;
+        })();
+      }
+      const pending = this.#pending;
+      try {
+        const taken = await abortable(abortable(pending, this.#dropped.signal), signal);
+        // `close()` may run after the value resolved but before this continuation. It then
+        // captured `#pending` and owns the value's release, so this read must not deliver it.
+        if (this.#abandoned) throw new Error("stream read was abandoned");
+        if (this.#closed) throw new Error("stream was dropped");
+        this.#pending = undefined;
+        return taken;
+      } catch (error) {
+        if (this.#abandoned) throw new Error("stream read was abandoned");
+        if (this.#closed) throw new Error("stream was dropped");
+        throw error;
+      }
+    });
+    this.#queue = next.then(
+      () => {},
+      () => {},
+    );
+    return next;
   }
 
   /**

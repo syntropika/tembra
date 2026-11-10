@@ -106,10 +106,10 @@ export class BrowserExecution {
       requires: installation.requires ?? {},
       grants: installation.grants ?? {},
       filesystem: Object.keys(this.options.providers?.filesystem ?? {}),
-      network: [
-        ...Object.keys(this.options.providers?.network ?? {}),
-        ...Object.keys(this.options.providers?.http ?? {}),
-      ],
+      // Network grants resolve only against socket providers and HTTP grants only against HTTP
+      // providers, so one registry never satisfies the other kind of grant.
+      network: Object.keys(this.options.providers?.network ?? {}),
+      http: Object.keys(this.options.providers?.http ?? {}),
     });
     const options = { ...identity, grants: installation.grants };
     let capabilities: BrowserCapabilities | undefined;
@@ -156,9 +156,15 @@ export class BrowserExecution {
         options.grants ?? {},
         this.options.providers ?? {},
       );
-      const description = query<{ imports: { contract: string; type_only: boolean }[] }>(contract, {
-        kind: "describe",
-      });
+      const description = query<{
+        imports: { binding: string; contract: string; type_only: boolean }[];
+      }>(contract, { kind: "describe" });
+      // Each socket interface uses exactly the provider its import binding selected.
+      const bound = (name: string) => {
+        const entry = description.imports.find((item) => item.contract === name);
+        const binding = entry && prepared.bindings[entry.binding];
+        return binding?.kind === "host" ? binding.provider : undefined;
+      };
       if (options.grants?.system?.includes("cli"))
         stdio = this.options.providers?.stdio?.(options.name, installation.cli ?? {});
       // Standard WASI calls reach only the interfaces this revision imported and was granted.
@@ -175,6 +181,10 @@ export class BrowserExecution {
           random: this.options.providers?.random,
           // Standard `wasi:http` sends reach only providers granted for an exact origin.
           http: capabilities.network,
+          sockets: {
+            types: capabilities.network.sockets(bound("wasi:sockets/types@0.3.0")),
+            lookup: capabilities.network.sockets(bound("wasi:sockets/ip-name-lookup@0.3.0")),
+          },
           ...(options.grants?.system?.includes("cli")
             ? {
                 cli: installation.cli,
@@ -211,12 +221,10 @@ export class BrowserExecution {
           },
         }),
       );
-      return new Revision(
-        port,
-        contract,
-        this.options.limits?.timeoutMs ?? 10000,
-        (request, signal) => capabilities!.execute(request, signal),
-      ).definition(options, prepared);
+      return new Revision(port, contract, this.options.limits?.timeoutMs ?? 10000).definition(
+        options,
+        prepared,
+      );
     } catch (error) {
       try {
         await port.close();

@@ -78,6 +78,7 @@ export class NodeExecution {
       grants: options.grants ?? {},
       filesystem: Object.keys(this.options.providers?.filesystem ?? {}),
       network: this.options.providers?.network ?? [],
+      http: this.options.providers?.network ?? [],
     });
     const backend = this.backend();
     // Compiled components execute without the interpreter; only source revisions load it.
@@ -93,12 +94,10 @@ export class NodeExecution {
     );
     try {
       const transport = new NodePort(port);
-      return new Revision(
-        transport,
-        artifact,
-        this.options.limits?.timeoutMs ?? 10000,
-        (request, signal) => transport.io(request, signal),
-      ).definition(identity, prepared);
+      return new Revision(transport, artifact, this.options.limits?.timeoutMs ?? 10000).definition(
+        identity,
+        prepared,
+      );
     } catch (error) {
       port.close();
       throw error;

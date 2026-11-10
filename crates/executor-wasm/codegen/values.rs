@@ -403,8 +403,9 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// Whether a resource type belongs to a blocking (filesystem) package, whose open handles
-    /// hold a unit of the open-file budget. Terminal and other handles never do.
+    /// Whether a resource type belongs to a budgeted package (filesystem descriptors, sockets),
+    /// whose open handles hold a unit of the open-file budget. Terminal and other handles never
+    /// do.
     pub(super) fn budgeted(&self, resource: TypeId) -> bool {
         let Type::Id(resource) = self.peel(Type::Id(resource)) else {
             return false;
@@ -416,14 +417,14 @@ impl<'a> Generator<'a> {
         let name = &self.resolve.packages[package].name.name;
         VIEWS
             .iter()
-            .any(|(view, _, _, blocking)| *blocking && view == name)
+            .any(|(view, _, _, _, budgeted)| *budgeted && view == name)
     }
 
     /// `budgeted` for a registered resource kind.
     pub(super) fn budgeted_kind(&self, kind: usize) -> bool {
         let path = &self.resources[kind].1;
-        VIEWS.iter().any(|(view, _, _, blocking)| {
-            *blocking && path.contains(&format!("p3::bindings::{view}::"))
+        VIEWS.iter().any(|(view, _, _, _, budgeted)| {
+            *budgeted && path.contains(&format!("p3::bindings::{view}::"))
         })
     }
 

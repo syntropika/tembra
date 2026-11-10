@@ -1,12 +1,11 @@
 import { BrowserNetwork, type BrowserNetworkProviders } from "./browser-network.ts";
 import type { FilesystemProvider } from "./filesystem.ts";
-import type { IORequest } from "./host-protocol.ts";
 import type { StandardMount } from "./standard-filesystem.ts";
 import type { Grants } from "../authoring/types.ts";
 
 /**
- * Installed grants remain host capabilities. Filesystem mounts are reached only through the
- * standard WASI host's descriptors; legacy source network operations run here.
+ * Installed grants remain host capabilities. Filesystem mounts, HTTP and sockets are reached
+ * only through the standard WASI host; there is no other host I/O channel.
  */
 export class BrowserCapabilities {
   readonly #mounts: StandardMount[] = [];
@@ -51,17 +50,12 @@ export class BrowserCapabilities {
     return this.#preopens;
   }
 
-  /** Authority and liveness are checked by Scope immediately before this operation is admitted. */
-  execute(request: IORequest, signal?: AbortSignal): Promise<unknown> {
-    return this.network.execute(request, signal);
-  }
-
   /** Called after the transport has awaited every physically admitted host operation. */
   async dispose(): Promise<void> {
     const mounts = this.#mounts.splice(0);
     this.#preopens = [];
     const settled = await Promise.allSettled([
-      this.network.dispose(),
+      Promise.resolve().then(() => this.network.dispose()),
       ...mounts.map(async (mount) => mount.filesystem.dispose()),
     ]);
     const errors = settled

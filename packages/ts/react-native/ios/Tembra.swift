@@ -165,12 +165,8 @@ extension Tembra {
     }
     /** Release guest-owned environment bookkeeping. */
     @objc public func portRelease(_ handle: String, port: String, environment: NSNumber) throws -> NSNumber { try checked { try execution(handle).port(port).release(environment: environment.uint64Value); return NSNumber(value: true) } }
-    /** Run capability-bound native filesystem or transport work. */
-    @objc public func portIo(_ handle: String, port: String, packet: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
-        Task { do { resolve(try await execution(handle).port(port).io(packet: packet)) } catch { reject(diagnostic(error)) } }
-    }
-    /** Revoke the active callback's source I/O after its caller was cancelled. */
-    @objc public func portCancelIo(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).port(port).cancelIo(); return NSNumber(value: true) } }
+    /** Cancel standard WASI work owned by the active callback. */
+    @objc public func portCancel(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).port(port).cancel(); return NSNumber(value: true) } }
     /** Close a revision after shared lifecycle cleanup. */
     @objc public func closePort(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).closePort(port); return NSNumber(value: true) } }
 }

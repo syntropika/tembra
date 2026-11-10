@@ -26,6 +26,9 @@ enum Request {
         filesystem: BTreeSet<String>,
         #[serde(default)]
         network: BTreeSet<String>,
+        /// HTTP provider keys; separate from `network` so a host may back them differently.
+        #[serde(default)]
+        http: BTreeSet<String>,
     },
     Implementation {
         name: String,
@@ -119,11 +122,12 @@ impl PreparedContract {
                 grants,
                 filesystem,
                 network,
+                http,
             } => {
                 let bindings = self.providers(&requires, &grants)?;
                 self.check_profiles(&bindings)?;
                 let plan = self.plan(&name, api_version, &bindings).map_err(invalid)?;
-                grants.check(&plan.host_imports, &filesystem, &network)?;
+                grants.check(&plan.host_imports, &filesystem, &network, &http)?;
                 Ok(serde_json::json!({
                     "bindings": bindings,
                     "plan": plan.describe(),
