@@ -104,7 +104,9 @@ a source Orb and a compiled component in one host. Backend values are reexports 
 implementation types; the facade adds no serialization, wrapper runtime or dispatch step. To write
 a compiled orb in Rust without a WIT file, see
 [the Rust orb example](../examples/rust-orb/README.md): `#[orb]` derives the
-contract from a module and `cargo tembra build` packages the artifact.
+contract from a module and `cargo tembra build` packages the artifact. A service of such an orb
+can own kernel-managed state with `#[state]`; see
+[the Rust state example](../examples/rust-orb-state/README.md).
 
 ## Serve incoming HTTP
 
