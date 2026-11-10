@@ -21,7 +21,8 @@ mod greeter {
         pub chars: u32,
     }
 
-    /// The service: a unit struct with an impl block of public functions.
+    /// The service: a unit struct marked #[service], with an impl block of public functions.
+    #[service]
     pub struct Greeting;
 
     impl Greeting {
@@ -45,13 +46,19 @@ mod greeter {
 | the module name                                                       | the `world`                                                                  |
 | `package = "..."` on the attribute                                    | `package ns:name@version;`                                                   |
 | `wit = "dir"` on the attribute                                        | the directory with the WIT packages the Orb consumes, relative to the crate  |
-| a unit struct with an `impl` block of `pub fn`                        | an exported `interface`, in kebab-case                                       |
+| a unit struct with `#[service]` and an `impl` block of `pub fn`       | an exported `interface`, in kebab-case                                       |
 | each `pub fn` without `self`                                          | a `func`; name and parameters in kebab-case                                  |
-| a struct with named fields                                            | a `record`                                                                   |
-| an enum of empty variants                                             | an `enum`; with one payload per variant, a `variant`                         |
+| a struct with named fields, when a service method uses it             | a `record`                                                                   |
+| an enum, when a service method uses it                                | an `enum` when every variant is empty, otherwise a `variant`                 |
 | `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>` |
 | a free `pub fn` with `#[contributes("ns:name/hook@version")]`         | `import` and `export` of that hook interface in the world                    |
 | `///` comments                                                        | `///` comments in the WIT                                                    |
+
+Nothing is exported by accident. A service is a unit struct marked `#[service]`; the `pub fn` of
+its `impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT
+only when a service method uses it, directly or through the fields of another exported type; the
+other types of the module, and unit structs without the marker, remain ordinary Rust. A method
+that names a type the module does not declare is a compile error.
 
 ## Contributing to a hook
 
@@ -114,5 +121,7 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
 - Types: records, enums, variants and the scalar, string, list, option, result and tuple types.
   No `resource`, `flags`, `stream` or `future`.
 - Replacing the author's types drops their `#[derive]`s.
+- `#[state]` is reserved and rejected: kernel-managed state for compiled Orbs needs the
+  executor to provide it first.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.
