@@ -1,18 +1,18 @@
 package example:greeter@1.0.0;
 
 interface greeting {
+  /// Counts over a text.
   record stats {
     words: u32,
     chars: u32,
   }
-
+  /// Greet by name.
   hello: func(name: string) -> string;
-
+  /// Count the words of a text.
   count-words: func(text: string) -> u32;
-
+  /// Words and characters of a text.
   measure: func(text: string) -> stats;
 }
-
 
 world greeter {
   export greeting;

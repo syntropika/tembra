@@ -83,7 +83,9 @@ replacement reject a mismatched signature before activation.
 Compiled contributors implement the same WIT callback export. Their build target supplies
 `contributes: { "example:hooks/guard@1.0.0": 0 }` alongside `entry`, `wit`, `world` and
 `apiVersion`. Only the binding and priority are stored in the artifact; callback slots and
-signatures are derived on loading. The contributed import is a type anchor, not a callable
+signatures are derived on loading. A Rust contributor can also mark a `pub fn` with
+`#[contributes("example:hooks/guard@1.0.0")]` under `#[orb]` and build with `cargo tembra`; see the
+[Rust hooks example](../examples/rust-orb-hooks/README.md). The contributed import is a type anchor, not a callable
 service dependency; attempting to call it traps the contributor.
 
 Native Rust providers attach the prepared callback digest with `Hook::signature(...)`.

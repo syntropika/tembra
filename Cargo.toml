@@ -24,6 +24,8 @@ exclude = [
   "crates/executor-wasm/stream-adapter",
   "examples/rust-orb/greeter",
   "examples/rust-orb/host",
+  "examples/rust-orb-hooks/filter",
+  "examples/rust-orb-hooks/host",
 ]
 
 [workspace.package]
