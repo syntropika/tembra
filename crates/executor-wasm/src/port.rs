@@ -37,6 +37,7 @@ impl Engine {
         artifact: &tembra_contracts::Artifact,
         bindings: &BTreeMap<String, Binding>,
         grants: &Grants,
+        cli: &crate::Cli,
     ) -> Result<InterpreterPort> {
         let contract = &artifact.contract;
         let name = &artifact.identity.name;
@@ -68,6 +69,7 @@ impl Engine {
                     &plan.host_imports,
                     grants,
                     std::time::Duration::from_millis(self.limits.timeout_ms),
+                    cli,
                 )?;
                 let session = Session::start(self.clone(), name.into(), io)?;
                 let description = session.load(source, contract.describe())?;
@@ -82,8 +84,14 @@ impl Engine {
                     &artifact.contributions,
                 );
                 let (services, hooks) = checked(&description)?;
-                let session =
-                    self.component_session(artifact, &plan, &services, bindings, grants, &hooks)?;
+                let session = self.component_session(
+                    artifact,
+                    &plan,
+                    &services,
+                    bindings,
+                    (grants, cli),
+                    &hooks,
+                )?;
                 (session, description, services, hooks)
             }
         };
@@ -168,6 +176,17 @@ pub struct PortTicket {
     finished: bool,
 }
 impl PortTicket {
+    /// Revoke the source I/O of this exchange's callback after its caller was cancelled.
+    ///
+    /// Its streams close and pending connects and requests settle with an error, so the callback
+    /// can observe the cancellation; the Store is not quarantined. After the exchange has
+    /// physically completed this does nothing, so a stale ticket never reaches a later callback.
+    pub fn cancel_io(&self) {
+        if !self.finished && !self.done.load(Ordering::Acquire) {
+            self.session.streams().end_callback();
+        }
+    }
+
     /// Admit the next exchange only after the worker's completion event was received.
     pub fn finish(mut self) -> Result<()> {
         if !self.done.load(Ordering::Acquire) {

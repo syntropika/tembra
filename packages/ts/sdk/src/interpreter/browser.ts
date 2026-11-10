@@ -1,15 +1,24 @@
 import type { OrbDefinition, OrbArtifact, LoadOptions } from "../authoring/types.ts";
 import { BrowserPort } from "./browser-port.ts";
 import { checkInterpreter, CoreGuest } from "./core.ts";
+import type { BrowserNetworkProviders } from "./browser-network.ts";
 import type { FilesystemProvider } from "./filesystem.ts";
 import { BrowserCapabilities } from "./io.ts";
 import { Revision } from "./revision.ts";
+import { StandardHost } from "./standard-host.ts";
+import type { SystemProviders } from "./standard-system.ts";
+import { CLOCK_MONOTONIC } from "./abi.ts";
+import type { StdioProvider, StdioStreams } from "./standard-cli.ts";
 import { query, type ContractPort, type InstallationPlan } from "./types.ts";
 
 export interface BrowserInterpreterOptions {
   /** URL of the interpreter core module; defaults to the packaged `interpreter.wasm`. */
   engine?: string | URL;
-  providers?: { filesystem?: Readonly<Record<string, FilesystemProvider>> };
+  providers?: BrowserNetworkProviders &
+    SystemProviders & {
+      filesystem?: Readonly<Record<string, FilesystemProvider>>;
+      stdio?: StdioProvider;
+    };
   limits?: {
     memoryBytes?: number;
     timeoutMs?: number;
@@ -90,8 +99,6 @@ export class BrowserExecution {
     };
     if (identity.kind !== "source")
       throw new Error("Compiled Orb execution is unavailable in this browser backend");
-    if (installation.grants?.network?.length)
-      throw new Error("This browser host has no raw TCP provider");
     const prepared = query<InstallationPlan>(contract, {
       kind: "install",
       name: identity.name,
@@ -99,18 +106,32 @@ export class BrowserExecution {
       requires: installation.requires ?? {},
       grants: installation.grants ?? {},
       filesystem: Object.keys(this.options.providers?.filesystem ?? {}),
-      network: [],
+      network: [
+        ...Object.keys(this.options.providers?.network ?? {}),
+        ...Object.keys(this.options.providers?.http ?? {}),
+      ],
     });
     const options = { ...identity, grants: installation.grants };
     let capabilities: BrowserCapabilities | undefined;
+    let stdio: StdioStreams | undefined;
     const port = new BrowserPort(
       this.options.limits?.timeoutMs ?? 10000,
       async () => {
-        try {
-          await capabilities?.dispose();
-        } finally {
-          release();
-        }
+        const cleanup: Promise<unknown>[] = [Promise.resolve().then(() => capabilities?.dispose())];
+        // Until construction succeeds, this scope owns providers returned by the factory.
+        if (stdio)
+          for (const provider of new Set([stdio.stdin, stdio.stdout, stdio.stderr]))
+            cleanup.push(Promise.resolve().then(() => provider?.close?.()));
+        const settled = await Promise.allSettled(cleanup);
+        release();
+        const failed = settled.filter(
+          (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (failed.length)
+          throw new AggregateError(
+            failed.map((result) => result.reason),
+            "Provider cleanup failed",
+          );
       },
       (record) => {
         if (!["log", "debug", "info", "warn", "error"].includes(record.level))
@@ -133,23 +154,66 @@ export class BrowserExecution {
         throw new Error("Invalid interpreter memory bound");
       capabilities = await BrowserCapabilities.open(
         options.grants ?? {},
-        this.options.providers?.filesystem ?? {},
+        this.options.providers ?? {},
       );
+      const description = query<{ imports: { contract: string; type_only: boolean }[] }>(contract, {
+        kind: "describe",
+      });
+      if (options.grants?.system?.includes("cli"))
+        stdio = this.options.providers?.stdio?.(options.name, installation.cli ?? {});
+      // Standard WASI calls reach only the interfaces this revision imported and was granted.
+      port.standard = new StandardHost(
+        new Set(
+          description.imports
+            .filter((item) => item.type_only === false)
+            .map((item) => item.contract),
+        ),
+        capabilities.mounts,
+        this.options.limits?.packetBytes ?? 8 << 20,
+        {
+          clocks: this.options.providers?.clocks,
+          random: this.options.providers?.random,
+          ...(options.grants?.system?.includes("cli")
+            ? {
+                cli: installation.cli,
+                stdio,
+              }
+            : { stdio: undefined }),
+        },
+      );
+      // The standard host now owns provider cleanup, including failed VM initialization.
+      stdio = undefined;
+      const { clocks, random } = port.standard;
       // The instance links no filesystem, socket or environment capability.
       port.guest = await CoreGuest.create(await this.engine(), memory, {
-        sync: (packet) => port.sync(packet),
+        sync: (packet) => (typeof packet === "string" ? port.sync(packet) : port.sync(packet)),
         log: (level, message) => port.log({ operation: "console", level, message }),
+        clock: (clock) => {
+          if (!options.grants?.system?.includes("clocks")) return 0n;
+          if (clock === CLOCK_MONOTONIC) return clocks.monotonicNow();
+          const instant = clocks.systemNow();
+          return instant.seconds * 1_000_000_000n + BigInt(instant.nanoseconds);
+        },
       });
       await port.load(
         JSON.stringify({
           source: contract.source(),
           heap_bytes: Math.floor(memory / 2),
           instruction_ticks: this.options.limits?.instructionTicks ?? 10000,
-          contract: query(contract, { kind: "describe" }),
+          contract: description,
+          builtins: {
+            clock: options.grants?.system?.includes("clocks") ?? false,
+            seed: options.grants?.system?.includes("random")
+              ? random.insecureSeed().map(String)
+              : null,
+          },
         }),
       );
-      return new Revision(port, contract, this.options.limits?.timeoutMs ?? 10000, (request) =>
-        capabilities!.execute(request),
+      return new Revision(
+        port,
+        contract,
+        this.options.limits?.timeoutMs ?? 10000,
+        (request, signal) => capabilities!.execute(request, signal),
       ).definition(options, prepared);
     } catch (error) {
       try {

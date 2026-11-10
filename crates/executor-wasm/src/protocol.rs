@@ -23,6 +23,21 @@ pub struct Load<'a> {
     pub contract: Value,
     #[serde(default = "default_instruction_ticks")]
     pub instruction_ticks: u32,
+    /// Host-decided authority for source built-ins (`Date`, `performance`, `Math.random`).
+    #[serde(default)]
+    pub builtins: Builtins,
+}
+
+/// Source built-in authority, decided by the host from the installation's system grants only.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Builtins {
+    /// The Orb holds the clocks grant: built-ins may read its configured clocks.
+    pub clock: bool,
+    /// With the random grant only: an insecure PRNG seed from the configured insecure-seed
+    /// provider, as two decimal u64 strings (exact in JavaScript), never derived from time.
+    /// Canonical order on every backend: `[getInsecureSeed()[0], getInsecureSeed()[1]]`.
+    pub seed: Option<[String; 2]>,
 }
 
 /// Serde default for hosts that do not configure an instruction bound.
@@ -217,10 +232,6 @@ pub enum AsyncRequest {
         method: String,
         args: Value,
     },
-    #[serde(rename = "filesystem.read-text")]
-    ReadText { path: String },
-    #[serde(rename = "filesystem.write-text")]
-    WriteText { path: String, value: String },
     /// Open one incremental byte stream to an exactly granted literal socket address.
     #[serde(rename = "transport.connect")]
     TransportConnect { ip: String, port: u16 },
@@ -233,6 +244,23 @@ pub enum AsyncRequest {
     /// Close a stream issued to this Orb and settle its pending reads and writes.
     #[serde(rename = "transport.close")]
     TransportClose { id: u32 },
+    /// Send one HTTP request to a granted origin; the host replies with an [`HttpResponse`].
+    ///
+    /// DNS, TLS and HTTP framing run in the host's standard WASI HTTP client. The request body
+    /// is bounded by `HTTP_BODY_BYTES`; the response body stays incremental.
+    #[serde(rename = "http.send")]
+    HttpSend {
+        url: String,
+        method: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    },
+    /// Read at most `TRANSPORT_CHUNK_BYTES` of a response body; `null` at its end.
+    #[serde(rename = "http.read")]
+    HttpRead { id: u32 },
+    /// Close a response body issued to this Orb; idempotent for issued identities.
+    #[serde(rename = "http.close")]
+    HttpClose { id: u32 },
     #[serde(rename = "wait")]
     Wait { milliseconds: u32 },
     /// Any operation name outside this vocabulary.
@@ -261,6 +289,19 @@ pub const WAIT_LIMIT_MILLISECONDS: u32 = 5000;
 
 /// Largest byte chunk carried by one transport read or write request.
 pub const TRANSPORT_CHUNK_BYTES: usize = 16 * 1024;
+
+/// Largest request body a source `http.send` carries in one packet.
+pub const HTTP_BODY_BYTES: usize = 1 << 20;
+/// Largest header list carried by one source request.
+pub const HTTP_HEADER_LIMIT: usize = 1024;
+
+/// Response head returned by `http.send`; the body is read through the issued stream `id`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HttpResponse {
+    pub id: u32,
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+}
 
 impl Request {
     /// Decode one synchronous packet, labelling structural failures as malformed.
@@ -294,16 +335,18 @@ impl AsyncRequest {
     pub fn is_io(&self) -> bool {
         matches!(
             self,
-            Self::ReadText { .. }
-                | Self::WriteText { .. }
-                | Self::TransportConnect { .. }
+            Self::TransportConnect { .. }
                 | Self::TransportRead { .. }
                 | Self::TransportWrite { .. }
                 | Self::TransportClose { .. }
+                | Self::HttpSend { .. }
+                | Self::HttpRead { .. }
+                | Self::HttpClose { .. }
         )
     }
 
-    /// Socket stream operations, whose lifetime ends with their callback or its cancellation.
+    /// Socket and HTTP stream operations, whose lifetime ends with their callback or its
+    /// cancellation.
     pub fn is_transport(&self) -> bool {
         matches!(
             self,
@@ -311,12 +354,15 @@ impl AsyncRequest {
                 | Self::TransportRead { .. }
                 | Self::TransportWrite { .. }
                 | Self::TransportClose { .. }
+                | Self::HttpSend { .. }
+                | Self::HttpRead { .. }
+                | Self::HttpClose { .. }
         )
     }
 
     /// Closing an already issued stream is cleanup and stays permitted after cancellation.
     pub fn survives_cancellation(&self) -> bool {
-        matches!(self, Self::TransportClose { .. })
+        matches!(self, Self::TransportClose { .. } | Self::HttpClose { .. })
     }
 
     /// Decode one asynchronous packet, labelling structural failures as malformed.
@@ -486,11 +532,12 @@ mod tests {
             heap_bytes: 64,
             contract: json!({"services": {}}),
             instruction_ticks: DEFAULT_INSTRUCTION_TICKS,
+            builtins: Default::default(),
         })
         .unwrap();
         assert_eq!(
             packet,
-            r#"{"source":"let a = \"\\n\";","heap_bytes":64,"contract":{"services":{}},"instruction_ticks":10000}"#
+            r#"{"source":"let a = \"\\n\";","heap_bytes":64,"contract":{"services":{}},"instruction_ticks":10000,"builtins":{"clock":false,"seed":null}}"#
         );
         let decoded: Load<'_> = serde_json::from_str(&packet).unwrap();
         assert_eq!(decoded.source, "let a = \"\\n\";");

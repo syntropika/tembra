@@ -256,9 +256,7 @@ impl PreparedContract {
         let mut imports = Vec::new();
         for Entry { key, item } in &self.model().imports {
             match item {
-                Item::Interface(interface)
-                    if !interface.functions.is_empty() || interface.resources =>
-                {
+                Item::Interface(interface) if interface.callable() => {
                     imports.push((key.as_str(), interface));
                 }
                 Item::Interface(_) | Item::Type(_) => {}

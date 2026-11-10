@@ -61,10 +61,10 @@ fn portable_source_transport_preserves_factories_and_isolates_heaps() {
     let artifact = NativeArtifact::new(bytes).unwrap();
     let backend = NativeInterpreter::new("{}".into(), engine).unwrap();
     let first = backend
-        .open(artifact.clone(), "{}".into(), "{}".into())
+        .open(artifact.clone(), "{}".into(), "{}".into(), None)
         .unwrap();
     let second = backend
-        .open(artifact.clone(), "{}".into(), "{}".into())
+        .open(artifact.clone(), "{}".into(), "{}".into(), None)
         .unwrap();
     for port in [&first, &second] {
         exchange(
@@ -97,7 +97,9 @@ fn portable_source_transport_preserves_factories_and_isolates_heaps() {
     second.shutdown().unwrap();
     assert_eq!(backend.instances(), 0);
     assert!(first.begin(call().to_string(), false).is_err());
-    let abandoned = backend.open(artifact, "{}".into(), "{}".into()).unwrap();
+    let abandoned = backend
+        .open(artifact, "{}".into(), "{}".into(), None)
+        .unwrap();
     exchange(
         &abandoned,
         json!({"kind":"create","environment":1,"service":null}),
@@ -187,12 +189,15 @@ fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
         let _ = stream.read_to_end(&mut rest);
         let _ = closed.send(Instant::now());
     });
-    let contract = Contract::from_source("mobile.wit", "package test:mobile; interface files { read: async func() -> string; denied: async func() -> bool; escape: async func() -> bool; request: async func(port: u16) -> string; abandon: async func(port: u16) -> bool; } world app { import wasi:filesystem/preopens@0.3.0; import wasi:sockets/types@0.3.0; export files; }", Some("app")).unwrap();
-    let source = r#"const ascii = (text) => Uint8Array.from(text, (character) => character.charCodeAt(0));
+    let contract = Contract::from_source("mobile.wit", "package test:mobile; interface files { read: async func() -> string; denied: async func() -> bool; escape: async func() -> bool; request: async func(port: u16) -> string; abandon: async func(port: u16) -> bool; } world app { import wasi:filesystem/types@0.3.0; import wasi:filesystem/preopens@0.3.0; import wasi:sockets/types@0.3.0; export files; }", Some("app")).unwrap();
+    let source = r#"const preopens = __tembraStandard['wasi:filesystem/preopens@0.3.0'];
+    const mount = (path) => { const [[root]] = preopens.getDirectories(); if (!path.startsWith('/data/')) throw new Error('outside the granted mount'); return [root, path.slice(6)]; };
+    const readText = async (path) => { const [root, relative] = mount(path); const fd = await root.openAt({}, relative, {}, {read: true}); const [stream, done] = fd.readViaStream(0n); let text = ''; for await (const byte of stream) text += String.fromCharCode(byte); await done; return text; };
+    const ascii = (text) => Uint8Array.from(text, (character) => character.charCodeAt(0));
     globalThis.__tembraOrb = { services: { files: { methods: {
-        async read() { return await tembra.filesystem.readText('/data/input'); },
-        async denied() { try { await tembra.filesystem.writeText('/data/input', 'bad'); return false; } catch { return true; } },
-        async escape() { try { await tembra.filesystem.readText('/data/../secret'); return false; } catch { return true; } },
+        async read() { return await readText('/data/input'); },
+        async denied() { try { const [root, relative] = mount('/data/input'); await root.openAt({}, relative, {truncate: true}, {write: true}); return false; } catch { return true; } },
+        async escape() { try { const [[root]] = preopens.getDirectories(); await root.openAt({}, '../secret', {}, {read: true}); return false; } catch { return true; } },
         async request(self, context, port) {
             const stream = await tembra.transport.connect('127.0.0.1', port);
             await stream.write(ascii('GET /mobile HTTP/1.0\r\n\r\n'));
@@ -212,7 +217,7 @@ fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
         Artifact::package_source("files", 1, contract.prepared(), source).unwrap(),
     )
     .unwrap();
-    let grants = json!({"filesystem":[{"provider":"data","mount":"/data","writable":false}],"network":[{"provider":"tcp","connect":[address.to_string()]}]});
+    let grants = json!({"system":["clocks"],"filesystem":[{"provider":"data","mount":"/data","writable":false}],"network":[{"provider":"tcp","connect":[address.to_string()]}]});
     let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"files","apiVersion":1,"requires":{},"grants":grants,"filesystem":["data"],"network":["tcp"]}).to_string())).unwrap();
     assert!(installation.get("error").is_none(), "{installation}");
     let engine = std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").unwrap()).unwrap();
@@ -226,6 +231,7 @@ fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
             artifact,
             installation["ok"]["bindings"].to_string(),
             grants.to_string(),
+            None,
         )
         .unwrap();
     exchange(
@@ -269,6 +275,225 @@ fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
     server.join().unwrap();
 }
 
+/// Exercise source HTTP through the real mobile transport, including a body that never reaches EOF.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn portable_http_streams_through_the_host_provider() {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        time::Duration,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (closed, observed) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            socket.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        assert!(request.starts_with(b"GET /events HTTP/1.1\r\n"));
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nd\r\ndata: hello\n\n\r\n").unwrap();
+        let mut rest = Vec::new();
+        assert_eq!(socket.read_to_end(&mut rest).unwrap(), 0);
+        closed.send(()).unwrap();
+    });
+    let contract = Contract::from_source("http.wit", "package test:mobile; interface web { first: async func(url: string) -> string; } world app { import wasi:http/client@0.3.0; export web; }", Some("app")).unwrap();
+    let source = r#"globalThis.__tembraOrb = { services: { web: { methods: {
+        async first(_self, _context, url) {
+            const response = await tembra.http.send(url, 'GET', [], new Uint8Array());
+            const chunk = await response.read();
+            await response.close();
+            return String.fromCharCode(...chunk);
+        }
+    } } } };"#;
+    let artifact = NativeArtifact::new(
+        Artifact::package_source("web", 1, contract.prepared(), source).unwrap(),
+    )
+    .unwrap();
+    let grants = json!({"http":[{"provider":"outbound","origins":[format!("http://{address}")]}]});
+    let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"web","apiVersion":1,"requires":{},"grants":grants,"filesystem":[],"network":["outbound"]}).to_string())).unwrap();
+    assert!(installation.get("error").is_none(), "{installation}");
+    let engine = std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").unwrap()).unwrap();
+    let backend =
+        NativeInterpreter::new(json!({"network":["outbound"]}).to_string(), engine).unwrap();
+    let port = backend
+        .open(
+            artifact,
+            installation["ok"]["bindings"].to_string(),
+            grants.to_string(),
+            None,
+        )
+        .unwrap();
+    exchange(
+        &port,
+        json!({"kind":"create","environment":1,"service":null}),
+        true,
+    );
+    exchange(
+        &port,
+        json!({"kind":"create","environment":2,"service":"web"}),
+        true,
+    );
+    let value = exchange(
+        &port,
+        json!({"kind":"invoke","environment":2,"service":"web","method":"first","args":[format!("http://{address}/events")]}),
+        false,
+    );
+    assert_eq!(value, "data: hello\n\n");
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    port.release(2).unwrap();
+    port.release(1).unwrap();
+    port.shutdown().unwrap();
+    assert_eq!(backend.instances(), 0);
+    server.join().unwrap();
+}
+
+/// A cancelled caller revokes its callback's pending source HTTP send; the Store keeps serving.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn portable_cancel_io_interrupts_a_pending_http_send_without_quarantine() {
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+    fn head(socket: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            socket.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        request
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (entered, waiting) = mpsc::channel();
+    let (closed, observed) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stalled, _) = listener.accept().unwrap();
+        stalled
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        assert!(head(&mut stalled).starts_with(b"GET /stalled HTTP/1.1\r\n"));
+        entered.send(()).unwrap();
+        // Never answer: only the revoked send can close this connection before the deadline.
+        let _ = stalled.read_to_end(&mut Vec::new());
+        closed.send(Instant::now()).unwrap();
+        let (mut answered, _) = listener.accept().unwrap();
+        assert!(head(&mut answered).starts_with(b"GET /values HTTP/1.1\r\n"));
+        answered
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+            .unwrap();
+    });
+    let contract = Contract::from_source("http.wit", "package test:mobile; interface web { first: async func(url: string) -> string; } world app { import wasi:http/client@0.3.0; export web; }", Some("app")).unwrap();
+    let source = r#"globalThis.__tembraOrb = { services: { web: { methods: {
+        async first(_self, _context, url) {
+            const response = await tembra.http.send(url, 'GET', [], new Uint8Array());
+            const chunk = await response.read();
+            await response.close();
+            return String.fromCharCode(...chunk);
+        }
+    } } } };"#;
+    let artifact = NativeArtifact::new(
+        Artifact::package_source("web", 1, contract.prepared(), source).unwrap(),
+    )
+    .unwrap();
+    let grants = json!({"http":[{"provider":"outbound","origins":[format!("http://{address}")]}]});
+    let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"web","apiVersion":1,"requires":{},"grants":grants,"filesystem":[],"network":["outbound"]}).to_string())).unwrap();
+    assert!(installation.get("error").is_none(), "{installation}");
+    let engine = std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").unwrap()).unwrap();
+    let backend =
+        NativeInterpreter::new(json!({"network":["outbound"]}).to_string(), engine).unwrap();
+    let port = backend
+        .open(
+            artifact,
+            installation["ok"]["bindings"].to_string(),
+            grants.to_string(),
+            None,
+        )
+        .unwrap();
+    exchange(
+        &port,
+        json!({"kind":"create","environment":1,"service":null}),
+        true,
+    );
+    exchange(
+        &port,
+        json!({"kind":"create","environment":2,"service":"web"}),
+        true,
+    );
+    let invoke = |path: &str| json!({"kind":"invoke","environment":2,"service":"web","method":"first","args":[format!("http://{address}/{path}")]});
+
+    // Drive the cancelled exchange like the SDK driver: its caller aborts while I/O is pending.
+    port.begin(invoke("stalled").to_string(), false).unwrap();
+    let mut pending = Vec::new();
+    let mut cancelled = None;
+    let complete = loop {
+        let event: Value = serde_json::from_str(&block_on(port.receive()).unwrap()).unwrap();
+        if event["event"] == "complete" {
+            break event;
+        }
+        let packet: Value = serde_json::from_str(event["packet"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            event["asynchronous"], true,
+            "unexpected host operation {packet}"
+        );
+        let operation = packet["operation"].clone();
+        let io = port.clone();
+        let id = event["id"].as_u64().unwrap() as u32;
+        pending.push(std::thread::spawn(move || {
+            let response = match block_on(io.io(packet.to_string())) {
+                Ok(value) => format!("{{\"ok\":{value}}}"),
+                Err(error) => json!({"error":error.to_string()}).to_string(),
+            };
+            let _ = io.reply(id, response);
+        }));
+        if operation == "http.send" && cancelled.is_none() {
+            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            cancelled = Some(Instant::now());
+            port.cancel_io().unwrap();
+        }
+    };
+    let cancelled = cancelled.expect("the guest never sent its request");
+    // Physical settlement: every admitted operation answered before the ticket finishes.
+    for operation in pending {
+        operation.join().unwrap();
+    }
+    port.finish().unwrap();
+    let settled = cancelled.elapsed();
+    assert!(
+        complete["result"].get("error").is_some(),
+        "the revoked send must fail its callback: {complete}"
+    );
+    assert!(
+        settled < Duration::from_secs(2),
+        "settled {settled:?} after cancel"
+    );
+    let closed = observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(closed.duration_since(cancelled) < Duration::from_secs(2));
+
+    // A stale cancellation outside any exchange does nothing, and the Store is not quarantined.
+    port.cancel_io().unwrap();
+    let started = Instant::now();
+    assert_eq!(exchange(&port, invoke("values"), false), "hello");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    port.release(2).unwrap();
+    port.release(1).unwrap();
+    port.shutdown().unwrap();
+    assert_eq!(backend.instances(), 0);
+    server.join().unwrap();
+}
+
 #[test]
 #[ignore = "requires TEMBRA_WASM_PROVIDER"]
 fn portable_compiled_orb_calls_the_same_wit_abi() {
@@ -286,7 +511,9 @@ fn portable_compiled_orb_calls_the_same_wit_abi() {
     )
     .unwrap();
     let backend = NativeInterpreter::new("{}".into(), vec![]).unwrap();
-    let port = backend.open(artifact, "{}".into(), "{}".into()).unwrap();
+    let port = backend
+        .open(artifact, "{}".into(), "{}".into(), None)
+        .unwrap();
     exchange(
         &port,
         json!({"kind":"create","environment":1,"service":"arithmetic"}),

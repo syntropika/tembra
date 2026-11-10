@@ -98,12 +98,13 @@ const artifact = new Uint8Array(await readFile("revised.wasm"));
 await host.reload([{ artifact, requires }]);
 ```
 
-The default `host.load(location, { requires, grants })` loader accepts only `.wasm` artifacts.
+The default `host.load(location, { requires, grants, cli })` loader accepts only `.wasm` artifacts.
 It reads `file:` locations and fetches other URLs. The artifact supplies
 the orb name, API version and WIT contract. The installer supplies the rest:
 
 - `requires` maps each WIT import to an installed orb and API version.
 - `grants` gives this orb access to registered providers. Providers alone grant nothing.
+- `cli` supplies explicit arguments, environment, initial directory and standard byte input/output.
 
 ```ts
 grants: {
@@ -113,16 +114,101 @@ grants: {
 ```
 
 Installation is refused when the orb imports a WASI interface without a matching grant.
-For source orbs, filesystem grants permit bounded UTF-8 text reads and writes under the mount.
-Compiled native components receive standard WASI directory permissions within their preopens,
-including binary and directory operations; the source text limits do not apply. Network grants permit
-outbound TCP to exact literal IP addresses. The guest helper in `@syntropika/tembra-sdk/http`
-frames HTTP/1 inside the guest, including request bodies, chunked responses and SSE. Consume
-`response.body` for byte streaming, `response.events()` for SSE, or `text()`/`json()` to collect
-up to 1 MiB. Iteration closes the connection when it ends or the consumer stops. The current
-URL profile is literal-IP `http:`; TLS, DNS, redirects and decompression are not implemented.
-Streams close when their callback completes or is cancelled. The host's `timeoutMs` still
-bounds the callback, so configure it for the expected duration of an SSE operation.
+Source and compiled native Orbs use standard WASI filesystem descriptors within granted
+preopens. Source bindings support binary reads, streamed writes and appends, metadata, directory
+streams and mutations. The `readBytes` and `readText` conveniences collect at most 16 MiB by
+default; direct streams do not collect the whole file. `writeBytes` and `writeText` use the same
+standard byte streams. Filesystem grants do not authorize HTTP or sockets.
+
+The helper in `@syntropika/tembra-sdk/http` delegates HTTP framing, DNS and TLS to the host.
+Consume `response.body` for byte streaming, `response.events()` for SSE, or `text()`/`json()` to
+collect up to 1 MiB. Source request bodies are currently buffered up to 1 MiB. Responses close
+when iteration ends or stops, or when their callback completes or is cancelled. Native requests
+use the host sender; browser requests use Fetch with its CORS restrictions and may use an
+injected provider. Redirects and full WHATWG Fetch semantics are not implemented. The host's
+`timeoutMs` bounds the callback, so configure it for the expected duration of an SSE operation.
+
+Source Orbs import standard interfaces by WIT name: `wasi:random/{random,insecure,insecure-seed}`,
+`wasi:clocks/{system-clock,monotonic-clock}`, `wasi:cli` interfaces and
+`wasi:filesystem/{preopens,types}@0.3.0`.
+Values follow the generated jco declarations: 64-bit integers are `bigint`, `list<u8>` is a
+`Uint8Array`, and refused filesystem calls throw an error whose `payload` is the WASI
+`error-code`. Descriptors belong to their Orb revision and may survive callbacks. Use `using`
+for deterministic disposal; collection provides best-effort cleanup at safe boundaries, and
+revision retirement closes remaining descriptors. Cancelling a callback settles its pending
+calls without revoking a descriptor retained by that revision.
+
+Filesystem timestamps do not grant access to clock functions. Type-only WIT dependencies stay
+available for TypeScript imports such as `import type { Instant } from "wasi:clocks/system-clock@0.3.0"`;
+runtime imports need callable authority in the world and the matching installation grant.
+
+Source builtins also respect system grants: reading the current time with `Date`, `Date.now`
+or `performance.now` requires `"clocks"`; `Math.random` requires `"random"`. Pure date construction,
+parsing and arithmetic remain available. `Math.random` is deliberately insecure; use standard
+`wasi:random/random` for cryptographic bytes. Host deadlines use the host clock independently.
+Without the clocks grant, `performance.timeOrigin` reports the fixed zero used by the VM's
+libc clock; it does not reveal the host's time.
+
+Without injected providers, CLI configuration defaults to empty arguments/environment/input and discarded output. In Node,
+select bytes or native files explicitly:
+
+```ts
+await host.load("tool.wasm", {
+  grants: { system: ["cli"] },
+  cli: {
+    arguments: ["--inspect"],
+    environment: [["MODE", "test"]],
+    stdin: { bytes: new Uint8Array([0, 255, 128]) },
+    stdout: { file: "./output.bin" }, // Appends bytes to a regular file; creates it if absent.
+  },
+});
+```
+
+CLI files refer to host-selected regular files; they are separate from the Orb's filesystem mounts.
+Devices, sockets, terminals and FIFOs are refused. Native file operations run inline in bounded
+chunks; an individual operating-system file call is not preemptible by the callback deadline.
+Native byte traffic stays in Rust after installation. Browser hosts can supply
+`isolated.providers.stdio(orb, configuration)` returning `stdin.read(maxBytes, signal)`,
+`stdout.write(bytes, signal)` and `stderr.write(bytes, signal)` providers, each with optional
+`close()`. Each revision receives fresh providers. Reads and writes are serialized, bounded by
+64 KiB and owned until their physical promises settle, even after cancellation. A provider's
+promise must represent its actual work. Browser file selections require such an explicit adapter.
+An injected provider is the default for its stream unless the installation explicitly selects
+`"empty"` input or `"discard"` output.
+Browser clock/random providers can likewise be injected through `isolated.providers.clocks`
+and `isolated.providers.random`. Without an injected random provider, secure bytes use
+`crypto.getRandomValues`; unavailable cryptography is an error, never a `Math.random` fallback.
+
+`wasi:cli/exit` ends only the invoking revision, including inside a guest try/catch, and reports
+its exit status. Supplied adapters are not terminals, so terminal getters return none. The
+unstable timezone interface has no implementation in the pinned upstream release.
+
+jco declares `stream<u8>` as `AsyncIterable<number>`. `readChunks` and `writeChunks` preserve
+those declarations while transporting raw chunks of at most 64 KiB. Write pumps apply
+backpressure and end with their originating callback. Directory streams yield typed entries.
+Await the completion future as well as iterating the stream: a producer error can end iteration
+and is reported by that future. A completed read whose reply is abandoned poisons its stream,
+so a later callback receives an error instead of silently skipping bytes or directory entries.
+
+```ts
+import { readChunks, writeText } from "@syntropika/tembra-sdk";
+import { getDirectories } from "wasi:filesystem/preopens@0.3.0";
+
+// Standard calls run inside callbacks, after installation has supplied the granted preopen.
+async function updateAndRead(consume: (chunk: Uint8Array) => void): Promise<void> {
+  using root = getDirectories()[0]![0];
+  using file = await root.openAt(
+    {},
+    "data.bin",
+    { create: true, truncate: true },
+    { read: true, write: true },
+  );
+  await writeText(file, "hello");
+  const [stream, done] = file.readViaStream(0n);
+  for await (const chunk of readChunks(stream)) consume(chunk);
+  if ((await done).tag === "err") throw new Error("read failed");
+}
+```
 
 Ordinary WIT exports become services named `<orb>::<package>/<interface>@<version>`. Acquire them with the
 string form of `host.get`. Kebab-case WIT names stay kebab-case on the reference, for example
@@ -160,8 +246,20 @@ The same entrypoint works in a module Worker.
 
 Browser hosts install isolated source orbs through the same reusable dquickts Wasm module.
 Pending host effects are awaited outside Wasm; JSPI is not required. Register filesystem providers with
-`memoryFilesystem()` or `opfsFilesystem()`. Raw TCP and compiled components are not yet supported in
-the browser. Relative `host.load()` locations resolve against `baseURL` or the page location.
+`memoryFilesystem()` or `opfsFilesystem()`. Browsers have no ambient TCP implementation; an embedding may supply a transport provider.
+Compiled components are not yet supported in the browser. Standard filesystem calls use the same providers: OPFS resolves direct handles,
+reads only the requested range and commits streamed writes once per stream. It does not mirror
+the directory into memory. Memory storage supports file and directory operations; OPFS supports
+file operations and directory enumeration/create/remove, with `unsupported` for directory
+rename where the browser has no implementation. Browser adapters do not emulate hard links,
+symlinks or setting timestamps. Read-only grants are enforced before provider effects.
+
+Custom filesystem providers implement `FilesystemProvider.open()` and return an owned
+`MountedFilesystem` with `openRoot()` and `dispose()`. Descriptors expose typed byte, metadata
+and directory operations; `FilesystemError` carries a standard error code. The optional
+`FileDescriptor.writeStream()` batches sequential chunks into one provider operation; providers
+without it receive bounded `write()` or `append()` calls instead. Relative `host.load()`
+locations resolve against `baseURL` or the page location.
 
 The packaged interpreter is resolved automatically. Set `isolated.engine` only to override its
 location (an absolute URL in browsers, bytes in Node). Browser hosts can supply `wasmInput` for the kernel

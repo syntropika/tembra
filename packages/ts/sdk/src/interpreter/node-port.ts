@@ -1,17 +1,21 @@
 import { reply } from "./codec.ts";
 import { failure as fault } from "../error.ts";
 import type { NodeInterpreterPort } from "@syntropika/tembra-engine-node";
-import { decodeAsyncHostRequest, decodeHostRequest } from "./host-protocol.ts";
-import { answer, type ExecutionScope, type InterpreterPort } from "./types.ts";
+import { decodeAsyncHostRequest, decodeHostRequest, type IORequest } from "./host-protocol.ts";
+import { answer, withIoCancellation, type ExecutionScope, type InterpreterPort } from "./types.ts";
 
 /** Native worker events cross a thread; browser execution uses the same scope directly. */
 export class NodePort implements InterpreterPort {
   /** Retain one native transport until the revision physically closes. */
   constructor(readonly transport: NodeInterpreterPort) {}
 
-  /** Native directory and socket capabilities execute on the host's worker pool. */
-  async io(request: import("./host-protocol.ts").IORequest): Promise<unknown> {
-    return JSON.parse(await this.transport.io(JSON.stringify(request)));
+  /** Native directory, socket and HTTP capabilities execute on the host's I/O reactor. */
+  async io(request: IORequest, signal?: AbortSignal): Promise<unknown> {
+    return JSON.parse(
+      await withIoCancellation(this.transport.io(JSON.stringify(request)), request, signal, () =>
+        this.transport.cancelIo(),
+      ),
+    );
   }
 
   /** Read the validated source metadata once. */
@@ -38,10 +42,15 @@ export class NodePort implements InterpreterPort {
     return new Promise((resolve, reject) => {
       let failure: unknown;
       const pending = new Set<Promise<unknown>>();
+      // A cancelled caller ends the native callback scope, which also revokes pending standard
+      // WASI calls that never pass through `scope.async`. Retained descriptors are unaffected.
+      const signal = scope.signal;
+      const cancel = () => this.transport.cancelIo();
       this.transport.dispatch(packet, (raw) => {
         try {
           const event = JSON.parse(raw);
           if (event.event === "complete") {
+            signal?.removeEventListener("abort", cancel);
             scope.cancel();
             Promise.allSettled([...pending])
               .then(() => {
@@ -91,6 +100,8 @@ export class NodePort implements InterpreterPort {
           failure = error;
         }
       });
+      if (signal?.aborted) cancel();
+      else signal?.addEventListener("abort", cancel, { once: true });
     });
   }
 

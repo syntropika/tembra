@@ -97,16 +97,28 @@ export function prepareDefinitions(
             ? {
                 grants: {
                   ...definition.grants,
+                  ...(definition.grants.system ? { system: [...definition.grants.system] } : {}),
                   ...(definition.grants.filesystem
                     ? {
                         filesystem: definition.grants.filesystem.map((mount) => ({ ...mount })),
+                      }
+                    : {}),
+                  ...(definition.grants.http
+                    ? {
+                        http: definition.grants.http.map((grant) => ({
+                          ...grant,
+                          origins: [...grant.origins],
+                        })),
                       }
                     : {}),
                   ...(definition.grants.network
                     ? {
                         network: definition.grants.network.map((grant) => ({
                           ...grant,
-                          connect: [...grant.connect],
+                          ...(grant.connect ? { connect: [...grant.connect] } : {}),
+                          ...(grant.listen ? { listen: [...grant.listen] } : {}),
+                          ...(grant.bind ? { bind: [...grant.bind] } : {}),
+                          ...(grant.datagrams ? { datagrams: [...grant.datagrams] } : {}),
                         })),
                       }
                     : {}),
@@ -114,6 +126,7 @@ export function prepareDefinitions(
               }
             : {}),
           artifact: definition.artifact.slice(),
+          ...(definition.cli ? { cli: captureCli(definition.cli) } : {}),
         }
       : definition,
   );
@@ -212,3 +225,4 @@ export function captureEnvironment(
     finish();
   }
 }
+import { captureCli } from "../interpreter/cli.ts";

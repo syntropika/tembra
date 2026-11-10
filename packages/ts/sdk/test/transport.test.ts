@@ -56,7 +56,7 @@ test.skipIf(!engine)(
       path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "wit-"),
     );
     await writeFile(path.join(directory, "transport.wit"), wit);
-    const contract = new binding.NodeContract(binding.compileContract(directory, "app"), "app");
+    const contract = new binding.NodeContract(directory, "app");
     const artifact = new Uint8Array(contract.sourceArtifact(source, "raw", 1));
     await rm(directory, { recursive: true, force: true });
     const logs: string[] = [];

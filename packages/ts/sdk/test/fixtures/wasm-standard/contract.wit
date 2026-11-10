@@ -1,0 +1,31 @@
+package example:standard@1.0.0;
+
+interface scenario {
+    probe: async func() -> string;
+    reuse: async func() -> string;
+    hang: async func() -> string;
+    abandon: async func() -> string;
+    denied: async func() -> string;
+    large: async func() -> string;
+}
+
+/// Hostile packet probes; used only by acceptance, never by the example scenario.
+interface probes {
+    descriptor: async func() -> u32;
+    inspect: async func(handle: u32) -> string;
+    probes: async func() -> string;
+}
+
+world standard {
+    import wasi:random/random@0.3.0;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:filesystem/types@0.3.0;
+    import wasi:filesystem/preopens@0.3.0;
+    export scenario;
+}
+
+world boundary {
+    import wasi:filesystem/types@0.3.0;
+    import wasi:filesystem/preopens@0.3.0;
+    export probes;
+}

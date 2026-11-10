@@ -4,11 +4,11 @@
   delete globalThis.__scopeActive;
   const pending = new Map<
     number,
-    { packet: string; resolve(value: string): void; reject(error: Error): void }
+    { packet: string | Uint8Array; resolve(value: any): void; reject(error: Error): void }
   >();
-  const outbox: { id: number; packet: string }[] = [];
+  const outbox: { id: number; packet: string | Uint8Array }[] = [];
   let sequence = 0;
-  globalThis.__hostAsync = (packet) => {
+  globalThis.__hostAsync = ((packet: string | Uint8Array) => {
     if (!active()) return Promise.reject(new Error("callback scope is closed"));
     if (pending.size >= 128) return Promise.reject(new Error("host operation queue is full"));
     if (!Number.isSafeInteger(sequence + 1)) throw new Error("effect identity space exhausted");
@@ -17,14 +17,14 @@
       pending.set(id, { packet, resolve, reject });
       outbox.push({ id, packet });
     });
-  };
+  }) as typeof globalThis.__hostAsync;
   globalThis.__tembraTakeEffects = () => outbox.splice(0);
   globalThis.__tembraCompleteEffect = (id, ok, value) => {
     const operation = pending.get(id);
     if (!operation) throw new Error("unknown or completed effect");
     pending.delete(id);
     if (ok) operation.resolve(value);
-    else operation.reject(new Error(value));
+    else operation.reject(new Error(String(value)));
   };
   globalThis.__tembraStopEffects = () => {
     for (const operation of pending.values()) operation.reject(new Error("callback scope ended"));

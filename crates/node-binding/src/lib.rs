@@ -49,20 +49,6 @@ impl NodeArtifact {
     }
 }
 
-/// Resolve canonical WIT dependencies for build tooling without evaluating Orb implementations.
-#[napi]
-pub fn compile_contract(
-    directory: String,
-    world: Option<String>,
-) -> napi::Result<napi::bindgen_prelude::Buffer> {
-    let contract = tembra_contracts::Contract::from_dir(directory, world.as_deref())
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-    Ok(contract
-        .encode()
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?
-        .into())
-}
-
 #[napi]
 pub struct NodeKernel {
     kernel: tembra_bridge::Kernel,
@@ -158,16 +144,23 @@ impl NodeContract {
             .map(Into::into)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
-    /// Decode a prepared package without reading project files at runtime.
+    /// Resolve a WIT directory and its `deps/` once, keeping each import's provenance, so
+    /// type-only dependencies never require or grant callable authority.
     #[napi(constructor)]
-    pub fn new(
-        bytes: napi::bindgen_prelude::Uint8Array,
-        world: Option<String>,
-    ) -> napi::Result<Self> {
+    pub fn new(directory: String, world: Option<String>) -> napi::Result<Self> {
         Ok(Self {
-            contract: tembra_contracts::Contract::from_bytes(&bytes, world.as_deref())
+            contract: tembra_contracts::Contract::from_dir(directory, world.as_deref())
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         })
+    }
+
+    /// The standard encoded WIT package, for type generation only; it carries no authority.
+    #[napi]
+    pub fn wit(&self) -> napi::Result<napi::bindgen_prelude::Buffer> {
+        self.contract
+            .encode()
+            .map(Into::into)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
     /// Inspect and install through the shared prepared-contract implementation.
     #[napi]

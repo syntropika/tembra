@@ -1,53 +1,16 @@
 import { expect, test } from "bun:test";
-import { memoryFilesystem } from "../src/interpreter/filesystem.ts";
+import { memoryFilesystem, type FilesystemProvider } from "../src/interpreter/filesystem.ts";
 import { BrowserCapabilities } from "../src/interpreter/io.ts";
 
-test("mount permissions and disposal are independent over shared data", async () => {
-  const provider = memoryFilesystem({ "nested/input.txt": "original" });
-  const writer = provider.open("/data", true);
-  const reader = provider.open("/data", false);
-  await expect(reader.writeText("nested/input.txt", "forbidden")).rejects.toThrow("read-only");
-  await writer.writeText("nested/input.txt", "updated");
-  expect(await reader.readText("nested/input.txt")).toBe("updated");
-  await writer.dispose();
-  await expect(writer.readText("nested/input.txt")).rejects.toThrow("closed");
-  expect(await reader.readText("nested/input.txt")).toBe("updated");
-  await reader.dispose();
-});
-
-test("host I/O rejects traversal, mount-prefix confusion and ungranted transport", async () => {
-  const io = await BrowserCapabilities.open(
-    { filesystem: [{ provider: "data", mount: "/data", writable: true }] },
-    { data: memoryFilesystem({ "input.txt": "value" }) },
-  );
-  for (const path of [
-    "/data/../input.txt",
-    "/data//input.txt",
-    "/database/input.txt",
-    "/input.txt",
-    "/data/./input.txt",
-    "/data/a\\b",
-    "/data/a\0b",
-  ])
-    await expect(io.execute({ operation: "filesystem.read-text", path })).rejects.toThrow();
-  for (const request of [
-    { operation: "transport.connect", ip: "127.0.0.1", port: 80 },
-    { operation: "transport.read", id: 1 },
-    { operation: "transport.write", id: 1, bytes: [1] },
-    { operation: "transport.close", id: 1 },
-  ] as const)
-    await expect(io.execute(request)).rejects.toThrow("no raw TCP");
-  expect(await io.execute({ operation: "filesystem.read-text", path: "/data/input.txt" })).toBe(
-    "value",
-  );
-  await io.dispose();
-  await expect(
-    io.execute({ operation: "filesystem.read-text", path: "/data/input.txt" }),
-  ).rejects.toThrow();
-});
-
-test("the most specific mount cannot inherit a broader write grant", async () => {
-  const provider = memoryFilesystem({ "input.txt": "protected", "nested/input.txt": "broader" });
+test("only granted mounts are opened with their exact rights and lifetime", async () => {
+  const opened: [string, boolean][] = [];
+  const provider = memoryFilesystem({ "input.txt": "value" });
+  const tracked: FilesystemProvider = {
+    open(path, writable) {
+      opened.push([path, writable]);
+      return provider.open(path, writable);
+    },
+  };
   const io = await BrowserCapabilities.open(
     {
       filesystem: [
@@ -55,75 +18,106 @@ test("the most specific mount cannot inherit a broader write grant", async () =>
         { provider: "data", mount: "/data/nested", writable: false },
       ],
     },
-    { data: provider },
+    { filesystem: { data: tracked, unused: tracked } },
   );
-  await expect(
-    io.execute({
-      operation: "filesystem.write-text",
-      path: "/data/nested/input.txt",
-      value: "forbidden",
-    }),
-  ).rejects.toThrow("read-only");
-  expect(
-    await io.execute({ operation: "filesystem.read-text", path: "/data/nested/input.txt" }),
-  ).toBe("protected");
+  expect(opened).toEqual([
+    ["/data", true],
+    ["/data/nested", false],
+  ]);
+  expect(io.mounts.map(({ path, writable }) => [path, writable])).toEqual(opened);
+  expect(Object.isFrozen(io.mounts)).toBe(true);
+  const directory = io.mounts[0]!.filesystem.openRoot();
+  await io.dispose();
+  expect(io.mounts).toEqual([]);
+  await expect(directory.stat()).rejects.toThrow();
   await io.dispose();
 });
 
-test("the host enforces read-only grants independently of a custom provider", async () => {
-  let writes = 0;
-  const io = await BrowserCapabilities.open(
-    { filesystem: [{ provider: "custom", mount: "/data", writable: false }] },
-    {
-      custom: {
-        open: () => ({
-          readText: async () => "value",
-          writeText: async () => {
-            writes++;
-          },
-          dispose() {},
-        }),
-      },
+test("a later mount failure closes every already opened mount", async () => {
+  let disposed = 0;
+  const provider: FilesystemProvider = {
+    open(path, writable) {
+      const mount = memoryFilesystem().open(path, writable);
+      return {
+        writable: mount.writable,
+        openRoot: () => mount.openRoot(),
+        async dispose() {
+          await mount.dispose();
+          disposed++;
+        },
+      };
     },
-  );
+  };
   await expect(
-    io.execute({ operation: "filesystem.write-text", path: "/data/input", value: "forbidden" }),
-  ).rejects.toThrow("read-only");
-  expect(writes).toBe(0);
-  expect(await io.execute({ operation: "filesystem.read-text", path: "/data/input" })).toBe(
-    "value",
+    BrowserCapabilities.open(
+      {
+        filesystem: [
+          { provider: "data", mount: "/data", writable: false },
+          { provider: "missing", mount: "/missing", writable: false },
+        ],
+      },
+      { filesystem: { data: provider } },
+    ),
+  ).rejects.toThrow("Unknown filesystem provider missing");
+  expect(disposed).toBe(1);
+});
+
+test("mount disposal drains every provider even when one destructor fails", async () => {
+  const disposed: string[] = [];
+  const provider: FilesystemProvider = {
+    open(path, writable) {
+      const mount = memoryFilesystem().open(path, writable);
+      return {
+        writable: mount.writable,
+        openRoot: () => mount.openRoot(),
+        async dispose() {
+          await mount.dispose();
+          disposed.push(path);
+          if (path === "/first") throw new Error("destructor failed");
+        },
+      };
+    },
+  };
+  const io = await BrowserCapabilities.open(
+    {
+      filesystem: [
+        { provider: "data", mount: "/first", writable: false },
+        { provider: "data", mount: "/second", writable: false },
+      ],
+    },
+    { filesystem: { data: provider } },
   );
+  await expect(io.dispose()).rejects.toThrow("Filesystem disposal failed");
+  expect(disposed.sort()).toEqual(["/first", "/second"]);
+  expect(io.mounts).toEqual([]);
   await io.dispose();
 });
 
-test("custom providers cannot bypass text bounds or return invalid text", async () => {
-  let reads: unknown = "x".repeat((1 << 20) + 1);
-  let writes = 0;
+test("filesystem grants do not authorize network providers", async () => {
+  let connects = 0;
   const io = await BrowserCapabilities.open(
-    { filesystem: [{ provider: "custom", mount: "/data", writable: true }] },
+    { filesystem: [{ provider: "data", mount: "/data", writable: true }] },
     {
-      custom: {
-        open: () => ({
-          readText: async () => reads as string,
-          writeText: async () => {
-            writes++;
+      filesystem: { data: memoryFilesystem() },
+      network: {
+        socket: {
+          async connect() {
+            connects++;
+            throw new Error("must not be called");
           },
-          dispose() {},
-        }),
+        },
       },
     },
   );
-  await expect(
-    io.execute({ operation: "filesystem.read-text", path: "/data/input" }),
-  ).rejects.toThrow("limit");
-  for (const value of ["x".repeat((1 << 20) + 1), "界".repeat(400000)])
+  try {
     await expect(
-      io.execute({ operation: "filesystem.write-text", path: "/data/input", value }),
-    ).rejects.toThrow("limit");
-  expect(writes).toBe(0);
-  reads = 42;
-  await expect(
-    io.execute({ operation: "filesystem.read-text", path: "/data/input" }),
-  ).rejects.toThrow("string");
-  await io.dispose();
+      io.execute(
+        { operation: "transport.connect", ip: "127.0.0.1", port: 80 },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow();
+    expect(connects).toBe(0);
+  } finally {
+    await io.dispose();
+  }
 });

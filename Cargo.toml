@@ -16,6 +16,7 @@ exclude = [
   "crates/executor-wasm/rust-provider",
   "crates/executor-wasm/rust-consumer",
   "crates/executor-wasm/rust-contributor",
+  "crates/executor-wasm/rust-http-client",
   "crates/executor-wasm/probe-provider",
 ]
 

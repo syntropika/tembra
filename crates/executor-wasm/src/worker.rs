@@ -1,8 +1,9 @@
 //! Keep Wasmtime on an owned worker; only scope-bound requests cross to the native host.
 //!
 //! One session owns one Store per Orb revision. A source revision runs the interpreter core
-//! module behind the private fixed-buffer ABI in `abi.rs`; its Store links no filesystem, socket
-//! or environment capability. A compiled revision runs its component on the same owner and
+//! module behind the private fixed-buffer ABI in `abi.rs`. Its preview 1 imports carry no
+//! filesystem or network authority; generated WASI calls use its separately granted context.
+//! A compiled revision runs its component on the same owner and
 //! speaks the same private host protocol (see `component::worker`).
 use crate::{Engine, abi::Operation, failure};
 use async_channel::{Receiver, Sender};
@@ -19,9 +20,13 @@ use tembra::Result;
 use tokio::sync::oneshot;
 
 pub(crate) mod diagnostics;
+
+/// Blocking threads of one Store's runtime, used by upstream WASI filesystem calls.
+const STORE_BLOCKING_THREADS: usize = 2;
 mod runtime;
+mod standard;
 mod steps;
-mod wasi;
+pub(crate) mod wasi;
 
 pub(crate) use runtime::check;
 
@@ -99,11 +104,14 @@ impl Session {
         self.0.io.operation(packet)
     }
 
-    /// Start an owned Store with no filesystem preopens, environment or socket grants.
+    /// Start one source Store with this installation's checked standard context.
     pub(crate) fn start(engine: Engine, orb: String, io: crate::io::SourceIo) -> Result<Self> {
         let worker = engine.clone();
+        let standard = io
+            .take_standard()
+            .ok_or_else(|| failure("source installation context was already used"))?;
         Self::spawn(&engine, orb, io, move |commands, poison, diagnostics| {
-            runtime::run(worker, commands, poison, diagnostics)
+            runtime::run(worker, commands, poison, diagnostics, standard)
         })
     }
 
@@ -144,7 +152,10 @@ impl Session {
             .spawn(move || {
                 instances.fetch_add(1, std::sync::atomic::Ordering::Release);
                 let count = Count(instances);
+                // Compiled upstream work has a small fallback pool. Qualified source file calls
+                // run inline under the process-wide active budget in io::file_turn.
                 let runtime = tokio::runtime::Builder::new_current_thread()
+                    .max_blocking_threads(STORE_BLOCKING_THREADS)
                     .enable_all()
                     .build();
                 if let Ok(runtime) = runtime {
@@ -191,6 +202,7 @@ impl Session {
             heap_bytes: self.0.heap_bytes,
             contract,
             instruction_ticks: crate::protocol::DEFAULT_INSTRUCTION_TICKS,
+            builtins: self.0.io.builtins(),
         };
         self.blocking(
             Operation::Load,
@@ -341,6 +353,7 @@ impl Session {
     pub(crate) async fn dispatch(
         &self,
         _admission: futures::lock::OwnedMutexGuard<()>,
+        cancellation: Option<&tembra::Cancellation>,
         packet: impl serde::Serialize,
         host: impl AsyncFn(&str, bool) -> Result<Value>,
     ) -> Result<Value> {
@@ -354,16 +367,34 @@ impl Session {
             completed: false,
         };
         let mut pending = FuturesUnordered::new();
+        let mut revoked = false;
         loop {
-            let event = if pending.is_empty() {
-                events.recv().await
-            } else {
-                let event = std::pin::pin!(events.recv());
-                let completed = std::pin::pin!(pending.next());
-                match futures::future::select(completed, event).await {
-                    futures::future::Either::Left(_) => continue,
-                    futures::future::Either::Right((event, _)) => event,
+            let next = async {
+                loop {
+                    if pending.is_empty() {
+                        return events.recv().await;
+                    }
+                    let event = std::pin::pin!(events.recv());
+                    let completed = std::pin::pin!(pending.next());
+                    match futures::future::select(completed, event).await {
+                        futures::future::Either::Left(_) => continue,
+                        futures::future::Either::Right((event, _)) => return event,
+                    }
                 }
+            };
+            let event = if let Some(cancellation) = cancellation.filter(|_| !revoked) {
+                let next = std::pin::pin!(next);
+                let cancelled = std::pin::pin!(cancellation.cancelled());
+                match futures::future::select(next, cancelled).await {
+                    futures::future::Either::Left((event, _)) => event,
+                    futures::future::Either::Right(_) => {
+                        self.0.io.streams().end_callback();
+                        revoked = true;
+                        continue;
+                    }
+                }
+            } else {
+                next.await
             };
             match event.map_err(failure)? {
                 Event::Done(result) => {
@@ -554,6 +585,7 @@ mod tests {
                 &[],
                 &crate::Grants::default(),
                 Duration::from_secs(1),
+                &crate::Cli::default(),
             )
             .unwrap(),
         )
@@ -617,7 +649,22 @@ mod tests {
                 orb: "capture".into(),
                 sink: None,
             };
-            let (mut store, driver) = runtime::instantiate(&engine, diagnostics).await.unwrap();
+            let (mut store, driver) = runtime::instantiate(
+                &engine,
+                diagnostics,
+                crate::io::StandardContext {
+                    clocks: None,
+                    wasi: wasmtime_wasi::WasiCtxBuilder::new(),
+                    allowed: Default::default(),
+                    scope: {
+                        let scope = crate::io::Streams::default();
+                        scope.begin_callback();
+                        scope
+                    },
+                },
+            )
+            .await
+            .unwrap();
             assert!(driver.capture(&mut store).await.unwrap().is_err());
             let load = serde_json::json!({
                 "source": "globalThis.__tembraOrb={services:{checks:{methods:{run(){return 1}}}}};",
@@ -646,7 +693,18 @@ mod tests {
                 orb: "memory".into(),
                 sink: None,
             };
-            let (mut store, driver) = runtime::instantiate(&engine, diagnostics).await.unwrap();
+            let (mut store, driver) = runtime::instantiate(
+                &engine,
+                diagnostics,
+                crate::io::StandardContext {
+                    clocks: None,
+                    wasi: wasmtime_wasi::WasiCtxBuilder::new(),
+                    allowed: Default::default(),
+                    scope: { let scope = crate::io::Streams::default(); scope.begin_callback(); scope },
+                },
+            )
+            .await
+            .unwrap();
             // The VM heap limit is deliberately larger than the linear-memory maximum.
             let load = serde_json::json!({
                 "source": "const chunks=[];for(let i=0;i<64;i++)chunks.push(new Uint8Array(1<<20));globalThis.__tembraOrb={services:{checks:{methods:{run(){return 1}}}}};",
@@ -682,6 +740,7 @@ mod tests {
                 &[],
                 &crate::Grants::default(),
                 Duration::from_secs(1),
+                &crate::Cli::default(),
             )
             .unwrap(),
         )
@@ -764,6 +823,7 @@ mod tests {
             heap_bytes: 64 << 20,
             contract: contract.describe(),
             instruction_ticks: 50,
+            builtins: Default::default(),
         };
         session
             .blocking(

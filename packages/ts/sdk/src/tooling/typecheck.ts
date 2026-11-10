@@ -8,6 +8,7 @@ export function typecheck(
   root: string,
   virtual: ReadonlyMap<string, string> = new Map(),
   conditions: readonly string[] = [],
+  paths: Readonly<Record<string, string[]>> = {},
 ): ts.Program {
   const configFile = ts.findConfigFile(root, ts.sys.fileExists);
   const loaded = configFile ? ts.readConfigFile(configFile, ts.sys.readFile) : { config: {} };
@@ -27,10 +28,11 @@ export function typecheck(
     noEmit: true,
     strict: true,
     skipLibCheck: true,
-    lib: ["lib.es2023.d.ts"],
+    lib: ["lib.es2023.d.ts", "lib.esnext.disposable.d.ts"],
     types: [],
     allowArbitraryExtensions: true,
     customConditions: [...conditions, "source"],
+    paths: { ...parsed.options.paths, ...paths },
   };
   const host = ts.createCompilerHost(options);
   const readFile = host.readFile;

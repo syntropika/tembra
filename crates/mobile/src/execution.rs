@@ -100,10 +100,16 @@ impl NativeInterpreter {
         artifact: Arc<NativeArtifact>,
         bindings: String,
         grants: String,
+        cli: Option<String>,
     ) -> Result<Arc<NativePort>, MobileError> {
         let bindings: BTreeMap<String, Binding> = serde_json::from_str(&bindings).map_err(error)?;
         let grants: Grants = serde_json::from_str(&grants).map_err(error)?;
-        NativePort::new(self.engine.clone(), artifact, bindings, grants)
+        // Data-only CLI configuration; standard streams are serviced in Rust.
+        let cli: tembra_executor_wasm::Cli = match cli {
+            Some(cli) => serde_json::from_str(&cli).map_err(error)?,
+            None => Default::default(),
+        };
+        NativePort::new(self.engine.clone(), artifact, bindings, grants, cli)
     }
 
     /// Count physical guest Stores, including work still draining after cancellation.

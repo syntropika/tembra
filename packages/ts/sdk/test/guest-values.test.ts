@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createContext, runInContext } from "node:vm";
-import { compileContract, NodeContract } from "@syntropika/tembra-engine-node";
+import { NodeContract } from "@syntropika/tembra-engine-node";
 
 test("guest callbacks follow official top-level result exceptions while nested results stay tagged", async () => {
   const directory = await mkdtemp(
@@ -22,7 +22,7 @@ test("guest callbacks follow official top-level result exceptions while nested r
       }
       world test { import values; export values; }`,
     );
-    const contract = new NodeContract(compileContract(directory));
+    const contract = new NodeContract(directory);
     const graph = JSON.parse(contract.request('{"kind":"describe"}')).ok;
     const context = createContext({ __tembraContract: graph });
     const source = await readFile(

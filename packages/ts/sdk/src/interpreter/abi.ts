@@ -1,6 +1,7 @@
 // Generated from crates/executor-wasm/src/abi.rs. Do not edit.
 // Regenerate with: TEMBRA_BLESS=1 cargo test -p tembra-executor-wasm --lib abi
-export const IMPORT_MODULE = "tembra-interpreter-v2";
+export const IMPORT_MODULE =
+  "tembra-interpreter-v6-06508ba48beca52825b5f9cdd22ed746cdeaa107029330fb16525cc3429ce23e";
 export const SYNC_IMPORT = "sync";
 export const SYNC_READ_IMPORT = "sync_read";
 export const MEMORY_MODULE = "env";
@@ -10,6 +11,7 @@ export const ALLOC_EXPORT = "tembra_alloc";
 export const CALL_EXPORT = "tembra_call";
 export const WASI_MODULE = "wasi_snapshot_preview1";
 export const SYNC_ERROR = 2147483648;
+export const STANDARD_PACKET = 0;
 export const MEMORY_INITIAL_PAGES = 32;
 export const PAGE_BYTES = 65536;
 export const LENGTH_LIMIT = 2147483647;

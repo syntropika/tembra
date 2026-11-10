@@ -81,7 +81,26 @@ export { ContextKey, ContextKind, opaqueFrom, type OpaqueContextValue } from "./
 export {
   memoryFilesystem,
   opfsFilesystem,
+  FilesystemError,
+  type FilesystemErrorCode,
   type FilesystemProvider,
+  type FileStat,
+  type MountedFilesystem,
+  type FileDescriptor,
+  type DirectoryDescriptor,
+  type Descriptor,
+  type DirectoryEntry,
+  type EntryType,
+  type OpenOptions,
 } from "./interpreter/filesystem.ts";
 export type { BrowserInterpreterOptions as IsolatedOptions } from "./interpreter/browser.ts";
-export type { Grants } from "./authoring/types.ts";
+export type { Grants, CliOptions } from "./authoring/types.ts";
+
+export type { HttpProvider, SocketProvider } from "./interpreter/browser-network.ts";
+export type { ClockProvider, ClockInstant, RandomProvider } from "./interpreter/standard-system.ts";
+export type {
+  StdioProvider,
+  StdioStreams,
+  StdioInput,
+  StdioOutput,
+} from "./interpreter/standard-cli.ts";

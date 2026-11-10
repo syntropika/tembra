@@ -81,10 +81,28 @@ await writeFile(
 for (const name of ["files", "writer", "reader", "persistent", "persistent-reader"]) {
   await writeFile(
     path.join(sources, "storage", `${name}.ts`),
-    `import {orb} from ${guest};
+    `import {orb,readText,writeText} from ${guest};
+import {getDirectories} from "wasi:filesystem/preopens@0.3.0";
+function mount(path:string) {
+ const directories=getDirectories();
+ const matching=directories.filter(([,name])=>path.startsWith(name+"/"));
+ matching.sort((a,b)=>b[1].length-a[1].length);
+ const selected=matching[0];
+ for(const [directory] of directories)if(directory!==selected?.[0])directory[Symbol.dispose]();
+ if(!selected)throw new Error("No granted mount matches the path");
+ return {directory:selected[0],relative:path.slice(selected[1].length+1)};
+}
 export default orb({name:${JSON.stringify(name)},apiVersion:1,services:{files:{methods:{
-read:async(_e:unknown,_c:unknown,path:string)=>tembra.filesystem!.readText(path),
-write:async(_e:unknown,_c:unknown,path:string,value:string)=>tembra.filesystem!.writeText(path,value),
+async read(_e:unknown,_c:unknown,path:string){
+ const selected=mount(path);using directory=selected.directory;
+ using file=await directory.openAt({},selected.relative,{}, {read:true});
+ return readText(file);
+},
+async write(_e:unknown,_c:unknown,path:string,value:string){
+ const selected=mount(path);using directory=selected.directory;
+ using file=await directory.openAt({},selected.relative,{create:true,truncate:true},{write:true});
+ await writeText(file,value);
+},
 }}}});`,
   );
   builds[name] = {
@@ -111,6 +129,43 @@ for (const world of ["provider", "extension"]) {
   );
   builds[target] = { entry: `${target}/orb.ts`, wit: `${target}/contract.wit`, world };
 }
+// Standard WASI source Orbs: the example scenario and the acceptance-only boundary probes. Two
+// boundary revisions let acceptance pass one revision's handle number to the other.
+const standardFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-standard");
+// Every source build of one WIT file selects the same world, so each world gets its own copy.
+for (const directory of ["standard", "boundary"]) {
+  await mkdir(path.join(sources, directory), { recursive: true });
+  await writeFile(
+    path.join(sources, directory, "contract.wit"),
+    await readFile(path.join(standardFixture, "contract.wit")),
+  );
+}
+const boundary = (await readFile(path.join(standardFixture, "boundary.ts"), "utf8"))
+  .replaceAll('"@syntropika/tembra-sdk"', guest)
+  .replaceAll(
+    '"../../../src/interpreter/standard.ts"',
+    JSON.stringify(path.join(root, "packages/ts/sdk/src/interpreter/standard.ts")),
+  );
+for (const [name, source, world] of [
+  [
+    "standard",
+    (await readFile(path.join(standardFixture, "orb.ts"), "utf8")).replaceAll(
+      '"@syntropika/tembra-sdk"',
+      guest,
+    ),
+    "standard",
+  ],
+  ["boundary", boundary, "boundary"],
+  ["boundary-peer", boundary.replace('name: "boundary"', 'name: "boundary-peer"'), "boundary"],
+] as const) {
+  await writeFile(path.join(sources, world, `${name}.ts`), source);
+  builds[name] = {
+    entry: `${world}/${name}.ts`,
+    wit: `${world}/contract.wit`,
+    world,
+    minify: false,
+  };
+}
 // The real Rust contributor joins all three hooks before the source participants.
 builds["hook-compiled"] = {
   entry: path.resolve(values.contributor),
@@ -128,6 +183,40 @@ if (values.provider)
     world: "arithmetic-provider",
     apiVersion: 1,
   };
+await mkdir(path.join(sources, "filesystem"), { recursive: true });
+for (const file of ["contract.wit", "orb.ts"]) {
+  const source = await readFile(
+    path.join(root, "packages/ts/sdk/test/fixtures/wasm-filesystem", file),
+    "utf8",
+  );
+  await writeFile(
+    path.join(sources, "filesystem", file),
+    source.replaceAll('"@syntropika/tembra-sdk"', guest),
+  );
+}
+builds.filesystem = {
+  entry: "filesystem/orb.ts",
+  wit: "filesystem/contract.wit",
+  world: "filesystem",
+};
+for (const name of ["system", "ambient"] as const) {
+  const directory = path.join(sources, name);
+  await mkdir(directory, { recursive: true });
+  const fixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-system");
+  await writeFile(
+    path.join(directory, "contract.wit"),
+    await readFile(path.join(fixture, "contract.wit")),
+  );
+  const source = await readFile(
+    path.join(fixture, name === "system" ? "orb.ts" : "ambient.ts"),
+    "utf8",
+  );
+  await writeFile(
+    path.join(directory, "orb.ts"),
+    source.replaceAll('"@syntropika/tembra-sdk"', guest),
+  );
+  builds[name] = { entry: `${name}/orb.ts`, wit: `${name}/contract.wit`, world: name };
+}
 const artifacts = await build({ root: sources, outDir: directory, builds });
 for (const artifact of artifacts) {
   await writeFile(path.join(directory, `${artifact.name}.wasm`), await readFile(artifact.path));

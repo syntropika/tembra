@@ -62,7 +62,7 @@ if (diagnostics.length)
     }),
   );
 const bundled = await Bun.build({
-  entrypoints: ["bridge", "state", "values", "runtime"].map((name) =>
+  entrypoints: ["bridge", "state", "values", "standard", "runtime"].map((name) =>
     path.join(root, "src", `${name}.ts`),
   ),
   outdir: bootstrap,
@@ -71,6 +71,18 @@ const bundled = await Bun.build({
   minify: { whitespace: true, syntax: true, identifiers: true },
 });
 if (!bundled.success) throw new AggregateError(bundled.logs, "Guest bootstrap build failed");
+// Rust requires literal link attributes; keep their names derived from the same ABI constants.
+await writeFile(
+  path.join(bootstrap, "host-imports.rs"),
+  `#[link(wasm_import_module = ${JSON.stringify(abi.IMPORT_MODULE)})]
+unsafe extern "C" {
+    #[link_name = ${JSON.stringify(abi.SYNC_IMPORT)}]
+    pub fn sync(packet: *const u8, length: usize) -> u32;
+    #[link_name = ${JSON.stringify(abi.SYNC_READ_IMPORT)}]
+    pub fn sync_read(destination: *mut u8, length: usize);
+}
+`,
+);
 // The interpreter is a WASI preview 1 reactor core module. Its linear memory is imported so each
 // host instance supplies the configured maximum; the initial size is part of the private ABI.
 const target = "wasm32-wasip1";
@@ -85,6 +97,7 @@ const env = {
   BINDGEN_EXTRA_CLANG_ARGS_wasm32_wasip1: `--sysroot=${sysroot} -isystem ${path.join(sysroot, `include/${target}`)}`,
   CARGO_TARGET_DIR: path.join(cache, "target"),
   TEMBRA_GUEST_BOOTSTRAP_DIR: bootstrap,
+  TEMBRA_INTERPRETER_IMPORT_MODULE: abi.IMPORT_MODULE,
 };
 const patch = `patch."https://github.com/stencil-hq/dquickts".rquickjs.path=${JSON.stringify(path.join(source, "rquickjs"))}`;
 const link = [

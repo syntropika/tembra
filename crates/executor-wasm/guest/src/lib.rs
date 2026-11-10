@@ -22,14 +22,9 @@ use vm::Vm;
 #[cfg(target_feature = "atomics")]
 compile_error!("The interpreter requires the single-threaded Wasm target");
 
-/// Host functions; the literal names must equal `abi::IMPORT_MODULE` and its import names,
-/// which the engine build verifies against the actual import section.
+/// Rust link attributes require a literal namespace; the build emits and verifies this file.
 mod host {
-    #[link(wasm_import_module = "tembra-interpreter-v2")]
-    unsafe extern "C" {
-        pub fn sync(packet: *const u8, length: usize) -> u32;
-        pub fn sync_read(destination: *mut u8, length: usize);
-    }
+    include!(concat!(env!("TEMBRA_GUEST_BOOTSTRAP_DIR"), "/host-imports.rs"));
 }
 
 /// Instance-wide state; the module is single-threaded and every access is non-reentrant.
@@ -92,6 +87,19 @@ pub(crate) fn host_sync(packet: &str) -> Result<String, String> {
         Ok(reply)
     } else {
         Err(reply)
+    }
+}
+
+/// Perform one binary standard request; the reply stays bytes and errors are text.
+pub(crate) fn host_sync_bytes(packet: &[u8]) -> Result<Vec<u8>, String> {
+    let header = unsafe { host::sync(packet.as_ptr(), packet.len()) };
+    let length = (header & !abi::SYNC_ERROR) as usize;
+    let mut reply = vec![0u8; length];
+    unsafe { host::sync_read(reply.as_mut_ptr(), length) };
+    if header & abi::SYNC_ERROR == 0 {
+        Ok(reply)
+    } else {
+        Err(String::from_utf8_lossy(&reply).into_owned())
     }
 }
 
@@ -208,24 +216,19 @@ fn resume(input: Box<[u8]>) -> Reply {
             return Err("callback scope is closed".into());
         }
         for completion in Completion::decode_batch(&input)? {
-            let value = std::str::from_utf8(completion.value)
-                .map_err(|_| "completion value is not UTF-8")?
-                .to_owned();
-            vm.complete(
-                completion.id,
-                if completion.ok { Ok(value) } else { Err(value) },
-            )?;
+            vm.complete(completion.id, completion.ok, completion.value)?;
         }
         advance(&vm)
     })()
     .unwrap_or_else(abort)
 }
-/// Revoke an idle callback after host cancellation; active frames must return first.
+/// Revoke a suspended callback while preserving a healthy revision and its owned resources.
 fn cancel() -> Reply {
-    if instance_vm().is_none() {
+    let Some(vm) = instance_vm() else {
         return Reply::quarantine("Orb source is not loaded".into());
-    }
-    abort("callback interrupted".into())
+    };
+    // Cleanup still has its instruction limit; a failing cleanup quarantines the Store.
+    finished(&vm, Err("callback cancelled".into()))
 }
 /// Capture only idle heap state with no platform stack or retained authority.
 fn capture() -> Reply {
@@ -307,7 +310,7 @@ pub extern "C" fn tembra_call(operation: u32, pointer: usize, length: usize) -> 
     let effects: Vec<(u64, &[u8])> = reply
         .effects
         .iter()
-        .map(|effect| (effect.id, effect.packet.as_bytes()))
+        .map(|effect| (effect.id, effect.packet.as_slice()))
         .collect();
     let bytes = abi::encode_reply(reply.kind, reply.interrupted, &reply.value, &effects)
         .or_else(|message| abi::encode_reply(ReplyKind::Error, true, message.as_bytes(), &[]))

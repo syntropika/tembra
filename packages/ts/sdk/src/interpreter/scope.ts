@@ -248,12 +248,13 @@ export class Scope {
   ): Promise<unknown> {
     checkSignal(ended);
     switch (request.operation) {
-      case "filesystem.read-text":
-      case "filesystem.write-text":
       case "transport.connect":
       case "transport.read":
       case "transport.write":
-      case "transport.close": {
+      case "transport.close":
+      case "http.send":
+      case "http.read":
+      case "http.close": {
         if (!("context" in authority) && !("signal" in authority))
           throw new Error("I/O requires an active callback");
         // Closing an owned stream is cleanup; it still needs a callback but survives cancellation.
@@ -261,13 +262,25 @@ export class Scope {
           if ("context" in authority) authority.context.check();
           else checkSignal(authority.signal);
         }
-        const result = await this.revision.io(request);
-        if (request.operation === "transport.connect") {
+        // Cleanup may outlive the root's admission; inspecting its Context would refuse cleanup.
+        const owner = asyncSurvivesCancellation(request) ? undefined : authoritySignal(authority);
+        const ioSignal = owner ? combinedSignal(owner, ended) : ended;
+        const result = await this.revision.io(request, ioSignal);
+        if (request.operation === "transport.connect" || request.operation === "http.send") {
           // Cancellation ends the stream's authority; closing it settles pending socket work.
-          const owner = authoritySignal(authority)!;
+          const owner = ioSignal;
           const close = () =>
             void this.revision
-              .io({ operation: "transport.close", id: result as number })
+              .io(
+                {
+                  operation: request.operation === "http.send" ? "http.close" : "transport.close",
+                  id:
+                    request.operation === "http.send"
+                      ? (result as { id: number }).id
+                      : (result as number),
+                },
+                ioSignal,
+              )
               .catch(() => {});
           if (owner.aborted) close();
           else owner.addEventListener("abort", close, { once: true });

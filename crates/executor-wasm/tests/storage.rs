@@ -5,9 +5,20 @@ use std::{path::PathBuf, rc::Rc};
 use tembra::Host;
 use tembra_executor_wasm::{Contract, Engine, FilesystemGrant, Grants, Install, Limits};
 
-const SOURCE: &str = r#"globalThis.__tembraOrb = {services:{files:{methods:{
-    read: async (_e,_c,path) => tembra.filesystem.readText(path),
-    write: async (_e,_c,path,content) => tembra.filesystem.writeText(path,content),
+// Standard WASI through the raw generated module: read bytes through a stream, write bytes
+// through `writeViaStream` with a plain async byte iterable and await its result future.
+const SOURCE: &str = r#"const preopens = __tembraStandard['wasi:filesystem/preopens@0.3.0'];
+const mount = (path) => { const [[root]] = preopens.getDirectories(); if (!path.startsWith('/data/')) throw new Error('outside the granted mount'); return [root, path.slice(6)]; };
+const readText = async (path) => { const [root, relative] = mount(path); const fd = await root.openAt({}, relative, {}, {read: true}); const [stream, done] = fd.readViaStream(0n); let text = ''; for await (const byte of stream) text += String.fromCharCode(byte); await done; return text; };
+globalThis.__tembraOrb = {services:{files:{methods:{
+    read: async (_e,_c,path) => readText(path),
+    write: async (_e,_c,path,content) => {
+        const [root, relative] = mount(path);
+        const fd = await root.openAt({}, relative, {create: true, truncate: true}, {write: true});
+        const bytes = (async function* () { for (let i = 0; i < content.length; i++) yield content.charCodeAt(i) & 0xff; })();
+        const result = await fd.writeViaStream(bytes, 0n);
+        if (result && result.tag === 'err') throw new Error(`write failed: ${result.val}`);
+    },
 }}}};"#;
 
 /// Check actual preopens, read-only access and traversal refusal in the same engine binary.

@@ -1,3 +1,4 @@
+import { asyncSurvivesCancellation, type IORequest } from "./host-protocol.ts";
 import type { Lifetime } from "../bridge/identifiers.ts";
 import type { KernelOrb } from "../bridge/kernel.ts";
 import { failure } from "../error.ts";
@@ -100,6 +101,31 @@ export function answer<T>(packet: string): T {
   throw failure(value.error ?? "Interpreter operation failed");
 }
 /** Reuse the prepared contract for installation planning. */
-export function query<T>(contract: ContractPort, value: unknown): T {
+export function query<T>(contract: Pick<ContractPort, "request">, value: unknown): T {
   return answer<T>(contract.request(JSON.stringify(value)));
+}
+
+/**
+ * Forward the callback's cancellation to the native port only while `operation` is pending.
+ *
+ * Native cancellation revokes the source I/O of the active callback, so pending connects and
+ * requests settle promptly instead of waiting for their deadline. The listener is removed when the
+ * operation settles, so a late abort cannot reach a later callback. Closing a stream is cleanup that
+ * survives cancellation and never cancels.
+ */
+export async function withIoCancellation<T>(
+  operation: Promise<T>,
+  request: IORequest,
+  signal: AbortSignal | undefined,
+  cancel: () => void,
+): Promise<T> {
+  if (!signal || asyncSurvivesCancellation(request)) return operation;
+  const abort = () => cancel();
+  if (signal.aborted) abort();
+  else signal.addEventListener("abort", abort, { once: true });
+  try {
+    return await operation;
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
 }

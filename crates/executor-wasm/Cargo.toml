@@ -13,7 +13,6 @@ name = "wasm"
 path = "../../examples/rust/wasm.rs"
 
 [dependencies]
-cap-std = "=4.0.3"
 tembra = { path = "../tembra", version = "=0.2.2", features = ["hooks"] }
 tembra-contracts.workspace = true
 serde.workspace = true
@@ -45,6 +44,19 @@ wasmtime = { version = "=51.0.0-rc.1", default-features = false, features = [
   "task-group-hook",
 ] }
 wasmtime-wasi = { version = "=51.0.0-rc.1", default-features = false, features = ["p2", "p3"] }
+# Standard WASI HTTP: hyper/rustls/DNS client and P3 `wasi:http` host. Source Orbs reuse its sender.
+wasmtime-wasi-http = { version = "=51.0.0-rc.1", default-features = false, features = [
+  "default-send-request",
+  "p3",
+] }
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+url = "2.5"
+
+[build-dependencies]
+sha2 = "0.10"
+wit-parser = "=0.261.0"
 
 [lints]
 workspace = true

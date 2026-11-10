@@ -71,4 +71,4 @@ export { ContextKey, ContextKind, opaqueFrom, type OpaqueContextValue } from "./
 
 export { directoryFilesystem, type DirectoryFilesystem } from "./interpreter/node.ts";
 export type { InterpreterOptions as IsolatedOptions } from "./interpreter/node.ts";
-export type { Grants } from "./authoring/types.ts";
+export type { Grants, CliOptions } from "./authoring/types.ts";

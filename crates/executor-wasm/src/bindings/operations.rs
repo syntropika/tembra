@@ -378,12 +378,13 @@ impl Environment {
                     futures::future::Either::Right(_) => Err(failure("operation cancelled")),
                 }
             }
-            AsyncRequest::ReadText { .. }
-            | AsyncRequest::WriteText { .. }
-            | AsyncRequest::TransportConnect { .. }
+            AsyncRequest::TransportConnect { .. }
             | AsyncRequest::TransportRead { .. }
             | AsyncRequest::TransportWrite { .. }
-            | AsyncRequest::TransportClose { .. } => {
+            | AsyncRequest::TransportClose { .. }
+            | AsyncRequest::HttpSend { .. }
+            | AsyncRequest::HttpRead { .. }
+            | AsyncRequest::HttpClose { .. } => {
                 unreachable!("I/O was handled under callback authority")
             }
             AsyncRequest::Unsupported => Err(failure("unsupported asynchronous host operation")),

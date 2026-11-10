@@ -5,10 +5,38 @@ import { builtinModules } from "node:module";
 import path from "node:path";
 import ts from "typescript";
 
+import { METHODS, RESOURCES } from "../interpreter/standard.ts";
 import type { BuildTarget } from "./types.ts";
 
+/** Interfaces with generated standard WASI source bindings. */
+export const STANDARD_INTERFACES: ReadonlySet<string> = new Set([
+  ...METHODS.map((method) => method.interface),
+  ...RESOURCES.map((name) => name.split("#")[0]!),
+]);
+
+/** Re-export the interpreter's generated module for one imported standard interface. */
+function standardModule(contract: string): string {
+  const names = new Set(
+    METHODS.filter((method) => method.interface === contract && method.resource === undefined).map(
+      (method) => method.name,
+    ),
+  );
+  for (const name of RESOURCES)
+    if (name.startsWith(`${contract}#`))
+      names.add(name.split("#")[1]!.replace(/(^|-)(\w)/g, (_, __, letter) => letter.toUpperCase()));
+  return [
+    `const module = globalThis.__tembraStandard[${JSON.stringify(contract)}];`,
+    `if (!module) throw new Error(${JSON.stringify(`The Orb contract does not import ${contract}`)});`,
+    ...[...names].map((name) => `export const ${name} = module.${name};`),
+  ].join("\n");
+}
+
 /** Resolve and bundle dependencies under the selected runtime rules. */
-export function resolver(root: string, target: BuildTarget): Bun.BunPlugin {
+export function resolver(
+  root: string,
+  target: BuildTarget,
+  imports: ReadonlySet<string>,
+): Bun.BunPlugin {
   const resolveModule = resolve.create.sync({
     fileSystem: fs,
     conditionNames: ["tembra-wasm", "source", "import", "default"],
@@ -27,6 +55,17 @@ export function resolver(root: string, target: BuildTarget): Bun.BunPlugin {
       }));
       builder.onLoad({ filter: /.*/, namespace: "tembra-orb" }, () => ({
         contents: `import orb from ${JSON.stringify(path.resolve(root, target.entry))}; globalThis.__tembraOrb = orb;`,
+        loader: "js",
+      }));
+      builder.onResolve({ filter: /^wasi:/ }, (request) => {
+        if (!imports.has(request.path))
+          throw new Error(`${request.importer}: the Orb contract does not import ${request.path}`);
+        if (!STANDARD_INTERFACES.has(request.path))
+          throw new Error(`${request.importer}: ${request.path} has no source binding yet`);
+        return { path: request.path, namespace: "tembra-standard" };
+      });
+      builder.onLoad({ filter: /.*/, namespace: "tembra-standard" }, (request) => ({
+        contents: standardModule(request.path),
         loader: "js",
       }));
       builder.onResolve({ filter: /.*/ }, (request) => {

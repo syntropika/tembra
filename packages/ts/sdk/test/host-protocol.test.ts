@@ -27,7 +27,6 @@ test("the SDK and the native executor share one host-operation vocabulary", () =
   const sync = operations("Request");
   const asynchronous = operations("AsyncRequest");
   expect(sync).not.toContain("io.check");
-  expect(asynchronous).toContain("filesystem.read-text");
   expect(asynchronous).toEqual(
     expect.arrayContaining([
       "transport.connect",
@@ -108,8 +107,8 @@ test("malformed and unsupported requests are distinguished", () => {
 
 test("host I/O packets reject forged context, invalid ports and non-byte chunks", () => {
   for (const packet of [
-    { operation: "filesystem.read-text", path: "/data/input", context: 1 },
-    { operation: "filesystem.write-text", path: "/data/input" },
+    { operation: "transport.read", id: 1, context: 1 },
+    { operation: "transport.write", id: 1 },
     { operation: "transport.connect", ip: "127.0.0.1", port: 65536 },
     { operation: "transport.connect", ip: "127.0.0.1", port: -1 },
     { operation: "transport.read", id: -1 },

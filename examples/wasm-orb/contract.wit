@@ -20,6 +20,6 @@ world calculator {
 
 world online-calculator {
     import arithmetic;
-    import wasi:sockets/types@0.3.0;
+    import wasi:http/client@0.3.0;
     export calculation;
 }

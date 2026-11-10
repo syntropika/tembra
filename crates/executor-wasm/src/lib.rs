@@ -11,15 +11,24 @@ mod io;
 mod port;
 mod protocol;
 mod providers;
+mod stdio;
 mod worker;
+// The build script's generator qualification rules are unit-tested with the host.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../codegen/mod.rs"]
+mod codegen;
 
 pub use engine::{Engine, Limits, LogRecord};
-pub use install::Install;
+pub use install::{Cli, Input, Install, Output, ReaderFactory, WriterFactory};
 #[doc(hidden)]
 pub use io::IoOperation;
 #[doc(hidden)]
 pub use port::{InterpreterPort, PortEvent, PortEvents, PortReply, PortTicket};
-pub use providers::{FilesystemGrant, Grants, NetworkGrant};
+pub use providers::{
+    Deterministic, FilesystemGrant, Grants, HostMonotonicClock, HostWallClock, HttpGrant,
+    NetworkGrant, Rng, SystemCapability,
+};
 #[doc(hidden)]
 pub use tembra_contracts::{Binding, Contract};
 

@@ -80,18 +80,48 @@ provide an import when it registers the matching service name and signature.
 - **Filesystem.** `FilesystemGrant { provider, mount, writable }` mounts a
   registered directory at a normalized virtual path. The operations available
   inside the mount depend on the artifact kind:
-  - Source Orbs call host helpers that read and write bounded UTF-8 text files.
-    They receive no WASI descriptors.
-  - Compiled components receive the directory as a standard WASI preopen. A
-    read-only grant allows reads only. A writable grant allows the WASI
-    filesystem operations on files and directories inside the mount, including
-    binary data, creating and removing entries, and listing directories. The
-    text-only and size bounds of the source helpers do not apply.
+  - Source Orbs import generated standard descriptor bindings for binary reads, streamed
+    writes/appends, metadata, directory enumeration and mutation. Descriptors survive callbacks
+    until dropped or their revision retires. TypeScript authors can use typed `using` for
+    deterministic disposal and bounded byte/text helpers above the standard streams.
+  - Compiled components receive standard WASI preopens from upstream. Read-only grants permit
+    reads; writable grants permit the corresponding file and directory mutations.
+  - Browser source Orbs use memory, OPFS or injected descriptor providers. Unsupported
+    platform operations return standard errors: built-in browser providers do not emulate
+    hard links, symbolic links or setting timestamps; OPFS directory rename is unsupported.
 
   Neither kind can reach paths outside the mount.
 
-- **Network.** `NetworkGrant { provider, connect }` permits outbound TCP to exact
-  literal socket addresses. There is no DNS, listening socket or UDP.
+- **Network.** `NetworkGrant` separately grants exact TCP `connect` peers, local
+  `listen` addresses, explicit local `bind` addresses, UDP `datagrams` peers and
+  `resolve` for DNS lookup. Standard compiled components use the upstream WASI
+  socket implementation. Source bindings currently expose outbound TCP only.
+- **HTTP.** `HttpGrant { provider, origins }` grants exact normalized HTTP(S)
+  origins. DNS and TLS are handled by the host HTTP sender. Raw socket grants
+  never authorize HTTP, and HTTP grants never authorize raw sockets.
+- **Process-local interfaces.** `SystemCapability::{Clocks, Random, Cli}`
+  explicitly admit their respective standard imports. Source and compiled Orbs use
+  standard system/monotonic clocks, secure/insecure random and CLI byte streams.
+  `Install::cli(Cli)` selects arguments, environment, initial directory and byte/file
+  standard input/output. Defaults are empty input and discarded output. Rust embedders
+  can supply reusable reader/writer factories; no process streams or environment are inherited.
+  Clock and random factories on `Engine` configure fresh providers per Store.
+  File adapters accept regular files only; devices, terminals, sockets and FIFOs are refused.
+  A regular-file operation runs inline in bounded chunks, but its individual operating-system
+  call is not preemptible by the callback deadline.
+
+  Source `Date.now()`, zero-argument `new Date()`, `Date()` and `performance.now()` require
+  Clocks; `Math.random()` requires Random and uses an explicitly insecure heap-owned PRNG.
+  Pure date parsing and arithmetic remain available. Secure randomness never uses that PRNG.
+  `wasi:cli/exit` retires only its invoking revision and reports its status to the host.
+  Terminal getters return none for the supplied nonterminal adapters. The unstable timezone
+  interface is not implemented by the pinned upstream release.
+
+A type-only dependency supplies types, not callable authority: filesystem timestamps do
+not require a Clocks grant. Resource-bearing dependency interfaces remain callable and
+grant-bound, including their constructors and statics. Source bindings follow the selected
+world's explicit imports; compiled admission additionally checks the actual binary's callable
+WASI imports, so an artifact cannot hide them by claiming type-only metadata.
 
 Installation fails when an Orb imports WASI sockets or filesystem without a
 matching grant, or when a grant names an unregistered provider. The standard
@@ -146,6 +176,36 @@ providers above. A compiled component can import selected Orbs:
   not fabricate WIT error values. This includes an import issued after the caller was
   cancelled. Provider calls already in flight remain physically owned until they settle.
 
+## WASI coverage
+
+The bundled WIT definitions contain all six packages of the pinned WASI 0.3
+release. Contract resolution, runtime linking and author-facing source bindings
+are different capabilities; bundled definitions alone do not establish execution
+support. Native compiled components link `wasmtime-wasi` and `wasmtime-wasi-http`
+51.0.0-rc.1. Upstream labels its P3 HTTP implementation experimental and incomplete.
+
+| Package           | Native compiled components                                   | Source TypeScript Orbs                                              | Browser source Orbs                                                             |
+| ----------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `wasi:filesystem` | Standard descriptors under granted preopens                  | Generated binary read/write/append, metadata and directory bindings | Same bindings over memory, OPFS or custom descriptors; explicit platform limits |
+| `wasi:http`       | Standard outgoing requests, response bodies and trailers     | Fetch facade, streamed responses and SSE; buffered uploads          | Same facade through an injectable Fetch provider                                |
+| `wasi:sockets`    | Standard TCP, UDP and DNS, with separate grants              | Outbound TCP helper                                                 | Outbound TCP only through an explicitly supplied adapter                        |
+| `wasi:clocks`     | System and monotonic clocks under an explicit grant          | Generated monotonic `now` / `wait-for`                              | Generated monotonic `now` / `wait-for`                                          |
+| `wasi:random`     | Secure and non-cryptographic random interfaces under a grant | Generated secure random bytes / u64                                 | Generated secure random bytes / u64                                             |
+| `wasi:cli`        | Upstream interfaces with an empty process context            | Console diagnostics only; no general CLI binding                    | Console diagnostics only; no general CLI binding                                |
+
+Compiled fixtures currently exercise filesystem preopens/open/create/remove-directory operations and outgoing HTTP request/body streaming. The remaining native operations are linked from upstream but still require operation-level qualification.
+
+System grants govern declared standard imports for source and compiled Orbs.
+Source JavaScript's `Date` and `Math.random` built-ins are not governed by them;
+secure randomness uses the separately granted generated binding. The experimental `wasi:clocks/timezone` interface is not linked by
+the pinned upstream runtime.
+
+Incoming `wasi:http/handler` serving is not integrated. Its resource-valued
+exports cannot currently be exposed as ordinary portable Orb services. Browser
+compiled components remain unsupported. Native/mobile share the native
+implementation, but host/Pulley tests do not establish iOS or Android device
+qualification. Full source WASI bindings and incoming HTTP remain work to do.
+
 ## Current scope
 
 Guests can use state reads, updates and selections, selected dependency
@@ -156,9 +216,6 @@ Source Orbs can also declare `series`, `waterfall` and `bail` hooks. See
 
 Not yet available:
 
-- WASI HTTP, random and general clock capabilities, and socket listening, UDP or DNS;
-- descriptor-level WASI filesystem access for source Orbs; only compiled components
-  receive it, and only inside a filesystem grant;
 - guest tasks, listeners, state subscriptions and migration;
 - compiled hook providers and portable custom composition, middleware or observation;
 - service access policies and exclusive or opaque resources;
@@ -195,11 +252,13 @@ just build-provider <target-directory>
 just build-probe <target-directory>
 just build-consumer <target-directory>
 just build-contributor <target-directory>
+just build-http-client <target-directory>
 just test-wasm-acceptance --out <directory> \
   --provider <target-directory>/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm \
   --probe <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm \
   --consumer <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm \
-  --contributor <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm
+  --contributor <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm \
+  --http-client <target-directory>/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm
 ```
 
 The runner builds the fixture Orbs with `scripts/test-wasm-fixtures.ts`, or reuses a
@@ -212,7 +271,9 @@ directory must not contain the checkout. `just test-wasm-orb` runs the
 Rust tests against supplied artifacts.
 
 The interpreter is a `wasm32-wasip1` reactor core module behind a private
-fixed-buffer ABI, `tembra-interpreter-v2`. [`src/abi.rs`](src/abi.rs) is its only
+fixed-buffer ABI, `tembra-interpreter-v3`. Its import namespace also carries the
+digest of the generated WASI method and type table, so mismatched host/interpreter
+bindings are refused before execution. [`src/abi.rs`](src/abi.rs) is its only
 definition: the guest includes it, the native host compiles it, and the browser host
 uses TypeScript constants generated from it. Two exports reserve one input buffer and
 run one logical operation (load, declare, start, resume, cancel or capture); two
@@ -236,29 +297,48 @@ use memory or an explicitly supplied OPFS directory handle. The source VM receiv
 no WASI filesystem preopens or socket grants; its standard-library imports cannot
 reach those providers.
 
-Source helpers check the admitted callback before each I/O effect and retain physical
-ownership until the operation settles, including after cancellation or an abandoned
-Promise. TypeScript still constructs and parses HTTP inside the guest; only the
-permitted raw transport runs in the host. One shared reactor handles nonblocking
-sockets; at most four blocking workers handle filesystem operations with bounded
-admission. Rust, Node and mobile share this path without occupying Node's libuv
-pool. Permissions and request bounds are checked before queue admission;
-expired queued operations cannot begin filesystem writes. Regular-file operations
-retain ownership until physical completion; their completion is not interruptible.
+Source bindings check the admitted callback before each I/O effect and retain physical
+ownership until it settles, including after cancellation or an abandoned Promise. Native
+filesystem methods call the upstream inline implementation during bounded Store turns; DNS
+and nonblocking socket work progress on the shared reactor without occupying Node's libuv
+pool. Pending borrows and streams retain descriptors until physical work ends. A callback's
+unfinished write pumps end as EOF: already accepted bytes remain owned until consumed.
+
+Source descriptors share a process-wide open-file budget derived from the soft OS limit,
+without changing that limit. Each source revision has a private share of one eighth of that
+pool (at least one unit), so one Orb cannot consume the entire source pool. Streams retain
+both units for their physical lifetime. This counts issued descriptors and file-holding
+streams conservatively, including repeated preopen handles; it is not an exact OS descriptor
+census. The budget does not cover compiled components, which currently rely on upstream resource handling
+and OS limits; it is not a complete process-wide file-descriptor guarantee.
 
 `tembra.transport.connect(ip, port)` returns a byte stream with `read`, `write` and
 `close`. Each chunk is at most 16 KiB. Streams belong to the callback that opened
 them and close on completion, abandonment or cancellation; an old handle cannot
-be used by the next callback. A slow read occupies no filesystem worker.
+be used by the next callback. A slow socket read does not occupy a filesystem turn.
 
-`@syntropika/tembra-sdk/http` implements HTTP/1 request and response framing in
-TypeScript inside the guest. It supports request bodies, incremental byte bodies,
-Content-Length, chunked responses and SSE through `response.events()`. Iteration
-applies backpressure and closes the stream on an early return. `text()` and
-`json()` collect at most 1 MiB; byte iteration does not collect the whole body.
-The helper currently accepts literal-IP `http:` URLs. TLS, DNS, redirects and
-content decompression are not implemented. These helpers do not expose the WASI
-HTTP interface or a complete WHATWG Fetch implementation.
+`@syntropika/tembra-sdk/http` adapts requests to the host's WASI HTTP sender.
+HTTP framing, DNS and TLS run in the host. A maintained `eventsource-parser`
+parser handles SSE through `response.events()`. Iteration applies backpressure and
+closes the response on an early return. `text()` and `json()` collect at most 1 MiB;
+byte iteration does not collect the whole body. Source uploads are buffered up to
+1 MiB. The facade does not implement complete WHATWG Fetch semantics.
+
+Compiled components import real `wasi:http/client@0.3.0` resources from
+`wasmtime-wasi-http`. Their bodies, streams and trailers use the upstream
+implementation, without the source facade's collection limits. Each send requires
+an admitted originating call and a granted origin. Compiled connection tasks progress
+while the Store is executing a call; a body retained between calls resumes when
+the Store runs again. New sends after cancellation
+are refused; a compiled request already in flight remains physically owned until
+it settles or reaches the callback deadline.
+
+The pinned native sender supports HTTP/1 with `webpki_roots` trust anchors. It
+does not follow redirects, use proxy settings, or load custom/system CA stores.
+The browser provider delegates to Fetch, preserving CORS and other platform rules;
+a consumer may inject a mock, proxy or alternate Fetch-compatible provider.
+Browser redirects are refused. Raw TCP has a separate optional socket-provider
+interface and no ambient browser implementation.
 
 SSE stays within its admitted callback and the configured callback/read deadlines.
 Long-running operations need an appropriate host `timeoutMs`; cancellation closes

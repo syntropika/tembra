@@ -64,22 +64,35 @@ installation choices, for example `host.reload([{ artifact, requires }])`.
 
 ## Network access
 
-The `calculator` world has no socket import, so `fetchAndSum` cannot connect.
-Build with `world: "online-calculator"` to import WASI sockets, then register a
-network provider and grant exact destinations at installation:
+The `calculator` world has no HTTP import, so `fetchAndSum` cannot send requests.
+Build with `world: "online-calculator"` to import `wasi:http/client@0.3.0`, then
+register a host provider and grant exact origins at installation:
 
 ```ts
 const host = createHost({ isolated: { providers: { network: ["outbound"] } } });
 await host.load(calculatorFile, {
   requires: { "example:integrated/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 } },
-  grants: { network: [{ provider: "outbound", connect: ["127.0.0.1:8080"] }] },
+  grants: { http: [{ provider: "outbound", origins: ["https://api.example.com"] }] },
 });
 ```
 
-The helper frames HTTP/1 in TypeScript over the granted TCP connection. It supports
-request bodies, Content-Length and chunked responses, byte streaming through
-`response.body`, and SSE through `response.events()`. `text()` and `json()` collect
-at most 1 MiB. Ending iteration early closes the connection; cancellation and the
-host's callback deadline also close it. URLs currently require literal-IP `http:`
-addresses. TLS, DNS, redirects and decompression are not implemented, and the
-helper does not expose WASI HTTP or complete WHATWG Fetch semantics.
+The native host uses Wasmtime's WASI HTTP sender for HTTP framing, DNS and TLS.
+TypeScript adapts the request and consumes the streamed body; a maintained SSE
+parser powers `response.events()`. `text()` and `json()` collect at most 1 MiB.
+Ending iteration early closes the response; callback completion and cancellation
+also close source response handles. Raw sockets require separate network grants.
+The facade does not implement complete WHATWG Fetch semantics.
+
+In a browser, register a Fetch-compatible provider through the same installation
+contract. The consumer may replace it with a mock, proxy or another implementation:
+
+```ts
+const host = await createHost({
+  isolated: { providers: { http: { outbound: globalThis.fetch } } },
+});
+```
+
+Browser Fetch retains platform restrictions such as CORS. Redirects are refused
+so a request cannot silently leave its granted origin. No browser TCP implementation
+is supplied; an embedding can provide an explicit socket adapter. See the
+[WASI support matrix](../../crates/executor-wasm/README.md#wasi-coverage) for current limits.

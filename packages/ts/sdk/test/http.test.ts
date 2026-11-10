@@ -1,38 +1,42 @@
 import { expect, test } from "bun:test";
-import { fetch, type TransportStream } from "../src/http.ts";
+import { fetch } from "../src/http.ts";
+import type { HttpStream } from "../src/guest.ts";
 import { Utf8Decoder } from "../src/http/bytes.ts";
 
 const encoder = new TextEncoder();
 
-/** Supply bytes only; all HTTP framing and text decoding still run in the client under test. */
-async function transport<T>(
+/** Model the host's decoded response, never a second HTTP framing implementation. */
+async function host<T>(
   chunks: Uint8Array[],
-  run: (state: { writes: Uint8Array[]; reads: number; closes: number }) => Promise<T>,
-  closeFailure?: Error,
+  run: (state: { calls: unknown[]; reads: number; closes: number }) => Promise<T>,
+  options: {
+    headers?: [string, string][];
+    status?: number;
+    closeError?: Error;
+    readError?: Error;
+  } = {},
 ): Promise<T> {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "tembra");
-  const state = { writes: [] as Uint8Array[], reads: 0, closes: 0 };
-  const stream: TransportStream = {
-    async read() {
-      state.reads++;
-      return chunks.shift() ?? null;
-    },
-    async write(bytes) {
-      state.writes.push(bytes.slice());
-    },
-    async close() {
-      state.closes++;
-      if (closeFailure) throw closeFailure;
-    },
-  };
+  const state = { calls: [] as unknown[], reads: 0, closes: 0 };
   Object.defineProperty(globalThis, "tembra", {
     configurable: true,
     value: {
-      transport: {
-        async connect(ip: string, port: number) {
-          expect(ip).toBe("127.0.0.1");
-          expect(port).toBe(8000);
-          return stream;
+      http: {
+        async send(...args: unknown[]): Promise<HttpStream> {
+          state.calls.push(args);
+          return {
+            status: options.status ?? 200,
+            headers: options.headers ?? [["content-type", "application/json"]],
+            async read() {
+              state.reads++;
+              if (options.readError) throw options.readError;
+              return chunks.shift() ?? null;
+            },
+            async close() {
+              state.closes++;
+              if (options.closeError) throw options.closeError;
+            },
+          };
         },
       },
     },
@@ -45,157 +49,109 @@ async function transport<T>(
   }
 }
 
-test("HTTP handles split framing, chunk extensions, trailers and UTF-8 POST bodies", async () => {
-  const body = encoder.encode('"hé🌍"');
-  const raw = encoder.encode(
-    `HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n${body.length.toString(16)};a=b\r\n"hé🌍"\r\n0\r\nX-Finished: yes\r\n\r\n`,
-  );
-  await transport(
-    [...raw].map((byte) => Uint8Array.of(byte)),
-    async (state) => {
-      const response = await fetch("http://127.0.0.1:8000/path?q=1", {
-        method: "POST",
-        body: "hé🌍",
-        headers: { "Content-Type": "text/plain" },
-      });
-      expect(response.status).toBe(200);
-      expect(await response.json()).toBe("hé🌍");
-      await expect(response.text()).rejects.toThrow("already been consumed");
-      expect(state.closes).toBe(1);
-      const request = new TextDecoder().decode(
-        Uint8Array.from(state.writes.flatMap((bytes) => [...bytes])),
-      );
-      expect(request).toStartWith("POST /path?q=1 HTTP/1.1\r\n");
-      expect(request).toContain("Content-Length: 7\r\n");
-      expect(request).toEndWith("\r\n\r\nhé🌍");
-    },
-  );
-});
-
-test("HTTP preserves opaque response header bytes and percent-encodes request targets", async () => {
-  const response = Uint8Array.from([
-    ...encoder.encode("HTTP/1.1 200 "),
-    0xe9,
-    ...encoder.encode("\r\nX-Name: caf"),
-    0xe9,
-    ...encoder.encode("\r\nX-Opaque: "),
-    0xa0,
-    0x61,
-    0xa0,
-    ...encoder.encode("\r\nContent-Length: 0\r\n\r\n"),
-  ]);
-  await transport([response], async (state) => {
-    const result = await fetch("http://127.0.0.1:8000/café/🌍/\x7f?q=ñ", { method: "POST" });
-    expect(result.headers.get("x-name")).toBe("caf\xe9");
-    expect(result.headers.get("x-opaque")).toBe("\xa0a\xa0");
-    expect(await result.text()).toBe("");
-    const request = new TextDecoder().decode(state.writes[0]);
-    expect(request).toStartWith("POST /caf%C3%A9/%F0%9F%8C%8D/%7F?q=%C3%B1 HTTP/1.1\r\n");
-    expect(request).toContain("Content-Length: 0\r\n");
+test("fetch forwards semantic request data and consumes a host-decoded response once", async () => {
+  await host([encoder.encode('"hé🌍"')], async (state) => {
+    const response = await fetch("https://example.test/path", {
+      method: "POST",
+      body: "hé🌍",
+      headers: { "Content-Type": "text/plain" },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toBe("hé🌍");
+    expect(state.calls).toEqual([
+      [
+        "https://example.test/path",
+        "POST",
+        [["Content-Type", "text/plain"]],
+        encoder.encode("hé🌍"),
+      ],
+    ]);
+    expect(state.closes).toBe(1);
+    await expect(response.text()).rejects.toThrow("already been consumed");
   });
 });
 
-test("HTTP supports known lengths, EOF bodies and empty HEAD/204/304 responses", async () => {
-  for (const [status, method, framing, expected] of [
-    [200, "GET", "Content-Length: 5\r\n", "hello"],
-    [200, "GET", "", "hello"],
-    [200, "HEAD", "Content-Length: 5\r\n", ""],
-    [204, "GET", "", ""],
-    [304, "GET", "", ""],
-  ] as const) {
-    await transport(
-      [encoder.encode(`HTTP/1.1 ${status} OK\r\n${framing}\r\nhello`)],
-      async (state) => {
-        const response = await fetch("http://127.0.0.1:8000/", { method });
-        if (!expected) expect(state.closes).toBe(1);
-        expect(await response.text()).toBe(expected);
-        expect(state.closes).toBe(1);
-      },
-    );
-  }
+test("HTTP bodies stream before EOF and early iteration closes the host handle", async () => {
+  await host([Uint8Array.of(1), Uint8Array.of(2)], async (state) => {
+    const response = await fetch("https://example.test/bytes");
+    for await (const bytes of response.body) {
+      expect(bytes).toEqual(Uint8Array.of(1));
+      break;
+    }
+    expect(state.reads).toBe(1);
+    expect(state.closes).toBe(1);
+    await response.close();
+    expect(state.closes).toBe(1);
+  });
 });
 
-test("HTTP cleanup cannot replace a body failure or turn a successful SSE break into a failure", async () => {
-  const cleanup = new Error("cleanup failed");
-  await transport(
-    [encoder.encode("HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nshort")],
-    async () => {
-      const response = await fetch("http://127.0.0.1:8000/");
-      await expect(response.text()).rejects.toThrow("Truncated HTTP body");
-      await expect(response.close()).rejects.toBe(cleanup);
-    },
-    cleanup,
-  );
-  await transport(
-    [encoder.encode("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: first\n\n")],
+test("fetch refuses browser-forbidden methods and GET/HEAD bodies before host I/O", async () => {
+  await host([], async (state) => {
+    for (const method of ["get", "HEAD"])
+      await expect(fetch("https://example.test/", { method, body: "" })).rejects.toThrow("body");
+    for (const method of ["CONNECT", "trace", "TRACK"])
+      await expect(fetch("https://example.test/", { method })).rejects.toThrow("forbidden");
+    expect(state.calls).toHaveLength(0);
+  });
+});
+
+test("host read failures retain their cause when close also fails", async () => {
+  const primary = new Error("read failed");
+  await host(
+    [],
     async (state) => {
-      const response = await fetch("http://127.0.0.1:8000/");
-      for await (const event of response.events()) {
-        expect(event.data).toBe("first");
-        break;
-      }
+      const response = await fetch("https://example.test/");
+      await expect(response.text()).rejects.toBe(primary);
       expect(state.closes).toBe(1);
     },
-    cleanup,
-  );
-  await transport(
-    [encoder.encode("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}")],
-    async (state) => {
-      const response = await fetch("http://127.0.0.1:8000/");
-      await expect(response.events()[Symbol.asyncIterator]().next()).rejects.toThrow(
-        "SSE requires",
-      );
-      expect(state.closes).toBe(1);
-    },
+    { readError: primary, closeError: new Error("close failed") },
   );
 });
 
-test("SSE yields before EOF, preserves event IDs and closes when the consumer stops", async () => {
-  const raw = encoder.encode(
-    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\r\n\ufeff:heartbeat\r\nid: 42\r\nevent: token\r\ndata: hé🌍\r\ndata: second\r\n\r\nid: invalid\0id\ndata: third\n\n",
+test("maintained SSE parser handles split UTF-8, CRLF, IDs and incomplete EOF", async () => {
+  const bytes = encoder.encode(
+    "\ufeff:heartbeat\r\nid: 42\r\nevent: token\r\ndata: hé🌍\r\ndata: second\r\n\r\nid: invalid\0id\ndata: third\n\ndata: incomplete",
   );
-  await transport(
-    [...raw].map((byte) => Uint8Array.of(byte)),
+  await host(
+    [...bytes].map((byte) => Uint8Array.of(byte)),
     async (state) => {
-      const response = await fetch("http://127.0.0.1:8000/events");
+      const response = await fetch("https://example.test/events");
       const iterator = response.events()[Symbol.asyncIterator]();
       expect((await iterator.next()).value).toEqual({
         event: "token",
         data: "hé🌍\nsecond",
         id: "42",
       });
-      expect(state.reads).toBeLessThan(raw.length);
-      expect(state.closes).toBe(0);
+      expect(state.reads).toBeLessThan(bytes.length);
       expect((await iterator.next()).value).toEqual({ event: "message", data: "third", id: "42" });
-      await iterator.return?.();
+      expect((await iterator.next()).done).toBe(true);
       expect(state.closes).toBe(1);
     },
+    { headers: [["Content-Type", "text/event-stream; charset=utf-8"]] },
   );
 });
 
-test("HTTP refuses ambiguous framing and closes truncated bodies", async () => {
-  for (const headers of [
-    "Content-Length: 1\r\nContent-Length: 1",
-    "Content-Length: 1\r\nTransfer-Encoding: chunked",
-    "Content-Length: -1",
-    "Transfer-Encoding: gzip, chunked",
-  ]) {
-    await transport(
-      [encoder.encode(`HTTP/1.1 200 OK\r\n${headers}\r\n\r\n0\r\n\r\n`)],
-      async (state) => {
-        await expect(fetch("http://127.0.0.1:8000/")).rejects.toThrow();
-        expect(state.closes).toBe(1);
-      },
-    );
-  }
-  await transport(
-    [encoder.encode("HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nshort")],
+test("early SSE return preserves success when close fails; wrong content types close too", async () => {
+  await host(
+    [encoder.encode("data: first\n\n"), encoder.encode("data: second\n\n")],
     async (state) => {
-      const response = await fetch("http://127.0.0.1:8000/");
-      await expect(response.text()).rejects.toThrow("Truncated HTTP body");
+      const response = await fetch("https://example.test/events");
+      for await (const event of response.events()) {
+        expect(event.data).toBe("first");
+        break;
+      }
+      expect(state.reads).toBe(1);
       expect(state.closes).toBe(1);
     },
+    { headers: [["content-type", "text/event-stream"]], closeError: new Error("cleanup failed") },
   );
+  await host([], async (state) => {
+    const response = await fetch("https://example.test/");
+    await expect(response.events()[Symbol.asyncIterator]().next()).rejects.toThrow(
+      "text/event-stream",
+    );
+    expect(state.closes).toBe(1);
+  });
 });
 
 test("UTF-8 decoding agrees with the platform decoder across scalar and invalid-byte boundaries", () => {

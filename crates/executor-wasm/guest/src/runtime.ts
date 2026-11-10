@@ -1,3 +1,5 @@
+import "./builtins.ts";
+
 // Host state and authority never live in these guest-side proxy objects.
 (() => {
   const environments = new Map<number, unknown>();
@@ -12,6 +14,8 @@
   const wire = globalThis.__tembraValues;
   const stateValues = globalThis.__tembraState;
   const imports = new Set(globalThis.__tembraContract.imports.map((item) => item.contract));
+  const sweepStandard = globalThis.__tembraSweepStandard!;
+  delete globalThis.__tembraSweepStandard;
   const writeLog = globalThis.__writeLog!;
   delete globalThis.__writeLog;
   Object.defineProperty(globalThis, "console", {
@@ -352,6 +356,7 @@
     const callback = Symbol("callback");
     activeCallback = callback;
     try {
+      sweepStandard();
       const request = JSON.parse(packet);
       const orb = globalThis.__tembraOrb;
       let result;
@@ -396,6 +401,8 @@
       }
       return JSON.stringify(result === undefined ? null : result);
     } finally {
+      // Callback end: also close this callback's unfinished standard input pumps.
+      sweepStandard(true);
       if (activeCallback === callback) activeCallback = null;
     }
   };
@@ -428,20 +435,40 @@
 
   globalThis.__tembraAbandon = () => {
     activeCallback = null;
+    // An abandoned callback's pumps end too; the host closes any writer this cannot reach.
+    try {
+      sweepStandard(true);
+    } catch {
+      // Cleanup never turns abandonment into a new failure.
+    }
   };
 
   globalThis.tembra = Object.freeze({
     wait(milliseconds: number) {
       return call("wait", { milliseconds });
     },
-    ...(imports.has("wasi:filesystem/preopens@0.3.0")
+    ...(imports.has("wasi:http/client@0.3.0")
       ? {
-          filesystem: Object.freeze({
-            async readText(path: string) {
-              return call("filesystem.read-text", { path });
-            },
-            async writeText(path: string, value: string) {
-              await call("filesystem.write-text", { path, value });
+          http: Object.freeze({
+            async send(
+              url: string,
+              method: string,
+              headers: readonly (readonly [string, string])[],
+              body: Uint8Array,
+            ): Promise<HttpStream> {
+              const response: { id: number; status: number; headers: [string, string][] } =
+                await call("http.send", { url, method, headers, body: Array.from(body) });
+              return Object.freeze({
+                status: response.status,
+                headers: response.headers,
+                async read() {
+                  const bytes: number[] | null = await call("http.read", { id: response.id });
+                  return bytes === null ? null : Uint8Array.from(bytes);
+                },
+                async close() {
+                  await call("http.close", { id: response.id });
+                },
+              });
             },
           }),
         }

@@ -45,7 +45,7 @@ globalThis.__tembraOrb = {services:{checks:{
     if (mode === "long-wait") { await tembra.wait(80); return 1; }
     if (mode === "state-checks") {
       const before = environment.state.value;
-      for (const invalid of [NaN,undefined,new Date(),1001,-0]) {
+      for (const invalid of [NaN,undefined,new Date(0),1001,-0]) {
         let rejected = false;
         try { environment.state.update(context,() => invalid); } catch { rejected = true; }
         if (!rejected || environment.state.value !== before) throw new Error("Invalid state was adopted");

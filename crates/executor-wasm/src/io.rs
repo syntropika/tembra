@@ -1,42 +1,59 @@
 //! Source-Orb I/O uses host-owned directory capabilities and exact destination grants.
 //!
-//! The guest supplies only typed requests. Filesystem work runs on a few bounded blocking
-//! workers; sockets are incremental, nonblocking streams on one shared reactor, so a slow reader
-//! never occupies a filesystem worker or the embedding runtime's thread pool.
+//! The guest supplies only typed requests. Filesystem access is standard WASI dispatched inside
+//! the Orb's own Store (see `worker::standard`) under the shared active filesystem budget;
+//! sockets are incremental, nonblocking streams on one shared reactor, so a slow reader never
+//! occupies the embedding runtime's thread pool. HTTP runs the host's standard WASI HTTP client
+//! on the same reactor; its response bodies are streams too.
 use crate::{failure, protocol::AsyncRequest, protocol::TRANSPORT_CHUNK_BYTES};
-#[cfg(unix)]
-use cap_std::fs::OpenOptionsExt;
-use cap_std::fs::{Dir, OpenOptions};
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
-    io::{Read, Write},
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tembra::Result;
 
+mod http;
 mod reactor;
 mod streams;
 
 pub(crate) use streams::Streams;
 
-const TEXT_LIMIT: usize = 1 << 20;
+/// Reserve one slot of the process-wide bounded filesystem admission.
+pub(crate) fn admit_file() -> Result<tokio::sync::OwnedSemaphorePermit> {
+    reactor::reactor()?.admit_file()
+}
 
-struct Mount {
-    path: String,
-    directory: Arc<Dir>,
-    writable: bool,
+/// Bound inline upstream filesystem work without holding a worker across an async wait.
+pub(crate) async fn file_turn<F: std::future::Future>(future: F) -> Result<F::Output> {
+    Ok(reactor::reactor()?.file_turn(future).await)
+}
+
+/// Standard WASI context of one source installation, moved once into its Store.
+pub(crate) struct StandardContext {
+    pub wasi: wasmtime_wasi::WasiCtxBuilder,
+    /// Checked contract imports; generated dispatch refuses any other interface.
+    pub allowed: BTreeSet<String>,
+    /// The existing callback epoch also revokes pending standard WASI calls.
+    pub scope: Streams,
+    /// Clocks for the interpreter's own WASIp1 `clock_time_get`, only with the clocks grant.
+    pub clocks: Option<crate::worker::wasi::Clocks>,
 }
 
 /// Bound once for an installation; no directory handle or network authority enters the VM.
 #[derive(Clone)]
 pub(crate) struct SourceIo {
-    mounts: Arc<Vec<Mount>>,
     destinations: Arc<BTreeSet<SocketAddr>>,
+    /// HTTP origins are checked against these grants; raw socket grants never authorize HTTP.
+    grants: Arc<crate::Grants>,
     streams: Streams,
     timeout: Duration,
+    /// Taken by the Session that owns the Store; never shared between Stores.
+    standard: Arc<std::sync::Mutex<Option<StandardContext>>>,
+    /// Source built-in authority sent with Load, decided from system grants only.
+    builtins: crate::protocol::Builtins,
 }
 impl SourceIo {
     pub(crate) fn new(
@@ -44,31 +61,25 @@ impl SourceIo {
         imports: &[tembra_contracts::HostImport],
         grants: &crate::Grants,
         timeout: Duration,
+        cli: &crate::Cli,
     ) -> Result<Self> {
         grants.check(
             imports,
             &providers.filesystem.keys().cloned().collect(),
             &providers.network,
         )?;
-        let mut mounts = grants
-            .filesystem
-            .iter()
-            .map(|grant| {
-                let directory = Dir::open_ambient_dir(
-                    &providers.filesystem[&grant.provider],
-                    cap_std::ambient_authority(),
-                )
-                .map_err(failure)?;
-                Ok(Mount {
-                    path: grant.mount.clone(),
-                    directory: Arc::new(directory),
-                    writable: grant.writable,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        mounts.sort_by_key(|mount| std::cmp::Reverse(mount.path.len()));
+        let streams = Streams::default();
+        let prepared = providers.context(imports, grants, cli)?;
+        let standard = StandardContext {
+            wasi: prepared.wasi,
+            clocks: prepared.clocks,
+            scope: streams.clone(),
+            allowed: imports
+                .iter()
+                .map(|import| import.contract.clone())
+                .collect(),
+        };
         Ok(Self {
-            mounts: Arc::new(mounts),
             destinations: Arc::new(
                 grants
                     .network
@@ -76,9 +87,22 @@ impl SourceIo {
                     .flat_map(|grant| grant.connect.iter().copied())
                     .collect(),
             ),
-            streams: Streams::default(),
+            grants: Arc::new(grants.clone()),
+            streams,
             timeout,
+            standard: Arc::new(std::sync::Mutex::new(Some(standard))),
+            builtins: prepared.builtins,
         })
+    }
+
+    /// Source built-in authority for this installation's Load.
+    pub(crate) fn builtins(&self) -> crate::protocol::Builtins {
+        self.builtins.clone()
+    }
+
+    /// Move the standard WASI context into the Store that owns this installation.
+    pub(crate) fn take_standard(&self) -> Option<StandardContext> {
+        self.standard.lock().expect("standard context").take()
     }
 
     /// The transport table whose epochs follow this Orb's guest callbacks.
@@ -89,22 +113,6 @@ impl SourceIo {
     /// Check one request against this installation and capture its deadline at admission.
     pub(crate) fn operation(&self, packet: &str) -> Result<IoOperation> {
         let request = match AsyncRequest::decode(packet).map_err(failure)? {
-            AsyncRequest::ReadText { path } => {
-                let (directory, path) = self.file(&path, false)?;
-                Operation::ReadText {
-                    directory: directory.clone(),
-                    path,
-                }
-            }
-            AsyncRequest::WriteText { path, value } => {
-                bounded(&value)?;
-                let (directory, path) = self.file(&path, true)?;
-                Operation::WriteText {
-                    directory: directory.clone(),
-                    path,
-                    value,
-                }
-            }
             AsyncRequest::TransportConnect { ip, port } => {
                 let address = SocketAddr::new(
                     ip.parse()
@@ -140,6 +148,29 @@ impl SourceIo {
                 streams: self.streams.clone(),
                 id,
             },
+            AsyncRequest::HttpSend {
+                url,
+                method,
+                headers,
+                body,
+            } => Operation::HttpSend {
+                request: Box::new(http::Outgoing::new(
+                    &self.grants,
+                    &url,
+                    &method,
+                    headers,
+                    body,
+                )?),
+                reservation: self.streams.reserve()?,
+            },
+            AsyncRequest::HttpRead { id } => {
+                let (body, reader) = self.streams.http_body(id)?;
+                Operation::HttpRead { body, reader }
+            }
+            AsyncRequest::HttpClose { id } => Operation::HttpClose {
+                streams: self.streams.clone(),
+                id,
+            },
             _ => return Err(failure("expected an I/O operation")),
         };
         Ok(IoOperation {
@@ -147,46 +178,10 @@ impl SourceIo {
             deadline: Instant::now() + self.timeout,
         })
     }
-
-    fn file(&self, path: &str, write: bool) -> Result<(&Arc<Dir>, String)> {
-        bounded(path)?;
-        if !path.starts_with('/')
-            || path.contains(['\\', '\0'])
-            || path
-                .split('/')
-                .skip(1)
-                .any(|part| part.is_empty() || part == "." || part == "..")
-        {
-            return Err(failure(
-                "filesystem paths must be normalized absolute paths",
-            ));
-        }
-        for mount in self.mounts.iter() {
-            if let Some(relative) = path
-                .strip_prefix(&mount.path)
-                .and_then(|suffix| suffix.strip_prefix('/'))
-            {
-                if write && !mount.writable {
-                    return Err(failure("filesystem mount is read-only"));
-                }
-                return Ok((&mount.directory, relative.to_owned()));
-            }
-        }
-        Err(failure("filesystem path is outside the granted mounts"))
-    }
 }
 
 /// A Send operation owns its original installation's capabilities until physical completion.
 enum Operation {
-    ReadText {
-        directory: Arc<Dir>,
-        path: String,
-    },
-    WriteText {
-        directory: Arc<Dir>,
-        path: String,
-        value: String,
-    },
     Connect {
         reservation: streams::Reservation,
         address: SocketAddr,
@@ -201,6 +196,18 @@ enum Operation {
         bytes: Vec<u8>,
     },
     Close {
+        streams: Streams,
+        id: u32,
+    },
+    HttpSend {
+        request: Box<http::Outgoing>,
+        reservation: streams::Reservation,
+    },
+    HttpRead {
+        body: Arc<http::Body>,
+        reader: tokio::sync::OwnedMutexGuard<http::Reader>,
+    },
+    HttpClose {
         streams: Streams,
         id: u32,
     },
@@ -222,19 +229,6 @@ impl IoOperation {
         };
         let deadline = self.deadline;
         match self.request {
-            request @ (Operation::ReadText { .. } | Operation::WriteText { .. }) => {
-                match reactor.admit_file() {
-                    Ok(permit) => reactor.run_file(permit, move || {
-                        let outcome =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                run_file(request, deadline)
-                            }))
-                            .unwrap_or_else(|_| Err(failure("host I/O worker panicked")));
-                        complete(outcome);
-                    }),
-                    Err(error) => complete(Err(error)),
-                }
-            }
             Operation::Connect {
                 reservation,
                 address,
@@ -252,6 +246,16 @@ impl IoOperation {
                 complete(stream.write(writer, bytes, deadline).await);
             }),
             Operation::Close { streams, id } => complete(streams.close(id)),
+            Operation::HttpSend {
+                request,
+                reservation,
+            } => reactor.spawn(async move {
+                complete(request.send(reservation, deadline).await);
+            }),
+            Operation::HttpRead { body, reader } => reactor.spawn(async move {
+                complete(body.read(reader, deadline).await);
+            }),
+            Operation::HttpClose { streams, id } => complete(streams.close_body(id)),
         }
     }
 
@@ -264,58 +268,7 @@ impl IoOperation {
     }
 }
 
-/// Execute one blocking filesystem operation; expired work never starts a write.
-fn run_file(request: Operation, deadline: Instant) -> Result<Value> {
-    if Instant::now() >= deadline {
-        return Err(failure("host I/O deadline exceeded"));
-    }
-    match request {
-        Operation::ReadText { directory, path } => {
-            let file = directory
-                .open_with(path, &options(false))
-                .map_err(failure)?;
-            if !file.metadata().map_err(failure)?.is_file() {
-                return Err(failure("text reads require a regular file"));
-            }
-            let mut text = String::new();
-            file.take((TEXT_LIMIT + 1) as u64)
-                .read_to_string(&mut text)
-                .map_err(failure)?;
-            bounded(&text)?;
-            Ok(Value::String(text))
-        }
-        Operation::WriteText {
-            directory,
-            path,
-            value,
-        } => {
-            let mut file = directory.open_with(path, &options(true)).map_err(failure)?;
-            if !file.metadata().map_err(failure)?.is_file() {
-                return Err(failure("text writes require a regular file"));
-            }
-            file.set_len(0).map_err(failure)?;
-            file.write_all(value.as_bytes()).map_err(failure)?;
-            Ok(Value::Null)
-        }
-        _ => Err(failure("expected a filesystem operation")),
-    }
-}
-
-fn bounded(text: &str) -> Result<()> {
-    if text.len() > TEXT_LIMIT {
-        Err(failure("text exceeds the one mebibyte limit"))
-    } else {
-        Ok(())
-    }
-}
-
-fn options(write: bool) -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options.read(!write).write(write).create(write);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NONBLOCK);
-    options
-}
-
+#[cfg(test)]
+mod http_tests;
 #[cfg(test)]
 mod tests;

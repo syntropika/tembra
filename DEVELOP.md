@@ -87,6 +87,7 @@ just build-provider <provider-target-directory>
 just build-probe <provider-target-directory>
 just build-consumer <provider-target-directory>
 just build-contributor <provider-target-directory>
+just build-http-client <provider-target-directory>
 ```
 
 The interpreter recipe packages the same `interpreter.wasm` into `packages/ts/engine-node/dist` and
@@ -100,7 +101,8 @@ just test-wasm-acceptance --out <directory> \
   --provider <provider-target-directory>/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm \
   --probe <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm \
   --consumer <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm \
-  --contributor <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm
+  --contributor <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm \
+  --http-client <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm
 ```
 
 The runner builds the fixture orbs into `<directory>/fixtures`, or reuses `--fixtures <directory>`.

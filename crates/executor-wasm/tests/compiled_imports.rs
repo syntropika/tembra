@@ -348,7 +348,12 @@ fn compiled_commands_cannot_cross_execution_entrypoints() {
         tembra_contracts::Artifact::decode(&artifact("math-provider", MATH_PROVIDER, "math"))
             .unwrap();
     let port = engine
-        .open_port(&artifact, &Default::default(), &Default::default())
+        .open_port(
+            &artifact,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
         .unwrap();
     let create = json!({"kind":"create", "environment":1, "service":null});
     let invoke =

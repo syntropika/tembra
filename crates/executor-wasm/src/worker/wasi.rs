@@ -1,18 +1,36 @@
 //! Capabilityless WASI preview 1 functions for the interpreter's exact import allowlist.
 //!
-//! The source VM receives an empty environment, real clocks and standard output/error that
+//! The source VM receives an empty environment, the Orb's configured clocks only when it holds
+//! the clocks grant (otherwise a constant zero time, so even libc's early seeding sees no real
+//! time), and standard output/error that
 //! forward to attributed diagnostics. There are no preopened directories, no readable input and
 //! no other descriptors, so filesystem and socket access stay scoped host effects. Each function
 //! works on a plain memory slice; the linker wrappers only borrow memory and state.
 use crate::abi;
 use crate::protocol::LogLevel;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use wasmtime::{Caller, Linker};
+use wasmtime_wasi::{HostMonotonicClock, HostWallClock};
 
-/// Per-instance standard descriptor state and monotonic clock origin.
+/// The configured clocks of a clocks-granted Orb, fresh for this Store.
+pub(crate) struct Clocks {
+    pub wall: Box<dyn HostWallClock>,
+    pub monotonic: Box<dyn HostMonotonicClock>,
+}
+
+/// Per-instance standard descriptor state and granted clocks.
 pub(super) struct Wasi {
     open: [bool; abi::STDIO_DESCRIPTORS as usize],
-    origin: Instant,
+    clocks: Option<Clocks>,
+}
+
+impl Wasi {
+    /// Instance state reading `clocks`; `None` (no clocks grant) reads a constant zero time.
+    pub(super) fn new(clocks: Option<Clocks>) -> Self {
+        Self {
+            clocks,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Wasi {
@@ -20,7 +38,7 @@ impl Default for Wasi {
     fn default() -> Self {
         Self {
             open: [true; abi::STDIO_DESCRIPTORS as usize],
-            origin: Instant::now(),
+            clocks: None,
         }
     }
 }
@@ -53,14 +71,13 @@ impl Wasi {
         self.open.get(descriptor as usize).copied().unwrap_or(false)
     }
 
-    /// Real wall-clock and monotonic time in nanoseconds; CPU-time clocks are unsupported.
+    /// The granted wall-clock and monotonic time in nanoseconds, or a constant zero without
+    /// the clocks grant; CPU-time clocks are unsupported.
     pub fn clock_time_get(&self, memory: &mut [u8], clock: u32, out: u32) -> u32 {
-        let nanoseconds = match clock {
-            abi::CLOCK_REALTIME => SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or(0),
-            abi::CLOCK_MONOTONIC => self.origin.elapsed().as_nanos(),
+        let nanoseconds = match (clock, &self.clocks) {
+            (abi::CLOCK_REALTIME, Some(clocks)) => clocks.wall.now().as_nanos(),
+            (abi::CLOCK_MONOTONIC, Some(clocks)) => u128::from(clocks.monotonic.now()),
+            (abi::CLOCK_REALTIME | abi::CLOCK_MONOTONIC, None) => 0,
             _ => return abi::ERRNO_INVAL,
         };
         let nanoseconds = u64::try_from(nanoseconds).unwrap_or(u64::MAX);
@@ -291,13 +308,46 @@ mod tests {
     fn clocks_environment_and_descriptors_have_capabilityless_behavior() {
         let mut wasi = Wasi::default();
         let mut memory = vec![0xffu8; 128];
+        // Without the clocks grant both clocks read a constant zero: no real time leaks.
         assert_eq!(wasi.clock_time_get(&mut memory, abi::CLOCK_REALTIME, 0), 0);
-        let realtime = u64::from_le_bytes(memory[0..8].try_into().unwrap());
-        assert!(
-            realtime > 1_600_000_000_000_000_000,
-            "realtime is a real wall clock"
-        );
+        assert_eq!(u64::from_le_bytes(memory[0..8].try_into().unwrap()), 0);
         assert_eq!(wasi.clock_time_get(&mut memory, abi::CLOCK_MONOTONIC, 8), 0);
+        assert_eq!(u64::from_le_bytes(memory[8..16].try_into().unwrap()), 0);
+        // With it, they read the Orb's configured clocks exactly.
+        struct Fixed;
+        impl wasmtime_wasi::HostWallClock for Fixed {
+            fn resolution(&self) -> std::time::Duration {
+                std::time::Duration::from_nanos(1)
+            }
+            fn now(&self) -> std::time::Duration {
+                std::time::Duration::new(1_700_000_000, 123)
+            }
+        }
+        impl wasmtime_wasi::HostMonotonicClock for Fixed {
+            fn resolution(&self) -> u64 {
+                1
+            }
+            fn now(&self) -> u64 {
+                42
+            }
+        }
+        let granted = Wasi::new(Some(Clocks {
+            wall: Box::new(Fixed),
+            monotonic: Box::new(Fixed),
+        }));
+        assert_eq!(
+            granted.clock_time_get(&mut memory, abi::CLOCK_REALTIME, 0),
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes(memory[0..8].try_into().unwrap()),
+            1_700_000_000_000_000_123
+        );
+        assert_eq!(
+            granted.clock_time_get(&mut memory, abi::CLOCK_MONOTONIC, 8),
+            0
+        );
+        assert_eq!(u64::from_le_bytes(memory[8..16].try_into().unwrap()), 42);
         assert_eq!(wasi.clock_time_get(&mut memory, 2, 8), abi::ERRNO_INVAL);
         assert_eq!(
             wasi.clock_time_get(&mut memory, abi::CLOCK_REALTIME, 124),

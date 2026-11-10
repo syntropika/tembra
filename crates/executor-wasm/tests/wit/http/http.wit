@@ -1,0 +1,14 @@
+package example:fetch@1.0.0;
+
+/// A compiled Orb that sends standard `wasi:http` requests through its host.
+interface fetcher {
+    /// GET `scheme://authority/path` and return `"<status> <body>"`, or the error code.
+    fetch: async func(scheme: string, authority: string, path: string) -> result<string, string>;
+    /// GET and return only the first body chunk, then drop the body before its end.
+    first: async func(scheme: string, authority: string, path: string) -> result<string, string>;
+}
+
+world client {
+    import wasi:http/client@0.3.0;
+    export fetcher;
+}

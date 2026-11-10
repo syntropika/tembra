@@ -5,7 +5,8 @@ use async_channel::Sender;
 use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::oneshot;
 use wasmtime::{
-    Caller, ExternType, Linker, Memory, MemoryType, Module, Store, StoreLimits, StoreLimitsBuilder,
+    AsContextMut, Caller, ExternType, Linker, Memory, MemoryType, Module, Store, StoreLimits,
+    StoreLimitsBuilder,
 };
 
 pub(super) struct State {
@@ -15,10 +16,24 @@ pub(super) struct State {
     pub(super) memory: Option<Memory>,
     limits: StoreLimits,
     pub(super) events: Option<Sender<Event>>,
-    packet_bytes: usize,
+    pub(super) packet_bytes: usize,
     deadline: Option<std::time::Instant>,
     /// A synchronous reply waiting for the guest's matching `sync_read`.
     reply: Option<Vec<u8>>,
+    /// Standard WASI context and resources of this revision; dropped with the Store.
+    ctx: wasmtime_wasi::WasiCtx,
+    table: wasmtime::component::ResourceTable,
+    pub(super) standard: super::standard::Standard,
+    pub(super) callback_scope: crate::io::Streams,
+}
+
+impl wasmtime_wasi::WasiView for State {
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        wasmtime_wasi::WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
+    }
 }
 
 /// Refuse interpreter modules whose imports or exports differ from the private ABI.
@@ -115,6 +130,22 @@ fn linker(engine: &wasmtime::Engine) -> wasmtime::Result<Linker<State>> {
             }
             let reply = if length as usize > caller.data().packet_bytes {
                 Err("host packet limit exceeded".to_owned())
+            } else if length > 0
+                && memory.data(&caller).get(pointer as usize).copied()
+                    == Some(super::standard::PACKET_TAG)
+            {
+                // Generated standard WASI calls run in this Store without a foreign carrier.
+                let start = pointer as usize;
+                let packet = memory
+                    .data(&caller)
+                    .get(start..start + length as usize)
+                    .ok_or_else(|| wasmtime::Error::msg("host packet is outside guest memory"))?
+                    .to_vec();
+                if caller.data().events.is_none() {
+                    Err("no active invocation".to_owned())
+                } else {
+                    super::standard::synchronous(caller.as_context_mut(), &packet)?
+                }
             } else {
                 let start = pointer as usize;
                 let packet = memory
@@ -124,17 +155,17 @@ fn linker(engine: &wasmtime::Engine) -> wasmtime::Result<Linker<State>> {
                 let packet = std::str::from_utf8(packet)
                     .map_err(|_| wasmtime::Error::msg("host packet is not UTF-8"))?
                     .to_owned();
-                synchronous(caller.data(), packet)
+                synchronous(caller.data(), packet).map(String::into_bytes)
             };
             let (flag, reply) = match reply {
                 Ok(value) => (0, value),
-                Err(message) => (abi::SYNC_ERROR, message),
+                Err(message) => (abi::SYNC_ERROR, message.into_bytes()),
             };
             let length = u32::try_from(reply.len())
                 .ok()
                 .filter(|length| *length <= abi::LENGTH_LIMIT)
                 .ok_or_else(|| wasmtime::Error::msg("host reply exceeds the ABI length limit"))?;
-            caller.data_mut().reply = Some(reply.into_bytes());
+            caller.data_mut().reply = Some(reply);
             Ok(flag | length)
         },
     )?;
@@ -160,7 +191,17 @@ fn linker(engine: &wasmtime::Engine) -> wasmtime::Result<Linker<State>> {
 pub(super) async fn instantiate(
     engine: &Engine,
     diagnostics: super::diagnostics::Diagnostics,
+    standard: crate::io::StandardContext,
 ) -> wasmtime::Result<(Store<State>, super::steps::Driver)> {
+    let crate::io::StandardContext {
+        mut wasi,
+        allowed,
+        scope,
+        clocks,
+    } = standard;
+    // Qualified source filesystem calls run inline during bounded Store polls. They cannot
+    // leave detached spawn_blocking work behind when a callback future is revoked.
+    wasi.allow_blocking_current_thread(true);
     let module = engine
         .interpreter
         .as_ref()
@@ -169,7 +210,7 @@ pub(super) async fn instantiate(
         &engine.engine,
         State {
             diagnostics,
-            wasi: super::wasi::Wasi::default(),
+            wasi: super::wasi::Wasi::new(clocks),
             memory: None,
             limits: StoreLimitsBuilder::new()
                 .memory_size(engine.limits.memory_bytes)
@@ -178,6 +219,10 @@ pub(super) async fn instantiate(
             packet_bytes: engine.limits.packet_bytes,
             deadline: None,
             reply: None,
+            ctx: wasi.build(),
+            table: wasmtime::component::ResourceTable::new(),
+            standard: super::standard::Standard::new(allowed, engine.open_files.clone()),
+            callback_scope: scope,
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -202,9 +247,10 @@ pub(super) async fn run(
     commands: mpsc::Receiver<Command>,
     poison: Arc<Mutex<Option<String>>>,
     diagnostics: super::diagnostics::Diagnostics,
+    standard: crate::io::StandardContext,
 ) -> super::Terminal {
     let outcome = async {
-        let (mut store, driver) = instantiate(&engine, diagnostics).await?;
+        let (mut store, driver) = instantiate(&engine, diagnostics, standard).await?;
         while let Ok(command) = commands.recv() {
             store.data_mut().events = Some(command.events.clone());
             store.data_mut().deadline = Some(
@@ -227,7 +273,14 @@ pub(super) async fn run(
             let trapped = result.as_ref().map_or(true, |outcome| outcome.interrupted);
             let result = result
                 .map(|outcome| outcome.value)
-                .unwrap_or_else(|error| Err(format!("interpreter trap: {error:#}")))
+                .unwrap_or_else(|error| {
+                    Err(match crate::providers::exit_status(&error) {
+                        Some(status) => {
+                            format!("orb exited with status {status}; revision retired")
+                        }
+                        None => format!("interpreter trap: {error:#}"),
+                    })
+                })
                 .and_then(|value| {
                     if value.len() <= engine.limits.packet_bytes {
                         Ok(value)
@@ -259,5 +312,32 @@ pub(super) async fn run(
                 )
             })
             .collect(),
+    }
+}
+
+/// Supply a real upstream context to focused binding tests without a guest module.
+#[cfg(test)]
+pub(super) fn test_state(ctx: wasmtime_wasi::WasiCtx) -> State {
+    let scope = crate::io::Streams::default();
+    scope.begin_callback();
+    State {
+        diagnostics: super::diagnostics::Diagnostics {
+            orb: "standard-test".into(),
+            sink: None,
+        },
+        wasi: super::wasi::Wasi::default(),
+        memory: None,
+        limits: StoreLimitsBuilder::new().build(),
+        events: None,
+        packet_bytes: 1 << 20,
+        deadline: None,
+        reply: None,
+        ctx,
+        table: Default::default(),
+        standard: super::standard::Standard::new(
+            Default::default(),
+            crate::engine::FileBudget::new(crate::engine::OPEN_FILES),
+        ),
+        callback_scope: scope,
     }
 }

@@ -11,7 +11,7 @@ description = "WIT contracts and prepared Orb declarations for Tembra"
 default = ["authoring"]
 # WIT resolution, artifact packaging and real compiled-component verification.
 # Runtimes that only execute source Orbs (the browser) disable it and ship no WIT parser.
-authoring = ["dep:wit-parser", "dep:wit-component"]
+authoring = ["dep:anyhow", "dep:wit-parser", "dep:wit-component"]
 
 [dependencies]
 heck = "0.5"
@@ -19,10 +19,12 @@ tembra-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+anyhow = { version = "1", optional = true }
 wit-parser = { version = "=0.261.0", optional = true }
 wit-component = { version = "=0.261.0", optional = true }
 
 [dev-dependencies]
+tempfile = "3"
 wit-component = { version = "=0.261.0", features = ["dummy-module"] }
 wasm-encoder = "=0.261.0"
 

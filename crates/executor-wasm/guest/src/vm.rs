@@ -1,7 +1,7 @@
 //! Synchronous VM access keeps Rust futures out of the serializable JavaScript heap.
 use super::{abi, protocol::Load};
 use rquickjs::{
-    Array, Context, Function, Object, Promise, Runtime,
+    Array, Context, Function, Object, Promise, Runtime, TypedArray, Value,
     context::EvalOptions,
     promise::PromiseState,
     snapshot::{SnapshotHost, SnapshotKind},
@@ -10,7 +10,21 @@ use std::{cell::Cell, rc::Rc};
 
 pub(super) struct Effect {
     pub id: u64,
-    pub packet: String,
+    pub packet: Vec<u8>,
+}
+
+thread_local! {
+    /// Effects whose packets were binary standard calls; their completions are bytes.
+    static BINARY: std::cell::RefCell<std::collections::BTreeSet<u64>> = Default::default();
+}
+
+/// Copy a JavaScript `Uint8Array` without converting its elements to numbers.
+pub(super) fn typed_bytes(array: &TypedArray<'_, u8>) -> rquickjs::Result<Vec<u8>> {
+    let raw = array.as_raw().ok_or_else(|| {
+        rquickjs::Error::new_from_js_message("bytes", "Uint8Array", "buffer is detached")
+    })?;
+    // The view is valid while no JavaScript runs; it is copied before returning.
+    Ok(unsafe { raw.as_ref() }.to_vec())
 }
 
 pub(super) struct Vm {
@@ -45,6 +59,12 @@ impl Vm {
         Ok((runtime, ticks, interrupted))
     }
     /// Load TypeScript and npm's closed bundle without evaluating it in the outer host.
+    ///
+    /// The standard WASI bootstrap is evaluated only when the checked contract imports a WASI
+    /// interface (including type-only dependencies such as clocks under filesystem). Otherwise
+    /// [`WITHOUT_STANDARD`] leaves exactly the globals that bootstrap leaves for an Orb without
+    /// standard imports. The decision depends only on the contract, so a captured heap is always
+    /// paired with the same choice.
     pub fn load(packet: &str) -> Result<Self, String> {
         let configuration: Load<'_> = serde_json::from_str(packet).map_err(|e| e.to_string())?;
         let (runtime, ticks, interrupted) = Self::runtime(&configuration)?;
@@ -56,6 +76,15 @@ impl Vm {
                 ctx.globals().set(
                     "__tembraContract",
                     ctx.json_parse(configuration.contract.to_string())?,
+                )?;
+                // Host-decided built-in authority; the runtime bootstrap reads and deletes it
+                // before any Orb source runs, so guest code cannot forge it.
+                ctx.globals().set(
+                    "__tembraBuiltins",
+                    ctx.json_parse(
+                        serde_json::to_string(&configuration.builtins)
+                            .unwrap_or_else(|_| "null".into()),
+                    )?,
                 )?;
                 ctx.eval::<(), _>(include_str!(concat!(
                     env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
@@ -69,6 +98,14 @@ impl Vm {
                     env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
                     "/values.js"
                 )))?;
+                if imports_wasi(&configuration.contract) {
+                    ctx.eval::<(), _>(include_str!(concat!(
+                        env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
+                        "/standard.js"
+                    )))?;
+                } else {
+                    ctx.eval::<(), _>(WITHOUT_STANDARD)?;
+                }
                 ctx.eval::<(), _>(include_str!(concat!(
                     env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
                     "/runtime.js"
@@ -186,9 +223,27 @@ impl Vm {
                                 "invalid effect identity",
                             ));
                         }
+                        let packet: Value = entry.get("packet")?;
+                        let packet = if let Ok(array) = TypedArray::<u8>::from_value(packet.clone())
+                        {
+                            BINARY.with(|binary| binary.borrow_mut().insert(id as u64));
+                            typed_bytes(&array)?
+                        } else {
+                            packet
+                                .as_string()
+                                .ok_or_else(|| {
+                                    rquickjs::Error::new_from_js_message(
+                                        "effect",
+                                        "packet",
+                                        "packet must be text or Uint8Array",
+                                    )
+                                })?
+                                .to_string()?
+                                .into_bytes()
+                        };
                         Ok(Effect {
                             id: id as u64,
-                            packet: entry.get("packet")?,
+                            packet,
                         })
                     })
                     .collect()
@@ -199,12 +254,20 @@ impl Vm {
     /// Deliver typed data to the original Promise without a second JSON envelope.
     ///
     /// `id` comes from `abi::Completion::decode_batch`, which has already checked its range.
-    pub fn complete(&self, id: u64, result: Result<String, String>) -> Result<(), String> {
-        let ok = result.is_ok();
-        let value = result.unwrap_or_else(|error| error);
+    pub fn complete(&self, id: u64, ok: bool, value: &[u8]) -> Result<(), String> {
+        let binary = BINARY.with(|binary| binary.borrow_mut().remove(&id));
         self.context.with(|ctx| {
             let result = (|| -> rquickjs::Result<()> {
                 let function: Function = ctx.globals().get("__tembraCompleteEffect")?;
+                // Standard results stay bytes; JSON and error messages are UTF-8 text.
+                let value: Value = if binary && ok {
+                    TypedArray::<u8>::new_copy(ctx.clone(), value)?.into_value()
+                } else {
+                    let text = std::str::from_utf8(value).map_err(|_| {
+                        rquickjs::Error::new_from_js_message("completion", "text", "not UTF-8")
+                    })?;
+                    rquickjs::String::from_str(ctx.clone(), text)?.into_value()
+                };
                 function.call((id as f64, ok, value))
             })();
             result.map_err(|error| format!("{error:?}: {:?}", ctx.catch()))
@@ -213,6 +276,7 @@ impl Vm {
     /// Revoke native authority before settling unobserved Promise continuations.
     pub fn stop(&self) -> Result<(), String> {
         self.accepting.set(false);
+        BINARY.with(|binary| binary.borrow_mut().clear());
         // Revoked callbacks may run rejection handlers under a fresh configured budget, never an
         // unbounded drain.
         self.ticks.set(self.tick_limit);
@@ -251,4 +315,28 @@ impl Vm {
                 .map_err(|error| format!("{error:?}: {:?}", ctx.catch()))
         })
     }
+}
+
+/// The observable result of the standard bootstrap for a contract without WASI imports: the
+/// raw byte host function is withdrawn, the standard module table is empty and frozen, and the
+/// callback-boundary sweep has nothing to release. Plain JavaScript, so a heap capture holds no
+/// unregistered native.
+const WITHOUT_STANDARD: &str = "delete globalThis.__hostSyncBytes; \
+     globalThis.__tembraStandard = Object.freeze({}); \
+     globalThis.__tembraSweepStandard = () => {};";
+
+/// Whether a checked contract description (`Contract::describe`) imports any WASI interface.
+/// Interface imports carry `contract` (`null` for inline interfaces); function and type imports
+/// carry none. A description without an `imports` array keeps the full bootstrap.
+fn imports_wasi(contract: &serde_json::Value) -> bool {
+    contract
+        .get("imports")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(|imports| {
+            imports.iter().any(|item| {
+                item.get("contract")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|contract| contract.starts_with("wasi:"))
+            })
+        })
 }

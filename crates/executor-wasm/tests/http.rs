@@ -1,4 +1,4 @@
-//! The fixture server runs natively; the TypeScript client frames HTTP inside Wasm.
+//! The TypeScript guest fetches through host-owned WASI HTTP and streams SSE before EOF.
 mod support;
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 use tembra::Host;
-use tembra_executor_wasm::{Contract, Engine, Grants, Install, Limits, NetworkGrant};
+use tembra_executor_wasm::{Contract, Engine, Grants, HttpGrant, Install, Limits};
 
 struct Server {
     stop: Arc<AtomicBool>,
@@ -152,9 +152,9 @@ fn run(interpreted: bool) {
             .is_err()
     );
     let grants = Grants {
-        network: vec![NetworkGrant {
+        http: vec![HttpGrant {
             provider: "tcp".into(),
-            connect: vec![server.address],
+            origins: vec![format!("http://{}", server.address)],
         }],
         ..Grants::default()
     };

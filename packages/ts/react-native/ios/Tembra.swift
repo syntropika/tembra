@@ -139,8 +139,8 @@ extension Tembra {
     /** Release one host-owned prepared artifact. */
     @objc public func releaseArtifact(_ handle: String, artifact: String) throws -> NSNumber { try checked { try execution(handle).releaseArtifact(artifact); return NSNumber(value: true) } }
     /** Prepare a fresh Store without blocking the JavaScript event loop. */
-    @objc public func openPort(_ handle: String, artifact: String, bindings: String, grants: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [self] in do { resolve(try execution(handle).open(artifact, bindings: bindings, grants: grants)) } catch { reject(diagnostic(error)) } }
+    @objc public func openPort(_ handle: String, artifact: String, bindings: String, grants: String, cli: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in do { resolve(try execution(handle).open(artifact, bindings: bindings, grants: grants, cli: cli)) } catch { reject(diagnostic(error)) } }
     }
     /** Read checked executable metadata. */
     @objc public func portDescription(_ handle: String, port: String) throws -> String { try checked { try execution(handle).description(port) } }
@@ -169,6 +169,8 @@ extension Tembra {
     @objc public func portIo(_ handle: String, port: String, packet: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
         Task { do { resolve(try await execution(handle).port(port).io(packet: packet)) } catch { reject(diagnostic(error)) } }
     }
+    /** Revoke the active callback's source I/O after its caller was cancelled. */
+    @objc public func portCancelIo(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).port(port).cancelIo(); return NSNumber(value: true) } }
     /** Close a revision after shared lifecycle cleanup. */
     @objc public func closePort(_ handle: String, port: String) throws -> NSNumber { try checked { try execution(handle).closePort(port); return NSNumber(value: true) } }
 }

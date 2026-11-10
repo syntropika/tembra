@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { readFile, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { readFile, mkdtemp, writeFile, rm, readdir } from "node:fs/promises";
 import { createHost, directoryFilesystem } from "../dist/node.js";
 
 const fixtures = process.env.TEMBRA_WASM_FIXTURES;
@@ -204,7 +204,7 @@ test(
         );
         await host.install({
           ...online,
-          grants: { network: [{ provider: "outbound", connect: [`127.0.0.1:${port}`] }] },
+          grants: { http: [{ provider: "outbound", origins: [`http://127.0.0.1:${port}`] }] },
         });
         const network = await host.get("online::example:integrated/calculation@1.0.0", "main");
         assert.equal(await network["fetch-and-sum"](`http://127.0.0.1:${port}/values`), 12);
@@ -240,11 +240,15 @@ test(
       await host.install([
         {
           artifact: await bytes("writer"),
-          grants: { filesystem: [{ provider: "data", mount: "/data", writable: true }] },
+          grants: {
+            filesystem: [{ provider: "data", mount: "/data", writable: true }],
+          },
         },
         {
           artifact: await bytes("reader"),
-          grants: { filesystem: [{ provider: "data", mount: "/data", writable: false }] },
+          grants: {
+            filesystem: [{ provider: "data", mount: "/data", writable: false }],
+          },
         },
       ]);
       const writer = await host.get("writer::example:storage/files@1.0.0", "main");
@@ -270,6 +274,314 @@ test(
       }
     }
     for (const engine of engines) assert.equal(engine.instances(), 0);
+    assert.equal(host.diagnostics().values, 0);
+    assert.equal(host.diagnostics().pendingJobs, 0);
+  },
+);
+
+test(
+  "cancelling a caller interrupts a pending source HTTP send without quarantining the Orb",
+  { skip: !fixtures, timeout: 60000 },
+  async () => {
+    const bytes = async (name) =>
+      new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
+    const sockets = new Set();
+    let peerClosed;
+    const closed = new Promise((resolve) => {
+      peerClosed = resolve;
+    });
+    let entered;
+    const waiting = new Promise((resolve) => {
+      entered = resolve;
+    });
+    // The /stalled peer reads the request and never answers; /values answers at once.
+    const server = createServer((socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+      let request = "";
+      socket.on("data", (chunk) => {
+        request += chunk.toString();
+        if (!request.includes("\r\n\r\n")) return;
+        if (request.startsWith("GET /stalled ")) {
+          socket.once("close", () => peerClosed(performance.now()));
+          entered();
+          return;
+        }
+        const body = '{"values":[1,2,3]}';
+        socket.end(
+          `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`,
+        );
+      });
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const { port } = server.address();
+    const origin = `http://127.0.0.1:${port}`;
+    const host = createHost({ isolated: { providers: { network: ["outbound"] } } });
+    try {
+      await host.install([
+        { artifact: await bytes("arithmetic") },
+        {
+          artifact: await bytes("online"),
+          requires: { "example:integrated/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 } },
+          grants: { http: [{ provider: "outbound", origins: [origin] }] },
+        },
+      ]);
+      const network = await host.get("online::example:integrated/calculation@1.0.0", "main");
+      let cancelledAt;
+      const started = performance.now();
+      await assert.rejects(
+        host.root(async (context) => {
+          const pending = network["fetch-and-sum"](`${origin}/stalled`, context);
+          await waiting;
+          setTimeout(() => {
+            cancelledAt = performance.now();
+            context.cancel();
+          }, 100);
+          return await pending;
+        }),
+      );
+      // The response head never arrives, so only cancellation can close the connection; the
+      // per-operation deadline is 10 s.
+      let timer;
+      const closedAt = await Promise.race([
+        closed,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("the pending send outlived its caller")), 2000);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      assert.ok(closedAt - cancelledAt < 2000, `peer closed ${closedAt - cancelledAt} ms late`);
+      // The same Store serves the next callback: it was neither quarantined nor left busy.
+      assert.equal(await network["fetch-and-sum"](`${origin}/values`), 12);
+      assert.ok(performance.now() - started < 5000, "the Orb waited for the I/O deadline");
+      network.release();
+    } finally {
+      try {
+        await host.close();
+      } finally {
+        for (const socket of sockets) socket.destroy();
+        server.close();
+      }
+    }
+  },
+);
+
+test(
+  "standard WASI source Orbs read raw bytes, retain descriptors and refuse forged handles natively",
+  { skip: !fixtures, timeout: 60000 },
+  async () => {
+    const bytes = async (name) =>
+      new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
+    const data = await mkdtemp(
+      path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-standard-"),
+    );
+    await writeFile(
+      path.join(data, "bytes.bin"),
+      Uint8Array.from({ length: 4100 }, (_, index) => index % 256),
+    );
+    await writeFile(
+      path.join(data, "large.bin"),
+      Uint8Array.from({ length: 3 * (1 << 20) + 5 }, (_, index) => index % 251),
+    );
+    const engine = process.env.TEMBRA_WASM_ENGINE;
+    const host = createHost({
+      isolated: {
+        ...(engine ? { engine: new Uint8Array(await readFile(engine)) } : {}),
+        providers: { filesystem: { data: directoryFilesystem(data) } },
+      },
+    });
+    const filesystem = [{ provider: "data", mount: "/data", writable: false }];
+    const grants = { system: ["clocks", "random"], filesystem };
+    const probing = { filesystem };
+    const [standard, boundary, peer] = await Promise.all(
+      ["standard", "boundary", "boundary-peer"].map(bytes),
+    );
+    try {
+      // Imports without matching grants refuse installation.
+      await assert.rejects(host.install({ artifact: standard, grants: { filesystem } }));
+      await assert.rejects(host.install({ artifact: standard, grants: { system: grants.system } }));
+      await host.install([
+        { artifact: standard, grants },
+        { artifact: boundary, grants: probing },
+        { artifact: peer, grants: probing },
+      ]);
+      const scenario = await host.get("standard::example:standard/scenario@1.0.0", "main");
+      assert.deepEqual(JSON.parse(await scenario.probe()), {
+        randomLength: 16,
+        randomIsBytes: true,
+        wordIsBigInt: true,
+        waitedAtLeast5ms: true,
+        mount: "/data",
+        type: "regular-file",
+        size: "4100",
+        length: 4100,
+        pattern: true,
+        beyond: 0,
+      });
+      const reused = JSON.stringify({ size: "4100", tail: [0, 1, 2, 3] });
+      assert.equal(await scenario.reuse(), reused);
+      const large = JSON.parse(await scenario.large());
+      assert.equal(large.length, 3 * (1 << 20) + 5);
+      assert.ok(large.chunks > 1 && large.largest <= 65536, JSON.stringify(large));
+      assert.deepEqual([large.matches, large.done], [true, "ok"]);
+      // External abort settles the pending standard wait; the retained descriptor survives.
+      await assert.rejects(
+        host.root(async (context) => {
+          const pending = scenario.hang(context);
+          setTimeout(() => context.cancel(), 20);
+          await pending;
+        }),
+      );
+      assert.equal(await scenario.reuse(), reused);
+      assert.equal(await scenario.abandon(), "returned");
+      assert.equal(await scenario.reuse(), reused);
+      assert.deepEqual(JSON.parse(await scenario.denied()), {
+        traversal: "not-permitted",
+        write: "not-permitted",
+        create: "not-permitted",
+        missing: "no-entry",
+      });
+      const probes = await host.get("boundary::example:standard/probes@1.0.0", "main");
+      const foreign = await host.get("boundary-peer::example:standard/probes@1.0.0", "main");
+      assert.deepEqual(JSON.parse(await probes.probes()), {
+        modules: ["wasi:filesystem/preopens@0.3.0", "wasi:filesystem/types@0.3.0"],
+        forged: "unknown or dropped handle",
+        wrongType: "handle has a different type",
+        dropped: "unknown or dropped handle",
+        droppedObject: "expected a live wasi:filesystem/types@0.3.0#descriptor handle",
+        unimported: "standard interface is not imported by this Orb",
+      });
+      assert.equal(await probes.inspect(await probes.descriptor()), "accepted");
+      assert.equal(await probes.inspect(await foreign.descriptor()), "unknown or dropped handle");
+      // A reloaded revision starts without the retired revision's descriptor.
+      await host.reload([{ artifact: standard, grants }]);
+      await assert.rejects(scenario.reuse(), /no retained descriptor/);
+      for (const reference of [scenario, probes, foreign]) reference.release();
+    } finally {
+      await host.close();
+      await rm(data, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "TypeScript uses the complete standard filesystem path for binary writes and directory operations",
+  { skip: !fixtures, timeout: 60000 },
+  async () => {
+    const data = await mkdtemp(
+      path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-filesystem-"),
+    );
+    const artifact = new Uint8Array(await readFile(path.join(fixtures, "filesystem.wasm")));
+    const engine = process.env.TEMBRA_WASM_ENGINE;
+    const host = createHost({
+      isolated: {
+        ...(engine ? { engine: new Uint8Array(await readFile(engine)) } : {}),
+        providers: { filesystem: { data: directoryFilesystem(data) } },
+        // This scenario also verifies every byte in guest JavaScript; retain the normal defaults elsewhere.
+        limits: { fuel: 500_000_000 },
+      },
+    });
+    const grants = (writable) => ({
+      filesystem: [{ provider: "data", mount: "/data", writable }],
+    });
+    try {
+      await host.install({ artifact, grants: grants(false) });
+      const readonly = await host.get("filesystem::example:filesystem/scenario@1.0.0", "main");
+      await assert.rejects(readonly.roundtrip(), /not-permitted/);
+      assert.deepEqual(await readdir(data), []);
+      readonly.release();
+      await host.reload([{ artifact, grants: grants(true) }]);
+      const reference = await host.get("filesystem::example:filesystem/scenario@1.0.0", "main");
+      try {
+        assert.deepEqual(JSON.parse(await reference.roundtrip()), {
+          length: 150006,
+          listing: ["renamed.bin"],
+          times: "ok",
+          links: "ok",
+          symlinks: "ok",
+          directoryRename: "moved",
+        });
+      } finally {
+        reference.release();
+      }
+      assert.deepEqual(await readdir(data), []);
+    } finally {
+      await host.close();
+      await rm(data, { recursive: true, force: true });
+    }
+    assert.equal(host.diagnostics().resources, 0);
+    assert.equal(host.diagnostics().values, 0);
+  },
+);
+
+test(
+  "standard clocks, random, CLI and builtin authority run through actual source Wasm",
+  { skip: !fixtures },
+  async () => {
+    const directory = await mkdtemp(
+      path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-cli-"),
+    );
+    const output = path.join(directory, "stdout.bin"),
+      error = path.join(directory, "stderr.bin");
+    const input = Uint8Array.from({ length: 131075 }, (_, index) => index % 251);
+    const host = createHost();
+    const bytes = async (name) =>
+      new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
+    try {
+      await host.install({ artifact: await bytes("ambient") });
+      const policy = await host.get("ambient::example:system/policy@1.0.0", "main");
+      assert.deepEqual(JSON.parse(await policy.inspect()), {
+        now: true,
+        date: true,
+        call: true,
+        constructor: true,
+        random: true,
+        pure: "1970-01-01T00:00:00.000Z",
+      });
+      policy.release();
+      await assert.rejects(
+        host.install({ artifact: await bytes("system"), grants: { system: ["clocks", "random"] } }),
+      );
+      await host.install({
+        artifact: await bytes("system"),
+        grants: { system: ["clocks", "random", "cli"] },
+        cli: {
+          arguments: ["probe", "--bytes"],
+          environment: [["MODE", "test"]],
+          initialCwd: "/data",
+          stdin: { bytes: input },
+          stdout: { file: output },
+          stderr: { file: error },
+        },
+      });
+      const scenario = await host.get("system::example:system/scenario@1.0.0", "main");
+      try {
+        const result = JSON.parse(await scenario.inspect());
+        assert.deepEqual(result.arguments, ["probe", "--bytes"]);
+        assert.deepEqual(result.environment, [["MODE", "test"]]);
+        assert.equal(result.cwd, "/data");
+        assert.equal(result.secureLength, 16);
+        assert.equal(result.insecureLength, 17);
+        assert.equal(result.seedStable, true);
+        assert.equal(result.terminal, true);
+        assert.ok(result.date > 1_600_000_000_000);
+        assert.ok(result.random >= 0 && result.random < 1);
+        assert.deepEqual(JSON.parse(await scenario.transfer()), {
+          length: input.length,
+          first: 0,
+          last: input[input.length - 1],
+        });
+        assert.deepEqual(new Uint8Array(await readFile(output)), input);
+        assert.deepEqual(new Uint8Array(await readFile(error)), new Uint8Array([0, 255, 128, 10]));
+        await assert.rejects(scenario.stop(7), /orb exited with status 7/);
+        await assert.rejects(scenario.inspect());
+      } finally {
+        scenario.release();
+      }
+    } finally {
+      await host.close();
+      await rm(directory, { recursive: true, force: true });
+    }
     assert.equal(host.diagnostics().values, 0);
     assert.equal(host.diagnostics().pendingJobs, 0);
   },

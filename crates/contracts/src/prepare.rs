@@ -17,34 +17,43 @@ struct Lowering<'a> {
 }
 
 /// Prepare a resolved world once; the result is validated like any decoded artifact.
-pub(crate) fn world(resolve: &Resolve, world: WorldId) -> Result<PreparedContract, Error> {
+/// `explicit` holds the world's own import keys; elaborated type-only dependencies are absent.
+/// `None` (unknown provenance) treats every import as explicit.
+pub(crate) fn world(
+    resolve: &Resolve,
+    world: WorldId,
+    explicit: Option<&std::collections::BTreeSet<String>>,
+) -> Result<PreparedContract, Error> {
     let selected = &resolve.worlds[world];
     let mut lowering = Lowering {
         resolve,
         types: Vec::new(),
         ids: HashMap::new(),
     };
-    let mut side = |items: &wit_parser::IndexMap<wit_parser::WorldKey, WorldItem>| {
+    let mut side = |items: &wit_parser::IndexMap<wit_parser::WorldKey, WorldItem>,
+                    imports: bool| {
         items
             .iter()
             .map(|(key, item)| {
+                let key = resolve.name_world_key(key);
+                let own = !imports || explicit.is_none_or(|explicit| explicit.contains(&key));
                 Ok(Entry {
-                    key: resolve.name_world_key(key),
                     item: match item {
                         WorldItem::Interface { id, .. } => {
-                            Item::Interface(lowering.interface(*id)?)
+                            Item::Interface(lowering.interface(*id, own)?)
                         }
                         WorldItem::Function(function) => {
                             Item::Function(lowering.function(function)?)
                         }
                         WorldItem::Type { id, .. } => Item::Type(lowering.ty(Type::Id(*id), 0)?),
                     },
+                    key,
                 })
             })
             .collect::<Result<Vec<_>, Error>>()
     };
-    let imports = side(&selected.imports)?;
-    let exports = side(&selected.exports)?;
+    let imports = side(&selected.imports, true)?;
+    let exports = side(&selected.exports, false)?;
     PreparedContract::new(Model {
         world: selected.name.clone(),
         package: selected
@@ -58,9 +67,10 @@ pub(crate) fn world(resolve: &Resolve, world: WorldId) -> Result<PreparedContrac
 
 impl Lowering<'_> {
     /// Lower an interface's functions and record whether it declares resources.
-    fn interface(&mut self, id: InterfaceId) -> Result<Interface, Error> {
+    fn interface(&mut self, id: InterfaceId, explicit: bool) -> Result<Interface, Error> {
         let interface = &self.resolve.interfaces[id];
         Ok(Interface {
+            explicit,
             contract: self.resolve.id_of(id),
             name: interface.name.clone(),
             resources: interface.types.values().any(|id| self.resource_type(*id)),

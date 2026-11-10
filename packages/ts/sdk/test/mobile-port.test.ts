@@ -21,6 +21,7 @@ function fixture(events: unknown[]) {
     abort: async () => {},
     release() {},
     io: async () => "null",
+    cancelIo() {},
     close() {},
   };
   const scope: ExecutionScope = {
@@ -62,7 +63,7 @@ test("mobile interruption retains physical ownership until admitted host work se
       event: "host",
       id: 1,
       asynchronous: true,
-      packet: '{"operation":"filesystem.read-text","path":"/data/input"}',
+      packet: '{"operation":"transport.read","id":1}',
     },
     { event: "complete", result: { error: "interrupted" } },
   ]);

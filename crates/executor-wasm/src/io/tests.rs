@@ -1,46 +1,19 @@
 use super::*;
 use serde_json::json;
+use std::io::{Read, Write};
 use std::{net::TcpListener, sync::mpsc, thread};
 
 const WAIT: Duration = Duration::from_secs(5);
 
-fn files(path: &std::path::Path, writable: bool) -> SourceIo {
-    let mut providers = crate::providers::Providers::default();
-    providers.filesystem.insert("files".into(), path.into());
-    SourceIo::new(
-        &providers,
-        &[tembra_contracts::HostImport {
-            binding: "filesystem".into(),
-            contract: "wasi:filesystem/preopens@0.3.0".into(),
-            provider: "files".into(),
-        }],
-        &crate::Grants {
-            filesystem: vec![crate::FilesystemGrant {
-                provider: "files".into(),
-                mount: "/data".into(),
-                writable,
-            }],
-            ..Default::default()
-        },
-        Duration::from_secs(5),
-    )
-    .unwrap()
-}
-
-/// An installation granted exactly `destinations`, optionally with the `/data` mount.
-fn sockets(destinations: &[SocketAddr], directory: Option<&std::path::Path>) -> SourceIo {
-    let io = directory.map_or_else(
-        || SourceIo {
-            mounts: Arc::default(),
-            destinations: Arc::default(),
-            streams: Streams::default(),
-            timeout: Duration::from_secs(5),
-        },
-        |directory| files(directory, false),
-    );
+/// An installation granted exactly `destinations`.
+fn sockets(destinations: &[SocketAddr], _directory: Option<&std::path::Path>) -> SourceIo {
     SourceIo {
+        builtins: Default::default(),
         destinations: Arc::new(destinations.iter().copied().collect()),
-        ..io
+        grants: Arc::default(),
+        streams: Streams::default(),
+        standard: Arc::default(),
+        timeout: Duration::from_secs(5),
     }
 }
 
@@ -100,162 +73,6 @@ fn peer(count: usize, reply: Vec<u8>) -> Peer {
         }
     });
     Peer { address, closed }
-}
-
-#[test]
-fn source_io_enforces_mounts_permissions_and_text_bounds() {
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("input"), "original").unwrap();
-    let reader = files(directory.path(), false);
-    let writer = files(directory.path(), true);
-    assert_eq!(
-        run(
-            &reader,
-            json!({"operation":"filesystem.read-text","path":"/data/input"})
-        )
-        .unwrap(),
-        "original"
-    );
-    assert!(
-        run(
-            &reader,
-            json!({"operation":"filesystem.write-text","path":"/data/input","value":"bad"})
-        )
-        .is_err()
-    );
-    for path in [
-        "/data/../input",
-        "/database/input",
-        "/data//input",
-        "/data/./input",
-        "/input",
-        "/data/a\\b",
-    ] {
-        assert!(
-            run(
-                &reader,
-                json!({"operation":"filesystem.read-text","path":path})
-            )
-            .is_err(),
-            "{path}"
-        );
-    }
-    run(
-        &writer,
-        json!({"operation":"filesystem.write-text","path":"/data/input","value":"updated"}),
-    )
-    .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(directory.path().join("input")).unwrap(),
-        "updated"
-    );
-    assert!(
-        run(
-            &writer,
-            json!({"operation":"filesystem.write-text","path":"/data/input","value":"x".repeat(TEXT_LIMIT+1)})
-        )
-        .is_err()
-    );
-}
-
-#[test]
-fn expired_work_cannot_start_a_write() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("input");
-    std::fs::write(&path, "original").unwrap();
-    let mut operation = files(directory.path(), true)
-        .operation(r#"{"operation":"filesystem.write-text","path":"/data/input","value":"late"}"#)
-        .unwrap();
-    operation.deadline = Instant::now() - Duration::from_secs(1);
-    assert!(futures::executor::block_on(operation.execute()).is_err());
-    assert_eq!(std::fs::read_to_string(path).unwrap(), "original");
-}
-
-#[cfg(unix)]
-#[test]
-fn directory_capability_rejects_symlink_escape_and_fifo() {
-    use std::os::unix::fs::symlink;
-    let directory = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    std::fs::write(outside.path().join("secret"), "private").unwrap();
-    symlink(outside.path(), directory.path().join("escape")).unwrap();
-    let io = files(directory.path(), true);
-    assert!(
-        run(
-            &io,
-            json!({"operation":"filesystem.read-text","path":"/data/escape/secret"})
-        )
-        .is_err()
-    );
-    assert!(
-        run(
-            &io,
-            json!({"operation":"filesystem.write-text","path":"/data/escape/secret","value":"bad"})
-        )
-        .is_err()
-    );
-    assert_eq!(
-        std::fs::read_to_string(outside.path().join("secret")).unwrap(),
-        "private"
-    );
-    let fifo = std::ffi::CString::new(directory.path().join("fifo").as_os_str().as_encoded_bytes())
-        .unwrap();
-    // This test owns the newly created temporary directory and named pipe.
-    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-    assert!(
-        run(
-            &io,
-            json!({"operation":"filesystem.read-text","path":"/data/fifo"})
-        )
-        .is_err()
-    );
-    assert!(
-        run(
-            &io,
-            json!({"operation":"filesystem.write-text","path":"/data/fifo","value":"x"})
-        )
-        .is_err()
-    );
-}
-
-/// Eight silent peers hold pending reads while a filesystem read still completes; ending the
-/// callback then settles every read promptly and physically closes every socket.
-#[test]
-fn idle_socket_reads_do_not_starve_filesystem_reads() {
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("input"), "available").unwrap();
-    let peer = peer(8, Vec::new());
-    let io = sockets(&[peer.address], Some(directory.path()));
-    io.streams().begin_callback();
-    let reads = (0..8)
-        .map(|_| {
-            let id = connect(&io, peer.address).unwrap();
-            start(&io, json!({"operation":"transport.read","id":id}))
-        })
-        .collect::<Vec<_>>();
-    let file = start(
-        &io,
-        json!({"operation":"filesystem.read-text","path":"/data/input"}),
-    );
-    assert_eq!(file.recv_timeout(WAIT).unwrap().unwrap(), "available");
-    for read in &reads {
-        assert!(read.try_recv().is_err(), "an idle read settled early");
-    }
-    let ended = Instant::now();
-    io.streams().end_callback();
-    for read in reads {
-        let error = read.recv_timeout(WAIT).unwrap().unwrap_err();
-        assert!(error.message.contains("closed"), "{error}");
-    }
-    assert!(
-        ended.elapsed() < Duration::from_secs(1),
-        "reads waited for their deadline"
-    );
-    for _ in 0..8 {
-        peer.closed
-            .recv_timeout(WAIT)
-            .expect("socket physically closed");
-    }
 }
 
 /// A response larger than one chunk arrives in bounded pieces and ends with `null`.

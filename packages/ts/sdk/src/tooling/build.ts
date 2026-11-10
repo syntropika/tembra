@@ -3,7 +3,8 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
 
-import { NodeContract, compileContract } from "@syntropika/tembra-engine-node";
+import { NodeContract } from "@syntropika/tembra-engine-node";
+import { query } from "../interpreter/types.ts";
 import { witTypes } from "./wit.ts";
 import { resolver } from "./resolver.ts";
 import { typecheck } from "./typecheck.ts";
@@ -36,10 +37,7 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
       }
     }
     let bytes: Uint8Array;
-    const contract = new NodeContract(
-      types?.contract ?? compileContract(path.dirname(wit), target.world),
-      target.world,
-    );
+    const contract = types?.contract ?? new NodeContract(path.dirname(wit), target.world);
     if (compiled) {
       if (!target.apiVersion)
         throw new Error(`Build ${name} requires apiVersion for a compiled Orb`);
@@ -54,7 +52,16 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
         throw new Error(`Build ${name} declares apiVersion in its source Orb`);
       if (target.contributes !== undefined)
         throw new Error(`Build ${name} declares contributions in its source Orb`);
-      const program = typecheck(entry, root, types!.files, ["tembra-wasm"]);
+      const program = typecheck(entry, root, types!.files, ["tembra-wasm"], types!.paths);
+      const description = query<{ imports: { contract?: string; type_only?: boolean }[] }>(
+        contract,
+        { kind: "describe" },
+      );
+      const imports = new Set(
+        description.imports.flatMap((item) =>
+          item.type_only === false && item.contract ? [item.contract] : [],
+        ),
+      );
       const result = await Bun.build({
         entrypoints: ["tembra:entry"],
         root,
@@ -63,7 +70,14 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
         splitting: false,
         minify: target.minify ?? true,
         ...(target.define ? { define: { ...target.define } } : {}),
-        plugins: [resolver(root, target)],
+        plugins: [resolver(root, target, imports)],
+      }).catch((error: unknown) => {
+        if (error instanceof AggregateError)
+          throw new AggregateError(
+            error.errors,
+            `Build ${name} failed: ${error.errors.map(String).join("\n")}`,
+          );
+        throw error;
       });
       if (!result.success) throw new AggregateError(result.logs, `Build ${name} failed`);
       if (result.outputs.length !== 1 || result.outputs[0]?.kind !== "entry-point")

@@ -74,7 +74,8 @@ fn side(entries: &[Entry]) -> Value {
             Item::Interface(interface) => json!({
                 "binding": key,
                 "contract": interface.contract,
-                "type_only": interface.functions.is_empty() && !interface.resources,
+                "type_only": !interface.callable(),
+                "explicit": interface.explicit,
                 "resources": interface.resources,
                 "functions": interface.functions.iter().map(|function| {
                     (function.name.clone(), describe_function(function))

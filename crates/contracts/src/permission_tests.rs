@@ -27,13 +27,16 @@ fn declared_imports_never_supply_their_own_authority() {
         assert_eq!(error.reason, "orb_grant");
     }
     assert!(
-        Grants::default()
-            .check(
-                &[import("wasi:clocks/system-clock@0.3.0", "system-clock")],
-                &BTreeSet::new(),
-                &BTreeSet::new()
-            )
-            .is_ok()
+        Grants {
+            system: [SystemCapability::Clocks].into(),
+            ..Default::default()
+        }
+        .check(
+            &[import("wasi:clocks/system-clock@0.3.0", "clocks")],
+            &BTreeSet::new(),
+            &BTreeSet::new()
+        )
+        .is_ok()
     );
     let error = Grants::default()
         .check(
@@ -42,8 +45,8 @@ fn declared_imports_never_supply_their_own_authority() {
             &BTreeSet::new(),
         )
         .unwrap_err();
-    assert_eq!(error.code, tembra_core::Code::Unsupported);
-    assert_eq!(error.reason, "wasi_contract");
+    assert_eq!(error.code, tembra_core::Code::Forbidden);
+    assert_eq!(error.reason, "orb_grant");
 }
 
 #[test]
@@ -110,6 +113,7 @@ fn network_grants_are_checked_against_the_selected_import_and_provider() {
         network: vec![NetworkGrant {
             provider: "tcp".into(),
             connect: vec!["127.0.0.1:8080".parse().unwrap()],
+            ..Default::default()
         }],
         ..Grants::default()
     };
@@ -128,6 +132,88 @@ fn network_grants_are_checked_against_the_selected_import_and_provider() {
             .reason,
         "wit_import"
     );
+}
+
+#[test]
+fn all_pinned_wasi_imports_resolve_and_require_explicit_capabilities() {
+    let source = "package example:wasi; world app { include wasi:cli/imports@0.3.0; import wasi:http/client@0.3.0; }";
+    let contract = Contract::from_source("wasi.wit", source, Some("app")).unwrap();
+    let grants = Grants {
+        filesystem: vec![FilesystemGrant {
+            provider: "files".into(),
+            mount: "/data".into(),
+            writable: false,
+        }],
+        network: vec![NetworkGrant {
+            provider: "net".into(),
+            resolve: true,
+            ..Default::default()
+        }],
+        http: vec![HttpGrant {
+            provider: "web".into(),
+            origins: vec!["https://example.com".into()],
+        }],
+        system: [
+            SystemCapability::Clocks,
+            SystemCapability::Random,
+            SystemCapability::Cli,
+        ]
+        .into(),
+    };
+    let bindings = contract.providers(&Default::default(), &grants).unwrap();
+    let plan = contract.plan("standard", 1, &bindings).unwrap();
+    let filesystem = ["files".into()].into();
+    let network = ["net".into(), "web".into()].into();
+    grants
+        .check(&plan.host_imports, &filesystem, &network)
+        .unwrap();
+    for category in [
+        SystemCapability::Clocks,
+        SystemCapability::Random,
+        SystemCapability::Cli,
+    ] {
+        let mut restricted = grants.clone();
+        restricted.system.remove(&category);
+        let error = restricted
+            .check(&plan.host_imports, &filesystem, &network)
+            .unwrap_err();
+        assert_eq!(error.code, tembra_core::Code::Forbidden, "{category:?}");
+    }
+    for package in ["clocks", "random", "filesystem", "sockets", "cli", "http"] {
+        assert!(
+            plan.host_imports
+                .iter()
+                .any(|import| import.contract.starts_with(&format!("wasi:{package}/"))),
+            "{package}"
+        );
+    }
+}
+
+#[test]
+fn a_dns_only_world_can_select_a_network_provider_without_a_tcp_grant() {
+    let contract = Contract::from_source(
+        "dns.wit",
+        "package example:dns; world app { import wasi:sockets/ip-name-lookup@0.3.0; }",
+        None,
+    )
+    .unwrap();
+    let grants = Grants {
+        network: vec![NetworkGrant {
+            provider: "net".into(),
+            resolve: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let bindings = contract.providers(&Default::default(), &grants).unwrap();
+    let plan = contract.plan("dns", 1, &bindings).unwrap();
+    grants
+        .check(
+            &plan.host_imports,
+            &Default::default(),
+            &["net".into()].into(),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -153,4 +239,37 @@ fn metadata_requests_reject_unknown_control_fields_and_preserve_error_codes() {
         assert_eq!(response["error"]["code"], "invalid");
         assert_eq!(response["error"]["reason"], "wit_contract");
     }
+}
+
+#[test]
+fn http_grants_require_host_providers_without_granting_raw_sockets() {
+    let grant = HttpGrant {
+        provider: "web".into(),
+        origins: vec!["https://EXAMPLE.com:443".into(), "http://[::1]:8000".into()],
+    };
+    let grants = Grants {
+        http: vec![grant],
+        ..Default::default()
+    };
+    let imports = [
+        import("wasi:http/client@0.3.0", "web"),
+        import("wasi:http/types@0.3.0", "web"),
+    ];
+    grants
+        .check(&imports, &BTreeSet::new(), &["web".into()].into())
+        .unwrap();
+    assert!(
+        grants
+            .check(
+                &[import("wasi:sockets/types@0.3.0", "web")],
+                &BTreeSet::new(),
+                &["web".into()].into()
+            )
+            .is_err()
+    );
+    assert!(
+        grants
+            .check(&imports, &BTreeSet::new(), &BTreeSet::new())
+            .is_err()
+    );
 }

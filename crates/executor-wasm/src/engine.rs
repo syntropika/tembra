@@ -71,6 +71,62 @@ pub struct Engine {
     pub(crate) providers: Providers,
     pub(crate) active_instances: Arc<AtomicUsize>,
     pub(crate) logger: Option<LogSink>,
+    /// Open host files shared by every source Orb in the process: owned descriptors plus
+    /// upstream stream objects that keep a file open after their descriptor is dropped.
+    pub(crate) open_files: FileBudget,
+}
+
+/// The process-wide open-file pool and the private share each source revision may hold of it.
+#[derive(Clone)]
+pub(crate) struct FileBudget {
+    pub(crate) process: Arc<tokio::sync::Semaphore>,
+    /// Permits one revision may hold at once: an eighth of the pool, at least one, so a single
+    /// Orb that hoards descriptors or streams cannot refuse every other Orb's files.
+    pub(crate) share: usize,
+}
+
+impl FileBudget {
+    /// A pool of `total` permits with the standard per-revision share.
+    pub(crate) fn new(total: usize) -> Self {
+        Self {
+            process: Arc::new(tokio::sync::Semaphore::new(total)),
+            share: (total / 8).max(1),
+        }
+    }
+}
+
+/// Upper bound of the process-wide open-file budget of source Orbs; each Orb additionally has
+/// its own logical handle limit.
+pub(crate) const OPEN_FILES: usize = 512;
+
+/// One budget for every Engine in the process, sized to a quarter of the current soft
+/// descriptor limit (read, never changed) so other host descriptors keep headroom; e.g. 64 on
+/// a default iOS soft limit of 256. Covers source Orbs only; see the Phase 2 FD note for
+/// compiled components.
+pub(crate) fn open_files() -> FileBudget {
+    static FILES: std::sync::OnceLock<FileBudget> = std::sync::OnceLock::new();
+    FILES
+        .get_or_init(|| FileBudget::new(open_file_limit()))
+        .clone()
+}
+
+fn open_file_limit() -> usize {
+    #[cfg(unix)]
+    {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit only writes the provided, properly aligned struct.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
+            && limit.rlim_cur != libc::RLIM_INFINITY
+        {
+            return usize::try_from(limit.rlim_cur / 4)
+                .unwrap_or(OPEN_FILES)
+                .clamp(16, OPEN_FILES);
+        }
+    }
+    OPEN_FILES
 }
 
 impl Engine {
@@ -116,6 +172,7 @@ impl Engine {
             providers: Providers::default(),
             active_instances: Arc::default(),
             logger: None,
+            open_files: open_files(),
         })
     }
 
@@ -125,6 +182,56 @@ impl Engine {
     }
 
     /// Receive attributed guest diagnostics without allowing observer panics to interrupt execution.
+    /// Wall clock for `wasi:clocks/system-clock` and granted source built-ins; one fresh
+    /// instance per Store.
+    pub fn wall_clock<C: crate::HostWallClock + 'static>(
+        mut self,
+        factory: impl Fn() -> C + Send + Sync + 'static,
+    ) -> Self {
+        self.providers.system.wall = Some(Arc::new(move || Box::new(factory())));
+        self
+    }
+
+    /// Monotonic clock for `wasi:clocks/monotonic-clock` and granted source built-ins.
+    pub fn monotonic_clock<C: crate::HostMonotonicClock + 'static>(
+        mut self,
+        factory: impl Fn() -> C + Send + Sync + 'static,
+    ) -> Self {
+        self.providers.system.monotonic = Some(Arc::new(move || Box::new(factory())));
+        self
+    }
+
+    /// Cryptographically secure source for `wasi:random/random`; must be a CSPRNG.
+    pub fn secure_random<R: crate::Rng + Send + 'static>(
+        mut self,
+        factory: impl Fn() -> R + Send + Sync + 'static,
+    ) -> Self {
+        self.providers.system.secure = Some(Arc::new(move |context| {
+            context.secure_random(factory());
+        }));
+        self
+    }
+
+    /// Insecure source for `wasi:random/insecure`.
+    pub fn insecure_random<R: crate::Rng + Send + 'static>(
+        mut self,
+        factory: impl Fn() -> R + Send + Sync + 'static,
+    ) -> Self {
+        self.providers.system.insecure = Some(Arc::new(move |context| {
+            context.insecure_random(factory());
+        }));
+        self
+    }
+
+    /// Seed for `wasi:random/insecure-seed` and the random-granted source built-in PRNG.
+    pub fn insecure_random_seed(
+        mut self,
+        factory: impl Fn() -> u128 + Send + Sync + 'static,
+    ) -> Self {
+        self.providers.system.seed = Some(Arc::new(factory));
+        self
+    }
+
     pub fn on_log(mut self, sink: impl Fn(&LogRecord) + Send + Sync + 'static) -> Self {
         self.logger = Some(Arc::new(sink));
         self
@@ -188,7 +295,7 @@ impl Engine {
         let bindings = artifact
             .contract
             .providers(&install.requires, &install.grants)?;
-        let port = self.open_port(&artifact, &bindings, &install.grants)?;
+        let port = self.open_port(&artifact, &bindings, &install.grants, &install.cli)?;
         adapter::orb(
             port.metadata,
             port.session,
@@ -223,6 +330,24 @@ mod tests {
             assert!(engine.clone().interpreter(bytes).is_err());
         }
         assert!(engine.interpreter.is_none());
+    }
+
+    #[test]
+    fn engines_with_a_different_wasi_schema_are_refused_before_instantiation() {
+        let namespace = format!("{}-different", crate::abi::IMPORT_MODULE);
+        let module = wat::parse_str(format!(
+            "(module (import {namespace:?} \"sync\" (func (param i32 i32) (result i32))))"
+        ))
+        .unwrap();
+        let engine = Engine::new(Limits::default()).unwrap();
+        let Err(error) = engine.interpreter(&module) else {
+            panic!("mismatched schema accepted")
+        };
+        assert!(
+            error
+                .message
+                .contains(&format!("{namespace}::sync is not allowed"))
+        );
     }
 
     #[test]

@@ -1,21 +1,29 @@
-import { boundedText, type FilesystemProvider, type MountedFilesystem } from "./filesystem.ts";
+import { BrowserNetwork, type BrowserNetworkProviders } from "./browser-network.ts";
+import type { FilesystemProvider } from "./filesystem.ts";
 import type { IORequest } from "./host-protocol.ts";
+import type { StandardMount } from "./standard-filesystem.ts";
 import type { Grants } from "../authoring/types.ts";
 
-/** Installed mounts remain host capabilities; the guest supplies only an operation and path. */
+/**
+ * Installed grants remain host capabilities. Filesystem mounts are reached only through the
+ * standard WASI host's descriptors; legacy source network operations run here.
+ */
 export class BrowserCapabilities {
-  readonly #mounts: { path: string; writable: boolean; filesystem: MountedFilesystem }[] = [];
+  readonly #mounts: StandardMount[] = [];
+  #preopens: readonly StandardMount[] = [];
 
-  private constructor() {}
+  private constructor(readonly network: BrowserNetwork) {}
 
   static async open(
     grants: Grants,
-    providers: Readonly<Record<string, FilesystemProvider>>,
+    providers: BrowserNetworkProviders & {
+      filesystem?: Readonly<Record<string, FilesystemProvider>>;
+    },
   ): Promise<BrowserCapabilities> {
-    const capabilities = new BrowserCapabilities();
+    const capabilities = new BrowserCapabilities(new BrowserNetwork(grants, providers));
     try {
       for (const grant of grants.filesystem ?? []) {
-        const provider = providers[grant.provider];
+        const provider = providers.filesystem?.[grant.provider];
         if (!provider) throw new Error(`Unknown filesystem provider ${grant.provider}`);
         capabilities.#mounts.push({
           path: grant.mount,
@@ -23,7 +31,7 @@ export class BrowserCapabilities {
           filesystem: provider.open(grant.mount, grant.writable),
         });
       }
-      capabilities.#mounts.sort((a, b) => b.path.length - a.path.length);
+      capabilities.#preopens = Object.freeze([...capabilities.#mounts]);
     } catch (error) {
       try {
         await capabilities.dispose();
@@ -38,42 +46,24 @@ export class BrowserCapabilities {
     return capabilities;
   }
 
+  /** Mounts in grant order for standard `wasi:filesystem` preopens. */
+  get mounts(): readonly StandardMount[] {
+    return this.#preopens;
+  }
+
   /** Authority and liveness are checked by Scope immediately before this operation is admitted. */
-  async execute(request: IORequest): Promise<unknown> {
-    if (
-      request.operation !== "filesystem.read-text" &&
-      request.operation !== "filesystem.write-text"
-    )
-      throw new Error("This browser host has no raw TCP provider");
-    const path = request.path;
-    if (
-      !path.startsWith("/") ||
-      path.includes("\\") ||
-      path.includes("\0") ||
-      path
-        .split("/")
-        .slice(1)
-        .some((part) => !part || part === "." || part === "..")
-    )
-      throw new Error("Filesystem paths must be normalized absolute paths");
-    for (const mount of this.#mounts) {
-      if (!path.startsWith(`${mount.path}/`)) continue;
-      const relative = path.slice(mount.path.length + 1);
-      if (request.operation === "filesystem.read-text")
-        return boundedText(await mount.filesystem.readText(relative));
-      if (!mount.writable) throw new Error("Filesystem mount is read-only");
-      await mount.filesystem.writeText(relative, boundedText(request.value));
-      return null;
-    }
-    throw new Error("Filesystem path is outside the granted mounts");
+  execute(request: IORequest, signal?: AbortSignal): Promise<unknown> {
+    return this.network.execute(request, signal);
   }
 
   /** Called after the transport has awaited every physically admitted host operation. */
   async dispose(): Promise<void> {
     const mounts = this.#mounts.splice(0);
-    const settled = await Promise.allSettled(
-      mounts.map(async (mount) => mount.filesystem.dispose()),
-    );
+    this.#preopens = [];
+    const settled = await Promise.allSettled([
+      this.network.dispose(),
+      ...mounts.map(async (mount) => mount.filesystem.dispose()),
+    ]);
     const errors = settled
       .filter((result) => result.status === "rejected")
       .map((result) => result.reason);

@@ -1,9 +1,49 @@
 //! Fixed-buffer interpreter steps keep waits outside the interpreter's native stack.
 use super::runtime::{State, request};
 use crate::abi::{self, Completion, Operation, Reply, ReplyKind};
-use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use std::collections::BTreeSet;
-use wasmtime::{Instance, Memory, Store, TypedFunc};
+use wasmtime::{AsContextMut, Instance, Memory, Store, TypedFunc};
+
+/// One settled effect: identity, value, and the publication journal of a standard reply.
+pub(super) type Settled = (u64, Result<Vec<u8>, Vec<u8>>, super::standard::Journal);
+
+/// Await one admitted (or refused) standard packet as a settled effect carrying its journal.
+pub(super) fn standard_effect(
+    id: u64,
+    admitted: Result<super::standard::Completion, String>,
+) -> BoxFuture<'static, Settled> {
+    async move {
+        let value = match admitted {
+            Ok(receive) => receive
+                .await
+                .unwrap_or_else(|_| Err("standard call was revoked".into())),
+            Err(error) => Err(error),
+        };
+        match value {
+            Ok(delivery) => {
+                let (bytes, journal) = delivery.split();
+                (id, Ok(bytes), journal)
+            }
+            Err(error) => (id, Err(error.into_bytes()), Default::default()),
+        }
+    }
+    .boxed()
+}
+
+/// Undo completions the guest will never receive: release their handles and poison streams
+/// whose read drained data. Callers first drop the callback's tasks: an aborted task never runs
+/// again, so every issued reply is already queued.
+pub(super) fn discard(
+    store: &mut Store<State>,
+    pending: &mut FuturesUnordered<BoxFuture<'static, Settled>>,
+) -> wasmtime::Result<()> {
+    while let Some(Some((_, _, journal))) = pending.next().now_or_never() {
+        super::standard::abandon(store.data_mut(), journal)?;
+    }
+    pending.clear();
+    Ok(())
+}
 
 /// One logical callback result; `interrupted` quarantines the Store.
 pub(super) struct Outcome {
@@ -123,11 +163,22 @@ impl Driver {
         let mut bytes = self
             .invoke(&mut *store, Operation::Start, Some(packet.as_bytes()))
             .await?;
-        let mut pending = FuturesUnordered::new();
+        let cancelled = store.data().callback_scope.cancelled();
+        let mut cancelled = std::pin::pin!(cancelled);
+        let mut revoked = false;
+        let mut pending: FuturesUnordered<BoxFuture<'static, Settled>> = FuturesUnordered::new();
         let mut outstanding = BTreeSet::new();
+        // Standard WASI tasks of this callback; dropping the owner revokes pending work and
+        // borrows, while revision-owned descriptors and streams stay in the Store.
+        let mut tasks = super::standard::Tasks::default();
         loop {
+            super::standard::check_trap(store.data_mut())?;
             let reply = Reply::decode(&bytes).map_err(violation)?;
             if let Some(outcome) = Self::finish(&reply)? {
+                // Effects the guest abandoned cannot publish resources after the callback ends,
+                // and their admitted work is disposed before the Orb goes idle.
+                super::standard::retire(store, &mut tasks).await?;
+                discard(store, &mut pending)?;
                 return Ok(outcome);
             }
             if pending.len() + reply.effects.len() > abi::EFFECT_LIMIT as usize {
@@ -137,8 +188,19 @@ impl Driver {
                 if !outstanding.insert(*id) {
                     return Err(violation("duplicate effect identity"));
                 }
-                let receive = request(store.data(), text(packet)?, true);
                 let id = *id;
+                if packet.first() == Some(&super::standard::PACKET_TAG) {
+                    let receive = match super::standard::spawn(store.as_context_mut(), packet)? {
+                        Ok((handle, leases, receive)) => {
+                            tasks.push(handle, leases);
+                            Ok(receive)
+                        }
+                        Err(error) => Err(error),
+                    };
+                    pending.push(standard_effect(id, receive));
+                    continue;
+                }
+                let receive = request(store.data(), text(packet)?, true);
                 pending.push(
                     async move {
                         let value = match receive {
@@ -147,30 +209,66 @@ impl Driver {
                                 .unwrap_or_else(|_| Err("host callback scope ended".into())),
                             Err(error) => Err(error),
                         };
-                        (id, value)
+                        (
+                            id,
+                            value.map(String::into_bytes).map_err(String::into_bytes),
+                            Default::default(),
+                        )
                     }
                     .boxed(),
                 );
             }
-            let first = if pending.is_empty() {
-                futures::future::pending().await
+            // Qualified upstream filesystem calls block only inside this bounded poll. Pending
+            // clocks and readers release the worker budget before awaiting another wakeup.
+            let files = super::standard::uses_filesystem(store.data());
+            let call = store.run_concurrent(async |_| {
+                tokio::select! {
+                    biased;
+                    _ = &mut cancelled, if !revoked => None,
+                    ready = async {
+                        if pending.is_empty() { futures::future::pending().await }
+                        else { pending.next().await.expect("nonempty effect queue") }
+                    } => Some(ready),
+                }
+            });
+            let first = if files {
+                crate::io::file_turn(call)
+                    .await
+                    .map_err(|error| violation(error.to_string()))??
             } else {
-                pending.next().await.expect("nonempty effect queue")
+                call.await?
             };
-            let mut settled = vec![first];
+            super::standard::check_trap(store.data_mut())?;
+            let mut settled = if let Some(first) = first {
+                vec![first]
+            } else {
+                // Reject issued promises while the heap can still run bounded finally blocks.
+                // Subsequent standard calls lose authority; resource drops remain cleanup.
+                // A reply that completed in the same turn is unpublished: release its handles.
+                revoked = true;
+                super::standard::retire(store, &mut tasks).await?;
+                discard(store, &mut pending)?;
+                if outstanding.is_empty() {
+                    return self.outcome(store, Operation::Cancel, None).await;
+                }
+                outstanding
+                    .iter()
+                    .map(|id| (*id, Err(b"callback cancelled".to_vec()), Default::default()))
+                    .collect()
+            };
             while let Some(Some(ready)) = pending.next().now_or_never() {
                 settled.push(ready);
             }
-            for (id, _) in &settled {
+            for (id, _, _) in &settled {
                 outstanding.remove(id);
             }
             let completions: Vec<Completion<'_>> = settled
                 .iter()
-                .map(|(id, value)| Completion {
+                .map(|(id, value, _)| Completion {
                     id: *id,
                     ok: value.is_ok(),
                     value: match value {
-                        Ok(value) | Err(value) => value.as_bytes(),
+                        Ok(value) | Err(value) => value.as_slice(),
                     },
                 })
                 .collect();

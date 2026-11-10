@@ -83,6 +83,7 @@ test("failed engine startup closes mounted providers and their contract together
     backend.materialize({
       artifact: new Uint8Array(),
       grants: {
+        system: ["clocks"],
         filesystem: [{ provider: "data", mount: "/data", writable: false }],
       },
     }),

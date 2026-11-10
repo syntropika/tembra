@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Format version of the compact contract body.
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 #[derive(Default)]
 pub(crate) struct Writer(Vec<u8>);
@@ -268,6 +268,7 @@ pub(crate) fn write_model(writer: &mut Writer, model: &Model) {
                     writer.option_str(interface.contract.as_deref());
                     writer.option_str(interface.name.as_deref());
                     writer.byte(u8::from(interface.resources));
+                    writer.byte(u8::from(interface.explicit));
                     writer.len(interface.functions.len());
                     for function in &interface.functions {
                         write_function(writer, function);
@@ -428,6 +429,7 @@ fn entry(reader: &mut Reader<'_>) -> Result<Entry, Error> {
             contract: reader.option_str()?,
             name: reader.option_str()?,
             resources: reader.flag()?,
+            explicit: reader.flag()?,
             functions: reader.list(MAX_MEMBERS, function)?,
         }),
         1 => Item::Function(function(reader)?),

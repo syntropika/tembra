@@ -24,7 +24,7 @@ impl PreparedContract {
             let Item::Interface(interface) = &entry.item else {
                 continue;
             };
-            if interface.functions.is_empty() && !interface.resources {
+            if !interface.callable() {
                 continue;
             }
             let binding = entry.key.clone();
@@ -65,11 +65,22 @@ impl PreparedContract {
                     .iter()
                     .map(|grant| grant.provider.as_str())
                     .collect()
-            } else if contract == "wasi:clocks/system-clock@0.3.0" {
+            } else if contract.starts_with("wasi:http/") {
+                grants
+                    .http
+                    .iter()
+                    .map(|grant| grant.provider.as_str())
+                    .collect()
+            } else if let Some(capability) = crate::permissions::system_capability(&contract) {
+                let provider = match capability {
+                    crate::SystemCapability::Clocks => "clocks",
+                    crate::SystemCapability::Random => "random",
+                    crate::SystemCapability::Cli => "cli",
+                };
                 bindings.insert(
                     binding,
                     Binding::Host {
-                        provider: "system-clock".into(),
+                        provider: provider.into(),
                     },
                 );
                 continue;

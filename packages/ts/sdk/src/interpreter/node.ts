@@ -1,4 +1,5 @@
 import { NodePort } from "./node-port.ts";
+import { cliPacket } from "./cli.ts";
 import { createRequire } from "node:module";
 import type { NodeArtifact, NodeInterpreter } from "@syntropika/tembra-engine-node";
 import type { OrbDefinition, OrbArtifact, LoadOptions } from "../authoring/types.ts";
@@ -88,11 +89,15 @@ export class NodeExecution {
       artifact,
       JSON.stringify(prepared.bindings),
       JSON.stringify(options.grants ?? {}),
+      cliPacket(options.cli),
     );
     try {
       const transport = new NodePort(port);
-      return new Revision(transport, artifact, this.options.limits?.timeoutMs ?? 10000, (request) =>
-        transport.io(request),
+      return new Revision(
+        transport,
+        artifact,
+        this.options.limits?.timeoutMs ?? 10000,
+        (request, signal) => transport.io(request, signal),
       ).definition(identity, prepared);
     } catch (error) {
       port.close();

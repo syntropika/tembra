@@ -7,19 +7,24 @@
  */
 import * as abi from "./abi.ts";
 
+/** Host-only termination that must trap the instance instead of becoming a catchable reply. */
+export class GuestTrap extends Error {}
+
 export interface Outcome {
   ok: boolean;
   value: string;
   interrupted: boolean;
 }
+/** A JSON host request, or a binary standard WASI packet (first byte `STANDARD_PACKET`). */
 export interface Effect {
   id: number;
-  packet: string;
+  packet: string | Uint8Array;
 }
+/** Successful standard results are bytes; JSON results and every error are text. */
 export interface Completion {
   id: number;
   ok: boolean;
-  value: string;
+  value: string | Uint8Array;
 }
 export interface Progress {
   outcome?: Outcome;
@@ -33,10 +38,15 @@ export interface Guest {
   resume(completed: Completion[]): Progress;
   cancel(): Outcome;
 }
-/** Host services supplied to one instance; `sync` throws to report an error message. */
+/**
+ * Host services supplied to one instance; `sync` throws to report an error message.
+ * Binary standard packets arrive and reply as bytes; JSON packets stay text.
+ */
 export interface GuestHost {
-  sync(packet: string): string;
+  sync(packet: string | Uint8Array): string | Uint8Array;
   log(level: "log" | "error", message: string): void;
+  /** Granted per-revision clock; absence exposes a fixed zero to interpreter libc. */
+  clock?(clock: number): bigint;
 }
 
 const encoder = new TextEncoder();
@@ -120,16 +130,20 @@ export class CoreGuest implements Guest {
   #sync(pointer: number, length: number): number {
     if (this.#reply) throw new Error("Synchronous reply was not read");
     // Invalid ranges or UTF-8 are ABI violations and trap; host failures become messages.
-    const packet = decoder.decode(this.#range(pointer, length >>> 0));
+    const range = this.#range(pointer, length >>> 0);
+    const binary = range.byteLength > 0 && range[0] === abi.STANDARD_PACKET;
     let ok = true,
-      value: string;
+      value: string | Uint8Array;
     try {
-      value = this.host.sync(packet);
+      // The packet is copied before host code runs; it never aliases guest memory.
+      value = binary ? this.host.sync(range.slice()) : this.host.sync(decoder.decode(range));
+      if (binary !== value instanceof Uint8Array) throw new Error("Host reply has the wrong kind");
     } catch (error) {
+      if (error instanceof GuestTrap) throw error;
       ok = false;
       value = error instanceof Error ? error.message : String(error);
     }
-    const bytes = encoder.encode(value);
+    const bytes = typeof value === "string" ? encoder.encode(value) : value;
     if (bytes.byteLength > abi.LENGTH_LIMIT) throw new Error("Host reply exceeds the ABI limit");
     this.#reply = bytes;
     return (ok ? 0 : abi.SYNC_ERROR) + bytes.byteLength;
@@ -205,7 +219,15 @@ export class CoreGuest implements Guest {
           high = field(view, record + 4);
         const id = high * 2 ** 32 + low;
         if (id === 0 || high >= 2 ** 21) throw new Error("Invalid interpreter effect identity");
-        effects.push({ id, packet: decoder.decode(body(field(view, record + 8))) });
+        const packet = body(field(view, record + 8));
+        // Standard packets stay raw bytes; every other effect is UTF-8 JSON.
+        effects.push({
+          id,
+          packet:
+            packet[0] === abi.STANDARD_PACKET && packet.byteLength > 0
+              ? packet.slice()
+              : decoder.decode(packet),
+        });
       }
       if (offset !== view.byteLength) throw new Error("Interpreter reply has trailing bytes");
       if (kind === abi.ReplyKind.Pending) return { effects };
@@ -246,7 +268,9 @@ export class CoreGuest implements Guest {
   resume(completed: Completion[]): Progress {
     if (!completed.length || completed.length > abi.EFFECT_LIMIT)
       throw new Error("Invalid completion batch");
-    const values = completed.map((completion) => encoder.encode(completion.value));
+    const values = completed.map(({ value }) =>
+      typeof value === "string" ? encoder.encode(value) : value,
+    );
     const records = abi.COMPLETION_HEADER_BYTES + completed.length * abi.COMPLETION_RECORD_BYTES;
     const batch = new Uint8Array(
       values.reduce((total, value) => total + value.byteLength, records),
@@ -280,7 +304,7 @@ export class CoreGuest implements Guest {
   }
 }
 
-/** Capabilityless WASI preview 1 functions mirroring `crates/executor-wasm/src/worker/wasi.rs`. */
+/** Restricted WASI preview 1 functions mirroring `crates/executor-wasm/src/worker/wasi.rs`. */
 export function wasi(memory: WebAssembly.Memory, host: GuestHost): Record<string, Function> {
   const open = [true, true, true];
   const isOpen = (descriptor: number): boolean => open[descriptor] === true;
@@ -291,13 +315,16 @@ export function wasi(memory: WebAssembly.Memory, host: GuestHost): Record<string
     (pointer >>> 0) + length <= memory.buffer.byteLength;
   return {
     clock_time_get(clock: number, _precision: bigint, out: number): number {
-      let nanoseconds: bigint;
-      if (clock === abi.CLOCK_REALTIME) nanoseconds = BigInt(Date.now()) * 1_000_000n;
-      else if (clock === abi.CLOCK_MONOTONIC)
-        nanoseconds = BigInt(Math.round(performance.now() * 1_000_000));
-      else return abi.ERRNO_INVAL;
+      if (clock !== abi.CLOCK_REALTIME && clock !== abi.CLOCK_MONOTONIC) return abi.ERRNO_INVAL;
       if (!fits(out, 8)) return abi.ERRNO_FAULT;
-      view().setBigUint64(out >>> 0, nanoseconds, true);
+      const nanoseconds = host.clock?.(clock) ?? 0n;
+      // WASIp1 has an unsigned nanosecond clock; match the native host's saturating conversion.
+      const maximum = (1n << 64n) - 1n;
+      view().setBigUint64(
+        out >>> 0,
+        nanoseconds < 0n ? 0n : nanoseconds > maximum ? maximum : nanoseconds,
+        true,
+      );
       return abi.ERRNO_SUCCESS;
     },
     environ_get: (): number => abi.ERRNO_SUCCESS,

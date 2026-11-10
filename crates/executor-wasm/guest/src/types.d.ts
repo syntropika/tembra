@@ -9,6 +9,7 @@ interface WitFunction {
 interface WitInterface {
   binding: string;
   contract?: string;
+  type_only?: boolean;
   functions: Record<string, WitFunction>;
 }
 interface WitKind {
@@ -87,9 +88,15 @@ interface HostRequests {
 }
 /** Asynchronous host operations awaited by the outer driver. */
 interface AsyncHostRequests {
+  "http.send": {
+    url: string;
+    method: string;
+    headers: readonly (readonly [string, string])[];
+    body: number[];
+  };
+  "http.read": { id: number };
+  "http.close": { id: number };
   "hook.run": HostHandle & { value: unknown };
-  "filesystem.read-text": { path: string };
-  "filesystem.write-text": { path: string; value: string };
   "transport.connect": { ip: string; port: number };
   "transport.read": { id: number };
   "transport.write": { id: number; bytes: number[] };
@@ -101,6 +108,7 @@ interface AsyncHostRequests {
 /** Omit the input argument only for operations without fields. */
 type HostInput<T> = {} extends T ? [input?: T] : [input: T];
 declare var __tembraContract: WitGraph;
+declare var __tembraBuiltins: { clock: boolean; seed: [string, string] | null } | undefined;
 declare var __tembraValues: GuestValues;
 declare var __tembraState: GuestState;
 declare var __tembraOrb: {
@@ -121,11 +129,19 @@ declare var __tembraOrb: {
   contributes?: GuestObject;
 };
 declare var __hostSync: (packet: string) => string;
-declare var __hostAsync: (packet: string) => Promise<string>;
+declare var __hostAsync: {
+  (packet: string): Promise<string>;
+  (packet: Uint8Array): Promise<Uint8Array>;
+};
+declare var __hostSyncBytes: ((packet: Uint8Array) => Uint8Array) | undefined;
+/** Generated standard WASI modules for the imported interfaces, keyed by WIT interface. */
+declare var __tembraStandard: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+/** Safe-boundary standard cleanup; `ending` also closes the callback's input pumps. */
+declare var __tembraSweepStandard: ((ending?: boolean) => void) | undefined;
 declare var __scopeActive: (() => boolean) | undefined;
 declare var __writeLog: ((level: string, message: string) => void) | undefined;
-declare var __tembraTakeEffects: () => { id: number; packet: string }[];
-declare var __tembraCompleteEffect: (id: number, ok: boolean, value: string) => void;
+declare var __tembraTakeEffects: () => { id: number; packet: string | Uint8Array }[];
+declare var __tembraCompleteEffect: (id: number, ok: boolean, value: string | Uint8Array) => void;
 declare var __tembraStopEffects: () => void;
 declare var __tembraPendingDispatch: unknown;
 declare var __tembraAbandon: (() => void) | undefined;
@@ -135,9 +151,13 @@ declare var __tembraDispatch: (packet: string) => Promise<string>;
 
 declare var tembra: {
   wait(milliseconds: number): Promise<void>;
-  filesystem?: {
-    readText(path: string): Promise<string>;
-    writeText(path: string, value: string): Promise<void>;
+  http?: {
+    send(
+      url: string,
+      method: string,
+      headers: readonly (readonly [string, string])[],
+      body: Uint8Array,
+    ): Promise<HttpStream>;
   };
   transport?: { connect(ip: string, port: number): Promise<TransportStream> };
 };
@@ -145,5 +165,13 @@ declare var tembra: {
 interface TransportStream {
   read(): Promise<Uint8Array | null>;
   write(bytes: Uint8Array): Promise<void>;
+  close(): Promise<void>;
+}
+
+/** Host-owned WASI HTTP response; the body is read incrementally under the originating callback. */
+interface HttpStream {
+  readonly status: number;
+  readonly headers: readonly (readonly [string, string])[];
+  read(): Promise<Uint8Array | null>;
   close(): Promise<void>;
 }

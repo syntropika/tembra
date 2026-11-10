@@ -52,18 +52,18 @@ fn portable_compiled_filesystem_enforces_standard_preopen_permissions() {
     .unwrap();
     assert!(
         backend
-            .open(artifact.clone(), "{}".into(), "{}".into())
+            .open(artifact.clone(), "{}".into(), "{}".into(), None)
             .is_err()
     );
     for writable in [false, true] {
-        let grants =
-            json!({"filesystem":[{"provider":"data","mount":"/data","writable":writable}]});
+        let grants = json!({"system":["clocks"],"filesystem":[{"provider":"data","mount":"/data","writable":writable}]});
         let plan: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"probe","apiVersion":1,"requires":{},"grants":grants,"filesystem":["data"],"network":[]}).to_string())).unwrap();
         let port = backend
             .open(
                 artifact.clone(),
                 plan["ok"]["bindings"].to_string(),
                 grants.to_string(),
+                None,
             )
             .unwrap();
         exchange(

@@ -65,12 +65,32 @@ export interface OrbProvider {
 /** Per-Orb access to providers registered by the host. An import alone grants nothing. */
 export interface Grants {
   filesystem?: readonly { provider: string; mount: string; writable: boolean }[];
-  network?: readonly { provider: string; connect: readonly string[] }[];
+  network?: readonly {
+    provider: string;
+    connect?: readonly string[];
+    listen?: readonly string[];
+    bind?: readonly string[];
+    datagrams?: readonly string[];
+    resolve?: boolean;
+  }[];
+  http?: readonly { provider: string; origins: readonly string[] }[];
+  system?: readonly ("clocks" | "random" | "cli")[];
 }
 
 export interface LoadOptions {
   requires?: Readonly<Record<string, OrbProvider>>;
   grants?: Grants;
+  cli?: CliOptions;
+}
+
+/** Host-selected standard CLI data. Files refer to the native host, never the Orb filesystem. */
+export interface CliOptions {
+  arguments?: readonly string[];
+  environment?: readonly (readonly [string, string])[];
+  initialCwd?: string;
+  stdin?: "empty" | { readonly bytes: Uint8Array } | { readonly file: string };
+  stdout?: "discard" | { readonly file: string };
+  stderr?: "discard" | { readonly file: string };
 }
 export interface OrbArtifact extends LoadOptions {
   artifact: Uint8Array;

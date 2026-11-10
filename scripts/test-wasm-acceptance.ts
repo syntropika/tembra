@@ -17,7 +17,7 @@ import { stagePackage } from "./release/npm.ts";
 const suites = ["native", "sdk", "node", "browser", "example", "package"];
 const usage =
   "Usage: bun scripts/test-wasm-acceptance.ts --out <directory> --provider <component.wasm> " +
-  `--probe <component.wasm> --consumer <component.wasm> --contributor <component.wasm> [--fixtures <directory>] [--suite <${suites.join("|")}>]...`;
+  `--probe <component.wasm> --consumer <component.wasm> --contributor <component.wasm> --http-client <component.wasm> [--fixtures <directory>] [--suite <${suites.join("|")}>]...`;
 const { values } = parseArgs({
   options: {
     out: { type: "string" },
@@ -25,11 +25,19 @@ const { values } = parseArgs({
     probe: { type: "string" },
     consumer: { type: "string" },
     contributor: { type: "string" },
+    "http-client": { type: "string" },
     fixtures: { type: "string" },
     suite: { type: "string", multiple: true },
   },
 });
-if (!values.out || !values.provider || !values.probe || !values.consumer || !values.contributor)
+if (
+  !values.out ||
+  !values.provider ||
+  !values.probe ||
+  !values.consumer ||
+  !values.contributor ||
+  !values["http-client"]
+)
   throw new Error(usage);
 const selected = values.suite ?? suites;
 for (const name of selected) if (!suites.includes(name)) throw new Error(usage);
@@ -44,6 +52,7 @@ const provider = path.resolve(values.provider);
 const probe = path.resolve(values.probe);
 const consumer = path.resolve(values.consumer);
 const contributor = path.resolve(values.contributor);
+const httpClient = path.resolve(values["http-client"]);
 const engine = path.join(root, "packages/ts/engine-node/dist/interpreter.wasm");
 const browserEngine = path.join(root, "packages/ts/engine-wasm/dist/interpreter");
 for (const file of [
@@ -53,6 +62,7 @@ for (const file of [
   probe,
   consumer,
   contributor,
+  httpClient,
 ])
   if (!existsSync(file)) throw new Error(`Missing acceptance input: ${file}`);
 // Native, Node and browser suites must qualify the same packaged interpreter bytes.
@@ -116,6 +126,7 @@ const environment = {
   TEMBRA_WASM_PROBE: probe,
   TEMBRA_WASM_CONSUMER: consumer,
   TEMBRA_WASM_CONTRIBUTOR: contributor,
+  TEMBRA_WASM_HTTP_CLIENT: httpClient,
 };
 const timings: string[] = [];
 for (const suite of selected) {

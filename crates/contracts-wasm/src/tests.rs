@@ -14,6 +14,7 @@ fn contract() -> PreparedContract {
             key: "test:browser/values@1.0.0".into(),
             item: Item::Interface(Interface {
                 contract: Some("test:browser/values@1.0.0".into()),
+                explicit: true,
                 name: Some("values".into()),
                 resources: false,
                 functions: vec![Function {

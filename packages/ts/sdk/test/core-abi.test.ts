@@ -65,7 +65,7 @@ test("standard descriptors and clocks behave without capabilities", () => {
   });
   const view = new DataView(memory.buffer);
   expect(functions.clock_time_get!(abi.CLOCK_REALTIME, 0n, 0)).toBe(abi.ERRNO_SUCCESS);
-  expect(view.getBigUint64(0, true)).toBeGreaterThan(1_600_000_000_000_000_000n);
+  expect(view.getBigUint64(0, true)).toBe(0n);
   expect(functions.clock_time_get!(2, 0n, 0)).toBe(abi.ERRNO_INVAL);
   expect(functions.clock_time_get!(abi.CLOCK_REALTIME, 0n, 65532)).toBe(abi.ERRNO_FAULT);
   expect(functions.fd_prestat_get!(3, 0)).toBe(abi.ERRNO_BADF);
@@ -84,13 +84,34 @@ test("standard descriptors and clocks behave without capabilities", () => {
   expect(() => functions.proc_exit!(3)).toThrow("status 3");
 });
 
+test("interpreter libc reads only its supplied host clock", () => {
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
+  const calls: number[] = [];
+  const functions = wasi(memory, {
+    sync: () => "null",
+    log() {},
+    clock(clock) {
+      calls.push(clock);
+      return clock === abi.CLOCK_REALTIME ? 1_234_567_890_000_000_123n : 9_007_199_254_740_993n;
+    },
+  });
+  const view = new DataView(memory.buffer);
+  functions.clock_time_get!(abi.CLOCK_REALTIME, 0n, 0);
+  expect(view.getBigUint64(0, true)).toBe(1_234_567_890_000_000_123n);
+  functions.clock_time_get!(abi.CLOCK_MONOTONIC, 0n, 0);
+  expect(view.getBigUint64(0, true)).toBe(9_007_199_254_740_993n);
+  expect(functions.clock_time_get!(2, 0n, 0)).toBe(abi.ERRNO_INVAL);
+  expect(functions.clock_time_get!(abi.CLOCK_REALTIME, 0n, 65532)).toBe(abi.ERRNO_FAULT);
+  expect(calls).toEqual([abi.CLOCK_REALTIME, abi.CLOCK_MONOTONIC]);
+});
+
 actual("the core transport drives effects, capture and isolated bounded memory", async () => {
   const module = await compiled();
   const { source, contract } = await fixture();
   const packets: string[] = [];
   const host: GuestHost = {
     sync(packet) {
-      packets.push(packet);
+      packets.push(packet as string);
       return "null";
     },
     log() {},
@@ -115,7 +136,7 @@ actual("the core transport drives effects, capture and isolated bounded memory",
   expect(pending.effects).toHaveLength(1);
   const [effect] = pending.effects;
   expect(typeof effect!.id).toBe("number");
-  expect(JSON.parse(effect!.packet)).toEqual({ operation: "wait", milliseconds: 200 });
+  expect(JSON.parse(effect!.packet as string)).toEqual({ operation: "wait", milliseconds: 200 });
   expect(() => guest.capture()).toThrow("closed admission");
   expect(guest.trapped).toBe(false);
   const done = guest.resume([{ id: effect!.id, ok: true, value: "null" }]);
@@ -201,4 +222,16 @@ actual("raw ABI misuse is refused and reported as interruption", async () => {
     kind: abi.ReplyKind.Error,
     interrupted: 1,
   });
+});
+
+test("WASIp1 clock conversion saturates instead of wrapping", () => {
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
+  let nanoseconds = -1n;
+  const functions = wasi(memory, { sync: () => "null", log() {}, clock: () => nanoseconds });
+  const view = new DataView(memory.buffer);
+  functions.clock_time_get!(abi.CLOCK_REALTIME, 0n, 0);
+  expect(view.getBigUint64(0, true)).toBe(0n);
+  nanoseconds = 1n << 64n;
+  functions.clock_time_get!(abi.CLOCK_REALTIME, 0n, 0);
+  expect(view.getBigUint64(0, true)).toBe((1n << 64n) - 1n);
 });

@@ -1,0 +1,27 @@
+package example:system@1.0.0;
+
+interface scenario {
+    inspect: func() -> string;
+    transfer: async func() -> string;
+    wait: async func(milliseconds: u32);
+    stop: func(code: u8) -> u32;
+}
+interface policy { inspect: func() -> string; }
+
+world system {
+    import wasi:clocks/system-clock@0.3.0;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:random/random@0.3.0;
+    import wasi:random/insecure@0.3.0;
+    import wasi:random/insecure-seed@0.3.0;
+    import wasi:cli/environment@0.3.0;
+    import wasi:cli/stdin@0.3.0;
+    import wasi:cli/stdout@0.3.0;
+    import wasi:cli/stderr@0.3.0;
+    import wasi:cli/exit@0.3.0;
+    import wasi:cli/terminal-stdin@0.3.0;
+    import wasi:cli/terminal-stdout@0.3.0;
+    import wasi:cli/terminal-stderr@0.3.0;
+    export scenario;
+}
+world ambient { export policy; }

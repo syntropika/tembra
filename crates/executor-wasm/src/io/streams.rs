@@ -5,6 +5,11 @@
 //! callback completes, is abandoned or its host closes, the epoch ends: its streams close at
 //! once, pending reads and writes settle, and a connection still in flight is discarded instead
 //! of becoming a usable handle.
+//!
+//! HTTP response bodies are entries of the same table: they share the identity sequence, the
+//! per-Orb limit and the callback epochs, but live in their own map, so a socket identity can
+//! never select a body or the reverse.
+use super::http::Body;
 use crate::{failure, protocol::TRANSPORT_CHUNK_BYTES};
 use serde_json::Value;
 use std::{
@@ -23,7 +28,7 @@ use tokio::{
     sync::{Mutex as Exclusive, OwnedMutexGuard, watch},
 };
 
-/// Live and connecting streams one Orb may hold at a time.
+/// Live and connecting streams and HTTP bodies one Orb may hold at a time.
 pub(super) const STREAM_LIMIT: usize = 16;
 
 /// The transport table of one installed Orb revision.
@@ -44,7 +49,8 @@ struct Table {
     epoch: u64,
     active: Option<u64>,
     live: BTreeMap<u32, Arc<Stream>>,
-    /// Admitted connections that have not yet registered or failed.
+    bodies: BTreeMap<u32, Arc<Body>>,
+    /// Admitted connections and HTTP requests that have not yet registered or failed.
     connecting: usize,
 }
 
@@ -84,16 +90,38 @@ impl Streams {
         self.0.scope.send_replace(Some(epoch));
     }
 
-    /// End the active epoch and close every stream it owns. Idempotent.
+    /// End the active epoch and close every stream and body it owns. Idempotent.
     pub(crate) fn end_callback(&self) {
-        let closed = {
+        let (closed, bodies) = {
             let mut table = self.table();
             table.active = None;
-            std::mem::take(&mut table.live)
+            (
+                std::mem::take(&mut table.live),
+                std::mem::take(&mut table.bodies),
+            )
         };
         self.0.scope.send_replace(None);
         for stream in closed.into_values() {
             stream.close();
+        }
+        for body in bodies.into_values() {
+            body.close();
+        }
+    }
+
+    /// Check authority without changing the callback's existing epoch.
+    pub(crate) fn active(&self) -> bool {
+        self.table().active.is_some()
+    }
+
+    /// Capture this callback's epoch now and wake when its existing owner revokes it.
+    pub(crate) fn cancelled(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut scope = self.0.scope.subscribe();
+        let epoch = *scope.borrow();
+        async move {
+            if epoch.is_some() {
+                let _ = scope.wait_for(|active| *active != epoch).await;
+            }
         }
     }
 
@@ -103,7 +131,7 @@ impl Streams {
         let epoch = table
             .active
             .ok_or_else(|| failure("transport requires an active callback"))?;
-        if table.live.len() + table.connecting >= STREAM_LIMIT {
+        if table.live.len() + table.bodies.len() + table.connecting >= STREAM_LIMIT {
             return Err(failure("transport stream limit reached"));
         }
         table.connecting += 1;
@@ -126,11 +154,49 @@ impl Streams {
         Ok(stream.clone())
     }
 
+    /// Resolve a live HTTP response body issued to the active callback of this Orb.
+    pub(super) fn body(&self, id: u32) -> Result<Arc<Body>> {
+        let table = self.table();
+        let body = table
+            .bodies
+            .get(&id)
+            .ok_or_else(|| failure("unknown HTTP response body"))?;
+        if table.active != Some(body.epoch) {
+            return Err(failure("unknown HTTP response body"));
+        }
+        Ok(body.clone())
+    }
+
+    /// Close an issued response body idempotently; pending reads settle immediately.
+    pub(super) fn close_body(&self, id: u32) -> Result<Value> {
+        let body = {
+            let mut table = self.table();
+            if id == 0 || id > table.issued || table.live.contains_key(&id) {
+                return Err(failure("unknown HTTP response body"));
+            }
+            table.bodies.remove(&id)
+        };
+        if let Some(body) = body {
+            body.close();
+        }
+        Ok(Value::Null)
+    }
+
+    /// Issue the next identity; identities are never reused within an Orb.
+    fn issue(table: &mut Table) -> Result<u32> {
+        let id = table
+            .issued
+            .checked_add(1)
+            .ok_or_else(|| failure("transport stream identities are exhausted"))?;
+        table.issued = id;
+        Ok(id)
+    }
+
     /// Close an issued stream idempotently, including cleanup after cancellation revoked it.
     pub(super) fn close(&self, id: u32) -> Result<Value> {
         let stream = {
             let mut table = self.table();
-            if id == 0 || id > table.issued {
+            if id == 0 || id > table.issued || table.bodies.contains_key(&id) {
                 return Err(failure("unknown transport stream"));
             }
             table.live.remove(&id)
@@ -149,11 +215,7 @@ impl Streams {
                 "callback ended before the transport stream connected",
             ));
         }
-        let id = table
-            .issued
-            .checked_add(1)
-            .ok_or_else(|| failure("transport stream identities are exhausted"))?;
-        table.issued = id;
+        let id = Self::issue(&mut table)?;
         let (reader, writer) = socket.into_split();
         table.live.insert(
             id,
@@ -189,6 +251,26 @@ impl Reservation {
             }
         };
         self.streams.register(epoch, socket).map(Value::from)
+    }
+}
+
+impl Reservation {
+    /// Resolve once the callback that admitted this reservation has ended.
+    pub(super) async fn abandoned(&self) {
+        let epoch = self.epoch;
+        let mut scope = self.streams.0.scope.subscribe();
+        let _ = scope.wait_for(|active| *active != Some(epoch)).await;
+    }
+
+    /// Publish a response body only while its callback epoch is still active.
+    pub(super) fn register_body(self, body: impl FnOnce(u64) -> Body) -> Result<u32> {
+        let mut table = self.streams.table();
+        if table.active != Some(self.epoch) {
+            return Err(failure("callback ended before the HTTP response arrived"));
+        }
+        let id = Streams::issue(&mut table)?;
+        table.bodies.insert(id, Arc::new(body(self.epoch)));
+        Ok(id)
     }
 }
 

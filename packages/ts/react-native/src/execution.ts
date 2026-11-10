@@ -87,11 +87,11 @@ export class MobileExecution implements MobileBackend {
   }
 
   /** Open source or compiled execution while the shared SDK retains lifecycle and callback authority. */
-  async open(artifact: MobileArtifact, bindings: string, grants: string) {
+  async open(artifact: MobileArtifact, bindings: string, grants: string, cli: string) {
     await this.ready();
     const native = this.native,
       host = this.kernel.handle;
-    const id = await native.openPort(host, this.artifactId(artifact), bindings, grants);
+    const id = await native.openPort(host, this.artifactId(artifact), bindings, grants, cli);
     this.logs(host, id);
     return {
       description: () => native.portDescription(host, id),
@@ -103,6 +103,9 @@ export class MobileExecution implements MobileBackend {
       abort: () => native.abortPort(host, id),
       release: (environment: number) => native.portRelease(host, id, environment),
       io: (packet: string) => native.portIo(host, id, packet),
+      cancelIo: () => {
+        native.portCancelIo(host, id);
+      },
       close: () => native.closePort(host, id),
     };
   }

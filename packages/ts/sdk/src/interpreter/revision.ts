@@ -55,6 +55,7 @@ export class Revision {
     readonly timeout: number,
     readonly io: (
       request: import("./host-protocol.ts").IORequest,
+      signal?: AbortSignal,
     ) => Promise<unknown> = async () => {
       throw new Error("No I/O provider is attached");
     },

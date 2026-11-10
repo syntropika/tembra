@@ -13,11 +13,11 @@ export class NodeArtifact {
   request(packet: string): string;
 }
 
-export function compileContract(directory: string, world?: string): Uint8Array;
-
 /** Resolved WIT used by optional sandbox platform adapters. */
 export class NodeContract {
-  constructor(bytes: Uint8Array, world?: string);
+  constructor(directory: string, world?: string);
+  /** Encoded WIT for type generation; the object retains the original import authority. */
+  wit(): Uint8Array;
   request(packet: string): string;
   sourceArtifact(source: string, name: string, apiVersion: number): Uint8Array;
   componentArtifact(
@@ -32,13 +32,15 @@ export class NodeContract {
 export class NodeInterpreter {
   constructor(configuration: string, log: (packet: string) => void);
   interpreter(bytes: Uint8Array): void;
-  open(artifact: NodeArtifact, bindings: string, grants: string): NodeInterpreterPort;
+  open(artifact: NodeArtifact, bindings: string, grants: string, cli?: string): NodeInterpreterPort;
   instances(): number;
 }
 
 /** Scoped source or compiled Orb transport; application consumers should use the SDK facade. */
 export class NodeInterpreterPort {
   io(packet: string): Promise<string>;
+  /** Revoke the active callback's source I/O after its caller was cancelled. */
+  cancelIo(): void;
   release(environment: number): void;
   description(): string;
   declare(packet: string, callback: (packet: string) => string): string;

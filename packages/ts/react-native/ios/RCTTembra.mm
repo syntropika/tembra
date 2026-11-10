@@ -135,6 +135,14 @@ RCT_EXPORT_MODULE(NativeTembra)
 }
 
 /** Forward one host-owned execution operation to the Swift storage. */
+- (NSNumber *)portCancelIo:(NSString *)handle port:(NSString *)port {
+  NSError *error = nil;
+  NSNumber *result = [_storage portCancelIo:handle port:port error:&error];
+  if (error) { @throw [NSException exceptionWithName:@"TembraError" reason:error.localizedDescription userInfo:nil]; }
+  return result;
+}
+
+/** Forward one host-owned execution operation to the Swift storage. */
 - (NSNumber *)closePort:(NSString *)handle port:(NSString *)port {
   NSError *error = nil;
   NSNumber *result = [_storage closePort:handle port:port error:&error];
@@ -148,8 +156,8 @@ RCT_EXPORT_MODULE(NativeTembra)
 }
 
 /** Forward one host-owned execution operation to the Swift storage. */
-- (void)openPort:(NSString *)handle artifact:(NSString *)artifact bindings:(NSString *)bindings grants:(NSString *)grants resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
-  [_storage openPort:handle artifact:artifact bindings:bindings grants:grants resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
+- (void)openPort:(NSString *)handle artifact:(NSString *)artifact bindings:(NSString *)bindings grants:(NSString *)grants cli:(NSString *)cli resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  [_storage openPort:handle artifact:artifact bindings:bindings grants:grants cli:cli resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
 }
 
 /** Forward one host-owned execution operation to the Swift storage. */

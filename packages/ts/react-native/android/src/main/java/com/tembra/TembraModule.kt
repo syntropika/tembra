@@ -106,7 +106,7 @@ class TembraModule(private val context: ReactApplicationContext) : NativeTembraS
     /** Release a prepared contract owner. */
     override fun releaseArtifact(handle: String, artifact: String): Boolean = nativeCall { execution(handle).releaseArtifact(artifact); true }
     /** Open a source or compiled revision away from the JS event loop. */
-    override fun openPort(handle: String, artifact: String, bindings: String, grants: String, promise: Promise) = promise(promise) { execution(handle).open(artifact, bindings, grants) }
+    override fun openPort(handle: String, artifact: String, bindings: String, grants: String, cli: String, promise: Promise) = promise(promise) { execution(handle).open(artifact, bindings, grants, cli) }
     /** Read checked executable metadata. */
     override fun portDescription(handle: String, port: String): String = nativeCall { execution(handle).description(port) }
     /** Transfer host-attributed guest diagnostics. */
@@ -125,6 +125,8 @@ class TembraModule(private val context: ReactApplicationContext) : NativeTembraS
     override fun portRelease(handle: String, port: String, environment: Double): Boolean = nativeCall { execution(handle).port(port).release(environment.toULong()); true }
     /** Execute capability-bound filesystem and network operations. */
     override fun portIo(handle: String, port: String, packet: String, promise: Promise) = promise(promise) { execution(handle).port(port).io(packet) }
+    /** Revoke the active callback's source I/O after its caller was cancelled. */
+    override fun portCancelIo(handle: String, port: String): Boolean = nativeCall { execution(handle).port(port).cancelIo(); true }
     /** Close a revision after shared lifecycle cleanup. */
     override fun closePort(handle: String, port: String): Boolean = nativeCall { execution(handle).closePort(port); true }
 

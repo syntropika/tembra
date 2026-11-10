@@ -73,24 +73,43 @@ const sources = new Map([
 ]);
 // The full suite qualifies an alternate engine when one is supplied; the other path gets a smoke run.
 const page = `<!doctype html><body>running<script type="module">
-import { verifyBrowserInterpreter, verifyEngineSelection } from "/fixture.js";
+import { verifyBrowserInterpreter, verifyEngineSelection, verifyStandardScenario } from "/fixture.js";
 try {
   const override = new URL(${JSON.stringify(overrideEngine)}, location.href);
   const alternate = ${JSON.stringify(Boolean(alternate))};
   await verifyBrowserInterpreter(alternate ? override : undefined);
   await verifyEngineSelection(alternate ? undefined : override);
+  const standard = await verifyStandardScenario(alternate ? override : undefined);
+  await fetch("/report", { method: "POST", body: JSON.stringify(standard) });
   document.body.textContent = "TEMBRA_WASM_PASS";
 } catch (error) {
   document.body.textContent = "TEMBRA_WASM_FAIL " + (error.stack ?? error);
 }
 </script>`;
 const requested = new Set<string>();
+/** Standard scenario evidence posted by the page: per provider timings and retirement counts. */
+let standardReport: unknown;
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   async fetch(request) {
     const pathname = new URL(request.url).pathname;
     requested.add(pathname);
+    if (pathname === "/report" && request.method === "POST") {
+      standardReport = await request.json();
+      return new Response(null, { status: 204 });
+    }
+    if (pathname === "/wasi/values") return Response.json({ values: [2, 4, 6] });
+    if (pathname === "/wasi/events")
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            // Keep the response open: the guest must read the first event without waiting for EOF.
+            controller.enqueue(new TextEncoder().encode("data: browser fetch\n\n"));
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
     if (pathname === "/") return new Response(page, { headers: { "Content-Type": "text/html" } });
     if (sources.has(pathname))
       return new Response(sources.get(pathname), {
@@ -119,6 +138,7 @@ try {
   await headless(server.url.href, "TEMBRA_WASM_PASS", "TEMBRA_WASM_FAIL");
   for (const engine of [defaultEngine, overrideEngine])
     if (!requested.has(engine)) throw new Error(`The browser did not request ${engine}`);
+  console.log(`Standard WASI scenario: ${JSON.stringify(standardReport)}`);
   console.log(
     `Actual browser interpreter facade, memory filesystem and OPFS acceptance passed on the ${alternate ? "alternate" : "default packaged"} engine; the ${alternate ? "default packaged" : "explicit override"} engine path passed its smoke check`,
   );

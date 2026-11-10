@@ -94,6 +94,7 @@ fn source_streams_are_incremental_and_close_with_their_callback() {
         network: vec![NetworkGrant {
             provider: "tcp".into(),
             connect: vec![address],
+            ..Default::default()
         }],
         ..Grants::default()
     };

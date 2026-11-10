@@ -182,13 +182,18 @@ impl Environment {
             Self::authorize(&scope)?;
         }
         self.session
-            .dispatch(admission, packet, async |packet, asynchronous| {
-                if asynchronous {
-                    self.asynchronous(&scope, packet).await
-                } else {
-                    self.sync(&scope, packet)
-                }
-            })
+            .dispatch(
+                admission,
+                cancellation.as_ref(),
+                packet,
+                async |packet, asynchronous| {
+                    if asynchronous {
+                        self.asynchronous(&scope, packet).await
+                    } else {
+                        self.sync(&scope, packet)
+                    }
+                },
+            )
             .await
     }
 

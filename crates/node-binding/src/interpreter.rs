@@ -74,13 +74,19 @@ impl NodeInterpreter {
         artifact: &crate::NodeArtifact,
         bindings: String,
         grants: String,
+        cli: Option<String>,
     ) -> napi::Result<NodeInterpreterPort> {
         let bindings: BTreeMap<String, Binding> =
             serde_json::from_str(&bindings).map_err(js_error)?;
         let grants: Grants = serde_json::from_str(&grants).map_err(js_error)?;
+        // Data-only CLI configuration; byte streams are serviced in Rust, never per chunk here.
+        let cli: tembra_executor_wasm::Cli = match cli {
+            Some(cli) => serde_json::from_str(&cli).map_err(js_error)?,
+            None => Default::default(),
+        };
         let port = self
             .engine
-            .open_port(&artifact.artifact, &bindings, &grants)
+            .open_port(&artifact.artifact, &bindings, &grants, &cli)
             .map_err(js_error)?;
         Ok(NodeInterpreterPort {
             port: Some(port),
@@ -127,6 +133,18 @@ impl NodeInterpreterPort {
             deferred.resolve(move |_| result.map_err(js_error));
         });
         Ok(promise)
+    }
+
+    /// Revoke the active callback's source I/O after its caller was cancelled.
+    ///
+    /// Internal transport plumbing for the SDK: pending requests settle with an error and the
+    /// exchange still finishes only after physical completion. Without an active exchange this
+    /// does nothing.
+    #[napi]
+    pub fn cancel_io(&self) {
+        if let Some(ticket) = self.ticket.borrow().as_ref() {
+            ticket.cancel_io();
+        }
     }
 
     /// Release guest closures without reentering a quarantined Store or inventing a lifecycle effect.

@@ -25,10 +25,7 @@ function checksum(rounds) {
 
 /** Package a raw component or closed source bundle as one Tembra artifact. */
 async function artifact(directory, world, name, { component, source } = {}) {
-  const resolved = new binding.NodeContract(
-    binding.compileContract(path.join(wit, directory), world),
-    world,
-  );
+  const resolved = new binding.NodeContract(path.join(wit, directory), world);
   const bytes = component === undefined ? undefined : new Uint8Array(await readFile(component));
   return new Uint8Array(
     source === undefined
@@ -69,7 +66,10 @@ test(
       try {
         await host.install({
           artifact: await probeArtifact("probe"),
-          grants: { filesystem: [{ provider: "data", mount: "/data", writable: false }] },
+          grants: {
+            system: ["clocks"],
+            filesystem: [{ provider: "data", mount: "/data", writable: false }],
+          },
         });
         const reference = await host.get(`probe::${service}`, "main");
         // Refused input settles without poisoning the Store.
@@ -132,7 +132,10 @@ test(
       try {
         await host.install({
           artifact: await probeArtifact("busy"),
-          grants: { filesystem: [{ provider: "data", mount: "/data", writable: false }] },
+          grants: {
+            system: ["clocks"],
+            filesystem: [{ provider: "data", mount: "/data", writable: false }],
+          },
         });
         const reference = await host.get(`busy::${service}`, "main");
         const calls = [reference.spin(4294967295), reference.spin(1), reference.spin(2)];
@@ -160,7 +163,10 @@ test(
         await writeFile(path.join(directory, "input.txt"), "initial");
         await host.install({
           artifact: await probeArtifact("probe"),
-          grants: { filesystem: [{ provider: "data", mount: "/data", writable: true }] },
+          grants: {
+            system: ["clocks"],
+            filesystem: [{ provider: "data", mount: "/data", writable: true }],
+          },
         });
         const reference = await host.get(`probe::${service}`, "main");
         assert.equal(await reference.spin(1000), checksum(1000));

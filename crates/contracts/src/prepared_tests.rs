@@ -33,6 +33,7 @@ fn model() -> Model {
             key: "test:prepared/store@1.0.0".into(),
             item: Item::Interface(Interface {
                 contract: Some("test:prepared/store@1.0.0".into()),
+                explicit: true,
                 name: Some("store".into()),
                 resources: false,
                 functions: vec![function(
@@ -46,6 +47,7 @@ fn model() -> Model {
             key: "test:prepared/values@1.0.0".into(),
             item: Item::Interface(Interface {
                 contract: Some("test:prepared/values@1.0.0".into()),
+                explicit: true,
                 name: Some("values".into()),
                 resources: false,
                 functions: vec![function(
@@ -192,6 +194,7 @@ fn doubling(levels: u32, functions: usize, level: impl Fn(Ty) -> Kind) -> Model 
             key: "test:prepared/values@1.0.0".into(),
             item: Item::Interface(Interface {
                 contract: Some("test:prepared/values@1.0.0".into()),
+                explicit: true,
                 name: Some("values".into()),
                 resources: false,
                 functions: (0..functions)

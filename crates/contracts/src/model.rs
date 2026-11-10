@@ -201,7 +201,25 @@ pub struct Interface {
     pub name: Option<String>,
     /// Whether the interface owns or aliases a resource type.
     pub resources: bool,
+    /// Whether the world imports this interface itself (directly, through `include`, or under a
+    /// named alias), rather than only because another item uses its types. Always true for
+    /// exports. Contracts decoded without provenance mark every import explicit.
+    pub explicit: bool,
     pub functions: Vec<Function>,
+}
+
+impl Interface {
+    /// Whether importing this interface carries callable authority, so it needs a provider and
+    /// a grant. A type-only dependency carries none even though elaboration keeps its functions
+    /// for type identity. A dependency that owns or aliases a resource type stays fully callable
+    /// and grant-bound, exactly like an explicit import of it. That includes constructors and
+    /// static functions that create handles without one (for example `tcp-socket.create` in
+    /// `wasi:sockets/types` or the `wasi:http/types` constructors). Its grant, the handle checks
+    /// and each operation's own grant limits (connect/bind lists, mounts, origins) still bound
+    /// what those calls can reach.
+    pub fn callable(&self) -> bool {
+        (self.explicit || self.resources) && (self.resources || !self.functions.is_empty())
+    }
 }
 
 /// One world import or export.

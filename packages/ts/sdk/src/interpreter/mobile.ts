@@ -4,8 +4,10 @@ import { isolate, type AdaptedHostOptions } from "#tembra-adapters";
 import { Revision } from "./revision.ts";
 import { decodeAsyncHostRequest, decodeHostRequest } from "./host-protocol.ts";
 import { reply } from "./codec.ts";
+import { cliPacket } from "./cli.ts";
 import {
   answer,
+  withIoCancellation,
   query,
   type ContractPort,
   type DirectoryFilesystem,
@@ -28,12 +30,19 @@ export interface MobilePort {
   abort(): Promise<void>;
   release(environment: number): void;
   io(packet: string): Promise<string>;
+  /** Revoke the active callback's source I/O after its caller was cancelled. */
+  cancelIo(): void;
   close(): void;
 }
 export interface MobileBackend {
   artifact(bytes: Uint8Array): MobileArtifact;
   /** Open a source or compiled revision; both answer the same scoped host requests. */
-  open(artifact: MobileArtifact, bindings: string, grants: string): Promise<MobilePort>;
+  open(
+    artifact: MobileArtifact,
+    bindings: string,
+    grants: string,
+    cli: string,
+  ): Promise<MobilePort>;
 }
 export interface MobileExecutionOptions {
   onLog?: (record: { orb: string; level: string; message: string }) => void;
@@ -171,11 +180,19 @@ export function createMobileHost(
         });
         const bindings = JSON.stringify(installation.bindings),
           grants = JSON.stringify(definition.grants ?? {});
-        const port = await backend.open(artifact, bindings, grants);
+        const port = await backend.open(artifact, bindings, grants, cliPacket(definition.cli));
         const driver = new MobileDriver(port, () => artifact.free());
         try {
-          return new Revision(driver, artifact, isolated.limits?.timeoutMs ?? 10000, (request) =>
-            port.io(JSON.stringify(request)).then((value) => JSON.parse(value)),
+          return new Revision(
+            driver,
+            artifact,
+            isolated.limits?.timeoutMs ?? 10000,
+            async (request, signal) =>
+              JSON.parse(
+                await withIoCancellation(port.io(JSON.stringify(request)), request, signal, () =>
+                  port.cancelIo(),
+                ),
+              ),
           ).definition(identity, installation);
         } catch (error) {
           driver.close();

@@ -257,7 +257,7 @@ fn colliding_javascript_service_and_method_names_fail_before_installation() {
         )
         .unwrap();
     let world = resolve.select_world(&[package], None).unwrap();
-    let contract = Contract::new(resolve, world).unwrap();
+    let contract = Contract::new(resolve, world, None).unwrap();
     let error = contract.plan("stores", 1, &BTreeMap::new()).unwrap_err();
     assert!(error.0.contains("ambiguous JavaScript service store"));
     assert!(Contract::from_source("methods.wit", "package test:names; interface values { get-HTTP: func(); get-http: func(); } world run { export values; }", None).is_err());

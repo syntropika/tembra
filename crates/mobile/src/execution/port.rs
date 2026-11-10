@@ -50,13 +50,14 @@ impl NativePort {
         artifact: Arc<NativeArtifact>,
         bindings: BTreeMap<String, Binding>,
         grants: Grants,
+        cli: tembra_executor_wasm::Cli,
     ) -> Result<Arc<Self>, MobileError> {
         let logs = super::logs::Logs::default();
         let engine = logs.attach(engine);
         let owner = Owner::new(move || {
             Ok(State {
                 port: engine
-                    .open_port(&artifact.artifact, &bindings, &grants)
+                    .open_port(&artifact.artifact, &bindings, &grants, &cli)
                     .map_err(error)?,
                 ticket: None,
             })
@@ -205,6 +206,20 @@ impl NativePort {
         })?;
         self.exchange.lock().map_err(error)?.take();
         Ok(())
+    }
+
+    /// Revoke the active callback's source I/O after its caller was cancelled.
+    ///
+    /// Internal transport plumbing for the SDK driver: pending requests settle with an error and
+    /// the exchange still finishes only after physical completion. Without an active exchange
+    /// this does nothing.
+    pub fn cancel_io(&self) -> Result<(), MobileError> {
+        self.command(|state| {
+            if let Some(ticket) = &state.ticket {
+                ticket.cancel_io();
+            }
+            Ok(())
+        })
     }
 
     /// Execute admitted filesystem and socket operations using the original installation grants.

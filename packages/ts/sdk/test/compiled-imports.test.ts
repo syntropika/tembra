@@ -25,7 +25,7 @@ interface Pipeline {
 
 /** Package the compiled consumer or a closed source bundle for one pipeline world. */
 async function artifact(world: string, name: string, source?: string): Promise<Uint8Array> {
-  const contract = new binding.NodeContract(binding.compileContract(wit, world), world);
+  const contract = new binding.NodeContract(wit, world);
   const component = source === undefined ? new Uint8Array(await readFile(consumer!)) : undefined;
   return new Uint8Array(
     source === undefined

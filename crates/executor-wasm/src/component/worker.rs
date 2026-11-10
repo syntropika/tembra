@@ -13,6 +13,11 @@
 //! completes only after its result is available and its task group has finished, so task work
 //! that outlives the returned value still runs under the call's own authority and can never
 //! observe a later call's scope.
+//!
+//! Standard `wasi:http` imports use upstream `wasmtime-wasi-http` P3 resources and its sender.
+//! Each request is attributed the same way as a dependency import: the hook captures the entered
+//! task group's authority synchronously, checks the installation's HTTP origin grants and then
+//! asks the originating call, through its own channel, whether its context is still admitted.
 use super::values;
 use crate::{
     Engine,
@@ -35,6 +40,9 @@ use wasmtime::{
     },
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi_http::{
+    RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
+};
 
 /// Default dependency object selected by a plain WIT import, which carries no object key.
 const DEFAULT_KEY: &str = "main";
@@ -142,6 +150,8 @@ impl TaskGroupHook for Hook {
 
 struct State {
     wasi: WasiCtx,
+    http: WasiHttpCtx,
+    hooks: HttpHooks,
     table: ResourceTable,
     limits: StoreLimits,
     groups: Arc<Mutex<Groups>>,
@@ -156,6 +166,96 @@ impl WasiView for State {
             table: &mut self.table,
         }
     }
+}
+
+impl WasiHttpView for State {
+    /// Standard HTTP resources share the Store's table; sends pass through [`HttpHooks`].
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.hooks,
+        }
+    }
+}
+
+/// Outgoing `wasi:http` requests need call authority and a granted origin.
+struct HttpHooks {
+    groups: Arc<Mutex<Groups>>,
+    grants: Arc<crate::Grants>,
+}
+
+/// The future of one sent response and its connection, as upstream hooks return them.
+type Sent = Box<
+    dyn Future<
+            Output = Result<
+                (
+                    http::Response<WasiBody>,
+                    Box<dyn Future<Output = Result<(), wasmtime_wasi_http::Error>> + Send>,
+                ),
+                wasmtime_wasi_http::Error,
+            >,
+        > + Send,
+>;
+
+impl HttpHooks {
+    /// Resolve the originating call's channel; runs synchronously inside the guest call.
+    fn admit(&self, request: &http::Request<WasiBody>) -> Result<Sender<Event>, String> {
+        let events = {
+            let groups = self
+                .groups
+                .lock()
+                .map_err(|_| "task-group attribution is poisoned".to_owned())?;
+            groups
+                .current
+                .and_then(|group| groups.bound.get(&group))
+                .map(|bound| bound.authority.events.clone())
+                .ok_or("HTTP request has no admitted invocation")?
+        };
+        crate::providers::check_http_url(&self.grants, &request.uri().to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(events)
+    }
+}
+
+impl WasiHttpHooks for HttpHooks {
+    fn send_request(
+        &mut self,
+        request: http::Request<WasiBody>,
+        options: Option<RequestOptions>,
+        _response: Box<dyn Future<Output = Result<(), wasmtime_wasi_http::Error>> + Send>,
+    ) -> Sent {
+        let admitted = self.admit(&request);
+        Box::new(async move {
+            // Refusals are standard error codes for the guest, never traps.
+            let denied = |_| wasmtime_wasi_http::Error::HttpRequestDenied;
+            let events = admitted.map_err(denied)?;
+            // The same context check a source binding performs, answered by the call's adapter.
+            check_context(&events).await.map_err(denied)?;
+            let (response, connection) =
+                wasmtime_wasi_http::default_send_request(request, options).await?;
+            Ok((
+                response.map(http_body_util::BodyExt::boxed_unsync),
+                Box::new(connection) as Box<dyn Future<Output = _> + Send>,
+            ))
+        })
+    }
+}
+
+/// Ask the originating call's adapter to confirm its context is still admitted.
+async fn check_context(events: &Sender<Event>) -> Result<(), String> {
+    let (reply, receive) = oneshot::channel();
+    events
+        .try_send(Event::Host {
+            packet: json!({"operation": "context.check"}).to_string(),
+            asynchronous: false,
+            reply,
+        })
+        .map_err(|_| "the originating call has ended".to_owned())?;
+    receive
+        .await
+        .map_err(|_| "the originating call has ended".to_owned())?
+        .map(|_| ())
 }
 
 /// Host-selected commands; a component has no guest closures to validate or call back.
@@ -199,13 +299,14 @@ pub(crate) async fn run(
     engine: Engine,
     component: Component,
     wasi: WasiCtxBuilder,
+    grants: Arc<crate::Grants>,
     layout: Layout,
     ready: mpsc::Sender<std::result::Result<(), String>>,
     commands: mpsc::Receiver<Command>,
 ) -> Terminal {
     let groups = Arc::new(Mutex::new(Groups::default()));
-    let (mut store, exports) = match instantiate(&engine, &component, wasi, &layout, &groups).await
-    {
+    let instance = instantiate(&engine, &component, wasi, grants, &layout, &groups).await;
+    let (mut store, exports) = match instance {
         Ok(instance) => instance,
         Err(error) => {
             let _ = ready.send(Err(format!("component initialization failed: {error:#}")));
@@ -231,7 +332,11 @@ pub(crate) async fn run(
             }
             Err(error) => {
                 // The Store is dropped with this future; its completion waits for runtime shutdown.
-                return vec![(command.events, format!("component trap: {error:#}"))];
+                let message = match crate::providers::exit_status(&error) {
+                    Some(status) => format!("orb exited with status {status}; component retired"),
+                    None => format!("component trap: {error:#}"),
+                };
+                return vec![(command.events, message)];
             }
         }
     }
@@ -243,16 +348,25 @@ async fn instantiate(
     engine: &Engine,
     component: &Component,
     mut wasi: WasiCtxBuilder,
+    grants: Arc<crate::Grants>,
     layout: &Layout,
     groups: &Arc<Mutex<Groups>>,
 ) -> wasmtime::Result<(Store<State>, BTreeMap<(String, String), Func>)> {
     let mut linker = Linker::<State>::new(&engine.engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    // Linking grants nothing: installation requires an HTTP grant for each wasi:http import and
+    // every request is checked against its granted origins.
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
     link_imports(&mut linker, layout)?;
     let mut store = Store::new(
         &engine.engine,
         State {
             wasi: wasi.build(),
+            http: WasiHttpCtx::new(),
+            hooks: HttpHooks {
+                groups: groups.clone(),
+                grants,
+            },
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new()
                 .memory_size(engine.limits.memory_bytes)
@@ -657,4 +771,83 @@ fn lock(groups: &Mutex<Groups>) -> wasmtime::Result<std::sync::MutexGuard<'_, Gr
     groups
         .lock()
         .map_err(|_| wasmtime::Error::msg("task-group attribution is poisoned"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    fn request(url: &str) -> http::Request<WasiBody> {
+        http::Request::get(url)
+            .body(
+                http_body_util::Empty::new()
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap()
+    }
+
+    fn hooks() -> HttpHooks {
+        HttpHooks {
+            groups: Arc::default(),
+            grants: Arc::new(crate::Grants {
+                http: vec![tembra_contracts::HttpGrant {
+                    provider: "web".into(),
+                    origins: vec!["http://127.0.0.1:9".into()],
+                }],
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// Requests from initializers or tasks outside an admitted call's group are denied.
+    #[test]
+    fn requests_without_call_authority_are_denied() {
+        let mut hooks = hooks();
+        let sent = hooks.send_request(
+            request("http://127.0.0.1:9/"),
+            None,
+            Box::new(async { Ok(()) }),
+        );
+        let error = futures::executor::block_on(Box::into_pin(sent))
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            wasmtime_wasi_http::Error::HttpRequestDenied
+        ));
+    }
+
+    /// The pre-send check refuses when the originating call ended or its adapter refuses.
+    #[test]
+    fn context_check_follows_the_originating_call() {
+        let (events, receive) = async_channel::bounded(1);
+        drop(receive);
+        assert!(futures::executor::block_on(check_context(&events)).is_err());
+        for (answer, admitted) in [
+            (Ok("null".to_owned()), true),
+            (Err("cancelled".into()), false),
+        ] {
+            let (events, receive) = async_channel::bounded(1);
+            let responder = std::thread::spawn(move || {
+                let Ok(Event::Host {
+                    packet,
+                    asynchronous,
+                    reply,
+                }) = receive.recv_blocking()
+                else {
+                    panic!("expected a host request");
+                };
+                assert_eq!(packet, r#"{"operation":"context.check"}"#);
+                assert!(!asynchronous);
+                let _ = reply.send(answer);
+            });
+            assert_eq!(
+                futures::executor::block_on(check_context(&events)).is_ok(),
+                admitted
+            );
+            responder.join().unwrap();
+        }
+    }
 }

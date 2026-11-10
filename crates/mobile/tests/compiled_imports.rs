@@ -41,7 +41,12 @@ fn consumer(backend: &NativeInterpreter) -> Arc<NativePort> {
     )
     .unwrap();
     backend
-        .open(artifact, plan["ok"]["bindings"].to_string(), "{}".into())
+        .open(
+            artifact,
+            plan["ok"]["bindings"].to_string(),
+            "{}".into(),
+            None,
+        )
         .unwrap()
 }
 

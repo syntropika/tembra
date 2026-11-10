@@ -16,8 +16,10 @@
 //! Completion batch (host-written into a buffer obtained from [`ALLOC_EXPORT`]):
 //! `count`, then `count` records `id_low, id_high, status, value_len`, then every value.
 
-/// Import module for the interpreter's host functions; it carries the ABI version.
-pub const IMPORT_MODULE: &str = "tembra-interpreter-v2";
+/// Import namespace carries the ABI version and the generated WASI schema digest.
+pub const IMPORT_MODULE: &str = env!("TEMBRA_INTERPRETER_IMPORT_MODULE");
+/// First byte of a binary standard WASI packet; JSON packets never start with NUL.
+pub const STANDARD_PACKET: u32 = 0;
 /// Synchronous host request: `(packet_ptr, packet_len) -> header`. The header holds the reply
 /// length; [`SYNC_ERROR`] marks an error message instead of a JSON value.
 pub const SYNC_IMPORT: &str = "sync";
@@ -386,10 +388,16 @@ pub fn typescript() -> String {
         ("WASI_MODULE", WASI_MODULE),
     ];
     for (name, value) in strings {
-        out += &format!("export const {name} = {value:?};\n");
+        let declaration = format!("export const {name} = {value:?};");
+        if declaration.len() > 100 {
+            out += &format!("export const {name} =\n  {value:?};\n");
+        } else {
+            out += &format!("{declaration}\n");
+        }
     }
     let numbers = [
         ("SYNC_ERROR", u64::from(SYNC_ERROR)),
+        ("STANDARD_PACKET", u64::from(STANDARD_PACKET)),
         ("MEMORY_INITIAL_PAGES", u64::from(MEMORY_INITIAL_PAGES)),
         ("PAGE_BYTES", u64::from(PAGE_BYTES)),
         ("LENGTH_LIMIT", u64::from(LENGTH_LIMIT)),
