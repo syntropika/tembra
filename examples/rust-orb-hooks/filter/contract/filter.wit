@@ -2,16 +2,18 @@ package example:filter@1.0.0;
 
 /// The contributor's own service.
 interface report {
-  /// What this contributor observed.
+  /// What this contributor observed: admissions seen, and how many it blocked.
   record counts {
     seen: u32,
     blocked: u32,
   }
-  /// Admissions seen and blocked so far.
+  /// Admissions seen and blocked so far by this instance of the Orb.
   read: func() -> counts;
 }
 
 world filter {
+  import tembra:guest/resources@1.0.0;
+  export tembra:guest/resources-init@1.0.0;
   import example:admission/guard@1.0.0;
   export example:admission/guard@1.0.0;
   export report;

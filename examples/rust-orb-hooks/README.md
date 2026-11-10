@@ -1,17 +1,18 @@
 # Rust Orb contributing to a hook
 
-This example runs two Orbs with state. A native Orb, `gate`, declares a waterfall hook and keeps a
-ledger of the admissions it decided. A compiled Orb, `filter`, written in Rust with `#[orb]` and
-built with `cargo tembra`, contributes to that hook, blocks negative values and counts what it saw.
-The host installs both and drives three admissions.
+This example runs two Orbs. A native Orb, `gate`, declares a waterfall hook and keeps a ledger of
+the admissions it decided. A compiled Orb, `filter`, written in Rust with `#[orb]` and built with
+`cargo tembra`, contributes to that hook, blocks negative values and counts what it saw in a
+resource of its root that the kernel opens and closes. The host installs both, drives three
+admissions, reloads the contributor and drives one more.
 
-| File                         | Role                                                                                                |
-| ---------------------------- | --------------------------------------------------------------------------------------------------- |
-| `wit/admission.wit`          | The hook contract: the `guard` interface with its `apply` callback, exported by `provider`          |
-| `filter/src/lib.rs`          | The compiled contributor: `#[hook]` on a `pub fn`, counts in statics, a `report` service            |
-| `filter/contract/filter.wit` | The contract `cargo tembra build` wrote: the hook imported and exported, `example:admission` nested |
-| `host/src/main.rs`           | The native `gate` Orb with its hook and ledger, and the application code installing both            |
-| `run.sh`                     | Build, show the contract, run the host                                                              |
+| File                         | Role                                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------------------- |
+| `wit/admission.wit`          | The hook contract: the `guard` interface with its `apply` callback, exported by `provider`        |
+| `filter/src/lib.rs`          | The compiled contributor: `#[hook]` on a `pub fn`, counts in a `#[resource]`, a `report` service  |
+| `filter/contract/filter.wit` | The contract `cargo tembra build` wrote: the hook imported and exported, the kernel's resources   |
+| `host/src/main.rs`           | The native `gate` Orb with its hook and ledger, and the application code installing and reloading |
+| `run.sh`                     | Build, show the contract, run the host                                                            |
 
 ## Why the provider is native
 
@@ -30,13 +31,14 @@ cargo install --path crates/cargo-tembra
 cargo tembra build --manifest-path examples/rust-orb-hooks/filter/Cargo.toml
 ```
 
-The summary lists the contribution next to the service:
+The summary lists the contribution and the resources next to the service:
 
 ```text
 exports, the services of filter:
   filter::example:filter/report@1.0.0  methods: read
 hook contributions, bound to the provider with Install::requires:
   example:admission/guard@1.0.0  priority -7
+kernel-managed resources: the kernel opens and closes the resources of this Orb's root (tembra:guest/resources@1.0.0)
 ```
 
 The priority comes from the attribute, `#[hook("example:admission/guard@1.0.0", priority = -7)]`,
@@ -57,20 +59,39 @@ admit(-3) -> {"blocked":true,"value":-3}
 admit(8) -> {"blocked":false,"value":8}
 gate ledger -> {"admitted":[5,8],"blocked":1}
 filter report -> {"blocked":1,"seen":3}
+filter reloaded
+admit(-1) -> {"blocked":true,"value":-1}
+gate ledger -> {"admitted":[5,8],"blocked":2}
+filter report -> {"blocked":1,"seen":1}
 ```
 
 The host loads the artifact with `Install::default().requires("example:admission/guard@1.0.0", "gate", 1)`:
 the imported hook interface is bound to the `gate` Orb like any other required import. Each
 `admit` runs the hook; the contributor transforms the admission and the provider records the
-decision. The two states diverge as expected: the ledger belongs to `gate`, the counts to `filter`,
-which keeps them in statics for as long as it stays installed. `run.sh` runs the three steps in
-order.
+decision. Then the host reloads `filter` with a second load of the same artifact: a new component
+instance. The ledger of the native `gate` continues, the counts of `filter` start again, because
+its resource was reopened in the new heap. `run.sh` runs the three steps in order.
 
-## Why the counts are statics
+## Why the counts are a resource, not a state
 
 The kernel keeps state for service objects, and a contribution runs in its Orb's root, which is not
 an object: there is no kernel state a contribution could update, in a compiled Orb as in a
-TypeScript one (whose contributions keep root-level data in a root resource, a value of the guest
-heap). The `report` service could own a kernel state, but only its own methods could change it.
-So the counts live in the component, and `report` reads them. The
-[state example](../rust-orb-state/README.md) shows a service whose state the kernel does keep.
+TypeScript one. What the root can own is a **resource**: a value the kernel opens when the Orb is
+activated and closes when it is torn down, in dependency order. `filter` declares one:
+
+```rust
+#[resource]
+pub struct Counts { pub seen: u32, pub blocked: u32 }
+
+impl Counts {
+    pub fn open() -> Counts { Counts { seen: 0, blocked: 0 } }
+}
+```
+
+The world gains `import tembra:guest/resources` and `export tembra:guest/resources-init`. When the
+kernel creates the root it asks the component for its declarations, then runs `open` during
+activation and `close` at teardown; `Counts::with(|counts| ...)` asks the kernel for the handle of
+the open resource and uses the value, which lives in the component. That is the same model as a
+TypeScript root resource: the kernel manages the lifecycle, the guest holds the value, and the
+value does not cross a reload. A kernel-managed state would survive the reload, but only a service's
+own methods can update one; see the [state example](../rust-orb-state/README.md).
