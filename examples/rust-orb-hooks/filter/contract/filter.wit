@@ -1,0 +1,28 @@
+package example:filter@1.0.0;
+
+interface report {
+  /// What this contributor observed.
+  record counts {
+    seen: u32,
+    blocked: u32,
+  }
+  /// Admissions seen and blocked so far.
+  read: func() -> counts;
+}
+
+world filter {
+  import example:admission/guard@1.0.0;
+  export example:admission/guard@1.0.0;
+  export report;
+}
+
+package example:admission@1.0.0 {
+  interface guard {
+    record admission {
+      value: s32,
+      blocked: bool,
+    }
+
+    apply: func(input: admission) -> admission;
+  }
+}

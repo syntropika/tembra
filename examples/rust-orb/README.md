@@ -53,6 +53,6 @@ cargo +"$(just --evaluate nightly)" rustc --manifest-path examples/rust-orb/gree
 
 ## Limits
 
-Exports only. Imports of other Orbs, WASI interfaces and hook contributions need the other party's
-WIT and are not expressed by the macro yet; see
-[the macro's limits](../../crates/orb-macro/README.md#limits).
+Imports of other Orbs and of WASI interfaces are not expressed by the macro yet; see
+[the macro's limits](../../crates/orb-macro/README.md#limits). Contributing to another Orb's hook is
+shown in [rust-orb-hooks](../rust-orb-hooks/README.md).

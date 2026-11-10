@@ -45,6 +45,7 @@ the same lifecycle.
 | [examples/rust/](examples/rust/)                       | Native orbs, identity, execution and resource lifetime                |
 | [examples/wasm-orb/](examples/wasm-orb/)               | A TypeScript orb and a compiled Rust orb built from one WIT file      |
 | [examples/rust-orb/](examples/rust-orb/)               | A Rust orb written from its code and built with `cargo tembra`        |
+| [examples/rust-orb-hooks/](examples/rust-orb-hooks/)   | A native orb with state and a hook, and a Rust orb contributing to it |
 
 ## Development
 
