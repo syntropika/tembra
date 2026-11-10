@@ -4,13 +4,15 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
-use tembra_contracts::Contract;
+use tembra_contracts::{Contract, guest};
 use wasmparser::{Parser, Payload};
 use wit_component::{DecodedWasm, WitPrinter};
 use wit_parser::{InterfaceId, PackageId, Resolve, WorldId, WorldItem, WorldKey};
 
 /// The custom section in which the macro stores the WIT it derived from the module.
 const WIT_SECTION: &str = "tembra:wit";
+/// The custom section in which the macro stores the hook priorities, as a JSON object.
+const HOOKS_SECTION: &str = "tembra:hooks";
 
 /// `cargo tembra wit`: print the reconstructed WIT, or write the contract with --emit.
 pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) -> Result<()> {
@@ -90,6 +92,22 @@ pub fn contract_text(
 
 /// The `tembra:wit` custom section of the component's core module, if the macro wrote one.
 fn embedded_wit(bytes: &[u8]) -> Result<Option<String>> {
+    embedded_section(bytes, WIT_SECTION)?
+        .map(|data| String::from_utf8(data).context("the tembra:wit section is not UTF-8"))
+        .transpose()
+}
+
+/// The hook priorities the macro stored in the component: `{"ns:name/hook@version": n}`.
+pub fn embedded_hooks(bytes: &[u8]) -> Result<BTreeMap<String, i32>> {
+    match embedded_section(bytes, HOOKS_SECTION)? {
+        Some(data) => serde_json::from_slice(&data)
+            .context("the tembra:hooks section is not a JSON object of priorities"),
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+/// A custom section of the component's core module, by name.
+fn embedded_section(bytes: &[u8], name: &str) -> Result<Option<Vec<u8>>> {
     for payload in Parser::new(0).parse_all(bytes) {
         let Payload::ModuleSection {
             unchecked_range, ..
@@ -102,10 +120,8 @@ fn embedded_wit(bytes: &[u8]) -> Result<Option<String>> {
             let Payload::CustomSection(section) = payload? else {
                 continue;
             };
-            if section.name() == WIT_SECTION {
-                let text = String::from_utf8(section.data().to_vec())
-                    .context("the tembra:wit section is not UTF-8")?;
-                return Ok(Some(text));
+            if section.name() == name {
+                return Ok(Some(section.data().to_vec()));
             }
         }
     }
@@ -143,8 +159,9 @@ fn derived_wit(resolve: &Resolve, world: WorldId, name: &str) -> Result<String> 
     Ok(text)
 }
 
-/// The packages a contract must carry along: not the synthesized root, not the standard WASI
-/// packages that ship with tembra-contracts, and only those accepted by the filter.
+/// The packages a contract must carry along: not the synthesized root, not the standard packages
+/// that ship with tembra-contracts (WASI and the kernel's `tembra:guest`), and only those
+/// accepted by the filter.
 fn nested<'a>(
     resolve: &'a Resolve,
     root: PackageId,
@@ -154,7 +171,9 @@ fn nested<'a>(
         .packages
         .iter()
         .filter(move |(id, package)| {
-            *id != root && package.name.namespace != "wasi" && keep(&package.name.to_string())
+            *id != root
+                && !matches!(package.name.namespace.as_str(), "wasi" | "tembra")
+                && keep(&package.name.to_string())
         })
         .map(|(id, _)| id)
 }
@@ -182,7 +201,8 @@ fn interface(item: &WorldItem) -> Option<InterfaceId> {
 }
 
 /// The hook contributions of a contract: the interfaces its world both imports and exports, with
-/// the given priorities or 0. A priority for an interface that is not a contribution is an error.
+/// the priorities the component carries, or 0. A priority for an interface that is not a
+/// contribution is an error.
 pub fn contributions(
     contract: &Contract,
     priorities: &BTreeMap<String, i32>,
@@ -205,9 +225,7 @@ pub fn contributions(
         .collect();
     for (id, priority) in priorities {
         let slot = contributions.get_mut(id).with_context(|| {
-            format!(
-                "[package.metadata.tembra] contributes names {id}, but the contract does not import and export it"
-            )
+            format!("#[hook] names {id}, but the contract does not import and export it")
         })?;
         *slot = *priority;
     }
@@ -263,7 +281,7 @@ pub fn inspect(
         None => None,
     };
     let contributions = match &contract {
-        Some((contract, ..)) => contributions(contract, &BTreeMap::new())?,
+        Some((contract, ..)) => contributions(contract, &embedded_hooks(&bytes)?)?,
         None => BTreeMap::new(),
     };
     summary(&resolve, world, "orb", &contributions);
@@ -299,8 +317,8 @@ fn world_key(resolve: &Resolve, key: &WorldKey, local: Option<PackageId>) -> Str
     }
 }
 
-/// Exports as services and methods, hook contributions, and imports with the grant they will
-/// need at installation.
+/// Exports as services and methods, hook contributions, kernel-managed state, and imports with
+/// the grant they will need at installation.
 pub fn summary(
     resolve: &Resolve,
     world: WorldId,
@@ -308,11 +326,16 @@ pub fn summary(
     contributions: &BTreeMap<String, i32>,
 ) {
     let world = &resolve.worlds[world];
+    let mut state = false;
     println!("exports, the services of {orb_name}:");
     for (key, item) in &world.exports {
         let id = world_key(resolve, key, None);
         if contributions.contains_key(&id) {
             continue; // a hook callback, not a service
+        }
+        if guest::reserved(&id) {
+            state = true; // the kernel's callback, answered to the kernel
+            continue;
         }
         if let WorldItem::Interface { id: interface, .. } = item {
             let methods: Vec<_> = resolve.interfaces[*interface]
@@ -331,6 +354,12 @@ pub fn summary(
             println!("  {id}  priority {priority}");
         }
     }
+    if state {
+        println!(
+            "kernel-managed state: the kernel keeps the state of this Orb's service objects ({})",
+            guest::STATE
+        );
+    }
     let mut requires = Vec::new();
     let mut grants: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (key, item) in &world.imports {
@@ -341,8 +370,8 @@ pub fn summary(
             continue; // types only: nothing to bind
         }
         let id = world_key(resolve, key, None);
-        if contributions.contains_key(&id) {
-            continue; // bound to the provider through the contribution
+        if contributions.contains_key(&id) || guest::reserved(&id) {
+            continue; // bound to the provider through the contribution, or served by the kernel
         }
         let kind = match id.split('/').next().unwrap_or_default() {
             "wasi:filesystem" => "filesystem (FilesystemGrant)",
