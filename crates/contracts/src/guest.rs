@@ -3,6 +3,7 @@
 //! A world imports them without a provider and without a grant, and exports the matching
 //! callbacks. The `tembra` namespace is reserved for them; their WIT is bundled with the standard
 //! contracts, so an Orb cannot redefine it.
+use crate::{Item, Model};
 
 /// Read and update the kernel-managed state of the service object running the call.
 pub const STATE: &str = "tembra:guest/state@1.0.0";
@@ -10,32 +11,42 @@ pub const STATE: &str = "tembra:guest/state@1.0.0";
 /// Exported by an Orb whose services own state: the kernel asks for each object's declaration.
 pub const STATE_INIT: &str = "tembra:guest/state-init@1.0.0";
 
-/// The callback of [`STATE_INIT`]: the declaration of one service's state, if it owns one.
+/// Read the handle of one of the root's open resources.
+pub const RESOURCE: &str = "tembra:guest/resources@1.0.0";
+
+/// Exported by an Orb whose root owns resources: declarations, then open and close callbacks.
+pub const RESOURCE_INIT: &str = "tembra:guest/resources-init@1.0.0";
+
+/// The declaring callback of [`STATE_INIT`] and [`RESOURCE_INIT`].
 pub const DECLARE: &str = "declare";
+
+/// The opening callback of [`RESOURCE_INIT`].
+pub const OPEN: &str = "open";
+
+/// The closing callback of [`RESOURCE_INIT`].
+pub const CLOSE: &str = "close";
+
+/// The interfaces a world imports from the kernel, each with the export that answers it.
+pub const PAIRS: [(&str, &str); 2] = [(STATE, STATE_INIT), (RESOURCE, RESOURCE_INIT)];
 
 /// Whether an interface identity belongs to the namespace reserved for kernel interfaces.
 pub fn reserved(contract: &str) -> bool {
     contract.starts_with("tembra:")
 }
 
-/// Whether a world imports [`STATE`].
-pub fn imports_state(model: &crate::Model) -> bool {
-    names(model, true, STATE)
+/// Whether a world imports the interface.
+pub fn imports(model: &Model, contract: &str) -> bool {
+    names(&model.imports, contract)
 }
 
-/// Whether a world exports [`STATE_INIT`].
-pub fn exports_state_init(model: &crate::Model) -> bool {
-    names(model, false, STATE_INIT)
+/// Whether a world exports the interface.
+pub fn exports(model: &Model, contract: &str) -> bool {
+    names(&model.exports, contract)
 }
 
-fn names(model: &crate::Model, imports: bool, contract: &str) -> bool {
-    let side = if imports {
-        &model.imports
-    } else {
-        &model.exports
-    };
+fn names(side: &[crate::Entry], contract: &str) -> bool {
     side.iter().any(|entry| match &entry.item {
-        crate::Item::Interface(interface) => interface.contract.as_deref() == Some(contract),
+        Item::Interface(interface) => interface.contract.as_deref() == Some(contract),
         _ => false,
     })
 }

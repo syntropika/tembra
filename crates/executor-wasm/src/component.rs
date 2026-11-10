@@ -222,7 +222,7 @@ fn layout(
         imports,
         contributions,
         ingress: contract.ingress().map(str::to_owned),
-        state_init: guest::exports_state_init(contract.model()),
+        state_init: guest::exports(contract.model(), guest::STATE_INIT),
     })
 }
 

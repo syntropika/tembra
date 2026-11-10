@@ -177,7 +177,7 @@ impl PreparedContract {
                     })?;
                     // Kernel callbacks are answered to the kernel, never offered as services.
                     if guest::reserved(&contract) {
-                        if contract == guest::STATE_INIT {
+                        if guest::PAIRS.iter().any(|(_, export)| contract == *export) {
                             continue;
                         }
                         return Err(Error(format!(
@@ -267,10 +267,11 @@ impl PreparedContract {
                     )));
                 }
                 Binding::Kernel => {
-                    if contract != guest::STATE {
+                    if !guest::PAIRS.iter().any(|(import, _)| contract == *import) {
                         return Err(Error(format!(
-                            "{binding}: the kernel serves only {}",
-                            guest::STATE
+                            "{binding}: the kernel serves only {} and {}",
+                            guest::STATE,
+                            guest::RESOURCE
                         )));
                     }
                 }
@@ -351,14 +352,14 @@ impl PreparedContract {
         if let Some(unused) = bindings.keys().find(|name| !used.contains(*name)) {
             return Err(Error(format!("unused provider binding {unused}")));
         }
-        // State is declared through the export and used through the import: one without the
-        // other is a world that can never work.
-        if guest::imports_state(self.model()) != guest::exports_state_init(self.model()) {
-            return Err(Error(format!(
-                "a world importing {} exports {}, and the other way round",
-                guest::STATE,
-                guest::STATE_INIT
-            )));
+        // A kernel interface is declared through the export and used through the import: one
+        // without the other is a world that can never work.
+        for (import, export) in guest::PAIRS {
+            if guest::imports(self.model(), import) != guest::exports(self.model(), export) {
+                return Err(Error(format!(
+                    "a world importing {import} exports {export}, and the other way round"
+                )));
+            }
         }
         orb.requires = requirements.into_values().collect();
         Ok(Plan {
