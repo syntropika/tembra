@@ -11,7 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tembra::Host;
 use tembra_executor_wasm::{Engine, Grants, HttpGrant, Install, Limits};
@@ -121,6 +121,8 @@ fn run(interpreted: bool) {
         .join("online.wasm"),
     )
     .unwrap();
+    let mode = if interpreted { "pulley" } else { "cranelift" };
+    let preparing = Instant::now();
     let engine = if interpreted {
         Engine::interpreted(Limits::default())
     } else {
@@ -128,9 +130,15 @@ fn run(interpreted: bool) {
     }
     .unwrap()
     .interpreter(&component)
-    .unwrap()
+    .unwrap_or_else(|error| {
+        panic!(
+            "HTTP fixture mode={mode} phase=prepare elapsed={:?}: {error:?}",
+            preparing.elapsed()
+        )
+    })
     .network("tcp")
     .unwrap();
+    let prepared_in = preparing.elapsed();
     let install =
         || Install::default().requires("example:integrated/arithmetic@1.0.0", "native.math", 1);
     assert!(engine.load(&bytes, install()).is_err());
@@ -143,7 +151,13 @@ fn run(interpreted: bool) {
     };
     let mut allowed = install();
     allowed.grants = grants;
-    let orb = engine.load(&bytes, allowed).unwrap();
+    let loading = Instant::now();
+    let orb = engine.load(&bytes, allowed).unwrap_or_else(|error| {
+        panic!(
+            "HTTP fixture mode={mode} phase=load elapsed={:?} prepare={prepared_in:?}: {error:?}",
+            loading.elapsed()
+        )
+    });
     let native = support::native_math("native.math");
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());

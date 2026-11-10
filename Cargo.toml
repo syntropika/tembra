@@ -54,3 +54,7 @@ strip = "symbols"
 # Optimize the bytecode dispatch loop without increasing optimization across the host.
 [profile.release.package.pulley-interpreter]
 opt-level = 3
+
+# Exercise interpreted execution within real deadlines while retaining test debug assertions.
+[profile.test.package.pulley-interpreter]
+opt-level = 3
