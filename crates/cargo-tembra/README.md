@@ -51,13 +51,18 @@ interfaces its world both imports and exports; the metadata only sets their prio
 ## Build outputs
 
 ```text
-contract/
+<crate>/contract/
   <world>.wit        the contract: the Orb's WIT, consumed packages nested after it; commit it
-artifacts/
+<crate>/artifacts/
   <name>.wasm        the compiled component
   <name>.orb.wasm    the Tembra artifact: the component plus the tembra:orb section
   checksums.txt      SHA-256 of both files
 ```
+
+Both directories sit inside the Orb's crate, like `schema/` and `artifacts/` of a CosmWasm contract:
+the first is committed, the second is a build output to ignore. With `--out <dir>` the component,
+the artifact, a copy of the contract and the checksums go to that directory instead, so a
+repository with several Orbs can collect them in one place.
 
 and a summary, here for the filter of the hooks example:
 
