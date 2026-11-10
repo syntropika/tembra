@@ -15,16 +15,22 @@ pub(crate) fn kebab(ident: &Ident) -> String {
     ident.to_string().to_kebab_case()
 }
 
+/// Which kernel interfaces the world uses.
+pub(crate) struct Kernel {
+    pub state: bool,
+    pub resources: bool,
+}
+
 /// Write the package: one interface per service, the types in the first interface and borrowed by
-/// the others with `use`, then a world using the kernel's state interfaces when a state exists,
-/// importing and exporting every contributed hook, and exporting every interface.
+/// the others with `use`, then a world using the kernel's interfaces for its states and
+/// resources, importing and exporting every contributed hook, and exporting every interface.
 pub(crate) fn render<'a>(
     package: &str,
     world: &str,
     shapes: &[Shape],
     services: &[Service],
     hooks: impl Iterator<Item = &'a String>,
-    state: bool,
+    kernel: Kernel,
 ) -> String {
     let mut wit = format!("package {package};\n");
     for (index, service) in services.iter().enumerate() {
@@ -71,9 +77,14 @@ pub(crate) fn render<'a>(
         wit.push_str("}\n");
     }
     wit.push_str(&format!("\nworld {world} {{\n"));
-    if state {
+    if kernel.state {
         wit.push_str(&format!(
             "  import {GUEST_STATE};\n  export {GUEST_STATE_INIT};\n"
+        ));
+    }
+    if kernel.resources {
+        wit.push_str(&format!(
+            "  import {GUEST_RESOURCES};\n  export {GUEST_RESOURCES_INIT};\n"
         ));
     }
     for hook in hooks {
@@ -86,9 +97,11 @@ pub(crate) fn render<'a>(
     wit
 }
 
-/// The kernel's state interfaces, as the world names them.
+/// The kernel's interfaces, as the world names them.
 const GUEST_STATE: &str = "tembra:guest/state@1.0.0";
 const GUEST_STATE_INIT: &str = "tembra:guest/state-init@1.0.0";
+const GUEST_RESOURCES: &str = "tembra:guest/resources@1.0.0";
+const GUEST_RESOURCES_INIT: &str = "tembra:guest/resources-init@1.0.0";
 
 /// The kernel's `tembra:guest` package in nested form, appended to the inline WIT so the bindings
 /// of a state resolve it; `cargo tembra` reads the same package from `tembra-contracts`.

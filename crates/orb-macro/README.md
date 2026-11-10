@@ -6,7 +6,8 @@ script. [`cargo tembra build`](../cargo-tembra/README.md) compiles the crate, re
 macro embedded in the component and packages the artifact. The
 [Rust orb example](../../examples/rust-orb/README.md) shows the whole path; the
 [hooks example](../../examples/rust-orb-hooks/README.md) adds a contribution to another Orb's hook;
-the [state example](../../examples/rust-orb-state/README.md) gives a service kernel-managed state.
+the [state example](../../examples/rust-orb-state/README.md) gives a service kernel-managed state;
+the hooks example also keeps its counts in a resource of the Orb's root.
 
 ```rust
 #![cfg_attr(target_arch = "wasm32", no_std)]
@@ -42,19 +43,20 @@ mod greeter {
 
 ## What the macro reads
 
-| In the module                                                          | In the WIT                                                                    |
-| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| the module name                                                        | the `world`                                                                   |
-| `package = "..."` on the attribute                                     | `package ns:name@version;`                                                    |
-| `wit = "dir"` on the attribute                                         | the directory with the WIT packages the Orb consumes, relative to the crate   |
-| a unit struct with `#[service]` and an `impl` block of `pub fn`        | an exported `interface`, in kebab-case                                        |
-| each `pub fn` without `self`                                           | a `func`; name and parameters in kebab-case                                   |
-| a struct with named fields, when a service method or a state uses it   | a `record`                                                                    |
-| an enum, when a service method uses it                                 | an `enum` when every variant is empty, otherwise a `variant`                  |
-| `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples  | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`  |
-| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`   | `import` and `export` of that hook interface in the world                     |
-| a struct with named fields and `#[state(service = Name, version = n)]` | `import tembra:guest/state` and `export tembra:guest/state-init` in the world |
-| `///` comments                                                         | `///` comments in the WIT                                                     |
+| In the module                                                          | In the WIT                                                                            |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| the module name                                                        | the `world`                                                                           |
+| `package = "..."` on the attribute                                     | `package ns:name@version;`                                                            |
+| `wit = "dir"` on the attribute                                         | the directory with the WIT packages the Orb consumes, relative to the crate           |
+| a unit struct with `#[service]` and an `impl` block of `pub fn`        | an exported `interface`, in kebab-case                                                |
+| each `pub fn` without `self`                                           | a `func`; name and parameters in kebab-case                                           |
+| a struct with named fields, when a service method or a state uses it   | a `record`                                                                            |
+| an enum, when a service method uses it                                 | an `enum` when every variant is empty, otherwise a `variant`                          |
+| `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples  | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`          |
+| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`   | `import` and `export` of that hook interface in the world                             |
+| a struct with named fields and `#[state(service = Name, version = n)]` | `import tembra:guest/state` and `export tembra:guest/state-init` in the world         |
+| a struct with `#[resource(version = n)]` and a `pub fn open() -> Self` | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world |
+| `///` comments                                                         | `///` comments in the WIT                                                             |
 
 Nothing is exported by accident. A service is a unit struct marked `#[service]`; the `pub fn` of
 its `impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT
@@ -136,9 +138,42 @@ grants nothing for them.
 Two rules follow from the kernel, not from the macro. A service's state is reached only by the
 methods of that service: a call runs on one object, and the kernel refuses an update from any
 other context. An Orb's root is not an object, so a hook contribution, which runs in the root, has
-no state to read or write; what a contribution counts stays in the component, in `static`s, as the
-[hooks example](../../examples/rust-orb-hooks/README.md) shows. One state per service object:
-group what an object owns in one struct, and let observers select the fields they care about.
+no state to read or write; what a contribution needs or counts is a resource of the root, below.
+One state per service object: group what an object owns in one struct, and let observers select
+the fields they care about.
+
+## Resources of the Orb's root
+
+A resource is a value the kernel opens when the Orb is activated and closes when it is torn down,
+in the order its dependencies require, and that every method and hook callback of the Orb can
+use. A struct marked `#[resource]`, with a `pub fn open() -> Self` and optionally a
+`pub fn close(self)` in its `impl` block, is a resource of the Orb's root:
+
+```rust
+/// What this contributor observed.
+#[resource]
+pub struct Counts { pub seen: u32, pub blocked: u32 }
+
+impl Counts {
+    pub fn open() -> Counts { Counts { seen: 0, blocked: 0 } }
+}
+
+#[hook("example:admission/guard@1.0.0", priority = -7)]
+pub fn block_negative(input: guard::Admission) -> guard::Admission {
+    Counts::with(|counts| counts.seen += 1);
+    // ...
+}
+```
+
+The macro gives the type `Counts::with(|counts| ...)`, which gives the closure the open value and
+returns its result; before `open` has run, or after `close`, it traps. Behind it, the world imports
+`tembra:guest/resources` and exports `tembra:guest/resources-init`: when the kernel creates the
+root it asks the component for its resource declarations (name and version), runs `open` during
+activation, and `close` at teardown; `with` asks the kernel for the handle of the open resource
+first. The value lives in the component, one per instance, as the TypeScript guest's root
+resources do: a reload gives the Orb a fresh instance whose resources the kernel opens again. A
+resource struct enters the WIT only when a service method uses it; a resource may hold types the
+WIT has no spelling for, such as a client of some granted I/O.
 
 ## What it generates
 
@@ -160,10 +195,12 @@ The macro rewrites the module with:
    generated traits share one type; and `pub use exports::...::guard;` for each contributed hook;
 6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface by forwarding to the
-   author's functions, hook callbacks and the kernel's `state-init` callback included, and
-   `export!`;
+   author's functions, hook callbacks and the kernel's `state-init` and `resources-init`
+   callbacks included, and `export!`;
 8. with a state, `Default` and the `read`/`update` functions on each state type, over a hidden
-   module that maps the kernel's JSON to the type with `serde_json`.
+   module that maps the kernel's JSON to the type with `serde_json`;
+9. with a resource, one slot in the component's memory per resource, filled by `open` and
+   emptied by `close`, and the `with` function on each resource type.
 
 The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmalloc` (feature
 `global`) among its dependencies, and `serde` (features `derive`, `alloc`) and `serde_json`
@@ -175,8 +212,10 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
   contribution is the only way to consume another Orb's WIT.
 - Compiled Orbs cannot declare hooks: the kernel does not accept hook providers from components
   yet, so a provider stays native or TypeScript.
-- Functions are associated functions without `self`. Besides a service's state, data lives in
-  `static`s, as in the compiled fixtures of `executor-wasm`.
+- Functions are associated functions without `self`. Besides a service's state and the root's
+  resources, data lives in `static`s, as in the compiled fixtures of `executor-wasm`.
+- Resources belong to the root, declare no dependencies on one another, and are opened in the
+  order the kernel chooses; `open` and `close` take no arguments besides the value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary.
 - Types: records, enums, variants and the scalar, string, list, option, result and tuple types.

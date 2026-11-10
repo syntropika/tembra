@@ -4,9 +4,11 @@
 //! `#[service]` and an `impl` block of `pub fn` becomes an exported interface whose functions are
 //! the Orb's methods. A free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`
 //! participates in another Orb's hook. A struct with named fields and `#[state]` is the
-//! kernel-managed state of a service's objects. Structs with named fields and enums become
-//! `record`s, `enum`s and `variant`s only when a service method or a state uses them, directly
-//! or through another type; the rest of the module stays ordinary Rust.
+//! kernel-managed state of a service's objects. A struct with `#[resource]` and a `pub fn open()`
+//! is a resource of the Orb's root, opened by the kernel at activation and usable by every
+//! method and hook callback. Structs with named fields and enums become `record`s, `enum`s and
+//! `variant`s only when a service method or a state uses them, directly or through another type;
+//! the rest of the module stays ordinary Rust.
 //!
 //! The macro derives the WIT contract from those items and generates what a WIT-first crate
 //! writes by hand: the `wit_bindgen::generate!` invocation with the WIT inline, the `Guest`
@@ -23,7 +25,7 @@
 //! packages the artifact.
 mod wit;
 
-use heck::ToSnakeCase;
+use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -106,6 +108,15 @@ struct State {
     version: u32,
 }
 
+/// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a
+/// `pub fn open() -> Self` and, optionally, a `pub fn close(self)`.
+struct Resource {
+    ident: Ident,
+    version: u32,
+    /// Whether the author defined `close`.
+    close: bool,
+}
+
 fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenStream> {
     let package = options
         .package
@@ -131,12 +142,22 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let mut services = Vec::new();
     let mut contributions = Vec::new();
     let mut states = Vec::new();
+    let mut resources: Vec<Resource> = Vec::new();
     let mut passthrough = Vec::new();
     let mut impls = Vec::new();
     for item in items {
         match item {
             Item::Struct(mut s) => {
-                if let Some(attribute) = take(&mut s.attrs, "state") {
+                if let Some(attribute) = take(&mut s.attrs, "resource") {
+                    resources.push(resource(&s, &attribute)?);
+                    // A resource enters the WIT only when a service method uses it.
+                    if matches!(s.fields, Fields::Named(_)) {
+                        let shape = wit::record(&s)?;
+                        candidates.push((Item::Struct(s), shape));
+                    } else {
+                        passthrough.push(Item::Struct(s));
+                    }
+                } else if let Some(attribute) = take(&mut s.attrs, "state") {
                     states.push(state(&s, &attribute)?);
                     let shape = wit::record(&s)?;
                     candidates.push((Item::Struct(s), shape));
@@ -207,6 +228,40 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 service.functions.push(method(function)?);
             }
         }
+    }
+    for resource in &mut resources {
+        let functions = impls
+            .iter()
+            .filter(|item| {
+                matches!(&*item.self_ty, Type::Path(path) if path.path.is_ident(&resource.ident))
+            })
+            .flat_map(|item| &item.items)
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(function) if matches!(function.vis, Visibility::Public(_)) => {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let opens = functions.iter().any(|function| {
+            function.sig.ident == "open"
+                && function.sig.inputs.is_empty()
+                && !matches!(function.sig.output, ReturnType::Default)
+        });
+        if !opens {
+            return Err(syn::Error::new(
+                resource.ident.span(),
+                format!(
+                    "a resource needs `pub fn open() -> {0}` in an impl block; `pub fn close(self)` is optional",
+                    resource.ident
+                ),
+            ));
+        }
+        resource.close = functions.iter().any(|function| {
+            function.sig.ident == "close"
+                && function.sig.inputs.len() == 1
+                && matches!(function.sig.inputs.first(), Some(FnArg::Receiver(_)))
+        });
     }
     if services.is_empty() {
         return Err(syn::Error::new(
@@ -298,7 +353,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &shapes,
         &services,
         hooks.keys(),
-        !states.is_empty(),
+        wit::Kernel {
+            state: !states.is_empty(),
+            resources: !resources.is_empty(),
+        },
     );
 
     // Generate the Rust side: the bindings from the inline WIT, the author's types replaced by
@@ -386,13 +444,15 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         }
     };
     let state_code = state_code(&states, &package, name, version);
+    let resource_code = resource_code(&resources);
     let wit_literal = LitStr::new(&wit, Span::call_site());
     let wit_bytes = LitByteStr::new(wit.as_bytes(), Span::call_site());
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
     let world_literal = LitStr::new(&world, Span::call_site());
-    // The bindings read the author's WIT and, nested in it, the kernel package a state uses; the
-    // hook packages come from the consumed directory. Foreign interfaces need `generate_all`.
-    let inline = if states.is_empty() {
+    // The bindings read the author's WIT and, nested in it, the kernel package a state or a
+    // resource uses; the hook packages come from the consumed directory. Foreign interfaces need
+    // `generate_all`.
+    let inline = if states.is_empty() && resources.is_empty() {
         wit_literal.clone()
     } else {
         LitStr::new(
@@ -454,6 +514,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             #(#bridges)*
             #(#contribution_bridges)*
             #state_code
+            #resource_code
             export!(__TembraExports);
         }
     })
@@ -739,6 +800,146 @@ fn state_code(
 
             fn parse<T: ::serde::de::DeserializeOwned>(text: &str) -> T {
                 ::serde_json::from_str(text).expect("the kernel state has the shape of this type")
+            }
+        }
+    }
+}
+
+/// Read a resource: any struct, with the version of its contract (default 1).
+fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resource> {
+    let mut version = 1;
+    if !matches!(attribute.meta, syn::Meta::Path(_)) {
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("version") {
+                let literal: LitInt = meta.value()?.parse()?;
+                version = literal.base10_parse::<u32>()?;
+                if version == 0 {
+                    return Err(syn::Error::new(literal.span(), "versions start at 1"));
+                }
+            } else {
+                return Err(meta.error("unknown option; use #[resource(version = n)]"));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(Resource {
+        ident: item.ident.clone(),
+        version,
+        close: false,
+    })
+}
+
+/// The Rust side of the resources: the kernel's `resources-init` callbacks listing, opening and
+/// closing them, one slot in the component's memory per resource, and `with` on each type.
+fn resource_code(resources: &[Resource]) -> proc_macro2::TokenStream {
+    if resources.is_empty() {
+        return quote! {};
+    }
+    let slot = |resource: &Resource| {
+        format_ident!(
+            "__TEMBRA_RESOURCE_{}",
+            resource.ident.to_string().to_shouty_snake_case()
+        )
+    };
+    let declarations = resources.iter().map(|resource| {
+        let name = wit::kebab(&resource.ident);
+        let version = resource.version;
+        quote! {
+            exports::tembra::guest::resources_init::Declaration {
+                name: __tembra_resource::String::from(#name),
+                version: #version,
+            }
+        }
+    });
+    let openers = resources.iter().map(|resource| {
+        let name = wit::kebab(&resource.ident);
+        let ident = &resource.ident;
+        let slot = slot(resource);
+        quote! { #name => { #slot.open(#ident::open()); 1 } }
+    });
+    let closers = resources.iter().map(|resource| {
+        let name = wit::kebab(&resource.ident);
+        let slot = slot(resource);
+        if resource.close {
+            quote! { #name => { if let Some(value) = #slot.close() { value.close(); } } }
+        } else {
+            quote! { #name => { #slot.close(); } }
+        }
+    });
+    let slots = resources.iter().map(|resource| {
+        let ident = &resource.ident;
+        let slot = slot(resource);
+        let name = wit::kebab(&resource.ident);
+        let doc = format!(
+            " Use the resource `{name}` of this Orb's root, opened by the kernel at activation; the kernel confirms it is open, the value lives in this component."
+        );
+        quote! {
+            static #slot: __tembra_resource::Slot<#ident> = __tembra_resource::Slot::new();
+            impl #ident {
+                #[doc = #doc]
+                pub fn with<R>(use_: impl FnOnce(&mut Self) -> R) -> R {
+                    let _handle = self::tembra::guest::resources::read(#name);
+                    #slot.with(use_)
+                }
+            }
+        }
+    });
+    quote! {
+        // The kernel lists the root's resources when it creates the root, then opens and closes
+        // each of them in its own order through these callbacks.
+        impl exports::tembra::guest::resources_init::Guest for __TembraExports {
+            fn declare() -> __tembra_resource::Vec<exports::tembra::guest::resources_init::Declaration> {
+                __tembra_resource::Vec::from([#(#declarations),*])
+            }
+            fn open(name: __tembra_resource::String) -> u32 {
+                match name.as_str() {
+                    #(#openers)*
+                    _ => ::core::panic!("unknown resource"),
+                }
+            }
+            fn close(name: __tembra_resource::String, _handle: u32) {
+                match name.as_str() {
+                    #(#closers)*
+                    _ => {}
+                }
+            }
+        }
+        #(#slots)*
+        /// A resource's value lives in the component while the resource is open.
+        #[doc(hidden)]
+        pub mod __tembra_resource {
+            extern crate alloc;
+            pub use alloc::{string::String, vec::Vec};
+
+            /// One resource's value, absent until the kernel opens it and after it closes it.
+            pub struct Slot<T>(::core::cell::RefCell<Option<T>>);
+
+            // SAFETY: a component runs one export at a time on one thread, so the slot is never
+            // reached from two threads; the RefCell refuses a reentrant use at run time.
+            unsafe impl<T> Sync for Slot<T> {}
+
+            impl<T> Slot<T> {
+                pub const fn new() -> Self {
+                    Self(::core::cell::RefCell::new(None))
+                }
+
+                pub fn open(&self, value: T) {
+                    *self.0.borrow_mut() = Some(value);
+                }
+
+                pub fn close(&self) -> Option<T> {
+                    self.0.borrow_mut().take()
+                }
+
+                pub fn with<R>(&self, use_: impl FnOnce(&mut T) -> R) -> R {
+                    use_(self.0.borrow_mut().as_mut().expect("the resource is not open"))
+                }
+            }
+
+            impl<T> Default for Slot<T> {
+                fn default() -> Self {
+                    Self::new()
+                }
             }
         }
     }
