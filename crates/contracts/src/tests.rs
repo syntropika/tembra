@@ -298,6 +298,8 @@ interface counter { add: func(by: s64) -> s64; }
 world stateful {
     import tembra:guest/state@1.0.0;
     export tembra:guest/state-init@1.0.0;
+    import tembra:guest/resources@1.0.0;
+    export tembra:guest/resources-init@1.0.0;
     export counter;
 }
 "#;
@@ -309,6 +311,7 @@ fn kernel_interfaces_bind_to_the_kernel_without_a_provider_or_grant() {
         .providers(&BTreeMap::new(), &Grants::default())
         .unwrap();
     assert_eq!(bindings.get(guest::STATE), Some(&Binding::Kernel));
+    assert_eq!(bindings.get(guest::RESOURCE), Some(&Binding::Kernel));
     let plan = contract.plan("counter", 1, &bindings).unwrap();
     assert!(plan.host_imports.is_empty());
     assert!(plan.orb.requires.is_empty());
@@ -332,14 +335,22 @@ fn kernel_interfaces_bind_to_the_kernel_without_a_provider_or_grant() {
     .into();
     assert!(contract.plan("counter", 1, &wrong).is_err());
 
-    // The import and the export come together.
-    let half = STATEFUL.replace("    export tembra:guest/state-init@1.0.0;\n", "");
-    let contract = Contract::from_source("half.wit", &half, None).unwrap();
-    let bindings = contract
-        .providers(&BTreeMap::new(), &Grants::default())
-        .unwrap();
-    let error = contract.plan("counter", 1, &bindings).unwrap_err();
-    assert!(error.0.contains("state-init"), "{error}");
+    // The import and the export come together, for each kernel interface.
+    for (export, name) in [
+        ("    export tembra:guest/state-init@1.0.0;\n", "state-init"),
+        (
+            "    export tembra:guest/resources-init@1.0.0;\n",
+            "resources-init",
+        ),
+    ] {
+        let half = STATEFUL.replace(export, "");
+        let contract = Contract::from_source("half.wit", &half, None).unwrap();
+        let bindings = contract
+            .providers(&BTreeMap::new(), &Grants::default())
+            .unwrap();
+        let error = contract.plan("counter", 1, &bindings).unwrap_err();
+        assert!(error.0.contains(name), "{error}");
+    }
 
     // The namespace is reserved: other kernel interfaces are refused, and the package cannot
     // be redefined by an Orb.

@@ -34,13 +34,14 @@ impl PreparedContract {
                 .as_deref()
                 .filter(|id| guest::reserved(id))
             {
-                if contract != guest::STATE {
+                if !guest::PAIRS.iter().any(|(import, _)| contract == *import) {
                     return Err(Error::new(
                         Code::Unsupported,
                         "wit_binding",
                         format!(
-                            "{binding}: the tembra namespace is reserved for kernel interfaces; this kernel serves {}",
-                            guest::STATE
+                            "{binding}: the tembra namespace is reserved for kernel interfaces; this kernel serves {} and {}",
+                            guest::STATE,
+                            guest::RESOURCE
                         ),
                     ));
                 }
