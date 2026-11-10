@@ -3,7 +3,7 @@ use crate::{Service, Shape};
 use heck::ToKebabCase;
 use proc_macro2::Span;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 use syn::{
@@ -16,14 +16,15 @@ pub(crate) fn kebab(ident: &Ident) -> String {
 }
 
 /// Write the package: one interface per service, the types in the first interface and borrowed by
-/// the others with `use`, then a world importing and exporting every contributed hook and
-/// exporting every interface.
-pub(crate) fn render(
+/// the others with `use`, then a world using the kernel's state interfaces when a state exists,
+/// importing and exporting every contributed hook, and exporting every interface.
+pub(crate) fn render<'a>(
     package: &str,
     world: &str,
     shapes: &[Shape],
     services: &[Service],
-    hooks: &BTreeSet<String>,
+    hooks: impl Iterator<Item = &'a String>,
+    state: bool,
 ) -> String {
     let mut wit = format!("package {package};\n");
     for (index, service) in services.iter().enumerate() {
@@ -70,6 +71,11 @@ pub(crate) fn render(
         wit.push_str("}\n");
     }
     wit.push_str(&format!("\nworld {world} {{\n"));
+    if state {
+        wit.push_str(&format!(
+            "  import {GUEST_STATE};\n  export {GUEST_STATE_INIT};\n"
+        ));
+    }
     for hook in hooks {
         wit.push_str(&format!("  import {hook};\n  export {hook};\n"));
     }
@@ -80,6 +86,20 @@ pub(crate) fn render(
     wit
 }
 
+/// The kernel's state interfaces, as the world names them.
+const GUEST_STATE: &str = "tembra:guest/state@1.0.0";
+const GUEST_STATE_INIT: &str = "tembra:guest/state-init@1.0.0";
+
+/// The kernel's `tembra:guest` package in nested form, appended to the inline WIT so the bindings
+/// of a state resolve it; `cargo tembra` reads the same package from `tembra-contracts`.
+pub(crate) fn guest_package() -> String {
+    const GUEST: &str = include_str!("../../contracts/wit/tembra/guest.wit");
+    let (package, body) = GUEST
+        .split_once(";\n")
+        .expect("the guest package starts with its declaration");
+    format!("{package} {{\n{}}}\n", body.trim_start_matches('\n'))
+}
+
 /// A directory of consumed WIT packages, resolved against the crate manifest.
 pub(crate) fn absolute(dir: &str) -> syn::Result<PathBuf> {
     let manifest = std::env::var_os("CARGO_MANIFEST_DIR")
@@ -88,9 +108,9 @@ pub(crate) fn absolute(dir: &str) -> syn::Result<PathBuf> {
 }
 
 /// The callback of every hook: the single function of its interface in the consumed packages.
-pub(crate) fn callbacks(
+pub(crate) fn callbacks<'a>(
     dir: &Path,
-    hooks: &BTreeSet<String>,
+    hooks: impl Iterator<Item = &'a String>,
 ) -> syn::Result<BTreeMap<String, String>> {
     let mut resolve = wit_parser::Resolve::default();
     resolve.push_dir(dir).map_err(|cause| {
@@ -100,7 +120,6 @@ pub(crate) fn callbacks(
         ))
     })?;
     hooks
-        .iter()
         .map(|hook| {
             let (_, interface) = resolve
                 .interfaces
