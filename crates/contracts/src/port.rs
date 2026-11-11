@@ -84,7 +84,37 @@ impl PreparedContract {
         envelope(
             serde_json::from_str::<Request>(packet)
                 .map_err(invalid)
-                .and_then(|request| self.query(request)),
+                .and_then(|request| self.query(request, false)),
+        )
+    }
+
+    /// Serve the bounded capability profile of an already verified compiled component.
+    pub fn request_resources(&self, packet: &str) -> String {
+        envelope(
+            serde_json::from_str::<Request>(packet)
+                .map_err(invalid)
+                .and_then(|request| self.query(request, true)),
+        )
+    }
+
+    /// Check the data lane of a capability call; attachments are checked by its executor.
+    pub fn validate_resource_packet(&self, slot: u32, arguments: bool, value: &str) -> String {
+        if let Some(bound) = self.slots().get(slot as usize)
+            && !bound.exports
+            && self
+                .references()
+                .contains_key(&self.side(false)[bound.entry as usize].key)
+        {
+            return self.validate_packet(slot, arguments, value);
+        }
+        envelope(
+            serde_json::from_str::<Value>(value)
+                .map_err(invalid)
+                .and_then(|value| {
+                    self.from_resource_wire(slot, arguments, value)
+                        .map_err(invalid)
+                })
+                .map(|_| Value::Null),
         )
     }
 
@@ -114,7 +144,7 @@ impl PreparedContract {
     }
 
     /// Answer the install-time metadata queries; value checks use bound slots instead.
-    fn query(&self, request: Request) -> Result<Value> {
+    fn query(&self, request: Request, resources: bool) -> Result<Value> {
         match request {
             Request::Describe {} => Ok(self.describe()),
             Request::Install {
@@ -127,7 +157,17 @@ impl PreparedContract {
                 http,
             } => {
                 let bindings = self.providers(&requires, &grants)?;
-                self.check_profiles(&bindings)?;
+                if resources {
+                    self.check_resource_profile().map_err(invalid)?;
+                    for (binding, provider) in &bindings {
+                        if matches!(provider, Binding::Orb { .. }) {
+                            self.check_import_resource_profile(binding)
+                                .map_err(invalid)?;
+                        }
+                    }
+                } else {
+                    self.check_profiles(&bindings)?;
+                }
                 let plan = self.plan(&name, api_version, &bindings).map_err(invalid)?;
                 grants.check(&plan.host_imports, &filesystem, &network, &http)?;
                 Ok(serde_json::json!({
@@ -142,7 +182,17 @@ impl PreparedContract {
                 value,
                 bindings,
             } => {
-                self.check_profiles(&bindings)?;
+                if resources {
+                    self.check_resource_profile().map_err(invalid)?;
+                    for (binding, provider) in &bindings {
+                        if matches!(provider, Binding::Orb { .. }) {
+                            self.check_import_resource_profile(binding)
+                                .map_err(invalid)?;
+                        }
+                    }
+                } else {
+                    self.check_profiles(&bindings)?;
+                }
                 let services = self
                     .check_implementation(&name, api_version, value.clone())
                     .map_err(invalid)?;

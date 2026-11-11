@@ -119,6 +119,8 @@ function recorder(acquired: () => Promise<ReferenceClaim>) {
   const signals: AbortSignal[] = [];
   const scope: CallbackScope = {
     check() {},
+    report() {},
+    releaseResource() {},
     cancel() {},
     call: () => Promise.reject(new Error("plain call")),
     acquire: (binding, key, abandoned) => {
@@ -232,6 +234,7 @@ function session() {
   const value = {
     rootReferences,
     report() {},
+    releaseResource() {},
     scopes: {
       requirement: (_: unknown, service: string) => ({ service, apiVersion: 1, methods: ["add"] }),
     },
@@ -313,6 +316,8 @@ describe("component scope reference views", () => {
         signal: new AbortController().signal,
         ...(invocation ? { invocation: { id: root } } : {}),
         check() {},
+        report() {},
+        releaseResource() {},
       }) as unknown as Context;
     return { runtime, declared, scope, context, owner, declaration };
   };

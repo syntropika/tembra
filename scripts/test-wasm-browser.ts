@@ -90,6 +90,10 @@ const adapters = [
   "hook-compiled",
   "http-client",
   "http-handler",
+  "resource-provider",
+  "resource-consumer",
+  "stream-producer",
+  "stream-consumer",
 ];
 for (const name of adapters)
   if (!(await Bun.file(path.join(fixtures, name, "browser/index.js")).exists()))

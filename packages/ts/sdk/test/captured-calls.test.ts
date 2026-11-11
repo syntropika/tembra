@@ -89,3 +89,52 @@ test("cancellation stops a call waiting on readiness before any handler is admit
     await host.close();
   }
 });
+
+test("ordinary prepared data callers retain actual work after their bounded result fails", async () => {
+  const host = createHost();
+  const actual = Promise.withResolvers<void>();
+  let ordinaryFallback = 0;
+  let checkedData = 0;
+  const method = bindCaptured(
+    () => {
+      ordinaryFallback++;
+      return 0;
+    },
+    "data-retention",
+    async () => {
+      throw new Error("capture-only path");
+    },
+    async (_environment, _context, args, retain) => {
+      checkedData++;
+      expect(args).toEqual([7]);
+      retain(actual.promise);
+      throw new Error("bounded prepared data timeout");
+    },
+  );
+  await host.install({
+    name: "data-retention",
+    apiVersion: 1,
+    services: { data: { methods: { read: method } } },
+  });
+  const reference = await host.get("data", "main");
+  try {
+    await expect(reference.read(7)).rejects.toThrow("bounded prepared data timeout");
+    expect(checkedData).toBe(1);
+    expect(ordinaryFallback).toBe(0);
+    expect(host.diagnostics().calls).toBe(1);
+    reference.release();
+    let closed = false;
+    const closing = host.close().then(() => {
+      closed = true;
+    });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    actual.resolve();
+    await closing;
+    expect(host.diagnostics().calls).toBe(0);
+  } finally {
+    actual.resolve();
+    reference.release();
+    await host.close();
+  }
+});

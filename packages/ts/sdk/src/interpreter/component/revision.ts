@@ -19,12 +19,14 @@ import {
   signature,
   signatures,
   validateEnvironment,
+  type CapturedDelivery,
+  type ResourceCapability,
   type AdaptedOrb,
   type AdaptedService,
 } from "#tembra-adapters";
 import { Context } from "../../runtime/context.ts";
 import type { Environment } from "../../runtime/records.ts";
-import { check, checkedResult, encode, VALUE_LIMIT, type Encoded } from "../codec.ts";
+import { check, checkedResult, encode, VALUE_LIMIT, Encoded } from "../codec.ts";
 import { Gate } from "../gate.ts";
 import { HTTP_HANDLER, IngressExchange } from "../http-ingress.ts";
 import {
@@ -36,6 +38,14 @@ import {
   type ReferenceBinding,
 } from "../types.ts";
 import { lift, shapes, type Signature, type WitFunction, type WitTypes } from "../wit-shape.ts";
+import {
+  ResourceOwner,
+  resourceRoles,
+  resourceDataFunction,
+  resourceExport,
+  type ResourceRoles,
+} from "./resources.ts";
+import { issueByteStream } from "./streams.ts";
 import { viewMethod } from "./host.ts";
 import type { ComponentPort } from "./port.ts";
 import { ComponentScope, type BoundMethod, type CallbackScope, type ScopeOwner } from "./scope.ts";
@@ -109,6 +119,8 @@ export class ComponentRevision implements ScopeOwner {
   readonly views = new Map<string, Map<string, BoundMethod>>();
   readonly signatures = new Map<number, Signature>();
   readonly scopes = new Map<number, ComponentScope>();
+  readonly importedResources = new Set<ResourceCapability>();
+  readonly #issuedResources = new Map<number, Set<ResourceOwner>>();
   /** The instance's incoming-HTTP bridge from the HTTP adapter (`wasi.ts`). */
   ingressBridge: IngressBridge | undefined;
   #closed = false;
@@ -118,7 +130,17 @@ export class ComponentRevision implements ScopeOwner {
     readonly contract: ContractPort,
     readonly graph: Described,
     readonly timeout: number,
-  ) {}
+  ) {
+    port.wasi.retired.addEventListener(
+      "abort",
+      () => {
+        for (const owner of this.importedResources) owner.close();
+        for (const owners of this.#issuedResources.values())
+          for (const owner of owners) owner.close();
+      },
+      { once: true },
+    );
+  }
 
   /** Call one typed export under an admitted callback and answer checked result bytes. */
   private async invoke(
@@ -130,22 +152,105 @@ export class ComponentRevision implements ScopeOwner {
     environment: ComponentScope,
     scope: CallbackScope,
     input: Encoded,
-  ): Promise<Encoded> {
-    const release = await this.gate.enter(undefined, scope.signal);
+    roles: ResourceRoles = {},
+    receiver?: ResourceCapability,
+    retain?: (physical: Promise<void>) => void,
+  ): Promise<Encoded | CapturedDelivery> {
+    const unlock = await this.gate.enter(undefined, scope.signal);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      unlock();
+    };
+    let continued = false;
+    let issued: ResourceOwner | undefined;
     try {
+      if (!!roles.receiver !== !!receiver)
+        throw new Error("Resource receiver differs from signature");
+      const borrowed = roles.receiver && receiver?.redeem(this, environment.id, roles.receiver);
       const args = lift(shape.params, JSON.parse(input.text)) as unknown[];
-      const result = await this.port.run(BigInt(environment.id), scope, () =>
-        values.fromGuest(() => {
-          const fn = this.port.exports?.[key]?.[spelling];
-          if (typeof fn !== "function")
-            throw new Error(`The component does not export ${key}#${spelling}`);
-          return fn(...values.guestArguments(args));
-        }),
+      const call = () => {
+        const exports = this.port.exports?.[key];
+        if (!exports) throw new Error(`The component does not export ${key}`);
+        return resourceExport(
+          exports,
+          spelling,
+          roles,
+          borrowed || undefined,
+          values.guestArguments(args),
+        );
+      };
+      if (roles.stream) {
+        const task = this.port.start(BigInt(environment.id), scope, call);
+        retain?.(task.physical);
+        const finished = task.finished.finally(() => {
+          scope.cancel();
+          release();
+        });
+        continued = true;
+        let owner: import("./streams.ts").ByteStreamOwner | undefined;
+        try {
+          const raw = await task.result;
+          owner = issueByteStream(raw, finished, scope.signal ?? new AbortController().signal);
+          const value = check(this.contract, slot, false, encode(0));
+          // Publication releases only the exclusive entry turn. Its task, imports, scope,
+          // deadline and active-group fuel remain owned until physical completion.
+          task.park();
+          release();
+          return { value, capability: owner, finished };
+        } catch (error) {
+          owner?.close();
+          await finished.catch(() => undefined);
+          throw error;
+        }
+      }
+      const result = await this.port.run(
+        BigInt(environment.id),
+        scope,
+        async () => {
+          if (!roles.own) return values.fromGuest(call);
+          const raw = await call();
+          if (typeof raw !== "object" || raw === null)
+            throw new Error("Owned result is not a resource");
+          const owner = new ResourceOwner(roles.own, this, environment.id, raw, () => {
+            return this.port.cleanup(async () => {
+              const unlock = await this.gate.enter();
+              try {
+                if (this.scopes.has(environment.id))
+                  await this.port.destroy(() => {
+                    const dispose = (raw as Disposable)[Symbol.dispose];
+                    if (typeof dispose !== "function")
+                      throw new Error("Resource has no destructor");
+                    dispose.call(raw);
+                  });
+              } finally {
+                unlock();
+              }
+            });
+          });
+          let owners = this.#issuedResources.get(environment.id);
+          if (!owners) this.#issuedResources.set(environment.id, (owners = new Set()));
+          owners.add(owner);
+          owner.whenClosed(() => owners.delete(owner));
+          issued = owner;
+          return null;
+        },
+        retain,
       );
+      if (roles.own) {
+        const value = check(this.contract, slot, false, encode(0));
+        return { value, capability: issued! };
+      }
       return check(this.contract, slot, false, encode(result, VALUE_LIMIT, shape.result));
+    } catch (error) {
+      issued?.close();
+      throw error;
     } finally {
-      scope.cancel();
-      release();
+      if (!continued) {
+        scope.cancel();
+        release();
+      }
     }
   }
 
@@ -185,29 +290,24 @@ export class ComponentRevision implements ScopeOwner {
           if (!bridge) throw new Error("This browser host has no incoming HTTP bridge");
           const scope = environment.exchange(entered(context));
           let failure: unknown = new Error("the HTTP handler callback ended");
+          let physical: Promise<void> | undefined;
           const release = await this.gate.enter(undefined, scope.signal);
           try {
-            const { result, finished } = this.port.start(
-              BigInt(environment.id),
-              scope,
-              async () => {
-                const handle = this.port.exports?.[HTTP_HANDLER]?.[method];
-                if (typeof handle !== "function")
-                  throw new Error(`The component does not export ${HTTP_HANDLER}#${method}`);
-                try {
-                  return { ok: await handle(bridge.request(exchange.own())) };
-                } catch (error) {
-                  // The handler's typed `err` lane refuses the request; anything else is a trap.
-                  if (
-                    error === null ||
-                    typeof error !== "object" ||
-                    !Object.hasOwn(error, "payload")
-                  )
-                    throw error;
-                  return { err: (error as { payload: unknown }).payload };
-                }
-              },
-            );
+            const task = this.port.start(BigInt(environment.id), scope, async () => {
+              const handle = this.port.exports?.[HTTP_HANDLER]?.[method];
+              if (typeof handle !== "function")
+                throw new Error(`The component does not export ${HTTP_HANDLER}#${method}`);
+              try {
+                return { ok: await handle(bridge.request(exchange.own())) };
+              } catch (error) {
+                // The handler's typed `err` lane refuses the request; anything else is a trap.
+                if (error === null || typeof error !== "object" || !Object.hasOwn(error, "payload"))
+                  throw error;
+                return { err: (error as { payload: unknown }).payload };
+              }
+            });
+            physical = task.physical;
+            const { result, finished } = task;
             let delivery: Promise<void> | undefined;
             try {
               const outcome = await result;
@@ -224,6 +324,7 @@ export class ComponentRevision implements ScopeOwner {
           } finally {
             exchange.settle(failure);
             scope.cancel();
+            await physical?.catch(() => undefined);
             release();
           }
         },
@@ -291,8 +392,12 @@ export class ComponentRevision implements ScopeOwner {
         const spelling = names[name];
         if (!spelling || methods.has(spelling)) throw new Error("Ambiguous prepared import method");
         const slot = this.contract.bind(binding, name, false);
-        this.signatures.set(slot, compile(fn));
-        methods.set(spelling, { name, slot });
+        const roles = resourceRoles(graph, selected.contract ?? binding, {
+          ...fn,
+          name,
+        } as GraphFunction);
+        this.signatures.set(slot, compile(resourceDataFunction(fn as GraphFunction, roles)));
+        methods.set(spelling, { name, slot, roles });
       }
       this.importMethods.set(binding, methods);
     }
@@ -320,10 +425,18 @@ export class ComponentRevision implements ScopeOwner {
             const slot = this.contract.bind(binding, method, true);
             const fn = functions?.[method];
             if (!fn) throw new Error(`Missing prepared signature for ${binding}#${method}`);
-            const shape = compile(fn);
-            const values = convert(fn as GraphFunction);
+            const roles = resourceRoles(graph, binding, { ...fn, name: method } as GraphFunction);
+            const data = resourceDataFunction(fn as GraphFunction, roles);
+            const shape = compile(data);
+            const values = convert(data);
             this.signatures.set(slot, shape);
-            const invoke = (environment: ComponentScope, context: Context, input: Encoded) =>
+            const invoke = (
+              environment: ComponentScope,
+              context: Context,
+              input: Encoded,
+              receiver?: ResourceCapability,
+              retain?: (physical: Promise<void>) => void,
+            ) =>
               this.invoke(
                 binding,
                 spelling,
@@ -333,22 +446,38 @@ export class ComponentRevision implements ScopeOwner {
                 environment,
                 environment.exchange(entered(context)),
                 input,
+                roles,
+                receiver,
+                retain,
               );
+            const invokeData = async (
+              environment: ComponentScope,
+              context: Context,
+              args: readonly unknown[],
+              retain?: (physical: Promise<void>) => void,
+            ) => {
+              const input = check(
+                this.contract,
+                slot,
+                true,
+                encode(args, VALUE_LIMIT, shape.params),
+              );
+              const output = await invoke(environment, context, input, undefined, retain);
+              if (!(output instanceof Encoded)) {
+                output.capability?.close();
+                await output.finished;
+                throw new Error("A data-only caller cannot receive a host capability");
+              }
+              return lift(shape.result, JSON.parse(output.text));
+            };
             return [
               method,
               bindCaptured(
-                async (environment: ComponentScope, context: Context, ...args: unknown[]) => {
-                  const input = check(
-                    this.contract,
-                    slot,
-                    true,
-                    encode(args, VALUE_LIMIT, shape.params),
-                  );
-                  const output = await invoke(environment, context, input);
-                  return lift(shape.result, JSON.parse(output.text));
-                },
+                (environment: ComponentScope, context: Context, ...args: unknown[]) =>
+                  invokeData(environment, context, args),
                 service.signature,
                 invoke,
+                invokeData,
               ),
             ];
           }),
@@ -380,16 +509,33 @@ export class ComponentRevision implements ScopeOwner {
             true,
             encode([input], VALUE_LIMIT, shape.params),
           );
-          const result = await this.invoke(
-            binding.name,
-            binding.method,
-            values,
-            binding.slot,
-            shape,
-            rootScope,
-            rootScope.exchange(entered(context)),
-            arguments_,
-          );
+          let physical: Promise<void> | undefined;
+          let result: Encoded | CapturedDelivery;
+          try {
+            result = await this.invoke(
+              binding.name,
+              binding.method,
+              values,
+              binding.slot,
+              shape,
+              rootScope,
+              rootScope.exchange(entered(context)),
+              arguments_,
+              {},
+              undefined,
+              (actual) => {
+                physical = actual;
+              },
+            );
+          } finally {
+            // Contributions have no early capability lane: retain their owned operation
+            // until actual guest/provider exit, including after a bounded failure.
+            await physical?.catch(() => undefined);
+          }
+          if (!(result instanceof Encoded)) {
+            result.capability?.close();
+            throw new Error("A contribution cannot carry a host capability");
+          }
           const value = lift(
             shape.result,
             JSON.parse(checkedResult(this.contract, binding.slot, result.text).text),
@@ -418,6 +564,17 @@ export class ComponentRevision implements ScopeOwner {
       },
       [admitFactory]: admit,
       [releaseEnvironment]: async (environment: Environment) => {
+        if (environment === environment.orb.scope) {
+          for (const owner of this.importedResources) owner.close();
+          this.importedResources.clear();
+        }
+        // Environment release owns any remaining exported instances. Drain while the
+        // environment is still registered, so each guest destructor runs exactly once.
+        const owners = this.#issuedResources.get(environment.id);
+        for (const owner of owners ?? []) owner.close();
+        // Closing schedules drops through the port's physical cleanup queue.
+        await this.port.settled();
+        this.#issuedResources.delete(environment.id);
         this.scopes.delete(environment.id);
       },
       [disposeOrb]: async () => {

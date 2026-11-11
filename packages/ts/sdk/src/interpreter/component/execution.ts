@@ -19,11 +19,12 @@ import {
   type SystemProviders,
 } from "../standard-system.ts";
 import { query, type ContractPort, type InstallationPlan } from "../types.ts";
-import { dependencyImport, referenceImport, referenceView, type ImportedFunction } from "./host.ts";
+import { referenceImport, referenceView, resourceImport } from "./host.ts";
 import { instantiate, requireJspi, type CoreLimits } from "./instance.ts";
 import { ComponentPort } from "./port.ts";
 import type { PreparedRecord } from "./prepared.ts";
 import { compiledDescription, ComponentRevision, type Described } from "./revision.ts";
+import { resourceDataFunction, resourceRoles } from "./resources.ts";
 import { converters, type GraphFunction } from "./values.ts";
 import { checkPublicWasi, publicWasi } from "./wasi.ts";
 
@@ -168,12 +169,6 @@ export async function openComponent(
         lookup: network.sockets(bound("wasi:sockets/ip-name-lookup@0.3.0")),
       },
     });
-    const functions = (entry: { functions?: Record<string, unknown> }): ImportedFunction[] =>
-      Object.entries(entry.functions ?? {}).map(([name, fn]) => {
-        const spelling = graph.javascriptNames[name];
-        if (spelling === undefined) throw new Error(`Missing WIT JavaScript name for ${name}`);
-        return { name, spelling, values: convert(fn as GraphFunction) };
-      });
     for (const name of record.imports) {
       if (Object.hasOwn(imports, name)) continue;
       const selected = graph.imports.find((item) => item.binding === name);
@@ -186,10 +181,25 @@ export async function openComponent(
       const view = graph.references[name];
       imports[name] = view
         ? referenceImport(port, name, referenceView(graph, name, view, convert))
-        : dependencyImport(port, name, functions(selected));
+        : resourceImport(
+            port,
+            name,
+            Object.entries(selected.functions ?? {}).map(([method, fn]) => {
+              const roles = resourceRoles(graph, selected.contract ?? name, {
+                ...fn,
+                name: method,
+              } as GraphFunction);
+              return {
+                name: method,
+                spelling: graph.javascriptNames[method]!,
+                roles,
+                values: convert(resourceDataFunction(fn as GraphFunction, roles)),
+              };
+            }),
+          );
     }
-    // One budget per instance: pages are shared by all its core modules; instantiation runs on
-    // its own finite fuel, and each admitted callback is refilled to `fuel`.
+    // Pages are shared by all core modules. Instantiation has finite fuel; subsequent fuel
+    // resets occur only between groups of physically overlapping callbacks.
     const limits: CoreLimits = {
       fuel: new WebAssembly.Global({ value: "i64", mutable: true }, fuel),
       pages: new WebAssembly.Global({ value: "i64", mutable: true }, BigInt(maximumPages)),

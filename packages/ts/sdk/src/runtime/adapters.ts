@@ -10,21 +10,68 @@ import type {
   ServiceDefinition,
   HookDefinition,
 } from "../authoring/types.ts";
-import type { Environment } from "./records.ts";
+import type { Environment, ReferenceRecord } from "./records.ts";
+import type { Session } from "./session.ts";
 
 import type { Handler } from "../authoring/types.ts";
 import type { Context } from "./context.ts";
 import type { Encoded } from "../interpreter/codec.ts";
+/** Internal platform-neutral resource transport; implementations keep their issuer state private. */
+export interface ResourceCapability {
+  readonly kind: "resource";
+  readonly nominal: { readonly interface: string; readonly name: string };
+  readonly reference: ReferenceRecord;
+  anchor(session: Session, reference: ReferenceRecord): void;
+  lend(): () => void;
+  redeem(issuer: object, environment: number, expected: ResourceCapability["nominal"]): object;
+  whenClosed(operation: () => void): void;
+  close(): void;
+}
+
+/** Internal byte-source authority; concrete browser state never enters shared runtime types. */
+export interface ByteStreamCapability {
+  readonly kind: "bytes";
+  readonly finished: Promise<void>;
+  /** Share one host notification across publication, receiver reads and abandonment. */
+  reportFailure(error: unknown, report: (error: unknown) => void): void;
+  bind(context: Context): void;
+  close(): void;
+}
+
+/** Private capability lane, available only between matched prepared handlers. */
+export interface CapturedDelivery {
+  readonly value: Encoded;
+  readonly capability?: ResourceCapability | ByteStreamCapability;
+  /** Bounded provider outcome after an early result head; actual work uses the retain sink. */
+  readonly finished?: Promise<void>;
+}
 
 /** A private data path, never passed to ordinary application handlers or stored on Context. */
 export interface CapturedInvocation {
   readonly signature: string;
   readonly input: Encoded;
   output?: Encoded;
+  receiver?: ResourceCapability;
+  capability?: ResourceCapability | ByteStreamCapability;
 }
+/** The ordinary checked data entry of a prepared backend, with physical retention. */
+type CapturedDataMethod = (
+  environment: any,
+  context: Context,
+  args: readonly unknown[],
+  retain: (physical: Promise<void>) => void,
+) => Promise<unknown>;
 interface CapturedMethod {
-  readonly signature: string;
-  invoke(environment: any, context: Context, input: Encoded): Promise<Encoded>;
+  readonly signature: string | undefined;
+  readonly invokeData?: CapturedDataMethod;
+  invoke(
+    environment: any,
+    context: Context,
+    input: Encoded,
+    receiver?: ResourceCapability,
+    /** Register actual physical completion before the bounded result may resolve or reject. */
+    retain?: (physical: Promise<void>) => void,
+  ): Promise<Encoded | CapturedDelivery>;
 }
 const capturedMethods = new WeakMap<Handler, CapturedMethod>();
 
@@ -33,8 +80,10 @@ export function bindCaptured(
   handle: Handler,
   signature: string | undefined,
   invoke: CapturedMethod["invoke"],
+  invokeData?: CapturedDataMethod,
 ): Handler {
-  if (signature) capturedMethods.set(handle, { signature, invoke });
+  if (signature || invokeData)
+    capturedMethods.set(handle, { signature, invoke, ...(invokeData ? { invokeData } : {}) });
   return handle;
 }
 
@@ -42,6 +91,11 @@ export function bindCaptured(
 export function capturedMethod(handle: Handler, signature: string): CapturedMethod | undefined {
   const adapter = capturedMethods.get(handle);
   return adapter?.signature === signature ? adapter : undefined;
+}
+
+/** Ordinary data callers retain backend work without receiving the capability channel. */
+export function capturedDataMethod(handle: Handler): CapturedDataMethod | undefined {
+  return capturedMethods.get(handle)?.invokeData;
 }
 
 // These hooks connect execution backends to the existing lifecycle; they grant no guest authority.

@@ -17,6 +17,16 @@ import {
 import type { BrowserHostOptions } from "../src/browser.ts";
 import type { HttpHandlerResponse } from "../src/interpreter/http-ingress.ts";
 import { verifyKeyedCompiledScenario } from "./keyed-compiled-scenario.ts";
+import {
+  verifyBrowserResourceOwnership,
+  verifyBrowserResourceRefusal,
+  verifyBrowserResourceReload,
+} from "./component-resources-browser.ts";
+import {
+  verifyBrowserByteStreams,
+  verifyBrowserByteStreamTraps,
+  verifyBrowserByteStreamCancellation,
+} from "./component-streams-browser.ts";
 
 type Host = Awaited<ReturnType<typeof createHost>>;
 // Service references are dynamically typed WIT proxies.
@@ -125,6 +135,10 @@ interface Adapters {
   client: PreparedComponent;
   handler: PreparedComponent;
   keyed: PreparedComponent;
+  resourceProvider: PreparedComponent;
+  resourceConsumer: PreparedComponent;
+  streamProducer: PreparedComponent;
+  streamConsumer: PreparedComponent;
 }
 
 /** Qualify every prepared-adapter scenario; returns the passed scenario names. */
@@ -142,6 +156,10 @@ export async function verifyPreparedComponents(engine?: URL): Promise<string[]> 
     client: await adapter("http-client"),
     handler: await adapter("http-handler"),
     keyed: await adapter("compiled-keyed-router"),
+    resourceProvider: await adapter("resource-provider"),
+    resourceConsumer: await adapter("resource-consumer"),
+    streamProducer: await adapter("stream-producer"),
+    streamConsumer: await adapter("stream-consumer"),
   };
   const base = engine ? { engine } : {};
   const scenarios: [string, () => Promise<void>][] = [
@@ -153,6 +171,40 @@ export async function verifyPreparedComponents(engine?: URL): Promise<string[]> 
     ["compiled calls source through JSPI trampolines", () => compiledToSource(adapters, base)],
     ["compiled hook contributions", () => contributions(adapters, base)],
     ["compiled reference views select keyed objects", () => keyedViews(adapters, base)],
+    [
+      "compiled resource ownership and borrowed methods",
+      () =>
+        verifyBrowserResourceOwnership(base, [
+          adapters.resourceProvider,
+          adapters.resourceConsumer,
+        ]),
+    ],
+    [
+      "compiled resource data-only refusal",
+      () =>
+        verifyBrowserResourceRefusal(base, [adapters.resourceProvider, adapters.resourceConsumer]),
+    ],
+    [
+      "compiled resource identity across reload",
+      () =>
+        verifyBrowserResourceReload(base, [adapters.resourceProvider, adapters.resourceConsumer]),
+    ],
+    [
+      "compiled byte streams and early drop",
+      () => verifyBrowserByteStreams(base, [adapters.streamProducer, adapters.streamConsumer]),
+    ],
+    [
+      "compiled byte streams report late producer traps",
+      () => verifyBrowserByteStreamTraps(base, [adapters.streamProducer, adapters.streamConsumer]),
+    ],
+    [
+      "compiled byte stream cancellation",
+      () =>
+        verifyBrowserByteStreamCancellation(base, [
+          adapters.streamProducer,
+          adapters.streamConsumer,
+        ]),
+    ],
     ["independent installs and reload", () => independence(adapters, base)],
     ["initial page budget", () => pages(adapters, base)],
     ["fuel exhaustion and trap quarantine", () => quarantine(adapters, base)],
@@ -187,6 +239,11 @@ async function brand(adapters: Adapters): Promise<void> {
     ["hooks", "hook-compiled"],
     ["client", "http-client"],
     ["handler", "http-handler"],
+    ["keyed", "compiled-keyed-router"],
+    ["resourceProvider", "resource-provider"],
+    ["resourceConsumer", "resource-consumer"],
+    ["streamProducer", "stream-producer"],
+    ["streamConsumer", "stream-consumer"],
   ];
   for (const [key, name] of expected) {
     const component = adapters[key];

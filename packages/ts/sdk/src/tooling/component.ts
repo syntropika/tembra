@@ -24,6 +24,7 @@ import {
 import type { Described } from "../interpreter/component/revision.ts";
 import { converters, type GraphFunction } from "../interpreter/component/values.ts";
 import { referenceView } from "../interpreter/component/host.ts";
+import { resourceDataFunction, resourceRoles } from "../interpreter/component/resources.ts";
 import { BROWSER_WASI } from "../interpreter/component/wasi.ts";
 import { JCO_VERSION, prepareGlue } from "./component-glue.ts";
 
@@ -57,11 +58,14 @@ async function generator() {
 /** Check what browser execution provides before generating anything. */
 function plan(graph: Described, imports: readonly string[]) {
   const convert = converters(graph);
-  const check = (label: string, fn: unknown) => {
+  const check = (binding: string, name: string, signature: unknown) => {
     try {
-      convert(fn as GraphFunction);
+      const fn = { ...(signature as GraphFunction), name };
+      convert(resourceDataFunction(fn, resourceRoles(graph, binding, fn)));
     } catch (error) {
-      throw new Error(`Browser preparation cannot execute ${label}: ${(error as Error).message}`);
+      throw new Error(
+        `Browser preparation cannot execute ${binding}#${name}: ${(error as Error).message}`,
+      );
     }
   };
   const suspending: string[] = [];
@@ -88,7 +92,7 @@ function plan(graph: Described, imports: readonly string[]) {
     }
     // Orb dependency calls are asynchronous host work behind a synchronous WIT import.
     for (const [fn, signature] of Object.entries(selected.functions ?? {})) {
-      check(`${name}#${fn}`, signature);
+      check(selected.contract ?? name, fn, signature);
       suspending.push(`${name}#${fn}`);
     }
   }
@@ -96,7 +100,7 @@ function plan(graph: Described, imports: readonly string[]) {
   for (const entry of graph.exports)
     for (const [fn, signature] of Object.entries(entry.functions ?? {})) {
       // The incoming HTTP handler uses the WASI adapter's own resources, not value conversion.
-      if (entry.contract !== HTTP_HANDLER) check(`${entry.binding}#${fn}`, signature);
+      if (entry.contract !== HTTP_HANDLER) check(entry.contract ?? entry.binding, fn, signature);
       promising.push(`${entry.binding}#${fn}`);
     }
   return { suspending, promising };

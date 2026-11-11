@@ -10,6 +10,8 @@
  * view's acquisition is the exception: its key is request data, so any failure to acquire is
  * its WIT `err`, never a trap.
  */
+import type { ResourceCapability, ByteStreamCapability } from "#tembra-adapters";
+import { receiveByteStream } from "./streams.ts";
 import type { ComponentPort } from "./port.ts";
 import type { Described } from "./revision.ts";
 import type { ReferenceBinding } from "../types.ts";
@@ -213,4 +215,118 @@ export function referenceImport(
     });
   };
   return { [view.resource]: Resource, [view.acquire.spelling]: acquire };
+}
+
+/** Ordinary provider-owned WIT resources; keyed reference views use their separate adapter. */
+export function resourceImport(
+  port: ComponentPort,
+  binding: string,
+  functions: readonly (ImportedFunction & {
+    readonly roles: import("./resources.ts").ResourceRoles;
+  })[],
+): Record<string, unknown> {
+  const held = new WeakMap<object, ResourceCapability>();
+  const classes = new Map<string, { new (...args: unknown[]): object }>();
+  const ownerOf = (value: object) => {
+    const owner = held.get(value);
+    if (!owner) throw new Error("Resource is not live");
+    return owner;
+  };
+  const invoke = (
+    fn: (typeof functions)[number],
+    args: unknown[],
+    receiver?: ResourceCapability,
+  ): Promise<unknown> & Disposable => {
+    const callback = port.current();
+    const input = fn.values.hostArguments(args);
+    let abandoned = false;
+    let issued: ResourceCapability | undefined;
+    const pending = port.physical(
+      callback,
+      (async () => {
+        const result = receiver
+          ? await callback.scope.resource!(receiver, binding, fn.spelling, input)
+          : await callback.scope.call(binding, fn.spelling, input);
+        if (fn.roles.own) {
+          const owner = result as ResourceCapability;
+          if (owner?.kind !== "resource") throw new Error("Missing owned resource result");
+          issued = owner;
+          if (abandoned) {
+            owner.close();
+            throw new Error("Resource delivery abandoned");
+          }
+          const Resource = classes.get(fn.roles.own.name);
+          if (!Resource) {
+            owner.close();
+            throw new Error("Missing imported resource class");
+          }
+          const value = Object.create(Resource.prototype) as object;
+          held.set(value, owner);
+          return value;
+        }
+        if (fn.roles.stream) {
+          // The stream's host adapter strips producer-private JCO representations.
+          return receiveByteStream(
+            result as ByteStreamCapability,
+            AbortSignal.any([
+              callback.ended.signal,
+              ...(callback.scope.signal ? [callback.scope.signal] : []),
+            ]),
+            (operation) => port.wasi.cleanup(operation),
+            (error) => callback.scope.report(error),
+          );
+        }
+        return fn.values.toGuest(result);
+      })(),
+    );
+    return Object.assign(pending, {
+      [Symbol.dispose]() {
+        abandoned = true;
+        issued?.close();
+      },
+    });
+  };
+  for (const fn of functions) {
+    const nominal = fn.roles.resource ?? fn.roles.own;
+    if (!nominal || classes.has(nominal.name)) continue;
+    const constructor = functions.find(
+      (item) => item.roles.construct && item.roles.resource?.name === nominal.name,
+    );
+    const Resource = class {
+      constructor(...args: unknown[]) {
+        if (!constructor) throw new Error("Resource has no constructor");
+        return invoke(constructor, args) as never;
+      }
+      [Symbol.dispose](): void {
+        const owner = held.get(this);
+        if (!owner) return;
+        held.delete(this);
+        try {
+          port.current().scope.releaseResource(owner);
+        } catch {
+          owner.close();
+        }
+      }
+    };
+    classes.set(nominal.name, Resource);
+  }
+  const output: Record<string, unknown> = {};
+  for (const [name, Resource] of classes) output[bindingName(name, true)] = Resource;
+  for (const fn of functions) {
+    if (fn.roles.construct) continue;
+    if (!fn.roles.resource) {
+      output[fn.spelling] = (...args: unknown[]) => invoke(fn, args);
+      continue;
+    }
+    const Resource = classes.get(fn.roles.resource.name)!;
+    const target = fn.roles.receiver ? Resource.prototype : Resource;
+    const spelling = bindingName(fn.roles.member!, false);
+    if (Object.hasOwn(target, spelling)) throw new Error("Ambiguous imported resource method");
+    Object.defineProperty(target, spelling, {
+      value(this: object, ...args: unknown[]) {
+        return invoke(fn, args, fn.roles.receiver ? ownerOf(this) : undefined);
+      },
+    });
+  }
+  return output;
 }

@@ -341,6 +341,8 @@ commands! {
     Status = "status" { reference: Handle } -> StatusName => |k, i| {
         k.host.status(i.reference.0).map(StatusName)
     };
+    /// Duplicate a claim with exactly its existing authority and API expectation.
+    Duplicate = "duplicate" { reference: Handle } -> Ident => |k, i| k.host.duplicate(i.reference.0).map(Ident);
     /// Release a reference claim.
     Release = "release" { reference: Handle } -> () => |k, i| k.host.release(i.reference.0);
     /// Forget a released reference.

@@ -10,7 +10,7 @@ description = "WIT contracts and prepared Orb declarations for Tembra"
 [features]
 default = ["authoring"]
 # WIT resolution, artifact packaging and real compiled-component verification.
-# Runtimes that only execute source Orbs (the browser) disable it and ship no WIT parser.
+# Prepared-artifact runtimes (the browser) disable it and ship no WIT parser.
 authoring = ["dep:anyhow", "dep:wit-parser", "dep:wit-component"]
 
 [dependencies]

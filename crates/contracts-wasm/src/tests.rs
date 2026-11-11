@@ -381,3 +381,83 @@ fn compiled_claim_of(contract: &PreparedContract) -> Vec<u8> {
     compiled.extend_from_slice(&source[8..orb_end]);
     compiled
 }
+
+#[test]
+fn prepared_component_capabilities_use_a_separate_checked_data_lane() {
+    let identity = "test:browser/sessions@1.0.0";
+    let prepared = PreparedContract::new(Model {
+        world: "run".into(),
+        package: Some("test:browser@1.0.0".into()),
+        types: vec![
+            Kind::Resource(tembra_contracts::ResourceIdentity {
+                interface: Some(identity.into()),
+                name: Some("session".into()),
+            }),
+            Kind::Own(0),
+            Kind::Borrow(0),
+        ],
+        imports: vec![],
+        exports: vec![Entry {
+            key: identity.into(),
+            item: Item::Interface(Interface {
+                contract: Some(identity.into()),
+                explicit: true,
+                name: Some("sessions".into()),
+                resources: [("session".into(), 0)].into(),
+                functions: vec![
+                    Function {
+                        name: "open".into(),
+                        kind: FunctionKind::Freestanding,
+                        params: vec![],
+                        result: Some(Ty::Ref(1)),
+                    },
+                    Function {
+                        name: "[method]session.total".into(),
+                        kind: FunctionKind::Method(0),
+                        params: vec![Field {
+                            name: "self".into(),
+                            ty: Ty::Ref(2),
+                        }],
+                        result: Some(Ty::U64),
+                    },
+                ],
+            }),
+        }],
+    })
+    .unwrap();
+    let open = prepared.bind(identity, "open", true).unwrap();
+    let total = prepared
+        .bind(identity, "[method]session.total", true)
+        .unwrap();
+    let request = r#"{"kind":"install","name":"browser","apiVersion":1}"#;
+    assert!(prepared.request(request).contains("error"));
+    assert!(prepared.request_resources(request).contains("\"ok\""));
+    assert_eq!(
+        prepared.validate_resource_packet(open, false, "0"),
+        r#"{"ok":null}"#
+    );
+    assert!(
+        prepared
+            .validate_resource_packet(open, false, "{}")
+            .contains("error")
+    );
+    assert_eq!(
+        prepared.validate_resource_packet(total, true, "[]"),
+        r#"{"ok":null}"#
+    );
+    assert!(
+        prepared
+            .validate_resource_packet(total, true, "[0]")
+            .contains("error")
+    );
+    assert_eq!(
+        prepared.validate_resource_packet(total, false, "\"18446744073709551615\""),
+        r#"{"ok":null}"#
+    );
+    assert!(
+        prepared
+            .validate_resource_packet(total, false, "18446744073709551615")
+            .contains("error")
+    );
+    assert!(prepared.validate_packet(open, false, "0").contains("error"));
+}

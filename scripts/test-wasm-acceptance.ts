@@ -161,8 +161,12 @@ if (!values.fixtures)
     httpHandler,
     "--resource-provider",
     resourceProvider,
+    "--resource-consumer",
+    resourceConsumer,
     "--stream-producer",
     streamProducer,
+    "--stream-consumer",
+    streamConsumer,
   ]);
 const environment = {
   TEMBRA_WASM_ENGINE: engine,

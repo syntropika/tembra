@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { converters, type TypeGraph } from "../src/interpreter/component/values.ts";
+import { Gate } from "../src/interpreter/gate.ts";
 import { ComponentPort } from "../src/interpreter/component/port.ts";
 import type { CallbackScope } from "../src/interpreter/component/scope.ts";
 import { checkPublicWasi } from "../src/interpreter/component/wasi.ts";
@@ -99,6 +100,8 @@ function scope(): CallbackScope & { cancelled: boolean } {
   return {
     cancelled: false,
     check() {},
+    report() {},
+    releaseResource() {},
     cancel() {
       this.cancelled = true;
     },
@@ -141,6 +144,70 @@ describe("component port", () => {
     created.exports = {};
     return created;
   };
+
+  test("queued resource cleanup cannot hold the callback whose gate it needs", async () => {
+    const instance = port();
+    const gate = new Gate();
+    const unlock = await gate.enter();
+    let destroyed = false;
+    expect(
+      await instance.run(1n, scope(), () => {
+        instance.cleanup(async () => {
+          const release = await gate.enter();
+          destroyed = true;
+          release();
+        });
+        return "returned";
+      }),
+    ).toBe("returned");
+    expect(destroyed).toBe(false);
+    unlock();
+    await instance.settled();
+    expect(destroyed).toBe(true);
+    expect(instance.usable).toBe(true);
+  });
+
+  test("canonical destructor tasks await observed exit without callback authority", async () => {
+    const instance = port();
+    let finished = false;
+    const pending = instance.destroy(() => {
+      instance.observer.taskStarted({ id: 9001, entry: "<resource-drop>", isAsync: false });
+      expect(() => instance.current()).toThrow("destructor holds no call authority");
+    });
+    pending.then(() => {
+      finished = true;
+    });
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    instance.observer.taskExited({ id: 9001 });
+    await pending;
+    expect(finished).toBe(true);
+    expect(instance.usable).toBe(true);
+    expect(await instance.run(1n, scope(), () => 7)).toBe(7);
+  });
+
+  test("destructor admission refuses an ordinary export task and quarantines failures", async () => {
+    const foreign = port();
+    await expect(
+      foreign.destroy(() => {
+        foreign.observer.taskStarted({ id: 9002, entry: "ordinary", isAsync: false });
+      }),
+    ).rejects.toThrow("non-destructor export task");
+    expect(foreign.usable).toBe(false);
+
+    const failed = port();
+    await expect(
+      failed.destroy(() => {
+        failed.observer.taskStarted({ id: 9003, entry: "<resource-drop>", isAsync: false });
+        failed.observer.taskExited({
+          id: 9003,
+          rejected: true,
+          error: new Error("destructor failed"),
+        });
+      }),
+    ).rejects.toThrow("destructor failed");
+    expect(failed.usable).toBe(false);
+  });
 
   test("detached host work stays attributed to its callback until it settles", async () => {
     const instance = port();
@@ -232,6 +299,7 @@ describe("component port", () => {
     ).rejects.toThrow("provider close failed");
     expect(instance.usable).toBe(false);
     await expect(instance.run(2n, scope(), () => 2)).rejects.toThrow("quarantined");
+    await instance.settled();
     await instance.close();
   });
 

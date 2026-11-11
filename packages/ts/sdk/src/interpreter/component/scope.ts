@@ -1,15 +1,16 @@
 /**
  * Host authority of one compiled component environment.
  *
- * A compiled component has no Tembra control imports: it cannot declare state, hooks, resources
- * or references. Its only host authority beyond granted WASI is calling its typed Orb dependency
+ * A compiled component has no Tembra control imports: it cannot declare kernel state, hooks,
+ * named host resources or references. Provider-owned WIT resources travel only through the
+ * private typed capability lane. Its host authority beyond granted WASI is its Orb dependency
  * imports. A plain import targets the default `main` reference the root factory declared for its
  * binding. A checked reference view (an artifact role) declares no default: the guest acquires
  * root claims by key through the view's acquisition function and calls the provider through the
  * returned host-local handle. Every call runs under the admitted invocation of the callback that
  * issued it, with arguments and results checked by the import's own WIT signature.
  */
-import type { CapturedInvocation } from "#tembra-adapters";
+import type { CapturedInvocation, ResourceCapability } from "#tembra-adapters";
 import type { Declaration } from "../../authoring/declaration.ts";
 import type { DynamicReference } from "../../authoring/types.ts";
 import type { Context } from "../../runtime/context.ts";
@@ -17,6 +18,7 @@ import { checkSignal, combinedSignal } from "../../runtime/signals.ts";
 import { acquireReference } from "../acquire.ts";
 import { check, encode, VALUE_LIMIT } from "../codec.ts";
 import type { ContractPort } from "../types.ts";
+import type { ResourceRoles } from "./resources.ts";
 import { lift, type Signature } from "../wit-shape.ts";
 
 const scopeEnded = Object.freeze(new Error("Component callback scope ended"));
@@ -25,6 +27,7 @@ const scopeEnded = Object.freeze(new Error("Component callback scope ended"));
 export interface BoundMethod {
   readonly name: string;
   readonly slot: number;
+  readonly roles?: ResourceRoles;
 }
 
 /**
@@ -49,6 +52,7 @@ const claims = new WeakMap<ReferenceClaim, Claim>();
 export interface CallbackScope {
   readonly signal?: AbortSignal;
   check(): void;
+  report(error: unknown): void;
   /** Revoke the callback: later calls are refused and pending waits stop. */
   cancel(): void;
   /**
@@ -56,6 +60,13 @@ export interface CallbackScope {
    * `bigint`) and answer its checked host-domain result.
    */
   call(binding: string, method: string, args: readonly unknown[]): Promise<unknown>;
+  releaseResource(owner: ResourceCapability): void;
+  resource?(
+    owner: ResourceCapability,
+    binding: string,
+    method: string,
+    args: readonly unknown[],
+  ): Promise<unknown>;
   /**
    * Acquire a reference view's provider at `key` for this callback's admitted invocation and
    * root. `abandoned` stops a pending readiness wait and releases the claim.
@@ -86,6 +97,7 @@ export interface ScopeOwner {
   readonly importSignatures: ReadonlyMap<string, string>;
   readonly signatures: ReadonlyMap<number, Signature>;
   readonly scopes: ReadonlyMap<number, ComponentScope>;
+  readonly importedResources?: Set<ResourceCapability>;
 }
 
 /** One kernel environment (the Orb root or a service instance) of a compiled component. */
@@ -117,6 +129,7 @@ export class ComponentScope {
     // Match native guest drops: a long callback can drop and reacquire the same address
     // without prematurely retiring its provider. Root cancellation remains immediate.
     const dropped = new Set<ReferenceClaim>();
+    const droppedResources = new Set<ResourceCapability>();
     const release = (token: ReferenceClaim) => {
       const claim = this.claim(token, token.binding);
       if (claim.root === context.root) claim.reference.release();
@@ -127,6 +140,7 @@ export class ComponentScope {
     return {
       signal: context.signal,
       check: () => context.check(),
+      report: (error) => this.declaration.session.report(error),
       cancel: () => {
         if (!ended.signal.aborted) ended.abort(scopeEnded);
         for (const token of dropped) {
@@ -137,6 +151,14 @@ export class ComponentScope {
           }
         }
         dropped.clear();
+        for (const owner of droppedResources) {
+          try {
+            owner.close();
+          } catch (error) {
+            this.declaration.session.report(error);
+          }
+        }
+        droppedResources.clear();
       },
       call: async (binding, method, args) => {
         live();
@@ -145,6 +167,21 @@ export class ComponentScope {
         const bound = this.owner.importMethods.get(binding)?.get(method);
         if (!bound) throw new Error("Unknown prepared import method");
         return this.call(reference, binding, bound, args, context, ended.signal);
+      },
+      releaseResource: (owner) => {
+        if (ended.signal.aborted) owner.close();
+        else droppedResources.add(owner);
+      },
+      resource: async (owner, binding, method, args) => {
+        live();
+        const bound = this.owner.importMethods.get(binding)?.get(method);
+        if (!bound?.roles?.receiver) throw new Error("Not a prepared resource method");
+        if (
+          owner.nominal.interface !== bound.roles.receiver.interface ||
+          owner.nominal.name !== bound.roles.receiver.name
+        )
+          throw new Error("Resource has another nominal type");
+        return this.call(owner.reference, binding, bound, args, context, ended.signal, owner);
       },
       acquire: async (binding, key, abandoned) => {
         live();
@@ -199,12 +236,13 @@ export class ComponentScope {
 
   /** Arguments are checked under the import's own WIT slot before the provider sees them. */
   private async call(
-    reference: DynamicReference,
+    reference: DynamicReference | import("../../runtime/records.ts").ReferenceRecord,
     binding: string,
     bound: BoundMethod,
     args: readonly unknown[],
     context: Context,
     ended: AbortSignal,
+    receiver?: ResourceCapability,
   ): Promise<unknown> {
     checkSignal(ended);
     context.check();
@@ -217,9 +255,13 @@ export class ComponentScope {
       encode(args, VALUE_LIMIT, shape?.params),
     );
     const signature = this.owner.importSignatures.get(binding);
-    const capture: CapturedInvocation | undefined = signature ? { signature, input } : undefined;
+    const capture: CapturedInvocation | undefined = signature
+      ? { signature, input, ...(receiver ? { receiver } : {}) }
+      : undefined;
+    if ((bound.roles?.own || bound.roles?.receiver || bound.roles?.stream) && !capture)
+      throw new Error("Resource transport requires an exact prepared signature");
     const session = this.declaration.session;
-    const record = session.handles.reference(reference);
+    const record = receiver ? receiver.reference : session.handles.reference(reference);
     if (!record.methods.has(bound.name)) throw new Error("Reference does not expose this method");
     const result =
       (await session.calls.invokePhysical(
@@ -229,7 +271,42 @@ export class ComponentScope {
         context,
         capture,
       )) ?? null;
-    checkSignal(ended);
+    try {
+      checkSignal(ended);
+      context.check();
+    } catch (error) {
+      capture?.capability?.close();
+      throw error;
+    }
+    if (bound.roles?.own || bound.roles?.stream) {
+      const owner = capture?.capability;
+      if (!owner || (bound.roles.own ? owner.kind !== "resource" : owner.kind !== "bytes")) {
+        owner?.close();
+        throw new Error("Prepared provider returned no matching capability");
+      }
+      if (!capture?.output || capture.output.text !== "0") {
+        owner.close();
+        throw new Error("A capability result names exactly one attachment");
+      }
+      if (
+        bound.roles.own &&
+        owner.kind === "resource" &&
+        (owner.nominal.interface !== bound.roles.own.interface ||
+          owner.nominal.name !== bound.roles.own.name)
+      ) {
+        owner.close();
+        throw new Error("Resource has another nominal type");
+      }
+      if (owner.kind === "resource") {
+        this.owner.importedResources?.add(owner);
+        owner.whenClosed(() => this.owner.importedResources?.delete(owner));
+      }
+      return owner;
+    }
+    if (capture?.capability) {
+      capture.capability.close();
+      throw new Error("A data result cannot carry a capability");
+    }
     // The provider may be an ordinary host implementation returning hostile JavaScript: reply
     // with the checked capture or a checked copy, never with the original object graph.
     const output =

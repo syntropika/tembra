@@ -108,6 +108,52 @@ support. Raw compiled artifacts without a registered adapter are refused.
 Source JS/TS targets do not use this step. Their closed scripts run through the shared dquickts
 interpreter and remain dynamically loadable without generating per-Orb browser bindings.
 
+### Resources and byte streams between browser components
+
+Prepared compiled components use the same bounded WIT capability profile as the native executor:
+
+- A constructor or factory may return one owned resource as its complete result. Its methods
+  borrow `self`; the provider keeps the resource in its own component instance.
+- An asynchronous freestanding function may return `stream<u8>` as its complete result. The
+  receiver pulls bounded chunks rather than collecting the body before returning the stream.
+
+For example:
+
+```wit
+interface sessions {
+    resource session {
+        constructor(seed: u64);
+        add: func(value: u64) -> u64;
+    }
+    open: func(seed: u64) -> session;
+}
+
+interface frames {
+    read: async func() -> stream<u8>;
+}
+```
+
+Prepare and register both components as above, then bind the consumer's imports with ordinary
+`requires`. No additional author API is needed: generated WIT bindings construct, borrow and
+drop resources, and read or drop streams. Resource ownership retains the exact provider claim,
+including its permissions; a reload cannot redirect an old resource to a new component instance.
+A guest drop releases its owner after the importing callback settles, and a physical borrower
+keeps the resource alive until that borrow ends.
+
+Stream publication and physical completion are separate. Several stream heads can be acquired
+before any body is read. The producer retains its admitted invocation and deadline while its
+writer is running. Cancellation, normal root end and reader drop close the stream; physical
+completion remains tracked after an early drop. A producer trap is reported to the host and
+quarantines that producer revision. Overlapping callbacks share the instance's remaining fuel
+budget until the group physically settles, so publishing another stream never replenishes fuel.
+Expiry rejects the observed operation and revokes its authority immediately. It does not prove
+that the guest exited: invocation and resource pins remain until the actual task and its host
+operations settle. If a quarantined task never acknowledges exit, shutdown keeps waiting.
+
+These capabilities travel only through the private component transport. Ordinary data-only
+host calls refuse a resource or stream result and close it. Owned arguments, nested handles or
+streams, non-byte stream elements and arbitrary futures remain outside this profile.
+
 ### Keyed dependency references
 
 A plain compiled WIT import calls the provider's `main` object. To select an object by key,

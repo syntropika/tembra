@@ -41,6 +41,7 @@ export const KernelOp = Object.freeze({
   Undepend: "undepend",
   Fail: "fail",
   Status: "status",
+  Duplicate: "duplicate",
   Release: "release",
   Forget: "forget",
   Root: "root",
@@ -743,6 +744,11 @@ export interface StatusInput {
   reference: number;
 }
 
+/** Duplicate a claim with exactly its existing authority and API expectation. */
+export interface DuplicateInput {
+  reference: number;
+}
+
 /** Release a reference claim. */
 export interface ReleaseInput {
   reference: number;
@@ -1039,6 +1045,7 @@ export interface KernelCommands {
   undepend: { input: UndependInput; output: null };
   fail: { input: FailInput; output: null };
   status: { input: StatusInput; output: Status };
+  duplicate: { input: DuplicateInput; output: number };
   release: { input: ReleaseInput; output: null };
   forget: { input: ForgetInput; output: null };
   root: { input: RootInput; output: number };

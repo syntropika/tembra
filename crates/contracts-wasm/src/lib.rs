@@ -121,7 +121,7 @@ impl WasmPreparedComponent {
 
     /// Answer the typed install-time queries: `install`, `implementation` and `describe`.
     pub fn request(&self, packet: &str) -> String {
-        self.component.contract.request(packet)
+        self.component.contract.request_resources(packet)
     }
 
     /// Bind an export (by interface identity) or import (by world binding) method once.
@@ -136,7 +136,7 @@ impl WasmPreparedComponent {
     pub fn validate(&self, slot: u32, arguments: bool, value: &str) -> String {
         self.component
             .contract
-            .validate_packet(slot, arguments, value)
+            .validate_resource_packet(slot, arguments, value)
     }
 }
 

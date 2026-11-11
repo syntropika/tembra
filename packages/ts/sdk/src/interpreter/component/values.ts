@@ -19,16 +19,20 @@ interface WitKind {
   result?: { ok?: WitType; err?: WitType };
   enum?: unknown;
   flags?: unknown;
+  handle?: { own?: number; borrow?: number };
+  stream?: WitType;
   [other: string]: unknown;
 }
 export interface TypeGraph {
   readonly javascriptNames: Readonly<Record<string, string>>;
   readonly types: readonly {
     readonly id: number;
-    readonly definition: { kind: WitKind | string };
+    readonly definition: { kind: WitKind | string; owner?: string; name?: string };
   }[];
 }
 export interface GraphFunction {
+  readonly name?: string;
+  readonly kind?: string | Readonly<Record<string, number>>;
   readonly params: readonly { readonly name: string; readonly type: WitType }[];
   readonly result?: WitType;
 }

@@ -358,6 +358,29 @@ export class References {
     }
   }
 
+  /** Retain exactly this claim, without reacquisition or re-evaluating access policy. */
+  duplicate(original: ReferenceRecord): ReferenceRecord {
+    if (this.session.references.get(original.id) !== original || original.released)
+      throw new TembraError(Errors.Released.Reference);
+    const id = this.session.kernel.command(KernelOp.Duplicate, { reference: original.id });
+    const record: ReferenceRecord = {
+      ...original,
+      id,
+      address: { ...original.address, key: [...original.address.key] },
+      methods: new Set(original.methods),
+      requiredMethods: new Set(original.requiredMethods),
+      stateCleanups: new Set(),
+      nativeOwned: false,
+      released: false,
+    };
+    delete record.context;
+    this.session.references.set(id, record);
+    let owned = this.#byObject.get(record.object);
+    if (!owned) this.#byObject.set(record.object, (owned = new Set()));
+    owned.add(record);
+    return record;
+  }
+
   /** Require a reference issued by this session. */
   reference(value: unknown): ReferenceRecord {
     const issued = typeof value === "object" && value !== null ? references.get(value) : undefined;

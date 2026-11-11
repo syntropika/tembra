@@ -271,7 +271,8 @@ Not yet available:
 - service access policies and exclusive or opaque resources;
 - causal reentry into the same interpreter;
 - durable checkpoint and restore;
-- inter-Orb resources, streams and futures in the browser prepared-component profile.
+- owned arguments, nested capability values, non-byte streams and arbitrary futures beyond the
+  bounded inter-Orb resource and byte-stream profile.
 
 Replacement refuses a provider whose initial activation is still pending, and an
 active native one-shot task blocks replacement.
