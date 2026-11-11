@@ -32,6 +32,15 @@ exclude = [
   "examples/rust-orb-hook-declaration/host",
   "examples/rust-orb-state/counter",
   "examples/rust-orb-state/host",
+  "examples/rust-orb-context/audit",
+  "examples/rust-orb-context/host",
+  "examples/rust-orb-service-lifetime/ledger",
+  "examples/rust-orb-service-lifetime/host",
+  "examples/rust-orb-shared-interface/book",
+  "examples/rust-orb-shared-interface/host",
+  "examples/rust-orb-wit-resource/decoder",
+  "examples/rust-orb-wit-resource/player",
+  "examples/rust-orb-wit-resource/host",
 ]
 
 [workspace.package]

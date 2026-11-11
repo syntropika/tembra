@@ -87,10 +87,18 @@ See [Wasm orb execution](../crates/executor-wasm/README.md) and
 [the Wasm consumer example](../examples/rust/wasm.rs). To write a compiled orb in Rust without a
 WIT file, see [the Rust orb example](../examples/rust-orb-service/README.md): `#[orb]` derives the
 contract from a module and `cargo tembra build` packages the artifact. A service of such an orb
-can own kernel-managed state with `#[state]`; see
+can own kernel-managed state with `#[state]`, validated by the state's own rule; see
 [the Rust state example](../examples/rust-orb-state/README.md). Such an orb can also declare a hook
 for other orbs to contribute to; see
-[the Rust hook declaration example](../examples/rust-orb-hook-declaration/README.md).
+[the Rust hook declaration example](../examples/rust-orb-hook-declaration/README.md). Its methods
+can read the call's principal, the object's address and write to the host's log through the
+kernel's context interface, see [the Rust context example](../examples/rust-orb-context/README.md),
+and each service can choose the lifetime of its objects, see
+[the Rust service lifetime example](../examples/rust-orb-service-lifetime/README.md). A service
+can implement an interface of a shared WIT package instead of deriving one, see
+[the Rust shared interface example](../examples/rust-orb-shared-interface/README.md), and hand
+out WIT resources to other orbs, see
+[the Rust WIT resource example](../examples/rust-orb-wit-resource/README.md).
 
 ## Serve incoming HTTP
 
