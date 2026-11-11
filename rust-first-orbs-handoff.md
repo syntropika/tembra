@@ -1,6 +1,6 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 21:30 CET
+- **Aggiornato:** 2026-11-11, 21:25 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   base `main`
 - **Stato:** strada A. Ribase fatto, verificato e pushato: la
