@@ -6,7 +6,7 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use tembra::{Host, Orb, Reference, Service};
+use tembra::{AcquisitionOptions, Host, Orb, Reference, Service};
 use tembra_contracts::{ComponentRoles, Contract};
 use tembra_executor_wasm::{Engine, Install, Limits};
 
@@ -342,7 +342,8 @@ fn retained(interpreted: bool, live: bool) {
         .unwrap();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
-    host.install(vec![provider(Default::default()), router])
+    let activated = Rc::new(RefCell::new(Vec::new()));
+    host.install(vec![provider(activated.clone()), router])
         .unwrap();
     let first = Rc::new(host.get(ROUTER, vec!["first".into()], "host").unwrap());
     let second = Rc::new(host.get(ROUTER, vec!["second".into()], "host").unwrap());
@@ -365,6 +366,23 @@ fn retained(interpreted: bool, live: bool) {
                             assert_eq!(kept, "keep@alice");
                             let _ = started.send(());
                             let _ = hold.await;
+                            // Retiring a compiled Store releases its views, not the unrelated
+                            // root that originally acquired them. That root still authorizes
+                            // native calls after the other root's forbidden use traps the Store.
+                            context.check()?;
+                            let native = context.get(
+                                &format!("keyed::{COUNTER}"),
+                                vec!["surviving-root".into()],
+                                AcquisitionOptions {
+                                    api_version: 1,
+                                    methods: ["who".into()].into(),
+                                },
+                            )?;
+                            native.ready().await?;
+                            let label: String =
+                                native.call_portable(&context, "who", json!([])).await?;
+                            assert_eq!(label, "surviving-root@alice");
+                            context.check()?;
                             Ok(())
                         }
                         .boxed_local()
@@ -381,6 +399,12 @@ fn retained(interpreted: bool, live: bool) {
         );
         None
     };
+    assert_eq!(engine.instances(), 1, "the compiled Store is still live");
+    assert_eq!(
+        host.kernel().diagnostics().references,
+        if live { 3 } else { 2 },
+        "the first root owns its view until it ends or its Store retires"
+    );
     // Both environments share the compiled heap. A retained slot cannot select a new claim
     // allocated under a later root, even if that root has the same principal.
     let error = call(
@@ -392,12 +416,24 @@ fn retained(interpreted: bool, live: bool) {
         json!(["retained"]),
     )
     .unwrap_err();
+    assert!(
+        activated
+            .borrow()
+            .iter()
+            .any(|label| label == "fresh@alice"),
+        "the forbidden attempt first acquired a separate temporary claim"
+    );
+    assert_eq!(
+        engine.instances(),
+        0,
+        "the forbidden import traps and physically retires the compiled Store"
+    );
     if let Some((release, finished)) = active {
         assert!(error.message.contains("belongs to another root"), "{error}");
         assert_eq!(
             host.kernel().diagnostics().references,
-            3,
-            "the first root still owns its claim"
+            2,
+            "Store retirement releases both its retained view and the temporary claim"
         );
         release.send(()).unwrap();
         pool.run_until(finished).unwrap();
@@ -407,6 +443,8 @@ fn retained(interpreted: bool, live: bool) {
     second.release().unwrap();
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
+    assert_eq!(host.kernel().diagnostics().references, 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
 }
 
 #[test]
