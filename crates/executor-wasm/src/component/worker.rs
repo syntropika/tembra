@@ -16,7 +16,9 @@
 //!
 //! Kernel-managed state follows the same path. A component exporting `tembra:guest/state-init`
 //! is asked, while each service object is created, for that object's declaration; the worker
-//! declares it through the existing synchronous `state.declare` request. The `tembra:guest/state`
+//! declares it through the existing synchronous `state.declare` request, with a worker-numbered
+//! validation callback when the declaration asks for one, which the kernel runs through a
+//! `validate` command before a reload adopts the retained value. The `tembra:guest/state`
 //! imports then issue `state.read` and `state.update` on the channel of the call that physically
 //! issued them, for the handle of the object that call runs on.
 //!
@@ -473,6 +475,12 @@ enum Packet {
         #[serde(default)]
         value: Option<u32>,
     },
+    /// The validator the worker numbered in a `state.declare` request, with the retained value
+    /// a reload would adopt.
+    Validate {
+        callback: u32,
+        value: Value,
+    },
     #[serde(other)]
     Unsupported,
 }
@@ -487,33 +495,43 @@ struct Environments {
     services: BTreeMap<u64, Option<String>>,
     states: BTreeMap<u64, u32>,
     resources: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
-    callbacks: BTreeMap<u32, ResourceCallback>,
+    callbacks: BTreeMap<u32, Callback>,
     next_callback: u32,
     hooks: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
     /// The kernel address of each environment's object, asked while it was declared.
     addresses: BTreeMap<u64, Arc<Value>>,
 }
 
-/// One numbered callback of a root resource: its opener or its closer.
+/// One callback the worker numbered in a declaration, for the kernel to run later.
 #[derive(Clone)]
-struct ResourceCallback {
-    environment: u64,
-    name: String,
-    open: bool,
+enum Callback {
+    /// The opener or the closer of a root resource.
+    Resource {
+        environment: u64,
+        name: String,
+        open: bool,
+    },
+    /// The validator of a service object's state: the interface identity `validate` is told.
+    State { environment: u64, interface: String },
+}
+
+impl Callback {
+    fn environment(&self) -> u64 {
+        match self {
+            Self::Resource { environment, .. } | Self::State { environment, .. } => *environment,
+        }
+    }
 }
 
 impl Environments {
-    /// Number the opener and closer of one more resource.
-    fn callbacks(&mut self) -> std::result::Result<(u32, u32), String> {
-        let open = self
+    /// Number one more callback.
+    fn callback(&mut self) -> std::result::Result<u32, String> {
+        let next = self
             .next_callback
             .checked_add(1)
-            .ok_or("resource callback space exhausted")?;
-        let close = open
-            .checked_add(1)
-            .ok_or("resource callback space exhausted")?;
-        self.next_callback = close;
-        Ok((open, close))
+            .ok_or("callback space exhausted")?;
+        self.next_callback = next;
+        Ok(next)
     }
 }
 
@@ -748,7 +766,7 @@ async fn instantiate(
         Ok(())
     };
     if layout.state_init {
-        kernel_callbacks(guest::STATE_INIT, &[guest::DECLARE])?;
+        kernel_callbacks(guest::STATE_INIT, &[guest::DECLARE, guest::VALIDATE])?;
     }
     if layout.resource_init {
         kernel_callbacks(
@@ -1629,7 +1647,7 @@ async fn serve(
         Err(error) => return Ok(Err(format!("malformed component command: {error}"))),
     };
     let expected = match packet {
-        Packet::Create { .. } => Operation::Declare,
+        Packet::Create { .. } | Packet::Validate { .. } => Operation::Declare,
         Packet::Invoke { .. }
         | Packet::Contribute { .. }
         | Packet::Release { .. }
@@ -1679,7 +1697,7 @@ async fn serve(
             environments.addresses.remove(&environment);
             environments
                 .callbacks
-                .retain(|_, callback| callback.environment != environment);
+                .retain(|_, callback| callback.environment() != environment);
             // Resources this environment issued are destroyed with it; entries leave the table
             // first, so no owner can reach them afterwards.
             let resources = store.data_mut().instances.take(environment);
@@ -1714,8 +1732,52 @@ async fn serve(
             release_dropped(&dropped, &(command.events.clone(), root)).await;
             Ok(Ok("null".into()))
         }
+        Packet::Validate { callback, value } => {
+            let Some(Callback::State {
+                environment,
+                interface,
+            }) = environments.callbacks.get(&callback).cloned()
+            else {
+                return Ok(Err("unknown compiled state validator".into()));
+            };
+            let Some(function) = exports
+                .kernel
+                .get(&(guest::STATE_INIT.to_owned(), guest::VALIDATE.to_owned()))
+                .copied()
+            else {
+                return Ok(Err("component declares no kernel state validator".into()));
+            };
+            // The validator runs under the declaration's channel, where the kernel answers only
+            // reads of the retained state and the log.
+            let authority = match authority(environment, layout, environments, command) {
+                Ok(authority) => authority,
+                Err(error) => return Ok(Err(error)),
+            };
+            let call = Call {
+                function,
+                roles: Resolved::default(),
+                environment,
+                receiver: None,
+                stream: None,
+                arguments: None,
+            };
+            let args = json!([interface, value.to_string()]);
+            let verdict = match invoke(engine, store, call, &args, authority, groups).await? {
+                Ok(verdict) => verdict,
+                Err(error) => return Ok(Err(error)),
+            };
+            let verdict: Value = serde_json::from_str(&verdict)?;
+            Ok(match verdict["tag"].as_str() {
+                Some("ok") => Ok("null".into()),
+                Some("err") => Err(verdict["val"]
+                    .as_str()
+                    .map(|message| format!("the state was refused: {message}"))
+                    .unwrap_or_else(|| "the state was refused".into())),
+                _ => Err("the state validator answered no result".into()),
+            })
+        }
         Packet::Callback { callback, value } => {
-            let Some(ResourceCallback {
+            let Some(Callback::Resource {
                 environment,
                 name,
                 open,
@@ -2030,7 +2092,7 @@ async fn declare(
             let version = resource["version"]
                 .as_u64()
                 .ok_or("a resource declaration carries no version")?;
-            let (open, close) = environments.callbacks()?;
+            let (open, close) = (environments.callback()?, environments.callback()?);
             let id = declaration(
                 events,
                 json!({
@@ -2051,7 +2113,7 @@ async fn declare(
             for (callback, opens) in [(open, true), (close, false)] {
                 environments.callbacks.insert(
                     callback,
-                    ResourceCallback {
+                    Callback::Resource {
                         environment,
                         name: name.clone(),
                         open: opens,
@@ -2123,9 +2185,26 @@ async fn declare(
     let version = declared["version"]
         .as_u64()
         .ok_or("the state declaration carries no version")?;
+    // A validated state gets a worker-numbered callback; the kernel runs it, through a
+    // `validate` command of this Store, on the value a reload would hand to this instance.
+    let validate = match declared["validated"].as_bool() {
+        Some(true) => {
+            let callback = environments.callback()?;
+            environments.callbacks.insert(
+                callback,
+                Callback::State {
+                    environment,
+                    interface,
+                },
+            );
+            Some(callback)
+        }
+        Some(false) => None,
+        None => return Err("the state declaration does not say whether it is validated".into()),
+    };
     let id = declaration(
         events,
-        json!({"operation": "state.declare", "initial": initial, "version": version}),
+        json!({"operation": "state.declare", "initial": initial, "version": version, "validate": validate}),
         limit,
     )
     .await?;
