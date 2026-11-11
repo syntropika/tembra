@@ -85,6 +85,27 @@ call or provide services through the same kernel. Each loaded orb runs in its ow
 See [Wasm orb execution](../crates/executor-wasm/README.md) and
 [the Wasm consumer example](../examples/rust/wasm.rs).
 
+To write a compiled orb in Rust without a WIT file, mark a module with `#[orb]` from
+[`tembra-orb-macro`](../crates/orb-macro/README.md) and build it with
+[`cargo tembra`](../crates/cargo-tembra/README.md): the macro derives the WIT contract from the
+module and implements the kernel's private `tembra:orb` lifecycle, the one a componentized
+TypeScript orb exports, and `cargo tembra build` packages the artifact; see
+[the Rust orb example](../examples/rust-orb-service/README.md). A service of such an orb can own
+kernel-managed state with `#[state]`, validated by the state's own rule, see
+[the Rust state example](../examples/rust-orb-state/README.md), and choose the lifetime of its
+objects, see [the Rust service lifetime example](../examples/rust-orb-service-lifetime/README.md).
+Its methods can read the call's principal and the object's address and write to the host's log
+through the kernel, see [the Rust context example](../examples/rust-orb-context/README.md). The
+orb can declare a hook for other orbs to contribute to, see
+[the Rust hook declaration example](../examples/rust-orb-hook-declaration/README.md), implement an
+interface of a shared WIT package instead of deriving one, see
+[the Rust shared interface example](../examples/rust-orb-shared-interface/README.md), import
+another orb's interface and call it, see
+[the Rust import example](../examples/rust-orb-import/README.md), and hand out WIT resources to
+other orbs, see [the Rust WIT resource example](../examples/rust-orb-wit-resource/README.md).
+[The Rust lifecycle example](../examples/rust-orb-lifecycle/README.md) writes that lifecycle by
+hand.
+
 ## Serve incoming HTTP
 
 A compiled component can export the standard `wasi:http/handler@0.3.0` interface. The application
@@ -207,10 +228,13 @@ tables; `Engine::instances()` counts live Stores. A removed entry may still be c
 its destructor.
 
 This transport currently covers compiled exporters with native or compiled callers through
-the Rust facade. Source Orbs and the Node/mobile JSON ports refuse inter-Orb resource contracts until
-their capability carriers are implemented. General resource arguments, nested resource
-results and futures remain outside this resource profile. Byte streams have a separate linear
-attachment described below.
+the Rust facade. Rust orbs written with `#[orb]` use it as exporters and callers, although they run
+on the source lifecycle; see
+[the Rust WIT resource example](../examples/rust-orb-wit-resource/README.md). Source Orbs built
+from TypeScript and the Node/mobile JSON ports refuse inter-Orb resource contracts until their
+capability carriers are implemented. General resource arguments, nested resource results and
+futures remain outside this resource profile. Byte streams have a separate linear attachment
+described below.
 
 ## Portable byte streams
 

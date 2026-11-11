@@ -1,11 +1,11 @@
-# A Rust Orb on the `tembra:orb` lifecycle
+# A Rust Orb on the `tembra:orb` lifecycle, by hand
 
-The counter of `rust-orb-state` (draft PR #1), written by hand in Rust with no macro and no
-`cargo tembra`, against `tembra:orb@0.1.0`: the private package this branch adds for
-componentized JavaScript Orbs. It answers one question before the Rust-first work is rebased
-here: can a Rust component use that package unchanged, instead of the PR's own `tembra:guest`?
-
-On the native host it can, with no change to the kernel, the executor or the contracts crate.
+The counter of [rust-orb-state](../rust-orb-state/README.md), written by hand in Rust with no macro
+and no `cargo tembra`, against `tembra:orb@0.1.0`: the kernel's private package, the one a
+componentized JavaScript Orb is built against. It is the lifecycle
+[`#[orb]`](../../crates/orb-macro/README.md) generates, spelled out: what the component exports and
+imports, which world its bindings come from and how the host packages it. Read next to the state
+example, it shows what the macro writes for a `#[state]` with a `#[validate]` rule.
 
 ## What the component does
 
@@ -39,24 +39,33 @@ wit_bindgen::generate!({
 });
 ```
 
-The host packages it with `Contract::source_component_artifact`, the call that packages a
-componentized JavaScript Orb. That call verifies the lifecycle export, the host imports and the
-public world. The private package never enters `contract/`, so another Orb can consume the
-contract as it is.
+The macro forms the same build world, named `<world>-orb`, and adds an import of each hook the
+module declares; it nests its own copy of the private package in the inline WIT instead of reading
+the contracts crate. The host packages the component with `Contract::source_component_artifact`,
+the call that packages a componentized JavaScript Orb and the one `cargo tembra build` makes. That
+call verifies the lifecycle export, the host imports and the public world. The private package
+never enters `contract/`, so another Orb can consume the contract as it is.
 
-## The PR's kernel interfaces, here
+## Where the earlier `tembra:guest` interfaces went
 
-| PR #1, `tembra:guest`         | here, `tembra:orb`                          |
-| ----------------------------- | ------------------------------------------- |
-| `state-init.declare`          | `host.state-declare`, called in `create`    |
-| `state.read`, `state.update`  | `host.state-read`, `host.state-update`      |
-| `state-init.validate`         | `lifecycle.validate`                        |
-| `resources-init`, `resources` | `host.resource-declare`, `lifecycle.open`   |
-| `context`                     | `host.instance-address`, `context-*`, `log` |
-| `tembra:manifest` section     | `lifecycle.describe`                        |
+Before it targeted `tembra:orb`, the Rust-first prototype had a kernel package of its own,
+`tembra:guest@1.0.0`, and a `tembra:manifest` custom section. Each part has its place in the
+lifecycle, here and in what the macro generates:
 
-The host side returns every refusal as a `result`, so the component decides what to do with it
-instead of trapping.
+| earlier, `tembra:guest`       | now, `tembra:orb`                                                                  |
+| ----------------------------- | ---------------------------------------------------------------------------------- |
+| `state-init.declare`          | `host.state-declare`, called in `create`                                           |
+| `state.read`, `state.update`  | `host.state-read`, `host.state-update`                                             |
+| `state-init.validate`         | `lifecycle.validate`                                                               |
+| `resources-init`, `resources` | `host.resource-declare`, `host.resource-read`, `lifecycle.open`, `lifecycle.close` |
+| `context`                     | `host.instance-address`, `context-*`, `signal-cancelled`, `log`                    |
+| `tembra:manifest` section     | `lifecycle.describe`                                                               |
+
+Two parts had no counterpart there, because the executor routed them by itself: running a hook the
+Orb declares, now `host.hook-declare` in the root's `create` and `host.select-hook` before each run,
+and calling an imported interface, now `host.reference-declare` in the root's `create` and
+`host.select` before each call. The host side returns every refusal as a `result`, so the
+component decides what to do with it instead of trapping.
 
 ## Run it
 
@@ -85,7 +94,12 @@ add(1)           -> ok {"steps":3,"total":4999999999}
 The reload creates a new component instance. The kernel keeps the object and its state, asks the
 new instance's `validate` about it (the `validate` log line), and only then serves calls.
 
-## Not checked yet
+## What it leaves out
 
-The Pulley interpreter, the Node and mobile hosts, root resources (`open`/`close`), hooks and the
-call context (`instance-address`, principal, cancellation).
+The counter has a state and nothing else: its root declares nothing, and `open` and `close` refuse
+every callback. The macro's examples run the other parts of the lifecycle on the native host: root
+resources in [rust-orb-hook-contribution](../rust-orb-hook-contribution/README.md), hooks in
+[rust-orb-hook-declaration](../rust-orb-hook-declaration/README.md), references to an imported
+interface in [rust-orb-import](../rust-orb-import/README.md) and the call context in
+[rust-orb-context](../rust-orb-context/README.md). Not checked yet, here or there: the Pulley
+interpreter and the Node and mobile hosts.

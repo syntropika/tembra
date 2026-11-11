@@ -86,6 +86,12 @@ Compiled contributors implement the same WIT callback export. Their build target
 signatures are derived on loading. The contributed import is a type anchor, not a callable
 service dependency; attempting to call it traps the contributor.
 
+A Rust contributor written with `#[orb]` marks a `pub fn` with
+`#[hook("example:hooks/guard@1.0.0", priority = 0)]` and builds with `cargo tembra`. Its component
+exports the private `tembra:orb` lifecycle, as a source orb does, and describes the binding and the
+priority there; its contribution runs in the orb's root, like a source contribution. See the
+[Rust hook contribution example](../examples/rust-orb-hook-contribution/README.md).
+
 Native Rust providers attach the prepared callback digest with `Hook::signature(...)`.
 Matching native Rust participants keep direct typed calls. Values crossing an isolated heap
 are encoded and checked against WIT. Both use the same participant ordering and lifetime rules.
@@ -100,9 +106,13 @@ respectively, no value, the input type, or an option:
   is no decision and continues to the next participant; if nobody decides, the hook returns
   `none`. A native participant can still decide after isolated ones.
 
-Compiled Orbs can contribute to hooks but cannot yet declare and aggregate them. Portable middleware, custom composition and observation
-are not exposed. Native providers can still apply their own composition, including
-`waterfall_until`, to isolated contributions.
+Compiled Orbs can contribute to hooks but cannot yet declare and aggregate them. A Rust orb
+written with `#[orb]` can, because it exports the source lifecycle: a unit struct `Guard` marked
+`#[hook(composition = waterfall, input = Admission)]` declares a hook whose interface the macro
+derives from the module, and `Guard::run(input)` runs its plan; see the
+[Rust hook declaration example](../examples/rust-orb-hook-declaration/README.md). Portable
+middleware, custom composition and observation are not exposed. Native providers can still apply
+their own composition, including `waterfall_until`, to isolated contributions.
 
 The complete source example is in the
 [hook fixtures](../packages/ts/sdk/test/fixtures/wasm-hooks/provider.ts), with the
