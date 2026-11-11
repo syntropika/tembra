@@ -422,6 +422,7 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, manifest: &Man
     }
     let mut requires = Vec::new();
     let mut grants: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut context = false;
     for (key, item) in &world.imports {
         let WorldItem::Interface { id: interface, .. } = item else {
             continue;
@@ -433,6 +434,7 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, manifest: &Man
         if contributions.contains_key(&id) || hooks.contains_key(&id) || guest::reserved(&id) {
             // Bound to the provider through the contribution, the entry to the Orb's own hook,
             // or served by the kernel.
+            context |= id == guest::CONTEXT;
             continue;
         }
         let kind = match id.split('/').next().unwrap_or_default() {
@@ -449,6 +451,12 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, manifest: &Man
             }
         };
         grants.entry(kind).or_default().push(id);
+    }
+    if context {
+        println!(
+            "kernel-served context: the call's principal and cancellation, the object's address and the log ({})",
+            guest::CONTEXT
+        );
     }
     if requires.is_empty() && grants.is_empty() {
         if contributions.is_empty() && hooks.is_empty() {

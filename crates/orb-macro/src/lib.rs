@@ -16,7 +16,9 @@
 //! prelude for the Wasm target. The hook interfaces come from the provider's WIT, found in the
 //! directory named by `wit = "dir"` on the attribute, relative to the crate manifest; their
 //! generated modules are re-exported under their own names, so the author writes
-//! `guard::Admission`. The kernel's `tembra:guest` package is bundled with the macro.
+//! `guard::Admission`. The kernel's `tembra:guest` package is bundled with the macro; with
+//! `context` on the attribute the module imports its `context` interface and reads the call's
+//! principal and cancellation, the object's address and the host's log as `context::...`.
 //!
 //! The crate using the macro must depend on `wit-bindgen` (features `macros` and `realloc`) and
 //! `dlmalloc` (feature `global`), because the generated code names them; a crate with a state
@@ -44,9 +46,12 @@ pub fn orb(attribute: TokenStream, item: TokenStream) -> TokenStream {
             options.package = Some(meta.value()?.parse::<LitStr>()?.value());
         } else if meta.path.is_ident("wit") {
             options.wit = Some(meta.value()?.parse::<LitStr>()?.value());
+        } else if meta.path.is_ident("context") {
+            options.context = true;
         } else {
-            return Err(meta
-                .error("unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\")]"));
+            return Err(meta.error(
+                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", context)]",
+            ));
         }
         Ok(())
     });
@@ -65,6 +70,8 @@ struct Options {
     package: Option<String>,
     /// A directory with the WIT packages this Orb consumes, relative to the crate manifest.
     wit: Option<String>,
+    /// The module imports the kernel's `tembra:guest/context` interface.
+    context: bool,
 }
 
 /// A type declared in the module, with its WIT definition and the module types it refers to.
@@ -442,6 +449,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         wit::Kernel {
             state: !states.is_empty(),
             resources: !resources.is_empty(),
+            context: options.context,
         },
     );
 
@@ -488,6 +496,11 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     });
+    // The kernel's context interface is re-exported as `context`, so the author writes
+    // `context::principal()`.
+    let context_module = options
+        .context
+        .then(|| quote! { pub use self::tembra::guest::context; });
     // Each hook's generated module is re-exported under its interface name: the export module
     // of a contributed hook, whose callback forwards to the author's function, and the import
     // module of a declared hook, whose types `run` takes and returns.
@@ -565,10 +578,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let wit_bytes = LitByteStr::new(wit.as_bytes(), Span::call_site());
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
     let world_literal = LitStr::new(&world, Span::call_site());
-    // The bindings read the author's WIT and, nested in it, the kernel package a state or a
-    // resource uses; the hook packages come from the consumed directory. Foreign interfaces need
-    // `generate_all`.
-    let inline = if states.is_empty() && resources.is_empty() {
+    // The bindings read the author's WIT and, nested in it, the kernel package a state, a
+    // resource or the context uses; the hook packages come from the consumed directory. Foreign
+    // interfaces need `generate_all`.
+    let inline = if states.is_empty() && resources.is_empty() && !options.context {
         wit_literal.clone()
     } else {
         LitStr::new(
@@ -622,6 +635,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             #generate
 
             #reexports
+            #context_module
             #(#hook_modules)*
 
             #(#passthrough)*

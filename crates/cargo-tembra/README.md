@@ -83,9 +83,9 @@ other imports: none; the installer grants nothing
 
 An Orb declaring a hook adds `hooks declared, run by the kernel's plan of contributions:` with the
 composition of each. A service that chose a lifetime or a linger says so after its methods, for
-example `lifetime: host, pinned until the host closes`. An Orb with a `#[state]` or a
-`#[resource]` adds a line naming the kernel's interface it uses: the executor serves it, so it
-appears among neither the imports to bind nor the grants to give.
+example `lifetime: host, pinned until the host closes`. An Orb with a `#[state]`, a
+`#[resource]` or `context` on the attribute adds a line naming the kernel's interface it uses:
+the executor serves it, so it appears among neither the imports to bind nor the grants to give.
 
 For an Orb that imports WASI, the last part names the grants an installer must give, for example
 `system: cli` and `system: clocks` for a std Orb that prints. Without it, those fourteen `wasi:cli`
