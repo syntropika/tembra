@@ -12,6 +12,7 @@ pub mod guest;
 mod hooks;
 mod implementation;
 mod lower;
+mod manifest;
 mod model;
 mod permissions;
 mod port;
@@ -26,7 +27,7 @@ mod signatures;
 mod standard;
 mod validate;
 
-pub use artifact::{Artifact, CallbackRoles, Identity, Implementation as ArtifactImplementation};
+pub use artifact::{Artifact, Identity, Implementation as ArtifactImplementation};
 #[cfg(feature = "authoring")]
 pub use authoring::Contract;
 pub use hooks::{ContributionBinding, HookBinding, HookComposition, HookPlan};
@@ -34,6 +35,7 @@ pub use implementation::{
     Implementation, IngressBinding, Lifetime, ServiceBinding, ServiceImplementation,
 };
 pub use lower::{Binding, HostImport, Plan};
+pub use manifest::{Manifest, ServicePolicy};
 pub use model::{
     Case, Entry, Field, Function, FunctionKind, Interface, Item, Kind, Model, PreparedContract,
     ResourceIdentity, Ty,

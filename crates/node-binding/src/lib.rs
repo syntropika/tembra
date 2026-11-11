@@ -139,7 +139,7 @@ impl NodeContract {
                 Ok((binding, priority as i32))
             })
             .collect::<napi::Result<_>>()?;
-        let roles = tembra_contracts::CallbackRoles {
+        let roles = tembra_contracts::Manifest {
             contributions,
             ..Default::default()
         };

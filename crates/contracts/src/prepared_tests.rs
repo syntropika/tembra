@@ -295,7 +295,11 @@ fn source_artifact(contract: &PreparedContract, source: &str) -> Vec<u8> {
         world: contract.world().into(),
     };
     let mut bytes = COMPONENT_HEADER.to_vec();
-    append_section(&mut bytes, "tembra:orb", &encode_orb(&identity, contract));
+    append_section(
+        &mut bytes,
+        "tembra:orb",
+        &encode_orb(&identity, contract, &Default::default()),
+    );
     append_section(&mut bytes, "tembra:source", source.as_bytes());
     bytes
 }
@@ -343,7 +347,11 @@ fn runtime_without_the_component_verifier_refuses_compiled_orbs() {
         world: "run".into(),
     };
     let mut bytes = COMPONENT_HEADER.to_vec();
-    append_section(&mut bytes, "tembra:orb", &encode_orb(&identity, &contract));
+    append_section(
+        &mut bytes,
+        "tembra:orb",
+        &encode_orb(&identity, &contract, &Default::default()),
+    );
     let error = Artifact::decode(&bytes).err().unwrap();
     assert!(error.0.contains("native component verifier"), "{error}");
 }

@@ -121,6 +121,16 @@ pub const EAGER_CONSUMER: &str = r#"(module
 
 /// Encode a core module and its WIT world as a component, then package it as an Orb artifact.
 pub fn artifact(world: &str, module: &str, name: &str) -> Vec<u8> {
+    artifact_with(world, module, name, &Default::default())
+}
+
+/// Like [`artifact`], with the manifest the artifact carries beside its contract.
+pub fn artifact_with(
+    world: &str,
+    module: &str,
+    name: &str,
+    manifest: &tembra_contracts::Manifest,
+) -> Vec<u8> {
     let mut resolve = wit_parser::Resolve::default();
     let package = resolve.push_str("deps.wit", WIT).unwrap();
     let selected = resolve.select_world(&[package], Some(world)).unwrap();
@@ -141,6 +151,6 @@ pub fn artifact(world: &str, module: &str, name: &str) -> Vec<u8> {
         .unwrap();
     tembra_contracts::Contract::from_source("deps.wit", WIT, Some(world))
         .unwrap()
-        .component_artifact(&component, name, 1, &Default::default())
+        .component_artifact(&component, name, 1, manifest)
         .unwrap()
 }

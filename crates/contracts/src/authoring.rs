@@ -3,8 +3,8 @@
 //! This module is the only user of `wit-parser` and `wit-component`. Runtime queries are answered
 //! by the prepared contract it produces, so tooling and runtimes share one implementation.
 use crate::{
-    Artifact, CallbackRoles, Error, PreparedContract,
-    artifact::{Container, Identity, append_section, encode_orb_roles},
+    Artifact, Error, Manifest, PreparedContract,
+    artifact::{Container, Identity, append_section, encode_orb},
 };
 use std::{collections::BTreeSet, path::Path};
 use wit_parser::{
@@ -241,16 +241,17 @@ impl Contract {
         Artifact::package_source(name, api_version, &self.prepared, source)
     }
 
-    /// Package a component with typed contribution roles; WIT owns every callback signature.
+    /// Package a component with its manifest, the hook roles and service lifetimes it cannot
+    /// state in WIT; WIT owns every callback signature.
     pub fn component_artifact(
         &self,
         component: &[u8],
         name: &str,
         api_version: u32,
-        roles: &CallbackRoles,
+        manifest: &Manifest,
     ) -> Result<Vec<u8>, Error> {
         self.prepared.check_resource_profile()?;
-        self.prepared.check_callback_roles(roles)?;
+        self.prepared.check_manifest(manifest)?;
         let identity = Identity {
             name: name.into(),
             api_version,
@@ -267,7 +268,7 @@ impl Contract {
         append_section(
             &mut bytes,
             "tembra:orb",
-            &encode_orb_roles(&identity, &self.prepared, roles),
+            &encode_orb(&identity, &self.prepared, manifest),
         );
         Ok(bytes)
     }

@@ -47,7 +47,7 @@ fn artifact(calls_anchor: bool) -> Vec<u8> {
             &component,
             "guard",
             1,
-            &tembra_contracts::CallbackRoles {
+            &tembra_contracts::Manifest {
                 contributions: [(GUARD.into(), -7)].into(),
                 ..Default::default()
             },

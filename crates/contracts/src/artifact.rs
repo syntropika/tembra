@@ -4,7 +4,10 @@
 //! only `tembra:orb` (identity and compact contract) and `tembra:source`. Compiled Orbs append
 //! `tembra:orb` to the real component, whose actual WIT types are verified against the contract
 //! by the native `authoring` verifier before any linking.
-use crate::{Error, HookComposition, PreparedContract, codec::Reader, model::MAX_NAME};
+use crate::{
+    Error, HookComposition, Lifetime, Manifest, PreparedContract, ServicePolicy, codec::Reader,
+    model::MAX_NAME,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -32,20 +35,10 @@ pub struct Artifact {
     pub identity: Identity,
     pub contract: PreparedContract,
     pub implementation: Implementation,
-    /// Compiled callback roles; source bundles declare their contributions in executable code.
-    pub contributions: BTreeMap<String, i32>,
-    /// The hooks a compiled component declares, by interface identity, with their composition;
-    /// source bundles declare theirs in executable code.
-    pub hooks: BTreeMap<String, HookComposition>,
-}
-
-/// The hook roles a compiled component carries in its artifact: the hooks it contributes to, with
-/// their priorities, and the hooks it declares, with their composition. Both are keyed by the
-/// versioned interface identity; an interface takes one role.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CallbackRoles {
-    pub contributions: BTreeMap<String, i32>,
-    pub hooks: BTreeMap<String, HookComposition>,
+    /// What a compiled component declares beyond its contract: its hook roles and the lifetime
+    /// of its services. A source bundle declares these in executable code, so its manifest is
+    /// empty.
+    pub manifest: Manifest,
 }
 
 impl Identity {
@@ -80,7 +73,11 @@ impl Artifact {
         identity.validate()?;
         contract.check_value_profile()?;
         let mut bytes = COMPONENT_HEADER.to_vec();
-        append_section(&mut bytes, ORB, &encode_orb(&identity, contract));
+        append_section(
+            &mut bytes,
+            ORB,
+            &encode_orb(&identity, contract, &Manifest::default()),
+        );
         append_section(&mut bytes, SOURCE, source.as_bytes());
         Ok(bytes)
     }
@@ -95,15 +92,12 @@ impl Artifact {
         if !container.tembra.is_empty() {
             return Err(Error("unsupported artifact metadata section".into()));
         }
-        let (identity, contract, roles) = decode_orb(orb)?;
-        let CallbackRoles {
-            contributions,
-            hooks,
-        } = roles.clone();
+        let (identity, contract, manifest) = decode_orb(orb)?;
         let implementation = if let Some(source) = source {
-            if !contributions.is_empty() || !hooks.is_empty() {
+            if manifest != Manifest::default() {
                 return Err(Error(
-                    "source artifacts declare their hook roles in their bundle".into(),
+                    "source artifacts declare their hook roles and service lifetimes in their bundle"
+                        .into(),
                 ));
             }
             if bytes[..8] != COMPONENT_HEADER || container.other {
@@ -117,15 +111,14 @@ impl Artifact {
             )
         } else {
             verify_component(&contract, bytes)?;
-            contract.check_callback_roles(&roles)?;
+            contract.check_manifest(&manifest)?;
             Implementation::Component(bytes.to_vec())
         };
         Ok(Self {
             identity,
             contract,
             implementation,
-            contributions,
-            hooks,
+            manifest,
         })
     }
 
@@ -163,29 +156,25 @@ fn verify_component(_: &PreparedContract, _: &[u8]) -> Result<(), Error> {
     ))
 }
 
-/// Encode identity and contract into one compact `tembra:orb` payload.
-pub(crate) fn encode_orb(identity: &Identity, contract: &PreparedContract) -> Vec<u8> {
-    encode_orb_roles(identity, contract, &CallbackRoles::default())
-}
-
-/// Encode identity, contract and the compiled callback roles: the contributions with their
-/// priorities, then the declared hooks with their composition.
-pub(crate) fn encode_orb_roles(
+/// Encode identity, contract and manifest into one compact `tembra:orb` payload: the
+/// contributions with their priorities, then the declared hooks with their composition, then the
+/// service policies with their lifetime and linger.
+pub(crate) fn encode_orb(
     identity: &Identity,
     contract: &PreparedContract,
-    roles: &CallbackRoles,
+    manifest: &Manifest,
 ) -> Vec<u8> {
     let mut writer = crate::codec::Writer::default();
     writer.str(&identity.name);
     writer.u32(identity.api_version);
     writer.bytes(&contract.encode());
-    writer.len(roles.contributions.len());
-    for (binding, priority) in &roles.contributions {
+    writer.len(manifest.contributions.len());
+    for (binding, priority) in &manifest.contributions {
         writer.str(binding);
         writer.u32(u32::from_le_bytes(priority.to_le_bytes()));
     }
-    writer.len(roles.hooks.len());
-    for (binding, composition) in &roles.hooks {
+    writer.len(manifest.hooks.len());
+    for (binding, composition) in &manifest.hooks {
         writer.str(binding);
         writer.byte(match composition {
             HookComposition::Series => 0,
@@ -193,21 +182,30 @@ pub(crate) fn encode_orb_roles(
             HookComposition::Bail => 2,
         });
     }
+    writer.len(manifest.services.len());
+    for (identity, policy) in &manifest.services {
+        writer.str(identity);
+        writer.byte(match policy.lifetime {
+            Lifetime::Referenced => 0,
+            Lifetime::Host => 1,
+        });
+        writer.u32(policy.linger_ms);
+    }
     writer.finish()
 }
 
-/// Decode and validate identity and contract from untrusted bytes.
-fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract, CallbackRoles), Error> {
+/// Decode and validate identity, contract and manifest from untrusted bytes.
+fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract, Manifest), Error> {
     let mut reader = Reader::new(bytes);
     let name = reader.str()?;
     let api_version = reader.u32()?;
     let length = reader.u32()? as usize;
     let contract = PreparedContract::decode(reader.take(length)?)?;
-    let mut roles = CallbackRoles::default();
+    let mut manifest = Manifest::default();
     for _ in 0..reader.count(crate::model::MAX_ITEMS)? {
         let binding = reader.str()?;
         let priority = i32::from_le_bytes(reader.u32()?.to_le_bytes());
-        if roles.contributions.insert(binding, priority).is_some() {
+        if manifest.contributions.insert(binding, priority).is_some() {
             return Err(Error("duplicate compiled contribution role".into()));
         }
     }
@@ -219,8 +217,24 @@ fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract, CallbackRoles
             2 => HookComposition::Bail,
             _ => return Err(Error("unknown compiled hook composition".into())),
         };
-        if roles.hooks.insert(binding, composition).is_some() {
+        if manifest.hooks.insert(binding, composition).is_some() {
             return Err(Error("duplicate compiled hook declaration".into()));
+        }
+    }
+    for _ in 0..reader.count(crate::model::MAX_ITEMS)? {
+        let identity = reader.str()?;
+        let lifetime = match reader.byte()? {
+            0 => Lifetime::Referenced,
+            1 => Lifetime::Host,
+            _ => return Err(Error("unknown compiled service lifetime".into())),
+        };
+        let linger_ms = reader.u32()?;
+        let policy = ServicePolicy {
+            lifetime,
+            linger_ms,
+        };
+        if manifest.services.insert(identity, policy).is_some() {
+            return Err(Error("duplicate compiled service policy".into()));
         }
     }
     reader.finish()?;
@@ -230,7 +244,7 @@ fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract, CallbackRoles
         world: contract.world().to_owned(),
     };
     identity.validate()?;
-    Ok((identity, contract, roles))
+    Ok((identity, contract, manifest))
 }
 
 /// Append a custom section to a WebAssembly binary.

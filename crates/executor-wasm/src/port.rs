@@ -136,13 +136,8 @@ impl Engine {
                 (session, description, checked)
             }
             tembra_contracts::ArtifactImplementation::Component(_) => {
-                let description = crate::component::describe(
-                    contract,
-                    name,
-                    api_version,
-                    &artifact.contributions,
-                    &artifact.hooks,
-                );
+                let description =
+                    crate::component::describe(contract, name, api_version, &artifact.manifest);
                 let checked = checked(&description)?;
                 let session = self.component_session(
                     artifact,

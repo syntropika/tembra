@@ -43,7 +43,7 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
     let contract = Contract::from_source("hooks.wit", "package test:hooks@1.0.0; interface guard { apply: func(value: u32) -> u32; } world extension { import guard; export guard; }", Some("extension")).unwrap();
     let component = component(&contract);
     let contributions = [("test:hooks/guard@1.0.0".into(), -7)].into();
-    let roles = CallbackRoles {
+    let roles = Manifest {
         contributions,
         ..Default::default()
     };
@@ -51,9 +51,9 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
         .component_artifact(&component, "extension", 1, &roles)
         .unwrap();
     let decoded = Artifact::decode(&bytes).unwrap();
-    assert_eq!(decoded.contributions, roles.contributions);
-    assert!(decoded.hooks.is_empty());
-    let invalid = CallbackRoles {
+    assert_eq!(decoded.manifest.contributions, roles.contributions);
+    assert!(decoded.manifest.hooks.is_empty());
+    let invalid = Manifest {
         contributions: [("test:hooks/missing@1.0.0".into(), 1)].into(),
         ..Default::default()
     };
@@ -71,14 +71,14 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
     crate::artifact::append_section(
         &mut forged,
         "tembra:orb",
-        &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &invalid),
+        &crate::artifact::encode_orb(&identity, contract.prepared(), &invalid),
     );
     assert!(Artifact::decode(&forged).is_err());
     let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
     crate::artifact::append_section(
         &mut source,
         "tembra:orb",
-        &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &roles),
+        &crate::artifact::encode_orb(&identity, contract.prepared(), &roles),
     );
     crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
     assert!(Artifact::decode(&source).is_err());
@@ -92,7 +92,7 @@ fn compiled_hook_declarations_travel_in_the_artifact_and_are_checked() {
     let contract = Contract::from_source("hooks.wit", "package test:hooks@1.0.0; interface guard { record admission { value: s32, blocked: bool } apply: func(input: admission) -> admission; } interface gate { admit: func(value: s32) -> admission; use guard.{admission}; } world provider { import guard; export guard; export gate; }", Some("provider")).unwrap();
     let component = component(&contract);
     let identity = "test:hooks/guard@1.0.0";
-    let roles = CallbackRoles {
+    let roles = Manifest {
         hooks: [(identity.into(), HookComposition::Waterfall)].into(),
         ..Default::default()
     };
@@ -100,20 +100,21 @@ fn compiled_hook_declarations_travel_in_the_artifact_and_are_checked() {
         .component_artifact(&component, "gate", 1, &roles)
         .unwrap();
     let decoded = Artifact::decode(&bytes).unwrap();
-    assert_eq!(decoded.hooks, roles.hooks);
-    assert!(decoded.contributions.is_empty());
+    assert_eq!(decoded.manifest.hooks, roles.hooks);
+    assert!(decoded.manifest.contributions.is_empty());
     for refused in [
-        CallbackRoles {
+        Manifest {
             hooks: [(identity.into(), HookComposition::Series)].into(),
             ..Default::default()
         },
-        CallbackRoles {
+        Manifest {
             hooks: [("test:hooks/gate@1.0.0".into(), HookComposition::Waterfall)].into(),
             ..Default::default()
         },
-        CallbackRoles {
+        Manifest {
             hooks: [(identity.into(), HookComposition::Waterfall)].into(),
             contributions: [(identity.into(), 0)].into(),
+            ..Default::default()
         },
     ] {
         assert!(
@@ -131,7 +132,126 @@ fn compiled_hook_declarations_travel_in_the_artifact_and_are_checked() {
     crate::artifact::append_section(
         &mut source,
         "tembra:orb",
-        &crate::artifact::encode_orb_roles(&packaged, contract.prepared(), &roles),
+        &crate::artifact::encode_orb(&packaged, contract.prepared(), &roles),
+    );
+    crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
+    assert!(Artifact::decode(&source).is_err());
+}
+
+/// A compiled service's lifetime and linger travel in the manifest and are applied by the
+/// implementation check. A policy for an interface that is no service (a hook callback, a kernel
+/// callback, an import, an unknown identity), a lingering host-lifetime object and a source
+/// bundle claiming a policy are refused.
+#[test]
+fn compiled_service_policies_travel_in_the_artifact_and_are_checked() {
+    let contract = Contract::from_source("policies.wit", "package test:policies@1.0.0; interface guard { apply: func(value: u32) -> u32; } interface ledger { count: func() -> u32; } world book { import guard; export guard; export ledger; import tembra:guest/state@1.0.0; export tembra:guest/state-init@1.0.0; }", Some("book")).unwrap();
+    let component = component(&contract);
+    let ledger = "test:policies/ledger@1.0.0";
+    let manifest = Manifest {
+        hooks: [(
+            "test:policies/guard@1.0.0".into(),
+            HookComposition::Waterfall,
+        )]
+        .into(),
+        services: [(
+            ledger.into(),
+            ServicePolicy {
+                lifetime: Lifetime::Host,
+                linger_ms: 0,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let bytes = contract
+        .component_artifact(&component, "book", 1, &manifest)
+        .unwrap();
+    let decoded = Artifact::decode(&bytes).unwrap();
+    assert_eq!(decoded.manifest, manifest);
+    let lingering = Manifest {
+        services: [(
+            ledger.into(),
+            ServicePolicy {
+                lifetime: Lifetime::Referenced,
+                linger_ms: 2_500,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let decoded = Artifact::decode(
+        &contract
+            .component_artifact(&component, "book", 1, &lingering)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded.manifest.services[ledger].linger_ms, 2_500);
+    let policy = |identity: &str, lifetime, linger_ms| Manifest {
+        hooks: manifest.hooks.clone(),
+        services: [(
+            identity.into(),
+            ServicePolicy {
+                lifetime,
+                linger_ms,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    for (refused, reason) in [
+        (
+            policy("test:policies/guard@1.0.0", Lifetime::Host, 0),
+            "a hook callback",
+        ),
+        (
+            policy("tembra:guest/state-init@1.0.0", Lifetime::Host, 0),
+            "a kernel callback",
+        ),
+        (
+            policy("tembra:guest/state@1.0.0", Lifetime::Host, 0),
+            "an import",
+        ),
+        (
+            policy("test:policies/missing@1.0.0", Lifetime::Host, 0),
+            "an unknown interface",
+        ),
+        (
+            policy(ledger, Lifetime::Host, 10),
+            "a lingering host object",
+        ),
+    ] {
+        assert!(
+            contract
+                .component_artifact(&component, "book", 1, &refused)
+                .is_err(),
+            "{reason}"
+        );
+        let identity = Identity {
+            name: "book".into(),
+            api_version: 1,
+            world: "book".into(),
+        };
+        let mut forged = component.clone();
+        crate::artifact::append_section(
+            &mut forged,
+            "tembra:orb",
+            &crate::artifact::encode_orb(&identity, contract.prepared(), &refused),
+        );
+        assert!(Artifact::decode(&forged).is_err(), "{reason}");
+    }
+    let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
+    crate::artifact::append_section(
+        &mut source,
+        "tembra:orb",
+        &crate::artifact::encode_orb(
+            &Identity {
+                name: "book".into(),
+                api_version: 1,
+                world: "book".into(),
+            },
+            contract.prepared(),
+            &lingering,
+        ),
     );
     crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
     assert!(Artifact::decode(&source).is_err());
@@ -339,7 +459,7 @@ fn forged_compiled_contracts_are_checked_against_the_real_component() {
     crate::artifact::append_section(
         &mut bytes,
         "tembra:orb",
-        &crate::artifact::encode_orb(&identity, claimed.prepared()),
+        &crate::artifact::encode_orb(&identity, claimed.prepared(), &Default::default()),
     );
     let error = Artifact::decode(&bytes).err().unwrap();
     assert!(error.0.contains("export signatures"), "{error}");
@@ -373,7 +493,7 @@ fn compiled_resource_only_imports_cannot_hide_their_provider_requirement() {
     append(
         &mut bytes,
         "tembra:orb",
-        &crate::artifact::encode_orb(&identity, &forged),
+        &crate::artifact::encode_orb(&identity, &forged, &Default::default()),
     );
     assert!(
         Artifact::decode(&bytes)
@@ -425,6 +545,7 @@ fn compiled_resource_identity_cannot_be_relabelled_in_artifact_metadata() {
                     world: "run".into(),
                 },
                 &forged,
+                &Default::default(),
             ),
         );
         assert!(

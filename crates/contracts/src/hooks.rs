@@ -84,22 +84,6 @@ impl HookPlan {
 }
 
 impl PreparedContract {
-    /// Validate the callback roles a compiled artifact carries: its contributions and the hooks
-    /// it declares, without relying on deployment provider names. An interface takes one role.
-    pub(crate) fn check_callback_roles(&self, roles: &crate::CallbackRoles) -> Result<(), Error> {
-        if let Some(both) = roles
-            .hooks
-            .keys()
-            .find(|identity| roles.contributions.contains_key(*identity))
-        {
-            return Err(Error(format!(
-                "{both}: an Orb declares a hook or contributes to it, not both"
-            )));
-        }
-        self.check_contribution_roles(&roles.contributions)?;
-        self.check_hook_roles(&roles.hooks)
-    }
-
     /// Validate the hooks a compiled component declares: each names an exported interface with
     /// one callback whose shape fits the composition.
     pub(crate) fn check_hook_roles(

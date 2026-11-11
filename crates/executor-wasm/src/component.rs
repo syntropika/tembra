@@ -11,24 +11,27 @@ use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, sync::mpsc};
 use tembra::Result;
 use tembra_contracts::{
-    FunctionKind, HookComposition, Item, Plan, PreparedContract, ServiceBinding, guest,
-    javascript_name,
+    FunctionKind, Item, Manifest, Plan, PreparedContract, ServiceBinding, guest, javascript_name,
 };
 pub(crate) use worker::State as ComponentState;
 
-/// Describe the plain interface exports a compiled artifact implements.
+/// Describe the plain interface exports a compiled artifact implements, with its manifest.
 ///
-/// Compiled services have no guest-selected lifetime, linger or access policy. Hook callbacks and
-/// the kernel's own callbacks (`tembra:guest`) are answered to their callers, never offered as
-/// services; the hooks the artifact declares are described under their export's alias, as a
-/// source bundle declares its own.
+/// A compiled service's lifetime and linger come from the artifact's manifest, when it names the
+/// service; it has no access policy. Hook callbacks and the kernel's own callbacks (`tembra:guest`)
+/// are answered to their callers, never offered as services; the hooks the artifact declares are
+/// described under their export's alias, as a source bundle declares its own.
 pub(crate) fn describe(
     contract: &PreparedContract,
     name: &str,
     api_version: u32,
-    contributions: &BTreeMap<String, i32>,
-    hooks: &BTreeMap<String, HookComposition>,
+    manifest: &Manifest,
 ) -> Value {
+    let Manifest {
+        contributions,
+        hooks,
+        services: policies,
+    } = manifest;
     let mut services = Map::new();
     let mut declared = Map::new();
     for entry in &contract.model().exports {
@@ -59,7 +62,16 @@ pub(crate) fn describe(
             .iter()
             .map(|function| javascript_name(&function.name))
             .collect::<Vec<_>>();
-        services.insert(alias, json!({ "methods": methods }));
+        let mut service = Map::from_iter([("methods".to_owned(), json!(methods))]);
+        if let Some(policy) = interface
+            .contract
+            .as_ref()
+            .and_then(|identity| policies.get(identity))
+        {
+            service.insert("lifetime".into(), json!(policy.lifetime));
+            service.insert("linger".into(), json!(policy.linger_ms));
+        }
+        services.insert(alias, Value::Object(service));
     }
     json!({ "name": name, "apiVersion": api_version, "services": services, "hooks": declared, "contributes": contributions })
 }
@@ -367,6 +379,38 @@ mod state_tests {
             export counter;
         }";
 
+    /// A service's lifetime and linger come from the manifest and reach the checked binding; a
+    /// service the manifest does not name keeps the defaults.
+    #[test]
+    fn the_manifest_describes_each_service_lifetime_and_linger() {
+        let contract = Contract::from_source("counter.wit", WIT, None).unwrap();
+        let manifest = Manifest {
+            services: BTreeMap::from([(
+                "example:counter/counter@1.0.0".to_owned(),
+                tembra_contracts::ServicePolicy {
+                    lifetime: tembra_contracts::Lifetime::Host,
+                    linger_ms: 0,
+                },
+            )]),
+            ..Default::default()
+        };
+        let description = describe(&contract, "counter", 1, &manifest);
+        assert_eq!(
+            description["services"]["counter"],
+            json!({ "methods": ["add"], "lifetime": "host", "linger": 0 })
+        );
+        let implementation: Implementation = serde_json::from_value(description).unwrap();
+        let services = contract
+            .check_implementation("counter", 1, implementation)
+            .unwrap();
+        assert_eq!(services[0].lifetime, tembra_contracts::Lifetime::Host);
+        let description = describe(&contract, "counter", 1, &Manifest::default());
+        assert_eq!(
+            description["services"]["counter"],
+            json!({ "methods": ["add"] })
+        );
+    }
+
     /// The kernel interfaces are neither services nor dependencies: the layout links the state
     /// import to the kernel and remembers the state-init export the worker calls on creation.
     #[test]
@@ -375,7 +419,7 @@ mod state_tests {
         let bindings = contract
             .providers(&Default::default(), &Grants::default())
             .unwrap();
-        let description = describe(&contract, "counter", 1, &BTreeMap::new(), &BTreeMap::new());
+        let description = describe(&contract, "counter", 1, &Manifest::default());
         assert_eq!(
             description["services"]
                 .as_object()
@@ -429,8 +473,14 @@ mod hook_tests {
             .providers(&Default::default(), &Grants::default())
             .unwrap();
         assert_eq!(bindings[identity], Binding::Hook);
-        let declared = BTreeMap::from([(identity.to_owned(), HookComposition::Waterfall)]);
-        let description = describe(&contract, "gate", 1, &BTreeMap::new(), &declared);
+        let manifest = Manifest {
+            hooks: BTreeMap::from([(
+                identity.to_owned(),
+                tembra_contracts::HookComposition::Waterfall,
+            )]),
+            ..Default::default()
+        };
+        let description = describe(&contract, "gate", 1, &manifest);
         assert_eq!(
             description["services"]
                 .as_object()
