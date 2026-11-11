@@ -90,12 +90,11 @@ mod speller {
 }
 ```
 
-`import = "ns:name/interface@version"` adds `import` of that interface to the world and
-re-exports its generated module under the interface's name: `texts::start` returns a
-`texts::Builder` handle with the methods of the resource, and the compiler checks every call on it.
-The package comes from the directory `wit` names, here the contract the text Orb's own build wrote.
-At installation the host binds the import to the text Orb with `Install::requires`, as for any
-dependency.
+The speller imports the text Orb's interface as [rust-orb-import](../rust-orb-import/README.md)
+shows for a plain method: `import = "..."` on the attribute, the provider's contract directory in
+`wit`, the installer binding the import to `text` with `Install::requires`. What is new here is the
+handle: `texts::start` returns a `texts::Builder` with the methods of the resource, the compiler
+checks every call on it, and dropping it at the end of `spell` destroys the builder in the text Orb.
 
 ## Why a resource and not a method
 
