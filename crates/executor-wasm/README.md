@@ -208,7 +208,9 @@ provider or a grant: `tembra:guest/state` and `tembra:guest/resources`, each wit
 answers it, and `tembra:guest/context`, which stands alone and gives a call the principal and the
 cancellation of the invocation that issued it, the key and principal of the object it runs on, and
 the host's log with the host's attribution. The service roles packaged with the artifact give each
-service its lifetime and linger, as a source bundle declares them in code.
+service its lifetime and linger, as a source bundle declares them in code. Prepared browser
+components serve the same interfaces and run the hooks they declare through their adapter, which
+issues the same host requests, answered by the same SDK scope as on Node and mobile.
 
 ## WASI coverage
 
