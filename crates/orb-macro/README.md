@@ -66,6 +66,7 @@ mod greeter {
 | a struct with `#[resource(version = n)]` and a function marked `#[open]`    | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                                                                              |
 | `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct | nothing in the WIT: the state's rule, run on every update and on reload; `validated` in the declaration to the kernel                                              |
 | `#[close]` on a `fn(self)` of a `#[resource]` struct                        | nothing in the WIT: run by the kernel at teardown                                                                                                                  |
+| an inline `mod`                                                             | nothing of its own: its items are read as the Orb's, grouped with what belongs to them                                                                             |
 | `///` comments                                                              | `///` comments in the WIT                                                                                                                                          |
 
 Nothing is exported by accident. A service is a unit struct marked `#[service]`; the `pub fn` of
@@ -425,6 +426,44 @@ taking a resource as a parameter: a resource is handed out, never taken. The res
 one interface, that of `#[wit_resource(service = Name)]` or of the module's only service; another
 service of the module may return it, and its interface `use`s the type. See
 [rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md).
+
+## Organizing the module in sub-modules
+
+The Orb module may hold sub-modules, written inline; the macro reads them as part of the Orb and
+leaves them in place, so a service can live with what belongs to it:
+
+```rust
+#[tembra_orb_macro::orb(package = "example:ledger@1.0.0")]
+mod ledger {
+    pub mod pinned {
+        /// The balance of one pinned ledger object, kept by the kernel.
+        #[state]
+        pub struct Balance { pub total: i64 }
+
+        #[service(lifetime = host)]
+        pub struct Pinned;
+
+        impl Pinned {
+            pub fn add(amount: i64) -> i64 { Balance::update(|balance| balance.total += amount).total }
+        }
+    }
+
+    pub mod passing { /* its own Balance, its own service */ }
+}
+```
+
+A state or a WIT resource that names no service belongs to the one service of its sub-module, else
+to the one service of the Orb. A service's methods are the `pub fn` of the `impl` blocks of its own
+module, and a marked function goes in the module of its struct. The bridges the macro generates for
+an item go in the item's module, so the author's types resolve where they were written; what the
+Orb module itself reaches, a state and its fields, a root resource, a WIT resource and a marked
+function, is `pub` or `pub(super)` in a sub-module. A name that enters the WIT is one across the
+modules, because the package has one namespace: the services, the hooks, the resources and the
+types a method or a hook mentions; a state that stays out of the WIT may repeat its name module by
+module, as `Balance` does, and a module's own name wins when a method mentions it. The modules the
+macro re-exports in the Orb module, `context`, an imported interface, a hook declared from a
+consumed package, are reached from a sub-module through `super::`. See
+[rust-orb-service-lifetime](../../examples/rust-orb-service-lifetime/README.md).
 
 ## What it generates
 

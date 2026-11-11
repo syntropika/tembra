@@ -88,6 +88,8 @@ struct Shape {
     references: Vec<Ident>,
     /// How the type is built, for the conversions between the two sides of a derived hook.
     kind: ShapeKind,
+    /// The module declaring the type, by scope; 0 is the Orb module.
+    scope: usize,
 }
 
 /// The construction of a shape: the named fields of a record, the cases of an enum, the cases of
@@ -108,6 +110,8 @@ struct Service {
     functions: Vec<Function>,
     policy: Option<Policy>,
     implements: Option<String>,
+    /// The module declaring the service, by scope; 0 is the Orb module.
+    scope: usize,
 }
 
 impl Service {
@@ -131,6 +135,8 @@ struct WitResource {
     constructor: Option<Constructor>,
     methods: Vec<Function>,
     statics: Vec<Function>,
+    /// The module declaring the resource, by scope; 0 is the Orb module.
+    scope: usize,
 }
 
 /// A WIT resource's constructor: the function marked `#[constructor]` and its parameters, with
@@ -164,6 +170,8 @@ struct Contribution {
     ident: Ident,
     param: (Ident, Type),
     result: Option<Type>,
+    /// The module declaring the function, by scope; 0 is the Orb module.
+    scope: usize,
 }
 
 /// A hook declaration: a unit struct marked `#[hook(composition = c, input = Type)]`, which
@@ -180,6 +188,8 @@ struct Declared {
     /// The callback's input when the hook is derived from the module: the author's type and its
     /// WIT spelling. `None` for a hook named from a consumed package.
     input: Option<(Type, String)>,
+    /// The module declaring the struct, by scope; 0 is the Orb module.
+    scope: usize,
 }
 
 /// How the kernel composes the contributions of a hook.
@@ -214,6 +224,8 @@ struct State {
     validator: Option<Ident>,
     /// The identity of the owning service's interface, once the owner is resolved.
     identity: String,
+    /// The module declaring the state, by scope; 0 is the Orb module.
+    scope: usize,
 }
 
 /// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a function
@@ -225,6 +237,8 @@ struct Resource {
     open: Option<Ident>,
     /// The function marked `#[close]`, if any.
     close: Option<Ident>,
+    /// The module declaring the resource, by scope; 0 is the Orb module.
+    scope: usize,
 }
 
 /// A marker on a function of an `impl` block. The functions the generated code calls by role
@@ -286,17 +300,21 @@ struct Marked {
     function: syn::ImplItemFn,
     /// Where the marker was written, for the errors.
     span: Span,
+    /// The module of the `impl` block, by scope; 0 is the Orb module.
+    scope: usize,
 }
 
-/// The one function of `ident`'s `impl` blocks carrying `marker`, if any; two are an error.
+/// The one function of `ident`'s `impl` blocks, in the module `scope`, carrying `marker`, if any;
+/// two are an error.
 fn marked_function<'a>(
     marked: &'a [Marked],
     marker: Marker,
     ident: &Ident,
+    scope: usize,
 ) -> syn::Result<Option<&'a Marked>> {
-    let mut found = marked
-        .iter()
-        .filter(|candidate| candidate.marker == marker && &candidate.self_ty == ident);
+    let mut found = marked.iter().filter(|candidate| {
+        candidate.marker == marker && &candidate.self_ty == ident && candidate.scope == scope
+    });
     let first = found.next();
     if let Some(second) = found.next() {
         return Err(syn::Error::new(
@@ -305,6 +323,405 @@ fn marked_function<'a>(
         ));
     }
     Ok(first)
+}
+
+/// A module of the Orb as the scan rebuilds it: the author's items copied through, the items the
+/// macro generates for it, and its sub-modules. The Orb module itself is the root, without a name.
+struct Module {
+    ident: Option<Ident>,
+    attrs: Vec<Attribute>,
+    vis: Visibility,
+    unsafety: Option<syn::token::Unsafe>,
+    items: Vec<Item>,
+    generated: Vec<proc_macro2::TokenStream>,
+    children: Vec<Module>,
+}
+
+impl Module {
+    /// The module at `path` below this one, which the scan registered.
+    fn at(&mut self, path: &[Ident]) -> &mut Module {
+        let mut module = self;
+        for segment in path {
+            module = module
+                .children
+                .iter_mut()
+                .find(|child| child.ident.as_ref() == Some(segment))
+                .expect("a scanned sub-module");
+        }
+        module
+    }
+
+    fn tokens(&self) -> proc_macro2::TokenStream {
+        let items = &self.items;
+        let generated = &self.generated;
+        let children = self.children.iter().map(Module::tokens);
+        let body = quote! { #(#items)* #(#generated)* #(#children)* };
+        match &self.ident {
+            Some(ident) => {
+                let attrs = &self.attrs;
+                let vis = &self.vis;
+                let unsafety = &self.unsafety;
+                quote! { #(#attrs)* #vis #unsafety mod #ident { #body } }
+            }
+            None => body,
+        }
+    }
+}
+
+/// What the scan of the Orb module collects, across its sub-modules.
+struct Scan {
+    package: String,
+    /// The path of each module from the Orb module, by scope; scope 0 is the Orb module itself.
+    modules: Vec<Vec<Ident>>,
+    candidates: Vec<(Item, Shape)>,
+    services: Vec<Service>,
+    contributions: Vec<Contribution>,
+    declared: Vec<Declared>,
+    states: Vec<State>,
+    resources: Vec<Resource>,
+    wit_resources: Vec<WitResource>,
+    impls: Vec<(usize, syn::ItemImpl)>,
+    marked: Vec<Marked>,
+}
+
+/// Whether an item of a sub-module is visible to the Orb module: `pub`, or `pub(..)`.
+fn reaches_root(vis: &Visibility) -> bool {
+    !matches!(vis, Visibility::Inherited)
+}
+
+impl Scan {
+    /// Read the items of one module: the marked ones are collected with their scope, the
+    /// sub-modules are read in turn, and everything else is copied through.
+    fn scan(&mut self, items: Vec<Item>, scope: usize) -> syn::Result<(Vec<Item>, Vec<Module>)> {
+        let mut passthrough = Vec::new();
+        let mut children = Vec::new();
+        let nested = scope != 0;
+        for item in items {
+            match item {
+                Item::Mod(module) => {
+                    let Some((_, inner)) = module.content else {
+                        return Err(syn::Error::new(
+                            module.ident.span(),
+                            "a sub-module of an Orb is written inline, `mod name { .. }`: the macro reads its items",
+                        ));
+                    };
+                    let child = self.modules.len();
+                    let mut path = self.modules[scope].clone();
+                    path.push(module.ident.clone());
+                    self.modules.push(path);
+                    let (items, grandchildren) = self.scan(inner, child)?;
+                    children.push(Module {
+                        ident: Some(module.ident),
+                        attrs: module.attrs,
+                        vis: module.vis,
+                        unsafety: module.unsafety,
+                        items,
+                        generated: Vec::new(),
+                        children: grandchildren,
+                    });
+                }
+                Item::Struct(mut s) => {
+                    if let Some(attribute) = take(&mut s.attrs, "hook") {
+                        let mut declaration = declaration(&s, &attribute, &self.package)?;
+                        declaration.scope = scope;
+                        self.declared.push(declaration);
+                        passthrough.push(Item::Struct(s));
+                    } else if let Some(attribute) = take(&mut s.attrs, "wit_resource") {
+                        if nested && !reaches_root(&s.vis) {
+                            return Err(syn::Error::new(
+                                s.ident.span(),
+                                format!(
+                                    "`{}` is a resource of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, whose services hand it out",
+                                    s.ident
+                                ),
+                            ));
+                        }
+                        let mut resource = wit_resource(&s, &attribute)?;
+                        resource.scope = scope;
+                        self.wit_resources.push(resource);
+                        passthrough.push(Item::Struct(s));
+                    } else if let Some(attribute) = take(&mut s.attrs, "resource") {
+                        if nested && !reaches_root(&s.vis) {
+                            return Err(syn::Error::new(
+                                s.ident.span(),
+                                format!(
+                                    "`{}` is a resource of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, which opens and closes it",
+                                    s.ident
+                                ),
+                            ));
+                        }
+                        let mut resource = resource(&s, &attribute)?;
+                        resource.scope = scope;
+                        self.resources.push(resource);
+                        // A resource enters the WIT only when a service method uses it.
+                        if matches!(s.fields, Fields::Named(_)) {
+                            let mut shape = wit::record(&s)?;
+                            shape.scope = scope;
+                            self.candidates.push((Item::Struct(s), shape));
+                        } else {
+                            passthrough.push(Item::Struct(s));
+                        }
+                    } else if let Some(attribute) = take(&mut s.attrs, "state") {
+                        if nested {
+                            let fields_visible = match &s.fields {
+                                Fields::Named(fields) => {
+                                    fields.named.iter().all(|field| reaches_root(&field.vis))
+                                }
+                                _ => true,
+                            };
+                            if !reaches_root(&s.vis) || !fields_visible {
+                                return Err(syn::Error::new(
+                                    s.ident.span(),
+                                    format!(
+                                        "`{}` is a state of a sub-module: make the struct and its fields visible to the Orb module, `pub` or `pub(super)`, which builds and reads it",
+                                        s.ident
+                                    ),
+                                ));
+                            }
+                        }
+                        let mut state = state(&s, &attribute)?;
+                        state.scope = scope;
+                        self.states.push(state);
+                        let mut shape = wit::record(&s)?;
+                        shape.scope = scope;
+                        self.candidates.push((Item::Struct(s), shape));
+                    } else if let Some(attribute) = take(&mut s.attrs, "service") {
+                        if !matches!(s.fields, Fields::Unit) {
+                            return Err(syn::Error::new(
+                                attribute.span(),
+                                "a service is a unit struct: its methods are the pub fn of its impl blocks",
+                            ));
+                        }
+                        let (implements, policy) = service_attribute(&attribute)?;
+                        self.services.push(Service {
+                            ident: s.ident.clone(),
+                            docs: wit::docs(&s.attrs),
+                            functions: Vec::new(),
+                            policy,
+                            implements,
+                            scope,
+                        });
+                        passthrough.push(Item::Struct(s));
+                    } else if matches!(s.fields, Fields::Named(_)) {
+                        let mut shape = wit::record(&s)?;
+                        shape.scope = scope;
+                        self.candidates.push((Item::Struct(s), shape));
+                    } else {
+                        passthrough.push(Item::Struct(s));
+                    }
+                }
+                Item::Enum(e) => {
+                    let mut shape = wit::enumeration(&e)?;
+                    shape.scope = scope;
+                    self.candidates.push((Item::Enum(e), shape));
+                }
+                Item::Impl(mut i) if i.trait_.is_none() => {
+                    if let Some(attribute) = i.attrs.iter().find(|a| a.path().is_ident("service")) {
+                        return Err(syn::Error::new(
+                            attribute.span(),
+                            "put #[service] on the unit struct, not on its impl block",
+                        ));
+                    }
+                    // The marked functions are read here and their markers removed: the
+                    // compiler knows no attribute of those names.
+                    for impl_item in &mut i.items {
+                        let syn::ImplItem::Fn(function) = impl_item else {
+                            continue;
+                        };
+                        let mut carried = Vec::new();
+                        for marker in Marker::ALL {
+                            if let Some(attribute) = take(&mut function.attrs, marker.name()) {
+                                carried.push((marker, attribute.span()));
+                            }
+                        }
+                        if carried.len() > 1 {
+                            return Err(syn::Error::new(
+                                carried[1].1,
+                                format!(
+                                    "`{}` carries two markers; a function has one role",
+                                    function.sig.ident
+                                ),
+                            ));
+                        }
+                        let Some((marker, span)) = carried.pop() else {
+                            continue;
+                        };
+                        if nested && !reaches_root(&function.vis) {
+                            return Err(syn::Error::new(
+                                span,
+                                format!(
+                                    "#[{}] on a function of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, which calls it",
+                                    marker.name()
+                                ),
+                            ));
+                        }
+                        let self_ty = match &*i.self_ty {
+                            Type::Path(path) => path.path.get_ident().cloned(),
+                            _ => None,
+                        };
+                        let Some(self_ty) = self_ty else {
+                            return Err(syn::Error::new(
+                                span,
+                                format!(
+                                    "#[{}] goes in the impl block of a {} struct of this module",
+                                    marker.name(),
+                                    marker.place()
+                                ),
+                            ));
+                        };
+                        self.marked.push(Marked {
+                            marker,
+                            self_ty,
+                            function: function.clone(),
+                            span,
+                            scope,
+                        });
+                    }
+                    self.impls.push((scope, i.clone()));
+                    passthrough.push(Item::Impl(i));
+                }
+                Item::Impl(i) => {
+                    // A trait impl is copied through unread; a marker belongs to an inherent
+                    // block.
+                    for impl_item in &i.items {
+                        let syn::ImplItem::Fn(function) = impl_item else {
+                            continue;
+                        };
+                        for marker in Marker::ALL {
+                            if let Some(attribute) = function
+                                .attrs
+                                .iter()
+                                .find(|attribute| attribute.path().is_ident(marker.name()))
+                            {
+                                return Err(syn::Error::new(
+                                    attribute.span(),
+                                    format!(
+                                        "#[{}] goes in an inherent impl block of a {} struct, not in a trait impl",
+                                        marker.name(),
+                                        marker.place()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    passthrough.push(Item::Impl(i));
+                }
+                Item::Fn(mut function) => {
+                    if let Some(attribute) = take(&mut function.attrs, "contributes") {
+                        return Err(syn::Error::new(
+                            attribute.span(),
+                            "#[contributes] is now #[hook(\"ns:name/hook@version\", priority = n)]",
+                        ));
+                    }
+                    for marker in Marker::ALL {
+                        if let Some(attribute) = take(&mut function.attrs, marker.name()) {
+                            return Err(syn::Error::new(
+                                attribute.span(),
+                                format!(
+                                    "#[{}] goes on a function in the impl block of a {} struct, not on a free function",
+                                    marker.name(),
+                                    marker.place()
+                                ),
+                            ));
+                        }
+                    }
+                    if let Some(attribute) = take(&mut function.attrs, "hook") {
+                        let mut contribution = contribution(&function, &attribute)?;
+                        contribution.scope = scope;
+                        self.contributions.push(contribution);
+                    }
+                    passthrough.push(Item::Fn(function));
+                }
+                other => passthrough.push(other),
+            }
+        }
+        Ok((passthrough, children))
+    }
+}
+
+/// `super::` once per level below the Orb module: how a sub-module's code names the root.
+fn supers(depth: usize) -> proc_macro2::TokenStream {
+    let supers = std::iter::repeat_n(quote! { super:: }, depth);
+    quote! { #(#supers)* }
+}
+
+/// The path of an item from the Orb module: its module's path, then its name.
+fn from_root(path: &[Ident], ident: &Ident) -> proc_macro2::TokenStream {
+    quote! { #(#path::)* #ident }
+}
+
+/// The path of an item from a module `depth` levels below the Orb module.
+fn relative(depth: usize, path: &[Ident], ident: &Ident) -> proc_macro2::TokenStream {
+    let root = supers(depth);
+    let target = from_root(path, ident);
+    quote! { #root #target }
+}
+
+/// The generated export module of an interface, as a module `depth` levels below the root names it.
+fn export_module(depth: usize, [ns, package, interface]: &[Ident; 3]) -> proc_macro2::TokenStream {
+    let root = supers(depth);
+    quote! { #root exports::#ns::#package::#interface }
+}
+
+/// The generated import module of an interface, as a module `depth` levels below the root names it.
+fn import_module(depth: usize, [ns, package, interface]: &[Ident; 3]) -> proc_macro2::TokenStream {
+    if depth == 0 {
+        quote! { self::#ns::#package::#interface }
+    } else {
+        let root = supers(depth);
+        quote! { #root #ns::#package::#interface }
+    }
+}
+
+/// A type spelled from a consumed WIT, as a module `depth` levels below the root names it: the
+/// spellings name the generated modules from the Orb module.
+fn rooted(spelling: &str, depth: usize) -> String {
+    if depth == 0 {
+        return spelling.to_owned();
+    }
+    let root = "super::".repeat(depth);
+    spelling
+        .replace("exports::", &format!("{root}exports::"))
+        .replace("self::", &root)
+}
+
+/// The module at `path`, for the errors: the Orb module itself when the path is empty.
+fn describe(path: &[Ident]) -> String {
+    if path.is_empty() {
+        return "the Orb module".into();
+    }
+    path.iter()
+        .map(|segment| format!("`{segment}`"))
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// The service owning a state or a WIT resource: the one named, else the only service of the
+/// item's module, else the only service of the Orb.
+fn owner_of<'a>(
+    services: &'a [Service],
+    named: Option<&Ident>,
+    scope: usize,
+    span: Span,
+    hint: &str,
+) -> syn::Result<&'a Service> {
+    if let Some(ident) = named {
+        return services
+            .iter()
+            .find(|service| &service.ident == ident)
+            .ok_or_else(|| {
+                syn::Error::new(
+                    ident.span(),
+                    format!("`{ident}` is not a #[service] of this module"),
+                )
+            });
+    }
+    let mut local = services.iter().filter(|service| service.scope == scope);
+    match (local.next(), local.next(), services.len()) {
+        (Some(only), None, _) => Ok(only),
+        (_, _, 1) => Ok(&services[0]),
+        _ => Err(syn::Error::new(span, hint)),
+    }
 }
 
 fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenStream> {
@@ -323,181 +740,52 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         ));
     };
 
-    // Read the module: marked services, contributions and states, candidate types, and
-    // everything else to copy through unchanged.
-    let mut candidates: Vec<(Item, Shape)> = Vec::new();
-    let mut services = Vec::new();
-    let mut contributions = Vec::new();
-    let mut declared: Vec<Declared> = Vec::new();
-    let mut states = Vec::new();
-    let mut resources: Vec<Resource> = Vec::new();
-    let mut wit_resources: Vec<WitResource> = Vec::new();
-    let mut passthrough = Vec::new();
-    let mut impls = Vec::new();
-    let mut marked: Vec<Marked> = Vec::new();
-    for item in items {
-        match item {
-            Item::Struct(mut s) => {
-                if let Some(attribute) = take(&mut s.attrs, "hook") {
-                    declared.push(declaration(&s, &attribute, &package)?);
-                    passthrough.push(Item::Struct(s));
-                } else if let Some(attribute) = take(&mut s.attrs, "wit_resource") {
-                    wit_resources.push(wit_resource(&s, &attribute)?);
-                    passthrough.push(Item::Struct(s));
-                } else if let Some(attribute) = take(&mut s.attrs, "resource") {
-                    resources.push(resource(&s, &attribute)?);
-                    // A resource enters the WIT only when a service method uses it.
-                    if matches!(s.fields, Fields::Named(_)) {
-                        let shape = wit::record(&s)?;
-                        candidates.push((Item::Struct(s), shape));
-                    } else {
-                        passthrough.push(Item::Struct(s));
-                    }
-                } else if let Some(attribute) = take(&mut s.attrs, "state") {
-                    states.push(state(&s, &attribute)?);
-                    let shape = wit::record(&s)?;
-                    candidates.push((Item::Struct(s), shape));
-                } else if let Some(attribute) = take(&mut s.attrs, "service") {
-                    if !matches!(s.fields, Fields::Unit) {
-                        return Err(syn::Error::new(
-                            attribute.span(),
-                            "a service is a unit struct: its methods are the pub fn of its impl blocks",
-                        ));
-                    }
-                    let (implements, policy) = service_attribute(&attribute)?;
-                    services.push(Service {
-                        ident: s.ident.clone(),
-                        docs: wit::docs(&s.attrs),
-                        functions: Vec::new(),
-                        policy,
-                        implements,
-                    });
-                    passthrough.push(Item::Struct(s));
-                } else if matches!(s.fields, Fields::Named(_)) {
-                    let shape = wit::record(&s)?;
-                    candidates.push((Item::Struct(s), shape));
-                } else {
-                    passthrough.push(Item::Struct(s));
-                }
-            }
-            Item::Enum(e) => {
-                let shape = wit::enumeration(&e)?;
-                candidates.push((Item::Enum(e), shape));
-            }
-            Item::Impl(mut i) if i.trait_.is_none() => {
-                if let Some(attribute) = i.attrs.iter().find(|a| a.path().is_ident("service")) {
-                    return Err(syn::Error::new(
-                        attribute.span(),
-                        "put #[service] on the unit struct, not on its impl block",
-                    ));
-                }
-                // The marked functions are read here and their markers removed: the compiler
-                // knows no attribute of those names.
-                for impl_item in &mut i.items {
-                    let syn::ImplItem::Fn(function) = impl_item else {
-                        continue;
-                    };
-                    let mut carried = Vec::new();
-                    for marker in Marker::ALL {
-                        if let Some(attribute) = take(&mut function.attrs, marker.name()) {
-                            carried.push((marker, attribute.span()));
-                        }
-                    }
-                    if carried.len() > 1 {
-                        return Err(syn::Error::new(
-                            carried[1].1,
-                            format!(
-                                "`{}` carries two markers; a function has one role",
-                                function.sig.ident
-                            ),
-                        ));
-                    }
-                    let Some((marker, span)) = carried.pop() else {
-                        continue;
-                    };
-                    let self_ty = match &*i.self_ty {
-                        Type::Path(path) => path.path.get_ident().cloned(),
-                        _ => None,
-                    };
-                    let Some(self_ty) = self_ty else {
-                        return Err(syn::Error::new(
-                            span,
-                            format!(
-                                "#[{}] goes in the impl block of a {} struct of this module",
-                                marker.name(),
-                                marker.place()
-                            ),
-                        ));
-                    };
-                    marked.push(Marked {
-                        marker,
-                        self_ty,
-                        function: function.clone(),
-                        span,
-                    });
-                }
-                impls.push(i.clone());
-                passthrough.push(Item::Impl(i));
-            }
-            Item::Impl(i) => {
-                // A trait impl is copied through unread; a marker belongs to an inherent block.
-                for impl_item in &i.items {
-                    let syn::ImplItem::Fn(function) = impl_item else {
-                        continue;
-                    };
-                    for marker in Marker::ALL {
-                        if let Some(attribute) = function
-                            .attrs
-                            .iter()
-                            .find(|attribute| attribute.path().is_ident(marker.name()))
-                        {
-                            return Err(syn::Error::new(
-                                attribute.span(),
-                                format!(
-                                    "#[{}] goes in an inherent impl block of a {} struct, not in a trait impl",
-                                    marker.name(),
-                                    marker.place()
-                                ),
-                            ));
-                        }
-                    }
-                }
-                passthrough.push(Item::Impl(i));
-            }
-            Item::Fn(mut function) => {
-                if let Some(attribute) = take(&mut function.attrs, "contributes") {
-                    return Err(syn::Error::new(
-                        attribute.span(),
-                        "#[contributes] is now #[hook(\"ns:name/hook@version\", priority = n)]",
-                    ));
-                }
-                for marker in Marker::ALL {
-                    if let Some(attribute) = take(&mut function.attrs, marker.name()) {
-                        return Err(syn::Error::new(
-                            attribute.span(),
-                            format!(
-                                "#[{}] goes on a function in the impl block of a {} struct, not on a free function",
-                                marker.name(),
-                                marker.place()
-                            ),
-                        ));
-                    }
-                }
-                if let Some(attribute) = take(&mut function.attrs, "hook") {
-                    contributions.push(contribution(&function, &attribute)?);
-                }
-                passthrough.push(Item::Fn(function));
-            }
-            other => passthrough.push(other),
-        }
-    }
-    for item in &impls {
+    // Read the module and its sub-modules: marked services, hooks, states and resources,
+    // candidate types, and everything else to copy through unchanged.
+    let mut scan = Scan {
+        package: package.clone(),
+        modules: vec![Vec::new()],
+        candidates: Vec::new(),
+        services: Vec::new(),
+        contributions: Vec::new(),
+        declared: Vec::new(),
+        states: Vec::new(),
+        resources: Vec::new(),
+        wit_resources: Vec::new(),
+        impls: Vec::new(),
+        marked: Vec::new(),
+    };
+    let (items, children) = scan.scan(items, 0)?;
+    let mut tree = Module {
+        ident: None,
+        attrs: Vec::new(),
+        vis: Visibility::Inherited,
+        unsafety: None,
+        items,
+        generated: Vec::new(),
+        children,
+    };
+    let Scan {
+        modules,
+        candidates,
+        mut services,
+        contributions,
+        declared,
+        mut states,
+        mut resources,
+        mut wit_resources,
+        impls,
+        marked,
+        ..
+    } = scan;
+    // A service's methods are the pub fn of the impl blocks of its own module.
+    for (scope, item) in &impls {
         let Type::Path(path) = &*item.self_ty else {
             continue;
         };
         let Some(service) = services
             .iter_mut()
-            .find(|service| path.path.is_ident(&service.ident))
+            .find(|service| service.scope == *scope && path.path.is_ident(&service.ident))
         else {
             continue;
         };
@@ -510,16 +798,19 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     }
-    // Every marker goes on a struct of its kind; the function's shape is checked below.
+    // Every marker goes on a struct of its kind, in the marker's module; the function's shape is
+    // checked below.
     for marked in &marked {
         let fits = match marked.marker {
-            Marker::Validate => states.iter().any(|state| state.ident == marked.self_ty),
+            Marker::Validate => states
+                .iter()
+                .any(|state| state.ident == marked.self_ty && state.scope == marked.scope),
             Marker::Open | Marker::Close => resources
                 .iter()
-                .any(|resource| resource.ident == marked.self_ty),
+                .any(|resource| resource.ident == marked.self_ty && resource.scope == marked.scope),
             Marker::Constructor => wit_resources
                 .iter()
-                .any(|resource| resource.ident == marked.self_ty),
+                .any(|resource| resource.ident == marked.self_ty && resource.scope == marked.scope),
         };
         if !fits {
             return Err(syn::Error::new(
@@ -534,7 +825,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         }
     }
     for resource in &mut wit_resources {
-        let constructor = marked_function(&marked, Marker::Constructor, &resource.ident)?;
+        let constructor = marked_function(
+            &marked,
+            Marker::Constructor,
+            &resource.ident,
+            resource.scope,
+        )?;
         if let Some(marked) = constructor {
             let function = &marked.function;
             let returns_self = match result(&function.sig.output) {
@@ -555,7 +851,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 params: typed_params(function)?,
             });
         }
-        for function in public_functions(&impls, &resource.ident) {
+        for function in public_functions(&impls, &resource.ident, resource.scope) {
             if constructor.is_some_and(|marked| marked.function.sig.ident == function.sig.ident) {
                 continue;
             }
@@ -566,7 +862,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         }
     }
     for resource in &mut resources {
-        let Some(open) = marked_function(&marked, Marker::Open, &resource.ident)? else {
+        let Some(open) = marked_function(&marked, Marker::Open, &resource.ident, resource.scope)?
+        else {
             return Err(syn::Error::new(
                 resource.ident.span(),
                 format!(
@@ -583,7 +880,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             ));
         }
         resource.open = Some(signature.ident.clone());
-        if let Some(close) = marked_function(&marked, Marker::Close, &resource.ident)? {
+        if let Some(close) =
+            marked_function(&marked, Marker::Close, &resource.ident, resource.scope)?
+        {
             let signature = &close.function.sig;
             let takes_self = signature.inputs.len() == 1
                 && matches!(signature.inputs.first(), Some(FnArg::Receiver(receiver))
@@ -598,7 +897,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         }
     }
     for state in &mut states {
-        if let Some(validator) = marked_function(&marked, Marker::Validate, &state.ident)? {
+        if let Some(validator) =
+            marked_function(&marked, Marker::Validate, &state.ident, state.scope)?
+        {
             let signature = &validator.function.sig;
             let borrows_self = signature.inputs.len() == 1
                 && matches!(signature.inputs.first(), Some(FnArg::Receiver(receiver))
@@ -703,27 +1004,17 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             ));
         }
     }
-    // Each state belongs to the objects of one service, and an object declares exactly one state.
+    // Each state belongs to the objects of one service, the one named, the only one of its
+    // module or the only one of the Orb, and an object declares exactly one state.
     let mut owners = BTreeMap::new();
     for state in &mut states {
-        let owner = match &state.service {
-            Some(ident) => services
-                .iter()
-                .find(|service| &service.ident == ident)
-                .ok_or_else(|| {
-                    syn::Error::new(
-                        ident.span(),
-                        format!("`{ident}` is not a #[service] of this module"),
-                    )
-                })?,
-            None if services.len() == 1 => &services[0],
-            None => {
-                return Err(syn::Error::new(
-                    state.ident.span(),
-                    "name the service whose objects own this state: #[state(service = Name)]",
-                ));
-            }
-        };
+        let owner = owner_of(
+            &services,
+            state.service.as_ref(),
+            state.scope,
+            state.ident.span(),
+            "name the service whose objects own this state, #[state(service = Name)], or put the state in the service's sub-module",
+        )?;
         if let Some(previous) = owners.insert(owner.ident.to_string(), state.ident.to_string()) {
             return Err(syn::Error::new(
                 state.ident.span(),
@@ -736,30 +1027,19 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         state.identity = owner.identity(&package);
         state.service = Some(owner.ident.clone());
     }
-    // Each WIT resource belongs to the interface of one service.
+    // Each WIT resource belongs to the interface of one service, found the same way.
     for resource in &mut wit_resources {
-        let owner = match &resource.service {
-            Some(ident) => services
-                .iter()
-                .find(|service| &service.ident == ident)
-                .ok_or_else(|| {
-                    syn::Error::new(
-                        ident.span(),
-                        format!("`{ident}` is not a #[service] of this module"),
-                    )
-                })?,
-            None if services.len() == 1 => &services[0],
-            None => {
-                return Err(syn::Error::new(
-                    resource.ident.span(),
-                    "name the service whose interface defines this resource: #[wit_resource(service = Name)]",
-                ));
-            }
-        };
+        let owner = owner_of(
+            &services,
+            resource.service.as_ref(),
+            resource.scope,
+            resource.ident.span(),
+            "name the service whose interface defines this resource, #[wit_resource(service = Name)], or put the resource in the service's sub-module",
+        )?;
         resource.service = Some(owner.ident.clone());
     }
-    // A resource is handed out, never taken: no parameter of a derived service or of a
-    // resource names one.
+    // A resource is handed out, never taken: no parameter of a derived service, of a resource or
+    // of a derived hook names one.
     let resource_names: BTreeSet<String> = wit_resources
         .iter()
         .map(|resource| resource.ident.to_string())
@@ -775,16 +1055,18 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .filter_map(|resource| resource.constructor.as_ref())
         .flat_map(|constructor| &constructor.params);
     let input_ident = format_ident!("input");
-    let hook_inputs: Vec<&Type> = declared
+    let hook_inputs: Vec<(&Type, usize)> = declared
         .iter()
-        .filter_map(|declaration| declaration.input.as_ref())
-        .map(|(ty, _)| ty)
+        .filter_map(|declaration| {
+            let (ty, _) = declaration.input.as_ref()?;
+            Some((ty, declaration.scope))
+        })
         .collect();
     for (ident, ty) in derived_functions
         .flat_map(|function| &function.params)
         .chain(constructor_params)
         .map(|(ident, ty, _)| (ident, ty))
-        .chain(hook_inputs.iter().map(|ty| (&input_ident, *ty)))
+        .chain(hook_inputs.iter().map(|(ty, _)| (&input_ident, *ty)))
     {
         let mut mentioned = Vec::new();
         wit::references(ty, &mut mentioned);
@@ -801,21 +1083,69 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         }
     }
 
-    // Only the types a service method or a resource uses, directly or through another type,
-    // enter the WIT; a state no method mentions stays an ordinary struct, with serde derives.
+    // Only the types a service method, a resource or a hook uses, directly or through another
+    // type, enter the WIT; the others go back to their modules as ordinary Rust, a state with
+    // serde derives.
+    let mut unreached: Vec<(usize, Item)> = Vec::new();
     let shapes = reachable(
         candidates,
         &services,
         &wit_resources,
         &hook_inputs,
-        &mut passthrough,
+        &mut unreached,
     )?;
-    for item in &mut passthrough {
-        if let Item::Struct(item) = item
-            && states.iter().any(|state| state.ident == item.ident)
+    for (scope, mut item) in unreached {
+        if let Item::Struct(item) = &mut item
+            && states
+                .iter()
+                .any(|state| state.ident == item.ident && state.scope == scope)
         {
             item.attrs
                 .push(syn::parse_quote!(#[derive(::serde::Serialize, ::serde::Deserialize)]));
+        }
+        tree.at(&modules[scope]).items.push(item);
+    }
+    // A name that enters the WIT is one across the Orb module: the types, the services, the
+    // derived hooks and the resources of every module share the package's names.
+    {
+        let mut names: BTreeMap<String, usize> = BTreeMap::new();
+        let entries = shapes
+            .iter()
+            .map(|shape| (&shape.ident, shape.scope))
+            .chain(
+                services
+                    .iter()
+                    .map(|service| (&service.ident, service.scope)),
+            )
+            .chain(
+                declared
+                    .iter()
+                    .filter(|declaration| declaration.input.is_some())
+                    .map(|declaration| (&declaration.ident, declaration.scope)),
+            )
+            .chain(
+                wit_resources
+                    .iter()
+                    .map(|resource| (&resource.ident, resource.scope)),
+            )
+            .chain(
+                resources
+                    .iter()
+                    .map(|resource| (&resource.ident, resource.scope)),
+            );
+        for (ident, scope) in entries {
+            if let Some(other) = names.insert(ident.to_string(), scope)
+                && other != scope
+            {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!(
+                        "`{ident}` is declared in {} and in {}; a name that enters the WIT is one across the Orb module",
+                        describe(&modules[other]),
+                        describe(&modules[scope])
+                    ),
+                ));
+            }
         }
     }
 
@@ -1004,15 +1334,17 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     );
 
     // Generate the Rust side: the bindings from the inline WIT, the author's types replaced by
-    // the generated ones, the bridges to the author's functions, and the no_std prelude.
+    // the generated ones, the bridges to the author's functions, each in the module of the item
+    // it serves, and the no_std prelude.
     let module_ident = module.ident;
     let vis = module.vis;
     let attrs = module.attrs;
     let ns_ident = format_ident!("{}", namespace.to_snake_case());
     let name_ident = format_ident!("{}", name.to_snake_case());
     // The generated types carry the author's names and public fields, so the author's functions
-    // and the generated traits speak about one type. A type a derived hook reaches is defined in
-    // the first derived hook's interface, any other in the first derived service's.
+    // and the generated traits speak about one type: each is re-exported in the module that
+    // declared it. A type a derived hook reaches is defined in the first derived hook's
+    // interface, any other in the first derived service's.
     let hook_shapes = wit::hook_shapes(&shapes, &declared);
     let interface_module = |ident: &Ident| format_ident!("{}", ident.to_string().to_snake_case());
     let first_hook = declared
@@ -1023,7 +1355,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .iter()
         .find(|service| service.implements.is_none())
         .map(|service| interface_module(&service.ident));
-    let mut grouped: Vec<(Ident, Vec<&Ident>)> = Vec::new();
+    let mut grouped: Vec<((Ident, usize), Vec<&Ident>)> = Vec::new();
     for shape in &shapes {
         let interface = if hook_shapes.contains(&shape.ident.to_string()) {
             &first_hook
@@ -1033,71 +1365,90 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         let interface = interface
             .clone()
             .expect("a shape is reached from a hook or a derived service");
-        match grouped.iter_mut().find(|(known, _)| *known == interface) {
+        let key = (interface, shape.scope);
+        match grouped.iter_mut().find(|(known, _)| *known == key) {
             Some((_, idents)) => idents.push(&shape.ident),
-            None => grouped.push((interface, vec![&shape.ident])),
+            None => grouped.push((key, vec![&shape.ident])),
         }
     }
-    let reexports = grouped.iter().map(|(interface, idents)| {
-        quote! { pub use exports::#ns_ident::#name_ident::#interface::{#(#idents),*}; }
-    });
+    for ((interface, scope), idents) in &grouped {
+        let root = supers(modules[*scope].len());
+        tree.at(&modules[*scope]).generated.push(quote! {
+            pub use #root exports::#ns_ident::#name_ident::#interface::{#(#idents),*};
+        });
+    }
     // A derived service's bridge forwards each function to the author's; a result that is a
     // resource is wrapped into the bindings' handle type, and the resources of the service's
-    // interface are the author's structs.
-    let bridges = services
+    // interface are the author's structs, each bridged in its own module.
+    for service in services
         .iter()
         .filter(|service| service.implements.is_none())
-        .map(|service| {
-            let interface = format_ident!("{}", service.ident.to_string().to_snake_case());
-            let module = quote! { exports::#ns_ident::#name_ident::#interface };
-            let target = &service.ident;
-            let functions = service.functions.iter().map(|function| {
-                let ident = &function.ident;
-                let params = function
-                    .params
-                    .iter()
-                    .map(|(ident, ty, _)| quote! { #ident: #ty });
-                let names = function.params.iter().map(|(ident, _, _)| ident);
-                let call = quote! { #target::#ident(#(#names),*) };
-                let (result, body) =
-                    derived_result(&function.result, &module, &resource_names, call);
-                quote! { fn #ident(#(#params),*) #result { #body } }
+    {
+        let depth = modules[service.scope].len();
+        let root = supers(depth);
+        let interface = interface_module(&service.ident);
+        let module = quote! { #root exports::#ns_ident::#name_ident::#interface };
+        let target = &service.ident;
+        let functions = service.functions.iter().map(|function| {
+            let ident = &function.ident;
+            let params = function
+                .params
+                .iter()
+                .map(|(ident, ty, _)| quote! { #ident: #ty });
+            let names = function.params.iter().map(|(ident, _, _)| ident);
+            let call = quote! { #target::#ident(#(#names),*) };
+            let (result, body) = derived_result(&function.result, &module, &resource_names, call);
+            quote! { fn #ident(#(#params),*) #result { #body } }
+        });
+        let owned = wit_resources
+            .iter()
+            .filter(|resource| resource.service.as_ref() == Some(&service.ident))
+            .map(|resource| {
+                let ident = &resource.ident;
+                let path = relative(depth, &modules[resource.scope], ident);
+                quote! { type #ident = #path; }
             });
-            let owned = wit_resources
-                .iter()
-                .filter(|resource| resource.service.as_ref() == Some(&service.ident))
-                .map(|resource| {
-                    let ident = &resource.ident;
-                    quote! { type #ident = #ident; }
-                });
-            let resource_impls = wit_resources
-                .iter()
-                .filter(|resource| resource.service.as_ref() == Some(&service.ident))
-                .map(|resource| derived_resource(resource, &module, &resource_names));
-            quote! {
-                impl #module::Guest for __TembraExports {
-                    #(#owned)*
-                    #(#functions)*
-                }
-                #(#resource_impls)*
+        tree.at(&modules[service.scope]).generated.push(quote! {
+            impl #module::Guest for #root __TembraExports {
+                #(#owned)*
+                #(#functions)*
             }
         });
+        for resource in wit_resources
+            .iter()
+            .filter(|resource| resource.service.as_ref() == Some(&service.ident))
+        {
+            let resource_root = supers(modules[resource.scope].len());
+            let resource_module =
+                quote! { #resource_root exports::#ns_ident::#name_ident::#interface };
+            tree.at(&modules[resource.scope])
+                .generated
+                .push(derived_resource(
+                    resource,
+                    &resource_module,
+                    &resource_names,
+                ));
+        }
+    }
     // An implemented interface's bridge takes its signatures from the WIT: the functions forward
     // to the author's of the same names, and each resource of the interface is the author's
     // struct of the same name.
-    let implemented_bridges = services
+    for service in services
         .iter()
-        .filter_map(|service| {
-            let identity = service.implements.as_deref()?;
-            Some(implemented_service(
-                service,
-                identity,
-                &consumed[identity],
-                &wit_resources,
-            ))
-        })
-        .collect::<syn::Result<Vec<_>>>()?;
-    // Implemented and imported interfaces are re-exported under their own names, like hooks.
+        .filter(|service| service.implements.is_some())
+    {
+        let identity = service.implements.as_deref().unwrap_or_default();
+        let bridge = implemented_service(
+            service,
+            identity,
+            &consumed[identity],
+            &wit_resources,
+            &modules,
+        )?;
+        tree.at(&modules[service.scope]).generated.push(bridge);
+    }
+    // Implemented and imported interfaces are re-exported under their own names, like hooks, in
+    // the Orb module; a sub-module reaches them through `super::`.
     let consumed_modules = services
         .iter()
         .filter_map(|service| service.implements.as_deref())
@@ -1116,7 +1467,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .then(|| quote! { pub use self::tembra::guest::context; });
     // Each hook's generated module is re-exported under its interface name: the export module
     // of a contributed hook, whose callback forwards to the author's function, and the import
-    // module of a declared hook, whose types `run` takes and returns.
+    // module of a hook declared from a consumed package, whose types `run` takes and returns.
     let hook_modules = hooks
         .keys()
         .map(|hook| {
@@ -1132,8 +1483,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                     quote! { pub use self::#ns::#package::#interface; }
                 }),
         );
-    let contribution_bridges = contributions.iter().map(|contribution| {
-        let [ns, package, interface] = hook_path(&contribution.hook);
+    for contribution in &contributions {
+        let depth = modules[contribution.scope].len();
+        let root = supers(depth);
+        let module = export_module(depth, &hook_path(&contribution.hook));
         let callback = format_ident!("{}", callbacks[&contribution.hook].name.to_snake_case());
         let target = &contribution.ident;
         let (param, ty) = &contribution.param;
@@ -1142,12 +1495,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             .as_ref()
             .map(|ty| quote! { -> #ty })
             .unwrap_or_default();
-        quote! {
-            impl exports::#ns::#package::#interface::Guest for __TembraExports {
-                fn #callback(#param: #ty) #result { #target(#param) }
-            }
-        }
-    });
+        tree.at(&modules[contribution.scope])
+            .generated
+            .push(quote! {
+                impl #module::Guest for #root __TembraExports {
+                    fn #callback(#param: #ty) #result { #target(#param) }
+                }
+            });
+    }
     // The manifest travels with the component, like the WIT: the contributions with their
     // priorities, the declarations with their composition, and the services that chose a
     // lifetime or a linger.
@@ -1200,13 +1555,52 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             static __TEMBRA_MANIFEST: [u8; #len] = *#bytes;
         }
     };
-    // Signatures spelled from a consumed WIT name strings and lists from `alloc`, which the
-    // module may not name.
-    let alloc_alias = (!declared.is_empty() || !implemented.is_empty())
-        .then(|| quote! { extern crate alloc as __tembra_alloc; });
-    let state_code = state_code(&states);
-    let resource_code = resource_code(&resources);
-    let declaration_code = declaration_code(&declared, &callbacks, &shapes, &hook_shapes)?;
+    // Signatures spelled from a consumed WIT name strings and lists from `alloc`, which a module
+    // may not name: the alias goes in every module that holds such a signature.
+    let alloc_scopes: BTreeSet<usize> = declared
+        .iter()
+        .filter(|declaration| declaration.input.is_none())
+        .map(|declaration| declaration.scope)
+        .chain(
+            services
+                .iter()
+                .filter(|service| service.implements.is_some())
+                .map(|service| service.scope),
+        )
+        .collect();
+    for scope in &alloc_scopes {
+        tree.at(&modules[*scope])
+            .generated
+            .push(quote! { extern crate alloc as __tembra_alloc; });
+    }
+    // The hooks: the export the contract requires and `run`, in the declaring module; the
+    // conversions between the two sides of the derived hooks' types, once, in the Orb module.
+    let defining = declared
+        .iter()
+        .find(|declaration| declaration.input.is_some())
+        .map(|declaration| hook_path(&declaration.hook));
+    for declaration in &declared {
+        let depth = modules[declaration.scope].len();
+        let code = declaration_code(
+            declaration,
+            &callbacks,
+            &hook_shapes,
+            defining.as_ref(),
+            depth,
+        )?;
+        tree.at(&modules[declaration.scope]).generated.push(code);
+    }
+    let conversions = defining.as_ref().map(|path| {
+        conversions(
+            &shapes,
+            &hook_shapes,
+            &export_module(0, path),
+            &import_module(0, path),
+        )
+    });
+    let state_code = state_code(&states, &modules);
+    let resource_code = resource_code(&resources, &modules);
+    let body = tree.tokens();
     let wit_literal = LitStr::new(&wit, Span::call_site());
     let wit_bytes = LitByteStr::new(wit.as_bytes(), Span::call_site());
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
@@ -1269,19 +1663,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
 
             #generate
 
-            #(#reexports)*
             #context_module
             #(#consumed_modules)*
             #(#hook_modules)*
 
-            #(#passthrough)*
+            #body
 
-            #alloc_alias
             struct __TembraExports;
-            #(#bridges)*
-            #(#implemented_bridges)*
-            #(#contribution_bridges)*
-            #declaration_code
+            #conversions
             #state_code
             #resource_code
             export!(__TembraExports);
@@ -1406,15 +1795,23 @@ fn wit_resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Wi
         constructor: None,
         methods: Vec::new(),
         statics: Vec::new(),
+        scope: 0,
     })
 }
 
-/// The `pub fn` of a type's `impl` blocks.
-fn public_functions<'a>(impls: &'a [syn::ItemImpl], ident: &Ident) -> Vec<&'a syn::ImplItemFn> {
+/// The `pub fn` of a type's `impl` blocks, in the module `scope`.
+fn public_functions<'a>(
+    impls: &'a [(usize, syn::ItemImpl)],
+    ident: &Ident,
+    scope: usize,
+) -> Vec<&'a syn::ImplItemFn> {
     impls
         .iter()
-        .filter(|item| matches!(&*item.self_ty, Type::Path(path) if path.path.is_ident(ident)))
-        .flat_map(|item| &item.items)
+        .filter(|(module, item)| {
+            *module == scope
+                && matches!(&*item.self_ty, Type::Path(path) if path.path.is_ident(ident))
+        })
+        .flat_map(|(_, item)| &item.items)
         .filter_map(|item| match item {
             syn::ImplItem::Fn(function) if matches!(function.vis, Visibility::Public(_)) => {
                 Some(function)
@@ -1577,11 +1974,14 @@ fn implemented_service(
     identity: &str,
     interface: &wit::Consumed,
     resources: &[WitResource],
+    modules: &[Vec<Ident>],
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let [ns, package, name] = hook_path(identity);
-    let module = quote! { exports::#ns::#package::#name };
+    let depth = modules[service.scope].len();
+    let root = supers(depth);
+    let module = export_module(depth, &hook_path(identity));
     let target = &service.ident;
-    let spelled = |spelling: &str| -> syn::Result<Type> { syn::parse_str(spelling) };
+    let spelled =
+        |spelling: &str| -> syn::Result<Type> { syn::parse_str(&rooted(spelling, depth)) };
     let signature = |function: &wit::ConsumedFunction| -> syn::Result<Signature> {
         let mut names = Vec::new();
         let mut params = Vec::new();
@@ -1635,7 +2035,7 @@ fn implemented_service(
         }) else {
             continue;
         };
-        let struct_ident = &implementation.ident;
+        let struct_ident = relative(depth, &modules[implementation.scope], &implementation.ident);
         owned.push(quote! { type #ident = #struct_ident; });
         let guest = format_ident!("Guest{}", ident);
         let constructor = match (&resource.constructor, &implementation.constructor) {
@@ -1697,7 +2097,7 @@ fn implemented_service(
         });
     }
     Ok(quote! {
-        impl #module::Guest for __TembraExports {
+        impl #module::Guest for #root __TembraExports {
             #(#owned)*
             #(#functions)*
         }
@@ -1706,35 +2106,44 @@ fn implemented_service(
 }
 
 /// Keep, in module order, the candidate types that a derived service's method, a resource's
-/// function or a derived hook's input reaches; the others go back to the module as ordinary Rust.
-/// A reference to a type the module does not declare is an error; a resource is a type of its own.
+/// function or a derived hook's input reaches; the others go back to their modules as ordinary
+/// Rust. A name resolves to the type of the module naming it, else to the one type of that name
+/// in the Orb; a type the module does not declare is an error, and a resource is a type of its own.
 fn reachable(
     candidates: Vec<(Item, Shape)>,
     services: &[Service],
     resources: &[WitResource],
-    hook_inputs: &[&Type],
-    passthrough: &mut Vec<Item>,
+    hook_inputs: &[(&Type, usize)],
+    unreached: &mut Vec<(usize, Item)>,
 ) -> syn::Result<Vec<Shape>> {
-    let declared: BTreeMap<String, usize> = candidates
-        .iter()
-        .enumerate()
-        .map(|(index, (_, shape))| (shape.ident.to_string(), index))
-        .collect();
-    let mut pending: Vec<Ident> = Vec::new();
-    let mention = |function: &Function, pending: &mut Vec<Ident>| {
-        for (_, ty, _) in &function.params {
-            wit::references(ty, pending);
-        }
-        if let Some((ty, _)) = &function.result {
-            wit::references(ty, pending);
-        }
+    let mut declared: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, (_, shape)) in candidates.iter().enumerate() {
+        declared
+            .entry(shape.ident.to_string())
+            .or_default()
+            .push(index);
+    }
+    let mut pending: Vec<(Ident, usize)> = Vec::new();
+    let mention = |ty: &Type, scope: usize, pending: &mut Vec<(Ident, usize)>| {
+        let mut idents = Vec::new();
+        wit::references(ty, &mut idents);
+        pending.extend(idents.into_iter().map(|ident| (ident, scope)));
     };
+    let mention_function =
+        |function: &Function, scope: usize, pending: &mut Vec<(Ident, usize)>| {
+            for (_, ty, _) in &function.params {
+                mention(ty, scope, pending);
+            }
+            if let Some((ty, _)) = &function.result {
+                mention(ty, scope, pending);
+            }
+        };
     for service in services
         .iter()
         .filter(|service| service.implements.is_none())
     {
         for function in &service.functions {
-            mention(function, &mut pending);
+            mention_function(function, service.scope, &mut pending);
         }
     }
     for resource in resources {
@@ -1743,21 +2152,21 @@ fn reachable(
             .iter()
             .flat_map(|constructor| &constructor.params)
         {
-            wit::references(ty, &mut pending);
+            mention(ty, resource.scope, &mut pending);
         }
         for function in resource.methods.iter().chain(&resource.statics) {
-            mention(function, &mut pending);
+            mention_function(function, resource.scope, &mut pending);
         }
     }
-    for input in hook_inputs {
-        wit::references(input, &mut pending);
+    for (input, scope) in hook_inputs {
+        mention(input, *scope, &mut pending);
     }
     let mut kept = BTreeSet::new();
-    while let Some(ident) = pending.pop() {
+    while let Some((ident, scope)) = pending.pop() {
         if resources.iter().any(|resource| resource.ident == ident) {
             continue;
         }
-        let Some(&index) = declared.get(&ident.to_string()) else {
+        let Some(indexes) = declared.get(&ident.to_string()) else {
             return Err(syn::Error::new(
                 ident.span(),
                 format!(
@@ -1765,8 +2174,30 @@ fn reachable(
                 ),
             ));
         };
+        let index = match indexes
+            .iter()
+            .find(|&&index| candidates[index].1.scope == scope)
+        {
+            Some(&index) => index,
+            None if indexes.len() == 1 => indexes[0],
+            None => {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!(
+                        "`{ident}` is declared in several modules of the Orb; a module uses its own `{ident}`, or the types take different names"
+                    ),
+                ));
+            }
+        };
         if kept.insert(index) {
-            pending.extend(candidates[index].1.references.iter().cloned());
+            let shape = &candidates[index].1;
+            pending.extend(
+                shape
+                    .references
+                    .iter()
+                    .cloned()
+                    .map(|reference| (reference, shape.scope)),
+            );
         }
     }
     let mut shapes = Vec::new();
@@ -1774,7 +2205,7 @@ fn reachable(
         if kept.contains(&index) {
             shapes.push(shape);
         } else {
-            passthrough.push(item);
+            unreached.push((shape.scope, item));
         }
     }
     Ok(shapes)
@@ -1871,6 +2302,7 @@ fn contribution(function: &ItemFn, attribute: &Attribute) -> syn::Result<Contrib
         ident: function.sig.ident.clone(),
         param: (pat.ident.clone(), (*typed.ty).clone()),
         result: result(&function.sig.output).cloned(),
+        scope: 0,
     })
 }
 
@@ -1990,91 +2422,75 @@ fn declaration(
         ident: item.ident.clone(),
         docs: wit::docs(&item.attrs),
         input,
+        scope: 0,
     })
 }
 
-/// The code of the declared hooks: for each, the export the contract requires, which traps
-/// because the contributions answer the hook, and `run` on the author's struct, which calls the
-/// matching import so the kernel runs the plan. A derived hook's `run` speaks the module's own
-/// types and converts them to and from the import side of the bindings.
+/// The code of one declared hook, for the module declaring it: the export the contract requires,
+/// which traps because the contributions answer the hook, and `run` on the author's struct, which
+/// calls the matching import so the kernel runs the plan. A derived hook's `run` speaks the
+/// module's own types and converts them to and from the import side of the bindings.
 fn declaration_code(
-    declared: &[Declared],
+    declaration: &Declared,
     callbacks: &BTreeMap<String, wit::Callback>,
-    shapes: &[Shape],
     hook_shapes: &BTreeSet<String>,
+    defining: Option<&[Ident; 3]>,
+    depth: usize,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    if declared.is_empty() {
-        return Ok(quote! {});
+    let path = hook_path(&declaration.hook);
+    let root = supers(depth);
+    let export = export_module(depth, &path);
+    let import = import_module(depth, &path);
+    if let Some((input, _)) = &declaration.input {
+        let import_types = import_module(depth, defining.expect("a derived hook defines types"));
+        return Ok(derived_hook_code(
+            declaration,
+            input,
+            hook_shapes,
+            &import_types,
+            &export,
+            &import,
+            &root,
+        ));
     }
-    // The types the derived hooks reach are defined in the first derived hook's interface, on
-    // both sides of the bindings.
-    let defining = declared
-        .iter()
-        .find(|declaration| declaration.input.is_some())
-        .map(|declaration| hook_path(&declaration.hook));
-    let (import_types, export_types) = match &defining {
-        Some([ns, package, interface]) => (
-            quote! { self::#ns::#package::#interface },
-            quote! { exports::#ns::#package::#interface },
-        ),
-        None => (quote! {}, quote! {}),
+    let callback = &callbacks[&declaration.hook];
+    let name = format_ident!("{}", callback.name.to_snake_case());
+    let export_input: Type = syn::parse_str(&rooted(&callback.input.export, depth))?;
+    let import_input: Type = syn::parse_str(&rooted(&callback.input.import, depth))?;
+    let output = |spelling: &str| -> syn::Result<proc_macro2::TokenStream> {
+        let ty: Type = syn::parse_str(&rooted(spelling, depth))?;
+        Ok(quote! { -> #ty })
     };
-    let conversions = defining
-        .is_some()
-        .then(|| conversions(shapes, hook_shapes, &export_types, &import_types));
-    let items = declared
-        .iter()
-        .map(|declaration| {
-            if let Some((input, _)) = &declaration.input {
-                return Ok(derived_hook_code(
-                    declaration,
-                    input,
-                    hook_shapes,
-                    &import_types,
-                ));
+    let export_result = match &callback.result {
+        Some(spelled) => output(&spelled.export)?,
+        None => quote! {},
+    };
+    let import_result = match &callback.result {
+        Some(spelled) => output(&spelled.import)?,
+        None => quote! {},
+    };
+    let ident = &declaration.ident;
+    let message = format!(
+        "the hook {} is declared by this Orb: its contributions answer it, this export never does",
+        declaration.hook
+    );
+    let doc = format!(
+        " Run the hook `{}`: the kernel calls its contributions in plan order and returns the composed result.",
+        declaration.hook
+    );
+    Ok(quote! {
+        impl #export::Guest for #root __TembraExports {
+            fn #name(_input: #export_input) #export_result {
+                ::core::panic!(#message)
             }
-            let callback = &callbacks[&declaration.hook];
-            let [ns, package, interface] = hook_path(&declaration.hook);
-            let name = format_ident!("{}", callback.name.to_snake_case());
-            let export_input: Type = syn::parse_str(&callback.input.export)?;
-            let import_input: Type = syn::parse_str(&callback.input.import)?;
-            let output = |spelling: &str| -> syn::Result<proc_macro2::TokenStream> {
-                let ty: Type = syn::parse_str(spelling)?;
-                Ok(quote! { -> #ty })
-            };
-            let export_result = match &callback.result {
-                Some(spelled) => output(&spelled.export)?,
-                None => quote! {},
-            };
-            let import_result = match &callback.result {
-                Some(spelled) => output(&spelled.import)?,
-                None => quote! {},
-            };
-            let ident = &declaration.ident;
-            let message = format!(
-                "the hook {} is declared by this Orb: its contributions answer it, this export never does",
-                declaration.hook
-            );
-            let doc = format!(
-                " Run the hook `{}`: the kernel calls its contributions in plan order and returns the composed result.",
-                declaration.hook
-            );
-            Ok(quote! {
-                impl exports::#ns::#package::#interface::Guest for __TembraExports {
-                    fn #name(_input: #export_input) #export_result {
-                        ::core::panic!(#message)
-                    }
-                }
-                impl #ident {
-                    #[doc = #doc]
-                    pub fn run(input: #import_input) #import_result {
-                        self::#ns::#package::#interface::#name(input)
-                    }
-                }
-            })
-        })
-        .collect::<syn::Result<Vec<_>>>()?;
-    Ok(quote! { #(#items)* #conversions })
+        }
+        impl #ident {
+            #[doc = #doc]
+            pub fn run(input: #import_input) #import_result {
+                #import::#name(input)
+            }
+        }
+    })
 }
 
 /// The code of a hook derived from `input = Type`: the export the contract requires, which traps
@@ -2086,8 +2502,10 @@ fn derived_hook_code(
     input: &Type,
     hook_shapes: &BTreeSet<String>,
     import_types: &proc_macro2::TokenStream,
+    export: &proc_macro2::TokenStream,
+    import: &proc_macro2::TokenStream,
+    root: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let [ns, package, interface] = hook_path(&declaration.hook);
     let ident = &declaration.ident;
     let import_input = respell(input, hook_shapes, import_types);
     let (result, settle) = match declaration.composition {
@@ -2121,13 +2539,13 @@ fn derived_hook_code(
     } else {
         quote! { input }
     };
-    let call = quote! { self::#ns::#package::#interface::apply(#argument) };
+    let call = quote! { #import::apply(#argument) };
     let body = match settle {
         Some(settle) => quote! { let answer = #call; #settle },
         None => quote! { #call; },
     };
     quote! {
-        impl exports::#ns::#package::#interface::Guest for __TembraExports {
+        impl #export::Guest for #root __TembraExports {
             fn apply(_input: #input) #result {
                 ::core::panic!(#message)
             }
@@ -2345,23 +2763,24 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
         version,
         validator: None,
         identity: String::new(),
+        scope: 0,
     })
 }
 
 /// The Rust side of the states: the kernel's `state-init` callback answering one declaration per
 /// owning service, the accessors on each state type, and the JSON helpers they share.
-fn state_code(states: &[State]) -> proc_macro2::TokenStream {
+fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStream {
     if states.is_empty() {
         return quote! {};
     }
     let declarations = states.iter().map(|state| {
         let identity = LitStr::new(&state.identity, Span::call_site());
-        let ident = &state.ident;
+        let path = from_root(&modules[state.scope], &state.ident);
         let version = state.version;
         let validated = state.validator.is_some();
         quote! {
             #identity => Some(exports::tembra::guest::state_init::Declaration {
-                initial: __tembra_state::to_json(&<#ident as ::core::default::Default>::default()),
+                initial: __tembra_state::to_json(&<#path as ::core::default::Default>::default()),
                 version: #version,
                 validated: #validated,
             }),
@@ -2374,10 +2793,10 @@ fn state_code(states: &[State]) -> proc_macro2::TokenStream {
         .filter_map(|state| state.validator.as_ref().map(|validator| (state, validator)))
         .map(|(state, validator)| {
             let identity = LitStr::new(&state.identity, Span::call_site());
-            let ident = &state.ident;
+            let path = from_root(&modules[state.scope], &state.ident);
             let name = LitStr::new(&state.ident.to_string(), Span::call_site());
             quote! {
-                #identity => match ::serde_json::from_str::<#ident>(&value) {
+                #identity => match ::serde_json::from_str::<#path>(&value) {
                     Ok(state) => state.#validator(),
                     Err(error) => Err(__tembra_state::format!(
                         "the retained state is not a `{}`: {error}", #name
@@ -2386,7 +2805,7 @@ fn state_code(states: &[State]) -> proc_macro2::TokenStream {
             }
         });
     let accessors = states.iter().map(|state| {
-        let ident = &state.ident;
+        let path = from_root(&modules[state.scope], &state.ident);
         let fields = &state.fields;
         let service = state.service.as_ref().expect("resolved owner").to_string();
         let read_doc = format!(
@@ -2421,12 +2840,12 @@ fn state_code(states: &[State]) -> proc_macro2::TokenStream {
             }
         };
         quote! {
-            impl ::core::default::Default for #ident {
+            impl ::core::default::Default for #path {
                 fn default() -> Self {
                     Self { #(#fields: ::core::default::Default::default()),* }
                 }
             }
-            impl #ident {
+            impl #path {
                 #[doc = #read_doc]
                 pub fn read() -> Self {
                     __tembra_state::read()
@@ -2505,12 +2924,13 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
         version,
         open: None,
         close: None,
+        scope: 0,
     })
 }
 
 /// The Rust side of the resources: the kernel's `resources-init` callbacks listing, opening and
 /// closing them, one slot in the component's memory per resource, and `with` on each type.
-fn resource_code(resources: &[Resource]) -> proc_macro2::TokenStream {
+fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2::TokenStream {
     if resources.is_empty() {
         return quote! {};
     }
@@ -2532,13 +2952,13 @@ fn resource_code(resources: &[Resource]) -> proc_macro2::TokenStream {
     });
     let openers = resources.iter().map(|resource| {
         let name = wit::kebab(&resource.ident);
-        let ident = &resource.ident;
+        let path = from_root(&modules[resource.scope], &resource.ident);
         let open = resource
             .open
             .as_ref()
             .expect("a resource has its #[open] function");
         let slot = slot(resource);
-        quote! { #name => { #slot.open(#ident::#open()); 1 } }
+        quote! { #name => { #slot.open(#path::#open()); 1 } }
     });
     let closers = resources.iter().map(|resource| {
         let name = wit::kebab(&resource.ident);
@@ -2551,15 +2971,15 @@ fn resource_code(resources: &[Resource]) -> proc_macro2::TokenStream {
         }
     });
     let slots = resources.iter().map(|resource| {
-        let ident = &resource.ident;
+        let path = from_root(&modules[resource.scope], &resource.ident);
         let slot = slot(resource);
         let name = wit::kebab(&resource.ident);
         let doc = format!(
             " Use the resource `{name}` of this Orb's root, opened by the kernel at activation; the kernel confirms it is open, the value lives in this component."
         );
         quote! {
-            static #slot: __tembra_resource::Slot<#ident> = __tembra_resource::Slot::new();
-            impl #ident {
+            static #slot: __tembra_resource::Slot<#path> = __tembra_resource::Slot::new();
+            impl #path {
                 #[doc = #doc]
                 pub fn with<R>(use_: impl FnOnce(&mut Self) -> R) -> R {
                     let _handle = self::tembra::guest::resources::read(#name);
