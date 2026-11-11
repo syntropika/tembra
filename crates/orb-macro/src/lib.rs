@@ -74,11 +74,22 @@ struct Shape {
     references: Vec<Ident>,
 }
 
-/// An exported interface: a unit struct marked `#[service]` with an `impl` block of `pub fn`.
+/// An exported interface: a unit struct marked `#[service]` with an `impl` block of `pub fn`, and
+/// the ownership policy of its objects when the attribute names one.
 struct Service {
     ident: Ident,
     docs: Vec<String>,
     functions: Vec<Function>,
+    policy: Option<Policy>,
+}
+
+/// The ownership policy of a service's objects, from `#[service(lifetime = host)]` or
+/// `#[service(linger_ms = n)]`; the kernel applies it.
+struct Policy {
+    /// Objects live until the host closes, instead of while they are referenced.
+    host: bool,
+    /// How long an unreferenced object stays, in milliseconds.
+    linger_ms: u32,
 }
 
 /// One exported function, with the WIT spelling of its parameter and result types.
@@ -151,10 +162,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let (namespace, rest) = package
         .split_once(':')
         .ok_or_else(|| syn::Error::new(module.span(), "package must be ns:name@version"))?;
-    let (name, version) = match rest.split_once('@') {
-        Some((name, version)) => (name, Some(version)),
-        None => (rest, None),
-    };
+    let name = rest.split_once('@').map_or(rest, |(name, _)| name);
     let world = wit::kebab(&module.ident);
     let Some((_, items)) = module.content else {
         return Err(syn::Error::new(
@@ -203,6 +211,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                         ident: s.ident.clone(),
                         docs: wit::docs(&s.attrs),
                         functions: Vec::new(),
+                        policy: policy(&attribute)?,
                     });
                     passthrough.push(Item::Struct(s));
                 } else if matches!(s.fields, Fields::Named(_)) {
@@ -508,9 +517,22 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     });
-    // The hook roles travel with the component, like the WIT: the contributions with their
-    // priorities and the declarations with their composition.
-    let hooks_section = if hooks.is_empty() && declarations.is_empty() {
+    // The manifest travels with the component, like the WIT: the contributions with their
+    // priorities, the declarations with their composition, and the services that chose a
+    // lifetime or a linger.
+    let policies = services
+        .iter()
+        .filter_map(|service| {
+            let policy = service.policy.as_ref()?;
+            let lifetime = if policy.host { "host" } else { "referenced" };
+            Some(format!(
+                "\"{}\":{{\"lifetime\":\"{lifetime}\",\"linger_ms\":{}}}",
+                identity(&package, &wit::kebab(&service.ident)),
+                policy.linger_ms
+            ))
+        })
+        .collect::<Vec<_>>();
+    let manifest_section = if hooks.is_empty() && declarations.is_empty() && policies.is_empty() {
         quote! {}
     } else {
         let contributes = hooks
@@ -523,17 +545,20 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             .map(|(hook, declaration)| format!("\"{hook}\":\"{}\"", declaration.composition.name()))
             .collect::<Vec<_>>()
             .join(",");
-        let json = format!("{{\"contributes\":{{{contributes}}},\"declares\":{{{declares}}}}}");
+        let services = policies.join(",");
+        let json = format!(
+            "{{\"contributes\":{{{contributes}}},\"declares\":{{{declares}}},\"services\":{{{services}}}}}"
+        );
         let bytes = LitByteStr::new(json.as_bytes(), Span::call_site());
         let len = proc_macro2::Literal::usize_unsuffixed(json.len());
         quote! {
             #[cfg(target_arch = "wasm32")]
-            #[unsafe(link_section = "tembra:hooks")]
+            #[unsafe(link_section = "tembra:manifest")]
             #[used]
-            static __TEMBRA_HOOKS: [u8; #len] = *#bytes;
+            static __TEMBRA_MANIFEST: [u8; #len] = *#bytes;
         }
     };
-    let state_code = state_code(&states, &package, name, version);
+    let state_code = state_code(&states, &package);
     let resource_code = resource_code(&resources);
     let declaration_code = declaration_code(&declared, &callbacks)?;
     let wit_literal = LitStr::new(&wit, Span::call_site());
@@ -592,7 +617,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             #[used]
             static __TEMBRA_WIT: [u8; #wit_len] = *#wit_bytes;
 
-            #hooks_section
+            #manifest_section
 
             #generate
 
@@ -616,6 +641,54 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
 fn take(attrs: &mut Vec<Attribute>, name: &str) -> Option<Attribute> {
     let index = attrs.iter().position(|attr| attr.path().is_ident(name))?;
     Some(attrs.remove(index))
+}
+
+/// The versioned identity of an interface of this package: `ns:name/interface@version`.
+fn identity(package: &str, interface: &str) -> String {
+    match package.split_once('@') {
+        Some((name, version)) => format!("{name}/{interface}@{version}"),
+        None => format!("{package}/{interface}"),
+    }
+}
+
+/// Read the ownership policy a `#[service]` attribute names, if any: `lifetime = host` pins the
+/// objects until the host closes, `linger_ms = n` keeps an unreferenced object for `n`
+/// milliseconds; a host-lifetime object cannot linger, as the kernel rules.
+fn policy(attribute: &Attribute) -> syn::Result<Option<Policy>> {
+    if matches!(attribute.meta, syn::Meta::Path(_)) {
+        return Ok(None);
+    }
+    let (mut host, mut linger_ms) = (false, 0);
+    attribute.parse_nested_meta(|meta| {
+        if meta.path.is_ident("lifetime") {
+            let value: Ident = meta.value()?.parse()?;
+            host = match value.to_string().as_str() {
+                "host" => true,
+                "referenced" => false,
+                _ => {
+                    return Err(syn::Error::new(
+                        value.span(),
+                        "the lifetime is referenced (the default) or host",
+                    ));
+                }
+            };
+        } else if meta.path.is_ident("linger_ms") {
+            let literal: LitInt = meta.value()?.parse()?;
+            linger_ms = literal.base10_parse::<u32>()?;
+        } else {
+            return Err(meta.error(
+                "unknown option; use #[service(lifetime = host)] or #[service(linger_ms = n)]",
+            ));
+        }
+        Ok(())
+    })?;
+    if host && linger_ms != 0 {
+        return Err(syn::Error::new(
+            attribute.span(),
+            "host-lifetime objects cannot linger: they live until the host closes",
+        ));
+    }
+    Ok(Some(Policy { host, linger_ms }))
 }
 
 /// Keep, in module order, the candidate types that a service method or a state reaches; the
@@ -911,24 +984,13 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
 
 /// The Rust side of the states: the kernel's `state-init` callback answering one declaration per
 /// owning service, the accessors on each state type, and the JSON helpers they share.
-fn state_code(
-    states: &[State],
-    package: &str,
-    name: &str,
-    version: Option<&str>,
-) -> proc_macro2::TokenStream {
+fn state_code(states: &[State], package: &str) -> proc_macro2::TokenStream {
     if states.is_empty() {
         return quote! {};
     }
-    let package_name = package.split('@').next().unwrap_or(package);
-    let _ = name;
     let declarations = states.iter().map(|state| {
         let service = state.service.as_ref().expect("resolved owner");
-        let identity = match version {
-            Some(version) => format!("{package_name}/{}@{version}", wit::kebab(service)),
-            None => format!("{package_name}/{}", wit::kebab(service)),
-        };
-        let identity = LitStr::new(&identity, Span::call_site());
+        let identity = LitStr::new(&identity(package, &wit::kebab(service)), Span::call_site());
         let ident = &state.ident;
         let version = state.version;
         quote! {
@@ -1165,3 +1227,6 @@ pub(crate) fn hook_path(hook: &str) -> [Ident; 3] {
     let interface = rest.split('@').next().unwrap_or(rest);
     [namespace, name, interface].map(|part| format_ident!("{}", part.to_snake_case()))
 }
+
+#[cfg(test)]
+mod tests;
