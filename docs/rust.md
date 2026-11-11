@@ -96,9 +96,10 @@ kernel's context interface, see [the Rust context example](../examples/rust-orb-
 and each service can choose the lifetime of its objects, see
 [the Rust service lifetime example](../examples/rust-orb-service-lifetime/README.md). A service
 can implement an interface of a shared WIT package instead of deriving one, see
-[the Rust shared interface example](../examples/rust-orb-shared-interface/README.md), and hand
-out WIT resources to other orbs, see
-[the Rust WIT resource example](../examples/rust-orb-wit-resource/README.md).
+[the Rust shared interface example](../examples/rust-orb-shared-interface/README.md), import
+another orb's interface and call it, see
+[the Rust import example](../examples/rust-orb-import/README.md), and hand out WIT resources to
+other orbs, see [the Rust WIT resource example](../examples/rust-orb-wit-resource/README.md).
 
 ## Serve incoming HTTP
 

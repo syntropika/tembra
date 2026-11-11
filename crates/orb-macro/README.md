@@ -339,32 +339,31 @@ interface to the world and re-exports its generated module under the interface's
 
 ```rust
 #[tembra_orb_macro::orb(
-    package = "example:speller@1.0.0",
-    wit = "../text/contract",
-    import = "example:text/texts@1.0.0"
+    package = "example:welcomer@1.0.0",
+    wit = "../greeter/contract",
+    import = "example:greeter/greeting@1.0.0"
 )]
-mod speller {
+mod welcomer {
     #[service]
-    pub struct Spelling;
+    pub struct Welcoming;
 
-    impl Spelling {
-        pub fn spell(word: String) -> String {
-            let builder = texts::start();
-            for letter in word.chars() {
-                builder.push(letter);
-            }
-            builder.text()
+    impl Welcoming {
+        pub fn welcome(names: Vec<String>) -> Vec<String> {
+            names.iter().map(|name| greeting::hello(name)).collect()
         }
     }
 }
 ```
 
 The package comes from the directory `wit` names, here the contract the provider's own build wrote.
-`texts::start` is the imported function; a resource it returns is an owned handle with the
-resource's methods, destroyed in the provider when the handle drops. At installation the host binds
-the import to a provider Orb with `Install::requires`, as for any dependency. The macro records the
-directory in the manifest and `cargo tembra build` nests the imported package whole in the
-contract, so the kernel checks the provider against the same signature. See
+`greeting::hello` is an ordinary function here and a call through the kernel at run time, under
+the caller's principal; a resource an imported function returns is an owned handle with the
+resource's methods, destroyed in the provider when the handle drops. Which Orb answers is the
+installer's choice: it binds the import to a provider Orb with `Install::requires`, as for any
+dependency, and the import reaches that provider's `main` object. The macro records the directory
+in the manifest and `cargo tembra build` nests the imported package whole in the contract, so the
+kernel checks the provider against the same signature. See
+[rust-orb-import](../../examples/rust-orb-import/README.md) and, for a handed-out resource,
 [rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md).
 
 ## Exporting a WIT resource
