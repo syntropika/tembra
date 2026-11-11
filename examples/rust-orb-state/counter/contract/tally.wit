@@ -1,0 +1,21 @@
+package example:counter@1.0.0;
+
+/// A counter. The module has one service, so `Count` is the state of its objects.
+interface counter {
+  /// The state of one counter object: its total and the number of additions made.
+  record count {
+    total: s64,
+    steps: u32,
+  }
+  /// Add `by` to the count and return the new count, or the refusal when the total would
+  /// go below zero; the kernel then keeps the previous count.
+  add: func(by: s64) -> result<count, string>;
+  /// The count so far.
+  read: func() -> count;
+}
+
+world tally {
+  import tembra:guest/state@1.0.0;
+  export tembra:guest/state-init@1.0.0;
+  export counter;
+}

@@ -1,0 +1,22 @@
+package example:audit@1.0.0;
+
+/// The service: it reports its callers and writes to the host's log.
+interface auditor {
+  /// Who called, and which object answered.
+  record caller {
+    principal: string,
+    key: list<string>,
+    owner: string,
+  }
+  /// The call's principal and the address of the object running it; a log record too.
+  whoami: func() -> caller;
+  /// Write a message to the host's log, at level warn, attributed to this Orb by the host.
+  warn: func(message: string);
+  /// Cancel the current call from inside, then report whether the kernel sees it cancelled.
+  give-up: func() -> bool;
+}
+
+world audit {
+  import tembra:guest/context@1.0.0;
+  export auditor;
+}

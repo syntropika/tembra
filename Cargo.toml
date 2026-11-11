@@ -9,6 +9,8 @@ members = [
   "crates/node-binding",
   "crates/executor-wasm",
   "crates/mobile",
+  "crates/orb-macro",
+  "crates/cargo-tembra",
 ]
 resolver = "2"
 exclude = [
@@ -22,6 +24,28 @@ exclude = [
   "crates/executor-wasm/stream-adapter",
   "examples/rust-orb-lifecycle/counter",
   "examples/rust-orb-lifecycle/host",
+  "examples/rust-orb-service/greeter",
+  "examples/rust-orb-service/host",
+  "examples/rust-orb-hook-contribution/gate",
+  "examples/rust-orb-hook-contribution/filter",
+  "examples/rust-orb-hook-contribution/host",
+  "examples/rust-orb-hook-declaration/gate",
+  "examples/rust-orb-hook-declaration/blocker",
+  "examples/rust-orb-hook-declaration/host",
+  "examples/rust-orb-state/counter",
+  "examples/rust-orb-state/host",
+  "examples/rust-orb-context/audit",
+  "examples/rust-orb-context/host",
+  "examples/rust-orb-service-lifetime/ledger",
+  "examples/rust-orb-service-lifetime/host",
+  "examples/rust-orb-shared-interface/book",
+  "examples/rust-orb-shared-interface/host",
+  "examples/rust-orb-import/greeter",
+  "examples/rust-orb-import/welcomer",
+  "examples/rust-orb-import/host",
+  "examples/rust-orb-wit-resource/text",
+  "examples/rust-orb-wit-resource/speller",
+  "examples/rust-orb-wit-resource/host",
 ]
 
 [workspace.package]

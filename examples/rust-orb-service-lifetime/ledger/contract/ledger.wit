@@ -1,0 +1,29 @@
+package example:ledger@1.0.0;
+
+/// A ledger whose `main` object the host creates when it installs the Orb and keeps until
+/// it closes; it is acquired only as `main` by the principal `host`.
+interface pinned {
+  /// Add to the balance and return it.
+  add: func(amount: s64) -> s64;
+}
+
+/// A ledger whose objects stay two and a half seconds after their last reference is
+/// released.
+interface lingering {
+  /// Add to the balance and return it.
+  add: func(amount: s64) -> s64;
+}
+
+/// A ledger whose objects live exactly while something references them: the default.
+interface passing {
+  /// Add to the balance and return it.
+  add: func(amount: s64) -> s64;
+}
+
+world ledger {
+  import tembra:guest/state@1.0.0;
+  export tembra:guest/state-init@1.0.0;
+  export pinned;
+  export lingering;
+  export passing;
+}
