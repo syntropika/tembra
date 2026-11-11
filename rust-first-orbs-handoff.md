@@ -1,10 +1,11 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 19:45 CET
+- **Aggiornato:** 2026-11-11, 19:40 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft)
-- **Stato:** strada A. Il piano del ribase sulla punta del
-  base (`865e4c6`) è pronto e aspetta l'ok di Giacomo. Non
-  toccare la PR e non pushare codice.
+- **Stato:** strada A. Javier ha mergiato il base in `main`,
+  in fast-forward: `origin/main` è `865e4c6`. Il piano del
+  ribase su `main` aspetta l'ok di Giacomo. Non toccare la
+  PR e non pushare codice.
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -118,6 +119,10 @@ come dice «Inizia qui», poi riprendi da
   - `f3a0e8f`: reference view con chiave per i compilati, e
     `ComponentRoles` nei metadati dell'artifact;
   - `865e4c6`: tempi di un test.
+- Fra le 19:30 e le 19:37 CET Javier ha mergiato il base in
+  `main`, in fast-forward: `origin/main` = `865e4c6`. La PR
+  #1 punta ancora a `feat/wasm-orb-runtime` e va spostata su
+  `main`.
 - Il merge della PR non è più pulito: su `92010d0` 3 blocchi,
   sulla punta 31 blocchi in 8 file, più due conflitti che il
   merge testuale non mostra.
@@ -182,9 +187,14 @@ Commit del branch convertito, dal più vecchio:
     contesto, select.
 - Il messaggio di `43bf592` dice che la migrazione è
   conservata su `backup/wasm-components-20261111`.
-- `origin/main` è `d5ada2d` (v0.2.2, 6/11). Il base ha 31
-  commit che `main` non ha.
-- Alle 19:30 CET la punta era ancora `865e4c6`.
+- Fra le 19:30 e le 19:37 CET (ora del push, vista dai
+  fetch) Javier ha portato `main` da `d5ada2d` (v0.2.2,
+  6/11) a `865e4c6`, in fast-forward: niente merge commit,
+  niente squash. Base e `main` sono lo stesso commit, e
+  `b08f386` è antenato di `main`.
+- Non c'è una PR GitHub per il base: Javier ha pushato
+  `main` direttamente. Il branch `feat/wasm-orb-runtime`
+  esiste ancora.
 
 ## Il base nuovo: cosa cambia per noi
 
@@ -305,6 +315,9 @@ per noi.
 
   La CI si fermava alla compilazione, quindi i test del merge
   non sono mai girati.
+- **GitHub, 11/11 sera:** la PR è `CONFLICTING`. Con un
+  conflitto GitHub non lancia i workflow `pull_request`:
+  fino al ribase la CI della PR non gira.
 
 ## Review: 15 problemi
 
@@ -548,10 +561,25 @@ Verso il backup `0dba202`:
 
 ## Piano del ribase (strada A)
 
-Proposto l'11/11 alle 19:45 CET. **Aspetta l'ok di Giacomo.**
+Proposto l'11/11 alle 19:35 CET. **Aspetta l'ok di Giacomo.**
 
-Bersaglio: la punta `865e4c6`, non `92010d0`. La CI della PR
-fa il merge con la punta.
+Bersaglio: `origin/main`, oggi `865e4c6`, cioè la punta del
+base mergiata in fast-forward. Conflitti e scelte sono quelli
+calcolati sulla punta: stesso commit.
+
+La PR #1 va spostata da `feat/wasm-orb-runtime` a `main`:
+
+```bash
+gh pr edit 1 --base main
+```
+
+- Oggi il diff della PR non cambia: i due branch sono lo
+  stesso commit.
+- Meglio farlo presto: se il branch del base viene
+  cancellato, GitHub chiude la PR. Il retarget automatico
+  scatta solo cancellando il branch di una PR mergiata, e
+  il base non ne aveva una.
+- Tocca la PR, quindi serve l'ok di Giacomo.
 
 ### Conflitti sulla punta
 
@@ -628,8 +656,8 @@ Il resto è meccanico:
 
 ### Passi
 
-0. `git fetch` e controllo che la punta sia ancora
-   `865e4c6`. Se si è mossa, rifare l'analisi.
+0. `git fetch` e controllo che `origin/main` sia ancora
+   `865e4c6`. Se si è mosso, rifare l'analisi.
 1. **Merge di prova** in un worktree staccato e usa e getta
    (`.worktrees/probe`, mai pushato): applicare D1–D6, poi
    `cargo check`, poi `just check`. Così ogni risoluzione è
@@ -642,7 +670,7 @@ Il resto è meccanico:
    CHECK="$CHECK --all-features --all-targets"
    git switch -c feat/rust-first-orbs-rebased
    git -c rerere.enabled=true rebase -x "$CHECK" \
-     origin/feat/wasm-orb-runtime
+     origin/main
    ```
 
    Le opzioni sono quelle di `just lint` e `just test`.
@@ -677,26 +705,31 @@ Il resto è meccanico:
 ### Adesso
 
 - Aspettare l'ok di Giacomo su «Piano del ribase»: il
-  bersaglio `865e4c6` e le scelte D1–D6.
+  bersaglio `origin/main`, le scelte D1–D6, e lo spostamento
+  della PR su `main`.
 - Non toccare la PR #1 e non pushare codice nuovo.
 
 ### Alla ripresa, sempre
 
-1. Aggiornare e guardare il base:
+1. Aggiornare e guardare il base, che dall'11/11 sera è
+   `main`:
 
    ```bash
    git fetch origin --prune
    ```
 
    ```bash
-   git log --oneline -10 origin/feat/wasm-orb-runtime
+   git log --oneline -10 origin/main
    ```
+
+   Guardare anche `origin/feat/wasm-orb-runtime`, nel caso
+   Javier continui lì.
 
 2. Capire se `tembra:orb` è tornato (zsh: usare `${B}:`, mai
    `$B:`):
 
    ```bash
-   B=origin/feat/wasm-orb-runtime
+   B=origin/main
    git cat-file -e \
      "${B}:crates/contracts/wit/tembra/orb.wit" \
      && echo "tembra:orb c'è" || echo "assente"
@@ -761,7 +794,7 @@ branch.
 
   ```bash
   git worktree add --detach .worktrees/probe \
-    origin/feat/wasm-orb-runtime
+    origin/main
   cd .worktrees/probe
   git -c merge.conflictStyle=diff3 merge \
     --no-commit --no-ff origin/feat/rust-first-orbs
