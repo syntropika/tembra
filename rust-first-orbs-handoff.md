@@ -1,6 +1,6 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 22:05 CET
+- **Aggiornato:** 2026-11-11, 22:50 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   base `main`
 - **Stato:** strada A. Ribase fatto, verificato e pushato: la
@@ -833,7 +833,8 @@ CI sulla PR: run `43095862614` (push) e `43095868722`
 (pull_request), su `f8d9cf2`. Alle 22:00 CET GitHub Actions
 era in «major outage»: la run pull_request è finita come
 failure senza mai partire (job in coda, zero step), la push è
-rimasta in coda. Va rilanciata quando Actions torna:
+rimasta in coda. Alle 22:50 Actions era di nuovo operativo e
+Claude ha rilanciato la run pull_request (tentativo 2):
 
 ```bash
 gh run rerun 43095868722
