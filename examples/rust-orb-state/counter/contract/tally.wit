@@ -7,8 +7,9 @@ interface counter {
     total: s64,
     steps: u32,
   }
-  /// Add `by` to the count and return the new count.
-  add: func(by: s64) -> count;
+  /// Add `by` to the count and return the new count, or the refusal when the total would
+  /// go below zero; the kernel then keeps the previous count.
+  add: func(by: s64) -> result<count, string>;
   /// The count so far.
   read: func() -> count;
 }
