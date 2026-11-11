@@ -28,7 +28,7 @@ use async_channel::Sender;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex, mpsc},
 };
 use tokio::sync::oneshot;
@@ -48,12 +48,12 @@ const DEFAULT_KEY: &str = "main";
 
 /// Exported callbacks and selected Orb imports, resolved from the prepared contract.
 pub(crate) struct Layout {
-    /// JavaScript service alias to its interface identity and method spellings.
-    pub exports: BTreeMap<String, Export>,
+    /// Callable export interfaces: service methods and contribution callbacks.
+    pub exports: Vec<Export>,
     /// Orb-bound import interfaces, in world order.
     pub imports: Vec<Import>,
-    /// Checked contribution binding to its callback export; never an ordinary service.
-    pub contributions: BTreeMap<String, (String, String)>,
+    /// Function ids of the checked contribution callbacks; never ordinary service methods.
+    pub contributions: BTreeSet<u32>,
     /// The exact incoming HTTP handler export, served only through the ingress adapter.
     pub ingress: Option<String>,
 }
@@ -64,10 +64,18 @@ type Handler = TypedFunc<(Resource<p3::Request>,), (Result<Resource<p3::Response
 
 /// Callable exports resolved once per Store.
 struct Exports {
-    functions: BTreeMap<(String, String), Func>,
-    /// The actual resource types of exports that lend `self` or return an owned resource.
-    roles: BTreeMap<(String, String), Resolved>,
+    /// Each callable export by its function id, the export slot `bind` returned.
+    functions: BTreeMap<u32, Target>,
     handler: Option<Handler>,
+}
+
+/// One resolved export function and the only service whose environments may call it.
+#[derive(Clone)]
+struct Target {
+    function: Func,
+    service: Arc<str>,
+    /// The actual resource types if it lends `self` or returns an owned resource.
+    roles: Resolved,
 }
 
 /// Resource positions of one export, as actual types of this Store.
@@ -79,10 +87,16 @@ struct Resolved {
 
 pub(crate) struct Export {
     pub interface: String,
-    /// JavaScript method spelling to original WIT function name.
-    pub methods: BTreeMap<String, String>,
-    /// Resource positions by JavaScript spelling; absent for data-only functions.
-    pub roles: BTreeMap<String, Roles>,
+    /// JavaScript service alias whose environments may call these functions.
+    pub service: String,
+    /// Function id (export slot) to original WIT function name and resource positions.
+    pub functions: BTreeMap<u32, ExportFunction>,
+}
+
+pub(crate) struct ExportFunction {
+    pub name: String,
+    /// Resource positions; absent for data-only functions.
+    pub roles: Option<Roles>,
 }
 
 /// Resource positions of one function, by the local name of the defining resource.
@@ -354,8 +368,7 @@ enum Packet {
     },
     Invoke {
         environment: u64,
-        service: Option<String>,
-        method: String,
+        function: u32,
         args: Value,
         /// The host-issued id of the exported resource lent as implicit `self`.
         #[serde(default)]
@@ -363,9 +376,7 @@ enum Packet {
     },
     Contribute {
         environment: u64,
-        binding: String,
-        service: String,
-        method: String,
+        function: u32,
         args: Value,
     },
     Release {
@@ -387,6 +398,8 @@ enum Packet {
 struct Environments {
     roots: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
     parents: BTreeMap<u64, u64>,
+    /// Every declared, unreleased environment and its service alias (`None` for an Orb root).
+    services: BTreeMap<u64, Option<String>>,
 }
 
 /// Instantiate the component, report readiness, then serve commands until the owner closes or a
@@ -550,8 +563,8 @@ async fn instantiate(
     .await
     .map_err(|_| wasmtime::Error::msg("component initialization timed out"))??;
     let mut exports = BTreeMap::new();
-    let mut roles = BTreeMap::new();
-    for (alias, export) in &layout.exports {
+    for export in &layout.exports {
+        let service = Arc::<str>::from(export.service.as_str());
         let (_, interface) = instance
             .get_export(&mut store, None, &export.interface)
             .ok_or_else(|| wasmtime::Error::msg("missing component interface"))?;
@@ -566,21 +579,32 @@ async fn instantiate(
                 })
                 .transpose()
         };
-        for (spelling, role) in &export.roles {
-            let resolved = Resolved {
-                receiver: resource(&role.receiver)?,
-                own_result: resource(&role.own_result)?,
-            };
-            roles.insert((alias.clone(), spelling.clone()), resolved);
+        let mut roles = BTreeMap::new();
+        for (id, exported) in &export.functions {
+            if let Some(role) = &exported.roles {
+                let resolved = Resolved {
+                    receiver: resource(&role.receiver)?,
+                    own_result: resource(&role.own_result)?,
+                };
+                roles.insert(*id, resolved);
+            }
         }
-        for (spelling, method) in &export.methods {
+        for (id, exported) in &export.functions {
+            let roles = roles.remove(id).unwrap_or_default();
             let (_, index) = instance
-                .get_export(&mut store, Some(&interface), method)
+                .get_export(&mut store, Some(&interface), &exported.name)
                 .ok_or_else(|| wasmtime::Error::msg("missing component method"))?;
             let function = instance
                 .get_func(&mut store, index)
                 .ok_or_else(|| wasmtime::Error::msg("component export is not a function"))?;
-            exports.insert((alias.clone(), spelling.clone()), function);
+            let target = Target {
+                function,
+                service: service.clone(),
+                roles,
+            };
+            if exports.insert(*id, target).is_some() {
+                return Err(wasmtime::Error::msg("duplicate component function id"));
+            }
         }
     }
     // The handler's actual binary type must be exactly the standard one; anything else refuses
@@ -609,7 +633,6 @@ async fn instantiate(
         store,
         Exports {
             functions: exports,
-            roles,
             handler,
         },
     ))
@@ -1018,42 +1041,27 @@ async fn serve(
         return Ok(Err("command does not match its execution entrypoint".into()));
     }
     let limit = engine.limits.packet_bytes;
-    let packet = match packet {
-        Packet::Contribute {
-            environment,
-            binding,
-            service,
-            method,
-            args,
-        } => {
-            if layout.contributions.get(&binding) != Some(&(service.clone(), method.clone())) {
-                return Ok(Err("unknown compiled contribution callback".into()));
-            }
-            Packet::Invoke {
-                environment,
-                service: Some(service),
-                method,
-                args,
-                receiver: None,
-            }
-        }
-        packet => packet,
-    };
     match packet {
         Packet::Create {
             environment,
             service,
-        } => Ok(declare(
-            environment,
-            service,
-            layout,
-            environments,
-            &command.events,
-            limit,
-        )
-        .await
-        .map(|()| "null".to_owned())),
+        } => {
+            let declared = declare(
+                environment,
+                service.clone(),
+                layout,
+                environments,
+                &command.events,
+                limit,
+            )
+            .await;
+            if declared.is_ok() {
+                environments.services.insert(environment, service);
+            }
+            Ok(declared.map(|()| "null".to_owned()))
+        }
         Packet::Release { environment } => {
+            environments.services.remove(&environment);
             environments.roots.remove(&environment);
             let root = environments.parents.remove(&environment);
             // Resources this environment issued are destroyed with it; entries leave the table
@@ -1092,26 +1100,64 @@ async fn serve(
         }
         Packet::Invoke {
             environment,
-            service: Some(service),
-            method,
+            function,
             args,
             receiver,
-        } if command.operation == Operation::Start && command.ingress.is_none() => {
-            let key = (service, method);
-            let Some(function) = exports.functions.get(&key).copied() else {
-                return Ok(Err("unknown component export".into()));
+        } if command.ingress.is_none() => {
+            // A service method, called only in an environment of its own service.
+            let target = match exports.functions.get(&function) {
+                Some(target) if !layout.contributions.contains(&function) => target,
+                _ => return Ok(Err("unknown component export".into())),
             };
-            let roles = exports.roles.get(&key).cloned().unwrap_or_default();
+            let Some(service) = environments.services.get(&environment) else {
+                return Ok(Err(
+                    "component environment is not declared or was released".into()
+                ));
+            };
+            if service.as_deref() != Some(&*target.service) {
+                return Ok(Err(
+                    "the function does not belong to this environment's service".into(),
+                ));
+            }
+            let target = target.clone();
             let authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
                 Err(error) => return Ok(Err(error)),
             };
             let call = Call {
-                function,
-                roles,
+                function: target.function,
+                roles: target.roles,
                 environment,
                 receiver,
                 stream: command.stream.take(),
+            };
+            invoke(engine, store, call, &args, authority, groups).await
+        }
+        Packet::Contribute {
+            environment,
+            function,
+            args,
+        } if command.ingress.is_none() && command.stream.is_none() => {
+            // A contribution callback, called only in its Orb root environment.
+            let target = match exports.functions.get(&function) {
+                Some(target) if layout.contributions.contains(&function) => target.clone(),
+                _ => return Ok(Err("unknown compiled contribution callback".into())),
+            };
+            if environments.services.get(&environment) != Some(&None) {
+                return Ok(Err(
+                    "a contribution runs only in its declared Orb root environment".into(),
+                ));
+            }
+            let authority = match authority(environment, layout, environments, command) {
+                Ok(authority) => authority,
+                Err(error) => return Ok(Err(error)),
+            };
+            let call = Call {
+                function: target.function,
+                roles: target.roles,
+                environment,
+                receiver: None,
+                stream: None,
             };
             invoke(engine, store, call, &args, authority, groups).await
         }

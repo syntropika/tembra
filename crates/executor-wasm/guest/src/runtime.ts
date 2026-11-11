@@ -3,6 +3,26 @@ import "./builtins.ts";
 // Host state and authority never live in these guest-side proxy objects.
 (() => {
   const environments = new Map<number, unknown>();
+  /** The service alias of each declared environment; `null` names an Orb root. */
+  const environmentServices = new Map<number, string | null>();
+  /**
+   * Exported functions by the id the host selects them with: the contract's export slot. Ids are
+   * local to this revision and grant nothing; each command's role and environment are checked.
+   */
+  const functions = new Map<
+    number,
+    { readonly contract: string; readonly service: string; readonly method: string }
+  >();
+  for (const exported of globalThis.__tembraExports!) {
+    for (const [id, method] of exported.functions) {
+      if (functions.has(id)) throw new Error("Duplicate exported function id");
+      functions.set(
+        id,
+        Object.freeze({ contract: exported.interface, service: exported.service, method }),
+      );
+    }
+  }
+  delete globalThis.__tembraExports;
   const callbacks = new Map<number, GuestCallback>();
   const values = new Map<number, unknown>();
   const owners = new Map<number, number | null>();
@@ -326,6 +346,21 @@ import "./builtins.ts";
     });
   }
 
+  /**
+   * Resolve a host-selected function id. A service method runs only in an environment of its own
+   * service, a contribution only in a declared Orb root; unknown ids and released or foreign
+   * environments are refused.
+   */
+  function exported(id: unknown, environment: unknown, contribution: boolean) {
+    const target = functions.get(id as number);
+    if (!target) throw new Error("Unknown exported function");
+    const service = environmentServices.get(environment as number);
+    if (service === undefined) throw new Error("Unknown or released interpreter environment");
+    if (contribution ? service !== null : service !== target.service)
+      throw new Error("The function does not belong to this environment");
+    return target;
+  }
+
   /** Describe callbacks without serializing or executing service factories. */
   globalThis.__tembraDescribe = () => {
     const orb = globalThis.__tembraOrb;
@@ -388,6 +423,7 @@ import "./builtins.ts";
     }
     if (typeof value?.then === "function") throw new Error("Factories must be synchronous");
     environments.set(request.environment, value);
+    environmentServices.set(request.environment, request.service);
     return "null";
   };
 
@@ -401,36 +437,47 @@ import "./builtins.ts";
       const orb = globalThis.__tembraOrb;
       let result;
       switch (request.kind) {
-        case "invoke":
-          if (wire.streamResult(request.service, request.method)) {
+        case "invoke": {
+          const { service, method } = exported(request.function, request.environment, false);
+          const methods = orb.services[service]?.methods;
+          if (!methods || typeof methods[method] !== "function")
+            throw new Error("Unknown service method");
+          const environment = environments.get(request.environment);
+          if (wire.streamResult(service, method)) {
             // The result leaves as a stream; this callback lasts until it was produced.
             await streamResult(
-              await orb.services[request.service]!.methods[request.method]!(
-                environments.get(request.environment),
+              await methods[method]!(
+                environment,
                 context(request.environment),
-                ...wire.arguments(request.service, request.method, request.args),
+                ...wire.arguments(service, method, request.args),
               ),
             );
             break;
           }
-          result = await wire.invoke(request.service, request.method, () =>
-            orb.services[request.service]!.methods[request.method]!(
-              environments.get(request.environment),
+          result = await wire.invoke(service, method, () =>
+            methods[method]!(
+              environment,
               context(request.environment),
-              ...wire.arguments(request.service, request.method, request.args),
+              ...wire.arguments(service, method, request.args),
             ),
           );
           break;
+        }
         case "contribute": {
-          const contribution = orb.contributes?.[request.binding];
+          const { contract, service, method } = exported(
+            request.function,
+            request.environment,
+            true,
+          );
+          const contribution = orb.contributes?.[contract];
           const handle = typeof contribution === "function" ? contribution : contribution?.handle;
           if (!handle) throw new Error("Unknown contribution callback");
           // Contributions run in the Orb root environment, like that environment's services.
-          result = await wire.invoke(request.service, request.method, () =>
+          result = await wire.invoke(service, method, () =>
             handle(
               environments.get(request.environment),
               context(request.environment),
-              wire.arguments(request.service, request.method, request.args)[0],
+              wire.arguments(service, method, request.args)[0],
             ),
           );
           break;
@@ -438,6 +485,8 @@ import "./builtins.ts";
         case "ingress": {
           // The host-local HTTP handler: an ordinary service method whose argument is the
           // host-issued request handle. The callback lasts until the response was delivered.
+          if (environmentServices.get(request.environment) !== request.service)
+            throw new Error("The HTTP handler does not belong to this environment");
           const handle = orb.services[request.service]?.methods[request.method];
           if (typeof handle !== "function") throw new Error("Unknown HTTP handler service");
           const environment = environments.get(request.environment);
@@ -451,6 +500,7 @@ import "./builtins.ts";
           break;
         case "release":
           environments.delete(request.environment);
+          environmentServices.delete(request.environment);
           for (const [id, owner] of owners) {
             if (owner !== request.environment) continue;
             callbacks.delete(id);

@@ -1,5 +1,6 @@
-//! Thread-affine metadata-only Node-API adapter. JavaScript stays in the existing Node runtime.
+//! Node-API facade for the kernel, WIT tooling and isolated execution.
 use napi_derive::napi;
+pub mod browser;
 mod interpreter;
 
 /// Immutable Orb bytes and their checked prepared contract, shared by every installation.

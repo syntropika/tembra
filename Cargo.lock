@@ -1753,6 +1753,7 @@ name = "tembra-contracts-wasm"
 version = "0.2.2"
 dependencies = [
  "serde_json",
+ "sha2",
  "tembra-contracts",
  "wasm-bindgen",
 ]
@@ -1826,6 +1827,10 @@ dependencies = [
  "tembra-bridge",
  "tembra-contracts",
  "tembra-executor-wasm",
+ "wasm-encoder 0.263.0",
+ "wasmparser 0.263.0",
+ "wasmtime",
+ "wat",
 ]
 
 [[package]]

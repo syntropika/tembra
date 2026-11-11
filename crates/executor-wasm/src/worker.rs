@@ -322,13 +322,21 @@ impl Session {
     }
 
     /// Load source without issuing any host authority to module initialization.
-    pub(crate) fn load(&self, source: &str, contract: Value) -> Result<Value> {
+    ///
+    /// The guest receives the contract description and, once, the exported-function table that
+    /// every later `invoke` and `contribute` command selects from by id.
+    pub(crate) fn load(
+        &self,
+        source: &str,
+        contract: &tembra_contracts::PreparedContract,
+    ) -> Result<Value> {
         let packet = crate::protocol::Load {
             source: source.into(),
             heap_bytes: self.0.heap_bytes,
-            contract,
+            contract: contract.describe(),
             instruction_ticks: crate::protocol::DEFAULT_INSTRUCTION_TICKS,
             builtins: self.0.io.builtins(),
+            exports: crate::adapter::exported_functions(contract)?,
         };
         self.blocking(
             Operation::Load,
@@ -988,7 +996,7 @@ mod tests {
         )
         .unwrap();
         let contract = Contract::from_source("checks.wit","package example:abandon; interface checks { run: func() -> u32; } world test { export checks; }",None).unwrap();
-        session.load(r#"globalThis.__tembraOrb={services:{checks:{create(){__hostSync('{"operation":"state.read"}');return {}},methods:{run(){return 1}}}}};"#,contract.describe()).unwrap();
+        session.load(r#"globalThis.__tembraOrb={services:{checks:{create(){__hostSync('{"operation":"state.read"}');return {}},methods:{run(){return 1}}}}};"#,&contract).unwrap();
         let events = session
             .begin(
                 Operation::Declare,
@@ -1070,6 +1078,7 @@ mod tests {
                 "source": "globalThis.__tembraOrb={services:{checks:{methods:{run(){return 1}}}}};",
                 "heap_bytes": 32 << 20,
                 "contract": contract.describe(),
+                "exports": crate::adapter::exported_functions(&contract).unwrap(),
             });
             let outcome = driver
                 .call(Operation::Load, load.to_string(), &mut store)
@@ -1113,6 +1122,7 @@ mod tests {
                 "source": "const chunks=[];for(let i=0;i<64;i++)chunks.push(new Uint8Array(1<<20));globalThis.__tembraOrb={services:{checks:{methods:{run(){return 1}}}}};",
                 "heap_bytes": 256 << 20,
                 "contract": contract.describe(),
+                "exports": crate::adapter::exported_functions(&contract).unwrap(),
             });
             let outcome = driver.call(Operation::Load, load.to_string(), &mut store).await;
             let failed = outcome.map_or(true, |outcome| outcome.value.is_err() && outcome.interrupted);
@@ -1156,10 +1166,14 @@ mod tests {
     fn source_commands_cannot_cross_execution_entrypoints() {
         let (_engine, session) = tick_bounded_session("entrypoints");
         let contract = Contract::from_source("checks.wit", "package example:entrypoints; interface checks { run: func() -> u32; } world test { export checks; }", None).unwrap();
-        session.load(r#"globalThis.__tembraOrb={create(){return {value:7}},services:{checks:{methods:{run(environment){return environment.value}}}}};"#,contract.describe()).unwrap();
+        session.load(r#"globalThis.__tembraOrb={services:{checks:{create(){return {value:7}},methods:{run(environment){return environment.value}}}}};"#,&contract).unwrap();
         let create =
-            serde_json::json!({"kind":"create","environment":1,"service":null}).to_string();
-        let invoke = serde_json::json!({"kind":"invoke","environment":1,"service":"checks","method":"run","args":[]}).to_string();
+            serde_json::json!({"kind":"create","environment":1,"service":"checks"}).to_string();
+        let run = contract
+            .bind("example:entrypoints/checks", "run", true)
+            .unwrap();
+        let invoke = serde_json::json!({"kind":"invoke","environment":1,"function":run,"args":[]})
+            .to_string();
         let no_host =
             |_: &str, _: bool| -> tembra::Result<Value> { panic!("no host requests expected") };
         let error = session
@@ -1195,8 +1209,25 @@ mod tests {
           for(let i=0;i<4000;i++) Promise.resolve().then(()=>i+1);
           while(true){}
         }}}}};"#;
-        session.blocking(Operation::Load, serde_json::json!({"source":source,"heap_bytes":64<<20,"contract":contract.describe(),"instruction_ticks":50}).to_string(), |_,_| Ok(Value::Null)).unwrap();
-        let error = session.blocking(Operation::Start, serde_json::json!({"kind":"invoke","environment":1,"service":"checks","method":"run","args":[]}).to_string(), |_,_| Ok(Value::Null)).unwrap_err();
+        session.blocking(Operation::Load, serde_json::json!({"source":source,"heap_bytes":64<<20,"contract":contract.describe(),"instruction_ticks":50,"exports":crate::adapter::exported_functions(&contract).unwrap()}).to_string(), |_,_| Ok(Value::Null)).unwrap();
+        session
+            .blocking(
+                Operation::Declare,
+                serde_json::json!({"kind":"create","environment":1,"service":"checks"}).to_string(),
+                |_, _| Ok(Value::Null),
+            )
+            .unwrap();
+        let run = contract
+            .bind("example:exhausted/checks", "run", true)
+            .unwrap();
+        let error = session
+            .blocking(
+                Operation::Start,
+                serde_json::json!({"kind":"invoke","environment":1,"function":run,"args":[]})
+                    .to_string(),
+                |_, _| Ok(Value::Null),
+            )
+            .unwrap_err();
         assert!(error.to_string().contains("interrupted"), "{error}");
         assert!(
             !error.to_string().contains("interpreter trap"),
@@ -1226,6 +1257,7 @@ mod tests {
             contract: contract.describe(),
             instruction_ticks: 50,
             builtins: Default::default(),
+            exports: crate::adapter::exported_functions(&contract).unwrap(),
         };
         session
             .blocking(
@@ -1234,7 +1266,24 @@ mod tests {
                 |_, _| Ok(Value::Null),
             )
             .unwrap();
-        let error = session.blocking(Operation::Start, serde_json::json!({"kind":"invoke","environment":1,"service":"checks","method":"run","args":[]}).to_string(), |_,_| Ok(Value::Null)).unwrap_err();
+        session
+            .blocking(
+                Operation::Declare,
+                serde_json::json!({"kind":"create","environment":1,"service":"checks"}).to_string(),
+                |_, _| Ok(Value::Null),
+            )
+            .unwrap();
+        let run = contract
+            .bind("example:cleanup/checks", "run", true)
+            .unwrap();
+        let error = session
+            .blocking(
+                Operation::Start,
+                serde_json::json!({"kind":"invoke","environment":1,"function":run,"args":[]})
+                    .to_string(),
+                |_, _| Ok(Value::Null),
+            )
+            .unwrap_err();
         // The default budget would let cleanup finish and return `Ok(1)`.
         assert!(error.to_string().contains("interrupted"), "{error}");
         assert!(

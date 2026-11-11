@@ -167,7 +167,8 @@ pub(crate) fn orb(
             let session = gate_session.clone();
             async move { session.reserve_factory().await }
         });
-        for (method, spelling) in service.methods {
+        // The guest selects each method by its export slot through the Load table.
+        for method in service.methods.into_keys() {
             let slot = contract
                 .bind(&service.interface, &method, true)
                 .map_err(failure)?;
@@ -177,16 +178,13 @@ pub(crate) fn orb(
                 // as data. A stream's call keeps working after its head.
                 implementation =
                     implementation.payload_method(method, move |environment, context, payload| {
-                        let spelling = spelling.clone();
                         let roles = roles.clone();
                         async move {
                             if roles.stream {
-                                return environment
-                                    .invoke_stream(context, &spelling, slot, payload)
-                                    .await;
+                                return environment.invoke_stream(context, slot, payload).await;
                             }
                             environment
-                                .invoke_resource(context, &spelling, slot, &roles, payload)
+                                .invoke_resource(context, slot, &roles, payload)
                                 .await
                                 .map(tembra::portable::Outcome::from)
                         }
@@ -197,12 +195,11 @@ pub(crate) fn orb(
             implementation = implementation.method::<Value, Value, _, _>(
                 method,
                 move |environment, context, args| {
-                    let spelling = spelling.clone();
                     let contract = contract.clone();
                     async move {
                         // Packets spell WIT 64-bit integers as canonical decimal strings.
                         let args = contract.to_wire(slot, true, args).map_err(failure)?;
-                        let value = environment.invoke(context, &spelling, args).await?;
+                        let value = environment.invoke(context, slot, args).await?;
                         contract.from_wire(slot, false, value).map_err(failure)
                     }
                 },
@@ -221,6 +218,48 @@ pub(crate) fn orb(
         ));
     }
     Ok(orb)
+}
+
+/// The exported-function table delivered once with an interpreter Load.
+///
+/// Every function of an exported interface with an identity is listed under the slot that
+/// `bind` returns for it, the same id every host sends in `invoke` and `contribute` commands.
+/// The incoming HTTP handler is served only through `ingress`, so it has no id.
+/// Which ids are services, contributions or neither is decided per command by the guest from
+/// its own Orb and the environment's service; the table only names functions.
+pub(crate) fn exported_functions(
+    contract: &tembra_contracts::PreparedContract,
+) -> Result<Vec<crate::protocol::ExportedInterface>> {
+    let mut exports = Vec::new();
+    for entry in &contract.model().exports {
+        let tembra_contracts::Item::Interface(interface) = &entry.item else {
+            continue;
+        };
+        let Some(identity) = &interface.contract else {
+            continue;
+        };
+        if interface.functions.is_empty() || identity == tembra_contracts::HTTP_HANDLER {
+            continue;
+        }
+        let functions = interface
+            .functions
+            .iter()
+            .map(|function| {
+                let slot = contract
+                    .bind(identity, &function.name, true)
+                    .map_err(failure)?;
+                Ok((slot, tembra_contracts::javascript_name(&function.name)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        exports.push(crate::protocol::ExportedInterface {
+            interface: identity.clone(),
+            service: tembra_contracts::javascript_name(
+                interface.name.as_deref().unwrap_or_default(),
+            ),
+            functions,
+        });
+    }
+    Ok(exports)
 }
 
 /// The host-local service through which the facade calls the incoming HTTP handler.

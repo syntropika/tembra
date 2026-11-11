@@ -52,15 +52,47 @@ An orb artifact is one immutable `.wasm` file. It carries a prepared WIT contrac
 version, and either a TypeScript bundle or a compiled component. Build tooling produces it;
 installation chooses its providers and grants. The artifact carries no authority.
 
-| Host    | Source orbs                             | Compiled components |
-| ------- | --------------------------------------- | ------------------- |
-| Rust    | Wasmtime and dquickts                   | Wasmtime            |
-| Node    | Wasmtime and dquickts                   | Wasmtime            |
-| Browser | dquickts core module, host effect waits | Not yet supported   |
+| Host    | Source orbs                             | Compiled components  |
+| ------- | --------------------------------------- | -------------------- |
+| Rust    | Wasmtime and dquickts                   | Wasmtime             |
+| Node    | Wasmtime and dquickts                   | Wasmtime             |
+| Browser | dquickts core module, host effect waits | App-prepared adapter |
 
 The interpreter is loaded lazily when the first source orb is installed. Each installed orb has
 its own Wasm instance and heap. Isolated and trusted orbs share one host and one kernel lifecycle.
 Trusted orbs are not sandboxed.
+
+Source Orbs carry a closed script and a compact WIT contract. The interpreter is compiled once
+per host; each Orb receives its own instance and memory. Installing a source Orb does not run a
+componentizer, generate bindings, or restore a component-specific interpreter snapshot.
+
+Both execution paths bind service methods to contract-local function slots before calls begin.
+A slot selects a checked signature; it grants no authority. Every invocation still belongs to an
+admitted environment and its selected service, and resource handles retain their issuer and
+lifetime. Source calls use the shared interpreter protocol. Native compiled calls use Wasmtime's
+Component Model functions; prepared browser components use their generated bindings.
+Engine-specific values stay inside the execution adapters.
+
+Browser components are prepared by the application's build. The application explicitly imports
+and registers the resulting trusted adapter; the runtime matches it against a digest computed
+from the actual Orb artifact. Neither an Orb URL nor its metadata can select executable host
+JavaScript. JCO and Wasm instrumentation run during preparation, not in the browser runtime.
+Raw compiled components without a registered adapter are refused. Source Orbs remain dynamically
+loadable through the shared interpreter.
+
+```mermaid
+flowchart LR
+    S[JS / TS source and WIT] --> D[Shared dquickts code]
+    D --> A[Isolated Orb instance]
+    C[Compiled Wasm component] --> R[Wasmtime adapter]
+    C --> P[Browser preparation]
+    P --> B[App-owned browser adapter]
+    B --> A
+    R --> I[Common installation and lifecycle]
+    N[Native Rust and WIT] --> I
+    A --> I
+    I --> K[Tembra kernel and granted host providers]
+```
 
 See [Wasm orb execution](../crates/executor-wasm/README.md).
 

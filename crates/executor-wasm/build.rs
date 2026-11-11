@@ -22,7 +22,7 @@ fn main() {
     // The core import name binds both sides to this exact generated value/method schema.
     let identity = Sha256::digest(typescript.as_bytes());
     println!(
-        "cargo:rustc-env=TEMBRA_INTERPRETER_IMPORT_MODULE=tembra-interpreter-v12-{identity:x}"
+        "cargo:rustc-env=TEMBRA_INTERPRETER_IMPORT_MODULE=tembra-interpreter-v13-{identity:x}"
     );
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out.join("standard.rs"), rust).expect("write Rust bindings");

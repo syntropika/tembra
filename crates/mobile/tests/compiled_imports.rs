@@ -28,6 +28,14 @@ fn exchange(port: &Arc<NativePort>, command: Value, declaration: bool, scope: Sc
     }
 }
 
+/// The export slot of the consumer's `calc#quadruple`: the function id every host sends.
+fn quadruple() -> u32 {
+    tembra_contracts::Contract::from_source("deps.wit", WIT, Some("consumer"))
+        .unwrap()
+        .bind("example:deps/calc@1.0.0", "quadruple", true)
+        .unwrap()
+}
+
 /// Open the compiled consumer with its math import bound to an Orb named `math`.
 fn consumer(backend: &NativeInterpreter) -> Arc<NativePort> {
     let artifact = NativeArtifact::new(artifact("consumer", CONSUMER, "consumer")).unwrap();
@@ -89,7 +97,7 @@ fn portable_compiled_imports_use_scoped_host_events() {
     let mut calls = Vec::new();
     let result = exchange(
         &port,
-        json!({"kind":"invoke","environment":2,"service":"calc","method":"quadruple","args":[5]}),
+        json!({"kind":"invoke","environment":2,"function":quadruple(),"args":[5]}),
         false,
         &mut |packet, asynchronous| {
             assert!(asynchronous);
@@ -125,9 +133,16 @@ fn portable_compiled_import_refusal_quarantines_the_importer() {
         true,
         &mut |_, _| json!({"ok": 7}).to_string(),
     );
+    // Service methods run only in an environment of their own service.
+    exchange(
+        &port,
+        json!({"kind":"create","environment":2,"service":"calc"}),
+        true,
+        &mut |_, _| json!({"ok": 1}).to_string(),
+    );
     let result = exchange(
         &port,
-        json!({"kind":"invoke","environment":1,"service":"calc","method":"quadruple","args":[5]}),
+        json!({"kind":"invoke","environment":2,"function":quadruple(),"args":[5]}),
         false,
         &mut |_, _| json!({"error":"provider refused"}).to_string(),
     );
@@ -137,8 +152,7 @@ fn portable_compiled_import_refusal_quarantines_the_importer() {
     assert_eq!(backend.instances(), 0);
     let error = port
         .begin(
-            json!({"kind":"invoke","environment":1,"service":"calc","method":"quadruple","args":[1]})
-                .to_string(),
+            json!({"kind":"invoke","environment":2,"function":quadruple(),"args":[1]}).to_string(),
             false,
         )
         .unwrap_err();

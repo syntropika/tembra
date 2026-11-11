@@ -1,7 +1,7 @@
 // Generated from crates/executor-wasm/src/abi.rs. Do not edit.
 // Regenerate with: TEMBRA_BLESS=1 cargo test -p tembra-executor-wasm --lib abi
 export const IMPORT_MODULE =
-  "tembra-interpreter-v12-d82248b7b421e5294c2536726adcbbe2c178bc87142fc7ee04faf691081c101b";
+  "tembra-interpreter-v13-d82248b7b421e5294c2536726adcbbe2c178bc87142fc7ee04faf691081c101b";
 export const SYNC_IMPORT = "sync";
 export const SYNC_READ_IMPORT = "sync_read";
 export const MEMORY_MODULE = "env";

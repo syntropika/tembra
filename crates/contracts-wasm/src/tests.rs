@@ -91,3 +91,56 @@ fn compiled_and_corrupt_artifacts_fail_explicitly_without_a_parser() {
     assert!(WasmArtifact::new(&corrupt).is_err());
     assert!(WasmArtifact::new(b"not wasm").is_err());
 }
+
+/// A compiled-component claim: only the `tembra:orb` metadata of a source artifact.
+fn compiled_claim() -> Vec<u8> {
+    let mut compiled = b"\0asm\x0d\0\x01\0".to_vec();
+    let source = Artifact::package_source("browser", 1, &contract(), "").unwrap();
+    let orb_end = source.len() - (2 + "tembra:source".len() + 1);
+    compiled.extend_from_slice(&source[8..orb_end]);
+    compiled
+}
+
+#[test]
+fn prepared_components_bind_metadata_to_registered_digests_only() {
+    let compiled = compiled_claim();
+    assert!(compiled_artifact(&compiled));
+    let source = Artifact::package_source("browser", 1, &contract(), "x").unwrap();
+    assert!(!compiled_artifact(&source));
+    assert!(!compiled_artifact(b"not wasm"));
+    let error = WasmPreparedComponent::new(&compiled, vec![]).err().unwrap();
+    assert!(error.contains("no prepared browser adapter"), "{error}");
+    // Digests are compared exactly; a near miss or a claim inside the artifact never matches.
+    let wrong = "0".repeat(64);
+    assert!(WasmPreparedComponent::new(&compiled, vec![wrong.clone()]).is_err());
+    let computed =
+        WasmPreparedComponent::new(&compiled, vec![wrong, sha256_hex(&compiled)]).unwrap();
+    assert_eq!(computed.digest(), sha256_hex(&compiled));
+    let identity: Value = serde_json::from_str(&computed.description()).unwrap();
+    assert_eq!(
+        identity,
+        json!({"name":"browser","apiVersion":1,"world":"run","kind":"component"})
+    );
+    assert_eq!(computed.contributions(), "{}");
+    let slot = computed
+        .bind("test:browser/values@1.0.0", "read-bytes", true)
+        .unwrap();
+    assert_eq!(computed.validate(slot, true, "[3]"), r#"{"ok":null}"#);
+    // The raw constructor still refuses the same bytes: only the registry path skips the verifier.
+    assert!(WasmArtifact::new(&compiled).is_err());
+    // Source artifacts never use prepared adapters, even when their digest is registered.
+    let error = WasmPreparedComponent::new(&source, vec![sha256_hex(&source)])
+        .err()
+        .unwrap();
+    assert!(error.contains("compiled component"), "{error}");
+    // Any byte change breaks the binding.
+    let mut changed = compiled.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    assert!(WasmPreparedComponent::new(&changed, vec![sha256_hex(&compiled)]).is_err());
+}
+
+/// Lowercase hexadecimal SHA-256, independent of the code under test.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}

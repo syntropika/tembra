@@ -271,9 +271,10 @@ Both hosts accept these `isolated.limits` options:
 | `packetBytes` |   8 MiB | Maximum packet size across the interpreter seam |
 | `timeoutMs`   |  10,000 | Callback deadline in milliseconds               |
 
-Node also accepts `fuel` (default 100,000,000 Wasmtime units). Browsers instead accept
-`instructionTicks` (default 10,000 interpreter interrupt checks). These are different execution
-budgets, not comparable instruction counts. Native source orbs also have the interpreter's fixed
+Node accepts `fuel` (default 100,000,000 Wasmtime units). Browser source Orbs use
+`instructionTicks` (default 10,000 interpreter interrupt checks); prepared components use
+`fuel` (default 100,000,000 instrumented core ticks). These are different execution budgets,
+not comparable instruction counts. Native source Orbs also have the interpreter's fixed
 10,000-check interrupt budget in addition to Wasmtime fuel.
 
 Inside an isolated orb, import `orb` from `@syntropika/tembra-sdk` as usual. The build selects the
@@ -336,8 +337,8 @@ properties matter. A handler's standard refusal is an `HttpHandlerError` with it
 
 Source handlers are exercised in Chrome and Node; Node also exercises compiled handlers.
 The SDK mobile carrier and the React Native bridge have separate qualification gates.
-Compiled components in the browser remain unsupported. A handler-only Orb needs no outgoing
-HTTP grant; an import of `wasi:http/client` still needs one.
+Browser components need an application-owned prepared adapter as described below. A handler-only
+Orb needs no outgoing HTTP grant; an import of `wasi:http/client` still needs one.
 
 ## Browser and Worker
 
@@ -349,12 +350,31 @@ The same entrypoint works in a module Worker.
 Browser hosts install isolated source orbs through the same reusable dquickts Wasm module.
 Pending host effects are awaited outside Wasm; JSPI is not required. Register filesystem providers with
 `memoryFilesystem()` or `opfsFilesystem()`. Browsers have no ambient TCP implementation; an embedding may supply a transport provider.
-Compiled components are not yet supported in the browser. Standard filesystem calls use the same providers: OPFS resolves direct handles,
+Standard filesystem calls use the same providers: OPFS resolves direct handles,
 reads only the requested range and commits streamed writes once per stream. It does not mirror
 the directory into memory. Memory storage supports file and directory operations; OPFS supports
 file operations and directory enumeration/create/remove, with `unsupported` for directory
 rename where the browser has no implementation. Browser adapters do not emulate hard links,
 symlinks or setting timestamps. Read-only grants are enforced before provider effects.
+
+Compiled components are prepared during the application build with `browser: true` (see
+[tooling](tooling.md#prepare-a-compiled-orb-for-browsers)). The application imports and registers the
+resulting adapter explicitly:
+
+```ts
+import arithmetic from "./dist/tembra/arithmetic/browser/index.js";
+
+const host = await createHost({ isolated: { components: [arithmetic] } });
+await host.load("./dist/tembra/arithmetic/orb.<sha>.wasm");
+```
+
+JCO runs only during preparation. The browser receives generated bindings and instrumented core
+modules; each installation gets separate memory, providers, grants and execution budgets.
+The verifier matches the uploaded artifact's SHA-256 against the registered adapter. An arbitrary
+compiled upload cannot introduce executable JavaScript. Prepared components require JSPI and support
+typed data imports, exports, contributions and standard WASI adapters. Inter-Orb WIT resources,
+streams and futures are refused in the browser; compiled hook definitions remain outside this
+profile. Source Orbs remain dynamically loadable without JSPI or a per-Orb adapter.
 
 Custom filesystem providers implement `FilesystemProvider.open()` and return an owned
 `MountedFilesystem` with `openRoot()` and `dispose()`. Descriptors expose typed byte, metadata

@@ -69,6 +69,7 @@ impl Vm {
     pub fn load(packet: &str) -> Result<Self, String> {
         let configuration: Load<'_> = serde_json::from_str(packet).map_err(|e| e.to_string())?;
         let (runtime, ticks, interrupted) = Self::runtime(&configuration)?;
+        let exports = serde_json::to_string(&configuration.exports).map_err(|e| e.to_string())?;
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;
         let host = super::io::host();
         context.with(|ctx| -> Result<(), String> {
@@ -78,6 +79,9 @@ impl Vm {
                     "__tembraContract",
                     ctx.json_parse(configuration.contract.to_string())?,
                 )?;
+                // The exported-function table; the runtime bootstrap indexes and deletes it.
+                ctx.globals()
+                    .set("__tembraExports", ctx.json_parse(exports)?)?;
                 // Host-decided built-in authority; the runtime bootstrap reads and deletes it
                 // before any Orb source runs, so guest code cannot forge it.
                 ctx.globals().set(

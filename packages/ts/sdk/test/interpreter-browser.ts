@@ -170,7 +170,7 @@ export async function verifyBrowserInterpreter(engine?: URL): Promise<void> {
         ),
       },
     ]);
-    // The browser is source-only: one source participant decides each portable hook.
+    // This scenario uses one source participant to decide each portable hook.
     stage = "portable hooks";
     const hooks = await host.get("tools::example:hooks/runner@1.0.0", "main");
     const reporter = await host.get("extension::example:hooks/reporter@1.0.0", "main");

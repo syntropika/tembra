@@ -4,6 +4,11 @@
 //! typed control vocabulary. Only control metadata is typed here; WIT-validated payloads
 //! (`initial`, `value`, `args`) stay JSON values. A `scope` field names an environment handle
 //! table, never a host context: the host accepts only its own table or its issued parent's.
+//!
+//! Host-to-guest calls select an exported WIT function by its `function` id: the export slot the
+//! prepared contract's `bind` returned. Ids are local to one contract revision and grant
+//! nothing; the guest (or compiled Store) resolves them through the table `Load::exports`
+//! delivered once, and refuses unknown ids and ids used outside their environment's service.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -26,6 +31,21 @@ pub struct Load<'a> {
     /// Host-decided authority for source built-ins (`Date`, `performance`, `Math.random`).
     #[serde(default)]
     pub builtins: Builtins,
+    /// Every bindable exported interface function by its `function` id. Required: a host that
+    /// sends no table can select no function.
+    pub exports: Vec<ExportedInterface>,
+}
+
+/// One exported WIT interface and its functions' ids, derived by the host from `bind`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportedInterface {
+    /// Versioned WIT interface identity; it also keys a contribution callback.
+    pub interface: String,
+    /// JavaScript service alias whose environments may call these functions.
+    pub service: String,
+    /// `[id, JavaScript method spelling]` for each function.
+    pub functions: Vec<(u32, String)>,
 }
 
 /// Source built-in authority, decided by the host from the installation's system grants only.
@@ -53,21 +73,20 @@ pub enum GuestCommand<'a> {
         environment: u64,
         service: Option<&'a str>,
     },
+    /// Call a service method of the environment's own service.
     Invoke {
         environment: u64,
-        service: Option<&'a str>,
-        method: &'a str,
+        function: u32,
         args: &'a Value,
         /// Compiled Stores only: the host-issued id of the resource lent as implicit `self`.
-        /// Absent otherwise, so the interpreter protocol is unchanged.
+        /// Absent from data-only calls; the host redeems the typed loan before dispatch.
         #[serde(skip_serializing_if = "Option::is_none")]
         receiver: Option<u32>,
     },
+    /// Call a contribution callback in an Orb root environment.
     Contribute {
         environment: u64,
-        binding: &'a str,
-        service: &'a str,
-        method: &'a str,
+        function: u32,
         args: &'a Value,
     },
     Validate {
@@ -474,29 +493,41 @@ mod tests {
             contract: json!({"services": {}}),
             instruction_ticks: DEFAULT_INSTRUCTION_TICKS,
             builtins: Default::default(),
+            exports: vec![ExportedInterface {
+                interface: "a:b/c@1.0.0".into(),
+                service: "c".into(),
+                functions: vec![(0, "run".into())],
+            }],
         })
         .unwrap();
         assert_eq!(
             packet,
-            r#"{"source":"let a = \"\\n\";","heap_bytes":64,"contract":{"services":{}},"instruction_ticks":10000,"builtins":{"clock":false,"seed":null}}"#
+            r#"{"source":"let a = \"\\n\";","heap_bytes":64,"contract":{"services":{}},"instruction_ticks":10000,"builtins":{"clock":false,"seed":null},"exports":[{"interface":"a:b/c@1.0.0","service":"c","functions":[[0,"run"]]}]}"#
         );
         let decoded: Load<'_> = serde_json::from_str(&packet).unwrap();
         assert_eq!(decoded.source, "let a = \"\\n\";");
         assert_eq!(decoded.instruction_ticks, DEFAULT_INSTRUCTION_TICKS);
         let omitted: Load<'_> =
-            serde_json::from_str(r#"{"source":"","heap_bytes":1,"contract":null}"#).unwrap();
+            serde_json::from_str(r#"{"source":"","heap_bytes":1,"contract":null,"exports":[]}"#)
+                .unwrap();
         assert_eq!(omitted.instruction_ticks, DEFAULT_INSTRUCTION_TICKS);
         let configured: Load<'_> = serde_json::from_str(
-            r#"{"source":"","heap_bytes":1,"contract":null,"instruction_ticks":50}"#,
+            r#"{"source":"","heap_bytes":1,"contract":null,"instruction_ticks":50,"exports":[]}"#,
         )
         .unwrap();
         assert_eq!(configured.instruction_ticks, 50);
-        assert!(
-            serde_json::from_str::<Load<'_>>(
-                r#"{"source":"","heap_bytes":1,"contract":null,"ticks":50}"#
-            )
-            .is_err()
-        );
+        for packet in [
+            r#"{"source":"","heap_bytes":1,"contract":null,"ticks":50,"exports":[]}"#,
+            // The exported-function table is required; there is no name-based fallback.
+            r#"{"source":"","heap_bytes":1,"contract":null}"#,
+            r#"{"source":"","heap_bytes":1,"contract":null,"exports":[{"interface":"i","service":"s","functions":[[-1,"m"]]}]}"#,
+            r#"{"source":"","heap_bytes":1,"contract":null,"exports":[{"interface":"i","service":"s","functions":[],"slot":0}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Load<'_>>(packet).is_err(),
+                "{packet}"
+            );
+        }
     }
 
     #[test]

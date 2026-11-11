@@ -131,6 +131,79 @@ impl Artifact {
     }
 }
 
+impl Artifact {
+    /// Whether `bytes` claim a compiled component: Orb metadata without a source bundle.
+    ///
+    /// Only a cheap container scan; it neither trusts nor validates the claim.
+    pub fn is_compiled(bytes: &[u8]) -> bool {
+        Container::parse(bytes).is_ok_and(|container| {
+            container.tembra.contains_key(ORB) && !container.tembra.contains_key(SOURCE)
+        })
+    }
+}
+
+/// Metadata of a compiled component accepted without the native component verifier.
+///
+/// A runtime that ships no WIT parser (the browser) cannot check a component's real types. It
+/// may still run a compiled Orb through a host-trusted adapter that Tembra's native tooling
+/// prepared after verifying exactly these bytes against their contract. The adapter names the
+/// SHA-256 digest of those bytes; this constructor hashes the bytes it is given and refuses them
+/// unless they match one such digest, so neither an artifact nor any claimed hash selects trust.
+/// The result never carries executable code and is not an [`Artifact`].
+pub struct PreparedComponent {
+    pub identity: Identity,
+    pub contract: PreparedContract,
+    pub contributions: BTreeMap<String, i32>,
+    /// Lowercase hexadecimal SHA-256 of the exact artifact bytes.
+    pub digest: String,
+}
+
+impl PreparedComponent {
+    /// Decode the metadata of `bytes` when their digest is one of the host-trusted `digests`.
+    pub fn decode(bytes: &[u8], digests: &[String]) -> Result<Self, Error> {
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        if !digests.contains(&digest) {
+            return Err(Error(
+                "no prepared browser adapter is registered for this compiled Orb artifact".into(),
+            ));
+        }
+        let mut container = Container::parse(bytes)?;
+        if bytes[..8] != COMPONENT_HEADER || container.take(SOURCE).is_some() {
+            return Err(Error(
+                "prepared browser adapters apply only to compiled component artifacts".into(),
+            ));
+        }
+        let orb = container
+            .take(ORB)
+            .ok_or_else(|| Error("missing artifact identity".into()))?;
+        if !container.tembra.is_empty() {
+            return Err(Error("unsupported artifact metadata section".into()));
+        }
+        let (identity, contract, contributions) = decode_orb(orb)?;
+        contract.check_contribution_roles(&contributions)?;
+        Ok(Self {
+            identity,
+            contract,
+            contributions,
+            digest,
+        })
+    }
+
+    /// Describe identity exactly as [`Artifact::describe`] does for a compiled component.
+    pub fn describe(&self) -> serde_json::Value {
+        let mut value =
+            serde_json::to_value(&self.identity).expect("serializable artifact identity");
+        value["kind"] = "component".into();
+        value
+    }
+
+    /// Compiled contribution roles and their priorities.
+    pub fn describe_contributions(&self) -> serde_json::Value {
+        serde_json::to_value(&self.contributions).expect("serializable contribution roles")
+    }
+}
+
 /// Check a compiled component's actual imports and exports against the prepared contract.
 #[cfg(feature = "authoring")]
 fn verify_component(contract: &PreparedContract, bytes: &[u8]) -> Result<(), Error> {

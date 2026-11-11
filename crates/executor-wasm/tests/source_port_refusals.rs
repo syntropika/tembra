@@ -28,12 +28,15 @@ globalThis.__tembraOrb = { services: { probe: { methods: {
 } } } };
 "#;
 
+/// Call a probe method by its export slot, the function id every host sends.
 fn invoke(port: &InterpreterPort, method: &str, asynchronous: bool) -> Value {
+    let function = Contract::from_source("port-refusal.wit", WIT, Some("orb"))
+        .unwrap()
+        .bind("tembra-test:port-refusal/probe", method, true)
+        .unwrap();
     let (ticket, events) = port
         .begin(
-            json!({"kind":"invoke", "environment":2, "service":"probe",
-                "method":method, "args":[]})
-            .to_string(),
+            json!({"kind":"invoke", "environment":2, "function":function, "args":[]}).to_string(),
         )
         .unwrap();
     let event = if asynchronous {

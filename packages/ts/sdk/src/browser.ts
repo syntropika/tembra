@@ -1,5 +1,6 @@
 import { isolate, type AdaptedHostOptions } from "#tembra-adapters";
 import type { BrowserExecution, BrowserInterpreterOptions } from "./interpreter/browser.ts";
+import { preparedRegistry } from "./interpreter/component/prepared.ts";
 import { orb } from "./authoring/orb.ts";
 import type { HostOptions } from "./authoring/types.ts";
 import type { KernelPort } from "./bridge/kernel.ts";
@@ -19,6 +20,8 @@ export type BrowserHostOptions = Omit<HostOptions, "kernel"> & {
 
 /** Configure a browser host with lazily loaded isolated execution for Wasm Orbs. */
 export async function createHost(options: BrowserHostOptions = {}): Promise<Host> {
+  // Refuse unprepared or foreign component registrations before any Orb is loaded.
+  preparedRegistry(options.isolated?.components);
   let kernel = options.kernel;
   if (!kernel) {
     const supplied = options.wasm;
@@ -101,6 +104,13 @@ export {
   type OpenOptions,
 } from "./interpreter/filesystem.ts";
 export type { BrowserInterpreterOptions as IsolatedOptions } from "./interpreter/browser.ts";
+/** Used by modules that Tembra tooling generates for compiled Orbs (`browser: true`). */
+export {
+  BrowserPlatformError,
+  preparedComponent,
+  type PreparedComponent,
+  type PreparedComponentSource,
+} from "./interpreter/component/prepared.ts";
 export type { Grants, CliOptions } from "./authoring/types.ts";
 
 export { fetchHttpProvider, FETCH_BODY_BYTES } from "./interpreter/fetch-http-provider.ts";

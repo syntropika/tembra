@@ -65,6 +65,49 @@ A `.wasm` entry is a compiled WebAssembly component. `build()` checks its export
 selected world, including imports, and packages it with the contract. The component carries no Tembra metadata, so
 the build name becomes the orb name and the target must supply `apiVersion`.
 
+### Prepare a compiled Orb for browsers
+
+Set `browser: true` on a compiled target to emit its application adapter alongside the artifact:
+
+```ts
+const artifacts = await build({
+  builds: {
+    arithmetic: {
+      entry: "provider.wasm",
+      wit: "contract.wit",
+      world: "arithmetic-provider",
+      apiVersion: 1,
+      browser: true,
+    },
+  },
+});
+```
+
+The build verifies the actual component signatures, generates its browser bindings with JCO,
+and instruments its core modules for instruction and memory limits. It writes the adapter under
+the target's `browser/` directory. The application imports and registers that module:
+
+```ts
+import arithmetic from "./dist/tembra/arithmetic/browser/index.js";
+import { createHost } from "@syntropika/tembra-sdk/browser";
+
+const host = await createHost({ isolated: { components: [arithmetic] } });
+await host.load("./dist/tembra/arithmetic/orb.<sha256>.wasm");
+```
+
+The adapter is trusted application code, prepared by the application's build. An Orb cannot name
+a JavaScript file for the host to execute. The browser computes the digest of the actual artifact
+and accepts a compiled Orb only when an application-registered adapter matches those exact bytes.
+Changing the component or its packaged contract requires preparing its adapter again.
+
+JCO, the component parser and the instrumenter stay in tooling. Browser execution receives the
+prepared bindings and core modules; each installation gets fresh memories, handles, grants and
+execution budgets. Prepared components require the browser's JavaScript Promise Integration
+support. Raw compiled artifacts without a registered adapter are refused.
+
+Source JS/TS targets do not use this step. Their closed scripts run through the shared dquickts
+interpreter and remain dynamically loadable without generating per-Orb browser bindings.
+
 ## Install an artifact
 
 Applications load artifacts by location. Default SDK loaders accept only `.wasm` files.

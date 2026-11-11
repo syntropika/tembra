@@ -152,7 +152,7 @@ impl Engine {
                 let io =
                     crate::io::SourceIo::new(&self.providers, &plan.host_imports, grants, cli)?;
                 let session = Session::start(self.clone(), name.into(), io)?;
-                let description = session.load(source, contract.describe())?;
+                let description = session.load(source, contract)?;
                 let checked = checked(&description)?;
                 (session, description, checked)
             }

@@ -147,7 +147,6 @@ impl Environment {
     pub(crate) async fn invoke_resource(
         &self,
         context: Context,
-        method: &str,
         slot: u32,
         roles: &Roles,
         mut payload: Payload,
@@ -169,8 +168,7 @@ impl Environment {
         let cancellation = context.signal();
         let packet = GuestCommand::Invoke {
             environment: self.id,
-            service: self.service.as_deref(),
-            method,
+            function: slot,
             args: &args,
             receiver,
         };

@@ -218,7 +218,12 @@ support. Native compiled components link `wasmtime-wasi` and `wasmtime-wasi-http
 | `wasi:random`     | Secure and non-cryptographic random interfaces under a grant                      | Generated secure/insecure bytes and u64, insecure seed              | The same bindings over injected or browser randomness                                                |
 | `wasi:cli`        | Explicit arguments, environment, initial directory and byte stdio; contained exit | The same generated bindings and per-revision configuration          | Injected byte stdio, explicit process configuration and contained exit; terminal getters return none |
 
-Compiled fixtures currently exercise filesystem preopens/open/create/remove-directory operations and outgoing HTTP request/body streaming. The remaining native operations are linked from upstream but still require operation-level qualification.
+Compiled fixtures exercise filesystem preopens/open/create/remove-directory operations, outgoing
+HTTP with streaming bodies, incoming HTTP, and native TCP/UDP/DNS. Browser preparation is
+qualified with compiled filesystem and HTTP fixtures, typed dependency calls and contributions.
+Compiled browser sockets and system/CLI imports still require component-level qualification;
+the source browser scenarios exercise their provider implementations. Other upstream operations
+require operation-level qualification.
 
 System grants govern declared standard imports for source and compiled Orbs.
 Source JavaScript's ambient `Date`/`Date.now`/`performance.now` require a clocks grant,
@@ -243,7 +248,11 @@ explicitly refuses trailers that its platform cannot expose.
 
 The SDK mobile adapter has a typed incoming HTTP carrier, but the React Native bridge and
 actual mobile runtime require separate qualification. Native/Pulley and adapter tests do not
-establish iOS or Android device support. Compiled components in the browser remain unsupported.
+establish iOS or Android device support. Browser compiled components require an explicitly
+registered application-owned adapter generated at build time; see
+[browser preparation](../../docs/tooling.md#prepare-a-compiled-orb-for-browsers). JCO is never loaded
+by the browser runtime. Each prepared component has separate memory, grants and budgets and
+requires JSPI; source Orbs reuse the interpreter without JSPI.
 
 ## Current scope
 
@@ -260,7 +269,7 @@ Not yet available:
 - service access policies and exclusive or opaque resources;
 - causal reentry into the same interpreter;
 - durable checkpoint and restore;
-- compiled-component execution in the browser.
+- inter-Orb resources, streams and futures in the browser prepared-component profile.
 
 Replacement refuses a provider whose initial activation is still pending, and an
 active native one-shot task blocks replacement.

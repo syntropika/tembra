@@ -2,7 +2,7 @@
  * Synchronous value semantics of outgoing standard `wasi:http@0.3.0` in the browser: the
  * `fields`, `request-options`, `request` and `response` resources and request-target
  * validation. Nothing here performs I/O or uses host services; bodies and transport lifetime
- * live in `standard-http.ts`.
+ * live in the source or compiled transport adapter.
  *
  * Semantics follow pinned upstream `wasmtime-wasi-http` 51.0.0-rc.1 (`p3/host/types.rs`,
  * `field_map.rs`, `p3/request.rs`): raw byte field values, explicit duplicates, the
@@ -114,7 +114,8 @@ export class HttpFields extends HttpResource {
   #size: number;
   readonly #mutable: boolean;
 
-  private constructor(entries: Map<string, readonly Uint8Array[]>, size: number, mutable: boolean) {
+  /** Standard `fields` constructor creates empty mutable fields. */
+  constructor(entries: Map<string, readonly Uint8Array[]> = new Map(), size = 0, mutable = true) {
     super();
     this.#entries = entries;
     this.#size = size;
@@ -333,10 +334,15 @@ export class HttpRequestOptions extends HttpResource {
 }
 
 // ---------------------------------------------------------------------------------------------
-// bodies (implemented in `standard-http.ts`)
+// bodies (owned by each transport adapter)
 
-/** The contents and trailers of one request or response, consumed or dropped once. */
-export interface Body {
+/** Minimum lifetime contract shared by both transports. */
+export interface HttpBody {
+  close(): void;
+}
+
+/** Source transport contents and trailers, consumed or dropped once. */
+export interface Body extends HttpBody {
   /** `consume-body`: the contents stream and trailers future; `res` reports the consumer. */
   consume(host: StandardServices, res: FutureReader<Outcome>): [OutputStream, HostFuture];
   /** Dropped unconsumed. */
@@ -347,19 +353,19 @@ export interface Body {
 // request and response
 
 /** State shared by requests and responses: immutable headers and a body that moves once. */
-export abstract class Message extends HttpResource {
-  #body: Body | undefined;
+export abstract class Message<B extends HttpBody = Body> extends HttpResource {
+  #body: B | undefined;
 
   constructor(
     readonly headers: HttpFields,
-    body: Body,
+    body: B,
   ) {
     super();
     this.#body = body;
   }
 
   /** Move the body out; afterwards the message holds only its metadata. */
-  take(): Body {
+  take(): B {
     const body = this.#body;
     if (!body) throw new Error("HTTP body was already consumed");
     this.#body = undefined;
@@ -486,7 +492,7 @@ export function canonicalHost(
 }
 
 /** `wasi:http/types#request` built by the guest. */
-export class HttpRequest extends Message {
+export class HttpRequest<B extends HttpBody = Body> extends Message<B> {
   #method: Method = { tag: "get" };
   #scheme: Scheme | undefined;
   #authority: string | undefined;
@@ -495,7 +501,7 @@ export class HttpRequest extends Message {
   constructor(
     headers: HttpFields,
     readonly options: HttpTimeouts | undefined,
-    body: Body,
+    body: B,
   ) {
     super(headers, body);
   }
@@ -598,10 +604,10 @@ export class HttpRequest extends Message {
 }
 
 /** `wasi:http/types#response`: received from a provider, or built by the guest. */
-export class HttpResponse extends Message {
+export class HttpResponse<B extends HttpBody = Body> extends Message<B> {
   #status: number;
 
-  constructor(headers: HttpFields, body: Body, status = 200) {
+  constructor(headers: HttpFields, body: B, status = 200) {
     super(headers, body);
     this.#status = status;
   }

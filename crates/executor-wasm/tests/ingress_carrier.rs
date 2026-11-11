@@ -348,8 +348,18 @@ fn the_carrier_refuses_invalid_bytes_before_admission() {
         port.begin_ingress(r#"{"kind":"invoke"}"#.into(), head("/sse"))
             .is_err()
     );
+    let handle = Contract::from_dir(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/wit/handler"),
+        Some("handler"),
+    )
+    .unwrap()
+    .bind("wasi:http/handler@0.3.0", "handle", true)
+    .unwrap();
     let (ticket, events) = port
-        .begin(r#"{"kind":"invoke","environment":2,"service":"handler","method":"handle","args":[null]}"#.into())
+        .begin(
+            serde_json::json!({"kind":"invoke","environment":2,"function":handle,"args":[null]})
+                .to_string(),
+        )
         .unwrap();
     let PortEvent::Complete(result) = events.receive().unwrap() else {
         panic!("expected completion")

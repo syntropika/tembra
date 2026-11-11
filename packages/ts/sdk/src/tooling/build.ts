@@ -8,6 +8,7 @@ import { query } from "../interpreter/types.ts";
 import { witTypes } from "./wit.ts";
 import { resolver } from "./resolver.ts";
 import { typecheck } from "./typecheck.ts";
+import { prepareBrowserComponent } from "./component.ts";
 import type { Artifact, BuildConfig } from "./types.ts";
 
 /** Resolve dependencies and WIT types, then emit one closed Wasm artifact per Orb. */
@@ -48,6 +49,8 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
         target.contributes,
       );
     } else {
+      if (target.browser !== undefined)
+        throw new Error(`Build ${name} is a source Orb; browsers run it without preparation`);
       if (target.apiVersion !== undefined)
         throw new Error(`Build ${name} declares apiVersion in its source Orb`);
       if (target.contributes !== undefined)
@@ -115,11 +118,16 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
     const temporary = `${destination}.${process.pid}.tmp`;
     await writeFile(temporary, bytes);
     await rename(temporary, destination);
+    const browser =
+      compiled && target.browser
+        ? (await prepareBrowserComponent(bytes, hash, path.join(directory, "browser"))).module
+        : undefined;
     artifacts.push({
       name,
       path: destination,
       sha256: hash,
       bytes: bytes.length,
+      ...(browser ? { browser } : {}),
     });
   }
   return artifacts;

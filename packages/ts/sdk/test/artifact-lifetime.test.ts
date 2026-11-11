@@ -35,6 +35,13 @@ function contracts(kind: "source" | "component" = "source") {
           freed++;
         }
       },
+      // Raw artifacts keep the source path; compiled ones are covered below.
+      compiledArtifact: () => false,
+      WasmPreparedComponent: class {
+        constructor() {
+          throw new Error("Prepared components are not expected");
+        }
+      } as never,
     },
   };
 }

@@ -135,7 +135,7 @@ export function prepareDefinitions(
 
 /** Overlap independent native preparations while bounding transient Stores and draining failures. */
 async function prepareBackends(
-  definitions: readonly OrbInput[],
+  definitions: (OrbInput | undefined)[],
   isolated?: (definition: OrbArtifact) => Promise<OrbDefinition>,
 ): Promise<OrbDefinition[]> {
   const prepared: (OrbDefinition | undefined)[] = new Array(definitions.length);
@@ -154,6 +154,9 @@ async function prepareBackends(
         } else prepared[index] = definition;
       } catch (error) {
         failures.push({ index, reason: error });
+      } finally {
+        // Release our captured input once the backend owns the prepared revision.
+        definitions[index] = undefined;
       }
     }
   }

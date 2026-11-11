@@ -14,11 +14,15 @@ fn exchange(port: &Arc<NativePort>, command: Value, declaration: bool) -> Value 
     event["result"].clone()
 }
 
-/// Call one probe method, addressed by its JavaScript spelling, and decode its WIT result.
-fn call(port: &Arc<NativePort>, method: &str, path: &str) -> Value {
+/// Call one probe method, addressed by its export slot (the function id every host sends), and
+/// decode its WIT result. `method` is the original WIT name.
+fn call(port: &Arc<NativePort>, contract: &Contract, method: &str, path: &str) -> Value {
+    let function = contract
+        .bind("example:probe/probe@1.0.0", method, true)
+        .unwrap();
     let result = exchange(
         port,
-        json!({"kind":"invoke","environment":1,"service":"probe","method":method,"args":[path]}),
+        json!({"kind":"invoke","environment":1,"function":function,"args":[path]}),
         false,
     );
     let text = result["ok"]
@@ -71,16 +75,22 @@ fn portable_compiled_filesystem_enforces_standard_preopen_permissions() {
             json!({"kind":"create","environment":1,"service":"probe"}),
             true,
         );
-        assert_eq!(call(&port, "open", "/data/input")["ok"]["tag"], "ok");
-        assert_eq!(call(&port, "open", "/data/../outside")["ok"]["tag"], "err");
         assert_eq!(
-            call(&port, "createDirectory", "/data/child")["ok"]["tag"],
+            call(&port, &contract, "open", "/data/input")["ok"]["tag"],
+            "ok"
+        );
+        assert_eq!(
+            call(&port, &contract, "open", "/data/../outside")["ok"]["tag"],
+            "err"
+        );
+        assert_eq!(
+            call(&port, &contract, "create-directory", "/data/child")["ok"]["tag"],
             if writable { "ok" } else { "err" }
         );
         if writable {
             assert!(directory.path().join("child").is_dir());
             assert_eq!(
-                call(&port, "removeDirectory", "/data/child")["ok"]["tag"],
+                call(&port, &contract, "remove-directory", "/data/child")["ok"]["tag"],
                 "ok"
             );
         }

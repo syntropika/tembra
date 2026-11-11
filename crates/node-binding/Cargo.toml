@@ -30,6 +30,26 @@ tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2" }
 tembra = { path = "../tembra", version = "=0.2.2" }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
+# Browser component preparation (build time only): exact component import names and
+# fuel/page instrumentation of generated core modules. Same pins as Wasmtime's own.
+wasmparser = "=0.263.0"
+wasm-encoder = { version = "=0.263.0", features = ["wasmparser"] }
+
+[dev-dependencies]
+# Limit tests execute instrumented modules; same pins and features as tembra-executor-wasm.
+wat = "=1.263.0"
+wasmtime = { version = "=51.0.0-rc.1", default-features = false, features = [
+  "anyhow",
+  "component-model",
+  "component-model-async",
+  "async",
+  "cranelift",
+  "parallel-compilation",
+  "pulley",
+  "runtime",
+  "std",
+  "task-group-hook",
+] }
 
 [build-dependencies]
 napi-build = "=2.6.0"

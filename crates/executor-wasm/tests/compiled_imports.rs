@@ -355,9 +355,12 @@ fn compiled_commands_cannot_cross_execution_entrypoints() {
             &Default::default(),
         )
         .unwrap();
-    let create = json!({"kind":"create", "environment":1, "service":null});
-    let invoke =
-        json!({"kind":"invoke", "environment":1, "service":"math", "method":"double", "args":[3]});
+    let create = json!({"kind":"create", "environment":1, "service":"math"});
+    let double = artifact
+        .contract
+        .bind("example:deps/math@1.0.0", "double", true)
+        .unwrap();
+    let invoke = json!({"kind":"invoke", "environment":1, "function":double, "args":[3]});
     let release = json!({"kind":"release", "environment":1});
     let (ticket, events) = port.begin(create.to_string()).unwrap();
     let PortEvent::Complete(result) = events.receive().unwrap() else {

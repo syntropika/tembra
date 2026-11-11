@@ -1,19 +1,40 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { build } from "../packages/ts/sdk/src/tooling/index.ts";
 
+// Every compiled component is also prepared for browsers, so Chrome qualifies exactly these bytes.
+const compiledInputs = {
+  provider: "the compiled arithmetic provider",
+  contributor: "the compiled hook contributor",
+  consumer: "the compiled pipeline consumer",
+  probe: "the compiled probe provider",
+  "http-client": "the compiled wasi:http client",
+  "http-handler": "the compiled wasi:http handler",
+  "resource-provider": "the compiled resource provider (browser preparation must refuse it)",
+  "stream-producer": "the compiled stream producer (browser preparation must refuse it)",
+} as const;
 const { values } = parseArgs({
   options: {
     out: { type: "string" },
     provider: { type: "string" },
     contributor: { type: "string" },
+    consumer: { type: "string" },
+    probe: { type: "string" },
+    "http-client": { type: "string" },
+    "http-handler": { type: "string" },
+    "resource-provider": { type: "string" },
+    "stream-producer": { type: "string" },
   },
 });
 if (!values.out) throw new Error("Supply --out with an external qualification artifact directory");
-// The compiled hook contributor is part of every hook fixture set, so its tests never skip.
-if (!values.contributor)
-  throw new Error("Supply --contributor with the compiled hook contributor component");
+/** The resolved path of one required compiled component input. */
+function component(name: keyof typeof compiledInputs): string {
+  const file = values[name];
+  if (!file) throw new Error(`Supply --${name} with ${compiledInputs[name]} component`);
+  return path.resolve(file);
+}
+for (const name of Object.keys(compiledInputs)) component(name as keyof typeof compiledInputs);
 const root = path.resolve(import.meta.dir, "..");
 const directory = path.resolve(values.out);
 const sources = path.join(directory, "sources");
@@ -305,21 +326,67 @@ for (const [name, source, world] of [
 }
 // The real Rust contributor joins all three hooks before the source participants.
 builds["hook-compiled"] = {
-  entry: path.resolve(values.contributor),
+  entry: component("contributor"),
   wit: "hook-extension/contract.wit",
   world: "extension",
   apiVersion: 1,
   contributes: Object.fromEntries(
     ["guard", "audit", "choice"].map((hook) => [`example:hooks/${hook}@1.0.0`, -7]),
   ),
+  browser: true,
 };
-if (values.provider)
-  builds.arithmetic = {
-    entry: path.resolve(values.provider),
-    wit: "calculation/contract.wit",
-    world: "arithmetic-provider",
+builds.arithmetic = {
+  entry: component("provider"),
+  wit: "calculation/contract.wit",
+  world: "arithmetic-provider",
+  apiVersion: 1,
+  browser: true,
+};
+// The compiled pipeline consumer imports `arithmetic` synchronously and `delayed` through P3
+// async lowering; two source providers wait before answering, so browser JSPI must suspend it.
+const pipelineWit = path.join(root, "crates/executor-wasm/tests/wit/pipeline/pipeline.wit");
+for (const [name, world, service] of [
+  ["pipeline-arithmetic", "arithmetic-provider", "arithmetic"],
+  ["pipeline-delayed", "delayed-provider", "delayed"],
+] as const) {
+  await mkdir(path.join(sources, name), { recursive: true });
+  await writeFile(path.join(sources, name, "contract.wit"), await readFile(pipelineWit));
+  await writeFile(
+    path.join(sources, name, "orb.ts"),
+    `import {orb} from ${guest};
+export default orb({name:${JSON.stringify(name)},apiVersion:1,services:{${service}:{methods:{
+async double(_e:unknown,_c:unknown,value:number){await tembra.wait(20);return value*2;}}}}});`,
+  );
+  builds[name] = { entry: `${name}/orb.ts`, wit: `${name}/contract.wit`, world, minify: false };
+}
+await mkdir(path.join(sources, "pipeline"), { recursive: true });
+await writeFile(path.join(sources, "pipeline/contract.wit"), await readFile(pipelineWit));
+builds.pipeline = {
+  entry: component("consumer"),
+  wit: "pipeline/contract.wit",
+  world: "consumer",
+  apiVersion: 1,
+  browser: true,
+};
+// Compiled controls (fuel, trap, filesystem) and the standard wasi:http client and handler.
+for (const [name, directory, file, world] of [
+  ["probe", "probe", "probe.wit", "probe-provider"],
+  ["http-client", "http", "http.wit", "client"],
+  ["http-handler", "handler", "handler.wit", "handler"],
+] as const) {
+  await mkdir(path.join(sources, name), { recursive: true });
+  await writeFile(
+    path.join(sources, name, "contract.wit"),
+    await readFile(path.join(root, "crates/executor-wasm/tests/wit", directory, file)),
+  );
+  builds[name] = {
+    entry: component(name),
+    wit: `${name}/contract.wit`,
+    world,
     apiVersion: 1,
+    browser: true,
   };
+}
 await mkdir(path.join(sources, "filesystem"), { recursive: true });
 for (const file of ["contract.wit", "orb.ts"]) {
   const source = await readFile(
@@ -357,5 +424,42 @@ for (const name of ["system", "ambient"] as const) {
 const artifacts = await build({ root: sources, outDir: directory, builds });
 for (const artifact of artifacts) {
   await writeFile(path.join(directory, `${artifact.name}.wasm`), await readFile(artifact.path));
+}
+// Every compiled target must have produced its application-owned browser adapter.
+for (const [name, target] of Object.entries(builds))
+  if (target.browser && !artifacts.find((artifact) => artifact.name === name)?.browser)
+    throw new Error(`Build ${name} produced no browser adapter`);
+// Browsers intentionally refuse resources and streams at the Orb boundary: preparing the real
+// compiled resource provider and stream producer must fail, and no adapter may remain.
+const refusals = path.join(directory, "browser-refusals");
+for (const [name, file, world] of [
+  ["resource-provider", "resources/resources.wit", "provider"],
+  ["stream-producer", "streams/streams.wit", "producer"],
+] as const) {
+  await mkdir(path.join(sources, `refused-${name}`), { recursive: true });
+  await writeFile(
+    path.join(sources, `refused-${name}/contract.wit`),
+    await readFile(path.join(root, "crates/executor-wasm/tests/wit", file)),
+  );
+  const refused = await build({
+    root: sources,
+    outDir: refusals,
+    builds: {
+      [name]: {
+        entry: component(name),
+        wit: `refused-${name}/contract.wit`,
+        world,
+        apiVersion: 1,
+        browser: true,
+      },
+    },
+  }).then(
+    () => undefined,
+    (error: unknown) => String(error),
+  );
+  await rm(refusals, { recursive: true, force: true });
+  if (!refused?.includes("Browser preparation cannot execute"))
+    throw new Error(`Browser preparation of ${name} was not refused as expected: ${refused}`);
+  console.error(`Browser preparation refused ${name}: ${refused}`);
 }
 console.log(JSON.stringify(artifacts, null, 2));

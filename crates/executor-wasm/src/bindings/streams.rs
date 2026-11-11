@@ -26,7 +26,6 @@ impl Environment {
     pub(crate) async fn invoke_stream(
         &self,
         context: Context,
-        method: &str,
         slot: u32,
         payload: Payload,
     ) -> Result<Outcome> {
@@ -43,12 +42,10 @@ impl Environment {
             head,
         });
         let environment = self.clone();
-        let method = method.to_owned();
         let mut dispatch = async move {
             let packet = GuestCommand::Invoke {
                 environment: environment.id,
-                service: environment.service.as_deref(),
-                method: &method,
+                function: slot,
                 args: &args,
                 receiver: None,
             };

@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import path from "node:path";
 import * as abi from "../src/interpreter/abi.ts";
 import { checkInterpreter, CoreGuest, wasi, type GuestHost } from "../src/interpreter/core.ts";
-import { query, type ContractPort } from "../src/interpreter/types.ts";
+import { exportedFunctions } from "../src/interpreter/revision.ts";
+import { query, type ContractPort, type ExportedInterface } from "../src/interpreter/types.ts";
 
 // Actual-engine transport checks; set TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES to run them.
 const engine = process.env.TEMBRA_WASM_ENGINE;
@@ -21,8 +22,15 @@ function importing(module: string, name: string, memory = false): Uint8Array<Arr
   ]);
 }
 
-/** Load the source fixture and its prepared contract description through the contract module. */
-async function fixture(): Promise<{ source: string; contract: unknown }> {
+/**
+ * Load the source fixture, its prepared contract description and the Load's exported-function
+ * table through the contract module.
+ */
+async function fixture(): Promise<{
+  source: string;
+  contract: unknown;
+  exports: ExportedInterface[];
+}> {
   const contracts = await import("@syntropika/tembra-engine-wasm/contracts");
   await contracts.default({
     module_or_path: await Bun.file(
@@ -33,7 +41,8 @@ async function fixture(): Promise<{ source: string; contract: unknown }> {
   const artifact = new contracts.WasmArtifact(bytes) as unknown as ContractPort & {
     source(): string;
   };
-  return { source: artifact.source(), contract: query(artifact, { kind: "describe" }) };
+  const contract = query<Parameters<typeof exportedFunctions>[0]>(artifact, { kind: "describe" });
+  return { source: artifact.source(), contract, exports: exportedFunctions(contract, artifact) };
 }
 
 const compiled = async () => {
@@ -107,7 +116,7 @@ test("interpreter libc reads only its supplied host clock", () => {
 
 actual("the core transport drives effects, capture and isolated bounded memory", async () => {
   const module = await compiled();
-  const { source, contract } = await fixture();
+  const { source, contract, exports } = await fixture();
   const packets: string[] = [];
   const host: GuestHost = {
     sync(packet) {
@@ -118,17 +127,19 @@ actual("the core transport drives effects, capture and isolated bounded memory",
   };
   const memoryBytes = 32 << 20;
   const guest = await CoreGuest.create(module, memoryBytes, host);
-  const loaded = guest.load(JSON.stringify({ source, heap_bytes: 8 << 20, contract }));
+  const loaded = guest.load(JSON.stringify({ source, heap_bytes: 8 << 20, contract, exports }));
   expect(loaded.ok && !loaded.interrupted).toBe(true);
   expect(JSON.parse(loaded.value).services.arithmetic.methods).toContain("double");
+  // Service methods run only in a declared environment of their own service, selected by id.
+  const created = guest.declare(
+    JSON.stringify({ kind: "create", environment: 1, service: "arithmetic" }),
+  );
+  expect(created.ok && !created.interrupted).toBe(true);
+  const double = exports
+    .find((item) => item.service === "arithmetic")!
+    .functions.find(([, method]) => method === "double")![0];
   const invoke = (value: number) =>
-    JSON.stringify({
-      kind: "invoke",
-      environment: 1,
-      service: "arithmetic",
-      method: "double",
-      args: [value],
-    });
+    JSON.stringify({ kind: "invoke", environment: 1, function: double, args: [value] });
   expect(guest.start(invoke(3)).outcome).toEqual({ ok: true, value: "6", interrupted: false });
   // A pending effect carries a JavaScript-number identity and blocks capture until settled.
   const pending = guest.start(invoke(6));
@@ -152,6 +163,7 @@ actual("the core transport drives effects, capture and isolated bounded memory",
         source: `const chunks=[];for(let i=0;i<64;i++)chunks.push(new Uint8Array(1<<20));${source}`,
         heap_bytes: 256 << 20,
         contract,
+        exports,
       }),
     );
     failed = !outcome.ok && outcome.interrupted;
@@ -166,7 +178,7 @@ actual("the core transport drives effects, capture and isolated bounded memory",
 
 actual("raw ABI misuse is refused and reported as interruption", async () => {
   const module = await compiled();
-  const { source, contract } = await fixture();
+  const { source, contract, exports: table } = await fixture();
   const memory = new WebAssembly.Memory({ initial: abi.MEMORY_INITIAL_PAGES, maximum: 512 });
   let reply: Uint8Array | undefined;
   const host: GuestHost = { sync: () => "null", log() {} };
@@ -198,7 +210,9 @@ actual("raw ABI misuse is refused and reported as interruption", async () => {
     new Uint8Array(memory.buffer, pointer, bytes.byteLength).set(bytes);
     return pointer;
   };
-  const load = new TextEncoder().encode(JSON.stringify({ source, heap_bytes: 8 << 20, contract }));
+  const load = new TextEncoder().encode(
+    JSON.stringify({ source, heap_bytes: 8 << 20, contract, exports: table }),
+  );
   expect(header(call(abi.Operation.Load, input(load), load.byteLength))).toEqual({
     kind: abi.ReplyKind.Ok,
     interrupted: 0,

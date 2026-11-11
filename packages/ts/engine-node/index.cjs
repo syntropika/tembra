@@ -6,3 +6,5 @@ exports.NodeArtifact = binding.NodeArtifact;
 exports.NodeContract = binding.NodeContract;
 exports.NodeInterpreter = binding.NodeInterpreter;
 exports.NodeInterpreterPort = binding.NodeInterpreterPort;
+exports.instrumentCore = binding.instrumentCore;
+exports.componentImports = binding.componentImports;

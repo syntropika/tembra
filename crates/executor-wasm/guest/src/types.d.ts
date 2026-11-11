@@ -103,7 +103,15 @@ interface AsyncHostRequests {
 }
 /** Omit the input argument only for operations without fields. */
 type HostInput<T> = {} extends T ? [input?: T] : [input: T];
+/** One exported interface's functions by host-selected id; mirrors `protocol::ExportedInterface`. */
+interface ExportedInterface {
+  interface: string;
+  service: string;
+  functions: [id: number, method: string][];
+}
 declare var __tembraContract: WitGraph;
+/** The Load's exported-function table; the runtime bootstrap indexes and deletes it. */
+declare var __tembraExports: readonly ExportedInterface[] | undefined;
 declare var __tembraBuiltins: { clock: boolean; seed: [string, string] | null } | undefined;
 declare var __tembraValues: GuestValues;
 declare var __tembraState: GuestState;

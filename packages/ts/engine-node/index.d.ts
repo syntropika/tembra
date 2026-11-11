@@ -30,6 +30,22 @@ export class NodeContract {
   ): Uint8Array;
 }
 
+/** One generated core module instrumented with shared `tembra:limits` fuel and page globals. */
+export interface BrowserCore {
+  bytes: Buffer;
+  /** Pages every instantiation of the module allocates for the memories it defines. */
+  initialPages: number;
+}
+
+/**
+ * Build-time browser preparation: instrument a generated core module. `maximumPages` (at most
+ * 65536) clamps every defined memory; the runtime budget is the shared `pages` global.
+ */
+export function instrumentCore(bytes: Uint8Array, maximumPages: number): BrowserCore;
+
+/** Build-time browser preparation: the exact versioned top-level import names of a component. */
+export function componentImports(component: Uint8Array): string[];
+
 /** Isolated Wasmtime backend used by Tembra's optional interpreter facade. */
 export class NodeInterpreter {
   constructor(configuration: string, log: (packet: string) => void);

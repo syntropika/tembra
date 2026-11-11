@@ -31,6 +31,7 @@ import { Scope } from "./scope.ts";
 import {
   query,
   type ContractPort,
+  type ExportedInterface,
   type HookBinding,
   type CheckedImplementation,
   type InstallationPlan,
@@ -44,6 +45,44 @@ type Described = WitTypes & {
   imports: { binding: string; functions?: Record<string, WitFunction> }[];
   exports: { binding: string; contract?: string; functions?: Record<string, WitFunction> }[];
 };
+
+/**
+ * Build the interpreter Load's exported-function table from the prepared contract, exactly as the
+ * native host does (`adapter::exported_functions`): every function of an exported interface with
+ * an identity, under the export slot `bind` returns for it. The incoming HTTP handler is served
+ * only through `ingress`, so it has no id.
+ */
+export function exportedFunctions(
+  description: {
+    readonly javascriptNames: Readonly<Record<string, string>>;
+    readonly exports: readonly {
+      readonly contract?: string | null;
+      readonly functions?: Readonly<Record<string, unknown>>;
+    }[];
+  },
+  contract: Pick<ContractPort, "bind">,
+): ExportedInterface[] {
+  const names = description.javascriptNames;
+  const spelling = (name: string) => {
+    const spelled = names[name];
+    if (spelled === undefined) throw new Error(`Missing WIT JavaScript name for ${name}`);
+    return spelled;
+  };
+  return description.exports.flatMap((item) => {
+    const identity = item.contract;
+    const functions = Object.keys(item.functions ?? {});
+    if (!identity || !functions.length || identity === HTTP_HANDLER) return [];
+    return [
+      {
+        interface: identity,
+        service: spelling(identity.split("/").at(-1)!.split("@")[0]!),
+        functions: functions.map(
+          (name) => [contract.bind(identity, name, true), spelling(name)] as const,
+        ),
+      },
+    ];
+  });
+}
 
 /** One isolated revision translates callbacks into ordinary SDK declarations and calls. */
 export class Revision {
@@ -235,7 +274,8 @@ export class Revision {
         linger: service.linger,
         [admitFactory]: () => this.gate.enter(Math.max(1, Math.floor(this.timeout / 2))),
         methods: Object.fromEntries(
-          Object.entries(service.methods).map(([method, spelling]) => {
+          Object.keys(service.methods).map((method) => {
+            // The guest selects the method by this export slot through its Load table.
             const slot = this.contract.bind(binding, method, true);
             const fn = exported?.[method];
             if (!fn) throw new Error(`Missing prepared signature for ${binding}#${method}`);
@@ -257,7 +297,7 @@ export class Revision {
               );
               const text = await this.executeText(
                 packet(
-                  { kind: "invoke", environment: environment.id, service: alias, method: spelling },
+                  { kind: "invoke", environment: environment.id, function: slot },
                   "args",
                   input,
                 ),
@@ -330,13 +370,7 @@ export class Revision {
           );
           const result = await this.executeText(
             packet(
-              {
-                kind: "contribute",
-                environment: rootScope.id,
-                binding: binding.binding,
-                service: binding.alias,
-                method: binding.method,
-              },
+              { kind: "contribute", environment: rootScope.id, function: binding.slot },
               "args",
               arguments_,
             ),

@@ -1,4 +1,6 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { headless } from "../packages/ts/test/headless.ts";
 
@@ -49,28 +51,48 @@ const sdk = await Bun.build({
     },
   ],
 });
-const fixture = await Bun.build({
-  entrypoints: [path.join(sdkPackage, "test/interpreter-browser.ts")],
-  target: "browser",
-  format: "esm",
-  plugins: [
-    {
-      name: "sdk-entry",
-      setup(builder) {
-        builder.onResolve({ filter: /\/src\/browser\.ts$/ }, () => ({
-          path: "/sdk.js",
-          external: true,
-        }));
+/** Bundle one test entry; its SDK import stays the page's single shared `/sdk.js`. */
+const testEntry = (file: string) =>
+  Bun.build({
+    entrypoints: [path.join(sdkPackage, "test", file)],
+    target: "browser",
+    format: "esm",
+    plugins: [
+      {
+        name: "sdk-entry",
+        setup(builder) {
+          builder.onResolve({ filter: /\/src\/browser\.ts$/ }, () => ({
+            path: "/sdk.js",
+            external: true,
+          }));
+        },
       },
-    },
-  ],
-});
-if (!sdk.success || !fixture.success)
-  throw new AggregateError([...sdk.logs, ...fixture.logs], "Browser fixture build failed");
+    ],
+  });
+const fixture = await testEntry("interpreter-browser.ts");
+const prepared = await testEntry("prepared-component-browser.ts");
+if (!sdk.success || !fixture.success || !prepared.success)
+  throw new AggregateError(
+    [...sdk.logs, ...fixture.logs, ...prepared.logs],
+    "Browser fixture build failed",
+  );
 const sources = new Map([
   ["/sdk.js", await sdk.outputs[0]!.text()],
   ["/fixture.js", await fixture.outputs[0]!.text()],
+  ["/prepared.js", await prepared.outputs[0]!.text()],
 ]);
+// Compiled fixtures whose generated browser adapters the prepared-component page imports.
+const adapters = [
+  "arithmetic",
+  "pipeline",
+  "probe",
+  "hook-compiled",
+  "http-client",
+  "http-handler",
+];
+for (const name of adapters)
+  if (!(await Bun.file(path.join(fixtures, name, "browser/index.js")).exists()))
+    throw new Error(`Fixture ${name} has no prepared browser adapter; rebuild the fixtures`);
 // The full suite qualifies an alternate engine when one is supplied; the other path gets a smoke run.
 const page = `<!doctype html><body>running<script type="module">
 import { verifyBrowserInterpreter, verifyEngineSelection, verifyStandardScenario, verifyPrecisionBrowser, verifyContextAcquireBrowser, verifyIngressScenario } from "/fixture.js";
@@ -89,9 +111,41 @@ try {
   document.body.textContent = "TEMBRA_WASM_FAIL " + (error.stack ?? error);
 }
 </script>`;
+// Compiled Orbs run through application-owned adapters. The import map resolves each generated
+// module's bare SDK import to the same `/sdk.js` the application imports, so both share one SDK
+// instance and therefore one prepared-component registry brand.
+const preparedPage = `<!doctype html><script type="importmap">${JSON.stringify({
+  imports: { "@syntropika/tembra-sdk/browser": "/sdk.js" },
+})}</script><body>running<script type="module">
+import { verifyPreparedComponents } from "/prepared.js";
+try {
+  const passed = await verifyPreparedComponents(${JSON.stringify(Boolean(alternate))} ? new URL(${JSON.stringify(overrideEngine)}, location.href) : undefined);
+  await fetch("/report/prepared", { method: "POST", body: JSON.stringify(passed) });
+  document.body.textContent = "TEMBRA_WASM_PASS";
+} catch (error) {
+  document.body.textContent = "TEMBRA_WASM_FAIL " + (error.stack ?? error);
+}
+</script>`;
 const requested = new Set<string>();
 /** Scenario evidence posted by the page, including actual incoming HTTP lifecycle checks. */
 let standardReport: unknown;
+/** Names of the prepared-component scenarios the page passed. */
+let preparedReport: string[] | undefined;
+// Every Chrome profile of this run lives under one run-owned directory, removed at shutdown.
+const profiles = await mkdtemp(
+  path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-wasm-browser-"),
+);
+process.env.TEMBRA_TEST_ARTIFACTS = profiles;
+
+/** Remove this run's profiles; a Chrome child can still flush state just after its browser exits. */
+async function removeProfiles(): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await rm(profiles, { recursive: true, force: true });
+    await Bun.sleep(100);
+    if (!existsSync(profiles)) return;
+  }
+  throw new Error(`Chrome kept writing ${profiles} after shutdown`);
+}
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -101,6 +155,24 @@ const server = Bun.serve({
     if (pathname === "/report" && request.method === "POST") {
       standardReport = await request.json();
       return new Response(null, { status: 204 });
+    }
+    if (pathname === "/report/prepared" && request.method === "POST") {
+      preparedReport = await request.json();
+      return new Response(null, { status: 204 });
+    }
+    if (pathname === "/prepared")
+      return new Response(preparedPage, { headers: { "Content-Type": "text/html" } });
+    const adapterFile = pathname.match(/^\/adapters\/([\w-]+)\/([\w.-]+\.(?:js|wasm))$/);
+    if (adapterFile) {
+      const [, name, file] = adapterFile;
+      if (!adapters.includes(name!)) return new Response("Not found", { status: 404 });
+      const served = Bun.file(path.join(fixtures, name!, "browser", file!));
+      if (!(await served.exists())) return new Response("Not found", { status: 404 });
+      return new Response(served, {
+        headers: {
+          "Content-Type": file!.endsWith(".js") ? "application/javascript" : "application/wasm",
+        },
+      });
     }
     if (pathname === "/wasi/values") return Response.json({ values: [2, 4, 6] });
     if (pathname === "/wasi/events")
@@ -145,6 +217,26 @@ try {
   console.log(
     `Actual browser interpreter facade, memory filesystem and OPFS acceptance passed on the ${alternate ? "alternate" : "default packaged"} engine; the ${alternate ? "default packaged" : "explicit override"} engine path passed its smoke check`,
   );
+  // A separate page and Chrome profile: compiled Orbs through their generated adapters.
+  await headless(new URL("/prepared", server.url).href, "TEMBRA_WASM_PASS", "TEMBRA_WASM_FAIL");
+  for (const name of adapters)
+    for (const file of ["index.js", "glue.js"])
+      if (!requested.has(`/adapters/${name}/${file}`))
+        throw new Error(`The browser did not import the ${name} adapter's ${file}`);
+  // The import map, not a second SDK copy, satisfied every adapter's SDK import.
+  if ([...requested].some((pathname) => pathname.includes("tembra-sdk")))
+    throw new Error("An adapter requested a second SDK module");
+  if (
+    ![...requested].some((pathname) =>
+      /^\/adapters\/[\w-]+\/orb\.core\.[0-9a-f]+\.wasm$/.test(pathname),
+    )
+  )
+    throw new Error("No prepared core module was fetched");
+  if (!preparedReport?.length) throw new Error("The prepared-component page reported nothing");
+  console.log(
+    `Prepared compiled components in Chrome: ${preparedReport.length} scenarios passed:\n- ${preparedReport.join("\n- ")}`,
+  );
 } finally {
-  server.stop(true);
+  await server.stop(true);
+  await removeProfiles();
 }

@@ -14,6 +14,25 @@ import {
 } from "../../../packages/ts/sdk/src/interpreter/standard.ts";
 
 const revision = "b51e92c0c7ca3b0ae7afff1a1f2de8baf2e7a34a";
+// Keep the engine corrections independent of the componentization toolchain. Each correction
+// must match the pinned source exactly, and its bytes select a separate immutable source cache.
+const sourcePatches = [
+  {
+    file: "dtoa.c",
+    before: "#include <setjmp.h>",
+    after: "#if !defined(__wasi__)\n#include <setjmp.h>\n#endif",
+  },
+  {
+    file: "quickjs.c",
+    before: "            call_type = FUNC_CALL_NORMAL;\n        } else if (s->token.val == '.') {",
+    after:
+      "            /* Preserve the caller's postfix-call flags after a nested new-expression. */\n" +
+      "            if (call_type == FUNC_CALL_NEW)\n" +
+      "                accept_lparen = (parse_flags & PF_POSTFIX_CALL) != 0;\n" +
+      "            call_type = FUNC_CALL_NORMAL;\n        } else if (s->token.val == '.') {",
+  },
+] as const;
+const patchHash = createHash("sha256").update(JSON.stringify(sourcePatches)).digest("hex");
 const root = import.meta.dir;
 const { values } = parseArgs({
   options: {
@@ -38,20 +57,19 @@ if (
   run("git", ["clone", "https://github.com/stencil-hq/dquickts", checkout]);
 }
 const archive = execFileSync("git", ["-C", checkout, "archive", revision], { maxBuffer: 64 << 20 });
-const source = path.join(cache, `dquickts-${revision}`);
+const source = path.join(cache, `dquickts-${revision}-${patchHash.slice(0, 16)}`);
 if (!(await exists(source))) {
   await mkdir(source);
   const archivePath = path.join(cache, "source.tar");
   await writeFile(archivePath, archive);
   run("tar", ["-xf", archivePath, "-C", source]);
-  const dtoa = path.join(source, "dtoa.c");
-  const text = await readFile(dtoa, "utf8");
-  if (text.split("#include <setjmp.h>").length !== 2)
-    throw new Error("Pinned dtoa include changed");
-  await writeFile(
-    dtoa,
-    text.replace("#include <setjmp.h>", "#if !defined(__wasi__)\n#include <setjmp.h>\n#endif"),
-  );
+  for (const patch of sourcePatches) {
+    const file = path.join(source, patch.file);
+    const text = await readFile(file, "utf8");
+    if (text.split(patch.before).length !== 2)
+      throw new Error(`Pinned engine correction does not match ${patch.file}`);
+    await writeFile(file, text.replace(patch.before, patch.after));
+  }
 }
 await verifySource(checkout, source);
 const bootstrap = path.join(cache, "bootstrap");
@@ -126,7 +144,7 @@ const env = {
   RQUICKJS_SYS_NO_WASI_SDK: "1",
   CC_wasm32_wasip1: path.join(sdk, "bin/clang"),
   AR_wasm32_wasip1: path.join(sdk, "bin/llvm-ar"),
-  CFLAGS_wasm32_wasip1: `--sysroot=${sysroot}`,
+  CFLAGS_wasm32_wasip1: `--sysroot=${sysroot} -ffile-prefix-map=${source}=/dquickts -ffile-prefix-map=${sdk}=/wasi-sdk`,
   BINDGEN_EXTRA_CLANG_ARGS_wasm32_wasip1: `--sysroot=${sysroot} -isystem ${path.join(sysroot, `include/${target}`)}`,
   CARGO_TARGET_DIR: path.join(cache, "target"),
   TEMBRA_GUEST_BOOTSTRAP_DIR: bootstrap,
@@ -136,11 +154,16 @@ const patch = `patch."https://github.com/stencil-hq/dquickts".rquickjs.path=${JS
 const link = [
   "-Clink-arg=--import-memory",
   `-Clink-arg=--initial-memory=${abi.MEMORY_INITIAL_PAGES * abi.PAGE_BYTES}`,
+  `--remap-path-prefix=${source}=/dquickts`,
+  `--remap-path-prefix=${root}=/tembra/guest`,
+  `--remap-path-prefix=${cache}=/tembra/build`,
 ];
 run(
-  "cargo",
+  "rustup",
   [
-    `+${values.toolchain}`,
+    "run",
+    values.toolchain!,
+    "cargo",
     "build",
     "--locked",
     "--release",
@@ -164,6 +187,7 @@ const manifest = {
   protocol: `${abi.IMPORT_MODULE} (wasm32-wasip1 core reactor)`,
   revision,
   sourceArchiveSha256: createHash("sha256").update(archive).digest("hex"),
+  sourcePatchSha256: patchHash,
   wasmSha256: createHash("sha256").update(bytes).digest("hex"),
   bytes: bytes.length,
   bun: Bun.version,
@@ -197,7 +221,7 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
-/** Verify every cached byte and symlink against the pinned Git tree and the one WASI include patch. */
+/** Verify every cached byte and symlink against the pinned Git tree and the exact corrections. */
 async function verifySource(checkout: string, directory: string): Promise<void> {
   const tree = execFileSync("git", ["-C", checkout, "ls-tree", "-rz", "--full-tree", revision], {
     encoding: "utf8",
@@ -217,12 +241,13 @@ async function verifySource(checkout: string, directory: string): Promise<void> 
     if (stat.isSymbolicLink() !== (mode === "120000"))
       throw new Error(`Cached source type differs: ${relative}`);
     let data = mode === "120000" ? Buffer.from(await readlink(file)) : await readFile(file);
-    if (relative === "dtoa.c")
-      data = Buffer.from(
-        data
-          .toString()
-          .replace("#if !defined(__wasi__)\n#include <setjmp.h>\n#endif", "#include <setjmp.h>"),
-      );
+    for (const patch of sourcePatches) {
+      if (relative !== patch.file) continue;
+      const text = data.toString();
+      if (text.split(patch.after).length !== 2)
+        throw new Error(`Cached engine correction differs: ${relative}`);
+      data = Buffer.from(text.replace(patch.after, patch.before));
+    }
     const actual = createHash("sha1").update(`blob ${data.length}\0`).update(data).digest("hex");
     if (actual !== hash) throw new Error(`Cached source differs: ${relative}`);
     expected.add(relative);

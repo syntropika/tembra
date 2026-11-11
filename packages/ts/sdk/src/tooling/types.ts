@@ -6,6 +6,12 @@ export interface BuildTarget {
   apiVersion?: number;
   /** Compiled callback interfaces contributing to their selected Orb's hook, with execution priority. */
   contributes?: Readonly<Record<string, number>>;
+  /**
+   * Compiled Orbs only: also emit `browser/index.js`, an application-owned module that lets
+   * browser hosts run exactly this artifact (register it with `createHost({ isolated: {
+   * components } })`). Source Orbs run in browsers without preparation.
+   */
+  browser?: boolean;
   minify?: boolean;
   define?: Readonly<Record<string, string>>;
 }
@@ -20,6 +26,8 @@ export interface Artifact {
   path: string;
   sha256: string;
   bytes: number;
+  /** The prepared browser module of a compiled Orb built with `browser: true`. */
+  browser?: string;
 }
 
 /** Preserve literal build configuration types. */

@@ -88,6 +88,19 @@ export interface ExecutionScope {
   sync(request: import("./host-protocol.ts").HostRequest): unknown;
   async(request: import("./host-protocol.ts").AsyncHostRequest): Promise<unknown>;
 }
+/**
+ * One exported WIT interface in the interpreter Load's function table. Each function is listed
+ * as `[id, JavaScript spelling]`, where the id is the export slot `ContractPort.bind` returns;
+ * `invoke` and `contribute` commands select functions only by that id. Mirrors
+ * `ExportedInterface` in `crates/executor-wasm/src/protocol.rs`.
+ */
+export interface ExportedInterface {
+  /** Versioned WIT interface identity; it also keys a contribution callback. */
+  readonly interface: string;
+  /** JavaScript service alias whose environments may call these functions. */
+  readonly service: string;
+  readonly functions: readonly (readonly [id: number, method: string])[];
+}
 /** The guest service and method that serve incoming HTTP in one environment. */
 export interface IngressDispatch {
   environment: number;

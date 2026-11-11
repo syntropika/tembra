@@ -71,16 +71,25 @@ const service = (orbName: string, alias: string, contract: string, methods: stri
   signature: `sig-${alias}`,
 });
 
+/**
+ * Every slot any contract double bound, by WIT method name. Slots are unique across doubles, so a
+ * guest double resolves the `function` id of a command the way the guest's Load table does.
+ */
+const boundMethods = new Map<number, string>();
+let slots = 0;
+
 /** The contract module's answers; every value check is accepted and recorded. */
 function contract(
   describe: unknown,
   implementation: unknown,
 ): ContractPort & { checked: string[] } {
-  let slot = 0;
   const checked: string[] = [];
   return {
     checked,
-    bind: () => ++slot,
+    bind: (_binding, method) => {
+      boundMethods.set(++slots, method);
+      return slots;
+    },
     validate: (_slot, _arguments, value) => {
       checked.push(value);
       return '{"ok":null}';
@@ -110,7 +119,7 @@ function port(guest: Guest): InterpreterPort & { packets: string[] } {
       packets.push(packet);
       const request = JSON.parse(packet);
       if (request.kind === "contribute") return guest.contribute!(request.args);
-      return guest.invoke!(request.method, request.args, scope);
+      return guest.invoke!(boundMethods.get(request.function)!, request.args, scope);
     },
     release() {},
     close() {},

@@ -66,8 +66,8 @@ fn portable_source_transport_preserves_factories_and_isolates_heaps() {
             true,
         );
     }
-    let call =
-        || json!({"kind":"invoke","environment":2,"service":"counter","method":"add","args":[]});
+    let add = contract.bind("test:mobile/counter", "add", true).unwrap();
+    let call = || json!({"kind":"invoke","environment":2,"function":add,"args":[]});
     assert_eq!(exchange(&first, call(), false), 1);
     assert_eq!(exchange(&first, call(), false), 2);
     assert_eq!(exchange(&second, call(), false), 1);
@@ -247,9 +247,10 @@ fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
         true,
     );
     let call = |method: &str, args: Value| {
+        let function = contract.bind("test:mobile/files", method, true).unwrap();
         exchange(
             &port,
-            json!({"kind":"invoke","environment":2,"service":"files","method":method,"args":args}),
+            json!({"kind":"invoke","environment":2,"function":function,"args":args}),
             false,
         )
     };
@@ -366,9 +367,10 @@ fn portable_http_streams_through_the_host_provider() {
         json!({"kind":"create","environment":2,"service":"web"}),
         true,
     );
+    let first = contract.bind("test:mobile/web", "first", true).unwrap();
     let value = exchange(
         &port,
-        json!({"kind":"invoke","environment":2,"service":"web","method":"first","args":[format!("http://{address}/events")]}),
+        json!({"kind":"invoke","environment":2,"function":first,"args":[format!("http://{address}/events")]}),
         false,
     );
     assert_eq!(value, "data: hello\n\n");
@@ -482,7 +484,8 @@ fn portable_cancel_interrupts_a_pending_http_send_without_quarantine() {
         json!({"kind":"create","environment":2,"service":"web"}),
         true,
     );
-    let invoke = |path: &str| json!({"kind":"invoke","environment":2,"service":"web","method":"first","args":[format!("http://{address}/{path}")]});
+    let first = contract.bind("test:mobile/web", "first", true).unwrap();
+    let invoke = |path: &str| json!({"kind":"invoke","environment":2,"function":first,"args":[format!("http://{address}/{path}")]});
 
     // The caller aborts once the peer holds the request head: standard HTTP is native, so the
     // cancellation comes from another thread rather than from a host operation event.
@@ -554,9 +557,12 @@ fn portable_compiled_orb_calls_the_same_wit_abi() {
         json!({"kind":"create","environment":1,"service":"arithmetic"}),
         true,
     );
+    let double = contract
+        .bind("example:integrated/arithmetic@1.0.0", "double", true)
+        .unwrap();
     let result = exchange(
         &port,
-        json!({"kind":"invoke","environment":1,"service":"arithmetic","method":"double","args":[21]}),
+        json!({"kind":"invoke","environment":1,"function":double,"args":[21]}),
         false,
     );
     assert_eq!(result, json!(42));

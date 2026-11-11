@@ -20,6 +20,8 @@ wasm-bindgen = "=0.2.129"
 
 [dev-dependencies]
 serde_json.workspace = true
+# Independent digest for prepared-component binding tests (already linked by tembra-contracts).
+sha2 = "0.10"
 
 [lints]
 workspace = true

@@ -163,18 +163,20 @@ impl Environment {
     }
 
     /// Invoke a guest callback under an actual admitted native context.
+    ///
+    /// `function` is the method's export slot; the guest accepts it only for this
+    /// environment's own service.
     pub(crate) async fn invoke(
         &self,
         context: Context,
-        method: &str,
+        function: u32,
         args: Value,
     ) -> Result<Value> {
         let context = context.enter_execution()?;
         let cancellation = context.signal();
         let packet = GuestCommand::Invoke {
             environment: self.id,
-            service: self.service.as_deref(),
-            method,
+            function,
             args: &args,
             receiver: None,
         };
@@ -229,9 +231,7 @@ impl Environment {
             .map_err(failure)?;
         let packet = GuestCommand::Contribute {
             environment: self.id,
-            binding: &binding.binding,
-            service: &binding.alias,
-            method: &binding.method,
+            function: binding.slot,
             args: &args,
         };
         let value = self

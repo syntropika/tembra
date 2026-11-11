@@ -8,7 +8,10 @@ mod values;
 pub(crate) mod worker;
 use crate::{Binding, Engine, Grants, failure, worker::Session};
 use serde_json::{Map, Value, json};
-use std::{collections::BTreeMap, sync::mpsc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::mpsc,
+};
 use tembra::Result;
 use tembra_contracts::{
     FunctionKind, Item, Plan, PreparedContract, ServiceBinding, javascript_name,
@@ -61,30 +64,32 @@ fn layout(
     bindings: &BTreeMap<String, Binding>,
     hooks: &tembra_contracts::HookPlan,
 ) -> Result<worker::Layout> {
-    let mut exports = BTreeMap::new();
+    let mut exports = Vec::new();
+    // Every callable export is keyed by its function id: the export slot `bind` returns, the
+    // same id the interpreter's Load table and every host's commands use.
     for service in services {
-        let mut methods = BTreeMap::new();
-        let mut roles = BTreeMap::new();
-        for (method, spelling) in &service.methods {
-            methods.insert(spelling.clone(), method.clone());
+        let mut functions = BTreeMap::new();
+        for method in service.methods.keys() {
             let slot = contract
                 .bind(&service.interface, method, true)
                 .map_err(failure)?;
             let role = resource_roles(contract, slot)?;
-            if role.receiver.is_some() || role.own_result.is_some() {
-                roles.insert(spelling.clone(), role);
-            }
+            let roles = (role.receiver.is_some() || role.own_result.is_some()).then_some(role);
+            functions.insert(
+                slot,
+                worker::ExportFunction {
+                    name: method.clone(),
+                    roles,
+                },
+            );
         }
-        exports.insert(
-            service.alias.clone(),
-            worker::Export {
-                interface: service.interface.clone(),
-                methods,
-                roles,
-            },
-        );
+        exports.push(worker::Export {
+            interface: service.interface.clone(),
+            service: service.alias.clone(),
+            functions,
+        });
     }
-    let mut contributions = BTreeMap::new();
+    let mut contributions = BTreeSet::new();
     for contribution in &hooks.contributions {
         let function = contract
             .model()
@@ -99,18 +104,19 @@ fn layout(
                 _ => None,
             })
             .ok_or_else(|| failure("checked contribution callback is missing"))?;
-        exports.insert(
-            contribution.alias.clone(),
-            worker::Export {
-                interface: contribution.name.clone(),
-                methods: [(contribution.method.clone(), function.name.clone())].into(),
-                roles: BTreeMap::new(),
-            },
-        );
-        contributions.insert(
-            contribution.binding.clone(),
-            (contribution.alias.clone(), contribution.method.clone()),
-        );
+        exports.push(worker::Export {
+            interface: contribution.name.clone(),
+            service: contribution.alias.clone(),
+            functions: [(
+                contribution.slot,
+                worker::ExportFunction {
+                    name: function.name.clone(),
+                    roles: None,
+                },
+            )]
+            .into(),
+        });
+        contributions.insert(contribution.slot);
     }
     let mut imports = Vec::new();
     // One dynamic host type per defining resource: every alias of it, in any selected import,
@@ -183,7 +189,10 @@ fn layout(
             binding: entry.key.clone(),
             resources,
             functions,
-            contribution: contributions.contains_key(&entry.key),
+            contribution: hooks
+                .contributions
+                .iter()
+                .any(|contribution| contribution.binding == entry.key),
         });
     }
     Ok(worker::Layout {
