@@ -1,0 +1,13 @@
+[package]
+name = "tembra-example-lifecycle-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+tembra = { path = "../../../crates/tembra" }
+tembra-executor-wasm = { path = "../../../crates/executor-wasm" }
+futures = "0.3"
+serde_json = "1"

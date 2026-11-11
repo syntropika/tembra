@@ -1,0 +1,27 @@
+[package]
+name = "tembra-example-lifecycle-counter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# `async`: the lifecycle's `open` and `close` are async functions of `tembra:orb`.
+wit-bindgen = { version = "=0.63.0", default-features = false, features = [
+  "macros",
+  "realloc",
+  "async",
+] }
+dlmalloc = { version = "0.2.12", features = ["global"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+strip = "symbols"

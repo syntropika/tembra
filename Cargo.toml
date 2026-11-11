@@ -20,6 +20,8 @@ exclude = [
   "crates/executor-wasm/rust-sockets",
   "crates/executor-wasm/probe-provider",
   "crates/executor-wasm/stream-adapter",
+  "examples/rust-orb-lifecycle/counter",
+  "examples/rust-orb-lifecycle/host",
 ]
 
 [workspace.package]
