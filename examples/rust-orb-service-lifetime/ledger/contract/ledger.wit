@@ -3,32 +3,18 @@ package example:ledger@1.0.0;
 /// A ledger whose `main` object the host creates when it installs the Orb and keeps until it
 /// closes; it is acquired only as `main` by the principal `host`.
 interface pinned {
-  /// The balance of a pinned ledger object.
-  record pinned-balance {
-    total: s64,
-  }
-  /// The balance of a lingering ledger object.
-  record lingering-balance {
-    total: s64,
-  }
-  /// The balance of a passing ledger object.
-  record passing-balance {
-    total: s64,
-  }
   /// Add to the balance and return it.
   add: func(amount: s64) -> s64;
 }
 
 /// A ledger whose objects stay two and a half seconds after their last reference is released.
 interface lingering {
-  use pinned.{pinned-balance, lingering-balance, passing-balance};
   /// Add to the balance and return it.
   add: func(amount: s64) -> s64;
 }
 
 /// A ledger whose objects live exactly while something references them: the default.
 interface passing {
-  use pinned.{pinned-balance, lingering-balance, passing-balance};
   /// Add to the balance and return it.
   add: func(amount: s64) -> s64;
 }
