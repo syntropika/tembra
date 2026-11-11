@@ -356,24 +356,51 @@ fn an_idle_producer_ends_only_at_the_terminal_timeout() {
 #[ignore = "requires TEMBRA_WASM_STREAM_PRODUCER"]
 fn a_trap_is_never_a_clean_end() {
     engines(|bytes, interpreted| {
-        for mode in [TRAP_HOLDING, TRAP_AFTER_END] {
+        for (mode, size) in [
+            (TRAP_HOLDING, 1024),
+            (TRAP_AFTER_END, 1024),
+            (TRAP_HOLDING, PIPE_BYTES as u32),
+            (TRAP_AFTER_END, PIPE_BYTES as u32),
+        ] {
             let mut fixture = install(bytes, interpreted, 30_000);
-            let (received, last) = fixture
-                .root(async move |context, reference, _| {
-                    let mut stream = open(&context, &reference, 4, 1024, mode).await?;
-                    let mut received = 0;
-                    loop {
-                        match stream.next().await {
-                            Some(Ok(chunk)) => received += chunk.len(),
-                            other => return Ok((received, other.map(|read| read.map(drop)))),
-                        }
+            let outcome = fixture.root(async move |context, reference, _| {
+                let mut stream = open(&context, &reference, 4, size, mode).await?;
+                let mut received = Vec::new();
+                loop {
+                    match stream.next().await {
+                        Some(Ok(chunk)) => received.extend(chunk),
+                        other => return Ok((received, other.map(|read| read.map(drop)))),
                     }
-                })
-                .unwrap();
-            assert_eq!(received, 4096, "{interpreted} {mode}");
-            let failure = last
-                .expect("a failure, not a clean end")
-                .expect_err("the producer trapped");
+                }
+            });
+            let failure = match outcome {
+                Err(error) => {
+                    // A small body can finish and trap before the host observes its head.
+                    // A body larger than the bounded pipe must instead publish a reader.
+                    assert_eq!(
+                        size, 1024,
+                        "a backpressured producer failed before its head"
+                    );
+                    error
+                }
+                Ok((received, last)) => {
+                    assert!(received.len() <= 4 * size as usize);
+                    assert!(
+                        received
+                            .iter()
+                            .enumerate()
+                            .all(|(offset, byte)| *byte == expected(offset, size as usize)),
+                        "{interpreted} {mode} {size}: corrupt prefix"
+                    );
+                    if size as usize == PIPE_BYTES {
+                        assert!(!received.is_empty(), "the post-head case read no bytes");
+                    }
+                    // A trap may discard an unread tail; it must never expose a clean EOF,
+                    // even when the writer closed before its task group trapped.
+                    last.expect("a failure, not a clean end")
+                        .expect_err("the producer trapped")
+                }
+            };
             assert!(
                 failure.message.contains("trap"),
                 "{interpreted} {mode}: {failure:?}"
