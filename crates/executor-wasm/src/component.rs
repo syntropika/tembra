@@ -352,8 +352,8 @@ impl Engine {
         let bytes = &artifact.component;
         // Admit the binary's actual imports before preparing any provider: a refused
         // installation opens no CLI file and invokes no configured factory.
-        let component = self.compiled(bytes)?.as_ref().clone();
-        check_component_imports(&self.engine, &component, grants, source.is_some())?;
+        let component = self.compiled(bytes)?;
+        check_component_imports(&self.engine, &component.component, grants, source.is_some())?;
         let prepared = self.providers.context(&plan.host_imports, grants, cli)?;
         // A source runtime's internal clocks follow the installation's clocks grant.
         if let Some(source) = &source {

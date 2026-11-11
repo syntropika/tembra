@@ -60,10 +60,14 @@ pub fn runtime_internal(key: &str) -> bool {
 }
 
 #[cfg(feature = "authoring")]
-/// The bundled private world, prepared once per call; it is small and parsed without I/O.
+/// Prepare the immutable bundled world once; actual Orb imports and exports are checked anew.
 fn private_world() -> Result<PreparedContract, Error> {
-    let contract = Contract::from_source("tembra-orb.wit", SOURCE_WIT, Some("source"))?;
-    Ok(contract.prepared().clone())
+    static WORLD: std::sync::LazyLock<Result<PreparedContract, Error>> =
+        std::sync::LazyLock::new(|| {
+            let contract = Contract::from_source("tembra-orb.wit", SOURCE_WIT, Some("source"))?;
+            Ok(contract.prepared().clone())
+        });
+    WORLD.clone()
 }
 
 #[cfg(feature = "authoring")]
@@ -132,6 +136,9 @@ impl Contract {
 
     /// Package a componentized source Orb. Its implementation is described by the component's
     /// own `lifecycle.describe` export and checked by the host before any factory runs.
+    ///
+    /// The component must already import the pinned shared runtime ([`crate::SharedRuntime::pack`]);
+    /// [`Self::check_source_component`] also verifies a componentizer's output before packing.
     pub fn source_component_artifact(
         &self,
         component: &[u8],
@@ -151,6 +158,7 @@ impl Contract {
             ));
         }
         self.check_source_component(component)?;
+        crate::artifact::runtime_reference(true, component)?;
         let mut bytes = component.to_vec();
         append_section(
             &mut bytes,

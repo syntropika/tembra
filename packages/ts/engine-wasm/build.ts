@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -109,3 +110,17 @@ for (const name of compilerAssets)
     path.join(destination, "compiler", name),
   );
 writeFileSync(path.join(destination, "compiler.d.ts"), readFileSync(compilerEntry, "utf8"));
+
+// TypeScript Orbs reference this immutable core instead of embedding another copy. The SDK
+// resolves this package-owned URL only after a verified artifact requests the shared runtime.
+const runtime = readFileSync(path.join(root, "crates/contracts/runtime/dquickts.wasm"));
+const runtimeHash = createHash("sha256").update(runtime).digest("hex");
+writeFileSync(path.join(destination, "dquickts.wasm"), runtime);
+writeFileSync(
+  path.join(destination, "runtime.js"),
+  `export default new URL("./dquickts.wasm?sha256=${runtimeHash}", import.meta.url);\n`,
+);
+writeFileSync(
+  path.join(destination, "runtime.d.ts"),
+  "declare const runtime: URL;\nexport default runtime;\n",
+);

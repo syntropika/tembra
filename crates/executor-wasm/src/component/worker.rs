@@ -35,8 +35,8 @@ use tokio::sync::oneshot;
 use wasmtime::{
     Store, StoreLimits, StoreLimitsBuilder,
     component::{
-        Accessor, Component, Func, Linker, Resource, ResourceTable, ResourceType, TaskGroupHook,
-        TaskGroupId, TypedFunc, Val, types::ComponentFunc,
+        Accessor, Func, Linker, Resource, ResourceTable, ResourceType, TaskGroupHook, TaskGroupId,
+        TypedFunc, Val, types::ComponentFunc,
     },
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -428,7 +428,7 @@ struct Environments {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     engine: Engine,
-    component: Component,
+    component: Arc<crate::engine::Compiled>,
     wasi: (WasiCtxBuilder, bool),
     grants: Arc<crate::Grants>,
     layout: Layout,
@@ -462,7 +462,7 @@ pub(crate) async fn run(
 async fn live(
     (engine, component, wasi, grants, layout): (
         Engine,
-        Component,
+        Arc<crate::engine::Compiled>,
         (WasiCtxBuilder, bool),
         Arc<crate::Grants>,
         Layout,
@@ -549,7 +549,7 @@ async fn live(
 #[allow(clippy::too_many_arguments)]
 async fn instantiate(
     engine: &Engine,
-    component: &Component,
+    compiled: &crate::engine::Compiled,
     (mut wasi, resolve): (WasiCtxBuilder, bool),
     grants: Arc<crate::Grants>,
     layout: &Layout,
@@ -557,7 +557,10 @@ async fn instantiate(
     transport: &crate::http::Transport,
     source: Option<&Source>,
 ) -> wasmtime::Result<(Store<State>, wasmtime::component::Instance)> {
+    let component = &compiled.component;
     let mut linker = Linker::<State>::new(&engine.engine);
+    // Shared code receives only what this Orb's own instances pass it.
+    compiled.link(&mut linker)?;
     link_wasi(&mut linker)?;
     // Linking grants nothing: installation requires an HTTP grant for each wasi:http import and
     // every request is checked against its granted origins.

@@ -42,8 +42,9 @@ let host = Host::new(pool.spawner());
 host.install(vec![arithmetic, calculator])?;
 ```
 
-There is no separately loaded interpreter asset. Each source artifact already contains its
-runtime. `Engine::interpreted` selects Wasmtime's Pulley execution strategy, including on
+Native packages include one pinned interpreter core. Source artifacts import it and carry their
+own snapshots and WIT adapters; compiled modules are shared while Stores and heaps remain isolated.
+`Engine::interpreted` selects Wasmtime's Pulley execution strategy, including on
 platforms that prohibit executable memory; it does not select a different Orb format.
 
 `Engine::load` verifies the component against its prepared contract before constructing an

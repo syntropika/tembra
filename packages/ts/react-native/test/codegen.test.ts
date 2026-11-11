@@ -66,7 +66,7 @@ test("Codegen accepts the binary carrier with a synchronous buffer take", () => 
     parameters: strings(2),
     result: "PromiseTypeAnnotation<StringTypeAnnotation>",
   });
-  // Source Orbs are components that carry their own interpreter: no engine bytes cross here.
+  // The native library supplies the shared interpreter; no engine bytes cross this bridge.
   expect(signature("configureExecution")).toEqual({
     parameters: strings(2),
     result: "PromiseTypeAnnotation<VoidTypeAnnotation>",

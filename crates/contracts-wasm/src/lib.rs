@@ -5,7 +5,12 @@
 //! (carrying `tembra:runtime`) is split into its public contract, the private `tembra:orb`
 //! package, hook self-imports and the fixed runtime internals, each checked against the actual
 //! component types. Neither embedded metadata nor a claimed hash is trusted.
-use tembra_contracts::Artifact;
+//!
+//! A production source component imports the pinned shared runtime core instead of embedding it
+//! and is verified in that thin form. The browser glue generator needs it inline: the host loads
+//! its own packaged runtime once, checks it with [`WasmSharedRuntime`], and expands each source
+//! component with [`WasmArtifact::expanded_component`]. The verifier never embeds the runtime.
+use tembra_contracts::{Artifact, SharedRuntime};
 
 mod limits;
 pub use limits::{InstrumentedCore, instrument_core};
@@ -24,6 +29,28 @@ fn failure(error: impl std::fmt::Display) -> Failure {
     return JsValue::from_str(&error.to_string());
     #[cfg(not(target_arch = "wasm32"))]
     return error.to_string();
+}
+
+/// The pinned shared source runtime core, checked once by content.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct WasmSharedRuntime {
+    runtime: SharedRuntime,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+impl WasmSharedRuntime {
+    /// Accept exactly the pinned runtime core bytes the host packaged.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
+    pub fn new(bytes: &[u8]) -> Result<WasmSharedRuntime, Failure> {
+        Ok(Self {
+            runtime: SharedRuntime::new(bytes.to_vec()).map_err(failure)?,
+        })
+    }
+
+    /// The pinned SHA-256 of the runtime core, lowercase hexadecimal.
+    pub fn digest() -> String {
+        SharedRuntime::SHA256.to_owned()
+    }
 }
 
 /// Immutable verified artifact data shared by one installed revision.
@@ -54,12 +81,43 @@ impl WasmArtifact {
         self.artifact.source_runtime
     }
 
+    /// Whether the verified component imports the pinned shared runtime, which the host must
+    /// supply through [`Self::expanded_component`].
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = requiresRuntime))]
+    pub fn requires_runtime(&self) -> bool {
+        self.artifact.shared_runtime
+    }
+
     /// Copy the verified component bytes once for the trusted glue generator.
     pub fn component(&self) -> Vec<u8> {
         self.artifact.component.clone()
     }
 
-    /// The exact versioned top-level import names of the verified component, as a JSON array.
+    /// The verified component with the shared runtime inline, for the trusted glue generator.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = expandedComponent))]
+    pub fn expanded_component(&self, runtime: &WasmSharedRuntime) -> Result<Vec<u8>, Failure> {
+        if !self.artifact.shared_runtime {
+            return Err(failure(
+                "the artifact does not import the shared runtime; use component()",
+            ));
+        }
+        if self.artifact.component.is_empty() {
+            return Err(failure("the artifact's component bytes were released"));
+        }
+        runtime
+            .runtime
+            .expand(&self.artifact.component)
+            .map_err(failure)
+    }
+
+    /// Keep signature validation alive after the executable bytes have been compiled.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = releaseComponent))]
+    pub fn release_component(&mut self) {
+        self.artifact.component = Vec::new();
+    }
+
+    /// The exact versioned top-level import names of the verified component, as a JSON array;
+    /// the shared runtime, which the host supplies, is not one of them.
     pub fn imports(&self) -> String {
         serde_json::Value::from(self.imports.clone()).to_string()
     }
@@ -91,7 +149,8 @@ impl WasmArtifact {
     }
 }
 
-/// Read the outer component's import names; nested components and core modules are skipped.
+/// Read the outer component's import names; nested components, core modules and the shared
+/// runtime import are skipped.
 fn component_imports(bytes: &[u8]) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     let mut depth = 0usize;
@@ -103,6 +162,11 @@ fn component_imports(bytes: &[u8]) -> Result<Vec<String>, String> {
             wasmparser::Payload::ComponentImportSection(reader) if depth == 0 => {
                 for import in reader {
                     let import = import.map_err(|error| error.to_string())?;
+                    if matches!(import.ty, wasmparser::ComponentTypeRef::Module(_))
+                        && tembra_contracts::shared_runtime_import(import.name.name)
+                    {
+                        continue;
+                    }
                     names.push(import.name.name.to_owned());
                 }
             }

@@ -349,7 +349,9 @@ Serve the generated WASM asset with its loader, or set `wasmInput`.
 The same entrypoint works in a module Worker.
 
 Browser hosts verify and execute actual WebAssembly components through Tembra's trusted compiler.
-Source components include dquickts. JSPI is required, and Content Security Policy must permit
+Source components reference one dquickts core loaded lazily from the engine package and shared by
+the host. Each Orb keeps its own memory and capabilities. Independent compiled components do not
+load the JavaScript interpreter. JSPI is required, and Content Security Policy must permit
 `script-src blob:` and `'wasm-unsafe-eval'`. Chrome 154 is the qualified browser. Register filesystem providers with
 `memoryFilesystem()` or `opfsFilesystem()`. Browsers have no ambient TCP implementation; an embedding may supply a transport provider.
 Source and other compiled components use the same backend. Standard filesystem calls use the same providers: OPFS resolves direct handles,

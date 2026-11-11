@@ -10,6 +10,8 @@ export class NodeKernel {
 export class NodeArtifact {
   constructor(bytes: Uint8Array);
   description(): string;
+  /** Keep the checked contract after its component has been materialized. */
+  releaseComponent(): void;
   bind(binding: string, method: string, exports: boolean): number;
   validate(slot: number, arguments_: boolean, value: string): string;
   request(packet: string): string;
@@ -17,6 +19,8 @@ export class NodeArtifact {
 
 /** Resolved WIT used by optional sandbox platform adapters. */
 export class NodeContract {
+  /** Derive the world-independent interpreter core from the pinned authoring dylib. */
+  static sourceRuntime(runtime: Uint8Array): Buffer;
   constructor(directory: string, world?: string);
   /** Encoded WIT for type generation; the object retains the original import authority. */
   wit(): Uint8Array;

@@ -13,6 +13,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { homedir } from "node:os";
+import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
 
 // Editing an Orb reuses this dylib. Only a runtime or toolchain change rebuilds it.
@@ -38,32 +40,27 @@ const runtimePatchBytes = await readFile(runtimePatch);
 const patchHash = digest(runtimePatchBytes);
 const enginePatchBytes = await readFile(path.join(root, "patches/dquickts.patch"));
 const enginePatchHash = digest(enginePatchBytes);
-const quickjs = await source(
+// Cargo hashes a path package relative to the workspace root only when it lies inside that
+// root; otherwise its absolute location changes crate identities, TypeIds and code layout.
+// The patched engine therefore lives at a fixed path inside the runtime workspace.
+const engineDirectory = "tembra-dquickts";
+const quickjsArchive = await archive(
   "dquickts",
   "https://github.com/stencil-hq/dquickts",
   quickjsRevision,
   values["quickjs-source"],
-  async (directory) => {
-    const patchFile = path.join(path.dirname(directory), "dquickts.patch");
-    await writeFile(patchFile, enginePatchBytes);
-    run(
-      "patch",
-      ["--batch", "--forward", "--fuzz=0", "-p1", "-i", patchFile],
-      undefined,
-      directory,
-    );
-  },
-  enginePatchHash,
 );
-const runtime = await source(
+const runtimeArchive = await archive(
   "componentize-qjs",
   "https://github.com/andreiltd/componentize-qjs",
   runtimeRevision,
   values["runtime-source"],
-  async (directory) => {
-    const patchFile = path.join(path.dirname(directory), "runtime.patch");
-    await writeFile(patchFile, runtimePatchBytes);
-    run("patch", ["--batch", "--forward", "-p1", "-i", patchFile], undefined, directory);
+);
+const runtime = await source(
+  `componentize-qjs-${runtimeRevision}-dquickts-${quickjsRevision}-${digest(Buffer.from(`${patchHash}\0${enginePatchHash}`))}`,
+  async (directory, scratch) => {
+    await extract(runtimeArchive, directory, scratch);
+    await applyPatch(runtimePatchBytes, directory, scratch, "runtime.patch");
     // The pinned lockfile stays authoritative. Only the four registry entries replaced by
     // the pinned local dquickts workspace lose their registry identity; no resolution runs.
     const file = path.join(directory, "Cargo.lock");
@@ -78,11 +75,32 @@ const runtime = await source(
     );
     if (replaced !== 4) throw new Error("Pinned QuickJS lock entries changed");
     await writeFile(file, patched);
+    const engine = path.join(directory, engineDirectory);
+    if (await exists(engine)) throw new Error(`Runtime source already contains ${engineDirectory}`);
+    await mkdir(engine);
+    await extract(quickjsArchive, engine, scratch);
+    await applyPatch(enginePatchBytes, engine, scratch, "dquickts.patch", ["--fuzz=0"]);
   },
-  patchHash,
 );
+const quickjs = path.join(runtime, engineDirectory);
 const target = "wasm32-wasip2";
 const sysroot = path.join(sdk, "share/wasi-sysroot");
+// Source and build-output locations can enter panic strings and change data offsets. Keep the
+// shared core identical across build machines, cache roots and dependency-cache locations.
+// rustc applies the last matching prefix, so nested locations follow their parents.
+const remaps = [
+  [cache, "/tembra"],
+  [process.env.CARGO_HOME ?? path.join(homedir(), ".cargo"), "/cargo"],
+  [sdk, "/wasi-sdk"],
+] as const;
+const rustFlags = [
+  "-Clink-arg=-shared",
+  "-Clink-arg=-Wl,--no-entry",
+  "-Clink-arg=-Wl,--allow-undefined",
+  "-Clto=fat",
+  "-Copt-level=3",
+  ...remaps.map(([from, to]) => `--remap-path-prefix=${from}=${to}`),
+];
 const env: NodeJS.ProcessEnv = {
   ...process.env,
   WASI_SDK: sdk,
@@ -90,17 +108,16 @@ const env: NodeJS.ProcessEnv = {
   RQUICKJS_SYS_NO_WASI_SDK: "1",
   CC_wasm32_wasip2: path.join(sdk, "bin/clang"),
   AR_wasm32_wasip2: path.join(sdk, "bin/llvm-ar"),
-  CFLAGS_wasm32_wasip2: `-fPIC -O3 --sysroot=${sysroot}`,
+  CFLAGS_wasm32_wasip2: `-fPIC -O3 --sysroot=${sysroot} ${remaps.map(([from, to]) => `-ffile-prefix-map=${from}=${to}`).join(" ")}`,
   BINDGEN_EXTRA_CLANG_ARGS_wasm32_wasip2: `--sysroot=${sysroot} -isystem ${path.join(sysroot, `include/${target}`)}`,
   CARGO_TARGET_DIR: path.join(cache, "target"),
   CARGO_TARGET_WASM32_WASIP2_LINKER: path.join(sdk, "bin/clang"),
-  CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS:
-    "-Clink-arg=-shared -Clink-arg=-Wl,--no-entry -Clink-arg=-Wl,--allow-undefined -Clto=fat -Copt-level=3",
+  CARGO_ENCODED_RUSTFLAGS: rustFlags.join("\x1f"),
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1",
   CARGO_INCREMENTAL: "0",
 };
-// Cargo gives the encoded variable precedence over target-specific flags.
-delete env.CARGO_ENCODED_RUSTFLAGS;
+// An encoded list preserves paths containing spaces and overrides inherited target flags.
+delete env.CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS;
 run(
   "rustup",
   [
@@ -156,46 +173,63 @@ const manifest = {
   }),
 };
 await writeFile(path.join(cache, "runtime.json"), JSON.stringify(manifest, null, 2) + "\n");
+let core: string | undefined;
 if (values.package) {
+  // Every Engine links the core that the real componentizer derives from this dylib. Package a
+  // dylib only when that derivation equals the pinned core; a runtime change replaces both.
+  const binding = path.resolve(root, "../../../packages/ts/engine-node/index.cjs");
+  const { NodeContract } = createRequire(import.meta.url)(binding);
+  if (typeof NodeContract?.sourceRuntime !== "function")
+    throw new Error(`Build the Node binding before packaging the runtime: ${binding}`);
+  const derived: Uint8Array = NodeContract.sourceRuntime(bytes);
+  const candidate = path.join(cache, "dquickts.wasm");
+  await writeFile(candidate, derived);
+  const pinned = path.resolve(root, "../../contracts/runtime/dquickts.wasm");
+  const expected = await readFile(pinned);
+  if (!expected.equals(derived))
+    throw new Error(
+      `Derived runtime core ${digest(derived)} differs from pinned ${digest(expected)} at ${pinned}; ` +
+        `derived core: ${candidate}`,
+    );
+  core = digest(derived);
   const output = path.resolve(root, "../../../packages/ts/engine-node/dist");
   await mkdir(output, { recursive: true });
   await copyFile(destination, path.join(output, "runtime.wasm"));
 }
-console.log(JSON.stringify({ module: destination, ...manifest }));
+console.log(JSON.stringify({ module: destination, ...manifest, coreSha256: core }));
 
 /** Archive only pinned Git objects; supplied working-tree edits never become runtime inputs. */
-async function source(
+async function archive(
   name: string,
   repository: string,
   revision: string,
   supplied: string | undefined,
-  patch: (directory: string) => Promise<void>,
-  suffix = "wasi",
-): Promise<string> {
+): Promise<Buffer> {
   const checkout = path.resolve(supplied ?? path.join(cache, `${name}-checkout`));
   if (!(await exists(checkout))) {
     if (supplied) throw new Error(`Missing ${name} source checkout`);
     run("git", ["clone", "--no-checkout", "--filter=blob:none", repository, checkout]);
   }
-  const archive = execFileSync("git", ["-C", checkout, "archive", revision], {
-    maxBuffer: 64 << 20,
-  });
-  const directory = path.join(cache, `${name}-${revision}-${suffix}`);
-  // Reconstruct the expected tree on every build, so cache edits and unexpected files are
-  // rejected. Scratch ownership is local to this invocation; existing caches are never deleted.
-  const scratch = await mkdtemp(path.join(cache, `.prepare-${name}-`));
+  return execFileSync("git", ["-C", checkout, "archive", revision], { maxBuffer: 64 << 20 });
+}
+
+/** Reconstruct the expected tree on every build, so cache edits and unexpected files are
+ * rejected. Scratch ownership is local to this invocation; existing caches are never deleted. */
+async function source(
+  name: string,
+  populate: (directory: string, scratch: string) => Promise<void>,
+): Promise<string> {
+  const directory = path.join(cache, name);
+  const scratch = await mkdtemp(path.join(cache, ".prepare-"));
   try {
-    const tar = path.join(scratch, "source.tar");
     const expected = path.join(scratch, "source");
     await mkdir(expected);
-    await writeFile(tar, archive);
-    run("tar", ["-xf", tar, "-C", expected]);
-    await patch(expected);
+    await populate(expected, scratch);
     if (await exists(directory)) {
       if (!(await lstat(directory)).isDirectory())
-        throw new Error(`Cached ${name} source must be a directory`);
+        throw new Error(`Cached source must be a directory: ${directory}`);
       if ((await treeDigest(directory)) !== (await treeDigest(expected)))
-        throw new Error(`Cached ${name} source differs from its pinned inputs: ${directory}`);
+        throw new Error(`Cached source differs from its pinned inputs: ${directory}`);
     } else {
       await rename(expected, directory);
     }
@@ -203,6 +237,25 @@ async function source(
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
+}
+
+async function extract(bytes: Buffer, directory: string, scratch: string): Promise<void> {
+  const tar = path.join(scratch, "source.tar");
+  await writeFile(tar, bytes);
+  run("tar", ["-xf", tar, "-C", directory]);
+  await rm(tar);
+}
+
+async function applyPatch(
+  bytes: Buffer,
+  directory: string,
+  scratch: string,
+  name: string,
+  options: string[] = [],
+): Promise<void> {
+  const file = path.join(scratch, name);
+  await writeFile(file, bytes);
+  run("patch", ["--batch", "--forward", ...options, "-p1", "-i", file], undefined, directory);
 }
 
 /** Hash file names, modes, symlink targets and bytes without following cached symlinks. */

@@ -15,7 +15,10 @@
 //!   host links them from a fixed private context, so `Date.now()` and panic diagnostics work
 //!   without user grants. Imports the source world declares are never stubbed, and any other
 //!   import fails the build.
-//! - The public contract then verifies the actual component and packages it.
+//! - The runtime core module, identical in every source Orb, is replaced by an import of the
+//!   pinned shared runtime ([`tembra_contracts::SharedRuntime`]); the build fails unless the
+//!   component embeds exactly that core. Only the snapshot, bindings and adapters stay embedded.
+//! - The public contract then verifies the actual thin component and packages it.
 
 mod link;
 mod shim;
@@ -33,7 +36,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use tembra_contracts::Contract;
+use tembra_contracts::{Contract, SharedRuntime};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
@@ -47,7 +50,7 @@ use wit_parser::Resolve;
 const MODULE_LOADER: &str = "local:init/module-loader";
 
 /// The one production authoring path: componentize against the private source world for
-/// `hooks`, then verify and package against the public contract.
+/// `hooks`, share the runtime core, then verify and package against the public contract.
 pub(crate) fn source_artifact(
     public: &Contract,
     source: &str,
@@ -58,8 +61,96 @@ pub(crate) fn source_artifact(
 ) -> Result<Vec<u8>> {
     let world = public.source_world(hooks)?;
     let component = componentize_with(&world, source, runtime, &type_only_imports(public))?;
+    let thin = SharedRuntime::pinned().pack(&component)?;
     // Verifies the actual component types against the public contract before packaging.
-    Ok(public.source_component_artifact(&component, name, api_version)?)
+    Ok(public.source_component_artifact(&thin, name, api_version)?)
+}
+
+/// A closed module exporting only the private lifecycle, for an empty world.
+const PROBE: &str = r#"
+export const lifecycle = {
+  describe() { return { name: "runtime", apiVersion: 1, services: [], hooks: [], contributes: [] }; },
+  create(environment, service) {},
+  release(environment) {},
+  validate(callback, value) {},
+  async open(callback) { return 0; },
+  async close(callback, value) {},
+};
+"#;
+
+/// Derive the runtime core module every source Orb built from the runtime dylib `runtime`
+/// embeds: componentize a minimal Orb of an empty world and return its one core module whose code
+/// is the dylib's. Packaging compares this with the pinned asset; it never packs anything.
+pub(crate) fn source_runtime(runtime: &[u8]) -> Result<Vec<u8>> {
+    let public =
+        Contract::from_source("runtime.wit", "package local:runtime; world probe {}", None)?;
+    let world = public.source_world(&BTreeSet::new())?;
+    let component = componentize_with(&world, PROBE, runtime, &BTreeSet::new())?;
+    let dylib = code(runtime)?.context("the runtime dylib has no code section")?;
+    let mut cores = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(&component) {
+        if let wasmparser::Payload::ModuleSection {
+            unchecked_range, ..
+        } = payload?
+        {
+            let module = slice(&component, unchecked_range)?;
+            if code(module)? == Some(dylib) && !cores.contains(&module) {
+                cores.push(module);
+            }
+        }
+    }
+    match cores.as_slice() {
+        [core] => Ok(core.to_vec()),
+        [] => bail!("no componentized module carries the runtime dylib's code"),
+        _ => bail!("several componentized modules carry the runtime dylib's code"),
+    }
+}
+
+/// The bytes a parser reported at `range`.
+fn slice(bytes: &[u8], range: std::ops::Range<u64>) -> Result<&[u8]> {
+    usize::try_from(range.start)
+        .ok()
+        .zip(usize::try_from(range.end).ok())
+        .and_then(|(start, end)| bytes.get(start..end))
+        .context("a section lies outside its binary")
+}
+
+/// The contents of a core module's code section.
+fn code(module: &[u8]) -> Result<Option<&[u8]>> {
+    for payload in wasmparser::Parser::new(0).parse_all(module) {
+        match payload? {
+            wasmparser::Payload::CodeSectionStart {
+                unchecked_range, ..
+            } => {
+                return Ok(Some(slice(module, unchecked_range)?));
+            }
+            wasmparser::Payload::ModuleSection { .. }
+            | wasmparser::Payload::ComponentSection { .. } => return Ok(None),
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
+/// Link this engine's compilation of the pinned shared runtime for each root import of it, as the
+/// executor does.
+#[cfg(test)]
+pub(crate) fn link_runtime<T: 'static>(
+    engine: &Engine,
+    component: &Component,
+    linker: &mut Linker<T>,
+) -> Result<()> {
+    let runtime = wasmtime::Module::new(engine, SharedRuntime::pinned().bytes())?;
+    for (name, item) in component.component_type().imports(engine) {
+        if matches!(
+            item.ty,
+            wasmtime::component::types::ComponentItem::Module(_)
+        ) && tembra_contracts::shared_runtime_import(name)
+        {
+            linker.root().module(name, &runtime)?;
+        }
+    }
+    Ok(())
 }
 
 /// Interfaces the public world imports only because an explicit import uses their types, and

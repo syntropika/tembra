@@ -71,7 +71,6 @@ export class NodeExecution {
     const identity = JSON.parse(artifact.description()) as {
       name: string;
       apiVersion: number;
-      kind: "component";
     };
     const prepared = query<InstallationPlan>(artifact, {
       kind: "install",
@@ -90,6 +89,7 @@ export class NodeExecution {
       JSON.stringify(options.grants ?? {}),
       cliPacket(options.cli),
     );
+    artifact.releaseComponent();
     try {
       const transport = new NodePort(port);
       return new Revision(transport, artifact, this.options.limits?.timeoutMs ?? 10000).definition(

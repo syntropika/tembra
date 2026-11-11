@@ -44,15 +44,22 @@ async function source(name: string): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-/** Install one source component and make one typed call. */
+/** Install two source components through one shared runtime and make independent typed calls. */
 export async function verifyArithmeticSource(): Promise<void> {
   const host = await createHost({});
   try {
-    await host.install({ artifact: await source("arithmetic-source") });
+    await host.install([
+      { artifact: await source("arithmetic-source") },
+      { artifact: await source("cpu-source") },
+    ]);
     const reference = await host.get("arithmetic::example:integrated/arithmetic@1.0.0", "main");
     const doubled = await reference.double(3);
     if (doubled !== 6) throw new Error(`Engine selection returned ${doubled}`);
     reference.release();
+    const other = await host.get("cpu::example:integrated/arithmetic@1.0.0", "main");
+    if ((await other.double(3)) !== 6)
+      throw new Error("The second source component did not answer");
+    other.release();
   } finally {
     await host.close();
   }

@@ -475,7 +475,9 @@ fn compiled_resource_exports_are_verified_but_need_a_capability_transport() {
     artifact.contract.check_resource_profile().unwrap();
     assert!(artifact.contract.check_value_profile().is_err());
     // A source Orb is a real component too: it may serve the same resources.
-    let source = component(&declared.source_world(&Default::default()).unwrap());
+    let source = crate::shared_tests::thin(component(
+        &declared.source_world(&Default::default()).unwrap(),
+    ));
     declared
         .source_component_artifact(&source, "sessions", 1)
         .unwrap();

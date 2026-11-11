@@ -206,6 +206,8 @@ async fn call(
         },
     );
     let mut linker = Linker::<Host>::new(&engine);
+    // Cranelift and Pulley alike link the one pinned runtime module the thin artifact imports.
+    super::link_runtime(&engine, &component, &mut linker).unwrap();
     linker.allow_shadowing(true);
     linker
         .define_unknown_imports_as_default_values(&mut store, &component)

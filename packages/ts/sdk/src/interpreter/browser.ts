@@ -65,15 +65,30 @@ export interface BrowserInterpreterOptions {
 interface BrowserArtifact extends ContractPort {
   description(): string;
   sourceRuntime(): boolean;
+  requiresRuntime(): boolean;
   component(): Uint8Array;
+  expandedComponent(runtime: SharedRuntime): Uint8Array;
+  releaseComponent(): void;
   imports(): string;
   contributions(): string;
   free(): void;
 }
+interface SharedRuntime {
+  free(): void;
+}
 interface ContractModule {
   WasmArtifact: new (bytes: Uint8Array) => BrowserArtifact;
+  WasmSharedRuntime: new (bytes: Uint8Array) => SharedRuntime;
   instrumentCore(bytes: Uint8Array, maximumPages: number): InstrumentedCore;
   default(input?: unknown): Promise<unknown>;
+}
+
+/** Resolve only Tembra's packaged engine asset; an Orb cannot select a download URL. */
+async function loadRuntime(): Promise<Uint8Array> {
+  const { default: url } = await import("@syntropika/tembra-engine-wasm/runtime");
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Shared runtime request failed: ${response.status}`);
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 const PAGE = 1 << 16;
@@ -92,12 +107,31 @@ const LEVELS: readonly string[] = ["log", "debug", "info", "warn", "error"];
  * instantiated once per installed revision with its own memories, tables and host tables.
  */
 export class BrowserExecution {
+  #runtime: Promise<SharedRuntime> | undefined;
+  readonly #instrumentCore = (bytes: Uint8Array, pages: number) =>
+    this.contracts.instrumentCore(bytes, pages);
+
   /** Keep the verifier and the lazily loaded trusted compiler out of metadata-only hosts. */
   constructor(
     readonly options: BrowserInterpreterOptions,
     readonly contracts: ContractModule,
     readonly compiler: TrustedCompiler = new TrustedCompiler(),
+    private readonly runtimeInput: () => Promise<Uint8Array> = loadRuntime,
   ) {}
+
+  /** Load and check immutable interpreter bytes once; every Orb still owns its mutable state. */
+  private sharedRuntime(): Promise<SharedRuntime> {
+    if (!this.#runtime) {
+      const loading = this.runtimeInput().then(
+        (bytes) => new this.contracts.WasmSharedRuntime(bytes),
+      );
+      this.#runtime = loading;
+      loading.catch(() => {
+        if (this.#runtime === loading) this.#runtime = undefined;
+      });
+    }
+    return this.#runtime;
+  }
 
   /** Own one verified artifact for exactly one installed revision. */
   async materialize(definition: OrbArtifact): Promise<OrbDefinition> {
@@ -151,6 +185,7 @@ export class BrowserExecution {
     const grants = installation.grants ?? {};
     const system = grants.system ?? [];
     const ended = new AbortController();
+    const runtime = contract.requiresRuntime() ? await this.sharedRuntime() : undefined;
     let capabilities: BrowserCapabilities | undefined;
     let stdio: StdioStreams | undefined;
     const port = new ComponentPort(
@@ -261,13 +296,14 @@ export class BrowserExecution {
         throw new Error(`Browser component execution cannot provide import ${name}`);
       }
       const compiled = await this.compiler.compile({
-        component: contract.component(),
+        component: runtime ? contract.expandedComponent(runtime) : contract.component(),
         imports: names,
         suspendingImports: suspending,
         promisingExports: promising,
-        instrumentCore: (bytes, pages) => this.contracts.instrumentCore(bytes, pages),
+        instrumentCore: this.#instrumentCore,
         maximumPages,
       });
+      contract.releaseComponent();
       // One budget per instance: pages are shared by all its core modules; instantiation runs on
       // its own finite fuel, and each admitted callback is refilled to `fuel`.
       const limits: CoreLimits = {

@@ -10,7 +10,7 @@ import { resolver } from "./resolver.ts";
 import { typecheck } from "./typecheck.ts";
 import type { Artifact, BuildConfig, WitImports } from "./types.ts";
 
-/** Resolve dependencies and WIT types, then emit one closed Wasm artifact per Orb. */
+/** Resolve dependencies and WIT types, then emit one prepared Wasm artifact per Orb. */
 export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
   if (typeof Bun === "undefined") throw new Error("Tembra build requires Bun");
   const root = path.resolve(config.root ?? process.cwd());

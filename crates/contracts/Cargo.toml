@@ -19,6 +19,9 @@ tembra-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+# Shared source runtime packaging, checking and expansion (`src/shared.rs`, `src/shared_runtime.rs`).
+wasmparser = "=0.262.0"
+wasm-encoder = { version = "=0.262.0", features = ["wasmparser"] }
 anyhow = { version = "1", optional = true }
 wit-parser = { version = "=0.262.0", optional = true }
 wit-component = { version = "=0.262.0", optional = true }
@@ -26,7 +29,7 @@ wit-component = { version = "=0.262.0", optional = true }
 [dev-dependencies]
 tempfile = "3"
 wit-component = { version = "=0.262.0", features = ["dummy-module"] }
-wasm-encoder = "=0.262.0"
+wat = "=1.263.0"
 
 [[bin]]
 name = "tembra-contract"

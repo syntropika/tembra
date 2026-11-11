@@ -18,6 +18,9 @@ export function checkArtifacts(root: string, version: string): void {
     "engine-node/dist/runtime.wasm",
     "engine-wasm/dist/compiler.js",
     "engine-wasm/dist/compiler.d.ts",
+    "engine-wasm/dist/runtime.js",
+    "engine-wasm/dist/runtime.d.ts",
+    "engine-wasm/dist/dquickts.wasm",
     "engine-wasm/dist/compiler/js-component-bindgen-component.core.wasm",
     "engine-wasm/dist/compiler/js-component-bindgen-component.core2.wasm",
     "engine-wasm/dist/contracts.js",
@@ -36,6 +39,10 @@ export function checkArtifacts(root: string, version: string): void {
     if (!existsSync(path.join(root, "packages/ts", file)))
       throw new Error(`Missing release artifact: ${file}`);
   }
+  const pinnedCore = readFileSync(path.join(root, "crates/contracts/runtime/dquickts.wasm"));
+  const browserCore = readFileSync(path.join(root, "packages/ts/engine-wasm/dist/dquickts.wasm"));
+  if (!pinnedCore.equals(browserCore))
+    throw new Error("Browser interpreter differs from the pinned native core");
   const aar = path.join(
     root,
     "packages/ts/react-native/native/maven/dev/tembra/tembra-kotlin",

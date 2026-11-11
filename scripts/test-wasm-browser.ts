@@ -95,6 +95,7 @@ try {
 sources.set("/runner.js", runner);
 const page = '<!doctype html><body>running<script type="module" src="/runner.js"></script>';
 const requested = new Set<string>();
+let runtimeRequests = 0;
 /** Scenario evidence posted by the page, including actual incoming HTTP lifecycle checks. */
 const reports: Record<string, unknown> = {};
 const server = Bun.serve({
@@ -103,6 +104,7 @@ const server = Bun.serve({
   async fetch(request) {
     const pathname = new URL(request.url).pathname;
     requested.add(pathname);
+    if (pathname === enginePrefix + "dist/dquickts.wasm") runtimeRequests++;
     if (pathname === "/report" && request.method === "POST") {
       const report = (await request.json()) as { scenario: string; result: unknown };
       reports[report.scenario] = report.result;
@@ -150,14 +152,23 @@ const server = Bun.serve({
 });
 try {
   for (const scenario of scenarios) {
+    const beforeRuntime = runtimeRequests;
     const url = new URL(server.url);
     url.searchParams.set("scenario", scenario);
     await headless(url.href, "TEMBRA_WASM_PASS", "TEMBRA_WASM_FAIL");
     if (!Object.hasOwn(reports, scenario))
       throw new Error(`The browser did not report ${scenario}`);
+    const loadedRuntime = runtimeRequests - beforeRuntime;
+    if (scenario === "verifyArithmeticSource" && loadedRuntime !== 1)
+      throw new Error(
+        `Two source Orbs must request one shared interpreter, received ${loadedRuntime}`,
+      );
+    if (scenario === "verifyCompiledLimits" && loadedRuntime !== 0)
+      throw new Error("An independent compiled component requested the JavaScript interpreter");
   }
   for (const asset of [
     "dist/compiler.js",
+    "dist/dquickts.wasm",
     "dist/compiler/js-component-bindgen-component.core.wasm",
     "dist/compiler/js-component-bindgen-component.core2.wasm",
   ])

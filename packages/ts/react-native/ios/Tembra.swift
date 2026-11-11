@@ -107,7 +107,7 @@ extension Tembra {
         return data
     }
 
-    /** Configure portable execution and providers; source Orbs carry their own interpreter. */
+    /** Configure portable execution and providers; the native library supplies the shared interpreter. */
     @objc public func configureExecution(_ handle: String, configuration: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             do {

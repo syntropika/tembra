@@ -253,6 +253,7 @@ impl Contract {
             ));
         }
         self.check_component_exports(component)?;
+        crate::artifact::runtime_reference(false, component)?;
         let mut bytes = component.to_vec();
         append_section(
             &mut bytes,

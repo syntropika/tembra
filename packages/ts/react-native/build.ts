@@ -15,21 +15,12 @@ function stage(source: string, destination: string): void {
   cpSync(source, destination, { recursive: true });
 }
 
-/**
- * Source Orbs are components that carry their own interpreter, so no engine asset is packaged.
- * Drop a stale staged copy so the published `native` directory never ships one.
- */
-function withoutEngineAsset(): void {
-  rmSync(path.join(native, "interpreter"), { recursive: true, force: true });
-}
-
 const [platform, ...args] = process.argv.slice(2);
 if (platform === "bindings" && args.length === 0) {
   run([process.execPath, path.join(swift, "build.ts"), "bindings"]);
   run([process.execPath, path.join(kotlin, "build.ts"), "bindings"]);
 } else if (platform === "ios" && args.length === 0) {
   run([process.execPath, path.join(swift, "build.ts"), "build"]);
-  withoutEngineAsset();
   stage(path.join(swift, "Sources"), path.join(native, "swift/Sources"));
   stage(
     path.join(swift, "native/TembraFFI.xcframework"),
@@ -37,7 +28,6 @@ if (platform === "bindings" && args.length === 0) {
   );
 } else if (platform === "android") {
   run([process.execPath, path.join(kotlin, "build.ts"), "android", ...args]);
-  withoutEngineAsset();
   stage(
     path.join(kotlin, "build/repository/dev/tembra/tembra-kotlin"),
     path.join(native, "maven/dev/tembra/tembra-kotlin"),

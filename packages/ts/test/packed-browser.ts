@@ -30,6 +30,7 @@ const imports = {
   "@syntropika/tembra-engine-wasm": await exported("engine", "."),
   "@syntropika/tembra-engine-wasm/contracts": await exported("engine", "./contracts"),
   "@syntropika/tembra-engine-wasm/compiler": await exported("engine", "./compiler"),
+  "@syntropika/tembra-engine-wasm/runtime": await exported("engine", "./runtime"),
 };
 const entry = await exported("sdk", "./browser");
 const rootEntry = await exported("sdk", ".");

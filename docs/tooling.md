@@ -5,6 +5,11 @@ Import it from `@syntropika/tembra-sdk/tooling` and run it with Bun.
 It needs the built Node engine (`just build-node`). Source builds also need the pinned
 authoring runtime (`just build-runtime <wasi-sdk> <cache-directory>`); compiled inputs do not.
 
+Source artifacts reference the shared interpreter core supplied by the matching engine package.
+They contain their own initialized snapshot and WIT adapters, rather than another interpreter copy.
+The host checks the runtime reference before instantiation; source builds fail if their authoring
+runtime differs from the pinned core. Independent compiled artifacts need no JavaScript runtime.
+
 ```ts
 import { build } from "@syntropika/tembra-sdk/tooling";
 

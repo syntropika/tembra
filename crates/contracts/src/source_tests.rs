@@ -1,4 +1,5 @@
 use super::*;
+use crate::shared_tests::thin;
 use std::collections::{BTreeMap, BTreeSet};
 
 const HOOKS: &str = r#"
@@ -69,7 +70,7 @@ fn the_source_world_adds_only_the_private_package_and_named_hook_imports() {
 #[test]
 fn prepared_source_components_package_the_public_contract_and_are_verified_on_decode() {
     let public = provider();
-    let built = component(&public.source_world(&hooks(&["guard"])).unwrap());
+    let built = thin(component(&public.source_world(&hooks(&["guard"])).unwrap()));
     let bytes = public
         .source_component_artifact(&built, "guarded", 1)
         .unwrap();
@@ -110,7 +111,7 @@ fn foreign_components_are_held_to_the_strict_public_contract() {
 #[test]
 fn imports_outside_the_contract_and_private_package_are_refused() {
     let stray = Contract::from_source("hooks.wit", HOOKS, Some("stray")).unwrap();
-    let built = component(&stray.source_world(&BTreeSet::new()).unwrap());
+    let built = thin(component(&stray.source_world(&BTreeSet::new()).unwrap()));
     let Err(error) = provider().source_component_artifact(&built, "stray", 1) else {
         panic!("undeclared import accepted")
     };
@@ -120,7 +121,7 @@ fn imports_outside_the_contract_and_private_package_are_refused() {
 #[test]
 fn other_runtime_packages_are_refused() {
     let public = provider();
-    let built = component(&public.source_world(&BTreeSet::new()).unwrap());
+    let built = thin(component(&public.source_world(&BTreeSet::new()).unwrap()));
     let mut bytes = public.source_component_artifact(&built, "old", 1).unwrap();
     let position = bytes
         .windows(SOURCE_PACKAGE.len())

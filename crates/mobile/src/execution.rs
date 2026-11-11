@@ -78,7 +78,7 @@ pub struct NativeInterpreter {
 #[uniffi::export]
 impl NativeInterpreter {
     /// Configure portable (Pulley) execution and host providers without granting any Orb access.
-    /// Source Orbs are components that carry their own interpreter; no engine asset is loaded.
+    /// The native library includes the shared interpreter; each Orb receives a separate Store.
     #[uniffi::constructor]
     pub fn new(configuration: String) -> Result<Arc<Self>, MobileError> {
         let config: Configuration = serde_json::from_str(&configuration).map_err(error)?;

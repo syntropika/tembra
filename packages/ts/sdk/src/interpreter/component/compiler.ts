@@ -14,6 +14,13 @@
  */
 
 import { fixLiftOwnTables, fixResultErrExit, instrumentGlue } from "./instrument.ts";
+import {
+  componentLayout,
+  contentHash as hash,
+  fileTemplate,
+  instantiateFiles,
+  type FileTemplate,
+} from "./layout.ts";
 
 /**
  * Tembra's packaged bindgen module (browser-only); it locates its two core Wasm assets through
@@ -110,6 +117,7 @@ export interface CoreLimits {
 
 /** Generated component core modules; JCO's own suspension trampolines carry no component code. */
 const COMPONENT_CORE = /^orb\.core[0-9]*\.wasm$/;
+const canHash = () => typeof globalThis.crypto?.subtle?.digest === "function";
 
 /** Generated bindings for one component; each `instantiate` creates an isolated instance. */
 export interface CompiledComponent {
@@ -120,9 +128,69 @@ export interface CompiledComponent {
   ): Promise<Record<string, unknown>>;
 }
 
+type CompiledCore = { module: WebAssembly.Module; pages: bigint };
+type CachedCore = { module: WeakRef<WebAssembly.Module>; pages: bigint } | Promise<CompiledCore>;
+
+/** Share immutable runtime code; each instantiation still supplies its own memory and limits. */
+export class CoreModules {
+  readonly #policies = new WeakMap<CompileRequest["instrumentCore"], Map<string, CachedCore>>();
+
+  /** Hash captured bytes, never an artifact's claimed identity or generated file name. */
+  async compile(
+    bytes: Uint8Array,
+    maximumPages: number,
+    instrument: CompileRequest["instrumentCore"],
+  ): Promise<CompiledCore> {
+    const create = async (input: Uint8Array): Promise<CompiledCore> => {
+      const core = instrument(input, maximumPages);
+      try {
+        const pages = core.initialPages();
+        return { module: await WebAssembly.compile(core.bytes() as BufferSource), pages };
+      } finally {
+        core.free();
+      }
+    };
+    // Small adapters are cheap; keep hashing and cache bookkeeping off their path.
+    if (bytes.byteLength < 64 << 10 || !canHash()) return create(bytes);
+    const captured = bytes.slice();
+    const key = `${maximumPages}:${await hash(captured)}`;
+    let entries = this.#policies.get(instrument);
+    if (!entries) {
+      entries = new Map();
+      this.#policies.set(instrument, entries);
+    }
+    const existing = entries.get(key);
+    if (existing instanceof Promise) return existing;
+    if (existing) {
+      const module = existing.module.deref();
+      if (module) {
+        entries.delete(key);
+        entries.set(key, existing);
+        return { module, pages: existing.pages };
+      }
+    }
+    const loading = create(captured);
+    entries.set(key, loading);
+    // The index is bounded and holds completed code weakly, so retired Orbs can be collected.
+    while (entries.size > 64) entries.delete(entries.keys().next().value!);
+    try {
+      const compiled = await loading;
+      if (entries.get(key) === loading)
+        entries.set(key, { module: new WeakRef(compiled.module), pages: compiled.pages });
+      return compiled;
+    } catch (error) {
+      if (entries.get(key) === loading) entries.delete(key);
+      throw error;
+    }
+  }
+}
+
 /** Lazily loaded, shared by every installation of one browser execution backend. */
 export class TrustedCompiler {
   #bindgen: Promise<Bindgen> | undefined;
+  readonly #modules = new CoreModules();
+  readonly #glue = new Map<string, Promise<Instantiate>>();
+  readonly #templates = new Map<string, Promise<FileTemplate | undefined>>();
 
   constructor(private readonly load: () => Promise<unknown> = loadCompiler) {}
 
@@ -142,11 +210,28 @@ export class TrustedCompiler {
     return this.#bindgen;
   }
 
+  /** JCO keeps instance state inside this factory; equal glue can share its executable code. */
+  private async glue(bytes: Uint8Array): Promise<Instantiate> {
+    if (!canHash()) return importGlue(bytes);
+    const key = await hash(bytes);
+    const existing = this.#glue.get(key);
+    if (existing) return existing;
+    const loading = importGlue(bytes);
+    this.#glue.set(key, loading);
+    while (this.#glue.size > 32) this.#glue.delete(this.#glue.keys().next().value!);
+    try {
+      return await loading;
+    } catch (error) {
+      if (this.#glue.get(key) === loading) this.#glue.delete(key);
+      throw error;
+    }
+  }
+
   /** Generate glue from the actual component and return an isolated instantiator. */
   async compile(request: CompileRequest): Promise<CompiledComponent> {
     requireJspi();
     const bindgen = await this.bindgen();
-    const output = bindgen.generate(request.component, {
+    const options: GenerateOptions = {
       name: "orb",
       noTypescript: true,
       instantiation: { tag: "async" },
@@ -163,18 +248,14 @@ export class TrustedCompiler {
         },
       },
       emitConditionalSuspendingWasm: true,
-    });
-    const files = new Map(output.files);
+    };
+    const files = await this.files(bindgen, request.component, options);
     const glue = files.get("orb.js");
     if (!glue) throw new Error("Trusted compiler produced no component glue");
     files.delete("orb.js");
     // Physical task exit and traps are observed through exact, fail-closed instrumentation.
-    const instantiate = await importGlue(
-      new TextEncoder().encode(
-        fixLiftOwnTables(fixResultErrExit(instrumentGlue(new TextDecoder().decode(glue)))),
-      ),
-    );
-    // Core modules compile once per component; instances never share memories or tables.
+    const instantiate = await this.glue(glue);
+    // Identical runtime modules share code across components; memories and tables stay local.
     // Every component core module is instrumented; anything instantiated through
     // `instantiateCore` without instrumentation is refused.
     const modules = new Map<string, Promise<WebAssembly.Module>>();
@@ -185,14 +266,13 @@ export class TrustedCompiler {
         modules.set(name, WebAssembly.compile(bytes as BufferSource));
         continue;
       }
-      const core = request.instrumentCore(bytes, request.maximumPages);
-      try {
-        const module = await WebAssembly.compile(core.bytes() as BufferSource);
-        initial.set(module, core.initialPages());
-        modules.set(name, Promise.resolve(module));
-      } finally {
-        core.free();
-      }
+      const compiled = await this.#modules.compile(
+        bytes,
+        request.maximumPages,
+        request.instrumentCore,
+      );
+      initial.set(compiled.module, compiled.pages);
+      modules.set(name, Promise.resolve(compiled.module));
     }
     const core = (name: string) => {
       const module = modules.get(name);
@@ -229,11 +309,41 @@ export class TrustedCompiler {
         }),
     };
   }
+
+  /** Core data is opaque to JCO; reuse its binding template while retaining actual Orb modules. */
+  private async files(
+    bindgen: Bindgen,
+    component: Uint8Array,
+    options: GenerateOptions,
+  ): Promise<Map<string, Uint8Array>> {
+    if (!canHash() || !options.instantiation || options.base64Cutoff !== 0)
+      return new Map(bindgen.generate(component, options).files);
+    const layout = componentLayout(component);
+    if (!layout) return new Map(bindgen.generate(component, options).files);
+    const key = `${await hash(layout.identity)}:${JSON.stringify(options)}`;
+    const previous = this.#templates.get(key);
+    if (previous) {
+      const template = await previous;
+      if (template) return instantiateFiles(template, layout.modules);
+    }
+    const output = bindgen.generate(layout.source, options);
+    const loading = fileTemplate(output.files, layout.modules);
+    this.#templates.set(key, loading);
+    while (this.#templates.size > 16) this.#templates.delete(this.#templates.keys().next().value!);
+    try {
+      await loading;
+    } catch (error) {
+      if (this.#templates.get(key) === loading) this.#templates.delete(key);
+      throw error;
+    }
+    return new Map(output.files);
+  }
 }
 
 /** Import generated ESM from a short-lived Blob URL. */
 async function importGlue(glue: Uint8Array): Promise<Instantiate> {
-  const url = URL.createObjectURL(new Blob([glue as BlobPart], { type: "text/javascript" }));
+  const source = fixLiftOwnTables(fixResultErrExit(instrumentGlue(new TextDecoder().decode(glue))));
+  const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
   let module: { instantiate?: unknown };
   try {
     module = await import(/* @vite-ignore */ /* webpackIgnore: true */ url);

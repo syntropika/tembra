@@ -3,7 +3,9 @@
 //! An artifact is a real WebAssembly component with `tembra:orb` (identity and compact contract)
 //! appended. A source Orb built from JavaScript also carries `tembra:runtime`, naming the private
 //! package it was built against. The actual WIT types are verified against the contract by the
-//! native `authoring` verifier before any linking; metadata is never trusted alone.
+//! native `authoring` verifier before any linking; metadata is never trusted alone. A source
+//! component imports the pinned shared runtime core instead of embedding it
+//! ([`crate::SharedRuntime`]); a compiled component imports no core module.
 use crate::{Error, PreparedContract, codec::Reader, model::MAX_NAME};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -32,6 +34,9 @@ pub struct Artifact {
     /// [`crate::LIFECYCLE`], describes its implementation itself and may import the fixed
     /// [`crate::RUNTIME_INTERNALS`].
     pub source_runtime: bool,
+    /// The component imports the pinned [`crate::SharedRuntime`] core, which the host supplies:
+    /// native engines link it, other hosts expand it inline. Always true for a source component.
+    pub shared_runtime: bool,
 }
 
 impl Identity {
@@ -79,12 +84,14 @@ impl Artifact {
             verify_component(&contract, bytes)?;
             contract.check_contribution_roles(&contributions)?;
         }
+        let shared_runtime = runtime_reference(runtime.is_some(), bytes)?;
         Ok(Self {
             identity,
             contract,
             component: bytes.to_vec(),
             contributions,
             source_runtime: runtime.is_some(),
+            shared_runtime,
         })
     }
 
@@ -106,6 +113,27 @@ impl Artifact {
         })
         .expect("serializable artifact identity")
     }
+}
+
+/// Check the component's core-module imports: a source component imports the pinned shared
+/// runtime exactly as it is packaged, and a compiled component imports no core module. Reports
+/// whether the runtime is imported.
+pub(crate) fn runtime_reference(source: bool, bytes: &[u8]) -> Result<bool, Error> {
+    let shared = crate::shared_runtime::references(bytes)?;
+    if shared && !source {
+        return Err(Error(
+            "compiled components must be self-contained; only source components may import the \
+             shared source runtime"
+                .into(),
+        ));
+    }
+    if source && !shared {
+        return Err(Error(format!(
+            "source components must import the pinned shared source runtime {}; rebuild the Orb",
+            crate::SharedRuntime::SHA256
+        )));
+    }
+    Ok(shared)
 }
 
 /// Check a compiled component's actual imports and exports against the prepared contract.

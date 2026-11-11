@@ -19,7 +19,7 @@ use wasmtime::{AsContextMut, Config, Engine, Store, StoreContextMut};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{HostWallClock, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use super::{Import, componentize, import_names, link, source_artifact};
+use super::{Import, componentize, import_names, link, source_artifact, source_runtime};
 
 /// Minimal private lifecycle: enough to qualify the augmented world, no semantics.
 const LIFECYCLE_JS: &str = r#"
@@ -270,6 +270,7 @@ async fn instantiate_on(
 ) -> (Store<Host>, Instance, MemoryOutputPipe) {
     let component = Component::new(&engine, bytes).unwrap();
     let mut linker = Linker::<Host>::new(&engine);
+    super::link_runtime(&engine, &component, &mut linker).unwrap();
     linker.allow_shadowing(true);
     linker.define_unknown_imports_as_traps(&component).unwrap();
     wasmtime_wasi::p2::add_to_linker_async(&mut linker).unwrap();
@@ -831,4 +832,16 @@ export const probe = {
             }
         }
     });
+}
+
+#[test]
+fn production_artifacts_import_the_one_pinned_runtime_core() {
+    let shared = tembra_contracts::SharedRuntime::pinned();
+    // The dylib componentizes to exactly the pinned core; deriving it packs nothing.
+    assert_eq!(source_runtime(runtime()).unwrap(), shared.bytes());
+    let artifact = tembra_contracts::Artifact::decode(exact()).unwrap();
+    assert!(artifact.source_runtime && artifact.shared_runtime);
+    // Only the runtime core is shared: the expansion adds it back and is a valid component.
+    let expanded = shared.expand(exact()).unwrap();
+    assert!(expanded.len() > exact().len() + shared.bytes().len() / 2);
 }

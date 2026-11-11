@@ -49,7 +49,8 @@ The WASM kernel module contains the kernel and bridge. It contains no JS interpr
 ## Isolated orbs
 
 An orb artifact is one immutable `.wasm` file. It carries a prepared WIT contract, an orb name and API
-version, and an actual WebAssembly component. TypeScript components include the dquickts runtime. Build tooling produces it;
+version, and an actual WebAssembly component. TypeScript components import Tembra's pinned dquickts
+core and carry only their own snapshot and WIT adapters. Build tooling produces the artifact;
 installation chooses its providers and grants. The artifact carries no authority.
 
 | Host        | Portable execution                                                           |
@@ -58,10 +59,23 @@ installation chooses its providers and grants. The artifact carries no authority
 | Browser     | Verified components compiled by Tembra's trusted JCO compiler; JSPI required |
 | Mobile      | The same component port with Wasmtime's Pulley strategy                      |
 
-Each installed Orb has its own Wasm instance and heap. All portable artifacts use the
-component path; no separate core-interpreter asset is loaded. Source authoring uses a
-reusable runtime input without rebuilding Rust for each edit. Trusted Orbs share the same
-kernel lifecycle and run outside the sandbox.
+Each installed Orb has its own Wasm instance, heap, tables and capabilities. Source Orbs share
+immutable interpreter code, compiled once per host. Native packages include the pinned core;
+browsers load the same core lazily from the engine package when a verified source Orb needs it.
+Independent compiled components use the component path without loading a JavaScript interpreter.
+Source authoring reuses a packaged runtime without rebuilding Rust for each edit. Trusted Orbs
+share the same kernel lifecycle and run outside the sandbox.
+
+```mermaid
+flowchart LR
+    TS[JavaScript / TypeScript] --> S[Source Orb: snapshot + WIT adapters]
+    E[Shared interpreter core] --> X[Isolated Wasm instance per Orb]
+    S --> X
+    W[Compiled Wasm component: any language] --> X
+    X --> I[Common installation]
+    R[Trusted native implementation] --> I
+    I --> K[Tembra kernel]
+```
 
 See [Wasm orb execution](../crates/executor-wasm/README.md).
 

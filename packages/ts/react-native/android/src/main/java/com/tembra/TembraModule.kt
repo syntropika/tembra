@@ -88,7 +88,7 @@ class TembraModule(private val context: ReactApplicationContext) : NativeTembraS
         return directory.absolutePath
     }
 
-    /** Configure portable execution and providers; source Orbs carry their own interpreter. */
+    /** Configure portable execution and providers; the native library supplies the shared interpreter. */
     override fun configureExecution(handle: String, configuration: String, promise: Promise) = promise(promise) {
         execution(handle).configure(configuration)
         null

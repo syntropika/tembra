@@ -20,6 +20,9 @@ mod prepare;
 mod provenance;
 mod resource_profile;
 mod selection;
+#[doc(hidden)]
+pub mod shared;
+mod shared_runtime;
 mod signatures;
 mod source;
 #[cfg(feature = "authoring")]
@@ -42,6 +45,7 @@ pub use permissions::{FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCa
 pub use port::envelope;
 pub use resource_profile::ResourceSignature;
 pub use selection::OrbProvider;
+pub use shared_runtime::{SharedRuntime, shared_runtime_import};
 pub use source::{
     HOST, LIFECYCLE, RUNTIME_INTERNALS, SOURCE_PACKAGE, SOURCE_WIT, runtime_internal,
 };
@@ -88,6 +92,8 @@ mod provenance_tests;
 mod resource_identity_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod resource_profile_tests;
+#[cfg(all(test, feature = "authoring"))]
+mod shared_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod source_tests;
 #[cfg(all(test, feature = "authoring"))]
