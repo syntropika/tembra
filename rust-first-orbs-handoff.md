@@ -1,12 +1,12 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 20:05 CET
+- **Aggiornato:** 2026-11-11, 20:35 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft)
-- **Stato:** strada A, ribase in corso su `origin/main`
-  (`865e4c6`). Giacomo ha dato l'ok: tenere le scelte di
-  Javier dove si può. Il merge di prova è verificato (vedi
-  «Avanzamento»). Non pushare codice: il force-push lo lancia
-  Giacomo.
+- **Stato:** strada A. Ribase fatto e verificato, solo in
+  locale sul server: `feat/rust-first-orbs-rebased` a
+  `f8d9cf2`, 52 commit sopra `origin/main` (`865e4c6`).
+  Tocca a Giacomo: spostare la PR su `main`, backup e
+  force-push (vedi «Da fare»).
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -127,11 +127,19 @@ come dice «Inizia qui», poi riprendi da
 - Il merge della PR non è più pulito: su `92010d0` 3 blocchi,
   sulla punta 31 blocchi in 8 file, più due conflitti che il
   merge testuale non mostra.
-- Il piano è in «Piano del ribase»: sei scelte da approvare,
-  un merge di prova verificato, poi il ribase commit per
-  commit.
+- Il ribase è fatto (vedi «Avanzamento»): stesso albero del
+  merge di prova, che passa `just check`. Manca il push, che
+  lancia Giacomo.
 
 ## Dove sta il lavoro
+
+Solo sul server, nel clone `/home/claude/github/tembra`:
+
+- `feat/rust-first-orbs-rebased` a `f8d9cf2`, nel worktree
+  `.worktrees/pr`: la PR ribasata, da pushare.
+- `refs/probe/rust-first-orbs-merge` a `a47eeb2`, nel
+  worktree `.worktrees/probe`: il merge di prova, stesso
+  albero (`777aa65`). Solo riferimento, mai da pushare.
 
 Su origin, quindi visibili da qualunque clone:
 
@@ -329,7 +337,6 @@ Legenda:
 
 - **A** = aperto
 - **R** = risolto
-- **D1** = si chiude con la scelta D1 del piano
 - **—** = non si applica
 
 Colonne:
@@ -339,7 +346,7 @@ Colonne:
 
 | #  | Problema                          | PR | Conv. |
 | -- | --------------------------------- | -- | ----- |
-| 1  | Il merge non compila (E0425)      | D1 | —     |
+| 1  | Il merge non compila (E0425)      | R  | —     |
 | 2  | `tembra:guest` rifiutato          | —  | R     |
 | 3  | `context::log` va in trap         | A  | R     |
 | 4  | Reload non validato               | A  | R     |
@@ -655,6 +662,35 @@ Passi fatti:
     Javier;
   - `contracts/src/prepared_tests.rs` aveva `encode_orb` a
     tre argomenti: torna quello di Javier.
+- **Esempi sul merge di prova:** i 9 `rust-orb-*` danno lo
+  stesso output della PR originale. Cambia solo la dimensione
+  dell'artifact, +1 byte: la mappa vuota delle reference.
+- **Passo 2, ribase:** `feat/rust-first-orbs-rebased` a
+  `f8d9cf2`, nel worktree `.worktrees/pr`.
+  - Fermate: per conflitto 5, 11, 12, 14, 17, 23, 24, 26,
+    30, 31, 36 e 43; perché non compilavano 2, 16, 33 e 39.
+  - Nella storia originale 16 e 23 non compilavano già: il
+    16 rinominava `guest::exports_state_init` senza aggiornare
+    l'executor, e il 23 aggiungeva `Binding::Hook` senza il
+    braccio nell'executor. Ora compilano: il 23 rifiuta
+    `Binding::Hook` finché il 24 non lo serve.
+  - Messaggi riscritti: 23 (`CallbackRoles` diventa
+    `ComponentRoles`), 24, 30 («component roles carry service
+    lifetimes»), 31 e 39. Nei riscritti c'è anche la riga
+    `Co-Authored-By` di Claude Opus 5.5.
+  - Autosquash finale con `cargo fmt --all --check` e
+    `cargo check --locked --workspace --all-features`
+    `--all-targets` dopo **ogni** commit: tutti verdi.
+- **Passi 3 e 4, verifica:**
+  - l'albero del ribase è identico a quello del merge di
+    prova (`777aa65`), quindi valgono `just check`, clippy e
+    gli esempi fatti lì;
+  - acceptance non eseguita: serve Chrome, che sul server
+    non c'è, più la nightly fissata, wasi-sdk 34 e la build
+    dell'interprete. La lancia la CI dopo il push.
+- **Trovato:** `examples/rust-orb-import/run.sh` ha modo
+  `100644`, quindi `./run.sh` dà «Permission denied» (con
+  `sh run.sh` gira). È già così nella PR: è un fix da fare.
 
 ### Scelte proposte (rivedute in «Avanzamento»)
 
@@ -752,10 +788,42 @@ Il resto è meccanico:
 
 ### Adesso
 
-- Aspettare l'ok di Giacomo su «Piano del ribase»: il
-  bersaglio `origin/main`, le scelte D1–D6, e lo spostamento
-  della PR su `main`.
-- Non toccare la PR #1 e non pushare codice nuovo.
+Tocca a Giacomo, sul server, dal worktree `pr` (Claude non
+può: `gh pr edit` è stato bloccato, e i push di codice e i
+force-push li lancia lui):
+
+```bash
+cd /home/claude/github/tembra/.worktrees/pr
+```
+
+1. Spostare la PR su `main`:
+
+   ```bash
+   gh pr edit 1 --base main
+   ```
+
+2. Backup della PR attuale:
+
+   ```bash
+   git push origin \
+     d1c4e12:refs/heads/archive/rust-first-orbs-d1c4e12
+   ```
+
+3. Force-push del ribase:
+
+   ```bash
+   git push origin \
+     --force-with-lease=feat/rust-first-orbs:d1c4e12 \
+     feat/rust-first-orbs-rebased:feat/rust-first-orbs
+   ```
+
+4. Aggiornare il corpo della PR: cita ancora `CallbackRoles`
+   e `Manifest` (sezioni «Artifact» e «The manifest, the
+   kernel's context and state validation»).
+
+Dopo il push: guardare la CI (`quality` e `acceptance`;
+alcuni test lenti del base erano già rossi), poi i fix in
+ordine di priorità.
 
 ### Alla ripresa, sempre
 
@@ -832,6 +900,7 @@ branch.
 7. **5 e 6** — perdite silenziose di forma o di precisione.
 8. **7** — contratti consumabili.
 9. Gli aperti dal base nuovo: browser e chiavi.
+10. Il bit eseguibile di `examples/rust-orb-import/run.sh`.
 
 ## Comandi e trappole
 
