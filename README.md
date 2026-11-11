@@ -51,6 +51,7 @@ the same lifecycle.
 | [examples/rust-orb-context/](examples/rust-orb-context/)                     | A compiled Rust orb reading its call's principal, its object's address and logging through the kernel                   |
 | [examples/rust-orb-service-lifetime/](examples/rust-orb-service-lifetime/)   | A compiled Rust orb with pinned, lingering and passing services, told apart by what survives a release                  |
 | [examples/rust-orb-shared-interface/](examples/rust-orb-shared-interface/)   | A compiled Rust orb implementing a WIT interface shared with a native orb; the host consults both                       |
+| [examples/rust-orb-import/](examples/rust-orb-import/)                       | A compiled Rust orb importing another compiled Rust orb's interface and calling it; the installer binds the two         |
 | [examples/rust-orb-wit-resource/](examples/rust-orb-wit-resource/)           | A compiled Rust orb handing out text builders as a WIT resource, and another compiled Rust orb importing and using them |
 
 ## Development

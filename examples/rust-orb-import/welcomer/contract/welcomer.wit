@@ -1,0 +1,23 @@
+package example:welcomer@1.0.0;
+
+/// The service: welcomes a list of names, one call to the greeter per name.
+interface welcoming {
+  /// Greet each name through the imported interface and return the greetings.
+  welcome: func(names: list<string>) -> list<string>;
+}
+
+world welcomer {
+  import example:greeter/greeting@1.0.0;
+  export welcoming;
+}
+
+package example:greeter@1.0.0 {
+  /// The service another Orb imports.
+  interface greeting {
+    /// Greet by name.
+    hello: func(name: string) -> string;
+  }
+  world greeter {
+    export greeting;
+  }
+}

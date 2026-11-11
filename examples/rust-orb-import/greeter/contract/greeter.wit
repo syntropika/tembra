@@ -1,0 +1,11 @@
+package example:greeter@1.0.0;
+
+/// The service another Orb imports.
+interface greeting {
+  /// Greet by name.
+  hello: func(name: string) -> string;
+}
+
+world greeter {
+  export greeting;
+}
