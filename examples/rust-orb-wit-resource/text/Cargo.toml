@@ -1,5 +1,5 @@
 [package]
-name = "tembra-example-player"
+name = "tembra-example-text"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 # Read by `cargo tembra build`: the Orb name and API version, which the WIT does not carry.
 [package.metadata.tembra]
-name = "player"
+name = "text"
 api-version = 1
 
 [dependencies]

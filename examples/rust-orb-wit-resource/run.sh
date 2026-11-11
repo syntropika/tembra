@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the decoder, then the player against the decoder's contract, show both contracts and run the host.
+# Build the text Orb, then the speller against its contract, show both contracts and run the host.
 set -eu
 cd "$(dirname "$0")"
 root=../..
@@ -8,14 +8,14 @@ tembra() {
     cargo run --quiet --locked --manifest-path "$root/Cargo.toml" -p cargo-tembra -- "$@"
   fi
 }
-tembra build --manifest-path decoder/Cargo.toml
+tembra build --manifest-path text/Cargo.toml
 echo
-tembra build --manifest-path player/Cargo.toml
+tembra build --manifest-path speller/Cargo.toml
 echo
-echo "decoder/contract/decoder.wit, derived from the component:"
-cat decoder/contract/decoder.wit
+echo "text/contract/text.wit, derived from the component:"
+cat text/contract/text.wit
 echo
-echo "player/contract/player.wit, derived from the component:"
-cat player/contract/player.wit
+echo "speller/contract/speller.wit, derived from the component:"
+cat speller/contract/speller.wit
 echo
-cargo run --quiet --manifest-path host/Cargo.toml --target-dir "$root/target" -- decoder/artifacts/decoder.orb.wasm player/artifacts/player.orb.wasm
+cargo run --quiet --manifest-path host/Cargo.toml --target-dir "$root/target" -- text/artifacts/text.orb.wasm speller/artifacts/speller.orb.wasm

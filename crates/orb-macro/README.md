@@ -339,25 +339,28 @@ interface to the world and re-exports its generated module under the interface's
 
 ```rust
 #[tembra_orb_macro::orb(
-    package = "example:player@1.0.0",
-    wit = "../decoder/contract",
-    import = "example:decoder/decoding@1.0.0"
+    package = "example:speller@1.0.0",
+    wit = "../text/contract",
+    import = "example:text/texts@1.0.0"
 )]
-mod player {
+mod speller {
     #[service]
-    pub struct Playback;
+    pub struct Spelling;
 
-    impl Playback {
-        pub fn play(key: u8, frames: Vec<Vec<u8>>) -> Vec<u32> {
-            let session = decoding::open(key);
-            frames.iter().map(|frame| u32::from(session.decode(frame)[0])).collect()
+    impl Spelling {
+        pub fn spell(word: String) -> String {
+            let builder = texts::start();
+            for letter in word.chars() {
+                builder.push(letter);
+            }
+            builder.text()
         }
     }
 }
 ```
 
 The package comes from the directory `wit` names, here the contract the provider's own build wrote.
-`decoding::open` is the imported function; a resource it returns is an owned handle with the
+`texts::start` is the imported function; a resource it returns is an owned handle with the
 resource's methods, destroyed in the provider when the handle drops. At installation the host binds
 the import to a provider Orb with `Install::requires`, as for any dependency. The macro records the
 directory in the manifest and `cargo tembra build` nests the imported package whole in the
@@ -372,32 +375,34 @@ the `pub fn` taking `&self` are its methods, the other `pub fn` its static funct
 without the marker is one of those.
 
 ```rust
-/// One decoding session: the caller owns it and decodes frame after frame with it.
+/// A text under construction: the caller owns it and pushes one character per call.
 #[wit_resource]
-pub struct Session { key: u8, frames: Cell<u32> }
+pub struct Builder { text: RefCell<String> }
 
-impl Session {
+impl Builder {
     #[constructor]
-    pub fn new(key: u8) -> Session { /* the constructor */ }
-    pub fn decode(&self, frame: Vec<u8>) -> Vec<u8> { /* a method */ }
+    pub fn new() -> Builder { /* the constructor */ }
+    pub fn push(&self, ch: char) -> u32 { /* a method */ }
+    pub fn text(&self) -> String { /* a method */ }
 }
 
 #[service]
-pub struct Decoding;
+pub struct Texts;
 
-impl Decoding {
-    /// Open a session for `key`; the caller owns the returned handle.
-    pub fn open(key: u8) -> Session { Session::new(key) }
+impl Texts {
+    /// Start an empty text; the caller owns the returned handle.
+    pub fn start() -> Builder { Builder::new() }
 }
 ```
 
 ```wit
-interface decoding {
-  resource session {
-    constructor(key: u8);
-    decode: func(frame: list<u8>) -> list<u8>;
+interface texts {
+  resource builder {
+    constructor();
+    push: func(ch: char) -> u32;
+    text: func() -> string;
   }
-  open: func(key: u8) -> session;
+  start: func() -> builder;
 }
 ```
 
