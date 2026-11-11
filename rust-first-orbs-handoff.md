@@ -210,6 +210,20 @@ Commit del branch convertito, dal più vecchio:
 - Non c'è una PR GitHub per il base: Javier ha pushato
   `main` direttamente. Il branch `feat/wasm-orb-runtime`
   esiste ancora.
+- Orari esatti dei push (API `repos/.../activity`, CET):
+  - 19:32: `main` `d5ada2d..865e4c6`, il fast-forward;
+  - 19:46: `feat/wasm-orb-runtime` `865e4c6..aa88fef`;
+  - 20:41: `feat/wasm-orb-runtime` `aa88fef..27c608c`, con
+    `ff78e94` (tooling: typed WIT imports), `d8b6d53`
+    (wasi: compiled operations e cancellation) e `27c608c`
+    (test).
+- Quindi Javier lavora su `feat/wasm-orb-runtime` e porta
+  `main` avanti in fast-forward quando vuole. Alle 20:45 il
+  suo branch era 4 commit avanti a `main`.
+- I 4 commit toccano due file della PR: il README di
+  executor-wasm e `component/worker.rs`. Il merge della PR
+  ribasata su `27c608c` è pulito e passa `cargo check`
+  sull'intero workspace.
 
 ## Il base nuovo: cosa cambia per noi
 
