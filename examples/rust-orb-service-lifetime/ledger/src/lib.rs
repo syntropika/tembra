@@ -23,7 +23,9 @@ mod ledger {
         impl Pinned {
             /// Add to the balance and return it.
             pub fn add(amount: i64) -> i64 {
-                Balance::update(|balance| balance.total += amount).total
+                Balance::update(|balance| balance.total += amount)
+                    .expect("the kernel keeps the balance")
+                    .total
             }
         }
     }
@@ -43,7 +45,9 @@ mod ledger {
         impl Lingering {
             /// Add to the balance and return it.
             pub fn add(amount: i64) -> i64 {
-                Balance::update(|balance| balance.total += amount).total
+                Balance::update(|balance| balance.total += amount)
+                    .expect("the kernel keeps the balance")
+                    .total
             }
         }
     }
@@ -62,7 +66,9 @@ mod ledger {
         impl Passing {
             /// Add to the balance and return it.
             pub fn add(amount: i64) -> i64 {
-                Balance::update(|balance| balance.total += amount).total
+                Balance::update(|balance| balance.total += amount)
+                    .expect("the kernel keeps the balance")
+                    .total
             }
         }
     }

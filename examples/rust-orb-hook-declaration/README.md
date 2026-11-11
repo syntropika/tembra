@@ -40,10 +40,15 @@ the contributors receive and, for a waterfall, return. The macro writes the hook
 the gate's own package, `example:gate/guard@1.0.0`, with the record and one callback, `apply`,
 whose result follows the composition: nothing for a series hook, the input type for a waterfall, an
 option for a bail. No WIT is written by hand, and `Admission` is one type: `admit` returns the
-value the hook composed.
+value the hook composed. The contract `cargo tembra build` wrote:
 
 ```wit
+package example:gate@1.0.0;
+
+/// The hook this Orb declares: a waterfall, each contributor may change the admission or
+/// block it, in plan order. Its interface is derived from this struct and from `Admission`.
 interface guard {
+  /// One admission: the value, and whether a contributor blocked it.
   record admission {
     value: s32,
     blocked: bool,
@@ -51,13 +56,14 @@ interface guard {
   apply: func(input: admission) -> admission;
 }
 
+/// The gate's service.
 interface admissions {
   use guard.{admission};
+  /// Run the guard hook over a fresh admission and report what the contributors decided.
   admit: func(value: s32) -> admission;
 }
 
 world gate {
-  import guard;
   export guard;
   export admissions;
 }
@@ -65,16 +71,18 @@ world gate {
 
 The macro gives the struct `Guard::run(input)`, which hands the input to the kernel; the kernel
 calls the contributions in plan order and returns the composed value, for a waterfall the admission
-as the last contributor left it. In the contract the hook interface is both imported and exported.
-The export is what the portable hook contract requires of a provider, and the macro answers it with
-a callback that traps: contributions answer the hook, the provider never does. The import is the
-typed entry to the plan; `Guard::run` calls it, and the executor turns the call into the kernel's
-`hook.run`, the same request a TypeScript provider makes. The bindings spell the record once per
-side, as two Rust types; the macro generates the conversions between them, so the author sees one.
-Which role an interface plays travels in the `tembra:manifest` section the macro writes into the
-component, `declares` for the gate and `contributes` for the blocker; `cargo tembra build` reads it
-and packages the role in the artifact, and the kernel binds the gate's import to the plan instead of
-asking the installer for a provider.
+as the last contributor left it. The contract only exports the hook interface: that export is what
+the portable hook contract requires of a provider, and the macro answers it with a callback that
+traps, because contributions answer the hook and the provider never does. The component imports the
+interface too, through the build world its bindings come from, which the contract never shows: that
+import is the typed entry to the plan. `Guard::run` selects the hook the gate's root declared, with
+`host.select-hook`, then calls the import, and the host runs the plan, as it does for a TypeScript
+provider. The bindings spell the record once per side, as two Rust types; the macro generates the
+conversions between them, so the author sees one. Which role an interface plays travels in each
+component's `lifecycle.describe`: the gate reports `guard` among the hooks it declares, with the
+waterfall composition, and the blocker reports its contribution to `example:gate/guard@1.0.0` with
+priority -7. The kernel binds the gate's import to the plan instead of asking the installer for a
+provider.
 
 ## Contributing from the gate's contract
 
@@ -111,14 +119,21 @@ The gate's summary names the hook it declares; the blocker's names its contribut
 exports, the services of gate:
   gate::example:gate/admissions@1.0.0  methods: admit
 hooks declared, run by the kernel's plan of contributions:
-  example:gate/guard@1.0.0  waterfall
-other imports: none; the installer grants nothing
+  example:gate/guard@1.0.0
+kernel lifecycle: the host describes, creates and releases this Orb through tembra:orb/lifecycle@0.1.0 and answers its state, resources, hooks and context through tembra:orb/host@0.1.0
+imports: none; the installer grants nothing
 
 exports, the services of blocker:
 hook contributions, bound to the provider with Install::requires:
-  example:gate/guard@1.0.0  priority -7
-other imports: none; the installer grants nothing
+  example:gate/guard@1.0.0
+kernel lifecycle: the host describes, creates and releases this Orb through tembra:orb/lifecycle@0.1.0 and answers its state, resources, hooks and context through tembra:orb/host@0.1.0
+imports: none; the installer grants nothing
 ```
+
+The summary tells the two roles apart by the contract. The gate's component imports the hook
+interface, to run it, but its contract does not; the blocker's contract imports it, as the portable
+hook contract requires of a contributor, while its component never calls that import and the linker
+drops it.
 
 ## Run
 
@@ -139,8 +154,8 @@ blocker sees every admission and blocks the negative one. `run.sh` runs the step
 
 ## Limits
 
-The composition is one of `series`, `waterfall` and `bail`, as for TypeScript providers; custom
-composition and observation are not exposed to compiled Orbs. `Guard::run` runs inside a method
-call, because the kernel runs a plan under an admitted invocation. The input of a derived hook is a
-record, an enum, a variant, a scalar, a string or a list; the types it reaches are defined in the
-hook's interface, and the services borrow them with `use`.
+The composition is one of `series`, `waterfall` and `bail`, as for TypeScript providers, whose
+lifecycle the gate shares; custom composition and observation are not expressed. `Guard::run` runs
+inside a method call, because the kernel runs a plan under an admitted invocation. The input of a
+derived hook is a record, an enum, a variant, a scalar, a string or a list; the types it reaches
+are defined in the hook's interface, and the services borrow them with `use`.

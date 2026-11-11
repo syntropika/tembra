@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Engine::new(Limits::default())?;
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
-    // The world imports only the kernel's state interface: nothing to require, nothing to grant.
+    // The world imports nothing: the kernel keeps the state, nothing to require or grant.
     // Installing creates the pinned service's `main` object at once.
     host.install(vec![engine.load(&std::fs::read(&artifact)?, Install::default())?])?;
 

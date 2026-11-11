@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Engine::new(Limits::default())?.on_log(|record| {
         println!("log            [{}] {}: {}", record.level, record.orb, record.message);
     });
-    // The world imports only the kernel's context interface: nothing to require, nothing to grant.
+    // The world imports nothing: the kernel answers the context, nothing to require or grant.
     let audit = engine.load(&std::fs::read(&artifact)?, Install::default())?;
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());

@@ -1,6 +1,8 @@
 //! A compiled Orb that reads the kernel's view of its calls: who is calling, which object answers,
-//! whether the call was cancelled, and a log the host observes. `context` on the attribute imports
-//! the kernel's `tembra:guest/context` interface; the executor serves it, the installer grants nothing.
+//! whether the call was cancelled, and a log the host observes. `context` on the attribute gives
+//! the module a `context` of functions the kernel answers through its private `tembra:orb/host`
+//! interface; the installer grants nothing. Each answer but `log` is a `Result`: the kernel
+//! refuses what needs a live call once the call is cancelled.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 
@@ -25,10 +27,10 @@ mod audit {
     impl Auditor {
         /// The call's principal and the address of the object running it; a log record too.
         pub fn whoami() -> Caller {
-            let object = context::object();
+            let object = context::object().expect("the kernel knows the object it runs");
             context::log(context::Level::Info, "whoami was asked");
             Caller {
-                principal: context::principal(),
+                principal: context::principal().expect("a running call has a principal"),
                 key: object.key,
                 owner: object.principal,
             }
@@ -41,8 +43,8 @@ mod audit {
 
         /// Cancel the current call from inside, then report whether the kernel sees it cancelled.
         pub fn give_up() -> bool {
-            context::cancel();
-            context::cancelled()
+            context::cancel().expect("the call is still running");
+            context::cancelled().unwrap_or(true)
         }
     }
 }

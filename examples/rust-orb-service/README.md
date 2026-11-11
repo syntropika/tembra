@@ -3,18 +3,18 @@
 This example writes a compiled Orb in Rust without a WIT file or a build script, builds it with
 `cargo tembra` and installs the artifact through the ordinary Rust host.
 
-| File                           | Role                                                                                  |
-| ------------------------------ | ------------------------------------------------------------------------------------- |
-| `greeter/src/lib.rs`           | The Orb: one module under `#[orb]`; the contract and the code in one place            |
-| `greeter/contract/greeter.wit` | The WIT derived from the component by `cargo tembra build`, committed as the contract |
-| `greeter/Cargo.toml`           | `[package.metadata.tembra]` names the Orb and its API version                         |
-| `host/src/main.rs`             | The wiring: loads the packaged artifact and calls two methods; it defines no Orb      |
-| `run.sh`                       | Build, show the derived WIT, run the host                                             |
+| File                           | Role                                                                                     |
+| ------------------------------ | ---------------------------------------------------------------------------------------- |
+| `greeter/src/lib.rs`           | The Orb: one module under `#[orb]`; the contract and the code in one place               |
+| `greeter/contract/greeter.wit` | The WIT derived from the component by `cargo tembra build`, committed as the contract    |
+| `greeter/Cargo.toml`           | `[package.metadata.tembra]` names the Orb and its API version, for the macro and the CLI |
+| `host/src/main.rs`             | The wiring: loads the packaged artifact and calls two methods; it defines no Orb         |
+| `run.sh`                       | Build, show the derived WIT, run the host                                                |
 
 `greeting` greets by name and measures a text. The author writes a `pub struct Stats`, a unit
-struct `Greeting` and three `pub fn`; [the macro](../../crates/orb-macro/README.md) turns them into a
-`record`, an exported `interface` and three `func`s, and generates the `wit-bindgen` bindings and
-the `export!`.
+struct `Greeting` and three `pub fn`; [the macro](../../crates/orb-macro/README.md) turns them
+into a `record`, an exported `interface` and three `func`s, and generates the `wit-bindgen`
+bindings, the `export!` and the kernel's lifecycle, which the host calls around the service.
 
 ## Build
 
@@ -28,8 +28,18 @@ cargo tembra build --manifest-path examples/rust-orb-service/greeter/Cargo.toml
 
 `build` compiles the crate on stable with the component linker, derives the WIT from the component
 into `greeter/contract/greeter.wit`, checks the component against it and writes `greeter.wasm`,
-`greeter.orb.wasm` and `checksums.txt` into `greeter/artifacts/`, next to the contract. The summary lists the services and the grants
-an installer must give; this Orb imports nothing.
+`greeter.orb.wasm` and `checksums.txt` into `greeter/artifacts/`, next to the contract. The summary
+lists the services and what an installer must bind or grant; this Orb imports nothing:
+
+```text
+exports, the services of greeter:
+  greeter::example:greeter/greeting@1.0.0  methods: hello, count-words, measure
+kernel lifecycle: the host describes, creates and releases this Orb through tembra:orb/lifecycle@0.1.0 and answers its state, resources, hooks and context through tembra:orb/host@0.1.0
+imports: none; the installer grants nothing
+```
+
+The `kernel lifecycle` line names the private package the component is built against, as a
+componentized TypeScript Orb is: the host links it itself, and the contract never mentions it.
 
 ## Run
 
@@ -57,5 +67,6 @@ WASI imports are not expressed by the macro yet; see
 [the macro's limits](../../crates/orb-macro/README.md#limits). Contributing to another Orb's hook is
 shown in [rust-orb-hook-contribution](../rust-orb-hook-contribution/README.md), declaring one in
 [rust-orb-hook-declaration](../rust-orb-hook-declaration/README.md), implementing a shared
-interface in [rust-orb-shared-interface](../rust-orb-shared-interface/README.md) and importing
-another Orb's in [rust-orb-wit-resource](../rust-orb-wit-resource/README.md).
+interface in [rust-orb-shared-interface](../rust-orb-shared-interface/README.md), importing
+another Orb's in [rust-orb-import](../rust-orb-import/README.md) and handing out a WIT resource in
+[rust-orb-wit-resource](../rust-orb-wit-resource/README.md).

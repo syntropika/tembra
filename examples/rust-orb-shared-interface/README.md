@@ -10,7 +10,7 @@ installer decides which Orb keeps a book, the contract stays the WIT package.
 | -------------------------- | ----------------------------------------------------------------------------------------------- |
 | `wit/ledger.wit`           | The shared contract: the `book` interface with its record and three functions                   |
 | `book/src/lib.rs`          | The compiled keeper: `#[service("example:ledger/book@1.0.0")]`, one `pub fn` per WIT function   |
-| `book/contract/keeper.wit` | The contract `cargo tembra build` wrote: the shared interface exported, the kernel's state      |
+| `book/contract/keeper.wit` | The contract `cargo tembra build` wrote: the shared interface exported, its package nested      |
 | `host/src/main.rs`         | The wiring: installs both keepers and consults them the same way; defines the native keeper too |
 | `run.sh`                   | Build the compiled keeper, show its contract, run the host                                      |
 
@@ -45,8 +45,6 @@ The derived contract therefore has no interface of its own, only the world:
 package example:keeper@1.0.0;
 
 world keeper {
-  import tembra:guest/state@1.0.0;
-  export tembra:guest/state-init@1.0.0;
   export example:ledger/book@1.0.0;
 }
 ```
@@ -54,7 +52,9 @@ world keeper {
 followed by the shared package, nested, as `cargo tembra build` writes every consumed package. The
 entries are a `#[state]` of the keeper's objects, so a keeper remembers across reloads; a state is
 not part of the contract unless a method of a derived service mentions it, so `Entries` is an
-ordinary struct of the module, with `serde` derives the macro adds.
+ordinary struct of the module, with `serde` derives the macro adds. The world says nothing about
+the state either: the kernel's lifecycle, which the macro implements, declares it for each keeper
+object.
 
 ## Build
 
@@ -68,7 +68,7 @@ cargo tembra build --manifest-path examples/rust-orb-shared-interface/book/Cargo
 ```text
 exports, the services of book:
   book::example:ledger/book@1.0.0  methods: add, total, entries
-kernel-managed state: the kernel keeps the state of this Orb's service objects (tembra:guest/state@1.0.0)
+kernel lifecycle: the host describes, creates and releases this Orb through tembra:orb/lifecycle@0.1.0 and answers its state, resources, hooks and context through tembra:orb/host@0.1.0
 imports: none; the installer grants nothing
 ```
 

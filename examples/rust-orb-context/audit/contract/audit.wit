@@ -17,6 +17,5 @@ interface auditor {
 }
 
 world audit {
-  import tembra:guest/context@1.0.0;
   export auditor;
 }

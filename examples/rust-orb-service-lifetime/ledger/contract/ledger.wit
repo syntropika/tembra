@@ -21,8 +21,6 @@ interface passing {
 }
 
 world ledger {
-  import tembra:guest/state@1.0.0;
-  export tembra:guest/state-init@1.0.0;
   export pinned;
   export lingering;
   export passing;

@@ -15,7 +15,5 @@ interface counter {
 }
 
 world tally {
-  import tembra:guest/state@1.0.0;
-  export tembra:guest/state-init@1.0.0;
   export counter;
 }

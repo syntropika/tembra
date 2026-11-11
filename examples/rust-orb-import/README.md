@@ -38,10 +38,13 @@ mod welcomer {
 
 `import` names an interface by its identity and `wit` the directory holding its package, here the
 contract the greeter's own build wrote, so the greeter is built first. The macro adds
-`import example:greeter/greeting@1.0.0` to the world and re-exports the generated module as
-`greeting`: `greeting::hello(name)` is an ordinary Rust function for the author, with the signature
+`import example:greeter/greeting@1.0.0` to the world and gives the module a module `greeting`, with
+the types of the generated bindings and a wrapper for each function of the interface:
+`greeting::hello(name)` is an ordinary Rust function for the author, with the signature
 `wit-bindgen` gives the WIT, `&str` in and `String` out, and a call through the kernel at run time,
-under the principal of the call running `welcome`. Nothing in the welcomer names the Orb that
+under the principal of the call running `welcome`. The wrapper first selects the reference the
+welcomer's root declared to the provider's `main` object, then calls the binding, because the
+kernel refuses a dependency call without a selection. Nothing in the welcomer names the Orb that
 answers.
 
 ```wit
@@ -64,7 +67,8 @@ engine.load(&welcomer, Install::default().requires("example:greeter/greeting@1.0
 An import is a hole the installer fills. `requires` names the interface, the Orb that provides it
 and the API version; the kernel checks that the named Orb exports that interface with the signature
 the welcomer was built against, and refuses the load otherwise. The import reaches the provider's
-`main` object. The provider could be native as well: the kernel binds by contract, as
+`main` object, the key of the reference the welcomer's root declares when the kernel creates it.
+The provider could be native as well: the kernel binds by contract, as
 [rust-orb-shared-interface](../rust-orb-shared-interface/README.md) shows with a native keeper of a
 WIT interface.
 
@@ -79,7 +83,15 @@ cargo tembra build --manifest-path examples/rust-orb-import/greeter/Cargo.toml
 cargo tembra build --manifest-path examples/rust-orb-import/welcomer/Cargo.toml
 ```
 
-The welcomer's summary lists the import under `imports of other Orbs, bound with Install::requires`.
+The welcomer's summary lists the import:
+
+```text
+exports, the services of welcomer:
+  welcomer::example:welcomer/welcoming@1.0.0  methods: welcome
+kernel lifecycle: the host describes, creates and releases this Orb through tembra:orb/lifecycle@0.1.0 and answers its state, resources, hooks and context through tembra:orb/host@0.1.0
+imports of other Orbs, bound with Install::requires:
+  example:greeter/greeting@1.0.0
+```
 
 ## Run
 
@@ -98,7 +110,9 @@ name, and the greetings come back as a `list<string>`. `run.sh` runs the steps i
 
 ## Limits
 
-A compiled import reaches the provider's `main` object; selecting another object of the provider
-by key, as a TypeScript Orb does with `context.get`, is not expressed. WASI imports are not
-expressed by the macro either. Handing out an object for the caller to keep and call repeatedly is
-a WIT resource; see [rust-orb-wit-resource](../rust-orb-wit-resource/README.md).
+An import reaches the provider's `main` object; selecting another object of the provider by key,
+as a TypeScript Orb does with `context.get`, is not expressed. WASI imports are not expressed by the
+macro either, and some signatures of an imported interface are refused; see
+[the macro's limits](../../crates/orb-macro/README.md#limits). Handing out an object for the caller
+to keep and call repeatedly is a WIT resource; see
+[rust-orb-wit-resource](../rust-orb-wit-resource/README.md).

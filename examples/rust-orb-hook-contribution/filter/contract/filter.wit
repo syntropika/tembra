@@ -12,8 +12,6 @@ interface report {
 }
 
 world filter {
-  import tembra:guest/resources@1.0.0;
-  export tembra:guest/resources-init@1.0.0;
   import example:admission/guard@1.0.0;
   export example:admission/guard@1.0.0;
   export report;

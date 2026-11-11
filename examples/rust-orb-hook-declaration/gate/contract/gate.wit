@@ -19,7 +19,6 @@ interface admissions {
 }
 
 world gate {
-  import guard;
   export guard;
   export admissions;
 }

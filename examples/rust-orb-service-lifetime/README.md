@@ -8,7 +8,7 @@ each service it adds, releases, acquires again and adds again.
 | File                         | Role                                                                                                         |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `ledger/src/lib.rs`          | The Orb: three sub-modules, each a service with its `#[state]`; `lifetime = host`, `linger_ms = 2500`, plain |
-| `ledger/contract/ledger.wit` | The contract `cargo tembra build` wrote: three interfaces, the kernel's state interfaces                     |
+| `ledger/contract/ledger.wit` | The contract `cargo tembra build` wrote: three interfaces of one shape; no lifetime, no state                |
 | `host/src/main.rs`           | The wiring: acquire, add, release, acquire again, add again, per service; it defines no Orb                  |
 | `run.sh`                     | Build, show the contract, run the host                                                                       |
 
@@ -38,9 +38,8 @@ before the host closes; such an object is acquired only as `main` by the princip
 pinned object cannot linger.
 
 The lifetime is not WIT: the derived contract shows three ordinary interfaces. It travels in the
-component's `tembra:manifest` section with the hook roles, keyed by the interface identity, and
-`cargo tembra build` packages it in the artifact, where the executor reads it as a TypeScript
-service's own `lifetime` and `linger` declaration.
+component's `lifecycle.describe`, which reports each service with its lifetime and its linger, as
+the description of a TypeScript Orb does, and the kernel applies it.
 
 ## One sub-module per service
 
@@ -55,7 +54,11 @@ mod ledger {
         pub struct Pinned;
 
         impl Pinned {
-            pub fn add(amount: i64) -> i64 { Balance::update(|balance| balance.total += amount).total }
+            pub fn add(amount: i64) -> i64 {
+                Balance::update(|balance| balance.total += amount)
+                    .expect("the kernel keeps the balance")
+                    .total
+            }
         }
     }
 
@@ -67,9 +70,11 @@ mod ledger {
 The three services are alike, so each lives in a sub-module with its state. A state that names no
 service belongs to the one service of its module, so none of the three writes
 `#[state(service = ..)]`; and since a balance stays out of the WIT, `add` returns the total, the
-three states share the name `Balance`, each in its module. The sub-modules are read as part of the
-Orb and left in place: the derived contract is the same as with everything at one level. A state of
-a sub-module is `pub` with `pub` fields, because the Orb module builds and reads it.
+three states share the name `Balance`, each in its module. `update` returns the stored value or the
+kernel's refusal; a balance has no rule of its own, so `add` expects the value. The sub-modules are
+read as part of the Orb and left in place: the derived contract is the same as with everything at
+one level. A state of a sub-module is `pub` with `pub` fields, because the Orb module builds and
+reads it.
 
 ## Build
 
@@ -80,14 +85,15 @@ cargo install --path crates/cargo-tembra
 cargo tembra build --manifest-path examples/rust-orb-service-lifetime/ledger/Cargo.toml
 ```
 
-The summary names the lifetime next to each service that chose one:
+The summary lists the three services alike: their lifetimes travel in `lifecycle.describe`, which
+the summary does not print.
 
 ```text
 exports, the services of ledger:
-  ledger::example:ledger/pinned@1.0.0  methods: add  lifetime: host, pinned until the host closes
-  ledger::example:ledger/lingering@1.0.0  methods: add  linger: 2500 ms after the last reference is released
+  ledger::example:ledger/pinned@1.0.0  methods: add
+  ledger::example:ledger/lingering@1.0.0  methods: add
   ledger::example:ledger/passing@1.0.0  methods: add
-kernel-managed state: the kernel keeps the state of this Orb's service objects (tembra:guest/state@1.0.0)
+kernel lifecycle: the host describes, creates and releases this Orb through tembra:orb/lifecycle@0.1.0 and answers its state, resources, hooks and context through tembra:orb/host@0.1.0
 imports: none; the installer grants nothing
 ```
 

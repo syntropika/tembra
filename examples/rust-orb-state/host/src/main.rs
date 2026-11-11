@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Engine::new(Limits::default())?;
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
-    // The world imports only the kernel's state interface: nothing to require, nothing to grant.
+    // The world imports nothing: the kernel keeps the state, nothing to require or grant.
     host.install(vec![engine.load(&bytes, Install::default())?])?;
 
     // 1. A reference to one counter object; creating it declares its state with the kernel.

@@ -28,7 +28,8 @@ mod keeper {
             let entries = Entries::update(|entries| {
                 entries.labels.push(entry.label.clone());
                 entries.amounts.push(entry.amount);
-            });
+            })
+            .expect("the kernel keeps the book");
             entries.amounts.len() as u32
         }
 

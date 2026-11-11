@@ -9,7 +9,7 @@ reloads the Orb with a fresh component instance while the count stays.
 | File                         | Role                                                                                                   |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `counter/src/lib.rs`         | The Orb: `#[state]` on a struct with a `#[validate]` function, `Count::read()` and `Count::update(..)` |
-| `counter/contract/tally.wit` | The contract `cargo tembra build` wrote: the kernel's state interfaces in the world                    |
+| `counter/contract/tally.wit` | The contract `cargo tembra build` wrote: the `counter` interface; the state is not part of it          |
 | `host/src/main.rs`           | The wiring: subscribes to the state, calls `add`, reloads, calls again; it defines no Orb              |
 | `run.sh`                     | Build, show the contract, run the host                                                                 |
 
@@ -45,28 +45,30 @@ impl Count {
 ```
 
 A state may carry its rule: a function of its `impl` block marked `#[validate]`, of the shape
-`fn(&self) -> Result<(), String>`, under any name. Then `Count::update` returns
-`Result<Count, String>`: the closure's result is validated before the kernel stores it, and a
-refusal leaves the previous value in place, so `add` returns a `result<count, string>` in the WIT.
-The same function answers the kernel on a reload, when the new instance is asked whether it
-accepts the value it inherits; a refusal fails the reload and the running revision keeps serving.
-Without the marker, a function named `validate` is ordinary Rust and the state is not validated.
-The world gains two lines:
+`fn(&self) -> Result<(), String>`, under any name. `Count::update` returns `Result<Count, String>`
+and runs the rule on the closure's result before the kernel stores it: a refusal is the `Err`, and
+the previous value stays in place, so `add` returns a `result<count, string>` in the WIT. The same
+function answers the kernel on a reload, when the new instance is asked whether it accepts the
+value it inherits; a refusal fails the reload and the running revision keeps serving. Without the
+marker, a function named `validate` is ordinary Rust, an update is stored as it is and a reload
+only checks that the retained JSON still reads as a `Count`.
+
+The contract does not change: the state is not WIT, and the world exports the service alone.
 
 ```wit
 world tally {
-  import tembra:guest/state@1.0.0;
-  export tembra:guest/state-init@1.0.0;
   export counter;
 }
 ```
 
-`tembra:guest` is the kernel's own package, bundled with `tembra-contracts` like WASI. When the
-kernel creates a `counter` object it calls the exported `state-init.declare` with the service's
-interface name, gets the initial JSON, the version and whether the state is validated back, and
-declares the state for that object; `read` and `update` then reach the state of the object running
-the call, and `state-init.validate` is what a reload calls. The executor serves the import itself:
-the installer requires and grants nothing.
+What declares the state is the kernel's lifecycle, which the macro implements in the component.
+When the kernel creates a `counter` object it calls `lifecycle.create` with the service's name: the
+component declares the object's state with `host.state-declare`, the initial JSON, the version and
+its validator, and keeps the handle the kernel returns. `read` and `update` then reach the state of
+the object running the call through `host.state-read` and `host.state-update`, and
+`lifecycle.validate` is what a reload calls. Both interfaces belong to the kernel's private
+`tembra:orb` package, which the host links itself: the installer requires and grants nothing, and
+the contract never names the package.
 
 ## Build
 
@@ -77,12 +79,12 @@ cargo install --path crates/cargo-tembra
 cargo tembra build --manifest-path examples/rust-orb-state/counter/Cargo.toml
 ```
 
-The summary names the state next to the service:
+The summary names the kernel's lifecycle, through which the state is kept, next to the service:
 
 ```text
 exports, the services of counter:
   counter::example:counter/counter@1.0.0  methods: add, read
-kernel-managed state: the kernel keeps the state of this Orb's service objects (tembra:guest/state@1.0.0)
+kernel lifecycle: the host describes, creates and releases this Orb through tembra:orb/lifecycle@0.1.0 and answers its state, resources, hooks and context through tembra:orb/host@0.1.0
 imports: none; the installer grants nothing
 ```
 
@@ -113,13 +115,15 @@ second load of the same artifact as a new revision: the new instance validates t
 inherits, the old component instance is retired (`instances: 1` once the handover settles), the
 object and its state remain, and `read` returns the count the previous instance left. A count kept
 in a `static` would have restarted from zero. `run.sh` runs the three steps in order. The
-executor's `compiled_state` test shows the other outcome of a reload, a value the new instance
-refuses, with the running revision kept.
+executor's [reload test](../../crates/executor-wasm/tests/reload.rs) shows the other outcome on the
+same lifecycle, with a TypeScript Orb whose validator refuses the value it would inherit: the
+reload fails and the running revision keeps serving.
 
 ## Limits
 
 A state belongs to one service object and is reached only by that service's methods: a call runs
-on one object, and the kernel refuses an update from any other context. The Orb's root is not an
-object, so a hook contribution has no kernel state; a root resource is what it can use, see
-[the hook contribution example](../rust-orb-hook-contribution/README.md#why-the-counts-are-a-resource-not-a-state). The
-kernel stores the state as JSON written by `serde`, with the Rust field names.
+on one object, and the accessors trap in a call that serves another service's object or none. The
+Orb's root is not an object, so a hook contribution has no kernel state; a root resource is what it
+can use, see
+[the hook contribution example](../rust-orb-hook-contribution/README.md#why-the-counts-are-a-resource-not-a-state).
+The kernel stores the state as JSON written by `serde`, with the Rust field names.

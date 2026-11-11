@@ -1,8 +1,6 @@
 package example:keeper@1.0.0;
 
 world keeper {
-  import tembra:guest/state@1.0.0;
-  export tembra:guest/state-init@1.0.0;
   export example:ledger/book@1.0.0;
 }
 

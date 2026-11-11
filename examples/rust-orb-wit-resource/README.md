@@ -49,14 +49,19 @@ returns an owned handle. Interior mutability (`Cell`, `RefCell`) is how a method
 because WIT methods borrow `self`.
 
 ```wit
+/// The service: starts builders and counts the ones destroyed.
 interface texts {
   /// A text under construction: the caller owns it and pushes one character per call.
   resource builder {
     constructor();
+    /// Append one character and return how many the text holds; a method of the resource.
     push: func(ch: char) -> u32;
+    /// The text built so far.
     text: func() -> string;
   }
+  /// Start an empty text; the caller owns the returned handle.
   start: func() -> builder;
+  /// How many builders were destroyed, when their last owner dropped them.
   dropped: func() -> u32;
 }
 ```
@@ -95,6 +100,11 @@ shows for a plain method: `import = "..."` on the attribute, the provider's cont
 `wit`, the installer binding the import to `text` with `Install::requires`. What is new here is the
 handle: `texts::start` returns a `texts::Builder` with the methods of the resource, the compiler
 checks every call on it, and dropping it at the end of `spell` destroys the builder in the text Orb.
+`texts::start` is one of the wrappers the macro writes for the imported interface, which select the
+root's reference to the text Orb's `main` object before calling; a method of the handle targets the
+handle and needs no selection. The resource's constructor is not wrapped, and the host refuses a
+call without a selection, so the speller starts its builder with `texts::start()`, not
+`texts::Builder::new()`.
 
 ## Why a resource and not a method
 
@@ -140,7 +150,8 @@ order.
 ## Limits
 
 A resource is handed out, never taken: a method taking a resource, owned or borrowed, as a
-parameter is not expressed by the macro. Methods borrow `self`; a `&mut self` method is a compile
-error. A resource belongs to one service's interface, the one named by `#[wit_resource(service =
-Name)]` or the module's only service; another service of the module may return it, and its
-interface `use`s the type.
+parameter is not expressed by the macro. Of an imported resource, the constructor and the static
+functions are not wrapped, so a consumer obtains the resource from a function of the interface.
+Methods borrow `self`; a `&mut self` method is a compile error. A resource belongs to one service's
+interface, the one named by `#[wit_resource(service = Name)]` or the module's only service; another
+service of the module may return it, and its interface `use`s the type.
