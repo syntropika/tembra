@@ -287,17 +287,130 @@ this Orb by the host. The executor serves the interface itself, as it does the s
 requires and grants nothing, and the world exports nothing for it. Outside a call, in a resource's
 `open` for instance, the principal and the cancellation are not available.
 
+## Implementing a shared interface
+
+A plain `#[service]` derives a new interface from the `impl` block, in the Orb's own package.
+`#[service("ns:name/interface@version")]` names an interface that exists already, in a package of
+the directory `wit = "dir"` points to, and the `impl` block implements it:
+
+```rust
+#[tembra_orb_macro::orb(package = "example:keeper@1.0.0", wit = "../wit")]
+mod keeper {
+    use alloc::vec::Vec;
+
+    /// Implements `book` of the shared package: every function of the interface.
+    #[service("example:ledger/book@1.0.0")]
+    pub struct Keeper;
+
+    impl Keeper {
+        pub fn add(entry: book::Entry) -> u32 { /* ... */ }
+        pub fn total() -> i64 { /* ... */ }
+        pub fn entries() -> Vec<book::Entry> { /* ... */ }
+    }
+}
+```
+
+The world exports that interface instead of a derived one, its generated module is re-exported
+under the interface's name, so the author writes `book::Entry`, and the macro generates the bridge
+from each WIT function to the `pub fn` of the same name. The interface is fixed by its WIT: the
+`impl` provides every function, with its parameter and result types, and nothing else; a missing or
+extra `pub fn` is a compile error and a wrong type fails to compile at the bridge. A resource of the
+interface is implemented by a `#[wit_resource(service = Keeper)]` struct of the resource's name,
+with its constructor and methods. The derived contract has no interface of its own, only the world,
+and `cargo tembra build` nests the shared package whole after it: the kernel holds every keeper of
+`example:ledger/book@1.0.0`, native or compiled, to one contract, and an installer binds a consumer
+of the interface to either. See
+[rust-orb-shared-interface](../../examples/rust-orb-shared-interface/README.md).
+
+## Importing another Orb's interface
+
+`import = "ns:name/interface@version"` on the attribute, repeatable, adds `import` of that
+interface to the world and re-exports its generated module under the interface's name:
+
+```rust
+#[tembra_orb_macro::orb(
+    package = "example:player@1.0.0",
+    wit = "../decoder/contract",
+    import = "example:decoder/decoding@1.0.0"
+)]
+mod player {
+    #[service]
+    pub struct Playback;
+
+    impl Playback {
+        pub fn play(key: u8, frames: Vec<Vec<u8>>) -> Vec<u32> {
+            let session = decoding::open(key);
+            frames.iter().map(|frame| u32::from(session.decode(frame)[0])).collect()
+        }
+    }
+}
+```
+
+The package comes from the directory `wit` names, here the contract the provider's own build wrote.
+`decoding::open` is the imported function; a resource it returns is an owned handle with the
+resource's methods, destroyed in the provider when the handle drops. At installation the host binds
+the import to a provider Orb with `Install::requires`, as for any dependency. The macro records the
+directory in the manifest and `cargo tembra build` nests the imported package whole in the
+contract, so the kernel checks the provider against the same signature. See
+[rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md).
+
+## Exporting a WIT resource
+
+A struct marked `#[wit_resource]` becomes a `resource` of the interface of the service whose
+methods hand it out: `pub fn new(..) -> Self` is its constructor, the `pub fn` taking `&self` are
+its methods, the other `pub fn` its static functions.
+
+```rust
+/// One decoding session: the caller owns it and decodes frame after frame with it.
+#[wit_resource]
+pub struct Session { key: u8, frames: Cell<u32> }
+
+impl Session {
+    pub fn new(key: u8) -> Session { /* the constructor */ }
+    pub fn decode(&self, frame: Vec<u8>) -> Vec<u8> { /* a method */ }
+}
+
+#[service]
+pub struct Decoding;
+
+impl Decoding {
+    /// Open a session for `key`; the caller owns the returned handle.
+    pub fn open(key: u8) -> Session { Session::new(key) }
+}
+```
+
+```wit
+interface decoding {
+  resource session {
+    constructor(key: u8);
+    decode: func(frame: list<u8>) -> list<u8>;
+  }
+  open: func(key: u8) -> session;
+}
+```
+
+The struct keeps its fields and its `Drop`. The value lives in the component; a method returning
+the struct returns an owned handle, which crosses to the caller, native or compiled, and every
+method call travels back under the caller's own admission; when the last owner drops the handle,
+the kernel destroys the value, which runs `Drop`. WIT methods borrow `self`, so a method changes a
+value through `Cell` or `RefCell`; a `&mut self` method is a compile error, and so is a function
+taking a resource as a parameter: a resource is handed out, never taken. The resource belongs to
+one interface, that of `#[wit_resource(service = Name)]` or of the module's only service; another
+service of the module may return it, and its interface `use`s the type. See
+[rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md).
+
 ## What it generates
 
 The macro rewrites the module with:
 
 1. `pub const WIT: &str`, the derived WIT text;
 2. the same text as a `tembra:wit` custom section of the Wasm module, and the manifest, the
-   declared hooks with their composition, the contributions with their priorities and the
-   services that chose a lifetime or a linger, as a `tembra:manifest` section. `cargo tembra
-build` reads them and packages the contract exactly as written here, with the `///` comments
-   the binary type section loses and the hook imports the linker drops because nothing calls
-   them;
+   declared hooks with their composition, the contributions with their priorities, the
+   services that chose a lifetime or a linger and the `wit` directory, as a `tembra:manifest`
+   section. `cargo tembra build` reads them and packages the contract exactly as written here,
+   with the `///` comments the binary type section loses, the hook imports the linker drops
+   because nothing calls them, and every consumed package nested whole, not the part the
+   component happens to call;
 3. the `no_std` prelude for the Wasm target, `#[global_allocator]` on `dlmalloc` and a
    `#[panic_handler]` that traps, under `#[cfg(target_arch = "wasm32")]`; on the host the crate
    builds with std, so `cargo check` and rust-analyzer work without a Wasm target;
@@ -306,14 +419,16 @@ build` reads them and packages the contract exactly as written here, with the `/
    `tembra:guest` package nested in the inline text and `serde` derives on the generated types;
 5. `pub use exports::...::{Stats}`: the author's record and enum definitions are replaced by the
    generated types with the same names and public fields, so the author's functions and the
-   generated traits share one type; `pub use exports::...::guard;` for each contributed hook and
-   `pub use ...::guard;`, the import module, for each declared one; `pub use ...::context;` with
-   the `context` option;
+   generated traits share one type; `pub use exports::...::guard;` for each contributed hook and each
+   implemented interface, `pub use ...::guard;`, the import module, for each declared hook and
+   each imported interface; `pub use ...::context;` with the `context` option;
 6. the author's items, unchanged;
-7. a private struct implementing the `Guest` trait of every interface by forwarding to the
-   author's functions, hook callbacks and the kernel's `state-init` and `resources-init`
-   callbacks included, with a trapping callback for each declared hook, and `export!`;
-   with a declared hook, `run` on its struct, calling the hook's import;
+7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
+   by forwarding to the author's functions, hook callbacks and the kernel's `state-init` and
+   `resources-init` callbacks included, with a trapping callback for each declared hook, and
+   `export!`; the resource trait of each `#[wit_resource]` struct on the struct itself, its
+   constructor and methods forwarded and the handles wrapped at the boundary; with a declared
+   hook, `run` on its struct, calling the hook's import;
 8. with a state, `Default` and the `read`/`update` functions on each state type, over a hidden
    module that maps the kernel's JSON to the type with `serde_json`, and the kernel's `validate`
    callback, which runs the state's own validator on the value a reload would adopt;
@@ -326,18 +441,26 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
 
 ## Limits
 
-- Imports of other Orbs' services and of WASI interfaces are not expressed yet; a hook
-  contribution is the only way to consume another Orb's WIT.
+- WASI interfaces are not expressed. An Orb consumes another Orb's WIT by importing an
+  interface, implementing one or contributing to a hook; selecting another object by key, as a
+  TypeScript Orb does with `context.get`, is not expressed.
 - A declared hook's types enter no service signature: a method that reports the hook's record
   returns a record of the module, converted from it.
-- Functions are associated functions without `self`. Besides a service's state and the root's
-  resources, data lives in `static`s, as in the compiled fixtures of `executor-wasm`.
-- Resources belong to the root, declare no dependencies on one another, and are opened in the
-  order the kernel chooses; `open` and `close` take no arguments besides the value.
+- A service's functions are associated functions without `self`; only the methods of a
+  `#[wit_resource]` struct take `&self`, never `&mut self`. Besides a service's state, a
+  resource's fields and the root's resources, data lives in `static`s, as in the compiled
+  fixtures of `executor-wasm`.
+- Root resources, `#[resource]`, belong to the root, declare no dependencies on one another, and
+  are opened in the order the kernel chooses; `open` and `close` take no arguments besides the
+  value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary.
 - Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
-  64-bit integers cross the boundary exactly. No `resource`, `flags`, `stream` or `future`.
+  64-bit integers cross the boundary exactly. A `resource` is a `#[wit_resource]` struct or the
+  handle of an imported interface, handed out as an owned handle and never taken as a
+  parameter. No `flags`, `stream` or `future`.
+- An implemented interface is fixed by its WIT: the `impl` adds no function to it, and a record
+  of a consumed package is not a state; a state copies it into a record of the module.
 - Replacing the author's types drops their `#[derive]`s.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.
