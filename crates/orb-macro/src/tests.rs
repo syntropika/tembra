@@ -40,7 +40,11 @@ fn expanded(package: &str, module: &str) -> ItemMod {
 }
 
 fn refused(package: &str, module: &str) -> String {
-    match orb(package, module) {
+    refused_with(options(package, None), module)
+}
+
+fn refused_with(options: Options, module: &str) -> String {
+    match orb_with(options, module) {
         Err(error) => error.to_string(),
         Ok(_) => panic!("the module was accepted"),
     }
@@ -269,32 +273,20 @@ fn a_service_may_implement_a_consumed_interface() {
         generated.contains("fn add (entry : exports :: example :: ledger :: book :: Entry) -> u32 { Keeper :: add (entry) }"),
         "{generated}"
     );
-    let missing = orb_with(
+    let error = refused_with(
         options("example:keeper@1.0.0", Some(&dir)),
         &KEEPER.replace("pub fn total() -> i64 { 0 }", ""),
     );
-    let error = missing
-        .err()
-        .expect("a missing function is refused")
-        .to_string();
     assert!(error.contains("has no `pub fn total`"), "{error}");
-    let extra = orb_with(
+    let error = refused_with(
         options("example:keeper@1.0.0", Some(&dir)),
         &KEEPER.replace(
             "pub fn total() -> i64 { 0 }",
             "pub fn total() -> i64 { 0 } pub fn extra() {}",
         ),
     );
-    let error = extra
-        .err()
-        .expect("an extra function is refused")
-        .to_string();
     assert!(error.contains("is not a function of"), "{error}");
-    let unresolved = orb("example:keeper@1.0.0", KEEPER);
-    let error = unresolved
-        .err()
-        .expect("the package is required")
-        .to_string();
+    let error = refused("example:keeper@1.0.0", KEEPER);
     assert!(error.contains("needs wit ="), "{error}");
 }
 
