@@ -151,6 +151,10 @@ struct State {
     /// The owning service, as named by `service = ...` or resolved to the module's only one.
     service: Option<Ident>,
     version: u32,
+    /// The author defined `pub fn validate(&self) -> Result<(), String>`: every update runs it
+    /// before the kernel stores the value, and a reload runs it on the value the new instance
+    /// inherits.
+    validate: bool,
 }
 
 /// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a
@@ -309,6 +313,35 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 && function.sig.inputs.len() == 1
                 && matches!(function.sig.inputs.first(), Some(FnArg::Receiver(_)))
         });
+    }
+    for state in &mut states {
+        let validator = impls
+            .iter()
+            .filter(|item| {
+                matches!(&*item.self_ty, Type::Path(path) if path.path.is_ident(&state.ident))
+            })
+            .flat_map(|item| &item.items)
+            .find_map(|item| match item {
+                syn::ImplItem::Fn(function)
+                    if matches!(function.vis, Visibility::Public(_))
+                        && function.sig.ident == "validate" =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            });
+        if let Some(function) = validator {
+            let borrows_self = function.sig.inputs.len() == 1
+                && matches!(function.sig.inputs.first(), Some(FnArg::Receiver(receiver))
+                    if receiver.reference.is_some() && receiver.mutability.is_none());
+            if !borrows_self || !result(&function.sig.output).is_some_and(refusal) {
+                return Err(syn::Error::new(
+                    function.sig.span(),
+                    "a state's validator is `pub fn validate(&self) -> Result<(), String>`",
+                ));
+            }
+            state.validate = true;
+        }
     }
     // An Orb exports services, declares hooks or contributes to them; a module doing none of
     // those would be an empty world.
@@ -958,6 +991,27 @@ fn declaration_code(
     })
 }
 
+/// Whether a type is `Result<(), String>`, the answer of a state's validator.
+fn refusal(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return false;
+    };
+    let mut arguments = arguments.args.iter();
+    let (Some(ok), Some(err), None) = (arguments.next(), arguments.next(), arguments.next()) else {
+        return false;
+    };
+    segment.ident == "Result"
+        && matches!(ok, syn::GenericArgument::Type(Type::Tuple(unit)) if unit.elems.is_empty())
+        && matches!(err, syn::GenericArgument::Type(Type::Path(path))
+            if path.path.segments.last().is_some_and(|segment| segment.ident == "String"))
+}
+
 /// Read a state: a struct with named fields, the owning service and the version (default 1).
 fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
     let Fields::Named(fields) = &item.fields else {
@@ -993,6 +1047,7 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
             .collect(),
         service,
         version,
+        validate: false,
     })
 }
 
@@ -1007,11 +1062,29 @@ fn state_code(states: &[State], package: &str) -> proc_macro2::TokenStream {
         let identity = LitStr::new(&identity(package, &wit::kebab(service)), Span::call_site());
         let ident = &state.ident;
         let version = state.version;
+        let validated = state.validate;
         quote! {
             #identity => Some(exports::tembra::guest::state_init::Declaration {
                 initial: __tembra_state::to_json(&<#ident as ::core::default::Default>::default()),
                 version: #version,
+                validated: #validated,
             }),
+        }
+    });
+    // On reload the kernel hands the new instance the value it inherits; a validated state
+    // answers with its validator, any other state accepts.
+    let validators = states.iter().filter(|state| state.validate).map(|state| {
+        let service = state.service.as_ref().expect("resolved owner");
+        let identity = LitStr::new(&identity(package, &wit::kebab(service)), Span::call_site());
+        let ident = &state.ident;
+        let name = LitStr::new(&state.ident.to_string(), Span::call_site());
+        quote! {
+            #identity => match ::serde_json::from_str::<#ident>(&value) {
+                Ok(state) => state.validate(),
+                Err(error) => Err(__tembra_state::format!(
+                    "the retained state is not a `{}`: {error}", #name
+                )),
+            },
         }
     });
     let accessors = states.iter().map(|state| {
@@ -1021,9 +1094,34 @@ fn state_code(states: &[State], package: &str) -> proc_macro2::TokenStream {
         let read_doc = format!(
             " The state of the `{service}` object running the current call, read from the kernel."
         );
-        let update_doc = format!(
-            " Change the state of the `{service}` object running the current call and store it in the kernel; returns the stored value."
-        );
+        let update = if state.validate {
+            let doc = format!(
+                " Change the state of the `{service}` object running the current call, validate it and store it in the kernel; returns the stored value, or the validator's refusal, in which case the kernel keeps the previous value."
+            );
+            quote! {
+                #[doc = #doc]
+                pub fn update(
+                    change: impl FnOnce(&mut Self),
+                ) -> Result<Self, __tembra_state::String> {
+                    let mut value = Self::read();
+                    change(&mut value);
+                    value.validate()?;
+                    Ok(__tembra_state::update(&value))
+                }
+            }
+        } else {
+            let doc = format!(
+                " Change the state of the `{service}` object running the current call and store it in the kernel; returns the stored value."
+            );
+            quote! {
+                #[doc = #doc]
+                pub fn update(change: impl FnOnce(&mut Self)) -> Self {
+                    let mut value = Self::read();
+                    change(&mut value);
+                    __tembra_state::update(&value)
+                }
+            }
+        };
         quote! {
             impl ::core::default::Default for #ident {
                 fn default() -> Self {
@@ -1035,17 +1133,13 @@ fn state_code(states: &[State], package: &str) -> proc_macro2::TokenStream {
                 pub fn read() -> Self {
                     __tembra_state::read()
                 }
-                #[doc = #update_doc]
-                pub fn update(change: impl FnOnce(&mut Self)) -> Self {
-                    let mut value = Self::read();
-                    change(&mut value);
-                    __tembra_state::update(&value)
-                }
+                #update
             }
         }
     });
     quote! {
-        // The kernel asks for each service object's state when it creates the object.
+        // The kernel asks for each service object's state when it creates the object, and asks
+        // a new instance to validate the state it inherits on reload.
         impl exports::tembra::guest::state_init::Guest for __TembraExports {
             fn declare(
                 service: __tembra_state::String,
@@ -1055,13 +1149,22 @@ fn state_code(states: &[State], package: &str) -> proc_macro2::TokenStream {
                     _ => None,
                 }
             }
+            fn validate(
+                service: __tembra_state::String,
+                value: __tembra_state::String,
+            ) -> Result<(), __tembra_state::String> {
+                match service.as_str() {
+                    #(#validators)*
+                    _ => Ok(()),
+                }
+            }
         }
         #(#accessors)*
         /// The kernel keeps a state as JSON; serde maps it to the state type and back.
         #[doc(hidden)]
         pub mod __tembra_state {
             extern crate alloc;
-            pub use alloc::string::String;
+            pub use alloc::{format, string::String};
 
             pub fn read<T: ::serde::de::DeserializeOwned>() -> T {
                 parse(&super::tembra::guest::state::read())
