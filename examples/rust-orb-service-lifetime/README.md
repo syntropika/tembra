@@ -5,12 +5,12 @@ This example writes a compiled Orb with three services of one shape and three li
 after every reference was released tells what the lifetime means. The host is wiring only: for
 each service it adds, releases, acquires again and adds again.
 
-| File                         | Role                                                                                            |
-| ---------------------------- | ----------------------------------------------------------------------------------------------- |
-| `ledger/src/lib.rs`          | The Orb: `#[service(lifetime = host)]`, `#[service(linger_ms = 2500)]` and a plain `#[service]` |
-| `ledger/contract/ledger.wit` | The contract `cargo tembra build` wrote: three interfaces, the kernel's state interfaces        |
-| `host/src/main.rs`           | The wiring: acquire, add, release, acquire again, add again, per service; it defines no Orb     |
-| `run.sh`                     | Build, show the contract, run the host                                                          |
+| File                         | Role                                                                                                         |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `ledger/src/lib.rs`          | The Orb: three sub-modules, each a service with its `#[state]`; `lifetime = host`, `linger_ms = 2500`, plain |
+| `ledger/contract/ledger.wit` | The contract `cargo tembra build` wrote: three interfaces, the kernel's state interfaces                     |
+| `host/src/main.rs`           | The wiring: acquire, add, release, acquire again, add again, per service; it defines no Orb                  |
+| `run.sh`                     | Build, show the contract, run the host                                                                       |
 
 ## The three lifetimes
 
@@ -41,6 +41,35 @@ The lifetime is not WIT: the derived contract shows three ordinary interfaces. I
 component's `tembra:manifest` section with the hook roles, keyed by the interface identity, and
 `cargo tembra build` packages it in the artifact, where the executor reads it as a TypeScript
 service's own `lifetime` and `linger` declaration.
+
+## One sub-module per service
+
+```rust
+mod ledger {
+    pub mod pinned {
+        /// The balance of one pinned ledger object, kept by the kernel.
+        #[state]
+        pub struct Balance { pub total: i64 }
+
+        #[service(lifetime = host)]
+        pub struct Pinned;
+
+        impl Pinned {
+            pub fn add(amount: i64) -> i64 { Balance::update(|balance| balance.total += amount).total }
+        }
+    }
+
+    pub mod lingering { /* its own Balance, Lingering */ }
+    pub mod passing { /* its own Balance, Passing */ }
+}
+```
+
+The three services are alike, so each lives in a sub-module with its state. A state that names no
+service belongs to the one service of its module, so none of the three writes
+`#[state(service = ..)]`; and since a balance stays out of the WIT, `add` returns the total, the
+three states share the name `Balance`, each in its module. The sub-modules are read as part of the
+Orb and left in place: the derived contract is the same as with everything at one level. A state of
+a sub-module is `pub` with `pub` fields, because the Orb module builds and reads it.
 
 ## Build
 

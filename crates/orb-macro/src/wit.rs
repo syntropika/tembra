@@ -657,6 +657,7 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
         wit,
         references,
         kind: ShapeKind::Record(named),
+        scope: 0,
     })
 }
 
@@ -709,6 +710,7 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
         wit,
         references,
         kind,
+        scope: 0,
     })
 }
 

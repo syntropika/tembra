@@ -842,3 +842,145 @@ fn a_declared_hook_may_name_a_consumed_interface() {
     let error = refused("example:gate@1.0.0", SHARED_GATE);
     assert!(error.contains("hooks need wit ="), "{error}");
 }
+
+const LEDGER: &str = "mod ledger {
+    pub mod pinned {
+        /// The balance of a pinned ledger object.
+        #[state]
+        pub struct Balance { pub total: i64 }
+        /// A ledger pinned until the host closes.
+        #[service(lifetime = host)]
+        pub struct Pinned;
+        impl Pinned {
+            /// Add to the balance and return it.
+            pub fn add(amount: i64) -> Balance { Balance::update(|balance| balance.total += amount) }
+        }
+    }
+    pub mod passing {
+        #[state]
+        pub struct Balance { pub total: i64 }
+        #[service]
+        pub struct Passing;
+        impl Passing {
+            pub fn add(amount: i64) -> i64 { Balance::update(|balance| balance.total += amount).total }
+        }
+    }
+}";
+
+/// A sub-module groups a service with its state: the state needs no `service = Name`, two states
+/// of two modules may share a name when they stay out of the WIT, the generated types are
+/// re-exported where the author declared them, and the bridges are generated in the service's
+/// module, naming the Orb module through `super::`.
+#[test]
+fn sub_modules_group_a_service_with_its_state() {
+    let module = expanded("example:ledger@1.0.0", LEDGER);
+    assert_eq!(
+        wit(&module),
+        "package example:ledger@1.0.0;\n\n/// A ledger pinned until the host closes.\ninterface pinned {\n  /// The balance of a pinned ledger object.\n  record balance {\n    total: s64,\n  }\n  /// Add to the balance and return it.\n  add: func(amount: s64) -> balance;\n}\n\ninterface passing {\n  add: func(amount: s64) -> s64;\n}\n\nworld ledger {\n  import tembra:guest/state@1.0.0;\n  export tembra:guest/state-init@1.0.0;\n  export pinned;\n  export passing;\n}\n"
+    );
+    assert_eq!(
+        manifest(&module).as_deref(),
+        Some(
+            r#"{"contributes":{},"declares":{},"services":{"example:ledger/pinned@1.0.0":{"lifetime":"host","linger_ms":0}}}"#
+        )
+    );
+    let generated = tokens(&module);
+    for expected in [
+        "pub use super :: exports :: example :: ledger :: pinned :: { Balance } ;",
+        "impl super :: exports :: example :: ledger :: pinned :: Guest for super :: __TembraExports { fn add (amount : i64) -> Balance { Pinned :: add (amount) } }",
+        "impl super :: exports :: example :: ledger :: passing :: Guest for super :: __TembraExports { fn add (amount : i64) -> i64 { Passing :: add (amount) } }",
+        "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance { pub total : i64 }",
+        "impl pinned :: Balance {",
+        "impl passing :: Balance {",
+        "< pinned :: Balance as :: core :: default :: Default > :: default ()",
+        "< passing :: Balance as :: core :: default :: Default > :: default ()",
+        "\"example:ledger/pinned@1.0.0\" => Some (",
+        "\"example:ledger/passing@1.0.0\" => Some (",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+}
+
+/// The owner of a state is the one service of its module, else the one service of the Orb; a file
+/// module cannot be read; an item the Orb module uses must be visible to it; a name that enters the
+/// WIT is one across the modules.
+#[test]
+fn sub_modules_are_refused_when_ill_formed() {
+    let error = refused(
+        "example:ledger@1.0.0",
+        &LEDGER.replace(
+            "        #[service]\n        pub struct Passing;",
+            "        #[service]\n        pub struct Passing;\n        #[service]\n        pub struct Other;\n        impl Other { pub fn count() -> u32 { 0 } }",
+        ),
+    );
+    assert!(
+        error.contains("put the state in the service's sub-module"),
+        "{error}"
+    );
+    let error = refused(
+        "example:ledger@1.0.0",
+        &LEDGER.replace(
+            "    pub mod passing {",
+            "    mod elsewhere;\n    pub mod passing {",
+        ),
+    );
+    assert!(error.contains("written inline"), "{error}");
+    let error = refused(
+        "example:ledger@1.0.0",
+        &LEDGER.replace(
+            "        #[state]\n        pub struct Balance { pub total: i64 }\n        #[service]",
+            "        #[state]\n        pub struct Balance { total: i64 }\n        #[service]",
+        ),
+    );
+    assert!(
+        error.contains("make the struct and its fields visible to the Orb module"),
+        "{error}"
+    );
+    let error = refused(
+        "example:ledger@1.0.0",
+        &LEDGER.replace(
+            "        impl Passing {",
+            "        impl Balance { #[validate] fn check(&self) -> Result<(), String> { Ok(()) } }\n        impl Passing {",
+        ),
+    );
+    assert!(
+        error.contains("#[validate] on a function of a sub-module: make it visible"),
+        "{error}"
+    );
+    let error = refused(
+        "example:ledger@1.0.0",
+        &LEDGER.replace(
+            "pub fn add(amount: i64) -> i64 { Balance::update(|balance| balance.total += amount).total }",
+            "pub fn add(amount: i64) -> Balance { Balance::update(|balance| balance.total += amount) }",
+        ),
+    );
+    assert!(
+        error.contains("`Balance` is declared in `pinned` and in `passing`"),
+        "{error}"
+    );
+}
+
+/// A contribution in a sub-module names the Orb module's generated modules through `super::`.
+#[test]
+fn a_contribution_in_a_sub_module_names_the_root_through_super() {
+    let dir = consumed("contributor", ADMISSION_WIT);
+    let module = orb_with(
+        options("example:blocker@1.0.0", Some(&dir)),
+        "mod blocker {
+            pub mod rules {
+                #[hook(\"example:admission/guard@1.0.0\", priority = -7)]
+                pub fn block(input: super::guard::Admission) -> super::guard::Admission { input }
+            }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let generated = tokens(&module);
+    assert!(
+        generated.contains("impl super :: exports :: example :: admission :: guard :: Guest for super :: __TembraExports { fn apply (input : super :: guard :: Admission) -> super :: guard :: Admission { block (input) } }"),
+        "{generated}"
+    );
+    assert!(
+        generated.contains("pub use exports :: example :: admission :: guard ;"),
+        "{generated}"
+    );
+}
