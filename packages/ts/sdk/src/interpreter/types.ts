@@ -47,9 +47,15 @@ export interface CheckedImplementation {
   };
 }
 
+/**
+ * What serves one WIT import: another Orb, a host provider, the kernel itself (`tembra:guest`,
+ * no provider and no grant), or the plan of a hook the importing Orb declares and also exports.
+ */
 export type ProviderBinding =
   | { kind: "orb"; name: string; api_version: number }
-  | { kind: "host"; provider: string };
+  | { kind: "host"; provider: string }
+  | { kind: "kernel" }
+  | { kind: "hook" };
 /** Checked install metadata; the kernel's generated types own shared lifecycle records. */
 export interface InstallationPlan {
   bindings: Record<string, ProviderBinding>;

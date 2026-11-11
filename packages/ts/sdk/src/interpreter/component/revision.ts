@@ -1,13 +1,16 @@
 /**
  * One installed compiled component revision, adapted to ordinary SDK Orb definitions.
  *
- * The checked contract plans services, contributions and incoming HTTP exactly as for native
- * hosts; a compiled component is described from its contract alone. Every guest entry is one
- * callback admitted by the revision gate and served by the component port, whose instrumented
- * task observation keeps admission and import attribution until physical completion.
+ * The checked contract plans services, hooks, contributions and incoming HTTP exactly as for
+ * native hosts; a compiled component is described from its contract and its artifact's roles
+ * (contributions, declared hooks, service lifetimes). Every guest entry is one callback admitted
+ * by the revision gate and served by the component port, whose instrumented task observation
+ * keeps admission and import attribution until physical completion. Kernel state, root resources,
+ * declared hooks and the call's context are served by `kernel.ts`.
  */
 import type { Declaration } from "../../authoring/declaration.ts";
 import type { Contribution, OrbDefinition, ServiceDefinition } from "../../authoring/types.ts";
+import type { Lifetime } from "../../bridge/identifiers.ts";
 import { KernelOp } from "../../bridge/protocol.ts";
 import {
   admitFactory,
@@ -31,6 +34,7 @@ import type { Environment } from "../../runtime/records.ts";
 import { check, checkedResult, encode, VALUE_LIMIT, Encoded } from "../codec.ts";
 import { Gate } from "../gate.ts";
 import { HTTP_HANDLER, IngressExchange } from "../http-ingress.ts";
+import { declaredHooks } from "../revision.ts";
 import {
   query,
   type CheckedImplementation,
@@ -49,6 +53,7 @@ import {
 } from "./resources.ts";
 import { issueByteStream } from "./streams.ts";
 import { viewMethod, importedResource } from "./host.ts";
+import { ComponentKernel, isKernel, type LogObserver } from "./kernel.ts";
 import type { ComponentPort } from "./port.ts";
 import { ComponentScope, type BoundMethod, type CallbackScope, type ScopeOwner } from "./scope.ts";
 import { converters, type FunctionValues, type GraphFunction, type TypeGraph } from "./values.ts";
@@ -72,13 +77,31 @@ export type Described = WitTypes &
     references: Readonly<Record<string, ReferenceBinding>>;
   };
 
-/** A compiled component's description: one service per callable export interface. */
+/**
+ * The roles a compiled artifact's metadata gives its exports, by interface identity: the hooks
+ * it contributes to with their priority, the hooks it declares with their composition, and the
+ * lifetime and linger of its services' objects.
+ */
+export interface CompiledRoles {
+  readonly contributions: Readonly<Record<string, number>>;
+  readonly hooks?: Readonly<Record<string, "series" | "waterfall" | "bail">>;
+  readonly services?: Readonly<Record<string, { lifetime: Lifetime; linger_ms: number }>>;
+}
+
+/**
+ * A compiled component's description: one service per callable export interface, with the
+ * lifetime and linger its policy names, and its declared hooks under their export's alias, as
+ * the native executor describes it. Contribution callbacks and the kernel's own callbacks
+ * (`tembra:guest`) are answered to their callers, never offered as services.
+ */
 export function compiledDescription(
   graph: Described,
   identity: { name: string; apiVersion: number },
-  contributions: Readonly<Record<string, number>>,
+  roles: CompiledRoles,
 ): Description {
   const services: Description["services"] = {};
+  const hooks: NonNullable<Description["hooks"]> = {};
+  const { contributions, hooks: declared = {}, services: policies = {} } = roles;
   const spelling = (name: string) => {
     const value = graph.javascriptNames[name];
     if (value === undefined) throw new Error(`Missing WIT JavaScript name for ${name}`);
@@ -86,16 +109,23 @@ export function compiledDescription(
   };
   for (const entry of graph.exports) {
     if (!entry.contract || !entry.functions || !Object.keys(entry.functions).length) continue;
-    if (Object.hasOwn(contributions, entry.contract)) continue;
     const name = entry.contract.slice(entry.contract.indexOf("/") + 1).split("@")[0]!;
+    if (Object.hasOwn(declared, entry.contract)) {
+      hooks[spelling(name)] = declared[entry.contract]!;
+      continue;
+    }
+    if (Object.hasOwn(contributions, entry.contract) || isKernel(entry.contract)) continue;
+    const policy = Object.hasOwn(policies, entry.contract) ? policies[entry.contract] : undefined;
     services[spelling(name)] = {
       methods: Object.keys(entry.functions).map(spelling),
+      ...(policy ? { lifetime: policy.lifetime, linger: policy.linger_ms } : {}),
     };
   }
   return {
     name: identity.name,
     apiVersion: identity.apiVersion,
     services,
+    hooks,
     contributes: { ...contributions },
   };
 }
@@ -125,6 +155,8 @@ export class ComponentRevision implements ScopeOwner {
   readonly #issuedResources = new Map<number, Set<() => void>>();
   /** The instance's incoming-HTTP bridge from the HTTP adapter (`wasi.ts`). */
   ingressBridge: IngressBridge | undefined;
+  /** The kernel's interfaces (`tembra:guest`) and the hooks this Orb declares. */
+  readonly kernel: ComponentKernel;
   #closed = false;
 
   constructor(
@@ -132,7 +164,10 @@ export class ComponentRevision implements ScopeOwner {
     readonly contract: ContractPort,
     readonly graph: Described,
     readonly timeout: number,
+    /** The Orb's name and where its `tembra:guest/context` log records go. */
+    log: { readonly orb: string; readonly observer?: LogObserver } = { orb: "" },
   ) {
+    this.kernel = new ComponentKernel(this, log.orb, log.observer);
     port.wasi.retired.addEventListener(
       "abort",
       () => {
@@ -405,7 +440,6 @@ export class ComponentRevision implements ScopeOwner {
       bindings: installation.bindings,
     });
     const { plan } = checked;
-    if (checked.hooks.hooks.length) throw new Error("Compiled components declare no hooks");
     const graph = this.graph;
     const compile = shapes(graph);
     const convert = converters(graph);
@@ -416,6 +450,10 @@ export class ComponentRevision implements ScopeOwner {
       if (!found) throw new Error(`Missing prepared signature for ${contract}#${method}`);
       return found[1];
     };
+    // A declared hook runs its plan through the kernel, its values checked by its callback.
+    this.kernel.declareHooks(checked.hooks.hooks, (hook) =>
+      compile(exported(hook.name, hook.method)),
+    );
     for (const [binding, service] of Object.entries(installation.importServices)) {
       if (checked.hooks.contributions.some((contribution) => contribution.binding === binding))
         continue;
@@ -461,13 +499,17 @@ export class ComponentRevision implements ScopeOwner {
       this.importMethods.set(binding, methods);
     }
     let rootScope: ComponentScope | undefined;
-    // A compiled component has no factory code: a factory only issues the host scope.
-    const create = (service: string | null) => async (declaration: Declaration) => {
-      const scope = new ComponentScope(this, declaration, service);
-      if (service === null) rootScope = scope;
-      this.scopes.set(scope.id, scope);
-      return scope;
-    };
+    // A compiled component has no factory code: a factory issues the host scope and declares
+    // what the component's kernel callbacks describe for it. The factory's admission holds the
+    // gate, so those callbacks enter the component directly.
+    const create =
+      (service: string | null, contract?: string) => async (declaration: Declaration) => {
+        const scope = new ComponentScope(this, declaration, service);
+        if (service === null) rootScope = scope;
+        this.scopes.set(scope.id, scope);
+        await this.kernel.declare(scope, declaration, service, contract);
+        return scope;
+      };
     const admit = () => this.gate.enter(Math.max(1, Math.floor(this.timeout / 2)));
     const services: Record<string, ServiceDefinition> = {};
     for (const service of checked.services) {
@@ -475,7 +517,7 @@ export class ComponentRevision implements ScopeOwner {
       const functions = graph.exports.find((item) => item.binding === binding)?.functions;
       services[service.name] = {
         [signature]: service.signature,
-        [declareFactory]: create(alias),
+        [declareFactory]: create(alias, binding),
         lifetime: service.lifetime,
         linger: service.linger,
         [admitFactory]: admit,
@@ -612,7 +654,7 @@ export class ComponentRevision implements ScopeOwner {
       name: identity.name,
       apiVersion: identity.apiVersion,
       services,
-      hooks: {},
+      hooks: declaredHooks(checked.hooks.hooks),
       contributes,
       requires: Object.fromEntries(
         plan.orb.requires.map((requirement) => [
@@ -622,9 +664,16 @@ export class ComponentRevision implements ScopeOwner {
       ),
       [isolatedRevision]: true,
       [declareFactory]: create(null),
-      // A compiled component declares no state, so it has no state validators.
-      [validateEnvironment]: async (environment: Environment) => {
-        if (!this.scopes.has(environment.id)) throw new Error("Validator scope is gone");
+      // A reload adopts a retained state only once the component validated it.
+      [validateEnvironment]: async (environment: Environment, value: unknown) => {
+        const scope = this.scopes.get(environment.id);
+        if (!scope) throw new Error("Validator scope is gone");
+        const release = await this.gate.enter();
+        try {
+          await this.kernel.validate(scope, value);
+        } finally {
+          release();
+        }
       },
       [admitFactory]: admit,
       [releaseEnvironment]: async (environment: Environment) => {
@@ -639,6 +688,7 @@ export class ComponentRevision implements ScopeOwner {
         // Closing schedules drops through the port's physical cleanup queue.
         await this.port.settled();
         this.#issuedResources.delete(environment.id);
+        this.kernel.release(environment.id);
         this.scopes.delete(environment.id);
       },
       [disposeOrb]: async () => {

@@ -53,6 +53,12 @@ function contracts(digest: string) {
         contributions() {
           return "{}";
         }
+        hooks() {
+          return "{}";
+        }
+        services() {
+          return "{}";
+        }
         bind(): number {
           throw new Error("No methods expected");
         }
