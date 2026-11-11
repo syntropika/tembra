@@ -51,7 +51,7 @@ mod filter {
     impl Report {
         /// Admissions seen and blocked so far by this instance of the Orb.
         pub fn read() -> Counts {
-            Counts::with(|counts| counts.clone())
+            Counts::with(|counts| *counts)
         }
     }
 }
