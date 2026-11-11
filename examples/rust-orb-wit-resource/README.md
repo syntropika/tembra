@@ -1,121 +1,142 @@
 # Rust Orb exporting a WIT resource
 
-This example runs two compiled Orbs. `decoder` hands out sessions: a `Session` is a WIT resource,
-a value that stays in the decoder while whoever opened it holds a handle and calls its methods, as
-often as it likes, until it drops the handle and the kernel destroys the value. `player` imports
-the decoder's interface, opens a session, decodes frame after frame through the handle and drops
-it. The host is wiring only: it installs both, drives the player, then holds a session itself.
+This example runs two compiled Orbs. `text` hands out builders: a `Builder` is a WIT resource, a
+text under construction that stays in the text Orb while whoever started it holds a handle and
+pushes one character per call, until it drops the handle and the kernel destroys the value.
+`speller` imports the text Orb's interface, starts a builder, spells a word through it one letter at
+a time and drops it. The host is wiring only: it installs both, drives the speller, then holds two
+builders itself.
 
-| File                           | Role                                                                                           |
-| ------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `decoder/src/lib.rs`           | The provider: `#[wit_resource]` on a struct with `&self` methods, a service returning it       |
-| `decoder/contract/decoder.wit` | The contract `cargo tembra build` wrote: the `resource` with its constructor and methods       |
-| `player/src/lib.rs`            | The consumer: `import = "..."` on the attribute, `decoding::open(..)` and `session.decode(..)` |
-| `player/contract/player.wit`   | The contract of the consumer: the decoder's interface imported, the decoder's package nested   |
-| `host/src/main.rs`             | The wiring: installs both, drives the player, holds an `Owned` session; it defines no Orb      |
-| `run.sh`                       | Build the decoder, then the player against the decoder's contract, show both, run the host     |
+| File                           | Role                                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `text/src/lib.rs`              | The provider: `#[wit_resource]` on a struct, its `#[constructor]`, two `&self` methods, a service |
+| `text/contract/text.wit`       | The contract `cargo tembra build` wrote: the `resource` with its constructor and methods          |
+| `speller/src/lib.rs`           | The consumer: `import = "..."` on the attribute, `texts::start()` and `builder.push(..)`          |
+| `speller/contract/speller.wit` | The contract of the consumer: the text Orb's interface imported, its package nested               |
+| `host/src/main.rs`             | The wiring: installs both, drives the speller, holds two `Owned` builders; it defines no Orb      |
+| `run.sh`                       | Build the text Orb, then the speller against its contract, show both, run the host                |
 
 ## The resource
 
 ```rust
-/// One decoding session: the caller owns it and decodes frame after frame with it.
+/// A text under construction: the caller owns it and pushes one character per call.
 #[wit_resource]
-pub struct Session { key: u8, frames: Cell<u32> }
+pub struct Builder { text: RefCell<String> }
 
-impl Session {
+impl Builder {
     #[constructor]
-    pub fn new(key: u8) -> Session { /* the constructor */ }
-    pub fn decode(&self, frame: Vec<u8>) -> Vec<u8> { /* a method */ }
-    pub fn frames(&self) -> u32 { /* a method */ }
+    pub fn new() -> Builder { /* the constructor */ }
+    pub fn push(&self, ch: char) -> u32 { /* a method */ }
+    pub fn text(&self) -> String { /* a method */ }
 }
 
 #[service]
-pub struct Decoding;
+pub struct Texts;
 
-impl Decoding {
-    /// Open a session for `key`; the caller owns the returned handle.
-    pub fn open(key: u8) -> Session { Session::new(key) }
+impl Texts {
+    /// Start an empty text; the caller owns the returned handle.
+    pub fn start() -> Builder { Builder::new() }
+    /// How many builders were destroyed, when their last owner dropped them.
+    pub fn dropped() -> u32 { /* a counter incremented by Builder's Drop */ }
 }
 ```
 
 A struct marked `#[wit_resource]` becomes a `resource` of the interface of the service whose
 methods hand it out: the function marked `#[constructor]` is its constructor, the `pub fn` taking
 `&self` are its methods, the other `pub fn` its static functions; a `pub fn new` without the
-marker is one of those. The struct keeps its fields and its `Drop`; a method
-returning the struct returns an owned handle. Interior mutability (`Cell`, `RefCell`) is how a
-method changes a session, because WIT methods borrow `self`.
+marker is one of those. The struct keeps its fields and its `Drop`; a method returning the struct
+returns an owned handle. Interior mutability (`Cell`, `RefCell`) is how a method changes the text,
+because WIT methods borrow `self`.
 
 ```wit
-interface decoding {
-  /// One decoding session: the caller owns it and decodes frame after frame with it.
-  resource session {
-    constructor(key: u8);
-    decode: func(frame: list<u8>) -> list<u8>;
-    frames: func() -> u32;
+interface texts {
+  /// A text under construction: the caller owns it and pushes one character per call.
+  resource builder {
+    constructor();
+    push: func(ch: char) -> u32;
+    text: func() -> string;
   }
-  open: func(key: u8) -> session;
-  closed: func() -> u32;
+  start: func() -> builder;
+  dropped: func() -> u32;
 }
 ```
 
-The value lives in the decoder's component. The handle crosses to the caller, native or compiled,
-and every method call travels back to the decoder under the caller's own admission; when the last
-owner drops the handle the kernel destroys the value, which runs `Drop`.
+The value lives in the text Orb's component. The handle crosses to the caller, native or compiled,
+and every method call travels back to the text Orb under the caller's own admission; when the last
+owner drops the handle the kernel destroys the value, which runs `Drop`, and `dropped` counts it.
 
 ## The consumer
 
 ```rust
 #[tembra_orb_macro::orb(
-    package = "example:player@1.0.0",
-    wit = "../decoder/contract",
-    import = "example:decoder/decoding@1.0.0"
+    package = "example:speller@1.0.0",
+    wit = "../text/contract",
+    import = "example:text/texts@1.0.0"
 )]
-mod player {
-    impl Playback {
-        pub fn play(key: u8, frames: Vec<Vec<u8>>) -> Vec<u32> {
-            let session = decoding::open(key);
-            // session.decode(&frame) as often as needed; dropped at the end
+mod speller {
+    impl Spelling {
+        pub fn spell(word: String) -> String {
+            let builder = texts::start();
+            for (index, letter) in word.chars().enumerate() {
+                if index > 0 {
+                    builder.push('-');
+                }
+                builder.push(letter);
+            }
+            builder.text()
+            // the handle is dropped here
         }
     }
 }
 ```
 
 `import = "ns:name/interface@version"` adds `import` of that interface to the world and
-re-exports its generated module under the interface's name: `decoding::open` returns a
-`decoding::Session` handle with the methods of the resource. The package comes from the directory
-`wit` names, here the contract the decoder's own build wrote. At installation the host binds the
-import to the decoder Orb with `Install::requires`, as for any dependency.
+re-exports its generated module under the interface's name: `texts::start` returns a
+`texts::Builder` handle with the methods of the resource, and the compiler checks every call on it.
+The package comes from the directory `wit` names, here the contract the text Orb's own build wrote.
+At installation the host binds the import to the text Orb with `Install::requires`, as for any
+dependency.
+
+## Why a resource and not a method
+
+The spelling is a job in several steps that belong together: each `push` adds to what the earlier
+ones built. A plain method has no memory between calls, so the speller would have to send the
+whole text back and forth, or the text Orb would have to keep a map from some id to a text and
+trust every caller to clean up. The resource gives the job an identity, the handle, usable only by
+whoever holds it; lets many run at once, the speller's builder and the host's two, each with its
+own text; and cleans up by itself when the handle drops.
 
 ## Build
 
-Run from the repository root; the player is built against the decoder's contract, so the decoder
-comes first.
+Run from the repository root; the speller is built against the text Orb's contract, so the text
+Orb comes first.
 
 ```sh
 cargo install --path crates/cargo-tembra
-cargo tembra build --manifest-path examples/rust-orb-wit-resource/decoder/Cargo.toml
-cargo tembra build --manifest-path examples/rust-orb-wit-resource/player/Cargo.toml
+cargo tembra build --manifest-path examples/rust-orb-wit-resource/text/Cargo.toml
+cargo tembra build --manifest-path examples/rust-orb-wit-resource/speller/Cargo.toml
 ```
 
 ## Run
 
 ```sh
-cargo run --manifest-path examples/rust-orb-wit-resource/host/Cargo.toml -- examples/rust-orb-wit-resource/decoder/artifacts/decoder.orb.wasm examples/rust-orb-wit-resource/player/artifacts/player.orb.wasm
+cargo run --manifest-path examples/rust-orb-wit-resource/host/Cargo.toml -- examples/rust-orb-wit-resource/text/artifacts/text.orb.wasm examples/rust-orb-wit-resource/speller/artifacts/speller.orb.wasm
 ```
 
 ```text
-player play(7, 3 frames) -> [0,9,7,3]
-decoder closed()          -> 1
-host   decode([3, 2])     -> [2,3], frames -> 1
-decoder closed()          -> 2
+speller spell("ciao") -> "c-i-a-o"
+text    dropped()     -> 1
+host    two builders  -> "hi", "yo"
+text    dropped()     -> 3
 ```
 
-The player decodes three frames through one session and reports the first byte of each, then the
-session's own count; dropping the handle at the end of `play` destroyed the session, as `closed`
-says. The host then opens a session of its own: `call_portable::<_, Owned>` returns the handle, the
-resource's methods are called on it by their WIT names, `[method]session.decode` and
-`[method]session.frames`, and dropping the handle at the end of the root destroys the second
-session. `run.sh` runs the steps in order.
+The speller pushes seven characters, four letters and three dashes, through one builder and reads
+the text; dropping the handle at the end of `spell` destroyed the builder, as `dropped` says. The
+host then starts two builders of its own: `call_portable::<_, Owned>` returns each handle, the
+resource's methods are called on them by their WIT names, `[method]builder.push` and
+`[method]builder.text`, the pushes interleave and the two texts stay apart, and dropping both
+handles at the end of the root destroys them, so `dropped` reaches 3. `run.sh` runs the steps in
+order.
 
 ## Limits
 

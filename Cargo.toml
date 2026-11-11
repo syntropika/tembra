@@ -39,8 +39,8 @@ exclude = [
   "examples/rust-orb-service-lifetime/host",
   "examples/rust-orb-shared-interface/book",
   "examples/rust-orb-shared-interface/host",
-  "examples/rust-orb-wit-resource/decoder",
-  "examples/rust-orb-wit-resource/player",
+  "examples/rust-orb-wit-resource/text",
+  "examples/rust-orb-wit-resource/speller",
   "examples/rust-orb-wit-resource/host",
 ]
 
