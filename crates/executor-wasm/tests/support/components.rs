@@ -131,8 +131,24 @@ pub fn artifact_with(
     name: &str,
     manifest: &tembra_contracts::Manifest,
 ) -> Vec<u8> {
+    encode(WIT, world, module, name, manifest)
+}
+
+/// The kernel's package, bundled with the contracts, for worlds importing its interfaces.
+pub const GUEST: &str = include_str!("../../../contracts/wit/tembra/guest.wit");
+
+/// Encode a core module and a world of `wit` as a component, then package it as an Orb artifact
+/// with the given manifest. The kernel's `tembra:guest` package is resolvable from `wit`.
+pub fn encode(
+    wit: &str,
+    world: &str,
+    module: &str,
+    name: &str,
+    manifest: &tembra_contracts::Manifest,
+) -> Vec<u8> {
     let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("deps.wit", WIT).unwrap();
+    resolve.push_str("guest.wit", GUEST).unwrap();
+    let package = resolve.push_str("orb.wit", wit).unwrap();
     let selected = resolve.select_world(&[package], Some(world)).unwrap();
     let mut core = wat::parse_str(module).unwrap();
     wit_component::embed_component_metadata(
@@ -149,7 +165,7 @@ pub fn artifact_with(
         .unwrap()
         .encode()
         .unwrap();
-    tembra_contracts::Contract::from_source("deps.wit", WIT, Some(world))
+    tembra_contracts::Contract::from_source("orb.wit", wit, Some(world))
         .unwrap()
         .component_artifact(&component, name, 1, manifest)
         .unwrap()
