@@ -1,4 +1,5 @@
-//! Install the counter, watch its kernel-managed state from the host, and keep it across a reload.
+//! Install the counter, watch its kernel-managed state from the host, see an update refused by
+//! the state's own rule, and keep the state across a reload.
 //!
 //! The state belongs to the kernel object, not to the component: the host observes it through
 //! the reference without calling a method, and a reload replaces the component with a fresh
@@ -39,11 +40,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let five_billion = json!([5_000_000_000_i64]);
     println!(
         "add(5000000000)  -> {}",
-        call(&mut pool, &host, &counter, "add", five_billion)?
+        outcome(call(&mut pool, &host, &counter, "add", five_billion)?)
     );
     println!(
         "add(-2)          -> {}",
-        call(&mut pool, &host, &counter, "add", json!([-2]))?
+        outcome(call(&mut pool, &host, &counter, "add", json!([-2]))?)
+    );
+    // The state's validator refuses a negative total: `add` reports the refusal as its result,
+    // the kernel keeps the previous count and the observer sees no change.
+    let six_billion_down = json!([-6_000_000_000_i64]);
+    println!(
+        "add(-6000000000) -> {}",
+        outcome(call(&mut pool, &host, &counter, "add", six_billion_down)?)
     );
 
     // 3. Reload the Orb: a second load of the same artifact is a new revision with a fresh
@@ -61,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "add(1)           -> {}",
-        call(&mut pool, &host, &counter, "add", json!([1]))?
+        outcome(call(&mut pool, &host, &counter, "add", json!([1]))?)
     );
 
     counter.release()?;
@@ -72,6 +80,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("host errors: {errors:?}").into());
     }
     Ok(())
+}
+
+/// Print a WIT `result<count, string>` as the boundary carries it: `{"tag":"ok","val":...}` or
+/// `{"tag":"err","val":"..."}`.
+fn outcome(result: Value) -> String {
+    match result["tag"].as_str() {
+        Some("ok") => format!("ok {}", result["val"]),
+        Some("err") => format!("refused: {}", result["val"].as_str().unwrap_or_default()),
+        _ => result.to_string(),
+    }
 }
 
 /// Call one method of the counter under a root context of the principal `alice`.
