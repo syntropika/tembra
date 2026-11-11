@@ -1366,7 +1366,7 @@ name = "tembra-core"
 version = "0.2.2"
 
 [[package]]
-name = "tembra-example-decoder-host"
+name = "tembra-example-text-host"
 version = "0.1.0"
 dependencies = [
  "futures",

@@ -1,0 +1,36 @@
+package example:speller@1.0.0;
+
+/// The service: spells words, one builder of the text Orb per word.
+interface spelling {
+  /// Spell `word` letter by letter, a dash between the letters, through one builder: as many
+  /// `push` calls as letters and dashes, all on the same handle.
+  spell: func(word: string) -> string;
+}
+
+world speller {
+  import example:text/texts@1.0.0;
+  export spelling;
+}
+
+package example:text@1.0.0 {
+  /// The service: starts builders and counts the ones destroyed.
+  interface texts {
+    /// A text under construction: the caller owns it and pushes one character per call.
+    resource builder {
+      constructor();
+      /// Append one character and return how many the text holds; a method of the resource.
+      push: func(ch: char) -> u32;
+      /// The text built so far.
+      text: func() -> string;
+    }
+
+    /// Start an empty text; the caller owns the returned handle.
+    start: func() -> builder;
+
+    /// How many builders were destroyed, when their last owner dropped them.
+    dropped: func() -> u32;
+  }
+  world text {
+    export texts;
+  }
+}

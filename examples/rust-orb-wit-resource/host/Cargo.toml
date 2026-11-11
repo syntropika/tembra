@@ -1,13 +1,13 @@
 [package]
-name = "tembra-example-decoder-host"
+name = "tembra-example-text-host"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [workspace]
 
-# The wiring that installs the decoder and the player, drives the player and holds a session of
-# its own; it defines no Orb.
+# The wiring that installs the text Orb and the speller, drives the speller and holds two builders
+# of its own; it defines no Orb.
 [dependencies]
 tembra = { path = "../../../crates/tembra" }
 tembra-executor-wasm = { path = "../../../crates/executor-wasm" }
