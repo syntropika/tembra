@@ -205,6 +205,10 @@ pub struct PreparedComponent {
     pub identity: Identity,
     pub contract: PreparedContract,
     pub contributions: BTreeMap<String, i32>,
+    /// Hooks the component declares, with their composition, as [`Artifact::hooks`].
+    pub hooks: BTreeMap<String, HookComposition>,
+    /// Ownership policies of the component's services, as [`Artifact::services`].
+    pub services: BTreeMap<String, ServicePolicy>,
     /// Lowercase hexadecimal SHA-256 of the exact artifact bytes.
     pub digest: String,
 }
@@ -232,26 +236,22 @@ impl PreparedComponent {
             return Err(Error("unsupported artifact metadata section".into()));
         }
         let (identity, contract, roles) = decode_orb(orb)?;
+        // The same checks as a natively verified artifact: the browser runs declared hooks and
+        // service policies exactly as the other hosts do.
+        contract.check_roles(&roles)?;
+        let contract = contract.with_references(&roles.references)?;
         let ComponentRoles {
             contributions,
-            references,
             hooks,
             services,
+            references: _,
         } = roles;
-        // Compiled hook definitions and service policies are outside the prepared browser
-        // profile; refusing them keeps the browser from running such an Orb differently.
-        if !hooks.is_empty() || !services.is_empty() {
-            return Err(Error(
-                "prepared browser adapters do not support declared hooks or service policies"
-                    .into(),
-            ));
-        }
-        contract.check_contribution_roles(&contributions)?;
-        let contract = contract.with_references(&references)?;
         Ok(Self {
             identity,
             contract,
             contributions,
+            hooks,
+            services,
             digest,
         })
     }
@@ -267,6 +267,16 @@ impl PreparedComponent {
     /// Compiled contribution roles and their priorities.
     pub fn describe_contributions(&self) -> serde_json::Value {
         serde_json::to_value(&self.contributions).expect("serializable contribution roles")
+    }
+
+    /// Declared hooks and their composition, by exported interface identity.
+    pub fn describe_hooks(&self) -> serde_json::Value {
+        serde_json::to_value(&self.hooks).expect("serializable hook declarations")
+    }
+
+    /// Service lifetimes and lingers, by exported interface identity.
+    pub fn describe_services(&self) -> serde_json::Value {
+        serde_json::to_value(&self.services).expect("serializable service policies")
     }
 }
 

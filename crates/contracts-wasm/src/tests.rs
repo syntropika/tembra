@@ -122,6 +122,8 @@ fn prepared_components_bind_metadata_to_registered_digests_only() {
         json!({"name":"browser","apiVersion":1,"world":"run","kind":"component"})
     );
     assert_eq!(computed.contributions(), "{}");
+    assert_eq!(computed.hooks(), "{}");
+    assert_eq!(computed.services(), "{}");
     let slot = computed
         .bind("test:browser/values@1.0.0", "read-bytes", true)
         .unwrap();
