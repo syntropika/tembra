@@ -93,6 +93,13 @@ For an Orb that imports WASI, the last part names the grants an installer must g
 `system: cli` and `system: clocks` for a std Orb that prints. Without it, those fourteen `wasi:cli`
 and `wasi:clocks` interfaces surface one at a time from `engine.load` errors.
 
+## Browsers
+
+The artifact runs in browsers through an adapter the application's build prepares from these
+exact bytes with `prepareBrowserComponent` of `@syntropika/tembra-sdk/tooling`; see
+[browser preparation](../../docs/tooling.md#prepare-a-compiled-orb-for-browsers). The adapter
+serves the kernel interfaces and the declared hooks itself, as the native executor does.
+
 ## Not yet
 
 - A `tembra-guest` crate re-exporting `wit-bindgen`, `dlmalloc` and the macro, so that `new` does
