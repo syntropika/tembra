@@ -1,12 +1,12 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 21:20 CET
+- **Aggiornato:** 2026-11-11, 21:30 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
-  ora con base `main`
-- **Stato:** strada A. Ribase fatto, verificato e su origin
-  come `feat/rust-first-orbs-rebased` (`f8d9cf2`), con la CI
-  in corso. Manca solo il force-push su `feat/rust-first-orbs`,
-  che lancia Giacomo (vedi «Da fare»).
+  base `main`
+- **Stato:** strada A. Ribase fatto, verificato e pushato: la
+  PR #1 è a `f8d9cf2`, 52 commit sopra `main` (`865e4c6`), e
+  GitHub la dà `MERGEABLE`/`CLEAN`. CI in corso. Restano il
+  corpo della PR e i fix (vedi «Da fare»).
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -818,19 +818,24 @@ Fatto da Claude verso le 20:30 CET, su richiesta di Giacomo
   `feat/rust-first-orbs-rebased`. La CI `Quality` gira sul
   push: run `43088224249`, `quality` e `acceptance`.
 
-Il force-push invece è bloccato per Claude dal classificatore
-(«Git Destructive»). Tocca a Giacomo, da qualunque clone:
+Il force-push al primo tentativo è stato bloccato dal
+classificatore («Git Destructive»). Giacomo, in Remote Control
+e senza SSH, ha mandato il comando esatto in chat (il prefisso
+`!` non passa dal Remote Control: arriva come messaggio), e
+alle 21:24 CET Claude l'ha lanciato:
 
-```bash
-git fetch origin
-git push origin \
-  --force-with-lease=feat/rust-first-orbs:d1c4e12 \
-  origin/feat/rust-first-orbs-rebased:feat/rust-first-orbs
+```text
++ d1c4e12...f8d9cf2 feat/rust-first-orbs-rebased
+  -> feat/rust-first-orbs (forced update)
 ```
+
+CI sulla PR: run `43095862614` (push) e `43095868722`
+(pull_request), su `f8d9cf2`.
 
 Poi:
 
-1. cancellare il branch di passaggio:
+1. cancellare il branch di passaggio, quando la sua run
+   `43088224249` è finita:
 
    ```bash
    git push origin --delete \
