@@ -1009,12 +1009,14 @@ fn the_head_arrives_early_and_the_producer_is_backpressured() {
     engines(|interpreter, interpreted| {
         let mut fixture = install(interpreter, interpreted, limits(30_000), Kind::Native, None);
         let mode = fixture.mode();
-        let (count, size) = (256_u32, 4096_u32);
+        // Three pipes exceed the allowed buffering without making this backpressure check a
+        // large interpreted byte-validation workload; complete reads are qualified separately.
+        let (count, size) = (48_u32, 4096_u32);
         let (bytes, mismatches, _) = fixture.read(count, size, CLEAN, u64::MAX, PROBED).unwrap();
         assert_eq!((bytes, mismatches), (u64::from(count * size), 0), "{mode}");
         let probed = fixture.native.probed.get().expect("probed");
         // The consumer's first read (at most one pipe), the refilled pipe, the chunk the pump
-        // holds and the one in flight: far below the whole 1 MiB body.
+        // holds and the one in flight: still below the whole three-pipe body.
         assert!(
             probed * size as usize <= 2 * PIPE_BYTES + 2 * size as usize,
             "{mode}: {probed}"
