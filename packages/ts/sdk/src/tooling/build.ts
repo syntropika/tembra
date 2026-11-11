@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
 
@@ -17,6 +17,7 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
   const root = path.resolve(config.root ?? process.cwd());
   const outDir = path.resolve(root, config.outDir ?? "dist/tembra");
   const artifacts: Artifact[] = [];
+  const declarations = new Map<string, Awaited<ReturnType<typeof witTypes>>>();
   const worlds = new Map<string, string | undefined>();
   for (const target of Object.values(config.builds)) {
     if (target.entry.endsWith(".wasm")) continue;
@@ -25,18 +26,35 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
       throw new Error(`Source builds for ${target.wit} must select the same WIT world`);
     worlds.set(file, target.world);
   }
+  const identities = new Map<string, string>();
+  const editorFiles = new Map<string, string>();
+  for (const [wit, world] of worlds) {
+    const types = await witTypes(wit, world, root);
+    declarations.set(wit, types);
+    for (const [identity, digest] of types.imports) {
+      const previous = identities.get(identity);
+      if (previous !== undefined && previous !== digest)
+        throw new Error(`Conflicting WIT declarations for ${identity} in one project`);
+      identities.set(identity, digest);
+    }
+    for (const [file, contents] of types.files) editorFiles.set(file, contents);
+  }
+  // Reject conflicting contracts before publishing any editor declaration.
+  for (const [file, contents] of editorFiles) {
+    const previous = await readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (previous === contents) continue;
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, contents);
+  }
   for (const [name, target] of Object.entries(config.builds)) {
     if (!/^[\w-]+$/.test(name)) throw new Error("Invalid build name");
     const entry = path.resolve(root, target.entry);
     const wit = path.resolve(root, target.wit);
     const compiled = entry.endsWith(".wasm");
-    const types = compiled ? undefined : await witTypes(wit, target.world);
-    if (types) {
-      for (const [file, contents] of types.files) {
-        await mkdir(path.dirname(file), { recursive: true });
-        await writeFile(file, contents);
-      }
-    }
+    const types = compiled ? undefined : declarations.get(wit);
     let bytes: Uint8Array;
     const contract = types?.contract ?? new NodeContract(path.dirname(wit), target.world);
     if (compiled) {
@@ -58,7 +76,7 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
         throw new Error(`Build ${name} declares contributions in its source Orb`);
       if (target.references !== undefined)
         throw new Error(`Build ${name} declares reference views in its source Orb`);
-      const program = typecheck(entry, root, types!.files, ["tembra-wasm"], types!.paths);
+      const program = typecheck(entry, root, types!.files, ["tembra-wasm"]);
       const description = query<{ imports: { contract?: string; type_only?: boolean }[] }>(
         contract,
         { kind: "describe" },

@@ -8,7 +8,6 @@ export function typecheck(
   root: string,
   virtual: ReadonlyMap<string, string> = new Map(),
   conditions: readonly string[] = [],
-  paths: Readonly<Record<string, string[]>> = {},
 ): ts.Program {
   const configFile = ts.findConfigFile(root, ts.sys.fileExists);
   const loaded = configFile ? ts.readConfigFile(configFile, ts.sys.readFile) : { config: {} };
@@ -32,7 +31,6 @@ export function typecheck(
     types: [],
     allowArbitraryExtensions: true,
     customConditions: [...conditions, "source"],
-    paths: { ...parsed.options.paths, ...paths },
   };
   const host = ts.createCompilerHost(options);
   const readFile = host.readFile;
@@ -71,7 +69,8 @@ export function typecheck(
   );
   // Include selected ambient declarations without typechecking unrelated build entrypoints.
   const ambient = parsed.fileNames.filter((file) => /\.d\.[cm]?ts$/.test(file));
-  const program = ts.createProgram([entry, environment, ...ambient], options, host);
+  const aliases = [...virtual.keys()].filter((file) => file.endsWith(".d.wit.ts"));
+  const program = ts.createProgram([entry, environment, ...ambient, ...aliases], options, host);
   const diagnostics = ts.getPreEmitDiagnostics(program);
   if (diagnostics.length)
     throw new Error(

@@ -15,6 +15,18 @@ then installs both through the ordinary Node host.
 `arithmetic` interface, updates managed state and reads a dependent resource.
 `fetchAndSum` uses the guest-side `fetch` helper from `@syntropika/tembra-sdk/http`.
 
+The implementation uses `satisfies WitMethods<typeof calculation, ReturnType<typeof create>>`
+once. TypeScript infers each method's environment, context, arguments and result from the
+factory and the WIT contract. Missing or extra methods and incorrect argument or result types
+fail the build. Imported Orb types use the canonical WIT identity:
+
+```ts
+import type * as Arithmetic from "example:integrated/arithmetic@1.0.0";
+```
+
+This is a type-only import. `self.get` acquires the actual provider under the Orb's declared
+requirement; neither the type import nor the npm dependency grants host capabilities.
+
 ## Build
 
 Run from the repository root after `just install` and `just build-node`. Running
@@ -43,6 +55,9 @@ its installed dependencies. The included `tsconfig.json` gives the editor the sa
 checked against the selected world and receives its name and API version from the
 build target. Each result is one immutable `orb.<sha256>.wasm` file under
 `dist/tembra/<name>/`, or under `--out`.
+
+Canonical imported interface types work in both the build and the editor without custom
+`paths` entries. Repeated builds keep unchanged managed declarations intact.
 
 ## Run
 

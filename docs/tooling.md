@@ -46,10 +46,81 @@ import type { calculation } from "./contract.wit";
 
 Generated declarations are written next to the WIT file in `.tembra/types/` and in a
 `<name>.d.wit.ts` alias. These are managed files; keep them out of version control.
+Canonical imported interface declarations are shared under the build root's `.tembra/imports/`,
+so several contracts in one editor project can consume the same interface without duplicate
+declarations. The shared graph includes the interface's transitive types. A build rejects
+different definitions of the same canonical interface identity before writing editor files.
 Source targets sharing a WIT file must select the same world so the editor alias stays unambiguous.
 Compiled targets do not generate TypeScript declarations.
 Set `customConditions: ["tembra-wasm"]` and `allowArbitraryExtensions: true` in the
 source project's `tsconfig.json` to use the same guest API and direct WIT types in the editor.
+
+### Infer implementations from the contract
+
+Keep the contract and implementation as the two author-owned source files. `WitMethods`
+contextually types every method's environment, context, arguments and result; no argument
+annotations, copied record types or handwritten bindings are needed:
+
+```wit
+package example:counter@1.0.0;
+interface counter {
+    add: func(amount: u64) -> u64;
+    read: func() -> u64;
+}
+world app { export counter; }
+```
+
+```ts
+import { orb, type Declaration, type WitMethods } from "@syntropika/tembra-sdk";
+import type { counter } from "./contract.wit";
+
+function create(self: Declaration) {
+  return self.state(0n);
+}
+
+export default orb({
+  name: "counter",
+  apiVersion: 1,
+  services: {
+    counter: {
+      create,
+      methods: {
+        add(total, context, amount) {
+          return total.update(context, (value) => value + amount);
+        },
+        read(total) {
+          return total.value;
+        },
+      } satisfies WitMethods<typeof counter, ReturnType<typeof create>>,
+    },
+  },
+});
+```
+
+Missing or extra methods and incorrect results fail the build. Here `amount` and the state
+are `bigint` because the WIT contract uses `u64`. WIT remains canonical: TypeScript `number`
+alone cannot distinguish a WIT `u32`, `s32` or `f64`. The Orb declaration retains runtime
+policy such as state creation and lifetime, which WIT does not express.
+
+Imported interface types also use their canonical WIT identities, including other Orbs:
+
+```ts
+import type * as Arithmetic from "example:integrated/arithmetic@1.0.0";
+
+// In a service factory whose world imports arithmetic:
+const arithmetic = self.get<typeof Arithmetic>("example:integrated/arithmetic@1.0.0", "main");
+```
+
+The same generated declarations serve the build and editor. The managed `.d.wit.ts` alias
+loads their canonical module names automatically; no `paths` entries or JCO-generated
+namespace names are required. These Orb imports are type-only; acquisition still goes
+through `self.get` or `context.get`, and the installer chooses the provider. Imported types
+grant no authority. Builds reuse declarations for targets sharing one contract and leave
+unchanged editor files untouched.
+
+The pinned JCO generator cannot distinguish every pair of versions of one imported interface.
+If it collapses different canonical identities into one declaration file, the build rejects
+the ambiguous declarations instead of assigning one version's types to another.
 
 Dependencies resolve with the `tembra-wasm` export condition. The build does not install
 packages. It rejects Node builtins, native addons, dynamic module names and any import left

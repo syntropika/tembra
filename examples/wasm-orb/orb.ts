@@ -1,6 +1,7 @@
 import { orb } from "@syntropika/tembra-sdk";
-import type { calculation, ExampleIntegratedArithmetic100 as Arithmetic } from "./contract.wit";
-import type { Context, Declaration, WitMethods } from "@syntropika/tembra-sdk";
+import type { calculation } from "./contract.wit";
+import type * as Arithmetic from "example:integrated/arithmetic@1.0.0";
+import type { Declaration, WitMethods } from "@syntropika/tembra-sdk";
 import { sum } from "simple-statistics";
 import { fetch } from "@syntropika/tembra-sdk/http";
 
@@ -20,8 +21,6 @@ function create(self: Declaration) {
   return { total, arithmetic, resource: doubled };
 }
 
-type Environment = ReturnType<typeof create>;
-
 export default orb({
   name: "calculator",
   apiVersion: 1,
@@ -29,30 +28,30 @@ export default orb({
     calculation: {
       create,
       methods: {
-        async sum(environment: Environment, context: Context, input: calculation.Input) {
+        async sum(environment, context, input) {
           const total = sum([...input.values]);
-          const doubled: number = await environment.arithmetic.double(total, context);
+          const doubled = await environment.arithmetic.double(total, context);
           environment.total.update(context, () => doubled);
           return environment.total.value;
         },
-        read(environment: Environment) {
+        read(environment) {
           return environment.total.value;
         },
-        resourceValue(environment: Environment) {
+        resourceValue(environment) {
           return environment.resource.value;
         },
-        async fetchAndSum(environment: Environment, context: Context, url: string) {
+        async fetchAndSum(environment, context, url) {
           const response = await fetch(url);
           if (!response.ok) {
             await response.close();
             throw new Error(`HTTP request failed: ${response.status}`);
           }
           const input = await response.json<{ values: number[] }>();
-          const doubled: number = await environment.arithmetic.double(sum(input.values), context);
+          const doubled = await environment.arithmetic.double(sum(input.values), context);
           environment.total.update(context, () => doubled);
           return environment.total.value;
         },
-      } satisfies WitMethods<typeof calculation, Environment>,
+      } satisfies WitMethods<typeof calculation, ReturnType<typeof create>>,
     },
   },
 });
