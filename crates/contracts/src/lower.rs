@@ -264,11 +264,10 @@ impl PreparedContract {
             }
             match selected {
                 Binding::Kernel => {
-                    if !guest::PAIRS.iter().any(|(import, _)| contract == *import) {
+                    if !guest::serves(&contract) {
                         return Err(Error(format!(
-                            "{binding}: the kernel serves only {} and {}",
-                            guest::STATE,
-                            guest::RESOURCE
+                            "{binding}: the kernel serves only {}",
+                            guest::IMPORTS.join(", ")
                         )));
                     }
                 }
