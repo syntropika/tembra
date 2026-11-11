@@ -12,15 +12,21 @@ interface state {
 }
 
 /// Exported by a compiled Orb whose services own kernel-managed state. The kernel asks when it
-/// creates a service object and binds the answer to the state it retains for that object.
+/// creates a service object and binds the answer to the state it retains for that object; on a
+/// reload it asks the new instance to validate the value it inherits, when the declaration says so.
 interface state-init {
-    /// The initial value, as JSON, and the version the kernel compares on reload.
+    /// The initial value, as JSON, the version the kernel compares on reload, and whether the
+    /// component validates the retained value before a reload adopts it.
     record declaration {
         initial: string,
         version: u32,
+        validated: bool,
     }
     /// The state of the service exporting the named interface, if it owns one.
     declare: func(service: string) -> option<declaration>;
+    /// Check the retained value, as JSON, of the named service's state; an error refuses the
+    /// reload with its message.
+    validate: func(service: string, value: string) -> result<_, string>;
 }
 
 /// The resources of a compiled Orb's root: values its component opens when the Orb is activated
