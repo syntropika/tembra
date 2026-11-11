@@ -663,21 +663,43 @@ fn dropping_a_backpressured_stream_stops_its_producer() {
 fn dropping_a_stream_of_an_idle_producer_ends_its_callback() {
     engines(|interpreter, interpreted| {
         let mut fixture = install(interpreter, interpreted, limits(30_000));
-        let started = Instant::now();
-        let first = fixture
+        let logs = fixture.logs.clone();
+        let (first, closing) = fixture
             .root(async move |context, reference, _| {
                 let mut stream = open(&context, &reference, 2, 1 << 10, IDLE).await?;
                 let first = stream.next().await.unwrap()?;
+                // Observe the producer's own idle marker before measuring its cancellation.
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while !logs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|line| line == "producer:idle")
+                {
+                    assert!(Instant::now() < deadline, "the producer never became idle");
+                    futures_timer::Delay::new(Duration::from_millis(2)).await;
+                }
+                // Opening and reading the stream are preparation, not close latency.
+                let closing = Instant::now();
                 drop(stream);
-                Ok(first)
+                Ok((first, closing))
             })
             .unwrap();
         let mode = fixture.mode();
         assert!(exact(&first, 1 << 10), "{mode}");
         fixture.wait(|fixture| fixture.calls() == 0);
-        assert!(started.elapsed() < Duration::from_secs(10), "{mode}");
+        let elapsed = closing.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "{mode}: close took {elapsed:?}"
+        );
+        assert!(
+            fixture.logged("producer:returned"),
+            "{mode}: cleanup did not run"
+        );
         assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
-        assert!(fixture.host.errors().is_empty(), "{mode}");
+        let errors = fixture.host.errors();
+        assert!(errors.is_empty(), "{mode}: {errors:?}");
         fixture.close();
     });
 }

@@ -27,6 +27,7 @@ jobs:
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ubuntu-24.04-${{ hashFiles('justfile', 'crates/executor-wasm/*/Cargo.toml', 'crates/executor-wasm/*/Cargo.lock') }}
+          cache-on-failure: "true"
       - run: cargo install just --version 1.21.0 --locked
       - run: just install-tools
       - run: just install
@@ -50,6 +51,7 @@ jobs:
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ubuntu-24.04-${{ hashFiles('justfile', 'crates/executor-wasm/*/Cargo.toml', 'crates/executor-wasm/*/Cargo.lock') }}
+          cache-on-failure: "true"
           workspaces: |
             . -> target
             crates/executor-wasm/rust-provider -> ${{ runner.temp }}/provider
