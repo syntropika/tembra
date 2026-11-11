@@ -276,11 +276,13 @@ impl Environment {
 
     /// Await portable references and cooperative timers under the active invocation's authority.
     /// `issued` receives the dependency call an import call issues, so the request's answer can
-    /// cancel it and wait for its physical end if the callback stops waiting.
+    /// cancel it and wait for its physical end if the callback stops waiting. A request on the
+    /// stream carrier (`stream`) is only ever an import call.
     pub(super) async fn asynchronous(
         &self,
         scope: &Scope,
         packet: &str,
+        stream: bool,
         issued: &crate::worker::Issued,
     ) -> Result<crate::worker::Reply> {
         let request = AsyncRequest::decode(packet).map_err(failure)?;
@@ -293,8 +295,11 @@ impl Environment {
         } = request
         {
             return self
-                .call_import(scope, owner, id, &method, args, issued)
+                .call_import(scope, owner, id, &method, args, stream, issued)
                 .await;
+        }
+        if stream {
+            return Err(failure("a stream carrier carries only an import call"));
         }
         let value = match request {
             AsyncRequest::HookRun {

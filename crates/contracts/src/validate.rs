@@ -251,6 +251,19 @@ impl PreparedContract {
 
     /// Check an Orb import without applying the JSON profile to standard WASI resource imports.
     pub fn check_import_value_profile(&self, binding: &str) -> Result<(), Error> {
+        self.check_import(binding, false)
+    }
+
+    /// Check an Orb import of a source Orb: the data profile, plus a `stream<u8>` returned as the
+    /// whole result of an asynchronous freestanding function.
+    ///
+    /// As for [`Self::check_source_profile`], only the native facade's capability transport
+    /// carries the stream end; data-only endpoints keep [`Self::check_import_value_profile`].
+    pub fn check_import_source_profile(&self, binding: &str) -> Result<(), Error> {
+        self.check_import(binding, true)
+    }
+
+    fn check_import(&self, binding: &str, streams: bool) -> Result<(), Error> {
         let entry = self
             .model()
             .imports
@@ -271,7 +284,7 @@ impl PreparedContract {
             ));
         }
         for function in &interface.functions {
-            self.supported_function(function, false)?;
+            self.supported_function(function, streams)?;
         }
         Ok(())
     }

@@ -886,9 +886,9 @@ fn platform_data_ports_refuse_source_stream_exports() {
     assert!(error.message.contains("stream"), "{error:?}");
 }
 
-/// Source imports stay data-only: a source Orb cannot select an import returning a stream.
+/// Data-only platform ports keep refusing stream imports until their carrier exists.
 #[test]
-fn source_stream_imports_remain_refused() {
+fn platform_data_ports_refuse_source_stream_imports() {
     const CONSUMER: &str = r#"
 package tembra-test:sourceimports;
 
@@ -909,15 +909,33 @@ world consumer {
         .unwrap()
         .source_artifact("globalThis.__tembraOrb={services:{}}", "consumer", 1)
         .unwrap();
-    let error = Engine::new(Limits::default())
-        .unwrap()
-        .load(
+    let artifact = tembra_contracts::Artifact::decode(&artifact).unwrap();
+    let bindings = artifact
+        .contract
+        .providers(
+            &BTreeMap::from([(
+                "tembra-test:sourceimports/frames".to_owned(),
+                tembra_contracts::OrbProvider {
+                    orb: "frames".into(),
+                    api_version: 1,
+                },
+            )]),
+            &Default::default(),
+        )
+        .unwrap();
+    let engine = Engine::new(Limits::default()).unwrap();
+    let error = engine
+        .open_port(
             &artifact,
-            Install::default().requires("tembra-test:sourceimports/frames", "frames", 1),
+            &bindings,
+            &Default::default(),
+            &Default::default(),
         )
         .err()
-        .expect("a source stream import is refused");
-    assert!(error.message.contains("stream"), "{error:?}");
+        .expect("a data port refuses a stream import");
+    assert!(error.message.contains("byte-stream"), "{error:?}");
+    assert!(error.message.contains("data only"), "{error:?}");
+    assert_eq!(engine.instances(), 0);
 }
 
 /// A source may throw any value: `throw undefined` after its head is a failure, never a clean

@@ -161,6 +161,14 @@ import {
   const exports = side(contract.exports, true);
   const imports = side(contract.imports, false);
 
+  /** Whether a whole result is exactly `stream<u8>`, through aliases. */
+  function byteStream(type: WitType | undefined): boolean {
+    if (type === undefined) return false;
+    type = primitive(type);
+    const kind = typeof type === "number" ? types.get(type) : undefined;
+    return kind?.stream !== undefined && kind.stream !== null && primitive(kind.stream) === "u8";
+  }
+
   /** Reject missing signatures instead of guessing how a value should be interpreted. */
   function signature(
     side: Map<string, Map<string, WitFunction>>,
@@ -189,11 +197,10 @@ import {
       return type.params.map((param, index) => convert(param.type, args[index], false));
     },
     streamResult(service, method) {
-      let type = signature(exports, service, method).result;
-      if (type === undefined) return false;
-      type = primitive(type);
-      const kind = typeof type === "number" ? types.get(type) : undefined;
-      return kind?.stream !== undefined && kind.stream !== null && primitive(kind.stream) === "u8";
+      return byteStream(signature(exports, service, method).result);
+    },
+    importStream(service, method) {
+      return byteStream(signature(imports, service.split("::").at(-1)!, method).result);
     },
     exportResult(service, method, value) {
       const type = signature(exports, service, method).result;

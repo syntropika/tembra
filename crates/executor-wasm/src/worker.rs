@@ -41,14 +41,28 @@ pub(crate) enum Event {
     Done(std::result::Result<String, String>),
     /// Incoming HTTP carrier events of a platform exchange (`crate::ingress::IngressPort`).
     Ingress(crate::ingress::IngressEvent),
-    /// A compiled guest's asynchronous import whose whole result is a `stream<u8>`. The Store
-    /// created `pipe` for the guest's reader; the host fills it from the delivered stream end.
-    /// It is never serialized, and no number in `packet` names it.
+    /// A guest's asynchronous import whose whole result is a `stream<u8>`: a compiled guest's
+    /// stream import, or a source guest's `STREAM_IMPORT`. The Store created `pipe` for the
+    /// guest's reader; the host fills it from the delivered stream end. It is never serialized,
+    /// and no number in `packet` names it.
     Stream {
         packet: String,
         reply: oneshot::Sender<std::result::Result<String, String>>,
         pipe: Arc<Mutex<Pipe>>,
     },
+}
+
+/// How a guest's host request reached the host. A request on the stream carrier may only call
+/// an import whose whole result is a `stream<u8>`, and such an import is called only on it; the
+/// host checks this before it issues the call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Carried {
+    /// A synchronous request: the guest stack waits for it.
+    Sync,
+    /// An asynchronous request whose answer is data, or resources the reply delivers.
+    Async,
+    /// An asynchronous import call answered with a stream end, pumped into the Store's pipe.
+    Stream,
 }
 
 /// The dependency call one host request issued, if any. When the callback stops waiting for
@@ -579,7 +593,7 @@ impl Session {
         cancellation: Option<&tembra::Cancellation>,
         packet: impl serde::Serialize,
         carrier: Carrier,
-        host: impl AsyncFn(&str, bool, &Issued) -> Result<Reply>,
+        host: impl AsyncFn(&str, Carried, &Issued) -> Result<Reply>,
     ) -> Result<Value> {
         let events = self.begin_with(
             Operation::Start,
@@ -701,7 +715,7 @@ impl Session {
     /// cancellation.
     fn answer<'a>(
         &'a self,
-        host: &'a impl AsyncFn(&str, bool, &Issued) -> Result<Reply>,
+        host: &'a impl AsyncFn(&str, Carried, &Issued) -> Result<Reply>,
         packet: String,
         asynchronous: bool,
         mut reply: oneshot::Sender<std::result::Result<String, String>>,
@@ -711,8 +725,13 @@ impl Session {
         async move {
             let issued = Issued::default();
             let _abandon = Abandon(&issued);
+            let carried = match (&stream, asynchronous) {
+                (Some(_), _) => Carried::Stream,
+                (None, true) => Carried::Async,
+                (None, false) => Carried::Sync,
+            };
             let result = {
-                let operation = std::pin::pin!(host(&packet, asynchronous, &issued));
+                let operation = std::pin::pin!(host(&packet, carried, &issued));
                 let closed = std::pin::pin!(reply.closed());
                 match futures::future::select(operation, closed).await {
                     futures::future::Either::Left((result, _)) => Some(result),

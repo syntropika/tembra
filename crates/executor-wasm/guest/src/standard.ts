@@ -12,11 +12,13 @@ import {
   STANDARD_PACKET,
   STREAM_CHUNK,
   STREAM_READ,
+  STREAM_IMPORT,
   STREAM_RESULT,
   Writer,
   decode,
   encode,
   resourceClassName,
+  utf8Encode,
 } from "../../../../packages/ts/sdk/src/interpreter/standard-codec.ts";
 
 import { InputBindings, type PumpOutcome } from "./standard-inputs.ts";
@@ -579,6 +581,20 @@ import { InputBindings, type PumpOutcome } from "./standard-inputs.ts";
       return;
     }
     if (failure !== undefined) throw failure.error;
+  };
+  /**
+   * Call an Orb import whose whole result is a `stream<u8>`. `request` is the same JSON
+   * `reference.call` packet a data import sends; only its carrier differs. The returned stream is
+   * the host-issued reader, so `readChunks` and the per-byte iterator both work; dropping it, or
+   * the callback's end, asks the producer to stop.
+   */
+  globalThis.__tembraStreamImport = async (request: string): Promise<unknown> => {
+    const writer = packet(STREAM_IMPORT);
+    writer.bytes(utf8Encode(request));
+    const reader = new Reader(await __hostAsync(writer.finish()));
+    const handle = reader.handle();
+    reader.end();
+    return handles.value("stream", "u8", handle);
   };
   globalThis.__tembraStandard = Object.freeze(
     Object.fromEntries(

@@ -252,8 +252,11 @@ consumer abandons its result.
 
 Source methods return `writeChunks(chunks)` from `@syntropika/tembra-sdk`, an
 `AsyncIterable<number>`, or a `Uint8Array`. They use the existing bounded stream writer;
-bytes cross as binary chunks. This source export support is available through the native
-Rust facade. Source Orb imports and the Node, browser and mobile SDK ports still refuse
+bytes cross as binary chunks. Through the native Rust facade, source Orbs can also import
+these streams from native Rust, compiled components and other source Orbs. The source
+consumer uses `readChunks(stream)` from the same SDK, or iterates bytes with `for await`.
+It can forward a reader by returning `writeChunks(readChunks(stream))`. A domain stream
+does not require a WASI import or grant. The Node, browser and mobile SDK ports still refuse
 domain stream contracts until their capability carriers are implemented.
 
 The whole source stream runs within one callback and shares its fuel and wall-time limits.
@@ -261,15 +264,16 @@ Expiry quarantines the producing revision. Prefer `writeChunks` over per-byte ge
 large bodies. The revision serves no other callback until production ends. After the reader
 closes, the producer's asynchronous iterator cleanup cannot rely on starting new host operations.
 
-Compiled Orbs can import that same async `stream<u8>` signature from a compiled or native
-provider. The host pumps bytes into the importing Store with bounded backpressure and at most
-16 outstanding stream imports per callback, until their readers close or that callback ends.
+Source and compiled Orbs can import that same async `stream<u8>` signature from a compiled,
+source or native provider. The host pumps bytes into the importing Store with bounded
+backpressure and at most 16 outstanding stream imports per callback, until their readers close
+or that callback ends.
 A compiled producer contributes at most 64 KiB in its pipe, 64 KiB in the pump's current chunk
 and 64 KiB in the importer pipe. A trusted native `ByteSource` controls its own chunk size;
 Tembra bounds the importer pipe, but does not split or bound that source's allocation.
 Consume an imported reader within the callback
 that received it; returning from that callback closes it, even if guest state retains it.
-Each compiled revision serves one callback at a time, so consume a stream before opening
+Each revision serves one callback at a time, so consume a stream before opening
 another against that same producer revision.
 
 When a source or compiled callback abandons a pending Orb import, the executor cancels that
@@ -292,7 +296,7 @@ for an imported stream. Model any required completion result explicitly in the a
 contract; this profile does not yet admit general WIT futures.
 
 Stream arguments, nested streams, non-byte elements, resource-method streams and futures are
-not admitted. Source Orb imports and the Node, browser and mobile data ports refuse domain
+not admitted. The Node, browser and mobile data ports refuse domain
 stream contracts.
 WASI HTTP body streams use their standard resources and host transport instead.
 

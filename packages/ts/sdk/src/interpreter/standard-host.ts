@@ -32,6 +32,7 @@ import {
   Reader,
   STANDARD_PACKET,
   STREAM_CHUNK,
+  STREAM_IMPORT,
   STREAM_NEW,
   STREAM_READ,
   STREAM_WRITE,
@@ -745,6 +746,10 @@ export class StandardHost implements StandardServices {
         }
         return this.#deliver(entry.payload, value);
       }
+      case STREAM_IMPORT:
+        // Stream imports need a host stream carrier; until the browser port has one, a source
+        // Orb importing a stream is refused at installation, and a forged packet here.
+        throw new Error("stream imports are served only through the native Rust facade");
       default:
         throw new Error("unknown standard operation");
     }

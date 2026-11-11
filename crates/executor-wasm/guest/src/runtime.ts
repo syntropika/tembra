@@ -17,6 +17,8 @@ import "./builtins.ts";
   delete globalThis.__tembraSweepStandard;
   const streamResult = globalThis.__tembraStreamResult!;
   delete globalThis.__tembraStreamResult;
+  const streamImport = globalThis.__tembraStreamImport!;
+  delete globalThis.__tembraStreamImport;
   const writeLog = globalThis.__writeLog!;
   delete globalThis.__writeLog;
   Object.defineProperty(globalThis, "console", {
@@ -110,12 +112,18 @@ import "./builtins.ts";
         if (typeof method !== "string") return undefined;
         return (...args: any[]) => {
           if (args.at(-1)?.[contextMarker] === true) args.pop();
-          return call("reference.call", {
+          const request = {
             scope,
             id,
             method,
             args: wire.importArguments(service, method, args),
-          }).then((value) => wire.importResult(service, method, value));
+          };
+          // A whole `stream<u8>` result arrives as a host-issued reader on its own carrier.
+          if (wire.importStream(service, method))
+            return streamImport(JSON.stringify({ operation: "reference.call", ...request }));
+          return call("reference.call", request).then((value) =>
+            wire.importResult(service, method, value),
+          );
         };
       },
     });

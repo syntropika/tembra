@@ -576,3 +576,63 @@ fn source_artifacts_admit_only_whole_async_byte_stream_results() {
         assert!(Artifact::decode(&forge(&contract)).is_err(), "{shape}");
     }
 }
+
+/// A source Orb's import admits a `stream<u8>` only as the whole result of an asynchronous
+/// freestanding function, under exactly the export rule; the data import profile, which data
+/// ports keep, still refuses it.
+#[test]
+fn source_imports_admit_only_whole_async_byte_stream_results() {
+    const BINDING: &str = "test:streams/frames@1.0.0";
+    let world = |body: &str| {
+        format!(
+            "package test:streams@1.0.0; interface frames {{ {body} }} \
+             interface probe {{ ping: func() -> u32; }} \
+             world orb {{ import frames; export probe; }}"
+        )
+    };
+    for accepted in [
+        "frames: async func(count: u32, label: string, seed: u64) -> stream<u8>; ping: func() -> u32;",
+        "type bytes = stream<u8>; frames: async func() -> bytes;",
+    ] {
+        let contract = contract(&world(accepted));
+        let prepared = contract.prepared();
+        prepared.check_import_source_profile(BINDING).unwrap();
+        assert!(
+            prepared.check_import_value_profile(BINDING).is_err(),
+            "{accepted}"
+        );
+        // Packaging profiles exports only; the import is checked when it is bound.
+        contract
+            .source_artifact("globalThis.__tembraOrb={}", "orb", 1)
+            .unwrap();
+    }
+    for refused in [
+        "frames: func() -> stream<u8>;",
+        "frames: async func(input: stream<u8>) -> u32;",
+        "frames: async func() -> list<stream<u8>>;",
+        "frames: async func() -> option<stream<u8>>;",
+        "frames: async func() -> result<stream<u8>, string>;",
+        "frames: async func() -> tuple<stream<u8>, u32>;",
+        "frames: async func() -> stream<u32>;",
+        "frames: async func() -> stream;",
+        "frames: async func() -> future<u8>;",
+        "frames: async func() -> future<stream<u8>>;",
+        "resource session { frames: async func() -> stream<u8>; }",
+        "resource session; open: async func() -> session;",
+    ] {
+        let contract = contract(&world(refused));
+        assert!(
+            contract
+                .prepared()
+                .check_import_source_profile(BINDING)
+                .is_err(),
+            "{refused}"
+        );
+    }
+    assert!(
+        contract(&world("ping: func() -> u32;"))
+            .prepared()
+            .check_import_source_profile("test:streams/missing@1.0.0")
+            .is_err()
+    );
+}

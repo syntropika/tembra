@@ -62,7 +62,7 @@ impl Vm {
     ///
     /// The standard WASI bootstrap is evaluated only when the checked contract imports a WASI
     /// interface (including type-only dependencies such as clocks under filesystem) or defines a
-    /// stream, whose bytes the bootstrap's standard writer produces. Otherwise
+    /// stream, whose bytes the bootstrap's standard writer produces or reader consumes. Otherwise
     /// [`WITHOUT_STANDARD`] leaves exactly the globals that bootstrap leaves for an Orb without
     /// standard imports. The decision depends only on the contract, so a captured heap is always
     /// paired with the same choice.
@@ -339,7 +339,8 @@ const WITHOUT_STANDARD: &str = "delete globalThis.__hostSyncBytes; \
      globalThis.__tembraSweepStandard = () => {};";
 
 /// Whether a checked contract description defines a stream type. An admitted source Orb has one
-/// only as the whole `stream<u8>` result of an export, produced through the standard writer.
+/// only as the whole `stream<u8>` result of an export, produced through the standard writer, or
+/// of an Orb import, read through the standard reader.
 fn defines_stream(contract: &serde_json::Value) -> bool {
     contract
         .get("types")

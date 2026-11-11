@@ -383,13 +383,28 @@ mod tests {
     fn previous_private_protocol_engines_are_refused_before_use() {
         let engine = Engine::new(Limits::default()).unwrap();
         let legacy = wat::parse_str(r#"(module (import "tembra-interpreter-v1" "sync" (func (param i32 i32) (result i32))))"#).unwrap();
-        let Err(error) = engine.interpreter(&legacy) else {
+        let Err(error) = engine.clone().interpreter(&legacy) else {
             panic!("old protocol accepted")
         };
         assert!(
             error
                 .message
                 .contains("tembra-interpreter-v1::sync is not allowed")
+        );
+        // The v11 interpreter predates `STREAM_IMPORT`; the same WASI schema does not admit it.
+        let previous = crate::abi::IMPORT_MODULE.replacen("-v12-", "-v11-", 1);
+        assert_ne!(previous, crate::abi::IMPORT_MODULE);
+        let module = wat::parse_str(format!(
+            "(module (import {previous:?} \"sync\" (func (param i32 i32) (result i32))))"
+        ))
+        .unwrap();
+        let Err(error) = engine.interpreter(&module) else {
+            panic!("v11 protocol accepted")
+        };
+        assert!(
+            error
+                .message
+                .contains(&format!("{previous}::sync is not allowed"))
         );
     }
 }

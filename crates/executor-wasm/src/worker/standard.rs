@@ -49,6 +49,9 @@ const INGRESS_HEAD: u8 = 8;
 /// Asynchronous, callbacks returning a whole `stream<u8>` only: publish the guest writer as the
 /// result once; completes when its bytes were delivered or the caller closed the stream.
 const STREAM_RESULT: u8 = 9;
+/// Asynchronous, native facade only: call an import whose whole result is a `stream<u8>`. The
+/// packet carries the JSON `reference.call` request; the reply is the readable stream's handle.
+const STREAM_IMPORT: u8 = 10;
 /// `STREAM_WRITE` status: the chunk was accepted.
 const WRITE_ACCEPTED: u8 = 0;
 /// `STREAM_WRITE` status: the reader closed the stream; production ends normally.
@@ -331,6 +334,74 @@ fn publish_stream(
         call.pipe.lock().expect("pipe").close();
     }
     Ok(task)
+}
+
+/// Call an import whose whole result is a `stream<u8>` (`STREAM_IMPORT`).
+///
+/// The guest's JSON `reference.call` request travels on the stream carrier with a pipe this
+/// Store creates for the guest's reader. The host checks the import's signature, arguments and
+/// authority before it issues the call, and pumps the delivered stream end into the pipe within
+/// this callback. The returned task, owned by the callback, waits for the host's answer and
+/// issues the pipe's readable handle with its reply. Until that reply is delivered, a guard owns
+/// the pipe: a refusal, an aborted task or an undelivered reply closes it, so the host drops the
+/// delivered end, which asks the producer to stop exactly once.
+fn import_stream(
+    store: StoreContextMut<'_, State>,
+    request: String,
+    reply: Reply,
+) -> wasmtime::Result<JoinHandle> {
+    let events = store
+        .data()
+        .events
+        .clone()
+        .ok_or_else(|| invalid("no active invocation"))?;
+    let pipe = Shared::<Pipe>::default();
+    let (answer, answered) = oneshot::channel();
+    events
+        .try_send(super::Event::Stream {
+            packet: request,
+            reply: answer,
+            pipe: Arc::clone(&pipe),
+        })
+        .map_err(|_| invalid("host operation queue is full or closed"))?;
+    let mut unheld = Unheld(Some(pipe));
+    store.spawn(async move |access: &wasmtime::component::Accessor<State>| {
+        let answer = answered
+            .await
+            .unwrap_or_else(|_| Err("host callback scope ended".into()));
+        let bytes = match answer {
+            Ok(value) if value == "0" => access.with(|mut store| {
+                let pipe = unheld.0.clone().expect("held until issued");
+                let id = store
+                    .data_mut()
+                    .standard
+                    .handles
+                    .issue(Entry::Stream(pipe))?;
+                // The table owns the pipe now; an undelivered reply releases the handle.
+                unheld.0 = None;
+                let mut writer = Writer::default();
+                writer.u64(id);
+                Ok(writer.0)
+            }),
+            Ok(_) => Err(invalid("a stream import result names no stream")),
+            Err(error) => Err(invalid(&error)),
+        };
+        settle(access, reply, bytes);
+        drop(unheld);
+        Ok(())
+    })
+}
+
+/// The pipe of a stream import until the guest's handle owns it; dropping it unheld closes the
+/// pipe, so the host's pump drops the delivered end.
+struct Unheld(Option<Shared<Pipe>>);
+
+impl Drop for Unheld {
+    fn drop(&mut self) {
+        if let Some(pipe) = self.0.take() {
+            pipe.lock().expect("pipe").close();
+        }
+    }
 }
 
 impl crate::ingress::IngressEvent {
@@ -743,6 +814,11 @@ pub(super) fn spawn(
                 let id = reader.u64()?;
                 reader.end()?;
                 publish_stream(store.as_context_mut(), id, reply)?
+            }
+            STREAM_IMPORT => {
+                let request = reader.string()?;
+                reader.end()?;
+                import_stream(store.as_context_mut(), request, reply)?
             }
             _ => return Err(invalid("unknown standard operation")),
         };

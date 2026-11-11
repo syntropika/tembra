@@ -2,7 +2,7 @@
 use crate::{
     failure,
     protocol::{GuestCommand, ScopeId},
-    worker::{Carrier, Session},
+    worker::{Carried, Carrier, Session},
 };
 use serde_json::Value;
 use std::{
@@ -273,12 +273,10 @@ impl Environment {
                 cancellation.as_ref(),
                 packet,
                 carrier,
-                async |packet, asynchronous, issued| {
-                    if asynchronous {
-                        self.asynchronous(&scope, packet, issued).await
-                    } else {
-                        self.sync(&scope, packet).map(Into::into)
-                    }
+                async |packet, carried, issued| match carried {
+                    Carried::Sync => self.sync(&scope, packet).map(Into::into),
+                    Carried::Async => self.asynchronous(&scope, packet, false, issued).await,
+                    Carried::Stream => self.asynchronous(&scope, packet, true, issued).await,
                 },
             )
             .await

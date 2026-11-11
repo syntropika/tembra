@@ -15,6 +15,7 @@ import {
   FUTURE_READ,
   type HandleCodec,
   Reader,
+  STREAM_IMPORT,
   STREAM_NEW,
   STREAM_READ,
   STREAM_WRITE,
@@ -423,6 +424,23 @@ test("forged, dropped, foreign, mistyped and unimported handles never reach a pr
   expect(result("getRandomBytes", random.sync(call("getRandomBytes", 32n)))).toHaveLength(32);
   await Promise.all([standard.dispose(), peer.dispose(), random.dispose()]);
   expect(stats.closes).toBe(2);
+});
+
+test("stream imports are refused until the browser port has a stream carrier", async () => {
+  const provider = memoryFilesystem({ "bytes.bin": pattern });
+  const { filesystem, stats } = instrument(provider.open("/data", false));
+  const standard = host(filesystem);
+  const writer = new Writer();
+  writer.u8(0);
+  writer.u8(STREAM_IMPORT);
+  writer.bytes(
+    utf8Encode(JSON.stringify({ operation: "reference.call", id: 1, method: "frames", args: [] })),
+  );
+  await expect(asynchronous(standard, writer.finish())).rejects.toThrow(
+    "stream imports are served only through the native Rust facade",
+  );
+  expect(stats.calls).toEqual([]);
+  await standard.dispose();
 });
 
 test("traversal and open authority are refused before the provider is called", async () => {

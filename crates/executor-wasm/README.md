@@ -168,8 +168,9 @@ resource results, implicit borrowed method receivers and whole `stream<u8>` resu
 freestanding exports and imports; see
 [owned WIT resources](../../docs/rust.md#owned-wit-resources) and
 [portable byte streams](../../docs/rust.md#portable-byte-streams). Source Orbs installed
-through the native Rust facade can also return a whole `stream<u8>` from an async
-freestanding export. Their Orb imports remain data-only. Public JSON ports still
+through the native Rust facade can also return or import a whole `stream<u8>` from an async
+freestanding function. Their imported readers use the same SDK `readChunks` helper as WASI
+body streams, without requiring a WASI import or grant. Public JSON ports still
 use the data profile and refuse these stream contracts at installation. A compiled
 component can import selected Orbs:
 
@@ -320,7 +321,7 @@ directory must not contain the checkout. `--suite native` selects the
 Rust tests against supplied artifacts.
 
 The interpreter is a `wasm32-wasip1` reactor core module behind a private
-fixed-buffer ABI, `tembra-interpreter-v11`. Its import namespace also carries the
+fixed-buffer ABI, `tembra-interpreter-v12`. Its import namespace also carries the
 digest of the generated WASI method and type table, so mismatched host/interpreter
 bindings are refused before execution. [`src/abi.rs`](src/abi.rs) is its only
 definition: the guest includes it, the native host compiles it, and the browser host

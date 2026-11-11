@@ -45,6 +45,13 @@ export const INGRESS_HEAD = 8;
  * callback stays alive while it streams. The reply is empty.
  */
 export const STREAM_RESULT = 9;
+/**
+ * Asynchronous, native Rust facade only: call an Orb import whose whole result is a `stream<u8>`.
+ * The packet carries the length-prefixed UTF-8 JSON `reference.call` request; the host checks the
+ * import's signature before calling it. The reply is the `u64` handle of the readable stream,
+ * issued once the producer delivered its head.
+ */
+export const STREAM_IMPORT = 10;
 /** Largest byte chunk either side moves through one stream read or write. */
 export const STREAM_CHUNK = 64 << 10;
 

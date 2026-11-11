@@ -1,3 +1,11 @@
 package tembra-test:typed-stream;
 interface frames { frames: async func(count: u32, size: u32) -> stream<u8>; }
 world producer { export frames; }
+
+interface relay {
+    record summary { bytes: u64, checksum: u64 }
+    summarize: async func(count: u32, size: u32) -> summary;
+    bytewise: async func(count: u32, size: u32) -> summary;
+    forward: async func(count: u32, size: u32) -> stream<u8>;
+}
+world consumer { import frames; export relay; }

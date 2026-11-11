@@ -39,7 +39,7 @@ pub(crate) enum Transport {
     Data,
     /// Data plus host-issued capabilities, for the native Rust facade. Only compiled
     /// components serve WIT resources; a source Orb adds only `stream<u8>` returned as the whole
-    /// result of an asynchronous freestanding export.
+    /// result of an asynchronous freestanding export or import.
     Capabilities,
 }
 
@@ -93,42 +93,44 @@ impl Engine {
                     .map_err(failure)?;
             }
         } else {
-            // Source imports stay data-only; a source export may return a whole byte stream
-            // only through the native facade.
-            let exports = if capabilities {
-                contract.check_source_profile()
+            // A source export or import may return a whole byte stream only through the native
+            // facade; data-only endpoints keep the data profiles.
+            let (exports, import): (_, fn(&_, &str) -> _) = if capabilities {
+                (
+                    contract.check_source_profile(),
+                    tembra_contracts::PreparedContract::check_import_source_profile,
+                )
             } else {
-                contract.check_value_profile()
+                (
+                    contract.check_value_profile(),
+                    tembra_contracts::PreparedContract::check_import_value_profile,
+                )
             };
-            let data = exports.and_then(|()| {
-                imports
-                    .clone()
-                    .try_for_each(|name| contract.check_import_value_profile(name))
-            });
+            let data =
+                exports.and_then(|()| imports.clone().try_for_each(|name| import(contract, name)));
             if let Err(error) = data {
                 // Say so when only the capability transport is missing, not the shape itself.
-                let imports_data = imports
-                    .clone()
-                    .all(|name| contract.check_import_value_profile(name).is_ok());
+                let streams = contract.check_source_profile().is_ok()
+                    && imports
+                        .clone()
+                        .all(|name| contract.check_import_source_profile(name).is_ok());
                 let resource_shapes = contract.check_resource_profile().is_ok()
                     && imports
                         .clone()
                         .all(|name| contract.check_import_resource_profile(name).is_ok());
-                return Err(failure(
-                    if !capabilities && imports_data && contract.check_source_profile().is_ok() {
-                        format!(
-                            "{error}: byte-stream results are served only through the native Rust \
+                return Err(failure(if !capabilities && streams {
+                    format!(
+                        "{error}: byte-stream results are served only through the native Rust \
                          facade; this endpoint exchanges data only"
-                        )
-                    } else if !source && resource_shapes {
-                        format!(
-                            "{error}: WIT resources are served only by compiled components installed \
+                    )
+                } else if !source && resource_shapes {
+                    format!(
+                        "{error}: WIT resources are served only by compiled components installed \
                          through the native Rust facade; this endpoint exchanges data only"
-                        )
-                    } else {
-                        error.to_string()
-                    },
-                ));
+                    )
+                } else {
+                    error.to_string()
+                }));
             }
         }
         let checked = |description: &Value| {
@@ -334,22 +336,30 @@ impl PortEvents {
 
     /// Forward an actual host request or physical completion to the embedding event loop.
     pub fn receive(&self) -> Result<PortEvent> {
-        self.event(self.events.recv_blocking().map_err(failure)?)
+        loop {
+            if let Some(event) = self.event(self.events.recv_blocking().map_err(failure)?) {
+                return Ok(event);
+            }
+        }
     }
 
     /// Await the next event without blocking an embedding runtime thread.
     pub async fn receive_async(&self) -> Result<PortEvent> {
-        self.event(self.events.recv().await.map_err(failure)?)
+        loop {
+            if let Some(event) = self.event(self.events.recv().await.map_err(failure)?) {
+                return Ok(event);
+            }
+        }
     }
 
     /// Mark physical completion before allowing the embedding owner to finish.
-    fn event(&self, event: Event) -> Result<PortEvent> {
+    fn event(&self, event: Event) -> Option<PortEvent> {
         match event {
             Event::Host {
                 packet,
                 asynchronous,
                 reply,
-            } => Ok(PortEvent::Host {
+            } => Some(PortEvent::Host {
                 packet,
                 asynchronous,
                 reply: PortReply {
@@ -362,14 +372,15 @@ impl PortEvents {
                 self.scope.end_callback();
                 self.done.store(true, Ordering::Release);
                 let result = result.map_err(failure);
-                Ok(PortEvent::Complete(result))
+                Some(PortEvent::Complete(result))
             }
-            Event::Ingress(event) => Ok(PortEvent::Ingress(event)),
-            // Platform ports exchange data only, so stream imports are never admitted here.
+            Event::Ingress(event) => Some(PortEvent::Ingress(event)),
+            // A forged private stream request is a per-request refusal. Keep driving this
+            // exchange until Done; only that event proves its callback physically completed.
             Event::Stream { reply, .. } => {
                 let refusal = "byte streams are served only through the native facade";
                 let _ = reply.send(Err(refusal.into()));
-                Err(failure(refusal))
+                None
             }
         }
     }

@@ -38,6 +38,8 @@ interface GuestValues {
   exportResult(service: string, method: string, value: unknown): unknown;
   /** Whether the export's whole result is a `stream<u8>`. */
   streamResult(service: string, method: string): boolean;
+  /** Whether the import's whole result is a `stream<u8>`. */
+  importStream(service: string, method: string): boolean;
   invoke(service: string, method: string, callback: () => unknown): Promise<unknown>;
   importArguments(service: string, method: string, arguments_: unknown[]): unknown[];
   importResult(service: string, method: string, value: unknown): unknown;
@@ -148,6 +150,8 @@ declare var __tembraEffects:
   | undefined;
 /** Publish an export's whole `stream<u8>` result and produce it until delivered or closed. */
 declare var __tembraStreamResult: ((source: unknown) => Promise<void>) | undefined;
+/** Call an import whose whole result is a `stream<u8>`; resolves to the host-issued reader. */
+declare var __tembraStreamImport: ((request: string) => Promise<unknown>) | undefined;
 /** Incoming HTTP: decode the host-issued request, run the handler, publish and settle. */
 declare var __tembraIngress:
   | { serve(request: number, handler: (request: unknown) => unknown): Promise<void> }

@@ -235,6 +235,11 @@ impl Environment {
     /// Forward one guest import call. The handle the guest named selects the callee: a service
     /// reference for freestanding functions, constructors and statics, or an owned resource for
     /// its methods.
+    ///
+    /// `stream` is set when the request came on the stream carrier, whose pipe receives the
+    /// result. It must match the import's checked signature before anything is issued: a data
+    /// import is never called as a stream, and a stream import never without its pipe.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn call_import(
         &self,
         scope: &Scope,
@@ -242,6 +247,7 @@ impl Environment {
         id: u32,
         method: &str,
         args: Value,
+        stream: bool,
         issued: &crate::worker::Issued,
     ) -> Result<Reply> {
         let context = Self::context(scope)?;
@@ -251,6 +257,15 @@ impl Environment {
             .get(method)
             .ok_or_else(|| failure("unknown prepared import method"))?;
         let roles = &method.roles;
+        match (roles.stream, stream) {
+            (true, false) => {
+                return Err(misuse(
+                    "a byte-stream import is called only on its stream carrier",
+                ));
+            }
+            (false, true) => return Err(misuse("the import does not return a byte stream")),
+            _ => {}
+        }
         let args = if roles.is_data() {
             self.contract.from_wire(method.slot, true, args)
         } else {
