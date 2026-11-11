@@ -528,7 +528,8 @@ fn undelivered_and_refused_results_are_destroyed_once(interpreted: bool) {
     assert_eq!(delivered.owned.len(), 1);
     drop(delivered);
     assert_eq!(closed(&mut pool, &host, &store), 2);
-    // A caller abandoned after the Store issued the instance, before delivery.
+    // A caller abandoned after the Store issued the instance. Keep any result that arrives
+    // during polling live until abandonment, so fast delivery cannot erase the observation.
     let (abort, registration) = AbortHandle::new_pair();
     let called = store.clone();
     let owner = host.clone();
@@ -536,17 +537,23 @@ fn undelivered_and_refused_results_are_destroyed_once(interpreted: bool) {
         owner
             .root("alice", move |context| {
                 async move {
-                    called
+                    let owned = called
                         .call_portable::<_, Owned>(&context, CONSTRUCT, (3_u64,))
-                        .await
-                        .map(drop)
+                        .await?;
+                    futures::future::pending::<()>().await;
+                    drop(owned);
+                    Ok(())
                 }
                 .boxed_local()
             })
             .await
     };
     pool.spawner()
-        .spawn_local(Abortable::new(caller, registration).map(drop))
+        .spawn_local(Abortable::new(caller, registration).map(|outcome| {
+            if let Ok(result) = outcome {
+                panic!("caller completed before abandonment: {result:?}");
+            }
+        }))
         .unwrap();
     let started = std::time::Instant::now();
     while engine.resources() == 0 {
