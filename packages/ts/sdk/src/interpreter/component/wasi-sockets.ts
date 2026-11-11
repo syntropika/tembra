@@ -47,7 +47,6 @@ import {
 } from "../socket-provider.ts";
 import {
   abortable,
-  cancelled,
   closing,
   guestBytes,
   hostBytes,
@@ -136,6 +135,12 @@ const socketCode = (error: unknown): ErrorCode =>
   code(error, SOCKET_CODES, error instanceof SocketProviderError ? error.code : undefined);
 const lookupCode = (error: unknown): LookupErrorCode =>
   code(error, LOOKUP_CODES, error instanceof NameLookupError ? error.code : undefined);
+
+/** Cancellation is an ordinary WASI error, never a rejection that traps generated bindings. */
+const callCancelled = (): { tag: "err"; val: { tag: "other"; val: string } } => ({
+  tag: "err",
+  val: { tag: "other", val: "call cancelled" },
+});
 
 /** Run a synchronous provider call, reporting its failure as a standard result. */
 function attempt<T>(operation: () => T): Result<T, ErrorCode> {
@@ -391,7 +396,7 @@ export class TcpSocket extends SocketResource {
           () => {},
         ),
       );
-      throw cancelled();
+      return callCancelled();
     } finally {
       call.signal?.removeEventListener("abort", stop);
     }
@@ -437,9 +442,36 @@ export class TcpSocket extends SocketResource {
     let accepting: Promise<unknown> | undefined;
     const next = async (): Promise<TcpSocket> => {
       for (;;) {
-        const pull = listener.accept(stop.signal);
+        // A retained accept stream belongs to the revision; each pull belongs to the callback
+        // reading it now. Do not capture the callback that originally called `listen`.
+        const call = callOf(host);
+        const signal = call.signal ? AbortSignal.any([stop.signal, call.signal]) : stop.signal;
+        const pull = Promise.resolve().then(() => listener.accept(signal));
         accepting = pull;
-        const { socket, connection } = await pull;
+        this.shared.busy(pull);
+        let accepted: Awaited<typeof pull>;
+        try {
+          accepted = await abortable(
+            host.physical(() => pull),
+            signal,
+          );
+        } catch (error) {
+          if (signal.aborted) {
+            // A provider may acknowledge cancellation with a late accepted connection. Nobody
+            // can receive it, but the listener owns its physical disposal until it settles.
+            const discarded = pull.then(
+              async ({ socket, connection }) => {
+                await discardConnection(host, connection);
+                await socket.close();
+              },
+              () => {},
+            );
+            this.shared.busy(discarded);
+            closing(host, () => discarded);
+          }
+          throw error;
+        }
+        const { socket, connection } = accepted;
         let checked: TcpConnection;
         try {
           checked = checkedConnection(connection);
@@ -750,7 +782,7 @@ export class UdpSocket extends SocketResource {
       this.#bound = true;
       return ok(undefined);
     } catch (error) {
-      if (call.signal?.aborted) throw cancelled();
+      if (call.signal?.aborted) return callCancelled();
       return { tag: "err", val: socketCode(error) };
     } finally {
       call.signal?.removeEventListener("abort", stop);
@@ -780,7 +812,7 @@ export class UdpSocket extends SocketResource {
         return ok([datagram.data.slice(), toWit(sender)] as [Uint8Array, IpSocketAddress]);
       }
     } catch (error) {
-      if (call.signal?.aborted) throw cancelled();
+      if (call.signal?.aborted) return callCancelled();
       return { tag: "err", val: socketCode(error) };
     } finally {
       call.signal?.removeEventListener("abort", stop);
@@ -859,7 +891,7 @@ async function resolveAddresses(
     if (!addresses.length) return failure("name-unresolvable");
     return ok(addresses as IpAddress[]);
   } catch (error) {
-    if (call.signal?.aborted) throw cancelled();
+    if (call.signal?.aborted) return callCancelled();
     return { tag: "err", val: lookupCode(error) };
   } finally {
     call.signal?.removeEventListener("abort", stop);

@@ -514,6 +514,42 @@ test("read-only directories, files and both rename/link sides refuse before any 
   await standard.dispose();
 });
 
+test("writable set-times-at checks existence for no-change and reports unsupported mutation", async () => {
+  const { filesystem, stats } = instrument(
+    memoryFilesystem({ "file.txt": "unchanged" }).open("/data", true),
+  );
+  const standard = host(filesystem);
+  const [root] = roots(standard);
+  const keep = { tag: "no-change" };
+  const attempt = async (path: string, accessed = keep, modified = keep) =>
+    result(
+      "setTimesAt",
+      await asynchronous(standard, call("setTimesAt", root, {}, path, accessed, modified)),
+    );
+  try {
+    expect(await attempt("file.txt")).toEqual({ tag: "ok" });
+    expect(stats.calls).toEqual(["statAt"]);
+    expect(await attempt("missing")).toEqual({ tag: "err", val: { tag: "no-entry" } });
+    expect(stats.calls).toEqual(["statAt", "statAt"]);
+    expect(await attempt("file.txt", { tag: "now" })).toEqual({
+      tag: "err",
+      val: { tag: "unsupported" },
+    });
+    expect(await attempt("file.txt", keep, { tag: "now" })).toEqual({
+      tag: "err",
+      val: { tag: "unsupported" },
+    });
+    expect(stats.calls).toEqual(["statAt", "statAt"]);
+    expect(await attempt("../outside")).toEqual({
+      tag: "err",
+      val: { tag: "not-permitted" },
+    });
+    expect(stats.calls).toEqual(["statAt", "statAt"]);
+  } finally {
+    await standard.dispose();
+  }
+});
+
 /** A write into a read-only file through a fresh writer. */
 function write_(standard: StandardHost, file: number) {
   return write(standard, file, [Uint8Array.of(1)], 0n);

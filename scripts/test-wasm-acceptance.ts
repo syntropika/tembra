@@ -17,7 +17,7 @@ import { stagePackage } from "./release/npm.ts";
 const suites = ["native", "sdk", "node", "browser", "example", "package"];
 const usage =
   "Usage: bun scripts/test-wasm-acceptance.ts --out <directory> --provider <component.wasm> " +
-  `--probe <component.wasm> --consumer <component.wasm> --keyed-router <component.wasm> --contributor <component.wasm> --http-client <component.wasm> --sockets <component.wasm> --http-handler <component.wasm> --http-proxy <component.wasm> --resource-provider <component.wasm> --resource-consumer <component.wasm> --stream-producer <component.wasm> --stream-consumer <component.wasm> [--fixtures <directory>] [--suite <${suites.join("|")}>]...`;
+  `--probe <component.wasm> --consumer <component.wasm> --keyed-router <component.wasm> --contributor <component.wasm> --http-client <component.wasm> --sockets <component.wasm> --system <component.wasm> --filesystem <component.wasm> --http-handler <component.wasm> --http-proxy <component.wasm> --resource-provider <component.wasm> --resource-consumer <component.wasm> --stream-producer <component.wasm> --stream-consumer <component.wasm> [--fixtures <directory>] [--suite <${suites.join("|")}>]...`;
 const { values } = parseArgs({
   options: {
     out: { type: "string" },
@@ -28,6 +28,8 @@ const { values } = parseArgs({
     contributor: { type: "string" },
     "http-client": { type: "string" },
     sockets: { type: "string" },
+    system: { type: "string" },
+    filesystem: { type: "string" },
     "http-handler": { type: "string" },
     "http-proxy": { type: "string" },
     "resource-provider": { type: "string" },
@@ -47,6 +49,8 @@ if (
   !values.contributor ||
   !values["http-client"] ||
   !values.sockets ||
+  !values.system ||
+  !values.filesystem ||
   !values["http-handler"] ||
   !values["http-proxy"] ||
   !values["resource-provider"] ||
@@ -71,6 +75,8 @@ const keyedRouter = path.resolve(values["keyed-router"]);
 const contributor = path.resolve(values.contributor);
 const httpClient = path.resolve(values["http-client"]);
 const sockets = path.resolve(values.sockets);
+const system = path.resolve(values.system);
+const filesystem = path.resolve(values.filesystem);
 const httpHandler = path.resolve(values["http-handler"]);
 const httpProxy = path.resolve(values["http-proxy"]);
 const resourceProvider = path.resolve(values["resource-provider"]);
@@ -89,6 +95,8 @@ for (const file of [
   contributor,
   httpClient,
   sockets,
+  system,
+  filesystem,
   httpHandler,
   httpProxy,
   resourceProvider,
@@ -157,6 +165,12 @@ if (!values.fixtures)
     probe,
     "--http-client",
     httpClient,
+    "--sockets",
+    sockets,
+    "--system",
+    system,
+    "--filesystem",
+    filesystem,
     "--http-handler",
     httpHandler,
     "--resource-provider",
@@ -179,6 +193,8 @@ const environment = {
   TEMBRA_WASM_CONTRIBUTOR: contributor,
   TEMBRA_WASM_HTTP_CLIENT: httpClient,
   TEMBRA_WASM_SOCKETS: sockets,
+  TEMBRA_WASM_SYSTEM: system,
+  TEMBRA_WASM_FILESYSTEM: filesystem,
   TEMBRA_WASM_HTTP_HANDLER: httpHandler,
   TEMBRA_WASM_HTTP_PROXY: httpProxy,
   TEMBRA_WASM_RESOURCE_PROVIDER: resourceProvider,

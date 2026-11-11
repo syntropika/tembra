@@ -11,6 +11,9 @@ const compiledInputs = {
   "keyed-router": "the compiled keyed-reference router",
   probe: "the compiled probe provider",
   "http-client": "the compiled wasi:http client",
+  sockets: "the compiled socket and DNS probe",
+  system: "the compiled clocks, random and CLI probe",
+  filesystem: "the compiled descriptor and directory probe",
   "http-handler": "the compiled wasi:http handler",
   "resource-provider": "the compiled resource provider",
   "resource-consumer": "the compiled resource consumer",
@@ -26,6 +29,9 @@ const { values } = parseArgs({
     "keyed-router": { type: "string" },
     probe: { type: "string" },
     "http-client": { type: "string" },
+    sockets: { type: "string" },
+    system: { type: "string" },
+    filesystem: { type: "string" },
     "http-handler": { type: "string" },
     "resource-provider": { type: "string" },
     "resource-consumer": { type: "string" },
@@ -441,7 +447,23 @@ for (const name of ["system", "ambient"] as const) {
   );
   builds[name] = { entry: `${name}/orb.ts`, wit: `${name}/contract.wit`, world: name };
 }
-// The same compiled resource and stream fixtures now exercise the browser capability path.
+// Exercise the public WASI bindings through actual compiled guests as well as source Orbs.
+for (const name of ["sockets", "system", "filesystem"] as const) {
+  const target = `compiled-${name}`;
+  await mkdir(path.join(sources, target), { recursive: true });
+  await writeFile(
+    path.join(sources, target, "contract.wit"),
+    await readFile(path.join(root, "crates/executor-wasm/tests/wit", name, `${name}.wit`)),
+  );
+  builds[target] = {
+    entry: component(name),
+    wit: `${target}/contract.wit`,
+    world: name,
+    apiVersion: 1,
+    browser: true,
+  };
+}
+// The same compiled resource and stream fixtures exercise the browser capability path.
 for (const [name, file, world] of [
   ["resource-provider", "resources/resources.wit", "provider"],
   ["resource-consumer", "resources/resources.wit", "consumer"],

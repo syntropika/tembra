@@ -172,6 +172,11 @@ function deadline<T>(
       stop();
       reject(cancelled());
     };
+    // Observe the physical promise even if cancellation already happened before this wait.
+    pending.then(
+      (value) => (stop(), resolve(value)),
+      (error) => (stop(), reject(error)),
+    );
     if (signal?.aborted) return abort();
     signal?.addEventListener("abort", abort, { once: true });
     if (ms !== undefined)
@@ -179,10 +184,6 @@ function deadline<T>(
         stop();
         reject(new HttpProviderError({ tag: "connection-read-timeout" } as never));
       }, ms);
-    pending.then(
-      (value) => (stop(), resolve(value)),
-      (error) => (stop(), reject(error)),
-    );
   });
 }
 
@@ -307,7 +308,7 @@ export function httpImports(
               val: 0n,
             } as never),
           );
-        } else complete(true);
+        } else trailers.then(() => complete(true), fail);
         return { body: null, trailers, completed, abort() {} };
       }
       const input = guestBytes(this.contents, host.retired);
@@ -329,6 +330,11 @@ export function httpImports(
                     tag: "HTTP-request-body-size",
                     val: sent,
                   } as never);
+                // EOF is successful only after the guest's completion future succeeded.
+                // Never let a provider commit bytes whose trailers later report failure.
+                await trailers;
+                if (stopped) return;
+                stopped = true;
                 controller.close();
                 complete(true);
                 return;
@@ -383,18 +389,24 @@ export function httpImports(
   /** A body received from a provider. */
   class ReceivedBody implements Body {
     #consumed = false;
+    #released = false;
+    readonly #retire = () => this.#release();
     constructor(
       readonly reader: ReadableStreamDefaultReader<Uint8Array> | undefined,
       readonly trailers: Promise<readonly HttpField[] | undefined> | undefined,
       readonly length: bigint | undefined,
       readonly between: number | undefined,
       readonly exchange: AbortController,
-    ) {}
+      readonly abortUpload: (reason: unknown) => void,
+    ) {
+      trailers?.catch(() => {});
+      host.retired.addEventListener("abort", this.#retire, { once: true });
+    }
     consume(res: unknown): [object, Promise<Trailers>] {
       this.#consumed = true;
       readFuture<Outcome>(res, host.retired).then(
-        (outcome) => outcome.tag === "err" && this.exchange.abort(),
-        () => this.exchange.abort(),
+        (outcome) => outcome.tag === "err" && this.#release(),
+        () => this.#release(),
       );
       let received = 0n;
       let settle!: (value: Trailers) => void;
@@ -402,28 +414,34 @@ export function httpImports(
       const reader = this.reader;
       const stream = hostBytes(
         async () => {
-          if (!reader) return undefined;
-          const next = await host.physical(() =>
-            deadline(reader.read(), this.exchange.signal, this.between),
-          );
-          if (next.done) {
-            if (this.length !== undefined && received !== this.length)
+          for (;;) {
+            const next = reader
+              ? await host.physical(() =>
+                  deadline(reader.read(), this.exchange.signal, this.between),
+                )
+              : { done: true as const, value: undefined };
+            if (next.done) {
+              if (this.length !== undefined && received !== this.length)
+                throw new HttpProviderError({ tag: "HTTP-response-incomplete" } as never);
+              return undefined;
+            }
+            if (!(next.value instanceof Uint8Array))
+              throw new HttpProviderError(
+                internal("the HTTP provider produced a non-byte chunk") as never,
+              );
+            if (!next.value.byteLength) continue;
+            received += BigInt(next.value.byteLength);
+            if (this.length !== undefined && received > this.length)
               throw new HttpProviderError({
-                tag: "HTTP-response-incomplete",
+                tag: "HTTP-response-body-size",
+                val: received,
               } as never);
-            return undefined;
+            return next.value;
           }
-          received += BigInt(next.value.byteLength);
-          if (this.length !== undefined && received > this.length)
-            throw new HttpProviderError({
-              tag: "HTTP-response-body-size",
-              val: received,
-            } as never);
-          return next.value;
         },
         (end, failure) => {
           if (end !== "eof") {
-            if (reader) closing(host, () => reader.cancel().catch(() => {}));
+            this.#release();
             settle(
               err(
                 end === "failed"
@@ -436,9 +454,13 @@ export function httpImports(
             );
             return;
           }
-          Promise.resolve(this.trailers)
+          abortable(Promise.resolve(this.trailers), host.retired)
             .then((pairs) => settle(ok(pairs ? HttpFields.received(pairs) : undefined)))
-            .catch((error) => settle(err(errorCode(error))));
+            .catch((error) => {
+              this.#release();
+              settle(err(errorCode(error)));
+            })
+            .finally(() => host.retired.removeEventListener("abort", this.#retire));
         },
         host.retired,
       );
@@ -447,7 +469,19 @@ export function httpImports(
     close(): void {
       if (this.#consumed) return;
       this.#consumed = true;
+      this.#release();
+    }
+    /** One physical exchange close, including a retained response or moved body at retirement. */
+    #release(): void {
+      if (this.#released) return;
+      this.#released = true;
+      host.retired.removeEventListener("abort", this.#retire);
       this.exchange.abort();
+      this.abortUpload(
+        new HttpProviderError(
+          internal("response was released before its request body completed") as never,
+        ),
+      );
       const reader = this.reader;
       if (reader) closing(host, () => reader.cancel().catch(() => {}));
     }
@@ -483,6 +517,13 @@ export function httpImports(
     [Symbol.dispose](): void {
       this.release();
     }
+  }
+
+  /** A late or refused provider response has no guest owner for either body or trailers. */
+  function discard(response: HttpProviderResponse | undefined): void {
+    response?.trailers?.catch(() => {});
+    const body = response?.body;
+    if (body instanceof ReadableStream) closing(host, () => body.cancel().catch(() => {}));
   }
 
   /**
@@ -530,17 +571,27 @@ export function httpImports(
     };
     // A body failure ends the exchange; an early stop by the provider leaves it to the provider.
     upload.completed.catch((error) => fail(errorCode(error)));
+    const signal = host.signal();
+    if (signal.aborted) return fail(internal("request was cancelled"));
+    let pending!: Promise<HttpProviderResponse>;
     let response: HttpProviderResponse;
     try {
       response = await deadline(
-        host.physical(() => provider.send(outgoing)),
-        host.retired,
+        host.physical(() => {
+          if (signal.aborted) return Promise.reject(cancelled());
+          return (pending = provider.send(outgoing));
+        }),
+        signal,
         millis(timeouts.firstByte),
       );
     } catch (error) {
-      if (host.retired.aborted) {
-        fail(internal("request was cancelled"));
-        throw cancelled();
+      // The provider's late result still belongs to the revision, although the caller stopped
+      // waiting. Release its body when it arrives instead of leaking the unread connection.
+      pending?.then(discard, () => {});
+      if (signal.aborted) {
+        // The caller observes cancellation separately. Let the guest finish this standard
+        // result import cooperatively; throwing here would turn cancellation into a trap.
+        return fail(internal("request was cancelled"));
       }
       return fail(errorCode(error));
     }
@@ -561,8 +612,7 @@ export function httpImports(
         );
       reader = response.body?.getReader();
     } catch (error) {
-      const stream = (response as Partial<HttpProviderResponse> | undefined)?.body;
-      if (stream instanceof ReadableStream) closing(host, () => stream.cancel().catch(() => {}));
+      discard(response);
       return fail(errorCode(error));
     }
     // After a response, the transmission succeeded once the body ended or the provider stopped
@@ -577,6 +627,7 @@ export function httpImports(
       length,
       millis(timeouts.betweenBytes),
       exchange,
+      upload.abort,
     );
     return ok(new Response(fields, received, response.status));
   }

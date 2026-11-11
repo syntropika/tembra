@@ -2,6 +2,36 @@ package example:fetch@1.0.0;
 
 /// A compiled Orb that sends standard `wasi:http` requests through its host.
 interface fetcher {
+    type field = tuple<string, list<u8>>;
+    record value-report {
+        checks: list<string>,
+        duplicate-values: list<list<u8>>,
+        exact-timeouts: tuple<u64, u64, u64>,
+    }
+    record request-spec {
+        method: string,
+        scheme: string,
+        authority: string,
+        path: string,
+        fields: list<field>,
+        chunks: list<list<u8>>,
+        trailers: list<field>,
+        trailer-error: bool,
+        connect: option<u64>,
+        first-byte: option<u64>,
+        between-bytes: option<u64>,
+    }
+    record exchange-report {
+        status: u16,
+        fields: list<field>,
+        body: list<u8>,
+        trailers: result<list<field>, string>,
+        transmission: result<_, string>,
+    }
+    /// Exercise every synchronous HTTP resource operation through the actual compiled bindings.
+    values: async func() -> result<value-report, string>;
+    /// Send a streamed request and return the independently completed body and trailers.
+    exchange: async func(spec: request-spec) -> result<exchange-report, string>;
     /// GET `scheme://authority/path` and return `"<status> <body>"`, or the error code.
     fetch: async func(scheme: string, authority: string, path: string) -> result<string, string>;
     /// GET and return only the first body chunk, then drop the body before its end.

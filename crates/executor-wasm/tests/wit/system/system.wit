@@ -1,0 +1,56 @@
+package example:system@1.0.0;
+
+/// Calls actual standard imports from a compiled guest, including async stream completion.
+interface probe {
+    record clock-report {
+        seconds: s64,
+        nanoseconds: u32,
+        system-resolution: u64,
+        monotonic: u64,
+        monotonic-resolution: u64,
+    }
+    record random-report {
+        secure: list<u8>,
+        insecure: list<u8>,
+        secure-word: u64,
+        insecure-word: u64,
+        seed: tuple<u64, u64>,
+        next-seed: tuple<u64, u64>,
+    }
+    record environment-report {
+        environment: list<tuple<string, string>>,
+        arguments: list<string>,
+        cwd: option<string>,
+        terminals: tuple<bool, bool, bool>,
+    }
+    record transfer-report { bytes: u64, checksum: u64, }
+    clocks: func() -> clock-report;
+    random: func(length: u64) -> random-report;
+    environment: func() -> environment-report;
+    wait-until: async func(when: u64);
+    wait-for: async func(duration: u64);
+    transfer: async func() -> result<transfer-report, string>;
+    read-drop: async func() -> result<u32, string>;
+    write: async func(stderr: bool, bytes: list<u8>) -> result<_, string>;
+    write-pair: async func(bytes: list<u8>) -> result<_, string>;
+    stop: func(code: u8);
+    exit: func(success: bool);
+    ping: func() -> string;
+}
+
+world system {
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:clocks/system-clock@0.3.0;
+    import wasi:random/random@0.3.0;
+    import wasi:random/insecure@0.3.0;
+    import wasi:random/insecure-seed@0.3.0;
+    import wasi:cli/environment@0.3.0;
+    import wasi:cli/stdin@0.3.0;
+    import wasi:cli/stdout@0.3.0;
+    import wasi:cli/stderr@0.3.0;
+    import wasi:cli/exit@0.3.0;
+    import wasi:cli/terminal-stdin@0.3.0;
+    import wasi:cli/terminal-stdout@0.3.0;
+    import wasi:cli/terminal-stderr@0.3.0;
+    export probe;
+}

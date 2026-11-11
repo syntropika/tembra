@@ -94,6 +94,9 @@ const adapters = [
   "resource-consumer",
   "stream-producer",
   "stream-consumer",
+  "compiled-sockets",
+  "compiled-system",
+  "compiled-filesystem",
 ];
 for (const name of adapters)
   if (!(await Bun.file(path.join(fixtures, name, "browser/index.js")).exists()))

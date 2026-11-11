@@ -273,11 +273,17 @@ impl crate::sockets::CallCancellation for State {
 }
 
 /// Link upstream WASI interface by interface, with name lookup served by Tembra's tracked
-/// resolver instead of upstream's untracked lookup jobs, and socket waits released by the
+/// resolver instead of upstream's untracked lookup jobs, and clock/socket waits released by the
 /// caller's cancellation.
 fn link_wasi(linker: &mut Linker<State>) -> wasmtime::Result<()> {
+    use wasmtime_wasi::clocks::{WasiClocks, WasiClocksView};
     use wasmtime_wasi::p3;
-    p3::clocks::add_to_linker(linker)?;
+    p3::bindings::clocks::types::add_to_linker::<State, WasiClocks>(linker, State::clocks)?;
+    p3::bindings::clocks::system_clock::add_to_linker::<State, WasiClocks>(linker, State::clocks)?;
+    p3::bindings::clocks::monotonic_clock::add_to_linker::<State, crate::clocks::CallClocks>(
+        linker,
+        State::clocks,
+    )?;
     p3::random::add_to_linker(linker)?;
     p3::cli::add_to_linker(linker)?;
     p3::filesystem::add_to_linker(linker)?;

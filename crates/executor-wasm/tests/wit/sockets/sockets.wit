@@ -33,6 +33,12 @@ interface probe {
     /// Connect and send `size` bytes through `tcp-socket.send` ("sent" once complete, or
     /// "unsent N: <send result>" once the write was released).
     send-blocked: async func(port: u16, size: u32) -> result<string, string>;
+    /// Exercise every TCP and UDP option getter/setter, including exact 64-bit values.
+    socket-options: func() -> result<list<string>, string>;
+    /// Exercise TCP address/state/family and backlog operations.
+    socket-addresses: async func(port: u16, listen-port: u16) -> result<list<string>, string>;
+    /// Exercise UDP explicit bind, peer association, connected I/O and disconnect.
+    udp-connected: async func(port: u16) -> result<list<string>, string>;
 }
 
 world sockets {

@@ -27,6 +27,34 @@ import {
   verifyBrowserByteStreamTraps,
   verifyBrowserByteStreamCancellation,
 } from "./component-streams-browser.ts";
+import {
+  verifyCompiledSocketOperations,
+  verifyCompiledSocketRefusals,
+  verifyCompiledSocketRetention,
+  verifyCompiledSocketCancellation,
+  verifyCompiledSocketOptions,
+} from "./component-sockets-browser.ts";
+import {
+  verifyBrowserSystemValues,
+  verifyBrowserSystemStreams,
+  verifyBrowserSystemIsolation,
+  verifyBrowserSystemCancellation,
+  verifyBrowserSystemOutputSerialization,
+  verifyBrowserSystemStdioCancellation,
+} from "./component-system-browser.ts";
+import {
+  verifyCompiledFilesystemMemory,
+  verifyCompiledFilesystemOpfs,
+  verifyCompiledFilesystemLifetime,
+} from "./component-filesystem-browser.ts";
+import {
+  verifyCompiledHttpValues,
+  verifyCompiledHttpDuplex,
+  verifyCompiledHttpFailures,
+  verifyCompiledHttpFetchLimits,
+  verifyCompiledHttpLifetime,
+  verifyCompiledHttpCancellation,
+} from "./component-http-browser.ts";
 
 type Host = Awaited<ReturnType<typeof createHost>>;
 // Service references are dynamically typed WIT proxies.
@@ -139,6 +167,9 @@ interface Adapters {
   resourceConsumer: PreparedComponent;
   streamProducer: PreparedComponent;
   streamConsumer: PreparedComponent;
+  sockets: PreparedComponent;
+  system: PreparedComponent;
+  filesystem: PreparedComponent;
 }
 
 /** Qualify every prepared-adapter scenario; returns the passed scenario names. */
@@ -160,6 +191,9 @@ export async function verifyPreparedComponents(engine?: URL): Promise<string[]> 
     resourceConsumer: await adapter("resource-consumer"),
     streamProducer: await adapter("stream-producer"),
     streamConsumer: await adapter("stream-consumer"),
+    sockets: await adapter("compiled-sockets"),
+    system: await adapter("compiled-system"),
+    filesystem: await adapter("compiled-filesystem"),
   };
   const base = engine ? { engine } : {};
   const scenarios: [string, () => Promise<void>][] = [
@@ -209,7 +243,75 @@ export async function verifyPreparedComponents(engine?: URL): Promise<string[]> 
     ["initial page budget", () => pages(adapters, base)],
     ["fuel exhaustion and trap quarantine", () => quarantine(adapters, base)],
     ["WASI filesystem grants", () => filesystem(adapters, base)],
+    [
+      "compiled WASI filesystem memory operations",
+      () => verifyCompiledFilesystemMemory(base, [adapters.filesystem]),
+    ],
+    [
+      "compiled WASI filesystem OPFS operations",
+      () => verifyCompiledFilesystemOpfs(base, [adapters.filesystem]),
+    ],
+    [
+      "compiled WASI filesystem lifetime and cancellation",
+      () => verifyCompiledFilesystemLifetime(base, [adapters.filesystem]),
+    ],
+    [
+      "compiled WASI clocks and random values",
+      () => verifyBrowserSystemValues(base, [adapters.system]),
+    ],
+    ["compiled WASI CLI streams", () => verifyBrowserSystemStreams(base, [adapters.system])],
+    [
+      "compiled WASI system grants and isolation",
+      () => verifyBrowserSystemIsolation(base, [adapters.system]),
+    ],
+    [
+      "compiled WASI clock cancellation",
+      () => verifyBrowserSystemCancellation(base, [adapters.system]),
+    ],
+    [
+      "compiled WASI output serialization",
+      () => verifyBrowserSystemOutputSerialization(base, [adapters.system]),
+    ],
+    [
+      "compiled WASI stdio cancellation",
+      () => verifyBrowserSystemStdioCancellation(base, [adapters.system]),
+    ],
+    [
+      "compiled WASI socket operations",
+      () => verifyCompiledSocketOperations(base, [adapters.sockets]),
+    ],
+    [
+      "compiled WASI socket grants and refusals",
+      () => verifyCompiledSocketRefusals(base, [adapters.sockets]),
+    ],
+    [
+      "compiled WASI socket retention",
+      () => verifyCompiledSocketRetention(base, [adapters.sockets]),
+    ],
+    [
+      "compiled WASI socket cancellation",
+      () => verifyCompiledSocketCancellation(base, [adapters.sockets]),
+    ],
+    [
+      "compiled WASI socket options and addresses",
+      () => verifyCompiledSocketOptions(base, [adapters.sockets]),
+    ],
     ["WASI HTTP client and streamed events", () => httpClient(adapters, base)],
+    ["compiled WASI HTTP resource values", () => verifyCompiledHttpValues(base, [adapters.client])],
+    [
+      "compiled WASI HTTP duplex and trailers",
+      () => verifyCompiledHttpDuplex(base, [adapters.client]),
+    ],
+    ["compiled WASI HTTP failures", () => verifyCompiledHttpFailures(base, [adapters.client])],
+    [
+      "compiled WASI HTTP Fetch limits",
+      () => verifyCompiledHttpFetchLimits(base, [adapters.client]),
+    ],
+    ["compiled WASI HTTP lifetime", () => verifyCompiledHttpLifetime(base, [adapters.client])],
+    [
+      "compiled WASI HTTP cancellation",
+      () => verifyCompiledHttpCancellation(base, [adapters.client]),
+    ],
     ["incoming HTTP handler", () => ingress(adapters, base)],
   ];
   const passed: string[] = [];
@@ -244,6 +346,9 @@ async function brand(adapters: Adapters): Promise<void> {
     ["resourceConsumer", "resource-consumer"],
     ["streamProducer", "stream-producer"],
     ["streamConsumer", "stream-consumer"],
+    ["sockets", "compiled-sockets"],
+    ["system", "compiled-system"],
+    ["filesystem", "compiled-filesystem"],
   ];
   for (const [key, name] of expected) {
     const component = adapters[key];

@@ -14,6 +14,7 @@ wit-bindgen = { version = "=0.63.0", default-features = false, features = [
   "macros",
   "realloc",
   "async",
+  "async-spawn",
 ] }
 dlmalloc = { version = "0.2.12", features = ["global"] }
 

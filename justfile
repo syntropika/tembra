@@ -94,6 +94,14 @@ build-http-client target-dir toolchain=nightly:
 build-sockets target-dir toolchain=nightly:
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-sockets/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
 
+# Compile the complete clocks, random and CLI operation probe.
+build-system target-dir toolchain=nightly:
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-system/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
+
+# Compile the descriptor and directory operation probe.
+build-filesystem target-dir toolchain=nightly:
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-filesystem/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
+
 # Compile the incoming HTTP handler fixture: its handler-only world into "$1/handler" and its proxy
 # world, which also imports the outgoing client, into "$1/proxy".
 build-http-handler target-dir toolchain=nightly:

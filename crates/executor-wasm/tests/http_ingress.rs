@@ -373,7 +373,13 @@ fn disconnects_end_writing_idle_and_watching_handlers() {
         reader.disconnect();
         settle(&mut served.pool, settled).unwrap();
         let (_, exit) = status(&mut served);
-        assert_eq!(exit, "request-ended-then-write-dropped events=1");
+        // The final write can reach the host buffer before the response drop reaches the
+        // guest. Either that write observes the drop, or transmission reports termination.
+        assert!(
+            exit == "request-ended-then-write-dropped events=1"
+                || exit == "complete events=2 transmit=Err(ErrorCode::ConnectionTerminated)",
+            "{exit}"
+        );
         drop(sender);
 
         // Watching the transmission result.

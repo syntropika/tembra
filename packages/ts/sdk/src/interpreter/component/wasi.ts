@@ -7,10 +7,10 @@
  * per-installation grants). Every instance receives fresh import objects and resources.
  */
 import type { CliOptions } from "../../authoring/types.ts";
-import type { StdioStreams } from "../standard-cli.ts";
+import type { StdioOutput, StdioStreams } from "../standard-cli.ts";
 import type { ClockProvider, RandomProvider } from "../standard-system.ts";
 import { filesystemImports, type StandardMount } from "./wasi-filesystem.ts";
-import { guestBytes, hostBytes, type WasiHost } from "./wasi-host.ts";
+import { cancelled, guestBytes, hostBytes, type WasiHost } from "./wasi-host.ts";
 import { httpImports, type HttpClient } from "./wasi-http.ts";
 import { socketImports, type SocketBindings } from "./wasi-sockets.ts";
 
@@ -101,14 +101,30 @@ export function publicWasi(
     return new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true);
   };
   let seed: readonly [bigint, bigint] | undefined;
+  const writes = new Map<StdioOutput, Promise<void>>();
   const write = (name: "stdout" | "stderr") => async (data: unknown) => {
     const output = need(cli, "cli").stdio[name];
     const selected = cli!.options[name];
+    const cancel = host.signal();
     try {
-      for await (const chunk of guestBytes(data, signal))
+      for await (const chunk of guestBytes(data, cancel))
         if (output && selected !== "discard") {
           const bytes = chunk.slice();
-          await host.physical(() => output.write(bytes, signal));
+          // One provider may back both output interfaces. A queued write retains its
+          // initiating callback and physical ownership before it waits for the previous sink.
+          const operation = (writes.get(output) ?? Promise.resolve()).then(() => {
+            if (cancel.aborted) throw cancelled();
+            return output.write(bytes, cancel);
+          });
+          const turn = operation.then(
+            () => {},
+            () => {},
+          );
+          writes.set(output, turn);
+          void turn.then(() => {
+            if (writes.get(output) === turn) writes.delete(output);
+          });
+          await host.physical(() => operation);
         }
       return ok();
     } catch {
@@ -186,7 +202,10 @@ export function publicWasi(
               offset += chunk.length;
               return chunk.length ? chunk.slice() : undefined;
             }
-            return input ? await host.physical(() => input.read(limit, signal)) : undefined;
+            // A retained stdin stream can be read by a later callback. Capture that read's
+            // cancellation now, rather than the callback that originally opened the stream.
+            const cancel = host.signal();
+            return input ? await host.physical(() => input.read(limit, cancel)) : undefined;
           },
           (end) => settle(end === "failed" ? { tag: "err", val: "io" } : ok()),
           signal,

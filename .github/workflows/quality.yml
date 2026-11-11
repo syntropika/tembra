@@ -59,6 +59,8 @@ jobs:
       - run: just build-contributor "$RUNNER_TEMP/provider"
       - run: just build-http-client "$RUNNER_TEMP/provider"
       - run: just build-sockets "$RUNNER_TEMP/provider"
+      - run: just build-system "$RUNNER_TEMP/provider"
+      - run: just build-filesystem "$RUNNER_TEMP/provider"
       - run: just build-http-handler "$RUNNER_TEMP/http-handler"
       # The runner image provides Google Chrome; fail here if that changes.
       - run: google-chrome --version
@@ -72,6 +74,8 @@ jobs:
           --contributor "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm"
           --http-client "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm"
           --sockets "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm"
+          --system "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_system.wasm"
+          --filesystem "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_filesystem.wasm"
           --http-handler "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm"
           --http-proxy "$RUNNER_TEMP/http-handler/proxy/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm"
           --resource-provider "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_resource_provider.wasm"

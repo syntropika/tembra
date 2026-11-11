@@ -12,7 +12,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 }
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 use wasi::sockets::types::{
-    IpAddress, IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, TcpSocket, UdpSocket,
+    ErrorCode, IpAddress, IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, TcpSocket, UdpSocket,
 };
 use wit_bindgen::{FutureReader, StreamReader, StreamResult};
 
@@ -71,8 +71,215 @@ fn loopback(port: u16) -> IpSocketAddress {
     })
 }
 
+fn checked<T: core::fmt::Debug + PartialEq>(
+    actual: Result<T, ErrorCode>,
+    expected: T,
+    label: &str,
+) -> Result<(), String> {
+    match actual {
+        Ok(value) if value == expected => Ok(()),
+        other => Err(format!("{label}: expected {expected:?}, got {other:?}")),
+    }
+}
+
+fn invalid<T: core::fmt::Debug>(actual: Result<T, ErrorCode>, label: &str) -> Result<(), String> {
+    match actual {
+        Err(ErrorCode::InvalidArgument) => Ok(()),
+        other => Err(format!("{label}: expected InvalidArgument, got {other:?}")),
+    }
+}
+
+fn checked_address(
+    actual: Result<IpSocketAddress, ErrorCode>,
+    port: u16,
+    label: &str,
+) -> Result<(), String> {
+    match actual {
+        Ok(IpSocketAddress::Ipv4(value))
+            if value.port == port && value.address == (127, 0, 0, 1) =>
+        {
+            Ok(())
+        }
+        other => Err(format!("{label}: unexpected address {other:?}")),
+    }
+}
+
 struct Probe;
 impl exports::example::sockets::probe::Guest for Probe {
+    fn socket_options() -> Result<Vec<String>, String> {
+        let tcp = TcpSocket::create(IpAddressFamily::Ipv4).map_err(|e| format!("{e:?}"))?;
+        let udp = UdpSocket::create(IpAddressFamily::Ipv4).map_err(|e| format!("{e:?}"))?;
+        let mut report = Vec::new();
+        // Every roundtrip crosses generated WIT bindings; values above JS's safe integer
+        // range deliberately verify that the duration and buffer lanes remain exact u64.
+        macro_rules! roundtrip {
+            ($socket:ident, $set:ident, $get:ident, $value:expr) => {{
+                checked($socket.$set($value), (), stringify!($set))?;
+                checked($socket.$get(), $value, stringify!($get))?;
+                report.push(String::from(concat!(
+                    stringify!($socket),
+                    ".",
+                    stringify!($get)
+                )));
+            }};
+        }
+        macro_rules! zero {
+            ($socket:ident, $set:ident, $value:expr) => {{
+                invalid($socket.$set($value), stringify!($set))?;
+                report.push(String::from(concat!(
+                    stringify!($socket),
+                    ".",
+                    stringify!($set),
+                    ".zero"
+                )));
+            }};
+        }
+        roundtrip!(tcp, set_keep_alive_enabled, get_keep_alive_enabled, true);
+        roundtrip!(
+            tcp,
+            set_keep_alive_idle_time,
+            get_keep_alive_idle_time,
+            u64::MAX - 2
+        );
+        roundtrip!(
+            tcp,
+            set_keep_alive_interval,
+            get_keep_alive_interval,
+            (1u64 << 53) + 1
+        );
+        roundtrip!(tcp, set_keep_alive_count, get_keep_alive_count, 13);
+        roundtrip!(tcp, set_hop_limit, get_hop_limit, 37);
+        roundtrip!(
+            tcp,
+            set_receive_buffer_size,
+            get_receive_buffer_size,
+            u64::MAX - 4
+        );
+        roundtrip!(
+            tcp,
+            set_send_buffer_size,
+            get_send_buffer_size,
+            (1u64 << 53) + 3
+        );
+        roundtrip!(udp, set_unicast_hop_limit, get_unicast_hop_limit, 41);
+        roundtrip!(
+            udp,
+            set_receive_buffer_size,
+            get_receive_buffer_size,
+            u64::MAX - 6
+        );
+        roundtrip!(
+            udp,
+            set_send_buffer_size,
+            get_send_buffer_size,
+            (1u64 << 53) + 5
+        );
+        zero!(tcp, set_keep_alive_idle_time, 0);
+        zero!(tcp, set_keep_alive_interval, 0);
+        zero!(tcp, set_keep_alive_count, 0);
+        zero!(tcp, set_hop_limit, 0);
+        zero!(tcp, set_receive_buffer_size, 0);
+        zero!(tcp, set_send_buffer_size, 0);
+        zero!(tcp, set_listen_backlog_size, 0);
+        zero!(udp, set_unicast_hop_limit, 0);
+        zero!(udp, set_receive_buffer_size, 0);
+        zero!(udp, set_send_buffer_size, 0);
+        Ok(report)
+    }
+
+    async fn socket_addresses(port: u16, listen_port: u16) -> Result<Vec<String>, String> {
+        let socket = connected(port).await?;
+        if !matches!(socket.get_address_family(), IpAddressFamily::Ipv4)
+            || socket.get_is_listening()
+        {
+            return Err(String::from("connected socket family/state"));
+        }
+        checked_address(socket.get_remote_address(), port, "TCP remote")?;
+        socket
+            .get_local_address()
+            .map_err(|e| format!("local: {e:?}"))?;
+        let server = TcpSocket::create(IpAddressFamily::Ipv4).map_err(|e| format!("{e:?}"))?;
+        checked(
+            server.set_listen_backlog_size(u64::MAX),
+            (),
+            "backlog before listen",
+        )?;
+        checked(server.bind(loopback(listen_port)), (), "listener bind")?;
+        let accepted = server.listen().map_err(|e| format!("listen: {e:?}"))?;
+        if !server.get_is_listening() {
+            return Err(String::from("listener state"));
+        }
+        checked_address(server.get_local_address(), listen_port, "listener local")?;
+        checked(
+            server.set_listen_backlog_size(9),
+            (),
+            "backlog after listen",
+        )?;
+        drop(accepted);
+        let v6 = TcpSocket::create(IpAddressFamily::Ipv6).map_err(|e| format!("{e:?}"))?;
+        if !matches!(v6.get_address_family(), IpAddressFamily::Ipv6) {
+            return Err(String::from("IPv6 family"));
+        }
+        invalid(v6.bind(loopback(port)), "wrong TCP family")?;
+        Ok(vec![
+            String::from("tcp.addresses"),
+            String::from("tcp.listening"),
+            String::from("tcp.backlog"),
+            String::from("tcp.families"),
+        ])
+    }
+
+    async fn udp_connected(port: u16) -> Result<Vec<String>, String> {
+        let socket = UdpSocket::create(IpAddressFamily::Ipv4).map_err(|e| format!("{e:?}"))?;
+        checked(socket.bind(loopback(0)), (), "UDP bind")?;
+        socket
+            .get_local_address()
+            .map_err(|e| format!("UDP local: {e:?}"))?;
+        checked(socket.connect(loopback(port)), (), "UDP connect")?;
+        checked_address(socket.get_remote_address(), port, "UDP remote")?;
+        if !matches!(socket.get_address_family(), IpAddressFamily::Ipv4) {
+            return Err(String::from("UDP IPv4 family"));
+        }
+        checked(
+            socket.send(vec![b'x'], None).await,
+            (),
+            "connected UDP send",
+        )?;
+        let (bytes, remote) = socket
+            .receive()
+            .await
+            .map_err(|e| format!("UDP receive: {e:?}"))?;
+        checked_address(Ok(remote), port, "UDP received peer")?;
+        if bytes != b"echo:x" {
+            return Err(format!("connected UDP receive: {bytes:?}"));
+        }
+        invalid(
+            socket.send(vec![0], Some(loopback(port + 1))).await,
+            "different connected peer",
+        )?;
+        checked(socket.disconnect(), (), "UDP disconnect")?;
+        if !matches!(socket.get_remote_address(), Err(ErrorCode::InvalidState)) {
+            return Err(String::from("UDP remote after disconnect"));
+        }
+        invalid(
+            socket.send(vec![0], None).await,
+            "missing disconnected peer",
+        )?;
+        let v6 = UdpSocket::create(IpAddressFamily::Ipv6).map_err(|e| format!("{e:?}"))?;
+        if !matches!(v6.get_address_family(), IpAddressFamily::Ipv6) {
+            return Err(String::from("UDP IPv6 family"));
+        }
+        invalid(v6.bind(loopback(port)), "wrong UDP family")?;
+        Ok(vec![
+            String::from("udp.bind"),
+            String::from("udp.addresses"),
+            String::from("udp.connect"),
+            String::from("udp.connected-io"),
+            String::from("udp.disconnect"),
+            String::from("udp.families"),
+        ])
+    }
+
     async fn read_drop(port: u16) -> Result<String, String> {
         let socket =
             TcpSocket::create(IpAddressFamily::Ipv4).map_err(|e| format!("create: {e:?}"))?;

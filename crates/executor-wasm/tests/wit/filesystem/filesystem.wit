@@ -1,0 +1,33 @@
+package example:compiled-filesystem@1.0.0;
+
+/// Direct standard WASI calls, without a language filesystem wrapper.
+interface probe {
+    record report {
+        length: u64,
+        large-offset: string,
+        listing: list<string>,
+        directory-rename: string,
+        hash-lower: u64,
+        hash-upper: u64,
+    }
+    roundtrip: async func(mount: string) -> result<report, string>;
+    record error-report {
+        checked: list<string>,
+        hard-link: string,
+        symlink: string,
+        timestamp: string,
+        timestamp-at: string,
+        timestamp-missing: string,
+    }
+    errors: async func(mount: string, readonly-mount: string) -> result<error-report, string>;
+    retain: async func(mount: string) -> result<_, string>;
+    read-retained: async func() -> result<list<u8>, string>;
+    drop-retained: func();
+    pending-read: async func(mount: string) -> result<list<u8>, string>;
+}
+
+world filesystem {
+    import wasi:filesystem/types@0.3.0;
+    import wasi:filesystem/preopens@0.3.0;
+    export probe;
+}
