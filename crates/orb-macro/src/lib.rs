@@ -110,17 +110,24 @@ impl Service {
 }
 
 /// A WIT resource: a struct marked `#[wit_resource]` whose instances callers own through handles.
-/// Its `pub fn new` is the constructor, its `pub fn` taking `&self` are the methods and the other
-/// `pub fn` its static functions. It belongs to the interface of one service: derived with it, or
-/// defined by the WIT the service implements.
+/// Its function marked `#[constructor]` is the constructor, its `pub fn` taking `&self` are the
+/// methods and the other `pub fn` its static functions. It belongs to the interface of one
+/// service: derived with it, or defined by the WIT the service implements.
 struct WitResource {
     ident: Ident,
     docs: Vec<String>,
     /// The owning service, as named by `service = ...` or resolved to the module's only one.
     service: Option<Ident>,
-    constructor: Option<Vec<(Ident, Type, String)>>,
+    constructor: Option<Constructor>,
     methods: Vec<Function>,
     statics: Vec<Function>,
+}
+
+/// A WIT resource's constructor: the function marked `#[constructor]` and its parameters, with
+/// the WIT spelling of their types.
+struct Constructor {
+    ident: Ident,
+    params: Vec<(Ident, Type, String)>,
 }
 
 /// The ownership policy of a service's objects, from `#[service(lifetime = host)]` or
@@ -184,21 +191,103 @@ struct State {
     /// The owning service, as named by `service = ...` or resolved to the module's only one.
     service: Option<Ident>,
     version: u32,
-    /// The author defined `pub fn validate(&self) -> Result<(), String>`: every update runs it
+    /// The function marked `#[validate]`, `fn(&self) -> Result<(), String>`: every update runs it
     /// before the kernel stores the value, and a reload runs it on the value the new instance
     /// inherits.
-    validate: bool,
+    validator: Option<Ident>,
     /// The identity of the owning service's interface, once the owner is resolved.
     identity: String,
 }
 
-/// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a
-/// `pub fn open() -> Self` and, optionally, a `pub fn close(self)`.
+/// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a function
+/// marked `#[open]`, `fn() -> Self`, and, optionally, one marked `#[close]`, `fn(self)`.
 struct Resource {
     ident: Ident,
     version: u32,
-    /// Whether the author defined `close`.
-    close: bool,
+    /// The function marked `#[open]`, once found.
+    open: Option<Ident>,
+    /// The function marked `#[close]`, if any.
+    close: Option<Ident>,
+}
+
+/// A marker on a function of an `impl` block. The functions the generated code calls by role
+/// carry one, whatever their names and visibility; a function without one is ordinary Rust.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    /// `#[validate]`: a state's rule, `fn(&self) -> Result<(), String>`.
+    Validate,
+    /// `#[open]`: a root resource's opening, `fn() -> Self`.
+    Open,
+    /// `#[close]`: a root resource's closing, `fn(self)`.
+    Close,
+    /// `#[constructor]`: a WIT resource's constructor, `fn(..) -> Self` without `self`.
+    Constructor,
+}
+
+impl Marker {
+    const ALL: [Marker; 4] = [
+        Marker::Validate,
+        Marker::Open,
+        Marker::Close,
+        Marker::Constructor,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Validate => "validate",
+            Self::Open => "open",
+            Self::Close => "close",
+            Self::Constructor => "constructor",
+        }
+    }
+
+    /// The shape of the function the marker goes on, for the errors.
+    fn shape(self) -> &'static str {
+        match self {
+            Self::Validate => "`fn(&self) -> Result<(), String>` of a #[state] struct",
+            Self::Open => "`fn() -> Self` of a #[resource] struct",
+            Self::Close => "`fn(self)` of a #[resource] struct",
+            Self::Constructor => "`fn(..) -> Self`, without self, of a #[wit_resource] struct",
+        }
+    }
+
+    /// The kind of struct whose `impl` block the marker goes in, for the errors.
+    fn place(self) -> &'static str {
+        match self {
+            Self::Validate => "#[state]",
+            Self::Open | Self::Close => "#[resource]",
+            Self::Constructor => "#[wit_resource]",
+        }
+    }
+}
+
+/// A marked function of an inherent `impl` block, with the marker removed from the function.
+struct Marked {
+    marker: Marker,
+    /// The type of the `impl` block.
+    self_ty: Ident,
+    function: syn::ImplItemFn,
+    /// Where the marker was written, for the errors.
+    span: Span,
+}
+
+/// The one function of `ident`'s `impl` blocks carrying `marker`, if any; two are an error.
+fn marked_function<'a>(
+    marked: &'a [Marked],
+    marker: Marker,
+    ident: &Ident,
+) -> syn::Result<Option<&'a Marked>> {
+    let mut found = marked
+        .iter()
+        .filter(|candidate| candidate.marker == marker && &candidate.self_ty == ident);
+    let first = found.next();
+    if let Some(second) = found.next() {
+        return Err(syn::Error::new(
+            second.span,
+            format!("`{ident}` has two functions marked #[{}]", marker.name()),
+        ));
+    }
+    Ok(first)
 }
 
 fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenStream> {
@@ -228,6 +317,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let mut wit_resources: Vec<WitResource> = Vec::new();
     let mut passthrough = Vec::new();
     let mut impls = Vec::new();
+    let mut marked: Vec<Marked> = Vec::new();
     for item in items {
         match item {
             Item::Struct(mut s) => {
@@ -277,14 +367,84 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 let shape = wit::enumeration(&e)?;
                 candidates.push((Item::Enum(e), shape));
             }
-            Item::Impl(i) if i.trait_.is_none() => {
+            Item::Impl(mut i) if i.trait_.is_none() => {
                 if let Some(attribute) = i.attrs.iter().find(|a| a.path().is_ident("service")) {
                     return Err(syn::Error::new(
                         attribute.span(),
                         "put #[service] on the unit struct, not on its impl block",
                     ));
                 }
+                // The marked functions are read here and their markers removed: the compiler
+                // knows no attribute of those names.
+                for impl_item in &mut i.items {
+                    let syn::ImplItem::Fn(function) = impl_item else {
+                        continue;
+                    };
+                    let mut carried = Vec::new();
+                    for marker in Marker::ALL {
+                        if let Some(attribute) = take(&mut function.attrs, marker.name()) {
+                            carried.push((marker, attribute.span()));
+                        }
+                    }
+                    if carried.len() > 1 {
+                        return Err(syn::Error::new(
+                            carried[1].1,
+                            format!(
+                                "`{}` carries two markers; a function has one role",
+                                function.sig.ident
+                            ),
+                        ));
+                    }
+                    let Some((marker, span)) = carried.pop() else {
+                        continue;
+                    };
+                    let self_ty = match &*i.self_ty {
+                        Type::Path(path) => path.path.get_ident().cloned(),
+                        _ => None,
+                    };
+                    let Some(self_ty) = self_ty else {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "#[{}] goes in the impl block of a {} struct of this module",
+                                marker.name(),
+                                marker.place()
+                            ),
+                        ));
+                    };
+                    marked.push(Marked {
+                        marker,
+                        self_ty,
+                        function: function.clone(),
+                        span,
+                    });
+                }
                 impls.push(i.clone());
+                passthrough.push(Item::Impl(i));
+            }
+            Item::Impl(i) => {
+                // A trait impl is copied through unread; a marker belongs to an inherent block.
+                for impl_item in &i.items {
+                    let syn::ImplItem::Fn(function) = impl_item else {
+                        continue;
+                    };
+                    for marker in Marker::ALL {
+                        if let Some(attribute) = function
+                            .attrs
+                            .iter()
+                            .find(|attribute| attribute.path().is_ident(marker.name()))
+                        {
+                            return Err(syn::Error::new(
+                                attribute.span(),
+                                format!(
+                                    "#[{}] goes in an inherent impl block of a {} struct, not in a trait impl",
+                                    marker.name(),
+                                    marker.place()
+                                ),
+                            ));
+                        }
+                    }
+                }
                 passthrough.push(Item::Impl(i));
             }
             Item::Fn(mut function) => {
@@ -293,6 +453,18 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                         attribute.span(),
                         "#[contributes] is now #[hook(\"ns:name/hook@version\", priority = n)]",
                     ));
+                }
+                for marker in Marker::ALL {
+                    if let Some(attribute) = take(&mut function.attrs, marker.name()) {
+                        return Err(syn::Error::new(
+                            attribute.span(),
+                            format!(
+                                "#[{}] goes on a function in the impl block of a {} struct, not on a free function",
+                                marker.name(),
+                                marker.place()
+                            ),
+                        ));
+                    }
                 }
                 if let Some(attribute) = take(&mut function.attrs, "hook") {
                     contributions.push(contribution(&function, &attribute)?);
@@ -321,64 +493,106 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     }
+    // Every marker goes on a struct of its kind; the function's shape is checked below.
+    for marked in &marked {
+        let fits = match marked.marker {
+            Marker::Validate => states.iter().any(|state| state.ident == marked.self_ty),
+            Marker::Open | Marker::Close => resources
+                .iter()
+                .any(|resource| resource.ident == marked.self_ty),
+            Marker::Constructor => wit_resources
+                .iter()
+                .any(|resource| resource.ident == marked.self_ty),
+        };
+        if !fits {
+            return Err(syn::Error::new(
+                marked.span,
+                format!(
+                    "#[{}] marks a function of a {} struct; `{}` is not one",
+                    marked.marker.name(),
+                    marked.marker.place(),
+                    marked.self_ty
+                ),
+            ));
+        }
+    }
     for resource in &mut wit_resources {
+        let constructor = marked_function(&marked, Marker::Constructor, &resource.ident)?;
+        if let Some(marked) = constructor {
+            let function = &marked.function;
+            let returns_self = match result(&function.sig.output) {
+                Some(Type::Path(path)) => {
+                    path.path.is_ident("Self") || path.path.is_ident(&resource.ident)
+                }
+                _ => false,
+            };
+            let takes_self = matches!(function.sig.inputs.first(), Some(FnArg::Receiver(_)));
+            if takes_self || !returns_self {
+                return Err(syn::Error::new(
+                    marked.span,
+                    format!("#[constructor] marks {}", Marker::Constructor.shape()),
+                ));
+            }
+            resource.constructor = Some(Constructor {
+                ident: function.sig.ident.clone(),
+                params: typed_params(function)?,
+            });
+        }
         for function in public_functions(&impls, &resource.ident) {
+            if constructor.is_some_and(|marked| marked.function.sig.ident == function.sig.ident) {
+                continue;
+            }
             match resource_function(function)? {
-                ResourceFunction::Constructor(params) => resource.constructor = Some(params),
                 ResourceFunction::Method(method) => resource.methods.push(method),
                 ResourceFunction::Static(function) => resource.statics.push(function),
             }
         }
     }
     for resource in &mut resources {
-        let functions = public_functions(&impls, &resource.ident);
-        let opens = functions.iter().any(|function| {
-            function.sig.ident == "open"
-                && function.sig.inputs.is_empty()
-                && !matches!(function.sig.output, ReturnType::Default)
-        });
-        if !opens {
+        let Some(open) = marked_function(&marked, Marker::Open, &resource.ident)? else {
             return Err(syn::Error::new(
                 resource.ident.span(),
                 format!(
-                    "a resource needs `pub fn open() -> {0}` in an impl block; `pub fn close(self)` is optional",
+                    "a resource needs a function marked #[open] returning `{0}` in an impl block; one marked #[close], taking `self`, is optional",
                     resource.ident
                 ),
             ));
+        };
+        let signature = &open.function.sig;
+        if !signature.inputs.is_empty() || matches!(signature.output, ReturnType::Default) {
+            return Err(syn::Error::new(
+                open.span,
+                format!("#[open] marks {}", Marker::Open.shape()),
+            ));
         }
-        resource.close = functions.iter().any(|function| {
-            function.sig.ident == "close"
-                && function.sig.inputs.len() == 1
-                && matches!(function.sig.inputs.first(), Some(FnArg::Receiver(_)))
-        });
-    }
-    for state in &mut states {
-        let validator = impls
-            .iter()
-            .filter(|item| {
-                matches!(&*item.self_ty, Type::Path(path) if path.path.is_ident(&state.ident))
-            })
-            .flat_map(|item| &item.items)
-            .find_map(|item| match item {
-                syn::ImplItem::Fn(function)
-                    if matches!(function.vis, Visibility::Public(_))
-                        && function.sig.ident == "validate" =>
-                {
-                    Some(function)
-                }
-                _ => None,
-            });
-        if let Some(function) = validator {
-            let borrows_self = function.sig.inputs.len() == 1
-                && matches!(function.sig.inputs.first(), Some(FnArg::Receiver(receiver))
-                    if receiver.reference.is_some() && receiver.mutability.is_none());
-            if !borrows_self || !result(&function.sig.output).is_some_and(refusal) {
+        resource.open = Some(signature.ident.clone());
+        if let Some(close) = marked_function(&marked, Marker::Close, &resource.ident)? {
+            let signature = &close.function.sig;
+            let takes_self = signature.inputs.len() == 1
+                && matches!(signature.inputs.first(), Some(FnArg::Receiver(receiver))
+                    if receiver.reference.is_none());
+            if !takes_self {
                 return Err(syn::Error::new(
-                    function.sig.span(),
-                    "a state's validator is `pub fn validate(&self) -> Result<(), String>`",
+                    close.span,
+                    format!("#[close] marks {}", Marker::Close.shape()),
                 ));
             }
-            state.validate = true;
+            resource.close = Some(signature.ident.clone());
+        }
+    }
+    for state in &mut states {
+        if let Some(validator) = marked_function(&marked, Marker::Validate, &state.ident)? {
+            let signature = &validator.function.sig;
+            let borrows_self = signature.inputs.len() == 1
+                && matches!(signature.inputs.first(), Some(FnArg::Receiver(receiver))
+                    if receiver.reference.is_some() && receiver.mutability.is_none());
+            if !borrows_self || !result(&signature.output).is_some_and(refusal) {
+                return Err(syn::Error::new(
+                    validator.span,
+                    format!("#[validate] marks {}", Marker::Validate.shape()),
+                ));
+            }
+            state.validator = Some(signature.ident.clone());
         }
     }
     // An Orb exports services, declares hooks or contributes to them; a module doing none of
@@ -513,7 +727,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let constructor_params = wit_resources
         .iter()
         .filter_map(|resource| resource.constructor.as_ref())
-        .flatten();
+        .flat_map(|constructor| &constructor.params);
     for (ident, ty, _) in derived_functions
         .flat_map(|function| &function.params)
         .chain(constructor_params)
@@ -617,20 +831,43 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                     ),
                 ));
             };
-            let expected = resource.constructor.iter().map(|_| "new".to_owned()).chain(
-                resource
+            match (&resource.constructor, &implementation.constructor) {
+                (Some(_), None) => {
+                    return Err(syn::Error::new(
+                        implementation.ident.span(),
+                        format!(
+                            "`{ident}` implements the resource `{}` of {identity} but none of its functions is marked #[constructor]",
+                            resource.name
+                        ),
+                    ));
+                }
+                (
+                    None,
+                    Some(Constructor {
+                        ident: constructor, ..
+                    }),
+                ) => {
+                    return Err(syn::Error::new(
+                        constructor.span(),
+                        format!(
+                            "`{ident}::{constructor}` is marked #[constructor], but the resource `{}` of {identity} has no constructor; the interface is fixed by its WIT",
+                            resource.name
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+            let expected = resource
+                .methods
+                .iter()
+                .chain(&resource.statics)
+                .map(|function| function.name.to_snake_case());
+            for name in expected {
+                let defined = implementation
                     .methods
                     .iter()
-                    .chain(&resource.statics)
-                    .map(|function| function.name.to_snake_case()),
-            );
-            for name in expected {
-                let defined = (name == "new" && implementation.constructor.is_some())
-                    || implementation
-                        .methods
-                        .iter()
-                        .chain(&implementation.statics)
-                        .any(|function| function.ident == name);
+                    .chain(&implementation.statics)
+                    .any(|function| function.ident == name);
                 if !defined {
                     return Err(syn::Error::new(
                         implementation.ident.span(),
@@ -1087,38 +1324,48 @@ fn public_functions<'a>(impls: &'a [syn::ItemImpl], ident: &Ident) -> Vec<&'a sy
         .collect()
 }
 
-/// One `pub fn` of a WIT resource, by its role.
+/// One `pub fn` of a WIT resource, by its role: a function taking `&self` is a method, any other
+/// a static function. The constructor is the function marked `#[constructor]`, read apart.
 enum ResourceFunction {
-    Constructor(Vec<(Ident, Type, String)>),
     Method(Function),
     Static(Function),
 }
 
-/// Read one `pub fn` of a WIT resource: `new` without `self` is the constructor, a function
-/// taking `&self` a method, any other a static function; `&mut self` and `self` are refused.
+/// Read one `pub fn` of a WIT resource; `&mut self` and `self` are refused.
 fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction> {
     let receiver = function.sig.inputs.first().and_then(|input| match input {
         FnArg::Receiver(receiver) => Some(receiver),
         FnArg::Typed(_) => None,
     });
-    match receiver {
-        Some(receiver) if receiver.reference.is_none() || receiver.mutability.is_some() => {
-            return Err(syn::Error::new(
-                receiver.span(),
-                "a WIT method borrows `&self`; change a resource through Cell or RefCell",
-            ));
-        }
-        _ => {}
-    }
-    let mut params = Vec::new();
-    for input in function
-        .sig
-        .inputs
-        .iter()
-        .skip(usize::from(receiver.is_some()))
+    if let Some(receiver) = receiver
+        && (receiver.reference.is_none() || receiver.mutability.is_some())
     {
+        return Err(syn::Error::new(
+            receiver.span(),
+            "a WIT method borrows `&self`; change a resource through Cell or RefCell",
+        ));
+    }
+    let read = Function {
+        ident: function.sig.ident.clone(),
+        docs: wit::docs(&function.attrs),
+        params: typed_params(function)?,
+        result: match result(&function.sig.output) {
+            Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
+            None => None,
+        },
+    };
+    Ok(match receiver {
+        Some(_) => ResourceFunction::Method(read),
+        None => ResourceFunction::Static(read),
+    })
+}
+
+/// The typed parameters of a function, the receiver left out: name, Rust type and WIT spelling.
+fn typed_params(function: &syn::ImplItemFn) -> syn::Result<Vec<(Ident, Type, String)>> {
+    let mut params = Vec::new();
+    for input in &function.sig.inputs {
         let FnArg::Typed(typed) = input else {
-            return Err(syn::Error::new(input.span(), "self comes first"));
+            continue;
         };
         let Pat::Ident(pat) = &*typed.pat else {
             return Err(syn::Error::new(
@@ -1132,34 +1379,7 @@ fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction
             wit::wit_type(&typed.ty)?,
         ));
     }
-    let read = |params: Vec<(Ident, Type, String)>| -> syn::Result<Function> {
-        Ok(Function {
-            ident: function.sig.ident.clone(),
-            docs: wit::docs(&function.attrs),
-            params,
-            result: match result(&function.sig.output) {
-                Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
-                None => None,
-            },
-        })
-    };
-    if receiver.is_some() {
-        return Ok(ResourceFunction::Method(read(params)?));
-    }
-    if function.sig.ident == "new" {
-        let returns_self = match result(&function.sig.output) {
-            Some(Type::Path(path)) => path.path.is_ident("Self") || path.path.segments.len() == 1,
-            _ => false,
-        };
-        if !returns_self {
-            return Err(syn::Error::new(
-                function.sig.span(),
-                "a WIT resource's constructor is `pub fn new(..) -> Self`",
-            ));
-        }
-        return Ok(ResourceFunction::Constructor(params));
-    }
-    Ok(ResourceFunction::Static(read(params)?))
+    Ok(params)
 }
 
 /// The result of a derived function's bridge: a resource is wrapped into the bindings' handle
@@ -1200,10 +1420,14 @@ fn derived_resource(
 ) -> proc_macro2::TokenStream {
     let ident = &resource.ident;
     let guest = format_ident!("Guest{}", ident);
-    let constructor = resource.constructor.as_ref().map(|params| {
-        let names = params.iter().map(|(ident, _, _)| ident);
-        let params = params.iter().map(|(ident, ty, _)| quote! { #ident: #ty });
-        quote! { fn new(#(#params),*) -> Self { #ident::new(#(#names),*) } }
+    let constructor = resource.constructor.as_ref().map(|constructor| {
+        let names = constructor.params.iter().map(|(ident, _, _)| ident);
+        let params = constructor
+            .params
+            .iter()
+            .map(|(ident, ty, _)| quote! { #ident: #ty });
+        let function = &constructor.ident;
+        quote! { fn new(#(#params),*) -> Self { #ident::#function(#(#names),*) } }
     });
     let methods = resource.methods.iter().map(|function| {
         let name = &function.ident;
@@ -1314,8 +1538,13 @@ fn implemented_service(
         let struct_ident = &implementation.ident;
         owned.push(quote! { type #ident = #struct_ident; });
         let guest = format_ident!("Guest{}", ident);
-        let constructor = match &resource.constructor {
-            Some(params) => {
+        let constructor = match (&resource.constructor, &implementation.constructor) {
+            (
+                Some(params),
+                Some(Constructor {
+                    ident: constructor, ..
+                }),
+            ) => {
                 let Signature { names, params, .. } = signature(&wit::ConsumedFunction {
                     name: "new".into(),
                     params: params
@@ -1333,9 +1562,9 @@ fn implemented_service(
                         .collect(),
                     result: None,
                 })?;
-                quote! { fn new(#(#params),*) -> Self { #struct_ident::new(#(#names),*) } }
+                quote! { fn new(#(#params),*) -> Self { #struct_ident::#constructor(#(#names),*) } }
             }
-            None => quote! {},
+            _ => quote! {},
         };
         let mut members = Vec::new();
         for method in &resource.methods {
@@ -1408,7 +1637,11 @@ fn reachable(
         }
     }
     for resource in resources {
-        for (_, ty, _) in resource.constructor.iter().flatten() {
+        for (_, ty, _) in resource
+            .constructor
+            .iter()
+            .flat_map(|constructor| &constructor.params)
+        {
             wit::references(ty, &mut pending);
         }
         for function in resource.methods.iter().chain(&resource.statics) {
@@ -1698,7 +1931,7 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
             .collect(),
         service,
         version,
-        validate: false,
+        validator: None,
         identity: String::new(),
     })
 }
@@ -1713,7 +1946,7 @@ fn state_code(states: &[State]) -> proc_macro2::TokenStream {
         let identity = LitStr::new(&state.identity, Span::call_site());
         let ident = &state.ident;
         let version = state.version;
-        let validated = state.validate;
+        let validated = state.validator.is_some();
         quote! {
             #identity => Some(exports::tembra::guest::state_init::Declaration {
                 initial: __tembra_state::to_json(&<#ident as ::core::default::Default>::default()),
@@ -1724,19 +1957,22 @@ fn state_code(states: &[State]) -> proc_macro2::TokenStream {
     });
     // On reload the kernel hands the new instance the value it inherits; a validated state
     // answers with its validator, any other state accepts.
-    let validators = states.iter().filter(|state| state.validate).map(|state| {
-        let identity = LitStr::new(&state.identity, Span::call_site());
-        let ident = &state.ident;
-        let name = LitStr::new(&state.ident.to_string(), Span::call_site());
-        quote! {
-            #identity => match ::serde_json::from_str::<#ident>(&value) {
-                Ok(state) => state.validate(),
-                Err(error) => Err(__tembra_state::format!(
-                    "the retained state is not a `{}`: {error}", #name
-                )),
-            },
-        }
-    });
+    let validators = states
+        .iter()
+        .filter_map(|state| state.validator.as_ref().map(|validator| (state, validator)))
+        .map(|(state, validator)| {
+            let identity = LitStr::new(&state.identity, Span::call_site());
+            let ident = &state.ident;
+            let name = LitStr::new(&state.ident.to_string(), Span::call_site());
+            quote! {
+                #identity => match ::serde_json::from_str::<#ident>(&value) {
+                    Ok(state) => state.#validator(),
+                    Err(error) => Err(__tembra_state::format!(
+                        "the retained state is not a `{}`: {error}", #name
+                    )),
+                },
+            }
+        });
     let accessors = states.iter().map(|state| {
         let ident = &state.ident;
         let fields = &state.fields;
@@ -1744,7 +1980,7 @@ fn state_code(states: &[State]) -> proc_macro2::TokenStream {
         let read_doc = format!(
             " The state of the `{service}` object running the current call, read from the kernel."
         );
-        let update = if state.validate {
+        let update = if let Some(validator) = &state.validator {
             let doc = format!(
                 " Change the state of the `{service}` object running the current call, validate it and store it in the kernel; returns the stored value, or the validator's refusal, in which case the kernel keeps the previous value."
             );
@@ -1755,7 +1991,7 @@ fn state_code(states: &[State]) -> proc_macro2::TokenStream {
                 ) -> Result<Self, __tembra_state::String> {
                     let mut value = Self::read();
                     change(&mut value);
-                    value.validate()?;
+                    value.#validator()?;
                     Ok(__tembra_state::update(&value))
                 }
             }
@@ -1855,7 +2091,8 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
     Ok(Resource {
         ident: item.ident.clone(),
         version,
-        close: false,
+        open: None,
+        close: None,
     })
 }
 
@@ -1884,16 +2121,21 @@ fn resource_code(resources: &[Resource]) -> proc_macro2::TokenStream {
     let openers = resources.iter().map(|resource| {
         let name = wit::kebab(&resource.ident);
         let ident = &resource.ident;
+        let open = resource
+            .open
+            .as_ref()
+            .expect("a resource has its #[open] function");
         let slot = slot(resource);
-        quote! { #name => { #slot.open(#ident::open()); 1 } }
+        quote! { #name => { #slot.open(#ident::#open()); 1 } }
     });
     let closers = resources.iter().map(|resource| {
         let name = wit::kebab(&resource.ident);
         let slot = slot(resource);
-        if resource.close {
-            quote! { #name => { if let Some(value) = #slot.close() { value.close(); } } }
-        } else {
-            quote! { #name => { #slot.close(); } }
+        match &resource.close {
+            Some(close) => {
+                quote! { #name => { if let Some(value) = #slot.close() { value.#close(); } } }
+            }
+            None => quote! { #name => { #slot.close(); } },
         }
     });
     let slots = resources.iter().map(|resource| {

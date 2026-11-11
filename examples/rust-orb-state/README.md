@@ -6,12 +6,12 @@ methods read and update the state through the kernel, which stores only what the
 the host observes the state through a reference, with no method call, sees an update refused, and
 reloads the Orb with a fresh component instance while the count stays.
 
-| File                         | Role                                                                                       |
-| ---------------------------- | ------------------------------------------------------------------------------------------ |
-| `counter/src/lib.rs`         | The Orb: `#[state]` on a struct with a `validate`, `Count::read()` and `Count::update(..)` |
-| `counter/contract/tally.wit` | The contract `cargo tembra build` wrote: the kernel's state interfaces in the world        |
-| `host/src/main.rs`           | The wiring: subscribes to the state, calls `add`, reloads, calls again; it defines no Orb  |
-| `run.sh`                     | Build, show the contract, run the host                                                     |
+| File                         | Role                                                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `counter/src/lib.rs`         | The Orb: `#[state]` on a struct with a `#[validate]` function, `Count::read()` and `Count::update(..)` |
+| `counter/contract/tally.wit` | The contract `cargo tembra build` wrote: the kernel's state interfaces in the world                    |
+| `host/src/main.rs`           | The wiring: subscribes to the state, calls `add`, reloads, calls again; it defines no Orb              |
+| `run.sh`                     | Build, show the contract, run the host                                                                 |
 
 ## The state
 
@@ -34,6 +34,7 @@ executor carries 64-bit integers exactly across the boundary, so the host can ad
 ```rust
 impl Count {
     /// The rule of this state: a total never goes below zero.
+    #[validate]
     pub fn validate(&self) -> Result<(), String> {
         if self.total < 0 {
             return Err(format!("a total of {} is below zero", self.total));
@@ -43,12 +44,14 @@ impl Count {
 }
 ```
 
-A state may carry its rule as `pub fn validate(&self) -> Result<(), String>`. Then
-`Count::update` returns `Result<Count, String>`: the closure's result is validated before the
-kernel stores it, and a refusal leaves the previous value in place, so `add` returns a
-`result<count, string>` in the WIT. The same validator answers the kernel on a reload, when the
-new instance is asked whether it accepts the value it inherits; a refusal fails the reload and the
-running revision keeps serving. The world gains two lines:
+A state may carry its rule: a function of its `impl` block marked `#[validate]`, of the shape
+`fn(&self) -> Result<(), String>`, under any name. Then `Count::update` returns
+`Result<Count, String>`: the closure's result is validated before the kernel stores it, and a
+refusal leaves the previous value in place, so `add` returns a `result<count, string>` in the WIT.
+The same function answers the kernel on a reload, when the new instance is asked whether it
+accepts the value it inherits; a refusal fails the reload and the running revision keeps serving.
+Without the marker, a function named `validate` is ordinary Rust and the state is not validated.
+The world gains two lines:
 
 ```wit
 world tally {

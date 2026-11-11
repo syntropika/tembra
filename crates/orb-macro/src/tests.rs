@@ -165,6 +165,7 @@ const COUNTER: &str = "mod tally {
     #[state]
     pub struct Count { pub total: i64 }
     impl Count {
+        #[validate]
         pub fn validate(&self) -> Result<(), String> {
             if self.total < 0 { Err(String::from(\"negative\")) } else { Ok(()) }
         }
@@ -176,31 +177,46 @@ const COUNTER: &str = "mod tally {
     }
 }";
 
-/// A state with a validator declares itself validated and its `update` answers the refusal; the
-/// validator has one shape.
+/// A state with a function marked `#[validate]` declares itself validated and its `update`
+/// answers the refusal; the marker decides, not the name, and the function has one shape.
 #[test]
 fn a_validated_state_declares_so_and_updates_fallibly() {
     let module = expanded("example:counter@1.0.0", COUNTER);
-    let generated = quote::quote!(#module).to_string();
+    let generated = tokens(&module);
     assert!(generated.contains("validated : true"), "{generated}");
     assert!(generated.contains("value . validate () ? ;"), "{generated}");
+    assert!(
+        generated.contains("Ok (state) => state . validate () ,"),
+        "{generated}"
+    );
+    assert!(!generated.contains("# [validate]"), "{generated}");
     assert!(
         wit(&module).contains("add: func(by: s64) -> result<count, string>;"),
         "{}",
         wit(&module)
     );
-    let plain = expanded(
+    // The marked function may have any name and stay private.
+    let renamed = tokens(&expanded(
         "example:counter@1.0.0",
         &COUNTER.replace(
             "pub fn validate(&self) -> Result<(), String>",
-            "fn check(&self) -> Result<(), String>",
+            "fn non_negative(&self) -> Result<(), String>",
         ),
-    );
+    ));
+    assert!(renamed.contains("validated : true"), "{renamed}");
+    assert!(renamed.contains("value . non_negative () ? ;"), "{renamed}");
     assert!(
-        quote::quote!(#plain)
-            .to_string()
-            .contains("validated : false")
+        renamed.contains("Ok (state) => state . non_negative () ,"),
+        "{renamed}"
     );
+    // Without the marker, `validate` is an ordinary function and the state is not validated.
+    let plain = tokens(&expanded(
+        "example:counter@1.0.0",
+        &COUNTER.replace("#[validate]\n", ""),
+    ));
+    assert!(plain.contains("validated : false"), "{plain}");
+    assert!(plain.contains("pub fn validate (& self)"), "{plain}");
+    assert!(!plain.contains("value . validate ()"), "{plain}");
     for wrong in [
         "pub fn validate(&mut self) -> Result<(), String>",
         "pub fn validate(&self) -> bool",
@@ -210,8 +226,122 @@ fn a_validated_state_declares_so_and_updates_fallibly() {
             "example:counter@1.0.0",
             &COUNTER.replace("pub fn validate(&self) -> Result<(), String>", wrong),
         );
-        assert!(error.contains("validator is"), "{wrong}: {error}");
+        assert!(error.contains("#[validate] marks"), "{wrong}: {error}");
     }
+    let error = refused(
+        "example:counter@1.0.0",
+        &COUNTER.replace(
+            "#[validate]\n        pub fn validate",
+            "#[validate]\n        pub fn other(&self) -> Result<(), String> { Ok(()) }\n        #[validate]\n        pub fn validate",
+        ),
+    );
+    assert!(
+        error.contains("two functions marked #[validate]"),
+        "{error}"
+    );
+}
+
+/// A marker goes on a function of a struct of its kind, in an inherent impl block, and a
+/// function carries one role.
+#[test]
+fn a_marker_goes_where_it_belongs() {
+    let error = refused(
+        "example:counter@1.0.0",
+        &COUNTER.replace("pub fn add(by: i64)", "#[validate] pub fn add(by: i64)"),
+    );
+    assert!(
+        error.contains("#[validate] marks a function of a #[state] struct; `Counter` is not one"),
+        "{error}"
+    );
+    let error = refused(
+        "example:counter@1.0.0",
+        &COUNTER.replace("#[service]", "#[open] pub fn free() {}\n    #[service]"),
+    );
+    assert!(error.contains("not on a free function"), "{error}");
+    let error = refused(
+        "example:counter@1.0.0",
+        &COUNTER.replace(
+            "#[service]",
+            "impl Default for Count { #[validate] fn default() -> Self { Count { total: 0 } } }\n    #[service]",
+        ),
+    );
+    assert!(error.contains("not in a trait impl"), "{error}");
+    let error = refused(
+        "example:counter@1.0.0",
+        &COUNTER.replace("#[validate]", "#[validate] #[open]"),
+    );
+    assert!(error.contains("carries two markers"), "{error}");
+}
+
+const FILTER: &str = "mod filter {
+    #[resource]
+    pub struct Counts { pub seen: u32 }
+    impl Counts {
+        #[open]
+        pub fn open() -> Counts { Counts { seen: 0 } }
+        #[close]
+        fn close(self) {}
+    }
+    #[service]
+    pub struct Report;
+    impl Report {
+        pub fn seen() -> u32 { Counts::with(|counts| counts.seen) }
+    }
+}";
+
+/// A root resource is opened and closed by its marked functions, whatever their names; `#[open]`
+/// is required, `#[close]` optional, and each has one shape.
+#[test]
+fn a_root_resource_is_opened_and_closed_by_its_marked_functions() {
+    let module = expanded("example:filter@1.0.0", FILTER);
+    assert!(
+        wit(&module).contains(
+            "world filter {\n  import tembra:guest/resources@1.0.0;\n  export tembra:guest/resources-init@1.0.0;\n  export report;\n}"
+        ),
+        "{}",
+        wit(&module)
+    );
+    let generated = tokens(&module);
+    assert!(
+        generated.contains("__TEMBRA_RESOURCE_COUNTS . open (Counts :: open ()) ;"),
+        "{generated}"
+    );
+    assert!(generated.contains("{ value . close () ; }"), "{generated}");
+    assert!(!generated.contains("# [open]"), "{generated}");
+    let renamed = tokens(&expanded(
+        "example:filter@1.0.0",
+        &FILTER
+            .replace("pub fn open() -> Counts", "fn start() -> Self")
+            .replace("fn close(self) {}", "pub fn stop(self) {}"),
+    ));
+    assert!(
+        renamed.contains("__TEMBRA_RESOURCE_COUNTS . open (Counts :: start ()) ;"),
+        "{renamed}"
+    );
+    assert!(renamed.contains("{ value . stop () ; }"), "{renamed}");
+    let unclosed = tokens(&expanded(
+        "example:filter@1.0.0",
+        &FILTER.replace("#[close]\n", ""),
+    ));
+    assert!(
+        unclosed.contains("{ __TEMBRA_RESOURCE_COUNTS . close () ; }"),
+        "{unclosed}"
+    );
+    let error = refused("example:filter@1.0.0", &FILTER.replace("#[open]\n", ""));
+    assert!(error.contains("needs a function marked #[open]"), "{error}");
+    let error = refused(
+        "example:filter@1.0.0",
+        &FILTER.replace(
+            "pub fn open() -> Counts",
+            "pub fn open(seen: u32) -> Counts",
+        ),
+    );
+    assert!(error.contains("#[open] marks"), "{error}");
+    let error = refused(
+        "example:filter@1.0.0",
+        &FILTER.replace("fn close(self) {}", "fn close(&self) {}"),
+    );
+    assert!(error.contains("#[close] marks"), "{error}");
 }
 
 #[test]
@@ -316,6 +446,7 @@ const DESK: &str = "mod desk {
     #[wit_resource]
     pub struct Session { n: u32 }
     impl Session {
+        #[constructor]
         pub fn new(n: u32) -> Session { Session { n } }
         /// The number.
         pub fn get(&self) -> u32 { self.n }
@@ -356,6 +487,10 @@ fn a_wit_resource_is_derived_from_the_struct_and_its_methods() {
         generated.contains("fn get (& self ,) -> u32 { Session :: get (self ,) }"),
         "{generated}"
     );
+    assert!(
+        generated.contains("fn new (n : u32) -> Self { Session :: new (n) }"),
+        "{generated}"
+    );
     let error = refused(
         "example:desk@1.0.0",
         &DESK.replace("pub fn get(&self) -> u32", "pub fn get(&mut self) -> u32"),
@@ -369,6 +504,50 @@ fn a_wit_resource_is_derived_from_the_struct_and_its_methods() {
         ),
     );
     assert!(error.contains("handed out, never taken"), "{error}");
+}
+
+/// The constructor is the function marked `#[constructor]`, of any name; a `pub fn new` without
+/// the marker is a static function of the resource, and the marked function has one shape.
+#[test]
+fn the_constructor_is_the_marked_function_not_the_one_named_new() {
+    let renamed = expanded(
+        "example:desk@1.0.0",
+        &DESK.replace(
+            "pub fn new(n: u32) -> Session { Session { n } }",
+            "fn numbered(n: u32) -> Self { Session { n } }",
+        ),
+    );
+    assert!(
+        wit(&renamed).contains("    constructor(n: u32);\n"),
+        "{}",
+        wit(&renamed)
+    );
+    assert!(
+        tokens(&renamed).contains("fn new (n : u32) -> Self { Session :: numbered (n) }"),
+        "{}",
+        tokens(&renamed)
+    );
+    let unmarked = expanded("example:desk@1.0.0", &DESK.replace("#[constructor]\n", ""));
+    assert!(
+        !wit(&unmarked).contains("constructor("),
+        "{}",
+        wit(&unmarked)
+    );
+    assert!(
+        wit(&unmarked).contains("    new: static func(n: u32) -> session;\n"),
+        "{}",
+        wit(&unmarked)
+    );
+    for wrong in [
+        "pub fn new(&self) -> Session { Session { n: 0 } }",
+        "pub fn new(n: u32) -> u32 { n }",
+    ] {
+        let error = refused(
+            "example:desk@1.0.0",
+            &DESK.replace("pub fn new(n: u32) -> Session { Session { n } }", wrong),
+        );
+        assert!(error.contains("#[constructor] marks"), "{wrong}: {error}");
+    }
 }
 
 /// A state no method mentions stays the author's struct, with serde derives, and out of the WIT.
