@@ -24,6 +24,9 @@ pub const CONTEXT: &str = "tembra:guest/context@1.0.0";
 /// The declaring callback of [`STATE_INIT`] and [`RESOURCE_INIT`].
 pub const DECLARE: &str = "declare";
 
+/// The validating callback of [`STATE_INIT`], run on reload for a state declared `validated`.
+pub const VALIDATE: &str = "validate";
+
 /// The opening callback of [`RESOURCE_INIT`].
 pub const OPEN: &str = "open";
 
