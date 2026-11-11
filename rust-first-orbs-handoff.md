@@ -1,6 +1,6 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 22:50 CET
+- **Aggiornato:** 2026-11-11, 23:20 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   base `main`
 - **Stato:** strada A. Ribase fatto, verificato e pushato: la
@@ -855,6 +855,18 @@ commit `f8d9cf2`:
   `a_source_consumer_reads_native_and_source_producers_`
   `exactly`). Sul `865e4c6` invece erano passati: sono test
   intermittenti, sensibili ai tempi.
+
+Esito del rilancio della run pull_request (tentativo 2, fino
+alle 23:20 CET): `quality` verde; `acceptance` rossa su due
+test di `source_streams.rs`, diversi dalla volta prima:
+`a_small_packet_limit_never_truncates_a_stream_into_a_clean_`
+`end` («standard packet exceeds the packet limit») e
+`dropping_a_stream_of_an_idle_producer_ends_its_callback`
+(Pulley). La PR non tocca quel percorso (zero modifiche a
+`bindings`, `worker.rs` e `adapter.rs` di executor-wasm):
+anche questi sono intermittenti. La PR resta `UNSTABLE` solo
+per l'acceptance. La run push `43095862614` è ancora in coda
+dall'outage: si può annullare, duplica la pull_request.
 
 Poi:
 
