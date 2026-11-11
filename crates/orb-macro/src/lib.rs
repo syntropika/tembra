@@ -626,8 +626,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
         quote! { path: #dir, }
     });
-    let derives = (!states.is_empty())
-        .then(|| quote! { additional_derives: [::serde::Serialize, ::serde::Deserialize], });
+    // A state's record is in the WIT whether or not a method mentions it; the bindings must
+    // generate it all the same, since the state type is the generated one.
+    let derives = (!states.is_empty()).then(|| {
+        quote! {
+            additional_derives: [::serde::Serialize, ::serde::Deserialize],
+            generate_unused_types: true,
+        }
+    });
     let generate = quote! {
         ::wit_bindgen::generate!({
             #path
