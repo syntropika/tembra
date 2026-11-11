@@ -60,3 +60,7 @@ opt-level = 3
 # Exercise interpreted execution within real deadlines while retaining test debug assertions.
 [profile.test.package.pulley-interpreter]
 opt-level = 3
+
+# Keep guest compilation in tests representative without optimizing away host debug assertions.
+[profile.test.package.cranelift-codegen]
+opt-level = 3

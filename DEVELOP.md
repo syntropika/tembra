@@ -127,6 +127,15 @@ Repeat `--suite native|sdk|node|browser|example|package` to run a subset. CI run
 `acceptance` job of the quality workflow. Incoming HTTP acceptance requires both the handler-only
 and outgoing-proxy fixtures through `--http-handler` and `--http-proxy`. Use `--suite native` to run the Rust tests with the same complete artifact set.
 
+CI restores Cargo dependencies and pinned tools separately from the verified interpreter build cache.
+Every build and all acceptance suites still run on cache hits. Interpreter cache keys include its
+sources, private ABI and standard bindings, dependencies and pinned toolchains; the build rechecks
+the upstream source revision and WASI SDK archive checksum before packaging identical engine bytes.
+The test profile optimizes Cranelift's compiler while retaining debug assertions in Tembra, avoiding
+repeated unoptimized guest compilation in source-Orb tests. New branch commits cancel obsolete
+checks; main and tag validation are not interrupted. Failed acceptance logs are retained as workflow
+artifacts so compiler setup, test execution and fixture preparation can be investigated separately.
+
 ## Native builds
 
 The Swift and Kotlin packages use UniFFI to generate bindings from the same Rust library.
