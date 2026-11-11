@@ -44,23 +44,26 @@ mod greeter {
 
 ## What the macro reads
 
-| In the module                                                          | In the WIT                                                                                                       |
-| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| the module name                                                        | the `world`                                                                                                      |
-| `package = "..."` on the attribute                                     | `package ns:name@version;`                                                                                       |
-| `wit = "dir"` on the attribute                                         | the directory with the WIT packages the Orb consumes, relative to the crate                                      |
-| `context` on the attribute                                             | `import tembra:guest/context` in the world: the call's principal and cancellation, the object's address, the log |
-| a unit struct with `#[service]` and an `impl` block of `pub fn`        | an exported `interface`, in kebab-case                                                                           |
-| `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`           | nothing in the WIT: the ownership policy of the service's objects, in the manifest                               |
-| each `pub fn` without `self`                                           | a `func`; name and parameters in kebab-case                                                                      |
-| a struct with named fields, when a service method or a state uses it   | a `record`                                                                                                       |
-| an enum, when a service method uses it                                 | an `enum` when every variant is empty, otherwise a `variant`                                                     |
-| `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples  | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                     |
-| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`   | `import` and `export` of that hook interface in the world: a contribution                                        |
-| a unit struct with `#[hook("ns:name/hook@version", composition = c)]`  | `import` and `export` of that hook interface in the world: a declaration                                         |
-| a struct with named fields and `#[state(service = Name, version = n)]` | `import tembra:guest/state` and `export tembra:guest/state-init` in the world                                    |
-| a struct with `#[resource(version = n)]` and a `pub fn open() -> Self` | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                            |
-| `///` comments                                                         | `///` comments in the WIT                                                                                        |
+| In the module                                                          | In the WIT                                                                                                          |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| the module name                                                        | the `world`                                                                                                         |
+| `package = "..."` on the attribute                                     | `package ns:name@version;`                                                                                          |
+| `wit = "dir"` on the attribute                                         | the directory with the WIT packages the Orb consumes, relative to the crate                                         |
+| `context` on the attribute                                             | `import tembra:guest/context` in the world: the call's principal and cancellation, the object's address, the log    |
+| a unit struct with `#[service]` and an `impl` block of `pub fn`        | an exported `interface`, in kebab-case                                                                              |
+| `#[service("ns:name/interface@version")]` on a unit struct             | `export` of that interface of a consumed package, implemented by the `impl` block                                   |
+| `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`           | nothing in the WIT: the ownership policy of the service's objects, in the manifest                                  |
+| `import = "ns:name/interface@version"` on the attribute                | `import` of that interface of a consumed package, bound to a provider at installation                               |
+| a struct with `#[wit_resource]` and an `impl` block of `pub fn`        | a `resource` of its service's interface: `new` its constructor, the `&self` functions its methods                   |
+| each `pub fn` without `self`                                           | a `func`; name and parameters in kebab-case                                                                         |
+| a struct with named fields, when a service method or a state uses it   | a `record`                                                                                                          |
+| an enum, when a service method uses it                                 | an `enum` when every variant is empty, otherwise a `variant`                                                        |
+| `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples  | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                        |
+| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`   | `import` and `export` of that hook interface in the world: a contribution                                           |
+| a unit struct with `#[hook("ns:name/hook@version", composition = c)]`  | `import` and `export` of that hook interface in the world: a declaration                                            |
+| a struct with named fields and `#[state(service = Name, version = n)]` | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it |
+| a struct with `#[resource(version = n)]` and a `pub fn open() -> Self` | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                               |
+| `///` comments                                                         | `///` comments in the WIT                                                                                           |
 
 Nothing is exported by accident. A service is a unit struct marked `#[service]`; the `pub fn` of
 its `impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT
