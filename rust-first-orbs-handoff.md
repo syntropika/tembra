@@ -1,11 +1,12 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 19:40 CET
+- **Aggiornato:** 2026-11-11, 20:05 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft)
-- **Stato:** strada A. Javier ha mergiato il base in `main`,
-  in fast-forward: `origin/main` è `865e4c6`. Il piano del
-  ribase su `main` aspetta l'ok di Giacomo. Non toccare la
-  PR e non pushare codice.
+- **Stato:** strada A, ribase in corso su `origin/main`
+  (`865e4c6`). Giacomo ha dato l'ok: tenere le scelte di
+  Javier dove si può. Il merge di prova è verificato (vedi
+  «Avanzamento»). Non pushare codice: il force-push lo lancia
+  Giacomo.
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -608,7 +609,54 @@ I pezzi in conflitto nascono qui:
 - `1a0050e` (23): gli hook nel payload `tembra:orb`;
 - `68ca53c` (30): `Manifest`.
 
-### Scelte da approvare
+### Avanzamento
+
+Ok di Giacomo poco dopo le 19:40 CET: «se possibile teniamo
+le scelte di Javier; se ci bloccano o non sono una buona
+idea, cambia di conseguenza». Quindi le scelte qui sotto sono
+state rivedute:
+
+- **D1:** `Artifact` tiene il campo `contributions` di
+  Javier (le view restano nel contratto) e aggiunge `hooks`
+  e `services`. Niente `Artifact.roles`, che duplicherebbe le
+  reference. `describe` riceve le tre mappe esplicite.
+- **Payload:** contributions, hooks, services, references.
+  Il test di Javier `source_artifacts_and_duplicate_roles_`
+  `are_refused` vuole le reference in fondo, e resta anche
+  l'ordine della PR.
+- **D2:** resta il `reference: bool` di Javier accanto al
+  `role: Role` della PR: una view è una dipendenza Orb che si
+  acquisisce per chiave.
+- **D3:** resta `import_authority(state)` di Javier, con i
+  suoi chiamanti; il corpo delega a `issuing_authority`.
+- **D5:** il braccio di Javier diventa
+  `Host | Kernel | Hook if reference.is_some()`.
+- **D4 e D6:** come sotto.
+- `manifest.rs` diventa `roles.rs` (resta `ServicePolicy`),
+  e il test `compiled_manifest.rs` diventa
+  `compiled_service_policies.rs`.
+
+Passi fatti:
+
+- **Spostamento della PR su `main`:** Giacomo ha detto «fai
+  te», ma il classificatore della modalità automatica ha
+  bloccato `gh pr edit`. Va lanciato da Giacomo, o va dato
+  il permesso.
+- **Passo 1, merge di prova:** worktree `.worktrees/probe`,
+  commit locale `a47eeb2`, ref
+  `refs/probe/rust-first-orbs-merge` (mai pushato).
+  - `cargo clippy --workspace --all-features --all-targets`
+    con `-D warnings`: pulito.
+  - `just check`: verde, con 609 test Rust in 115 binari e i
+    test TS.
+- Due trappole trovate nel merge «pulito»:
+  - `executor-wasm/tests/hooks.rs` univa i due involucri
+    (`Manifest` dentro `ComponentRoles`): torna quello di
+    Javier;
+  - `contracts/src/prepared_tests.rs` aveva `encode_orb` a
+    tre argomenti: torna quello di Javier.
+
+### Scelte proposte (rivedute in «Avanzamento»)
 
 - **D1. Un solo tipo per i metadati del compilato:**
   `ComponentRoles` di Javier, con in più `hooks` e
