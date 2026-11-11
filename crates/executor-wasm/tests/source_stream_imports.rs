@@ -982,13 +982,19 @@ fn a_source_consumer_reads_a_compiled_producer_exactly_and_sees_its_trap() {
             Some(&compiled),
         );
         reads_exactly(&mut fixture);
-        // The compiled producer traps after its whole body while holding its writer: the
-        // consumer never sees a clean end.
+        // Force the producer to wait for the consumer before trapping: a small body can
+        // fit in the bounded pipes and trap before its head is delivered to the caller.
+        // Five pipes exceed both pipes and the pump's in-flight chunks. The consumer must
+        // receive bytes and then a read failure, never an import failure or a clean end.
         let mode = fixture.mode();
+        let (count, size) = (5_u32, PIPE_BYTES as u32);
         let (bytes, outcome) = fixture
-            .call::<_, (u64, String)>("failure", (4_u32, 1024_u32, FAIL_AFTER))
+            .call::<_, (u64, String)>("failure", (count, size, FAIL_AFTER))
             .unwrap();
-        assert!(bytes <= 4096, "{mode}: {bytes}");
+        assert!(
+            bytes > 0 && bytes <= u64::from(count * size),
+            "{mode}: {bytes}"
+        );
         assert!(outcome.starts_with("read:"), "{mode}: {outcome}");
         fixture.wait(|fixture| fixture.calls() == 0);
         assert_eq!(
@@ -1140,6 +1146,10 @@ fn returning_early_or_closing_stops_the_producer() {
         let (bytes, _, _) = fixture.read(256, 4096, CLEAN, 8192, CHUNKS).unwrap();
         assert!(bytes >= 8192, "{mode}");
         fixture.wait(|fixture| fixture.native.closes.get() == 2 && fixture.native.ended.get() == 2);
+        // Breaking the default per-byte iterator also closes its producer exactly once.
+        let (bytes, mismatches, _) = fixture.read(256, 4096, CLEAN, 257, BYTES).unwrap();
+        assert_eq!((bytes, mismatches), (257, 0), "{mode}");
+        fixture.wait(|fixture| fixture.native.closes.get() == 3 && fixture.native.ended.get() == 3);
         // An explicit close reaches the producer while the callback still runs.
         assert_eq!(
             fixture
@@ -1147,7 +1157,7 @@ fn returning_early_or_closing_stops_the_producer() {
                 .unwrap(),
             CLOSED + 1
         );
-        fixture.wait(|fixture| fixture.native.closes.get() == 3 && fixture.native.ended.get() == 3);
+        fixture.wait(|fixture| fixture.native.closes.get() == 4 && fixture.native.ended.get() == 4);
         assert!(started.elapsed() < Duration::from_secs(10), "{mode}");
         fixture.settled();
         fixture.close();

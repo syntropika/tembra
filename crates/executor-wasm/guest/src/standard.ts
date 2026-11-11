@@ -145,8 +145,10 @@ import { InputBindings, type PumpOutcome } from "./standard-inputs.ts";
     /** Iterate bytes as declared by jco for `stream<u8>`; transfer remains chunked. */
     async *[Symbol.asyncIterator](): AsyncGenerator<number> {
       try {
-        for (let chunk = await this[READ_CHUNK](); chunk; chunk = await this[READ_CHUNK]())
-          yield* chunk;
+        for (let chunk = await this[READ_CHUNK](); chunk; chunk = await this[READ_CHUNK]()) {
+          // Avoid an async-from-sync delegation and its extra promise for every byte.
+          for (let index = 0; index < chunk.length; index++) yield chunk[index]!;
+        }
       } finally {
         this.#close();
       }
