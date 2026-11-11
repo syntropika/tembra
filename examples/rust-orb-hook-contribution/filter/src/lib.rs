@@ -15,7 +15,8 @@ mod filter {
     }
 
     impl Counts {
-        /// Opened by the kernel when the Orb is activated.
+        /// Opened by the kernel when the Orb is activated: the function marked `#[open]`.
+        #[open]
         pub fn open() -> Counts {
             Counts {
                 seen: 0,

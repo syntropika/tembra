@@ -171,8 +171,9 @@ fn resource_text(resource: &WitResource) -> String {
         text.push_str(&format!("  ///{doc}\n"));
     }
     text.push_str(&format!("  resource {} {{\n", kebab(&resource.ident)));
-    if let Some(params) = &resource.constructor {
-        let params = params
+    if let Some(constructor) = &resource.constructor {
+        let params = constructor
+            .params
             .iter()
             .map(|(ident, _, wit)| format!("{}: {wit}", kebab(ident)))
             .collect::<Vec<_>>()

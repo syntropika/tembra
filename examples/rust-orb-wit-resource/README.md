@@ -23,6 +23,7 @@ it. The host is wiring only: it installs both, drives the player, then holds a s
 pub struct Session { key: u8, frames: Cell<u32> }
 
 impl Session {
+    #[constructor]
     pub fn new(key: u8) -> Session { /* the constructor */ }
     pub fn decode(&self, frame: Vec<u8>) -> Vec<u8> { /* a method */ }
     pub fn frames(&self) -> u32 { /* a method */ }
@@ -38,8 +39,9 @@ impl Decoding {
 ```
 
 A struct marked `#[wit_resource]` becomes a `resource` of the interface of the service whose
-methods hand it out: `pub fn new` is its constructor, the `pub fn` taking `&self` are its methods,
-the other `pub fn` its static functions. The struct keeps its fields and its `Drop`; a method
+methods hand it out: the function marked `#[constructor]` is its constructor, the `pub fn` taking
+`&self` are its methods, the other `pub fn` its static functions; a `pub fn new` without the
+marker is one of those. The struct keeps its fields and its `Drop`; a method
 returning the struct returns an owned handle. Interior mutability (`Cell`, `RefCell`) is how a
 method changes a session, because WIT methods borrow `self`.
 

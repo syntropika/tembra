@@ -16,9 +16,10 @@ mod tally {
     }
 
     impl Count {
-        /// The rule of this state: a total never goes below zero. Every `update` checks it
-        /// before the kernel stores the value, and a reload checks it on the value the new
-        /// instance inherits before adopting it.
+        /// The rule of this state, the function marked `#[validate]`: a total never goes below
+        /// zero. Every `update` checks it before the kernel stores the value, and a reload
+        /// checks it on the value the new instance inherits before adopting it.
+        #[validate]
         pub fn validate(&self) -> Result<(), String> {
             if self.total < 0 {
                 return Err(format!("a total of {} is below zero", self.total));
