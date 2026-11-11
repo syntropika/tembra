@@ -351,14 +351,38 @@ fn prepared_components_expose_checked_reference_roles_without_a_parser() {
     assert!(component.validate(add, true, "[0,5]").contains("error"));
     assert_eq!(component.validate(add, false, "7"), r#"{"ok":null}"#);
 
-    // Without the role, the same metadata is an ordinary resource import the data profile refuses.
+    // Without the role this is an ordinary provider-owned resource factory, including its
+    // nested result<counter, string>. It keeps its nominal service and resource methods.
     let plain = compiled_claim_of(&view_contract());
     let plain = WasmPreparedComponent::new(&plain, vec![sha256_hex(&plain)]).unwrap();
-    let refused: Value = serde_json::from_str(&plain.request(&format!(
+    let ordinary: Value = serde_json::from_str(&plain.request(&format!(
         r#"{{"kind":"install","name":"router","apiVersion":1,"requires":{{"{VIEW}":{{"orb":"keyed","apiVersion":1}}}}}}"#
     )))
     .unwrap();
-    assert!(refused.get("error").is_some(), "{refused}");
+    let resource_service = format!("keyed::{VIEW}");
+    assert_eq!(
+        ordinary["ok"]["importServices"][VIEW], resource_service,
+        "{ordinary}"
+    );
+    let requirement = &ordinary["ok"]["plan"]["orb"]["requires"][0];
+    assert_eq!(
+        requirement["services"][&resource_service],
+        json!(["[method]counter.add", "get"])
+    );
+    assert!(requirement["signatures"][&resource_service].is_string());
+    assert_ne!(requirement["signatures"][&resource_service], signature);
+    assert!(requirement["services"].get(&qualified).is_none());
+    let described: Value = serde_json::from_str(&plain.request(r#"{"kind":"describe"}"#)).unwrap();
+    assert_eq!(described["ok"]["references"], json!({}));
+    let add = plain.bind(VIEW, "[method]counter.add", false).unwrap();
+    assert_eq!(plain.validate(add, true, "[5]"), r#"{"ok":null}"#);
+    assert!(
+        plain
+            .component
+            .contract
+            .validate_slot(add, true, &json!([5]))
+            .is_err()
+    );
 
     // Malformed roles are refused by the browser decoder as well.
     for (binding, target) in [(VIEW, VIEW), ("test:keyed/missing@1.0.0", SERVICE)] {
