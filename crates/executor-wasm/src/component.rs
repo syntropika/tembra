@@ -263,6 +263,7 @@ fn layout(
         state_init: guest::exports(contract.model(), guest::STATE_INIT),
         resource_init: guest::exports(contract.model(), guest::RESOURCE_INIT),
         hooks: declared,
+        context: guest::imports(contract.model(), guest::CONTEXT),
     })
 }
 
@@ -497,6 +498,61 @@ mod state_tests {
         );
         assert_eq!(layout.imports[1].binding, guest::RESOURCE);
         assert_eq!(layout.imports[1].role, worker::Role::Kernel);
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use tembra_contracts::{Contract, Implementation};
+
+    const WIT: &str = "package example:aware@1.0.0;
+        interface probe { whoami: func() -> string; }
+        world aware { import tembra:guest/context@1.0.0; export probe; }";
+
+    /// The context import is linked to the kernel like state and resources, needs no export of
+    /// its own, and the layout tells the worker to ask each environment's address.
+    #[test]
+    fn the_context_import_is_linked_to_the_kernel_and_needs_no_export() {
+        let contract = Contract::from_source("aware.wit", WIT, None).unwrap();
+        let bindings = contract
+            .providers(&Default::default(), &Grants::default())
+            .unwrap();
+        let description = describe(
+            &contract,
+            "aware",
+            1,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        let implementation: Implementation = serde_json::from_value(description).unwrap();
+        let services = contract
+            .check_implementation("aware", 1, implementation.clone())
+            .unwrap();
+        let hooks = contract.check_hooks(&implementation, &bindings).unwrap();
+        let layout = layout(&contract, &services, &bindings, &hooks).unwrap();
+        assert!(layout.context);
+        assert!(!layout.state_init && !layout.resource_init);
+        assert_eq!(
+            layout
+                .exports
+                .iter()
+                .map(|export| export.service.as_str())
+                .collect::<Vec<_>>(),
+            ["probe"]
+        );
+        assert_eq!(layout.imports.len(), 1);
+        assert_eq!(layout.imports[0].binding, guest::CONTEXT);
+        assert_eq!(layout.imports[0].role, worker::Role::Kernel);
+        assert_eq!(
+            layout.imports[0]
+                .functions
+                .iter()
+                .map(|function| function.name.as_str())
+                .collect::<Vec<_>>(),
+            ["object", "principal", "cancelled", "cancel", "log"]
+        );
     }
 }
 
