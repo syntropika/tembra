@@ -218,7 +218,7 @@ Commit del branch convertito, dal più vecchio:
     (wasi: compiled operations e cancellation) e `27c608c`
     (test).
 - Quindi Javier lavora su `feat/wasm-orb-runtime` e porta
-  `main` avanti in fast-forward quando vuole. Alle 20:45 il
+  `main` avanti in fast-forward quando vuole. Alle 21:15 il
   suo branch era 4 commit avanti a `main`.
 - I 4 commit toccano due file della PR: il README di
   executor-wasm e `component/worker.rs`. Il merge della PR
