@@ -21,6 +21,7 @@ mod prepare;
 mod provenance;
 mod references;
 mod resource_profile;
+mod roles;
 mod selection;
 mod signatures;
 #[cfg(feature = "authoring")]
@@ -45,6 +46,7 @@ pub use permissions::{FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCa
 pub use port::envelope;
 pub use references::ReferenceBinding;
 pub use resource_profile::ResourceSignature;
+pub use roles::ServicePolicy;
 pub use selection::OrbProvider;
 pub use validate::javascript_name;
 

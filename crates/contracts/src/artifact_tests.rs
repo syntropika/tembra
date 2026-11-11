@@ -137,6 +137,127 @@ fn compiled_hook_declarations_travel_in_the_artifact_and_are_checked() {
     assert!(Artifact::decode(&source).is_err());
 }
 
+/// A compiled service's lifetime and linger travel in the component roles and are applied by
+/// the implementation check. A policy for an interface that is no service (a hook callback, a kernel
+/// callback, an import, an unknown identity), a lingering host-lifetime object and a source
+/// bundle claiming a policy are refused.
+#[test]
+fn compiled_service_policies_travel_in_the_artifact_and_are_checked() {
+    let contract = Contract::from_source("policies.wit", "package test:policies@1.0.0; interface guard { apply: func(value: u32) -> u32; } interface ledger { count: func() -> u32; } world book { import guard; export guard; export ledger; import tembra:guest/state@1.0.0; export tembra:guest/state-init@1.0.0; }", Some("book")).unwrap();
+    let component = component(&contract);
+    let ledger = "test:policies/ledger@1.0.0";
+    let roles = ComponentRoles {
+        hooks: [(
+            "test:policies/guard@1.0.0".into(),
+            HookComposition::Waterfall,
+        )]
+        .into(),
+        services: [(
+            ledger.into(),
+            ServicePolicy {
+                lifetime: Lifetime::Host,
+                linger_ms: 0,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let bytes = contract
+        .component_artifact(&component, "book", 1, &roles)
+        .unwrap();
+    let decoded = Artifact::decode(&bytes).unwrap();
+    assert!(decoded.contributions.is_empty());
+    assert_eq!(decoded.hooks, roles.hooks);
+    assert_eq!(decoded.services, roles.services);
+    let lingering = ComponentRoles {
+        services: [(
+            ledger.into(),
+            ServicePolicy {
+                lifetime: Lifetime::Referenced,
+                linger_ms: 2_500,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let decoded = Artifact::decode(
+        &contract
+            .component_artifact(&component, "book", 1, &lingering)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded.services[ledger].linger_ms, 2_500);
+    let policy = |identity: &str, lifetime, linger_ms| ComponentRoles {
+        hooks: roles.hooks.clone(),
+        services: [(
+            identity.into(),
+            ServicePolicy {
+                lifetime,
+                linger_ms,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    for (refused, reason) in [
+        (
+            policy("test:policies/guard@1.0.0", Lifetime::Host, 0),
+            "a hook callback",
+        ),
+        (
+            policy("tembra:guest/state-init@1.0.0", Lifetime::Host, 0),
+            "a kernel callback",
+        ),
+        (
+            policy("tembra:guest/state@1.0.0", Lifetime::Host, 0),
+            "an import",
+        ),
+        (
+            policy("test:policies/missing@1.0.0", Lifetime::Host, 0),
+            "an unknown interface",
+        ),
+        (
+            policy(ledger, Lifetime::Host, 10),
+            "a lingering host object",
+        ),
+    ] {
+        assert!(
+            contract
+                .component_artifact(&component, "book", 1, &refused)
+                .is_err(),
+            "{reason}"
+        );
+        let identity = Identity {
+            name: "book".into(),
+            api_version: 1,
+            world: "book".into(),
+        };
+        let mut forged = component.clone();
+        crate::artifact::append_section(
+            &mut forged,
+            "tembra:orb",
+            &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &refused),
+        );
+        assert!(Artifact::decode(&forged).is_err(), "{reason}");
+    }
+    let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
+    crate::artifact::append_section(
+        &mut source,
+        "tembra:orb",
+        &crate::artifact::encode_orb_roles(
+            &Identity {
+                name: "book".into(),
+                api_version: 1,
+                world: "book".into(),
+            },
+            contract.prepared(),
+            &lingering,
+        ),
+    );
+    crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
+    assert!(Artifact::decode(&source).is_err());
+}
+
 #[test]
 fn source_and_compiled_artifacts_round_trip_without_executing_source() {
     let contract = contract(

@@ -84,23 +84,6 @@ impl HookPlan {
 }
 
 impl PreparedContract {
-    /// Validate the contribution and hook roles of a compiled component against this contract,
-    /// without relying on deployment provider names. An interface takes one hook role. Reference
-    /// views are checked where they are attached to the contract.
-    pub(crate) fn check_roles(&self, roles: &crate::ComponentRoles) -> Result<(), Error> {
-        if let Some(both) = roles
-            .hooks
-            .keys()
-            .find(|identity| roles.contributions.contains_key(*identity))
-        {
-            return Err(Error(format!(
-                "{both}: an Orb declares a hook or contributes to it, not both"
-            )));
-        }
-        self.check_contribution_roles(&roles.contributions)?;
-        self.check_hook_roles(&roles.hooks)
-    }
-
     /// Validate the hooks a compiled component declares: each names an exported interface with
     /// one callback whose shape fits the composition.
     pub(crate) fn check_hook_roles(
