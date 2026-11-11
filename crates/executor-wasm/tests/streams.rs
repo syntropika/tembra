@@ -24,6 +24,7 @@ const TRAP_HOLDING: u32 = 1;
 const TRAP_AFTER_END: u32 = 2;
 const WAIT_FOR_READER: u32 = 3;
 const IDLE: u32 = 4;
+const TRAP_BEFORE_HEAD: u32 = 5;
 
 fn producer() -> Option<Vec<u8>> {
     let Some(path) =
@@ -357,6 +358,7 @@ fn an_idle_producer_ends_only_at_the_terminal_timeout() {
 fn a_trap_is_never_a_clean_end() {
     engines(|bytes, interpreted| {
         for (mode, size) in [
+            (TRAP_BEFORE_HEAD, 1024),
             (TRAP_HOLDING, 1024),
             (TRAP_AFTER_END, 1024),
             (TRAP_HOLDING, PIPE_BYTES as u32),
@@ -373,7 +375,7 @@ fn a_trap_is_never_a_clean_end() {
                     }
                 }
             });
-            let failure = match outcome {
+            let (failure, published) = match outcome {
                 Err(error) => {
                     // A small body can finish and trap before the host observes its head.
                     // A body larger than the bounded pipe must instead publish a reader.
@@ -381,9 +383,10 @@ fn a_trap_is_never_a_clean_end() {
                         size, 1024,
                         "a backpressured producer failed before its head"
                     );
-                    error
+                    (error, false)
                 }
                 Ok((received, last)) => {
+                    assert_ne!(mode, TRAP_BEFORE_HEAD, "a pre-head trap published a reader");
                     assert!(received.len() <= 4 * size as usize);
                     assert!(
                         received
@@ -397,16 +400,29 @@ fn a_trap_is_never_a_clean_end() {
                     }
                     // A trap may discard an unread tail; it must never expose a clean EOF,
                     // even when the writer closed before its task group trapped.
-                    last.expect("a failure, not a clean end")
-                        .expect_err("the producer trapped")
+                    (
+                        last.expect("a failure, not a clean end")
+                            .expect_err("the producer trapped"),
+                        true,
+                    )
                 }
             };
             assert!(
                 failure.message.contains("trap"),
                 "{interpreted} {mode}: {failure:?}"
             );
-            fixture.wait(|fixture| fixture.calls() == 0);
-            assert!(!fixture.host.errors().is_empty());
+            // Join reporting as well as the invocation: this does not poll or drain errors.
+            fixture.pool.run_until(fixture.host.settled());
+            assert_eq!(fixture.calls(), 0);
+            assert_eq!(fixture.engine.instances(), 0);
+            let errors = fixture.host.errors();
+            if published {
+                // The caller already received the head; its physical failure is reported once.
+                assert_eq!(errors, vec![failure], "{interpreted} {mode} {size}");
+            } else {
+                // The ordinary call result already delivered this failure: no duplicate report.
+                assert!(errors.is_empty(), "{interpreted} {mode} {size}: {errors:?}");
+            }
             assert_eq!(
                 fixture.ping().unwrap_err().reason,
                 "wasm_executor_quarantined"

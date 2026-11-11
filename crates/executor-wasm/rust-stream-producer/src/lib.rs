@@ -32,6 +32,9 @@ async fn write(writer: &mut StreamWriter<u8>, count: u32, size: u32) -> bool {
 
 impl exports::tembra_test::streams::frames::Guest for Component {
     async fn frames(count: u32, size: u32, mode: u32) -> StreamReader<u8> {
+        if mode == 5 {
+            core::arch::wasm32::unreachable();
+        }
         let (mut writer, reader) = wit_stream::new::<u8>();
         wit_bindgen::spawn_local(async move {
             match mode {
