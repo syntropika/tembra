@@ -44,26 +44,28 @@ mod greeter {
 
 ## What the macro reads
 
-| In the module                                                          | In the WIT                                                                                                          |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| the module name                                                        | the `world`                                                                                                         |
-| `package = "..."` on the attribute                                     | `package ns:name@version;`                                                                                          |
-| `wit = "dir"` on the attribute                                         | the directory with the WIT packages the Orb consumes, relative to the crate                                         |
-| `context` on the attribute                                             | `import tembra:guest/context` in the world: the call's principal and cancellation, the object's address, the log    |
-| a unit struct with `#[service]` and an `impl` block of `pub fn`        | an exported `interface`, in kebab-case                                                                              |
-| `#[service("ns:name/interface@version")]` on a unit struct             | `export` of that interface of a consumed package, implemented by the `impl` block                                   |
-| `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`           | nothing in the WIT: the ownership policy of the service's objects, in the manifest                                  |
-| `import = "ns:name/interface@version"` on the attribute                | `import` of that interface of a consumed package, bound to a provider at installation                               |
-| a struct with `#[wit_resource]` and an `impl` block of `pub fn`        | a `resource` of its service's interface: `new` its constructor, the `&self` functions its methods                   |
-| each `pub fn` without `self`                                           | a `func`; name and parameters in kebab-case                                                                         |
-| a struct with named fields, when a service method or a state uses it   | a `record`                                                                                                          |
-| an enum, when a service method uses it                                 | an `enum` when every variant is empty, otherwise a `variant`                                                        |
-| `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples  | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                        |
-| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`   | `import` and `export` of that hook interface in the world: a contribution                                           |
-| a unit struct with `#[hook("ns:name/hook@version", composition = c)]`  | `import` and `export` of that hook interface in the world: a declaration                                            |
-| a struct with named fields and `#[state(service = Name, version = n)]` | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it |
-| a struct with `#[resource(version = n)]` and a `pub fn open() -> Self` | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                               |
-| `///` comments                                                         | `///` comments in the WIT                                                                                           |
+| In the module                                                               | In the WIT                                                                                                                |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| the module name                                                             | the `world`                                                                                                               |
+| `package = "..."` on the attribute                                          | `package ns:name@version;`                                                                                                |
+| `wit = "dir"` on the attribute                                              | the directory with the WIT packages the Orb consumes, relative to the crate                                               |
+| `context` on the attribute                                                  | `import tembra:guest/context` in the world: the call's principal and cancellation, the object's address, the log          |
+| a unit struct with `#[service]` and an `impl` block of `pub fn`             | an exported `interface`, in kebab-case                                                                                    |
+| `#[service("ns:name/interface@version")]` on a unit struct                  | `export` of that interface of a consumed package, implemented by the `impl` block                                         |
+| `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`                | nothing in the WIT: the ownership policy of the service's objects, in the manifest                                        |
+| `import = "ns:name/interface@version"` on the attribute                     | `import` of that interface of a consumed package, bound to a provider at installation                                     |
+| a struct with `#[wit_resource]` and an `impl` block of `pub fn`             | a `resource` of its service's interface: the `#[constructor]` function its constructor, the `&self` functions its methods |
+| each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                               |
+| a struct with named fields, when a service method or a state uses it        | a `record`                                                                                                                |
+| an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`                                                              |
+| `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                              |
+| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`        | `import` and `export` of that hook interface in the world: a contribution                                                 |
+| a unit struct with `#[hook("ns:name/hook@version", composition = c)]`       | `import` and `export` of that hook interface in the world: a declaration                                                  |
+| a struct with named fields and `#[state(service = Name, version = n)]`      | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it       |
+| a struct with `#[resource(version = n)]` and a function marked `#[open]`    | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                                     |
+| `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct | nothing in the WIT: the state's rule, run on every update and on reload; `validated` in the declaration to the kernel     |
+| `#[close]` on a `fn(self)` of a `#[resource]` struct                        | nothing in the WIT: run by the kernel at teardown                                                                         |
+| `///` comments                                                              | `///` comments in the WIT                                                                                                 |
 
 Nothing is exported by accident. A service is a unit struct marked `#[service]`; the `pub fn` of
 its `impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT
@@ -71,6 +73,12 @@ only when a service method or a state uses it, directly or through the fields of
 type; the other types of the module, and unit structs without the marker, remain ordinary Rust. A
 method that names a type the module does not declare is a compile error, and so is a service with
 the name of the module, because WIT refuses a world and an interface of one name.
+
+Nothing is bound by name either. The functions the generated code calls by role, a state's rule,
+a root resource's opening and closing and a WIT resource's constructor, carry a marker,
+`#[validate]`, `#[open]`, `#[close]` or `#[constructor]`, whatever their names and visibility; a
+function without a marker is ordinary Rust, and a marker on a function of the wrong shape, or of
+a struct of another kind, is a compile error.
 
 ## Contributing to a hook
 
@@ -206,12 +214,13 @@ declaration of that service's state, as JSON with its version, and binds it to t
 retains for the object. The executor serves both interfaces itself; the installer requires and
 grants nothing for them.
 
-A state may carry its own rule, `pub fn validate(&self) -> Result<(), String>` in an `impl`
-block. Then `Count::update` returns `Result<Count, String>`: the closure's result is validated
-before the kernel stores it, and a refusal leaves the previous value in place. The same validator
-answers the kernel on a reload, when the new instance is asked whether it accepts the value it
-inherits: a refusal fails the reload and the running revision keeps serving, as the
-[state example](../../examples/rust-orb-state/README.md) shows for an update.
+A state may carry its own rule: a function of its `impl` block marked `#[validate]`, of the shape
+`fn(&self) -> Result<(), String>`, under any name. Then `Count::update` returns
+`Result<Count, String>`: the closure's result is validated before the kernel stores it, and a
+refusal leaves the previous value in place. The same function answers the kernel on a reload, when
+the new instance is asked whether it accepts the value it inherits: a refusal fails the reload and
+the running revision keeps serving, as the [state example](../../examples/rust-orb-state/README.md)
+shows for an update. A function named `validate` without the marker is ordinary Rust.
 
 Two rules follow from the kernel, not from the macro. A service's state is reached only by the
 methods of that service: a call runs on one object, and the kernel refuses an update from any
@@ -224,8 +233,8 @@ the fields they care about.
 
 A resource is a value the kernel opens when the Orb is activated and closes when it is torn down,
 in the order its dependencies require, and that every method and hook callback of the Orb can
-use. A struct marked `#[resource]`, with a `pub fn open() -> Self` and optionally a
-`pub fn close(self)` in its `impl` block, is a resource of the Orb's root:
+use. A struct marked `#[resource]`, with a function marked `#[open]`, `fn() -> Self`, and
+optionally one marked `#[close]`, `fn(self)`, in its `impl` block, is a resource of the Orb's root:
 
 ```rust
 /// What this contributor observed.
@@ -233,6 +242,7 @@ use. A struct marked `#[resource]`, with a `pub fn open() -> Self` and optionall
 pub struct Counts { pub seen: u32, pub blocked: u32 }
 
 impl Counts {
+    #[open]
     pub fn open() -> Counts { Counts { seen: 0, blocked: 0 } }
 }
 
@@ -244,10 +254,10 @@ pub fn block_negative(input: guard::Admission) -> guard::Admission {
 ```
 
 The macro gives the type `Counts::with(|counts| ...)`, which gives the closure the open value and
-returns its result; before `open` has run, or after `close`, it traps. Behind it, the world imports
+returns its result; before the resource is opened, or after it is closed, it traps. Behind it, the world imports
 `tembra:guest/resources` and exports `tembra:guest/resources-init`: when the kernel creates the
-root it asks the component for its resource declarations (name and version), runs `open` during
-activation, and `close` at teardown; `with` asks the kernel for the handle of the open resource
+root it asks the component for its resource declarations (name and version), runs the `#[open]`
+function during activation and the `#[close]` one at teardown; `with` asks the kernel for the handle of the open resource
 first. The value lives in the component, one per instance, as the TypeScript guest's root
 resources do: a reload gives the Orb a fresh instance whose resources the kernel opens again. A
 resource struct enters the WIT only when a service method uses it; a resource may hold types the
@@ -357,8 +367,9 @@ contract, so the kernel checks the provider against the same signature. See
 ## Exporting a WIT resource
 
 A struct marked `#[wit_resource]` becomes a `resource` of the interface of the service whose
-methods hand it out: `pub fn new(..) -> Self` is its constructor, the `pub fn` taking `&self` are
-its methods, the other `pub fn` its static functions.
+methods hand it out: the function marked `#[constructor]`, `fn(..) -> Self`, is its constructor,
+the `pub fn` taking `&self` are its methods, the other `pub fn` its static functions; a `pub fn new`
+without the marker is one of those.
 
 ```rust
 /// One decoding session: the caller owns it and decodes frame after frame with it.
@@ -366,6 +377,7 @@ its methods, the other `pub fn` its static functions.
 pub struct Session { key: u8, frames: Cell<u32> }
 
 impl Session {
+    #[constructor]
     pub fn new(key: u8) -> Session { /* the constructor */ }
     pub fn decode(&self, frame: Vec<u8>) -> Vec<u8> { /* a method */ }
 }
@@ -431,9 +443,9 @@ The macro rewrites the module with:
    hook, `run` on its struct, calling the hook's import;
 8. with a state, `Default` and the `read`/`update` functions on each state type, over a hidden
    module that maps the kernel's JSON to the type with `serde_json`, and the kernel's `validate`
-   callback, which runs the state's own validator on the value a reload would adopt;
-9. with a resource, one slot in the component's memory per resource, filled by `open` and
-   emptied by `close`, and the `with` function on each resource type.
+   callback, which runs the state's `#[validate]` function on the value a reload would adopt;
+9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
+   function and emptied by the `#[close]` one, and the `with` function on each resource type.
 
 The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmalloc` (feature
 `global`) among its dependencies, and `serde` (features `derive`, `alloc`) and `serde_json`
@@ -451,8 +463,8 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
   resource's fields and the root's resources, data lives in `static`s, as in the compiled
   fixtures of `executor-wasm`.
 - Root resources, `#[resource]`, belong to the root, declare no dependencies on one another, and
-  are opened in the order the kernel chooses; `open` and `close` take no arguments besides the
-  value.
+  are opened in the order the kernel chooses; the `#[open]` and `#[close]` functions take no
+  arguments besides the value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary.
 - Types: records, enums, variants and the scalar, string, list, option, result and tuple types;

@@ -86,13 +86,15 @@ activated and closes when it is torn down, in dependency order. `filter` declare
 pub struct Counts { pub seen: u32, pub blocked: u32 }
 
 impl Counts {
+    #[open]
     pub fn open() -> Counts { Counts { seen: 0, blocked: 0 } }
 }
 ```
 
 The world gains `import tembra:guest/resources` and `export tembra:guest/resources-init`. When the
-kernel creates the root it asks the component for its declarations, then runs `open` during
-activation and `close` at teardown; `Counts::with(|counts| ...)` asks the kernel for the handle of
+kernel creates the root it asks the component for its declarations, then runs the function marked
+`#[open]` during activation and the one marked `#[close]`, if any, at teardown;
+`Counts::with(|counts| ...)` asks the kernel for the handle of
 the open resource and uses the value, which lives in the component. That is the same model as a
 TypeScript root resource: the kernel manages the lifecycle, the guest holds the value, and the
 value does not cross a reload. A kernel-managed state would survive the reload, but only a service's

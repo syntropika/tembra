@@ -24,7 +24,9 @@ mod decoder {
     }
 
     impl Session {
-        /// A session keyed by `key`; the constructor of the WIT resource.
+        /// A session keyed by `key`: the constructor of the WIT resource, the function marked
+        /// `#[constructor]`.
+        #[constructor]
         pub fn new(key: u8) -> Session {
             Session {
                 key,
