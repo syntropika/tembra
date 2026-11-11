@@ -11,12 +11,12 @@ cargo tembra --help
 
 ## Commands
 
-| Command                                                              | Effect                                                                                                                                                                                                                                                                                 |
-| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cargo tembra new <name> --package ns:name@1.0.0`                    | creates an Orb crate: `Cargo.toml` with `[package.metadata.tembra]`, `src/lib.rs` with an `#[orb]` module and a first method                                                                                                                                                           |
-| `cargo tembra build [--debug] [--out <dir>]`                         | compiles for `wasm32-unknown-unknown` with `wasm-component-ld`, writes the contract to `contract/`, verifies the component against it, packages into `artifacts/`, writes checksums and summarizes services, hooks declared and contributed to, kernel state and resources, and grants |
-| `cargo tembra wit <component.wasm> [--emit <dir> --world <name>]`    | prints the WIT reconstructed from a component, or writes its contract as a `.wit` file                                                                                                                                                                                                 |
-| `cargo tembra inspect <component.wasm> [--wit <dir> --world <name>]` | core import sections, services and methods, required grants and, against a WIT, hook contributions and the verifier's verdict                                                                                                                                                          |
+| Command                                                              | Effect                                                                                                                                                                                                                                                                                                     |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cargo tembra new <name> --package ns:name@1.0.0`                    | creates an Orb crate: `Cargo.toml` with `[package.metadata.tembra]`, `src/lib.rs` with an `#[orb]` module and a first method                                                                                                                                                                               |
+| `cargo tembra build [--debug] [--out <dir>]`                         | compiles for `wasm32-unknown-unknown` with `wasm-component-ld`, writes the contract to `contract/`, verifies the component against it, packages into `artifacts/`, writes checksums and summarizes services with their lifetime, hooks declared and contributed to, kernel state and resources, and grants |
+| `cargo tembra wit <component.wasm> [--emit <dir> --world <name>]`    | prints the WIT reconstructed from a component, or writes its contract as a `.wit` file                                                                                                                                                                                                                     |
+| `cargo tembra inspect <component.wasm> [--wit <dir> --world <name>]` | core import sections, services and methods, required grants and, against a WIT, hook contributions and the verifier's verdict                                                                                                                                                                              |
 
 `new` finds the tembra checkout by walking up from the current directory, because the created
 crate depends on the macro by path; outside the checkout, pass `--tembra <root>`.
@@ -24,9 +24,11 @@ crate depends on the macro by path; outside the checkout, pass `--tembra <root>`
 ## Where the contract comes from
 
 A component built with the macro carries the module's WIT in a `tembra:wit` custom section and
-its hook roles in a `tembra:hooks` section: the hooks it declares, with the composition from
-`#[hook(..., composition = c)]`, and the hooks it contributes to, with the priority from
-`#[hook(..., priority = n)]`. `build` takes the contract from there, so it is the text the macro
+its manifest in a `tembra:manifest` section: the hooks it declares, with the composition from
+`#[hook(..., composition = c)]`, the hooks it contributes to, with the priority from
+`#[hook(..., priority = n)]`, and the services that chose a lifetime or a linger with
+`#[service(lifetime = host)]` or `#[service(linger_ms = n)]`. `build` takes the contract from
+there, so it is the text the macro
 derived: `///` comments included, and with the hook imports the linker drops because nothing calls
 them. The packages the Orb consumes, such as a hook's interface, are nested after it from the
 component's types; the standard packages that ship with `tembra-contracts`, WASI and the kernel's
@@ -47,10 +49,11 @@ api-version = 1         # default 1
 world = "filter"        # only for a component without an embedded contract; default: the Orb name
 ```
 
-The name and the API version live here because the WIT does not carry them: they are the two
-arguments `Contract::component_artifact` takes. Hook interfaces are read from the contract, the
-interfaces its world both imports and exports; the component says which it declares and which it
-contributes to, with composition and priority.
+The name and the API version live here because the WIT does not carry them: they are two of the
+arguments `Contract::component_artifact` takes; the third is the manifest. Hook interfaces are
+read from the contract, the interfaces its world both imports and exports; the component says
+which it declares and which it contributes to, with composition and priority, and which of its
+services chose a lifetime.
 
 ## Build outputs
 
@@ -79,9 +82,10 @@ other imports: none; the installer grants nothing
 ```
 
 An Orb declaring a hook adds `hooks declared, run by the kernel's plan of contributions:` with the
-composition of each. An Orb with a `#[state]` or a `#[resource]` adds a line naming the kernel's
-interface it uses: the executor serves it, so it appears among neither the imports to bind nor the
-grants to give.
+composition of each. A service that chose a lifetime or a linger says so after its methods, for
+example `lifetime: host, pinned until the host closes`. An Orb with a `#[state]` or a
+`#[resource]` adds a line naming the kernel's interface it uses: the executor serves it, so it
+appears among neither the imports to bind nor the grants to give.
 
 For an Orb that imports WASI, the last part names the grants an installer must give, for example
 `system: cli` and `system: clocks` for a std Orb that prints. Without it, those fourteen `wasi:cli`

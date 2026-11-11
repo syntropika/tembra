@@ -4,23 +4,25 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
-use tembra_contracts::{CallbackRoles, Contract, HookComposition, guest};
+use tembra_contracts::{Contract, HookComposition, Lifetime, Manifest, ServicePolicy, guest};
 use wasmparser::{Parser, Payload};
 use wit_component::{DecodedWasm, WitPrinter};
 use wit_parser::{InterfaceId, PackageId, Resolve, WorldId, WorldItem, WorldKey};
 
 /// The custom section in which the macro stores the WIT it derived from the module.
 const WIT_SECTION: &str = "tembra:wit";
-/// The custom section in which the macro stores the hook roles, as a JSON object.
-const HOOKS_SECTION: &str = "tembra:hooks";
+/// The custom section in which the macro stores the module's manifest, as a JSON object.
+const MANIFEST_SECTION: &str = "tembra:manifest";
 
-/// The hook roles the macro stored in the component: the hooks it contributes to, with their
-/// priorities, and the hooks it declares, with their composition.
+/// The manifest the macro stored in the component: the hooks it contributes to, with their
+/// priorities, the hooks it declares, with their composition, and the services whose
+/// `#[service]` attribute names a lifetime or a linger, by interface identity.
 #[derive(Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct EmbeddedHooks {
+pub struct EmbeddedManifest {
     pub contributes: BTreeMap<String, i32>,
     pub declares: BTreeMap<String, HookComposition>,
+    pub services: BTreeMap<String, ServicePolicy>,
 }
 
 /// `cargo tembra wit`: print the reconstructed WIT, or write the contract with --emit.
@@ -106,13 +108,15 @@ fn embedded_wit(bytes: &[u8]) -> Result<Option<String>> {
         .transpose()
 }
 
-/// The hook roles the macro stored in the component:
-/// `{"contributes": {"ns:name/hook@version": n}, "declares": {"ns:name/hook@version": "waterfall"}}`.
-pub fn embedded_hooks(bytes: &[u8]) -> Result<EmbeddedHooks> {
-    match embedded_section(bytes, HOOKS_SECTION)? {
-        Some(data) => serde_json::from_slice(&data)
-            .context("the tembra:hooks section is not a JSON object of hook roles"),
-        None => Ok(EmbeddedHooks::default()),
+/// The manifest the macro stored in the component:
+/// `{"contributes": {"ns:name/hook@version": n}, "declares": {"ns:name/hook@version": "waterfall"},
+/// "services": {"ns:name/service@version": {"lifetime": "host", "linger_ms": 0}}}`.
+pub fn embedded_manifest(bytes: &[u8]) -> Result<EmbeddedManifest> {
+    match embedded_section(bytes, MANIFEST_SECTION)? {
+        Some(data) => serde_json::from_slice(&data).context(
+            "the tembra:manifest section is not a JSON object of hook roles and service policies",
+        ),
+        None => Ok(EmbeddedManifest::default()),
     }
 }
 
@@ -210,11 +214,12 @@ fn interface(item: &WorldItem) -> Option<InterfaceId> {
     }
 }
 
-/// The hook roles of a contract. A hook interface is one the world both imports and exports: the
+/// The manifest of a contract. A hook interface is one the world both imports and exports: the
 /// ones the component declares, with their composition, are its own hooks; the others are
-/// contributions, with the priority the component carries, or 0. A role the component names
-/// for an interface that is not such a pair is an error.
-pub fn roles(contract: &Contract, embedded: &EmbeddedHooks) -> Result<CallbackRoles> {
+/// contributions, with the priority the component carries, or 0. A service policy names an
+/// interface the world exports and no hook. A role or policy the component names for any other
+/// interface is an error.
+pub fn manifest(contract: &Contract, embedded: &EmbeddedManifest) -> Result<Manifest> {
     let model = contract.prepared().model();
     let identities = |entries: &[tembra_contracts::Entry]| -> BTreeSet<String> {
         entries
@@ -246,9 +251,17 @@ pub fn roles(contract: &Contract, embedded: &EmbeddedHooks) -> Result<CallbackRo
         })?;
         *slot = *priority;
     }
-    Ok(CallbackRoles {
+    for id in embedded.services.keys() {
+        if !exported.contains(id) || paired.contains(id) {
+            bail!(
+                "#[service] names a lifetime for {id}, but the contract does not export it as a service"
+            );
+        }
+    }
+    Ok(Manifest {
         contributions,
         hooks: embedded.declares.clone(),
+        services: embedded.services.clone(),
     })
 }
 
@@ -300,14 +313,14 @@ pub fn inspect(
         }
         None => None,
     };
-    let roles = match &contract {
-        Some((contract, ..)) => roles(contract, &embedded_hooks(&bytes)?)?,
-        None => CallbackRoles::default(),
+    let manifest = match &contract {
+        Some((contract, ..)) => self::manifest(contract, &embedded_manifest(&bytes)?)?,
+        None => Manifest::default(),
     };
-    summary(&resolve, world, "orb", &roles);
+    summary(&resolve, world, "orb", &manifest);
     if let Some((contract, name, wit_dir)) = contract {
         println!("checked against world {name} of {}:", wit_dir.display());
-        match contract.component_artifact(&bytes, "orb", 1, &roles) {
+        match contract.component_artifact(&bytes, "orb", 1, &manifest) {
             Ok(artifact) => println!("  ACCEPTED, artifact of {} bytes", artifact.len()),
             Err(error) => println!("  REFUSED: {error}"),
         }
@@ -333,13 +346,15 @@ fn world_key(resolve: &Resolve, key: &WorldKey, local: Option<PackageId>) -> Str
     }
 }
 
-/// Exports as services and methods, hooks declared and contributed to, kernel-managed state and
-/// resources, and imports with the grant they will need at installation.
-pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &CallbackRoles) {
-    let CallbackRoles {
+/// Exports as services and methods, with the lifetime a service chose, hooks declared and
+/// contributed to, kernel-managed state and resources, and imports with the grant they will need
+/// at installation.
+pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, manifest: &Manifest) {
+    let Manifest {
         contributions,
         hooks,
-    } = roles;
+        services,
+    } = manifest;
     let world = &resolve.worlds[world];
     let (mut state, mut resources) = (false, false);
     println!("exports, the services of {orb_name}:");
@@ -360,7 +375,20 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Callba
                 .keys()
                 .cloned()
                 .collect();
-            println!("  {orb_name}::{id}  methods: {}", methods.join(", "));
+            let policy = match services.get(&id) {
+                Some(ServicePolicy {
+                    lifetime: Lifetime::Host,
+                    ..
+                }) => "  lifetime: host, pinned until the host closes".to_owned(),
+                Some(ServicePolicy { linger_ms, .. }) if *linger_ms > 0 => {
+                    format!("  linger: {linger_ms} ms after the last reference is released")
+                }
+                _ => String::new(),
+            };
+            println!(
+                "  {orb_name}::{id}  methods: {}{policy}",
+                methods.join(", ")
+            );
         } else {
             println!("  {id}");
         }
