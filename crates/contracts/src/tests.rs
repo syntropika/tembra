@@ -374,3 +374,43 @@ fn kernel_interfaces_bind_to_the_kernel_without_a_provider_or_grant() {
     };
     assert!(redefined.0.contains("already provided"), "{redefined}");
 }
+
+/// The context interface is served by the kernel alone: a world imports it with no export, no
+/// provider and no grant, and nothing may export it.
+#[test]
+fn the_context_interface_is_imported_alone() {
+    let aware = r#"
+package example:aware@1.0.0;
+interface probe { whoami: func() -> string; }
+world aware {
+    import tembra:guest/context@1.0.0;
+    export probe;
+}
+"#;
+    let contract = Contract::from_source("aware.wit", aware, None).unwrap();
+    let bindings = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap();
+    assert_eq!(bindings.get(guest::CONTEXT), Some(&Binding::Kernel));
+    let plan = contract.plan("aware", 1, &bindings).unwrap();
+    assert!(plan.host_imports.is_empty());
+    assert!(plan.orb.requires.is_empty());
+    assert_eq!(
+        plan.orb
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        ["aware::example:aware/probe@1.0.0"]
+    );
+    let exporting = aware.replace(
+        "import tembra:guest/context@1.0.0;",
+        "export tembra:guest/context@1.0.0;",
+    );
+    let contract = Contract::from_source("exporting.wit", &exporting, None).unwrap();
+    let bindings = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap();
+    let error = contract.plan("aware", 1, &bindings).unwrap_err();
+    assert!(error.0.contains("reserved"), "{error}");
+}

@@ -47,3 +47,33 @@ interface resources-init {
     /// Close the named resource's value.
     close: func(name: string, handle: u32);
 }
+
+/// The kernel's view of the call a compiled Orb is serving and of the object it runs on. The
+/// executor serves this interface itself: a world imports it without a provider and without a
+/// grant, and exports nothing for it.
+interface context {
+    /// The severity of a diagnostic record.
+    enum level {
+        log,
+        debug,
+        info,
+        warn,
+        error,
+    }
+    /// Where an object lives in the kernel: the key its reference was acquired with and the
+    /// principal that acquired it. The Orb root has an empty key and the host as its principal.
+    record address {
+        key: list<string>,
+        principal: string,
+    }
+    /// The address of the object running the current call; the root's, for a hook contribution.
+    object: func() -> address;
+    /// The principal of the current call.
+    principal: func() -> string;
+    /// Whether the current call was cancelled.
+    cancelled: func() -> bool;
+    /// Cancel the current call: the caller and this Orb both observe it cancelled.
+    cancel: func();
+    /// Write a diagnostic record attributed to this Orb, for the host's log observers.
+    log: func(level: level, message: string);
+}
