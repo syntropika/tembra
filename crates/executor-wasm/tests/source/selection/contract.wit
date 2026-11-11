@@ -1,0 +1,15 @@
+package tembra-test:selection@1.0.0;
+
+interface math {
+    double: func(value: u8) -> u8;
+}
+
+interface probe {
+    /// Call the dependency with an out-of-range argument, then with a valid one.
+    recover: async func() -> string;
+}
+
+world consumer {
+    import math;
+    export probe;
+}

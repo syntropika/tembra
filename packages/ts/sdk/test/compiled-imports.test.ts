@@ -7,6 +7,7 @@ import { signature } from "../src/runtime/adapters.ts";
 
 // The no-std pipeline component imports `arithmetic` synchronously and `delayed` through P3.
 const consumer = process.env.TEMBRA_WASM_CONSUMER;
+const fixtures = process.env.TEMBRA_WASM_FIXTURES;
 const binding = createRequire(import.meta.url)("@syntropika/tembra-engine-node");
 const wit = path.resolve(import.meta.dir, "../../../../crates/executor-wasm/tests/wit/pipeline");
 const pipeline = "example:pipeline/pipeline@1.0.0";
@@ -23,14 +24,11 @@ interface Pipeline {
   release(): void;
 }
 
-/** Package the compiled consumer or a closed source bundle for one pipeline world. */
-async function artifact(world: string, name: string, source?: string): Promise<Uint8Array> {
-  const contract = new binding.NodeContract(wit, world);
-  const component = source === undefined ? new Uint8Array(await readFile(consumer!)) : undefined;
+/** Package the compiled consumer against its WIT world. */
+async function artifact(): Promise<Uint8Array> {
+  const contract = new binding.NodeContract(wit, "consumer");
   return new Uint8Array(
-    source === undefined
-      ? contract.componentArtifact(component!, name, 1)
-      : contract.sourceArtifact(source, name, 1),
+    contract.componentArtifact(new Uint8Array(await readFile(consumer!)), "pipeline", 1),
   );
 }
 
@@ -55,10 +53,10 @@ function requiredSignature(bytes: Uint8Array): string {
   return requirement.signatures[arithmetic];
 }
 
-test.skipIf(!consumer)(
+test.skipIf(!consumer || !fixtures)(
   "a trusted provider calling back into its suspended compiled caller is refused",
   async () => {
-    const bytes = await artifact("consumer", "pipeline");
+    const bytes = await artifact();
     let back: Pipeline | undefined;
     let refusal: unknown;
     const host = createHost();
@@ -85,10 +83,8 @@ test.skipIf(!consumer)(
           },
         } as never,
         {
-          artifact: await artifact(
-            "delayed-provider",
-            "delayed",
-            "globalThis.__tembraOrb={services:{delayed:{methods:{async double(_e,_c,v){return v*2;}}}}};",
+          artifact: new Uint8Array(
+            await readFile(path.join(fixtures!, "test-pipeline-delayed.wasm")),
           ),
         },
         { artifact: bytes, requires },

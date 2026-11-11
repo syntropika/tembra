@@ -1,48 +1,18 @@
-//! Private host-operation protocol shared by the native executor and the guest interpreter.
+//! Private host-operation vocabulary between a component Store's worker and its adapter.
 //!
-//! The guest crate includes this exact file through `#[path]`, so both sides agree on one
-//! typed control vocabulary. Only control metadata is typed here; WIT-validated payloads
-//! (`initial`, `value`, `args`) stay JSON values. A `scope` field names an environment handle
-//! table, never a host context: the host accepts only its own table or its issued parent's.
+//! Only control metadata is typed here; WIT-validated payloads (`initial`, `value`, `args`)
+//! stay JSON values in the kernel's portable wire form. A `scope` field names an environment
+//! handle table, never a host context: the host accepts only its own table or its issued
+//! parent's.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::borrow::Cow;
 
-/// Interpreter interrupt polls granted to one callback and, separately, to its cleanup.
-pub const DEFAULT_INSTRUCTION_TICKS: u32 = 10_000;
-
-/// Source revision and VM bounds delivered by `Operation::Load`.
-///
-/// Hosts may omit `instruction_ticks`; the guest then applies `DEFAULT_INSTRUCTION_TICKS`.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Load<'a> {
-    #[serde(borrow)]
-    pub source: Cow<'a, str>,
-    pub heap_bytes: usize,
-    pub contract: Value,
-    #[serde(default = "default_instruction_ticks")]
-    pub instruction_ticks: u32,
-    /// Host-decided authority for source built-ins (`Date`, `performance`, `Math.random`).
-    #[serde(default)]
-    pub builtins: Builtins,
-}
-
-/// Source built-in authority, decided by the host from the installation's system grants only.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Builtins {
-    /// The Orb holds the clocks grant: built-ins may read its configured clocks.
-    pub clock: bool,
-    /// With the random grant only: an insecure PRNG seed from the configured insecure-seed
-    /// provider, as two decimal u64 strings (exact in JavaScript), never derived from time.
-    /// Canonical order on every backend: `[getInsecureSeed()[0], getInsecureSeed()[1]]`.
-    pub seed: Option<[String; 2]>,
-}
-
-/// Serde default for hosts that do not configure an instruction bound.
-fn default_instruction_ticks() -> u32 {
-    DEFAULT_INSTRUCTION_TICKS
+/// The entry point of one command: a declaration runs synchronously in a declaration scope;
+/// a call or cleanup starts admitted work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    Declare,
+    Start,
 }
 
 /// Host-selected callbacks contain typed control fields and WIT-checked argument values.
@@ -59,7 +29,7 @@ pub enum GuestCommand<'a> {
         method: &'a str,
         args: &'a Value,
         /// Compiled Stores only: the host-issued id of the resource lent as implicit `self`.
-        /// Absent otherwise, so the interpreter protocol is unchanged.
+        /// Absent for functions without a receiver.
         #[serde(skip_serializing_if = "Option::is_none")]
         receiver: Option<u32>,
     },
@@ -70,11 +40,15 @@ pub enum GuestCommand<'a> {
         method: &'a str,
         args: &'a Value,
     },
+    /// `environment` declared the validated state; its callback runs in that environment.
     Validate {
+        environment: u64,
         callback: u32,
         value: &'a Value,
     },
+    /// `environment` declared the resource; its opener and closer run in that environment.
     Callback {
+        environment: u64,
         callback: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
         value: Option<u32>,
@@ -111,7 +85,7 @@ pub struct Handle {
     pub id: u32,
 }
 
-/// Console severities accepted from guest code.
+/// Console severities of attributed guest diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -140,9 +114,6 @@ impl LogLevel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
 pub enum Request {
-    /// Attributed diagnostic record; requires no callback authority.
-    #[serde(rename = "console")]
-    Console { level: LogLevel, message: String },
     #[serde(rename = "address")]
     Address {},
     #[serde(rename = "orb")]
@@ -249,6 +220,8 @@ pub enum AsyncRequest {
     /// issued into the calling environment's own table, so the request carries no scope.
     #[serde(rename = "reference.acquire")]
     ReferenceAcquire { service: String, key: Vec<String> },
+    /// `binding` is the world import whose function was called; the reference or owned resource
+    /// named by `id` must belong to exactly that import.
     #[serde(rename = "reference.call")]
     ReferenceCall {
         #[serde(default)]
@@ -256,6 +229,7 @@ pub enum AsyncRequest {
         id: u32,
         method: String,
         args: Value,
+        binding: String,
     },
     #[serde(rename = "wait")]
     Wait { milliseconds: u32 },
@@ -299,8 +273,7 @@ impl Request {
     pub fn survives_cancellation(&self) -> bool {
         matches!(
             self,
-            Self::Console { .. }
-                | Self::SignalCancelled {}
+            Self::SignalCancelled {}
                 | Self::StateRead { .. }
                 | Self::ResourceRead { .. }
                 | Self::ReferenceState { .. }
@@ -410,7 +383,6 @@ mod tests {
             r#"{"operation":"state.declare","scope":1,"version":1}"#,
             r#"{"operation":"reference.declare","service":"s","key":"main"}"#,
             r#"{"operation":"resource.declare","name":"r","version":1,"open":1,"close":2,"dependencies":[{"id":1,"extra":0}]}"#,
-            r#"{"operation":"console","level":"trace","message":"x"}"#,
         ] {
             let error = Request::decode(packet).unwrap_err();
             assert!(
@@ -454,49 +426,13 @@ mod tests {
     }
 
     #[test]
-    fn guest_requests_round_trip() {
-        let console = Request::Console {
-            level: LogLevel::Warn,
-            message: "hi".into(),
+    fn requests_round_trip() {
+        let request = Request::StateRead {
+            scope: Some(3),
+            id: 7,
+            known: None,
         };
-        assert_eq!(
-            console.encode(),
-            r#"{"operation":"console","level":"warn","message":"hi"}"#
-        );
-        assert_eq!(Request::decode(&console.encode()).unwrap(), console);
-    }
-
-    #[test]
-    fn load_packets_default_ticks_and_refuse_unknown_fields() {
-        let packet = serde_json::to_string(&Load {
-            source: "let a = \"\\n\";".into(),
-            heap_bytes: 64,
-            contract: json!({"services": {}}),
-            instruction_ticks: DEFAULT_INSTRUCTION_TICKS,
-            builtins: Default::default(),
-        })
-        .unwrap();
-        assert_eq!(
-            packet,
-            r#"{"source":"let a = \"\\n\";","heap_bytes":64,"contract":{"services":{}},"instruction_ticks":10000,"builtins":{"clock":false,"seed":null}}"#
-        );
-        let decoded: Load<'_> = serde_json::from_str(&packet).unwrap();
-        assert_eq!(decoded.source, "let a = \"\\n\";");
-        assert_eq!(decoded.instruction_ticks, DEFAULT_INSTRUCTION_TICKS);
-        let omitted: Load<'_> =
-            serde_json::from_str(r#"{"source":"","heap_bytes":1,"contract":null}"#).unwrap();
-        assert_eq!(omitted.instruction_ticks, DEFAULT_INSTRUCTION_TICKS);
-        let configured: Load<'_> = serde_json::from_str(
-            r#"{"source":"","heap_bytes":1,"contract":null,"instruction_ticks":50}"#,
-        )
-        .unwrap();
-        assert_eq!(configured.instruction_ticks, 50);
-        assert!(
-            serde_json::from_str::<Load<'_>>(
-                r#"{"source":"","heap_bytes":1,"contract":null,"ticks":50}"#
-            )
-            .is_err()
-        );
+        assert_eq!(Request::decode(&request.encode()).unwrap(), request);
     }
 
     #[test]

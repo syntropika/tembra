@@ -8,7 +8,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use tembra::{Orb, Result};
-use wasmtime::{Module, component::Component};
+use wasmtime::component::Component;
 
 /// Console output is attributed by the host, never by a guest-provided Orb name.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -38,7 +38,7 @@ fn compile<T: Send>(work: impl FnOnce() -> wasmtime::Result<T> + Send) -> Result
         .map_err(failure)
 }
 
-/// Bounds apply to each interpreter instance and each exported callback.
+/// Bounds apply to each component Store and each exported callback.
 #[derive(Clone, Copy, Debug, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Limits {
@@ -60,12 +60,10 @@ impl Default for Limits {
     }
 }
 
-/// A reusable compiled interpreter; each prepared Orb receives a separate Store and VM.
+/// Shared compiled code; each prepared Orb receives a separate Store.
 #[derive(Clone)]
 pub struct Engine {
     pub(crate) engine: wasmtime::Engine,
-    /// Reusable interpreter core module; each source Orb instantiates it in its own Store.
-    pub(crate) interpreter: Option<Arc<Module>>,
     compiled: Arc<Mutex<BTreeMap<[u8; 32], Weak<Component>>>>,
     pub(crate) limits: Limits,
     pub(crate) providers: Providers,
@@ -73,68 +71,12 @@ pub struct Engine {
     /// Exported WIT resources held in compiled Stores on behalf of native owners.
     pub(crate) live_resources: Arc<AtomicUsize>,
     pub(crate) logger: Option<LogSink>,
-    /// Open host files shared by every source Orb in the process: owned descriptors plus
-    /// upstream stream objects that keep a file open after their descriptor is dropped.
-    pub(crate) open_files: FileBudget,
-    /// The private socket stream adapter of source Orbs, compiled on first use.
+    /// The private socket stream adapter, compiled on first use.
     pub(crate) stream_adapter: Arc<crate::worker::StreamAdapter>,
 }
 
-/// The process-wide open-file pool and the private share each source revision may hold of it.
-#[derive(Clone)]
-pub(crate) struct FileBudget {
-    pub(crate) process: Arc<tokio::sync::Semaphore>,
-    /// Permits one revision may hold at once: an eighth of the pool, at least one, so a single
-    /// Orb that hoards descriptors or streams cannot refuse every other Orb's files.
-    pub(crate) share: usize,
-}
-
-impl FileBudget {
-    /// A pool of `total` permits with the standard per-revision share.
-    pub(crate) fn new(total: usize) -> Self {
-        Self {
-            process: Arc::new(tokio::sync::Semaphore::new(total)),
-            share: (total / 8).max(1),
-        }
-    }
-}
-
-/// Upper bound of the process-wide open-file budget of source Orbs; each Orb additionally has
-/// its own logical handle limit.
-pub(crate) const OPEN_FILES: usize = 512;
-
-/// One budget for every Engine in the process, sized to a quarter of the current soft
-/// descriptor limit (read, never changed) so other host descriptors keep headroom; e.g. 64 on
-/// a default iOS soft limit of 256. Covers source Orbs only; see the Phase 2 FD note for
-/// compiled components.
-pub(crate) fn open_files() -> FileBudget {
-    static FILES: std::sync::OnceLock<FileBudget> = std::sync::OnceLock::new();
-    FILES
-        .get_or_init(|| FileBudget::new(open_file_limit()))
-        .clone()
-}
-
-fn open_file_limit() -> usize {
-    #[cfg(unix)]
-    {
-        let mut limit = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: getrlimit only writes the provided, properly aligned struct.
-        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
-            && limit.rlim_cur != libc::RLIM_INFINITY
-        {
-            return usize::try_from(limit.rlim_cur / 4)
-                .unwrap_or(OPEN_FILES)
-                .clamp(16, OPEN_FILES);
-        }
-    }
-    OPEN_FILES
-}
-
 impl Engine {
-    /// Configure Wasmtime limits without loading an interpreter for compiled-only hosts.
+    /// Configure Wasmtime limits with native code generation (Pulley on iOS).
     pub fn new(limits: Limits) -> Result<Self> {
         Self::configured(limits, cfg!(target_os = "ios"))
     }
@@ -153,7 +95,7 @@ impl Engine {
             || limits.timeout_ms == 0
         {
             return Err(failure(
-                "interpreter limits must be positive and the Wasm memory bound must fit wasm32 with at least 2 MiB",
+                "engine limits must be positive and the Wasm memory bound must fit wasm32 with at least 2 MiB",
             ));
         }
         let mut config = wasmtime::Config::new();
@@ -170,14 +112,12 @@ impl Engine {
         let engine = wasmtime::Engine::new(&config).map_err(failure)?;
         Ok(Self {
             engine,
-            interpreter: None,
             compiled: Arc::default(),
             limits,
             providers: Providers::default(),
             active_instances: Arc::default(),
             live_resources: Arc::default(),
             logger: None,
-            open_files: open_files(),
             stream_adapter: Arc::default(),
         })
     }
@@ -285,18 +225,6 @@ impl Engine {
         Ok(self)
     }
 
-    /// Compile reusable interpreter code for source Orbs without changing earlier engine clones.
-    /// The module must match the private interpreter ABI and its exact import allowlist.
-    pub fn interpreter(mut self, module: &[u8]) -> Result<Self> {
-        if self.interpreter.is_some() {
-            return Err(failure("interpreter is already configured"));
-        }
-        let module = compile(|| Module::new(&self.engine, module))?;
-        crate::worker::check(&module).map_err(failure)?;
-        self.interpreter = Some(Arc::new(module));
-        Ok(self)
-    }
-
     /// Reuse live compiled code while fresh Stores retain all mutable state and permissions.
     pub(crate) fn compiled(&self, bytes: &[u8]) -> Result<Arc<Component>> {
         let key: [u8; 32] = Sha256::digest(bytes).into();
@@ -349,62 +277,5 @@ mod tests {
         let second = clone.compiled(bytes).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(engine.instances(), 0);
-    }
-
-    #[test]
-    fn interpreters_must_be_core_modules_matching_the_private_abi() {
-        let engine = Engine::new(Limits::default()).unwrap();
-        // A component, or a core module without the ABI exports, is refused before use.
-        for bytes in [&b"\0asm\x0d\0\x01\0"[..], &b"\0asm\x01\0\0\0"[..]] {
-            assert!(engine.clone().interpreter(bytes).is_err());
-        }
-        assert!(engine.interpreter.is_none());
-    }
-
-    #[test]
-    fn engines_with_a_different_wasi_schema_are_refused_before_instantiation() {
-        let namespace = format!("{}-different", crate::abi::IMPORT_MODULE);
-        let module = wat::parse_str(format!(
-            "(module (import {namespace:?} \"sync\" (func (param i32 i32) (result i32))))"
-        ))
-        .unwrap();
-        let engine = Engine::new(Limits::default()).unwrap();
-        let Err(error) = engine.interpreter(&module) else {
-            panic!("mismatched schema accepted")
-        };
-        assert!(
-            error
-                .message
-                .contains(&format!("{namespace}::sync is not allowed"))
-        );
-    }
-
-    #[test]
-    fn previous_private_protocol_engines_are_refused_before_use() {
-        let engine = Engine::new(Limits::default()).unwrap();
-        let legacy = wat::parse_str(r#"(module (import "tembra-interpreter-v1" "sync" (func (param i32 i32) (result i32))))"#).unwrap();
-        let Err(error) = engine.clone().interpreter(&legacy) else {
-            panic!("old protocol accepted")
-        };
-        assert!(
-            error
-                .message
-                .contains("tembra-interpreter-v1::sync is not allowed")
-        );
-        // The v11 interpreter predates `STREAM_IMPORT`; the same WASI schema does not admit it.
-        let previous = crate::abi::IMPORT_MODULE.replacen("-v12-", "-v11-", 1);
-        assert_ne!(previous, crate::abi::IMPORT_MODULE);
-        let module = wat::parse_str(format!(
-            "(module (import {previous:?} \"sync\" (func (param i32 i32) (result i32))))"
-        ))
-        .unwrap();
-        let Err(error) = engine.interpreter(&module) else {
-            panic!("v11 protocol accepted")
-        };
-        assert!(
-            error
-                .message
-                .contains(&format!("{previous}::sync is not allowed"))
-        );
     }
 }

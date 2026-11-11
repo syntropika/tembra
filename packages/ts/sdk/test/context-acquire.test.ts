@@ -208,7 +208,7 @@ const acquire = (scope: ExecutionScope, key: string) =>
 /** Call an acquired import and decode its checked wire reply. */
 const call = (scope: ExecutionScope, id: number, method: string, args: unknown[] = []) =>
   scope
-    .async({ operation: "reference.call", id, method, args })
+    .async({ operation: "reference.call", binding: COUNTER, id, method, args })
     .then((value) => JSON.parse(reply(value)));
 const refusal = (operation: Promise<unknown>) =>
   operation.then(
@@ -394,7 +394,9 @@ test("cancellation during readiness releases the claim at once and publishes no 
 test("a resource close cannot select instances under the cleanup principal", async () => {
   const { host, harness, router, activated } = await served();
   try {
-    await host.root((context) => router.route("a", 1, context), { principal: "alice" });
+    await host.root((context) => router.route("a", 1, context), {
+      principal: "alice",
+    });
     // Releasing the only claim disposes the router object while the host stays open, so its
     // `session` close runs now, under a cleanup root without an admitted invocation.
     router.release();
@@ -423,6 +425,7 @@ test("a root handle issued into the Orb table is refused from a service table in
         await refusal(
           scope.async({
             operation: "reference.call",
+            binding: COUNTER,
             scope: parent.id,
             id,
             method: "add",
@@ -433,7 +436,9 @@ test("a root handle issued into the Orb table is refused from a service table in
       orbScope.cancel();
       return 0;
     };
-    await host.root((context) => router.route("a", 0, context), { principal: "alice" });
+    await host.root((context) => router.route("a", 0, context), {
+      principal: "alice",
+    });
     // The service table never issued it; the Orb table's handle is root-scoped to that table.
     expect(outcomes).toEqual([
       "1",
@@ -462,7 +467,9 @@ test("a root handle expires once the root's claims are revoked, before the callb
       );
       return 0;
     };
-    await host.root((context) => router.route("a", 0, context), { principal: "alice" });
+    await host.root((context) => router.route("a", 0, context), {
+      principal: "alice",
+    });
     expect(outcomes).toEqual(["Reference expired with its root"]);
   } finally {
     router.release();
@@ -514,10 +521,42 @@ test("a callback that ends right after readiness publishes no handle", async () 
       scope.cancel();
       return 0;
     };
-    await host.root((context) => router.route("a", 0, context), { principal: "alice" });
+    await host.root((context) => router.route("a", 0, context), {
+      principal: "alice",
+    });
     expect(await acquisition).toBe("Interpreter callback scope ended");
     expect(harness.table.references.size).toBe(0);
     keeper.release();
+  } finally {
+    router.release();
+    await settle(host);
+  }
+});
+
+test("a selected reference cannot call a different WIT import", async () => {
+  const { host, harness, router } = await served();
+  try {
+    harness.route = async (scope) => {
+      const id = await acquire(scope, "a");
+      expect(
+        await refusal(
+          scope.async({
+            operation: "reference.call",
+            id,
+            binding: "example:other/counter",
+            method: "add",
+            args: [100],
+          }),
+        ),
+      ).toBe("The selected reference belongs to another import");
+      // Refusal happens before dispatch: the same handle still starts its own counter at zero.
+      return call(scope, id, "add", [1]);
+    };
+    expect(
+      await host.root((context) => router.route("a", 0, context), {
+        principal: "alice",
+      }),
+    ).toBe(1);
   } finally {
     router.release();
     await settle(host);

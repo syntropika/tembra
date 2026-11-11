@@ -103,7 +103,7 @@ impl Drop for Server {
 
 /// Combine a real HTTP request, native interop and an SSE stream that closes before EOF.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn typescript_owns_http_and_the_host_only_grants_transport() {
     for interpreted in [false, true] {
         run(interpreted);
@@ -112,8 +112,6 @@ fn typescript_owns_http_and_the_host_only_grants_transport() {
 
 fn run(interpreted: bool) {
     let server = Server::start();
-    let component =
-        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
     let bytes = std::fs::read(
         std::path::PathBuf::from(
             std::env::var_os("TEMBRA_WASM_FIXTURES").expect("TEMBRA_WASM_FIXTURES"),
@@ -128,8 +126,6 @@ fn run(interpreted: bool) {
     } else {
         Engine::new(Limits::default())
     }
-    .unwrap()
-    .interpreter(&component)
     .unwrap_or_else(|error| {
         panic!(
             "HTTP fixture mode={mode} phase=prepare elapsed={:?}: {error:?}",

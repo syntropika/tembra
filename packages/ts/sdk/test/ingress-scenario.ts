@@ -153,6 +153,24 @@ async function scenario(options: IngressScenarioOptions, report: string[]): Prom
   try {
     await host.install({ artifact: ledger });
     await host.install({ artifact: handler, requires });
+    /**
+     * A trap quarantines the handler revision: later requests are refused until the host reloads
+     * it. Assert that, then reload and wait until the new revision serves.
+     */
+    const reinstated = async (cause: string) => {
+      const refused = await host.handleHttp(ORB, request("/status/204")).then(
+        () => "served",
+        (error: { message?: string }) => String(error?.message ?? error),
+      );
+      // The refusal carries the quarantine or its original trap as the cause.
+      same(
+        /quarantined|component trap/.test(refused),
+        true,
+        `${cause} quarantined the revision (${refused.slice(0, 200)})`,
+      );
+      await host.reload([{ artifact: handler, requires }]);
+      await replaced(host, ORB);
+    };
     const entries = async () => {
       const reference = (await host.get(LEDGER, "main")) as unknown as {
         entries(): Promise<string[]>;
@@ -265,7 +283,7 @@ async function scenario(options: IngressScenarioOptions, report: string[]): Prom
       `handler trap (${String(trapped)})`,
     );
     await settled(host);
-    await replaced(host, ORB);
+    await reinstated("an uncaught handler throw");
     report.push("handler error-code and trap reported after settlement");
     report.push("(disconnects)");
 
@@ -319,6 +337,8 @@ async function scenario(options: IngressScenarioOptions, report: string[]): Prom
       "cancelled trailers",
     );
     await settled(host);
+    // The cancelled producer's revoked wait escapes a strict stream: the revision fails closed.
+    await reinstated("a cancelled strict response producer");
     report.push("cancellation through the caller's signal");
 
     // Reload: an in-flight stream drains on the old revision; new requests reach the new one.

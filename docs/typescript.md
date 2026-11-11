@@ -245,7 +245,7 @@ async function updateAndRead(consume: (chunk: Uint8Array) => void): Promise<void
   await writeText(file, "hello");
   const [stream, done] = file.readViaStream(0n);
   for await (const chunk of readChunks(stream)) consume(chunk);
-  if ((await done).tag === "err") throw new Error("read failed");
+  if ((await done.read()).tag === "err") throw new Error("read failed");
 }
 ```
 
@@ -259,22 +259,25 @@ variants and results. A JavaScript `number` or numeric `string` in a 64-bit posi
 use `bigint` before any arithmetic that could exceed the safe integer range. WIT `string` values
 are never reinterpreted as integers.
 
-The interpreter is loaded from `@syntropika/tembra-engine-node` when the first source orb is
-installed. Hosts that install only compiled components never load it. `isolated.onLog` receives
-console records attributed to the source Orb.
+Source artifacts contain their dquickts runtime. Hosts execute source and other compiled
+components through the same component backend, without a separately loaded interpreter.
+`isolated.onLog` receives console records attributed to the source Orb.
 
-Both hosts accept these `isolated.limits` options:
+Node accepts these `isolated.limits` options:
 
-| Option        | Default | Purpose                                         |
-| ------------- | ------: | ----------------------------------------------- |
-| `memoryBytes` | 128 MiB | Maximum Wasm linear memory per instance         |
-| `packetBytes` |   8 MiB | Maximum packet size across the interpreter seam |
-| `timeoutMs`   |  10,000 | Callback deadline in milliseconds               |
+| Option        |     Default | Purpose                                 |
+| ------------- | ----------: | --------------------------------------- |
+| `memoryBytes` |     128 MiB | Maximum Wasm linear memory per Store    |
+| `fuel`        | 100,000,000 | Wasmtime execution budget per callback  |
+| `packetBytes` |       8 MiB | Maximum native command or result packet |
+| `timeoutMs`   |      10,000 | Callback deadline in milliseconds       |
 
-Node also accepts `fuel` (default 100,000,000 Wasmtime units). Browsers instead accept
-`instructionTicks` (default 10,000 interpreter interrupt checks). These are different execution
-budgets, not comparable instruction counts. Native source orbs also have the interpreter's fixed
-10,000-check interrupt budget in addition to Wasmtime fuel.
+Browser hosts accept `memoryBytes`, `fuel` and `timeoutMs` with the same defaults. Browser
+fuel counts function entries and loop iterations; native fuel uses Wasmtime units, so the
+counts are not comparable. Browser memory accounting covers initial linear memories on
+every core instantiation and later growth, in whole 64 KiB pages. It does not bound tables,
+the Wasm GC heap, host buffers or other JavaScript allocations. The callback deadline
+includes detached host work through physical completion.
 
 Inside an isolated orb, import `orb` from `@syntropika/tembra-sdk` as usual. The build selects the
 guest implementation. Guests can use state, selected dependencies, resources and granted I/O.
@@ -336,8 +339,7 @@ properties matter. A handler's standard refusal is an `HttpHandlerError` with it
 
 Source handlers are exercised in Chrome and Node; Node also exercises compiled handlers.
 The SDK mobile carrier and the React Native bridge have separate qualification gates.
-Compiled components in the browser remain unsupported. A handler-only Orb needs no outgoing
-HTTP grant; an import of `wasi:http/client` still needs one.
+A handler-only Orb needs no outgoing HTTP grant; an import of `wasi:http/client` still needs one.
 
 ## Browser and Worker
 
@@ -346,10 +348,11 @@ It loads `@syntropika/tembra-engine-wasm` unless the application supplies a kern
 Serve the generated WASM asset with its loader, or set `wasmInput`.
 The same entrypoint works in a module Worker.
 
-Browser hosts install isolated source orbs through the same reusable dquickts Wasm module.
-Pending host effects are awaited outside Wasm; JSPI is not required. Register filesystem providers with
+Browser hosts verify and execute actual WebAssembly components through Tembra's trusted compiler.
+Source components include dquickts. JSPI is required, and Content Security Policy must permit
+`script-src blob:` and `'wasm-unsafe-eval'`. Chrome 154 is the qualified browser. Register filesystem providers with
 `memoryFilesystem()` or `opfsFilesystem()`. Browsers have no ambient TCP implementation; an embedding may supply a transport provider.
-Compiled components are not yet supported in the browser. Standard filesystem calls use the same providers: OPFS resolves direct handles,
+Source and other compiled components use the same backend. Standard filesystem calls use the same providers: OPFS resolves direct handles,
 reads only the requested range and commits streamed writes once per stream. It does not mirror
 the directory into memory. Memory storage supports file and directory operations; OPFS supports
 file operations and directory enumeration/create/remove, with `unsupported` for directory
@@ -363,10 +366,9 @@ and directory operations; `FilesystemError` carries a standard error code. The o
 without it receive bounded `write()` or `append()` calls instead. Relative `host.load()`
 locations resolve against `baseURL` or the page location.
 
-The packaged interpreter is resolved automatically. Set `isolated.engine` only to override its
-location (an absolute URL in browsers, bytes in Node). Browser hosts can supply `wasmInput` for the kernel
-and `isolated.contractsInput` for the contract validator when the application owns asset loading;
-ordinary installations use the packaged defaults.
+Browser hosts can supply `wasmInput` for the kernel and `isolated.contractsInput` for the
+contract verifier when the application owns asset loading. The trusted compiler and its
+Wasm assets load lazily from the engine package when the first component is installed.
 
 Let the application bundler emit the engine package's Wasm assets, or serve its loaders beside
 their Wasm files. If dependency prebundling moves a loader without preserving those asset paths,

@@ -3,18 +3,16 @@
 //! [`CallSockets`] delegates every operation to upstream's implementation. Its data view is
 //! upstream's own `WasiSocketsCtxView`, so the synchronous methods, the resource drops and the
 //! socket address grants are upstream's unchanged. What it adds:
-//! - the futures a compiled caller's cancellation can end cooperatively (`tcp connect`,
-//!   `udp send`, `udp receive`) race the current call's `cancelled` signal, the same signal
-//!   standard HTTP sends observe; a cancelled operation is dropped, which upstream supports, and
-//!   the guest gets `error-code.other("call cancelled")`. Source callbacks cancel by aborting
-//!   their Store tasks instead, which drops the same futures;
+//! - the futures a caller's cancellation can end cooperatively (`tcp connect`, `udp send`,
+//!   `udp receive`) race the current call's `cancelled` signal, the same signal standard HTTP
+//!   sends observe; a cancelled operation is dropped, which upstream supports, and the guest
+//!   gets `error-code.other("call cancelled")`;
 //! - `connect` prepares the socket's send writer in the private stream adapter, and `send` hands
 //!   upstream that guest-produced stream, so a cancelled send ends physically
 //!   (`worker::stream_adapter`);
-//! - in compiled Stores, `receive` and `listen` streams are read by the adapter's pumps and the
-//!   guest reads them from a Tembra producer owned by the call that reads it, so the call's
-//!   cancellation ends a pending read and closes the upstream producer physically. The source
-//!   Store adapts them in its generated dispatch.
+//! - `receive` and `listen` streams are read by the adapter's pumps and the guest reads them
+//!   from a Tembra producer owned by the call that reads it, so the call's cancellation ends a
+//!   pending read and closes the upstream producer physically.
 //!
 //! Upstream constraint: a dropped connect leaves the kernel connection attempt inside the
 //! guest's `tcp-socket` resource; it ends when the guest drops the socket or the revision
@@ -102,9 +100,6 @@ where
     ) -> SocketResult<StreamReader<Resource<TcpSocket>>> {
         let upstream = Access::<U, WasiSockets>::new(store.as_context_mut(), U::sockets);
         let accepts = <WasiSockets as HostTcpSocketWithStore<U>>::listen(upstream, socket).await?;
-        if !U::GUEST_STREAMS {
-            return Ok(accepts);
-        }
         crate::worker::stream_adapter::listen(store.as_context_mut(), accepts)
             .map_err(wasmtime_wasi::p3::sockets::SocketError::trap)
     }
@@ -128,9 +123,6 @@ where
     ) -> wasmtime::Result<(StreamReader<u8>, FutureReader<Result<(), ErrorCode>>)> {
         let upstream = Access::<U, WasiSockets>::new(store.as_context_mut(), U::sockets);
         let (data, done) = <WasiSockets as HostTcpSocketWithStore<U>>::receive(upstream, socket)?;
-        if !U::GUEST_STREAMS {
-            return Ok((data, done));
-        }
         crate::worker::stream_adapter::receive(store.as_context_mut(), data, done)
     }
 }

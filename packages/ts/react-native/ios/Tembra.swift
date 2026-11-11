@@ -107,20 +107,11 @@ extension Tembra {
         return data
     }
 
-    /** Load the packaged interpreter unless the host supplies explicit engine bytes. */
-    @objc public func configureExecution(_ handle: String, engine: String, configuration: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
+    /** Configure portable execution and providers; source Orbs carry their own interpreter. */
+    @objc public func configureExecution(_ handle: String, configuration: String, resolve: @escaping (String) -> Void, reject: @escaping (String) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             do {
-                let data: Data
-                if engine.isEmpty {
-                    guard let bundleURL = Bundle(for: Tembra.self).url(forResource: "TembraInterpreter", withExtension: "bundle"),
-                          let bundle = Bundle(url: bundleURL),
-                          let url = bundle.url(forResource: "interpreter", withExtension: "wasm") else {
-                        throw MobileError.Execution(diagnostic: "The packaged interpreter is missing; rebuild the native library")
-                    }
-                    data = try Data(contentsOf: url)
-                } else { data = try bytes(engine) }
-                try execution(handle).configure(configuration, bytes: data)
+                try execution(handle).configure(configuration)
                 resolve("")
             } catch { reject(diagnostic(error)) }
         }

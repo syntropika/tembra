@@ -1,7 +1,7 @@
 # WIT and TypeScript Orb
 
 This example builds a TypeScript Orb and a compiled Rust Orb from one WIT contract,
-then installs both through the ordinary Node host.
+then installs both through the ordinary Node host. Both artifacts contain real WebAssembly components.
 
 | File           | Role                                                                   |
 | -------------- | ---------------------------------------------------------------------- |
@@ -17,8 +17,8 @@ then installs both through the ordinary Node host.
 
 ## Build
 
-Run from the repository root after `just install` and `just build-node`. Running
-the TypeScript Orb also needs the packaged interpreter; see
+Run from the repository root after `just install` and `just build-node`. Building
+the TypeScript Orb also needs the pinned authoring runtime; see
 [DEVELOP.md](../../DEVELOP.md#isolated-orbs).
 
 Compile the Rust provider component. It uses the official `wit-bindgen` macro
@@ -38,8 +38,8 @@ bun examples/wasm-orb/build.ts \
 ```
 
 `build()` compiles the WIT, generates TypeScript declarations into ignored managed
-files (`.tembra/` and `contract.d.wit.ts`), typechecks `orb.ts` and bundles it with
-its installed dependencies. The included `tsconfig.json` gives the editor the same guest types. It does not download packages. A compiled component is
+files (`.tembra/` and `contract.d.wit.ts`), typechecks `orb.ts`, bundles it with
+its installed dependencies and componentizes the closed module with the pinned dquickts runtime. The included `tsconfig.json` gives the editor the same guest types. It does not download packages. A compiled component is
 checked against the selected world and receives its name and API version from the
 build target. Each result is one immutable `orb.<sha256>.wasm` file under
 `dist/tembra/<name>/`, or under `--out`.
@@ -58,8 +58,8 @@ the API received exactly one request. The local API and host close when the exam
 
 The calculator artifact declares a WIT import, not a provider. The installer maps
 `example:integrated/arithmetic@1.0.0` to the installed `arithmetic` Orb. The
-compiled provider needs no interpreter; the calculator lazily loads the packaged
-dquickts engine on first use.
+compiled provider runs directly; the calculator component already contains its dquickts runtime.
+The host loads both through the same component execution path, without a separate engine asset.
 
 Change `orb.ts` and run the build again to produce a new artifact. The engine is
 not rebuilt. To replace a running Orb, pass the new bytes with the same

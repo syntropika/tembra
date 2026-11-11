@@ -1,3 +1,14 @@
+/** WIT imports the bundle may keep external, by who may import them. */
+export interface WitImports {
+  /** Imports author modules may use directly: the world's standard `wasi:*` interfaces. */
+  readonly direct: ReadonlySet<string>;
+  /**
+   * Imports only the generated entry may use: the private host, Orb dependencies (reached through
+   * `Declaration.get`/`Context.get`) and hook self-imports.
+   */
+  readonly entry: ReadonlySet<string>;
+}
+
 export interface BuildTarget {
   entry: string;
   wit: string;

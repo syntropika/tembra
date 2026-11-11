@@ -1,9 +1,14 @@
-//! Browser binding for prepared Orb contracts, separate from the small lifecycle kernel.
+//! Browser binding for prepared Orb artifacts, separate from the small lifecycle kernel.
 //!
-//! This crate links only the runtime contract model. Compiled Orb artifacts are refused at
-//! construction because their real component types cannot be verified without the native
-//! verifier, which is deliberately not shipped here.
-use tembra_contracts::{Artifact, ArtifactImplementation};
+//! Every artifact is a WebAssembly component. Construction runs the same verifier as native
+//! hosts: a compiled component is checked against its public contract, and a source component
+//! (carrying `tembra:runtime`) is split into its public contract, the private `tembra:orb`
+//! package, hook self-imports and the fixed runtime internals, each checked against the actual
+//! component types. Neither embedded metadata nor a claimed hash is trusted.
+use tembra_contracts::Artifact;
+
+mod limits;
+pub use limits::{InstrumentedCore, instrument_core};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -21,25 +26,48 @@ fn failure(error: impl std::fmt::Display) -> Failure {
     return error.to_string();
 }
 
-/// Immutable artifact data shares one prepared contract across isolated installations.
+/// Immutable verified artifact data shared by one installed revision.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct WasmArtifact {
     artifact: Artifact,
+    imports: Vec<String>,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl WasmArtifact {
-    /// Decode and re-validate the prepared contract before a browser creates any guest authority.
+    /// Decode and verify the actual component before a browser creates any guest authority.
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new(bytes: &[u8]) -> Result<WasmArtifact, Failure> {
-        Ok(Self {
-            artifact: Artifact::decode(bytes).map_err(failure)?,
-        })
+        let artifact = Artifact::decode(bytes).map_err(failure)?;
+        let imports = component_imports(&artifact.component).map_err(failure)?;
+        Ok(Self { artifact, imports })
     }
 
     /// Read identity without copying the implementation through JSON.
     pub fn description(&self) -> String {
         self.artifact.describe().to_string()
+    }
+
+    /// Whether the verified component exports the private `tembra:orb` lifecycle.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = sourceRuntime))]
+    pub fn source_runtime(&self) -> bool {
+        self.artifact.source_runtime
+    }
+
+    /// Copy the verified component bytes once for the trusted glue generator.
+    pub fn component(&self) -> Vec<u8> {
+        self.artifact.component.clone()
+    }
+
+    /// The exact versioned top-level import names of the verified component, as a JSON array.
+    pub fn imports(&self) -> String {
+        serde_json::Value::from(self.imports.clone()).to_string()
+    }
+
+    /// A compiled component's packaged contribution roles (`{binding: priority}`) as JSON. Source
+    /// components describe theirs through `lifecycle.describe`, so this is empty for them.
+    pub fn contributions(&self) -> String {
+        serde_json::to_string(&self.artifact.contributions).expect("serializable contributions")
     }
 
     /// Answer the typed install-time queries: `install`, `implementation` and `describe`.
@@ -61,16 +89,27 @@ impl WasmArtifact {
             .contract
             .validate_packet(slot, arguments, value)
     }
+}
 
-    /// Copy source once when creating a fresh interpreter heap.
-    pub fn source(&self) -> Result<String, Failure> {
-        match &self.artifact.implementation {
-            ArtifactImplementation::Source(source) => Ok(source.clone()),
-            ArtifactImplementation::Component(_) => Err(failure(
-                "compiled Orb execution is unavailable in this browser backend",
-            )),
+/// Read the outer component's import names; nested components and core modules are skipped.
+fn component_imports(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    let mut depth = 0usize;
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        match payload.map_err(|error| error.to_string())? {
+            wasmparser::Payload::ModuleSection { .. }
+            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
+            wasmparser::Payload::End(_) => depth = depth.saturating_sub(1),
+            wasmparser::Payload::ComponentImportSection(reader) if depth == 0 => {
+                for import in reader {
+                    let import = import.map_err(|error| error.to_string())?;
+                    names.push(import.name.name.to_owned());
+                }
+            }
+            _ => {}
         }
     }
+    Ok(names)
 }
 
 #[cfg(test)]

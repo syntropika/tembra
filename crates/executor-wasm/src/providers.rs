@@ -30,8 +30,8 @@ impl std::fmt::Debug for System {
     }
 }
 
-/// One clock instance of a Store, shared by upstream WASI and the interpreter's WASIp1
-/// imports so the standard clock and source built-ins read the same configured source.
+/// One clock instance of a Store, shared by upstream WASI and a source runtime's internal
+/// clocks so both read the same configured source.
 #[derive(Clone)]
 struct SharedWall(std::sync::Arc<std::sync::Mutex<Box<dyn HostWallClock>>>);
 impl HostWallClock for SharedWall {
@@ -53,22 +53,20 @@ impl HostMonotonicClock for SharedMonotonic {
     }
 }
 
+/// The configured clocks of a clocks-granted Orb, fresh for its Store.
+pub(crate) struct Clocks {
+    pub wall: Box<dyn HostWallClock>,
+    pub monotonic: Box<dyn HostMonotonicClock>,
+}
+
 /// The system authority of one new Store, built once from its installation's grants.
 pub(crate) struct Prepared {
     pub wasi: WasiCtxBuilder,
-    /// The same clock pair as `wasi`, for the interpreter's WASIp1 imports; clocks grant only.
-    pub clocks: Option<crate::worker::wasi::Clocks>,
-    /// Built-in authority for a source Load; the seed equals `wasi`'s insecure seed.
-    pub builtins: crate::protocol::Builtins,
+    /// The same clock pair as `wasi`, for a source runtime's internal clocks; clocks grant only.
+    pub clocks: Option<Clocks>,
     /// Whether the provider bound to `wasi:sockets/ip-name-lookup` grants name resolution.
     pub resolve: bool,
 }
-
-/// The per-Store clocks for WASIp1 and the Load built-ins.
-type Shared = (
-    Option<crate::worker::wasi::Clocks>,
-    crate::protocol::Builtins,
-);
 
 impl System {
     /// Apply every configured provider whose capability is granted, invoking each factory at
@@ -78,8 +76,7 @@ impl System {
         grants: &Grants,
         cli: &crate::install::Cli,
         context: &mut WasiCtxBuilder,
-    ) -> Result<Shared> {
-        let mut builtins = crate::protocol::Builtins::default();
+    ) -> Result<Option<Clocks>> {
         let mut clocks = None;
         if grants.system.contains(&SystemCapability::Clocks) {
             let wall = SharedWall(std::sync::Arc::new(std::sync::Mutex::new(
@@ -97,11 +94,10 @@ impl System {
             context
                 .wall_clock(wall.clone())
                 .monotonic_clock(monotonic.clone());
-            clocks = Some(crate::worker::wasi::Clocks {
+            clocks = Some(Clocks {
                 wall: Box::new(wall),
                 monotonic: Box::new(monotonic),
             });
-            builtins.clock = true;
         }
         if grants.system.contains(&SystemCapability::Random) {
             for apply in [&self.secure, &self.insecure].into_iter().flatten() {
@@ -115,14 +111,11 @@ impl System {
                 }
             };
             context.insecure_random_seed(seed);
-            // Canonical order on every backend: `[getInsecureSeed()[0], getInsecureSeed()[1]]`,
-            // which upstream reports as `(low, high)` of the u128.
-            builtins.seed = Some([(seed as u64).to_string(), ((seed >> 64) as u64).to_string()]);
         }
         if grants.system.contains(&SystemCapability::Cli) {
             cli_context(context, cli)?;
         }
-        Ok((clocks, builtins))
+        Ok(clocks)
     }
 }
 
@@ -164,7 +157,7 @@ impl Providers {
             }
         }
         let mut context = WasiCtxBuilder::new();
-        let (clocks, builtins) = self.system.prepare(grants, cli, &mut context)?;
+        let clocks = self.system.prepare(grants, cli, &mut context)?;
         // Each interface carries only the authority of the provider it is bound to.
         let sockets = Sockets::scoped(grants, bound(imports, "wasi:sockets/types@0.3.0"));
         let resolve = bound(imports, "wasi:sockets/ip-name-lookup@0.3.0").is_some_and(|provider| {
@@ -199,7 +192,6 @@ impl Providers {
         Ok(Prepared {
             wasi: context,
             clocks,
-            builtins,
             resolve,
         })
     }

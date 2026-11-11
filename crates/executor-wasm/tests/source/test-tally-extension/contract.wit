@@ -1,0 +1,22 @@
+package example:tally@1.0.0;
+
+/// Waterfall hook over a record of 64-bit integers.
+interface tally {
+    record entry {
+        total: u64,
+        delta: s64,
+        note: string,
+    }
+    apply: func(input: entry) -> entry;
+}
+
+/// The provider's service, which runs its hook.
+interface runner {
+    use tally.{entry};
+    run: func(input: entry) -> entry;
+}
+
+world extension {
+    import tally;
+    export tally;
+}

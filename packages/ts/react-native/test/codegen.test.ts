@@ -66,6 +66,11 @@ test("Codegen accepts the binary carrier with a synchronous buffer take", () => 
     parameters: strings(2),
     result: "PromiseTypeAnnotation<StringTypeAnnotation>",
   });
+  // Source Orbs are components that carry their own interpreter: no engine bytes cross here.
+  expect(signature("configureExecution")).toEqual({
+    parameters: strings(2),
+    result: "PromiseTypeAnnotation<VoidTypeAnnotation>",
+  });
   for (const name of ["portPullResponse", "portDisconnect"])
     expect(signature(name)).toEqual({
       parameters: strings(2),

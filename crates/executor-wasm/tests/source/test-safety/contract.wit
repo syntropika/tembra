@@ -1,0 +1,10 @@
+package example:safety;
+
+interface checks {
+    /// One scope, cleanup or limit probe named by `mode`.
+    run: async func(mode: string) -> u32;
+}
+
+world test {
+    export checks;
+}

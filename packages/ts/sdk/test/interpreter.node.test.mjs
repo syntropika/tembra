@@ -8,6 +8,16 @@ import path from "node:path";
 import { readFile, mkdtemp, writeFile, rm, readdir } from "node:fs/promises";
 import { createHost, directoryFilesystem } from "../dist/node.js";
 import { verifyPrecisionScenario } from "./precision-scenario.ts";
+import { cleanup, closeQuarantined } from "./cleanup.ts";
+
+/** Resolve once an attributed guest log record carries `message` (bounded to 10 s). */
+async function logged(records, message) {
+  const deadline = performance.now() + 10_000;
+  while (!records.some((record) => record.message === message)) {
+    if (performance.now() > deadline) throw new Error(`no guest log ${message}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 import { verifyContextAcquireScenario } from "./context-acquire-scenario.ts";
 import {
   COUNTERS as INGRESS_COUNTERS,
@@ -66,10 +76,7 @@ test(
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
-    const engine = process.env.TEMBRA_WASM_ENGINE;
-    const host = createHost(
-      engine ? { isolated: { engine: new Uint8Array(await readFile(engine)) } } : {},
-    );
+    const host = createHost();
     const requires = Object.fromEntries(
       ["guard", "audit", "choice"].map((hook) => [
         `example:hooks/${hook}@1.0.0`,
@@ -144,6 +151,8 @@ test(
       },
     };
     const host = createHost(options);
+    let failure;
+    let stage = "install calculator";
     try {
       await writeFile(path.join(directory, "input.txt"), "initial");
       const provider = { artifact: await bytes("arithmetic") };
@@ -159,17 +168,32 @@ test(
       assert.equal(engines[0].instances(), 2);
       assert.equal(host.diagnostics().codeVersion, installedVersion);
       assert.equal(await reference.read(), 24);
-      await assert.rejects(reference.fail(), /Expected guest failure/);
-      await assert.rejects(reference.forbidden());
-      await assert.rejects(reference.malformed());
+      stage = "strict non-result traps";
+      // An uncaught throw from a non-result WIT function traps and quarantines the revision;
+      // reloading the same artifact restores service with the kernel's retained state.
+      for (const failing of [
+        // The trap does not carry the JavaScript error text; the quarantine below proves it.
+        () => assert.rejects(reference.fail(), /component trap/),
+        // The old private host seam no longer exists: probing it throws, which traps too.
+        () => assert.rejects(reference.forbidden()),
+        () => assert.rejects(reference.malformed()),
+      ]) {
+        await failing();
+        await assert.rejects(reference.read(), /quarantined/);
+        await host.reload([calculator]);
+        assert.equal(await reference.read(), 24);
+      }
       assert.equal(await reference.fanout(), 24);
       await assert.rejects(reference.sum({ values: [0.5] }));
       assert.equal(await reference.recover(), 42);
       assert.deepEqual(await reference.checked(7), { tag: "ok", val: 7 });
       assert.deepEqual(await reference.checked(-1), { tag: "err", val: "negative" });
       await new Promise(setImmediate);
-      for (const message of ["module log", "factory log", "method log"])
+      stage = "attributed logs";
+      // Module-level console output is refused at build time (fixture-sources.test.ts).
+      for (const message of ["factory log", "method log"])
         assert(logs.some((record) => record.orb === "calculator" && record.message === message));
+      stage = "separate host";
       const other = createHost(options);
       try {
         await other.install([provider, calculator]);
@@ -187,21 +211,29 @@ test(
       assert.equal(engines[1].instances(), 0);
       assert.deepEqual(await Promise.all([reference.read(), reference.recover()]), [24, 42]);
       const replacement = { artifact: await bytes("revised"), requires: requirements };
+      stage = "prepare and reload revised";
       const candidate = await host.prepare([replacement]);
       assert.equal(engines[0].instances(), 3);
       await candidate.abort();
       assert.equal(engines[0].instances(), 2);
       await host.reload([replacement]);
       assert.equal(await reference.read(), 24);
-      await assert.rejects(reference.fail(), /Expected revised guest failure/);
+      await assert.rejects(reference.fail(), /component trap/);
+      await assert.rejects(reference.read(), /quarantined/);
+      await host.reload([replacement]);
       assert.equal(await reference["resource-value"](), 42);
+      // Cancel once the guest entered its wait: the revoked wait escapes a non-result export,
+      // so the revision fails closed; reload restores service.
       await assert.rejects(
         host.root(async (context) => {
           const pending = reference.pending(context);
-          setTimeout(() => context.cancel(), 5);
+          await logged(logs, "pending: waiting");
+          context.cancel();
           await pending;
         }),
       );
+      await assert.rejects(reference.recover(), /quarantined/);
+      await host.reload([replacement]);
       assert.equal(await reference.recover(), 42);
       let releaseResponse;
       let enteredResponse;
@@ -213,6 +245,7 @@ test(
       const sseClosed = new Promise((resolve) => {
         observeSseClose = resolve;
       });
+      stage = "online HTTP";
       const server = createServer((socket) => {
         sockets.add(socket);
         socket.once("close", () => sockets.delete(socket));
@@ -287,6 +320,7 @@ test(
           server.close((error) => (error ? reject(error) : resolve())),
         );
       }
+      stage = "storage grants";
       await host.install([
         {
           artifact: await bytes("writer"),
@@ -306,8 +340,22 @@ test(
       assert.equal(await reader.read("/data/input.txt"), "initial");
       await writer.write("/data/output.txt", "persisted");
       assert.equal(await readFile(path.join(directory, "output.txt"), "utf8"), "persisted");
-      await assert.rejects(reader.write("/data/output.txt", "forbidden"));
-      await assert.rejects(reader.read("/data/../outside.txt"));
+      // `files` has no failure lane: each refusal traps and fails its revision closed, so each
+      // strict case runs on a fresh reader revision.
+      const readerDefinition = {
+        artifact: await bytes("reader"),
+        grants: { filesystem: [{ provider: "data", mount: "/data", writable: false }] },
+      };
+      stage = "read-only write refused";
+      await assert.rejects(reader.write("/data/output.txt", "forbidden"), /component trap/);
+      await assert.rejects(reader.read("/data/input.txt"), /quarantined/);
+      assert.equal(await readFile(path.join(directory, "output.txt"), "utf8"), "persisted");
+      await host.reload([readerDefinition]);
+      stage = "traversal refused";
+      await assert.rejects(reader.read("/data/../outside.txt"), /component trap/);
+      await host.reload([readerDefinition]);
+      assert.equal(await reader.read("/data/input.txt"), "initial");
+      stage = "artifact loading";
       const malicious = path.join(directory, "untrusted.mjs");
       await writeFile(malicious, "globalThis.__tembraUnsafeLoad = true; export default {};");
       await assert.rejects(host.load(malicious), /\.wasm artifact/);
@@ -315,14 +363,20 @@ test(
       reader.release();
       writer.release();
       reference.release();
-    } finally {
-      try {
-        await host.close();
-      } finally {
-        binding.NodeInterpreter = Original;
-        await rm(directory, { recursive: true, force: true });
-      }
+    } catch (error) {
+      failure = new Error(`${stage}: ${error?.message ?? error}`, { cause: error });
     }
+    // The strict `fail`/`forbidden` cases quarantined calculator revisions that held source
+    // resources: their cleanup failure is expected and asserted. Otherwise cleanup reports its
+    // own failure together with the test's; neither is masked.
+    try {
+      if (failure) await cleanup(failure, () => host.close());
+      else await closeQuarantined(() => host.close());
+    } finally {
+      binding.NodeInterpreter = Original;
+      await rm(directory, { recursive: true, force: true });
+    }
+    if (failure) throw failure;
     for (const engine of engines) assert.equal(engine.instances(), 0);
     assert.equal(host.diagnostics().values, 0);
     assert.equal(host.diagnostics().pendingJobs, 0);
@@ -330,20 +384,24 @@ test(
 );
 
 test(
-  "cancelling a caller interrupts a pending source HTTP send without quarantining the Orb",
+  "cancelling a caller interrupts a pending source HTTP send: a result lane recovers, a strict callback fails closed",
   { skip: !fixtures, timeout: 60000 },
   async () => {
     const bytes = async (name) =>
       new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
     const sockets = new Set();
-    let peerClosed;
-    const closed = new Promise((resolve) => {
-      peerClosed = resolve;
-    });
-    let entered;
-    const waiting = new Promise((resolve) => {
-      entered = resolve;
-    });
+    /** One stalled exchange: the peer's close and the request's arrival. */
+    function fresh() {
+      const state = {};
+      state.closed = new Promise((resolve) => {
+        state.peerClosed = resolve;
+      });
+      state.waiting = new Promise((resolve) => {
+        state.entered = resolve;
+      });
+      return state;
+    }
+    let { closed, peerClosed, waiting, entered } = fresh();
     // The /stalled peer reads the request and never answers; /values answers at once.
     const server = createServer((socket) => {
       sockets.add(socket);
@@ -367,51 +425,72 @@ test(
     await once(server, "listening");
     const { port } = server.address();
     const origin = `http://127.0.0.1:${port}`;
-    const host = createHost({ isolated: { providers: { network: ["outbound"] } } });
+    /** Install online on a fresh host, cancel a stalled `method` call and check the peer closes. */
+    async function cancelled(method, after) {
+      let peer = closed;
+      const host = createHost({ isolated: { providers: { network: ["outbound"] } } });
+      try {
+        await host.install([
+          { artifact: await bytes("arithmetic") },
+          {
+            artifact: await bytes("online"),
+            requires: {
+              "example:integrated/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 },
+            },
+            grants: { http: [{ provider: "outbound", origins: [origin] }] },
+          },
+        ]);
+        const network = await host.get("online::example:integrated/network@1.0.0", "main");
+        let cancelledAt;
+        const started = performance.now();
+        await assert.rejects(
+          host.root(async (context) => {
+            const pending = network[method](`${origin}/stalled`, context);
+            await waiting;
+            setTimeout(() => {
+              cancelledAt = performance.now();
+              context.cancel();
+            }, 100);
+            return await pending;
+          }),
+        );
+        // The response head never arrives, so only cancellation can close the connection; the
+        // per-operation deadline is 10 s.
+        let timer;
+        const closedAt = await Promise.race([
+          peer,
+          new Promise((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("the pending send outlived its caller")),
+              2000,
+            );
+          }),
+        ]).finally(() => clearTimeout(timer));
+        assert.ok(closedAt - cancelledAt < 2000, `peer closed ${closedAt - cancelledAt} ms late`);
+        await after(network);
+        assert.ok(performance.now() - started < 5000, "the Orb waited for the I/O deadline");
+        network.release();
+      } finally {
+        await host.close();
+      }
+    }
     try {
-      await host.install([
-        { artifact: await bytes("arithmetic") },
-        {
-          artifact: await bytes("online"),
-          requires: { "example:integrated/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 } },
-          grants: { http: [{ provider: "outbound", origins: [origin] }] },
-        },
-      ]);
-      const network = await host.get("online::example:integrated/network@1.0.0", "main");
-      let cancelledAt;
-      const started = performance.now();
-      await assert.rejects(
-        host.root(async (context) => {
-          const pending = network["fetch-and-sum"](`${origin}/stalled`, context);
-          await waiting;
-          setTimeout(() => {
-            cancelledAt = performance.now();
-            context.cancel();
-          }, 100);
-          return await pending;
+      // A declared `result` lane makes the revoked send recoverable: the same Store serves the
+      // next callback, neither quarantined nor left busy.
+      await cancelled("fetch-and-sum-checked", async (network) =>
+        assert.deepEqual(await network["fetch-and-sum-checked"](`${origin}/values`), {
+          tag: "ok",
+          val: 12,
         }),
       );
-      // The response head never arrives, so only cancellation can close the connection; the
-      // per-operation deadline is 10 s.
-      let timer;
-      const closedAt = await Promise.race([
-        closed,
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error("the pending send outlived its caller")), 2000);
-        }),
-      ]).finally(() => clearTimeout(timer));
-      assert.ok(closedAt - cancelledAt < 2000, `peer closed ${closedAt - cancelledAt} ms late`);
-      // The same Store serves the next callback: it was neither quarantined nor left busy.
-      assert.equal(await network["fetch-and-sum"](`${origin}/values`), 12);
-      assert.ok(performance.now() - started < 5000, "the Orb waited for the I/O deadline");
-      network.release();
+      // Without a failure lane the uncaught failure traps and the revision fails closed.
+      ({ closed, peerClosed, waiting, entered } = fresh());
+      await cancelled("fetch-and-sum", (network) =>
+        assert.rejects(network["fetch-and-sum"](`${origin}/values`), /quarantined/),
+      );
     } finally {
-      try {
-        await host.close();
-      } finally {
-        for (const socket of sockets) socket.destroy();
-        server.close();
-      }
+      for (const socket of sockets) socket.destroy();
+      server.close();
     }
   },
 );
@@ -433,11 +512,11 @@ test(
       path.join(data, "large.bin"),
       Uint8Array.from({ length: 3 * (1 << 20) + 5 }, (_, index) => index % 251),
     );
-    const engine = process.env.TEMBRA_WASM_ENGINE;
+    const standardLogs = [];
     const host = createHost({
       isolated: {
-        ...(engine ? { engine: new Uint8Array(await readFile(engine)) } : {}),
         providers: { filesystem: { data: directoryFilesystem(data) } },
+        onLog: (record) => void standardLogs.push(record),
       },
     });
     const filesystem = [{ provider: "data", mount: "/data", writable: false }];
@@ -474,16 +553,27 @@ test(
       assert.equal(large.length, 3 * (1 << 20) + 5);
       assert.ok(large.chunks > 1 && large.largest <= 65536, JSON.stringify(large));
       assert.deepEqual([large.matches, large.done], [true, "ok"]);
-      // External abort settles the pending standard wait; the retained descriptor survives.
+      // Cancelling `hang` (a non-result callback) once it waits in the standard clock settles
+      // the call promptly.
+      const cancelledAt = performance.now();
       await assert.rejects(
         host.root(async (context) => {
           const pending = scenario.hang(context);
-          setTimeout(() => context.cancel(), 20);
+          await logged(standardLogs, "standard:waiting");
+          context.cancel();
           await pending;
         }),
       );
+      assert.ok(performance.now() - cancelledAt < 5000, "the cancelled wait settled promptly");
+      // Measured on Node: the host tears down the cancelled callback while it is blocked in the
+      // WASI wait, so no guest code observes the revocation; the revision is not quarantined
+      // and the retained descriptor survives (native `hold` keeps the same invariant).
       assert.equal(await scenario.reuse(), reused);
+      // Finite detached work (40 ms wait + stat) belongs to the callback: it completes
+      // physically before the call settles, and the descriptor stays usable.
+      const abandoned = performance.now();
       assert.equal(await scenario.abandon(), "returned");
+      assert.ok(performance.now() - abandoned >= 30, "detached work finished within the call");
       assert.equal(await scenario.reuse(), reused);
       assert.deepEqual(JSON.parse(await scenario.denied()), {
         traversal: "not-permitted",
@@ -493,19 +583,22 @@ test(
       });
       const probes = await host.get("boundary::example:standard/probes@1.0.0", "main");
       const foreign = await host.get("boundary-peer::example:standard/probes@1.0.0", "main");
-      assert.deepEqual(JSON.parse(await probes.probes()), {
-        modules: ["wasi:filesystem/preopens@0.3.0", "wasi:filesystem/types@0.3.0"],
-        forged: "unknown or dropped handle",
-        wrongType: "handle has a different type",
-        dropped: "unknown or dropped handle",
-        droppedObject: "expected a live wasi:filesystem/types@0.3.0#descriptor handle",
-        unimported: "standard interface is not imported by this Orb",
-      });
-      assert.equal(await probes.inspect(await probes.descriptor()), "accepted");
-      assert.equal(await probes.inspect(await foreign.descriptor()), "unknown or dropped handle");
-      // A reloaded revision starts without the retired revision's descriptor.
+      // No old private seam exists, and the runtime refuses a disposed descriptor.
+      const boundaryProbes = JSON.parse(await probes.probes());
+      assert.deepEqual(boundaryProbes.seams, []);
+      assert.equal(typeof boundaryProbes.droppedObject, "string");
+      assert.notEqual(boundaryProbes.droppedObject, "accepted");
+      // Descriptor indices name only the Orb's own retained descriptors.
+      assert.equal(await probes.descriptor(), 0);
+      assert.equal(await probes.inspect(0), "accepted");
+      assert.equal(await foreign.descriptor(), 0);
+      assert.equal(await foreign.descriptor(), 1);
+      assert.equal(await probes.inspect(1), "unknown descriptor");
+      assert.equal(await foreign.inspect(1), "accepted");
+      // A reloaded revision starts without the retired revision's descriptor; `reuse` has no
+      // failure lane, so its refusal traps (the trap carries no JavaScript text).
       await host.reload([{ artifact: standard, grants }]);
-      await assert.rejects(scenario.reuse(), /no retained descriptor/);
+      await assert.rejects(scenario.reuse(), /component trap/);
       for (const reference of [scenario, probes, foreign]) reference.release();
     } finally {
       await host.close();
@@ -522,10 +615,8 @@ test(
       path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-filesystem-"),
     );
     const artifact = new Uint8Array(await readFile(path.join(fixtures, "filesystem.wasm")));
-    const engine = process.env.TEMBRA_WASM_ENGINE;
     const host = createHost({
       isolated: {
-        ...(engine ? { engine: new Uint8Array(await readFile(engine)) } : {}),
         providers: { filesystem: { data: directoryFilesystem(data) } },
         // This scenario also verifies every byte in guest JavaScript; retain the normal defaults elsewhere.
         limits: { fuel: 500_000_000 },
@@ -537,7 +628,8 @@ test(
     try {
       await host.install({ artifact, grants: grants(false) });
       const readonly = await host.get("filesystem::example:filesystem/scenario@1.0.0", "main");
-      await assert.rejects(readonly.roundtrip(), /not-permitted/);
+      // A refused WASI call reaches the declared failure lane as its error-code tag.
+      assert.deepEqual(await readonly["roundtrip-checked"](), { tag: "err", val: "not-permitted" });
       assert.deepEqual(await readdir(data), []);
       readonly.release();
       await host.reload([{ artifact, grants: grants(true) }]);
@@ -580,15 +672,25 @@ test(
     try {
       await host.install({ artifact: await bytes("ambient") });
       const policy = await host.get("ambient::example:system/policy@1.0.0", "main");
-      assert.deepEqual(JSON.parse(await policy.inspect()), {
-        now: true,
-        date: true,
-        call: true,
-        constructor: true,
-        random: true,
-        pure: "1970-01-01T00:00:00.000Z",
-      });
+      // Without grants, ambient time is frozen at the epoch and randomness has a fixed seed: the
+      // Orb observes neither host time nor host entropy.
+      const ambient = JSON.parse(await policy.inspect());
+      assert.equal(ambient.now, 0);
+      assert.equal(ambient.date, 0);
+      assert.equal(ambient.constructor, 0);
+      assert.equal(Date.parse(ambient.call), 0);
+      assert.equal(ambient.pure, "1970-01-01T00:00:00.000Z");
+      assert.ok(Number.isFinite(ambient.random) && ambient.random >= 0 && ambient.random < 1);
       policy.release();
+      const again = createHost();
+      try {
+        await again.install({ artifact: await bytes("ambient") });
+        const repeated = await again.get("ambient::example:system/policy@1.0.0", "main");
+        assert.equal(JSON.parse(await repeated.inspect()).random, ambient.random);
+        repeated.release();
+      } finally {
+        await again.close();
+      }
       await assert.rejects(
         host.install({ artifact: await bytes("system"), grants: { system: ["clocks", "random"] } }),
       );
@@ -664,10 +766,8 @@ function assertRetired(host, engines) {
 }
 
 const ingressHost = async (limits) => {
-  const engine = process.env.TEMBRA_WASM_ENGINE;
   return createHost({
     isolated: {
-      ...(engine ? { engine: new Uint8Array(await readFile(engine)) } : {}),
       ...(limits ? { limits } : {}),
     },
   });
@@ -723,6 +823,10 @@ test(
         const idle = await host.handleHttp(INGRESS_ORB, request("/idle", stalled));
         const events = idle.body[Symbol.asyncIterator]();
         await events.next();
+        // Disconnect only once the guest's body read is pending on the application's next(),
+        // so the case proves a never-settling read does not hold the call (bounded wait).
+        for (let tries = 0; orphan.nexts === 0 && tries < 500; tries++)
+          await new Promise((resolve) => setTimeout(resolve, 10));
         await events.return();
         await settled(host);
         assert.deepEqual(orphan, { nexts: 1, returns: 1 });

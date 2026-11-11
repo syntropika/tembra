@@ -77,9 +77,10 @@ pub struct NativeInterpreter {
 
 #[uniffi::export]
 impl NativeInterpreter {
-    /// Configure portable execution and host providers without granting any Orb access.
+    /// Configure portable (Pulley) execution and host providers without granting any Orb access.
+    /// Source Orbs are components that carry their own interpreter; no engine asset is loaded.
     #[uniffi::constructor]
-    pub fn new(configuration: String, interpreter: Vec<u8>) -> Result<Arc<Self>, MobileError> {
+    pub fn new(configuration: String) -> Result<Arc<Self>, MobileError> {
         let config: Configuration = serde_json::from_str(&configuration).map_err(error)?;
         let mut engine = Engine::interpreted(config.limits).map_err(error)?;
         for (name, path) in config.filesystem {
@@ -88,13 +89,11 @@ impl NativeInterpreter {
         for name in config.network {
             engine = engine.network(name).map_err(error)?;
         }
-        if !interpreter.is_empty() {
-            engine = engine.interpreter(&interpreter).map_err(error)?;
-        }
         Ok(Arc::new(Self { engine }))
     }
 
-    /// Create an isolated source or compiled revision after validating its imports and grants.
+    /// Create an isolated revision of a source or compiled Orb component after validating its
+    /// imports and grants.
     ///
     /// Compiled dependency calls arrive as ordinary scoped host events on the same port.
     pub fn open(

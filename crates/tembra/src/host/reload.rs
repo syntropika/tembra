@@ -120,6 +120,8 @@ impl Host {
                     self.activate(*object, *orb, &address.service)?;
                 }
             }
+            // The deadline counts from now, not from the kernel's last observed time.
+            self.tick();
             self.kernel()
                 .reload_registered_scopes(reload.id, deadline_ms)
         })();

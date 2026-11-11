@@ -1,8 +1,7 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync, writeFileSync } from "node:fs";
-import ts from "typescript";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const destination = fileURLToPath(new URL("./dist/", import.meta.url));
@@ -21,7 +20,10 @@ if (features) args.push("--features", features);
 
 /** Stop packaging when a compiler or binding-generation step fails. */
 function run(command: string, arguments_: string[]): void {
-  const result = spawnSync(command, arguments_, { cwd: root, stdio: "inherit" });
+  const result = spawnSync(command, arguments_, {
+    cwd: root,
+    stdio: "inherit",
+  });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status}`);
 }
@@ -64,19 +66,46 @@ run("wasm-bindgen", [
   ),
 ]);
 
-// Keep the asset locator beside the generated loaders and its interpreter directory.
-const assets = await Bun.build({
-  entrypoints: [fileURLToPath(new URL("./assets.ts", import.meta.url))],
+// Keep compilation lazy at runtime and ship a browser-only trusted implementation. Removing
+// Node branches here lets applications bundle it without adding Node polyfills.
+const compilerEntry = fileURLToPath(new URL("./compiler.ts", import.meta.url));
+const compilerVendor = Bun.resolveSync(
+  "@bytecodealliance/jco-transpile/component",
+  import.meta.dir,
+);
+const compilerAssets = new Set<string>();
+const compiler = await Bun.build({
+  entrypoints: [compilerEntry],
   outdir: destination,
-  naming: "assets.js",
+  naming: "compiler.js",
   target: "browser",
   format: "esm",
+  define: { process: "undefined" },
+  plugins: [
+    {
+      name: "component-compiler-assets",
+      setup(builder) {
+        builder.onLoad({ filter: /js-component-bindgen-component\.js$/ }, (args) => {
+          const contents = readFileSync(args.path, "utf8").replace(
+            /new URL\('\.\/(js-component-bindgen-component\.core[0-9]*\.wasm)', import\.meta\.url\)/g,
+            (_match, name: string) => {
+              compilerAssets.add(name);
+              return `new URL("./compiler/${name}", import.meta.url)`;
+            },
+          );
+          return { contents, loader: "js" };
+        });
+      },
+    },
+  ],
 });
-if (!assets.success) throw new AggregateError(assets.logs, "Engine asset locator build failed");
-const declarations = ts.transpileDeclaration(
-  readFileSync(new URL("./assets.ts", import.meta.url), "utf8"),
-  { fileName: "assets.ts" },
-);
-if (declarations.diagnostics?.length)
-  throw new Error("Engine asset locator declaration generation failed");
-writeFileSync(path.join(destination, "assets.d.ts"), declarations.outputText);
+if (!compiler.success)
+  throw new AggregateError(compiler.logs, "Browser component compiler build failed");
+if (compilerAssets.size !== 2) throw new Error("Pinned component compiler assets changed");
+mkdirSync(path.join(destination, "compiler"), { recursive: true });
+for (const name of compilerAssets)
+  copyFileSync(
+    path.join(path.dirname(compilerVendor), name),
+    path.join(destination, "compiler", name),
+  );
+writeFileSync(path.join(destination, "compiler.d.ts"), readFileSync(compilerEntry, "utf8"));

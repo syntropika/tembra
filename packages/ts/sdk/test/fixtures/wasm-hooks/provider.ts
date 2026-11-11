@@ -12,7 +12,7 @@ import type { guard, runner } from "./contract.wit";
 function create(self: Declaration) {
   return {
     guard: self.hook<guard.Admission>("guard"),
-    audit: self.hook<number, void>("audit"),
+    audit: self.hook<number, undefined>("audit"),
     choice: self.hook<number, number | undefined>("choice"),
   };
 }

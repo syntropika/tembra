@@ -88,10 +88,9 @@ class TembraModule(private val context: ReactApplicationContext) : NativeTembraS
         return directory.absolutePath
     }
 
-    /** Load the packaged interpreter unless an explicit engine was supplied. */
-    override fun configureExecution(handle: String, engine: String, configuration: String, promise: Promise) = promise(promise) {
-        val bytes = if (engine.isEmpty()) context.assets.open("tembra/interpreter.wasm").use { it.readBytes() } else Base64.decode(engine, Base64.NO_WRAP)
-        execution(handle).configure(configuration, bytes)
+    /** Configure portable execution and providers; source Orbs carry their own interpreter. */
+    override fun configureExecution(handle: String, configuration: String, promise: Promise) = promise(promise) {
+        execution(handle).configure(configuration)
         null
     }
     /** Decode prepared artifacts into host-owned handles. */

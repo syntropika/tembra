@@ -2,6 +2,8 @@ name: Quality
 on: [push, pull_request, workflow_call]
 permissions:
   contents: read
+env:
+  TEMBRA_QJS_RUNTIME: ${{ github.workspace }}/packages/ts/engine-node/dist/runtime.wasm
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -19,9 +21,16 @@ jobs:
       - run: cargo install just --version 1.21.0 --locked
       - run: just install-tools
       - run: just install
+      - name: Build the pinned authoring runtime for component preparation tests
+        run: |
+          rustup target add wasm32-wasip2
+          curl --fail --location --retry 3 https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz --output "$RUNNER_TEMP/wasi-sdk.tar.gz"
+          printf '%s  %s\n' b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4 "$RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$RUNNER_TEMP"
+          just build-runtime "$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux" "$RUNNER_TEMP/runtime"
       - run: just check
 
-  # Build the pinned interpreter and compiled provider once, then run every isolated Orb suite.
+  # Build the pinned authoring runtime and compiled provider, then run every isolated Orb suite.
   acceptance:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -41,13 +50,14 @@ jobs:
       # Exercise the optimized Node package used by published consumers.
       - run: bun run --cwd packages/ts/engine-node build --features=hooks,subscriptions,views,telemetry
       - run: bun run --cwd packages/ts/engine-wasm build --features=hooks,subscriptions,views,telemetry
-      - name: Build the pinned interpreter into both engine packages
+      - name: Build the pinned authoring runtime
         run: |
-          rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip1 --target wasm32-wasip3 --target wasm32-unknown-unknown
+          rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip3 --target wasm32-unknown-unknown
+          rustup target add wasm32-wasip2
           curl --fail --location --retry 3 https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz --output "$RUNNER_TEMP/wasi-sdk.tar.gz"
           printf '%s  %s\n' b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4 "$RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$RUNNER_TEMP"
-          just build-interpreter "$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux" "$RUNNER_TEMP/interpreter"
+          just build-runtime "$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux" "$RUNNER_TEMP/runtime"
       - run: just build-sdk
       - run: just check-stream-adapter "$RUNNER_TEMP/stream-adapter"
       - run: just build-provider "$RUNNER_TEMP/provider"
@@ -77,4 +87,4 @@ jobs:
           --stream-producer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_stream_producer.wasm"
           --stream-consumer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_stream_consumer.wasm"
       - name: Test portable mobile execution and foreign continuation delivery
-        run: just test-mobile-wasm packages/ts/engine-node/dist/interpreter.wasm "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm" "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm"
+        run: just test-mobile-wasm "$RUNNER_TEMP/acceptance/fixtures" "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm" "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm"

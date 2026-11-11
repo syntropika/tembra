@@ -317,7 +317,12 @@ fn prepared_runtime_contracts_preserve_wit_value_semantics() {
     authoring.check_import_value_profile(IMPORT).unwrap();
     let artifact = Artifact::decode(
         &authoring
-            .source_artifact("globalThis.__tembraOrb={}", "conformance", 1)
+            .component_artifact(
+                &component(&authoring),
+                "conformance",
+                1,
+                &Default::default(),
+            )
             .unwrap(),
     )
     .unwrap();
@@ -374,4 +379,27 @@ fn unknown_methods_and_slots_name_the_requested_side() {
     assert!(import.0.contains("unknown WIT import"), "{import}");
     let slots = contract.prepared().slots().len() as u32;
     assert!(contract.validate_slot(slots, true, &json!([])).is_err());
+}
+
+/// Encode a real component whose core module implements every function of the world.
+fn component(contract: &Contract) -> Vec<u8> {
+    let mut module = wit_component::dummy_module(
+        &contract.resolve,
+        contract.world,
+        wit_parser::ManglingAndAbi::Standard32,
+    );
+    wit_component::embed_component_metadata(
+        &mut module,
+        &contract.resolve,
+        contract.world,
+        wit_component::StringEncoding::UTF8,
+        false,
+    )
+    .unwrap();
+    wit_component::ComponentEncoder::default()
+        .module(&module)
+        .unwrap()
+        .validate(true)
+        .encode()
+        .unwrap()
 }

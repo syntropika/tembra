@@ -58,7 +58,8 @@ impl Ledger {
         Held(vec![Arc::clone(&self.0)])
     }
 
-    /// Physical work units still alive.
+    /// Physical work units still alive (tests).
+    #[cfg(test)]
     pub(crate) fn live(&self) -> usize {
         *self.0.borrow()
     }
@@ -297,15 +298,6 @@ impl<T> Drop for Joined<T> {
 }
 
 impl Transport {
-    /// Trust exactly `roots` instead of the public web roots (tests only).
-    #[cfg(test)]
-    pub(crate) fn trusting(roots: rustls::RootCertStore) -> Self {
-        Self {
-            roots: Arc::new(roots),
-            ..Self::default()
-        }
-    }
-
     /// Send one admitted request, keeping upstream request-option timeouts. Returns the
     /// response and the connection driver whose drop is the physical acknowledgement.
     pub(crate) async fn send(

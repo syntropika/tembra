@@ -1,11 +1,22 @@
 //! A source (TypeScript) export's `stream<u8>` result consumed by native Rust as a `ByteStream`.
 //!
-//! The Orb is a raw source bundle packaged with `Contract::source_artifact` and run by the
-//! packaged interpreter (`TEMBRA_WASM_ENGINE`). Every case runs on Cranelift and on Pulley,
-//! through the real host, kernel references and roots. The caller receives the stream end as soon
-//! as the guest published it; the producer keeps writing in the same admitted callback, which
-//! ends only after its byte pump and the host relay have ended.
+//! The producer is the SDK-authored fixture `tests/source/stream-frames` (and its reload
+//! replacement `stream-frames-v2`), prepared by the production SDK build into
+//! `TEMBRA_WASM_FIXTURES`. Every case runs on Cranelift and on Pulley, through the real host,
+//! kernel references and roots. The caller receives the stream end as soon as the guest
+//! published it; the producer keeps writing in the same admitted export task, which ends only
+//! after its byte source and the host relay have ended.
+//!
+//! Declared breaking semantics of the component runtime (COORDINATION, corrections 5 and 6):
+//! - a raw producer exception, before or after the head, is not a typed business error: it traps
+//!   the producer's instance and quarantines its revision. A native reader never sees a clean
+//!   end.
+//! - a host operation the host revokes (the receiving root ended or was cancelled) is the
+//!   producer's to handle; unhandled, it is such a raw failure.
 use futures::{FutureExt, StreamExt, channel::oneshot, executor::LocalPool, task::LocalSpawnExt};
+#[path = "support/source.rs"]
+mod source;
+use source::fixture;
 use std::{
     cell::RefCell,
     collections::BTreeMap,
@@ -16,34 +27,12 @@ use std::{
 use tembra::{Host, Orb, Reference, Service, portable::ByteStream};
 use tembra_executor_wasm::{Contract, Engine, Install, Limits};
 
-const WIT: &str = r#"
-package tembra-test:sourcestreams;
-
-interface ledger {
-  note: func(event: string) -> string;
-}
-
-interface frames {
-  frames: async func(count: u32, size: u32, mode: u32) -> stream<u8>;
-  ping: func(value: u32) -> u32;
-}
-
-world producer {
-  import ledger;
-  export frames;
-}
-
-world ledger-provider {
-  export ledger;
-}
-"#;
-
-const SERVICE: &str = "frames::tembra-test:sourcestreams/frames";
-const LEDGER: &str = "tembra-test:sourcestreams/ledger";
-/// The pipe's byte capacity (`worker::standard::PIPE_BYTES`).
+const SERVICE: &str = "frames::tembra-test:source-streams/frames@1.0.0";
+const LEDGER: &str = "tembra-test:source-streams/ledger@1.0.0";
+/// The pipe's byte capacity of the component host.
 const PIPE_BYTES: usize = 64 << 10;
 
-/// Producer modes of the source fixture below.
+/// Producer modes of `tests/source/stream-frames/orb.ts`.
 const CHUNKS: u32 = 0;
 const BYTES: u32 = 1;
 const ARRAY: u32 = 2;
@@ -55,137 +44,26 @@ const DEPENDENCY: u32 = 7;
 const THROW_UNDEFINED: u32 = 8;
 const CLEANUP: u32 = 9;
 const GATED: u32 = 10;
+const NUMBERS: u32 = 11;
+const RAW_ARRAY: u32 = 12;
+const IDLE_HANDLED: u32 = 13;
 
-/// The fixture Orb. `writeChunks` transcribes `writeChunks(chunks)` from
-/// `@syntropika/tembra-sdk` (`packages/ts/sdk/src/guest.ts`): the helper returns exactly this
-/// object, recognized by the interpreter through its registered symbol.
-fn source(revision: u32) -> String {
-    format!(
-        r#"
-const WRITE_CHUNKS = Symbol.for("tembra.wasi.stream.write-chunks");
-function writeChunks(chunks) {{
-  const iterator = () =>
-    Symbol.asyncIterator in chunks ? chunks[Symbol.asyncIterator]() : chunks[Symbol.iterator]();
-  return {{
-    [WRITE_CHUNKS]: iterator,
-    async *[Symbol.asyncIterator]() {{ for await (const chunk of chunks) yield* chunk; }},
-  }};
-}}
-/**
- * Byte `j` of chunk `i` is `(i + j) mod 256`: a view of one pattern built while the bundle loads,
- * so producing a chunk spends no per-byte instructions of the callback's fuel (the
- * whole stream is one callback, bounded by its fuel).
- */
-const PATTERN = new Uint8Array((1 << 16) + 256);
-for (let offset = 0; offset < 256; offset++) PATTERN[offset] = offset;
-for (let length = 256; length < PATTERN.length; length *= 2) PATTERN.copyWithin(length, 0, length);
-function chunk(index, size) {{
-  const start = index & 255;
-  return PATTERN.subarray(start, start + size);
-}}
-globalThis.__tembraOrb = {{ services: {{ frames: {{
-  create(self) {{
-    return {{ ledger: self.get("{LEDGER}", ["main"]) }};
-  }},
-  methods: {{
-    ping(_environment, _context, value) {{ return value + {revision}; }},
-    async frames(environment, context, count, size, mode) {{
-      switch (mode) {{
-        case {CHUNKS}:
-          return writeChunks((async function* () {{
-            let index = 0;
-            try {{
-              for (; index < count; index++) yield chunk(index, size);
-            }} finally {{
-              console.log("producer:returned:" + index);
-            }}
-          }})());
-        case {BYTES}:
-          return (async function* () {{
-            for (let index = 0; index < count; index++)
-              for (let offset = 0; offset < size; offset++) yield (index + offset) & 255;
-          }})();
-        case {ARRAY}: {{
-          const bytes = new Uint8Array(count * size);
-          for (let index = 0; index < count; index++) bytes.set(chunk(index, size), index * size);
-          return bytes;
-        }}
-        case {FAIL_AFTER_HEAD}:
-          return writeChunks((async function* () {{
-            for (let index = 0; index < count; index++) {{
-              if (index === count >> 1) throw new Error("producer failed after its head");
-              yield chunk(index, size);
-            }}
-          }})());
-        case {FAIL_BEFORE_HEAD}:
-          throw new Error("producer refused before its head");
-        case {NOT_A_STREAM}:
-          return 42;
-        case {IDLE}:
-          return writeChunks((async function* () {{
-            try {{
-              yield chunk(0, size);
-              console.log("producer:idle");
-              // Idle until the callback ends; one wait is bounded by the callback wait limit.
-              for (;;) await tembra.wait(5000);
-            }} finally {{
-              console.log("producer:returned");
-            }}
-          }})());
-        case {DEPENDENCY}:
-          return writeChunks((async function* () {{
-            yield chunk(0, size);
-            const seen = await environment.ledger.note("after-head", context);
-            console.log("ledger:" + seen);
-            for (let index = 1; index < count; index++) yield chunk(index, size);
-          }})());
-        case {THROW_UNDEFINED}:
-          return writeChunks((async function* () {{
-            for (let index = 0; index < count; index++) yield chunk(index, size);
-            throw undefined;
-          }})());
-        case {CLEANUP}:
-          return writeChunks((async function* () {{
-            try {{
-              for (let index = 0; ; index++) yield chunk(index, size);
-            }} finally {{
-              const seen = await environment.ledger.note("cleanup", context);
-              console.log("cleanup:" + seen);
-            }}
-          }})());
-        case {GATED}:
-          return writeChunks((async function* () {{
-            yield chunk(0, size);
-            const seen = await environment.ledger.note("gated", context);
-            console.log("gated:" + seen);
-            for (let index = 1; ; index++) yield chunk(index, size);
-          }})());
-        default:
-          throw new Error("unknown mode");
-      }}
-    }},
-  }},
-}} }} }};
-"#
-    )
-}
-
-fn interpreter() -> Option<Vec<u8>> {
-    let Some(path) = std::env::var_os("TEMBRA_WASM_ENGINE").filter(|path| !path.is_empty()) else {
-        eprintln!("skipped: TEMBRA_WASM_ENGINE names no packaged interpreter");
-        return None;
-    };
-    Some(std::fs::read(path).unwrap())
-}
-
+/// The producer's contract, plus a provider world for the native ledger's signature.
 fn contract(world: &str) -> Contract {
-    Contract::from_source("source-streams.wit", WIT, Some(world)).unwrap()
+    let wit = format!(
+        "{}\nworld ledger-provider {{ export ledger; }}\n",
+        include_str!("source/stream-frames/contract.wit")
+    );
+    Contract::from_source("contract.wit", &wit, Some(world)).unwrap()
 }
 
+/// The prepared producer: revision 1 (`stream-frames`) or its replacement (`stream-frames-v2`).
 fn artifact(revision: u32) -> Vec<u8> {
-    contract("producer")
-        .source_artifact(&source(revision), "frames", 1)
-        .unwrap()
+    fixture(if revision == 1 {
+        "stream-frames"
+    } else {
+        "stream-frames-v2"
+    })
 }
 
 /// What the native ledger saw: `(event, principal, root)` of each call.
@@ -277,11 +155,7 @@ struct Fixture {
     interpreted: bool,
 }
 
-fn engine(
-    interpreter: &[u8],
-    interpreted: bool,
-    limits: Limits,
-) -> (Engine, Arc<Mutex<Vec<String>>>) {
+fn engine(interpreted: bool, limits: Limits) -> (Engine, Arc<Mutex<Vec<String>>>) {
     let logs = Arc::<Mutex<Vec<String>>>::default();
     let sink = logs.clone();
     let engine = if interpreted {
@@ -290,14 +164,12 @@ fn engine(
         Engine::new(limits)
     }
     .unwrap()
-    .interpreter(interpreter)
-    .unwrap()
     .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
     (engine, logs)
 }
 
-fn install(interpreter: &[u8], interpreted: bool, limits: Limits) -> Fixture {
-    let (engine, logs) = engine(interpreter, interpreted, limits);
+fn install(interpreted: bool, limits: Limits) -> Fixture {
+    let (engine, logs) = engine(interpreted, limits);
     let pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     let seen = Seen::default();
@@ -334,12 +206,9 @@ fn limits(timeout_ms: u64) -> Limits {
 }
 
 /// Run `body` once on Cranelift and once on Pulley.
-fn engines(body: impl Fn(&[u8], bool)) {
-    let Some(interpreter) = interpreter() else {
-        return;
-    };
+fn engines(body: impl Fn(bool)) {
     for interpreted in [false, true] {
-        body(&interpreter, interpreted);
+        body(interpreted);
     }
 }
 
@@ -378,8 +247,12 @@ impl Fixture {
         while !done(self) {
             assert!(
                 Instant::now() < deadline,
-                "{}: the condition never held",
-                self.mode()
+                "{}: the condition never held; logs {:?}; gates {:?}; calls {}; host errors {:?}",
+                self.mode(),
+                self.logs.lock().unwrap(),
+                self.gates.log.borrow(),
+                self.calls(),
+                self.host.errors()
             );
             self.pool.run_until_stalled();
             std::thread::sleep(Duration::from_millis(2));
@@ -407,6 +280,19 @@ impl Fixture {
     fn close(mut self) {
         self.reference.release().unwrap();
         self.pool.run_until(self.host.close()).unwrap();
+        self.closed();
+    }
+
+    /// Close a host whose producer revision was quarantined: every kernel record and Store is
+    /// still physically gone.
+    fn retire(mut self) {
+        let _ = self.reference.release();
+        // Closing may report the trap; the Stores are retired either way.
+        let _ = self.pool.run_until(self.host.close());
+        self.closed();
+    }
+
+    fn closed(&self) {
         let diagnostics = self.host.kernel().diagnostics();
         assert_eq!(
             (
@@ -420,6 +306,29 @@ impl Fixture {
             self.mode()
         );
         assert_eq!(self.engine.instances(), 0, "{}", self.mode());
+        assert_eq!(self.engine.resources(), 0, "{}", self.mode());
+    }
+
+    /// The producer revision traps or was quarantined: the next ordinary call is refused.
+    fn quarantined(&mut self) {
+        let mode = self.mode();
+        let refused = self.ping().unwrap_err();
+        assert_eq!(
+            refused.reason, "wasm_executor_quarantined",
+            "{mode}: {refused:?}"
+        );
+    }
+
+    /// The host recorded the producer's trap (its failure after the head never ended cleanly).
+    fn recorded_trap(&self) {
+        let errors = self.host.errors();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("component trap")),
+            "{}: {errors:?}",
+            self.mode()
+        );
     }
 }
 
@@ -461,10 +370,10 @@ async fn drain(stream: &mut ByteStream) -> Result<Vec<u8>, (Vec<u8>, tembra::Err
 
 /// The decisive case: 512 KiB, beyond the 64 KiB pipe, published before the producer finished.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn a_source_stream_head_arrives_while_its_producer_is_still_admitted() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
+    engines(|interpreted| {
+        let mut fixture = install(interpreted, limits(30_000));
         let (calls_at_head, after_pause, received) = fixture
             .root(async move |context, reference, host| {
                 let mut stream = open(&context, &reference, 8, 64 << 10, CHUNKS).await?;
@@ -492,74 +401,79 @@ fn a_source_stream_head_arrives_while_its_producer_is_still_admitted() {
     });
 }
 
-/// Per-byte `AsyncIterable<number>` and a whole `Uint8Array` are the other accepted sources.
+/// Per-byte `AsyncIterable<number>` and a bare `Uint8Array` (an iterable of numbers) are still
+/// accepted: the runtime writes each non-chunk item as one byte. One-byte chunks and a whole
+/// array as the single chunk of a synchronous iterable are the chunked forms of the same bytes.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn per_byte_iterables_and_byte_arrays_stream_exactly() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
-        let (bytes, array) = fixture
-            .root(async move |context, reference, _| {
-                let mut bytes = open(&context, &reference, 3, 1000, BYTES).await?;
-                let bytes = drain(&mut bytes).await.map_err(|(_, error)| error)?;
-                let mut array = open(&context, &reference, 5, 50_000, ARRAY).await?;
-                let array = drain(&mut array).await.map_err(|(_, error)| error)?;
-                Ok((bytes, array))
-            })
-            .unwrap();
+    engines(|interpreted| {
+        // Each item is written by its own JavaScript turn of the export task; thousands of them
+        // need more fuel than the small default.
+        let mut fixture = install(
+            interpreted,
+            Limits {
+                fuel: 20_000_000_000,
+                ..limits(30_000)
+            },
+        );
         let mode = fixture.mode();
-        assert_eq!(bytes.len(), 3000, "{mode}");
-        assert!(exact(&bytes, 1000), "{mode}");
-        assert_eq!(array.len(), 250_000, "{mode}");
-        assert!(exact(&array, 50_000), "{mode}");
-        fixture.wait(|fixture| fixture.calls() == 0);
+        for (producer, count, size) in [
+            (NUMBERS, 3, 1000),
+            (RAW_ARRAY, 2, 5000),
+            (BYTES, 3, 1000),
+            (ARRAY, 5, 50_000),
+        ] {
+            let received = fixture
+                .root(async move |context, reference, _| {
+                    let mut stream = open(&context, &reference, count, size, producer).await?;
+                    drain(&mut stream).await.map_err(|(_, error)| error)
+                })
+                .unwrap();
+            assert_eq!(received.len(), (count * size) as usize, "{mode} {producer}");
+            assert!(exact(&received, size as usize), "{mode} {producer}");
+            fixture.wait(|fixture| fixture.calls() == 0);
+        }
         assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
+        assert!(fixture.host.errors().is_empty(), "{mode}");
         fixture.close();
     });
 }
 
-/// Failing before the head, or returning something that is not a byte source, publishes no
-/// stream: the call fails, and the revision is not quarantined.
+/// Breaking: failing before the head, or returning something that is not a byte source, is an
+/// uncaught exception of an export without a WIT `result`: the call fails with a trap and the
+/// revision is quarantined (the removed interpreter kept serving). Nothing outlives the call.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
-fn a_producer_without_a_head_fails_its_call_and_keeps_its_revision() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
-        let mode = fixture.mode();
-        for (producer, cause) in [
-            (FAIL_BEFORE_HEAD, "producer refused before its head"),
-            (
-                NOT_A_STREAM,
-                "a stream<u8> value requires an AsyncIterable<number> source",
-            ),
-        ] {
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+fn a_producer_without_a_head_fails_its_call_and_quarantines_its_revision() {
+    engines(|interpreted| {
+        for producer in [FAIL_BEFORE_HEAD, NOT_A_STREAM] {
+            let mut fixture = install(interpreted, limits(30_000));
+            let mode = format!("{} {producer}", fixture.mode());
             let error = fixture
                 .root(async move |context, reference, _| {
                     open(&context, &reference, 1, 1, producer).await.map(drop)
                 })
                 .unwrap_err();
             assert!(
-                !error.message.contains("quarantined"),
-                "{mode} {producer}: {error:?}"
-            );
-            assert!(
-                error.message.contains(cause),
-                "{mode} {producer}: {error:?}"
+                error.message.contains("component trap"),
+                "{mode}: {error:?}"
             );
             fixture.wait(|fixture| fixture.calls() == 0);
-            assert_eq!(fixture.ping().unwrap(), 42, "{mode} {producer}");
+            fixture.quarantined();
+            fixture.retire();
         }
-        fixture.close();
     });
 }
 
-/// An author error after the head is never a clean end: a prefix, then an error. It is an
-/// ordinary guest error, not a trap: the revision keeps serving.
+/// An author error after the head is never a clean end: an exact prefix, then an error. Breaking:
+/// a raw producer exception is not a business error; it traps before the writer is dropped, the
+/// host records the trap and the revision is quarantined.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
-fn an_author_error_after_the_head_fails_the_read_and_never_ends_cleanly() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+fn an_author_error_after_the_head_fails_the_read_and_quarantines_the_revision() {
+    engines(|interpreted| {
+        let mut fixture = install(interpreted, limits(30_000));
         let outcome = fixture
             .root(async move |context, reference, _| {
                 let mut stream = open(&context, &reference, 16, 64 << 10, FAIL_AFTER_HEAD).await?;
@@ -572,31 +486,20 @@ fn an_author_error_after_the_head_fails_the_read_and_never_ends_cleanly() {
         };
         assert!(prefix.len() <= 8 << 16, "{mode}");
         assert!(exact(&prefix, 64 << 10), "{mode}");
-        assert!(
-            error.message.contains("producer failed after its head"),
-            "{mode}: {error:?}"
-        );
-        assert!(!error.message.contains("quarantined"), "{mode}: {error:?}");
+        eprintln!("{mode}: failed read: {error:?}");
         fixture.wait(|fixture| fixture.calls() == 0);
-        // An ordinary guest error, not a trap: the revision keeps serving.
-        assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
-        // The physical failure after the head is recorded once, like a compiled producer's.
-        let errors = fixture.host.errors();
-        assert_eq!(errors.len(), 1, "{mode}: {errors:?}");
-        assert!(
-            errors[0].message.contains("producer failed after its head"),
-            "{mode}: {errors:?}"
-        );
-        fixture.close();
+        fixture.recorded_trap();
+        fixture.quarantined();
+        fixture.retire();
     });
 }
 
 /// After its head, the producer calls a dependency under the caller's root and principal.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn a_post_head_dependency_call_keeps_the_callers_root_and_principal() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
+    engines(|interpreted| {
+        let mut fixture = install(interpreted, limits(30_000));
         let (root, received) = fixture
             .root(async move |context, reference, _| {
                 let root = format!("{:?}", context.root);
@@ -622,10 +525,10 @@ fn a_post_head_dependency_call_keeps_the_callers_root_and_principal() {
 /// A consumer that drops its end while the producer is held by backpressure stops the producer:
 /// its next write sees the closed reader, its source is returned, and the callback ends cleanly.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn dropping_a_backpressured_stream_stops_its_producer() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
+    engines(|interpreted| {
+        let mut fixture = install(interpreted, limits(30_000));
         let first = fixture
             .root(async move |context, reference, _| {
                 let mut stream = open(&context, &reference, 256, 64 << 10, CHUNKS).await?;
@@ -657,107 +560,161 @@ fn dropping_a_backpressured_stream_stops_its_producer() {
 }
 
 /// A consumer that drops its end while the producer is idle in its own wait ends the callback
-/// at once; it does not wait for the revision's timeout.
+/// at once; it does not wait for the revision's timeout. The consumer's root then ends, and its
+/// cancellation revokes the producer's pending wait. A producer that handles the revocation ends
+/// normally and keeps its revision. Breaking: an unhandled revocation is a raw producer failure
+/// (no WIT error lane), so it traps and quarantines the revision, still at once and with
+/// nothing outliving the call.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn dropping_a_stream_of_an_idle_producer_ends_its_callback() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
-        let started = Instant::now();
-        let first = fixture
-            .root(async move |context, reference, _| {
-                let mut stream = open(&context, &reference, 2, 1 << 10, IDLE).await?;
-                let first = stream.next().await.unwrap()?;
+    engines(|interpreted| {
+        for producer in [IDLE_HANDLED, IDLE] {
+            let mut fixture = install(interpreted, limits(30_000));
+            let mode = format!("{} {producer}", fixture.mode());
+            let started = Instant::now();
+            let first = Rc::new(RefCell::new(None));
+            let received = first.clone();
+            let outcome = fixture.root(async move |context, reference, _| {
+                let mut stream = open(&context, &reference, 2, 1 << 10, producer).await?;
+                *received.borrow_mut() = Some(stream.next().await.unwrap()?);
                 drop(stream);
-                Ok(first)
-            })
-            .unwrap();
-        let mode = fixture.mode();
-        assert!(exact(&first, 1 << 10), "{mode}");
-        fixture.wait(|fixture| fixture.calls() == 0);
-        assert!(started.elapsed() < Duration::from_secs(10), "{mode}");
-        assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
-        assert!(fixture.host.errors().is_empty(), "{mode}");
-        fixture.close();
+                Ok(())
+            });
+            assert!(exact(first.borrow().as_ref().unwrap(), 1 << 10), "{mode}");
+            fixture.wait(|fixture| fixture.calls() == 0);
+            assert!(started.elapsed() < Duration::from_secs(10), "{mode}");
+            if producer == IDLE_HANDLED {
+                outcome.unwrap();
+                assert!(
+                    fixture
+                        .logs
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|line| line.starts_with("producer:revoked:")),
+                    "{mode}"
+                );
+                assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
+                assert!(fixture.host.errors().is_empty(), "{mode}");
+                fixture.close();
+            } else {
+                // The dropping root may also report the producer's trap.
+                if let Err(error) = outcome {
+                    assert!(error.message.contains("trap"), "{mode}: {error:?}");
+                }
+                assert!(fixture.logged("producer:returned"), "{mode}");
+                fixture.recorded_trap();
+                fixture.quarantined();
+                fixture.retire();
+            }
+        }
     });
 }
 
-/// Cancelling the root of an idle producer fails the read; cancellation is not a trap.
+/// Cancelling the root of an idle producer fails the read. The revoked wait is the producer's to
+/// handle: handled, the revision keeps serving; unhandled (breaking, as above), it traps and
+/// quarantines the revision. Either way nothing outlives the call.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
-fn cancelling_the_root_fails_the_read_and_keeps_the_revision() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
-        let (first, outcome) = fixture
-            .root(async move |context, reference, _| {
-                let mut stream = open(&context, &reference, 2, 1 << 10, IDLE).await?;
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+fn cancelling_the_root_fails_the_read() {
+    engines(|interpreted| {
+        for producer in [IDLE_HANDLED, IDLE] {
+            let mut fixture = install(interpreted, limits(30_000));
+            let mode = format!("{} {producer}", fixture.mode());
+            let outcome = fixture.root(async move |context, reference, _| {
+                let mut stream = open(&context, &reference, 2, 1 << 10, producer).await?;
                 let first = stream.next().await.unwrap()?;
                 context.cancel()?;
                 Ok((first, drain(&mut stream).await))
-            })
-            .unwrap();
-        let mode = fixture.mode();
-        assert!(exact(&first, 1 << 10), "{mode}");
-        let Err((rest, error)) = outcome else {
-            panic!("{mode}: a cancelled producer ended cleanly");
-        };
-        assert!(rest.is_empty(), "{mode}");
-        assert!(!error.message.contains("quarantined"), "{mode}: {error:?}");
-        fixture.wait(|fixture| fixture.calls() == 0);
-        assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
-        eprintln!(
-            "{mode}: cancelled read: {error:?}; host errors {:?}",
-            fixture.host.errors()
-        );
-        fixture.close();
+            });
+            eprintln!("{mode}: cancelled root: {outcome:?}");
+            match outcome {
+                Ok((first, read)) => {
+                    assert!(exact(&first, 1 << 10), "{mode}");
+                    let Err((rest, error)) = read else {
+                        panic!("{mode}: a cancelled producer ended cleanly");
+                    };
+                    assert!(rest.is_empty(), "{mode}");
+                    assert_ne!(
+                        error.reason, "wasm_executor_quarantined",
+                        "{mode}: {error:?}"
+                    );
+                }
+                Err(error) => assert_ne!(
+                    error.reason, "wasm_executor_quarantined",
+                    "{mode}: the cancelled root itself failed: {error:?}"
+                ),
+            }
+            fixture.wait(|fixture| fixture.calls() == 0);
+            if producer == IDLE_HANDLED {
+                assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
+                assert!(
+                    fixture.host.errors().is_empty(),
+                    "{mode}: {:?}",
+                    fixture.host.errors()
+                );
+                fixture.close();
+            } else {
+                fixture.recorded_trap();
+                fixture.quarantined();
+                fixture.retire();
+            }
+        }
     });
 }
 
-/// The whole callback, stream included, is bounded by the revision timeout. Expiry is terminal
+/// The whole export task, stream included, is bounded by the revision timeout. Expiry is terminal
 /// (the selected policy): the read fails and the revision is quarantined.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn the_terminal_timeout_fails_the_read_and_quarantines_the_revision() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(1_500));
-        let outcome = fixture
-            .root(async move |context, reference, _| {
-                let mut stream = open(&context, &reference, 2, 1 << 10, IDLE).await?;
-                Ok(drain(&mut stream).await)
-            })
-            .unwrap();
+    engines(|interpreted| {
+        let mut fixture = install(interpreted, limits(1_500));
+        let started = Instant::now();
+        let outcome = fixture.root(async move |context, reference, _| {
+            let mut stream = open(&context, &reference, 2, 1 << 10, IDLE).await?;
+            Ok(drain(&mut stream).await)
+        });
         let mode = fixture.mode();
-        let Err((prefix, error)) = outcome else {
-            panic!("{mode}: a timed-out producer ended cleanly");
+        // The read fails after the head; the root may also report the expiry itself.
+        let error = match outcome {
+            Ok(Err((prefix, error))) => {
+                assert_eq!(prefix.len(), 1 << 10, "{mode}");
+                error
+            }
+            Ok(Ok(_)) => panic!("{mode}: a timed-out producer ended cleanly"),
+            Err(error) => error,
         };
-        assert_eq!(prefix.len(), 1 << 10, "{mode}");
-        // The dropped Store fails the pipe, or the settlement reports the wall time first.
-        assert!(
-            error.message.contains("wall time")
-                || error
-                    .message
-                    .contains("ended before its stream was delivered"),
-            "{mode}: {error:?}"
-        );
+        assert!(started.elapsed() >= Duration::from_millis(1_400), "{mode}");
+        assert!(error.message.contains("timed out"), "{mode}: {error:?}");
         fixture.wait(|fixture| fixture.calls() == 0);
         let refused = fixture.ping().unwrap_err();
         assert_eq!(
             refused.reason, "wasm_executor_quarantined",
             "{mode}: {refused:?}"
         );
-        assert!(refused.message.contains("wall time"), "{mode}: {refused:?}");
-        let _ = fixture.host.errors();
-        fixture.close();
+        assert!(refused.message.contains("timed out"), "{mode}: {refused:?}");
+        fixture.retire();
     });
 }
 
 /// A reload while a stream is being read lets the old revision finish it; new calls reach the
 /// replacement, and closing the host releases everything.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn a_reload_lets_an_open_stream_finish_on_its_revision() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
+    engines(|interpreted| {
+        let mut fixture = install(interpreted, limits(30_000));
+        // Prepare the replacement before the stream opens: its compilation is not part of the
+        // open call's budget.
+        let replacement = fixture
+            .engine
+            .load(
+                &artifact(2),
+                Install::default().requires(LEDGER, "ledger", 1),
+            )
+            .unwrap();
         let (sender, opened) = futures::channel::oneshot::channel();
         let (resume, resumed) = futures::channel::oneshot::channel::<()>();
         let reading = {
@@ -784,13 +741,6 @@ fn a_reload_lets_an_open_stream_finish_on_its_revision() {
                 .unwrap()
         };
         fixture.pool.run_until(opened).unwrap();
-        let replacement = fixture
-            .engine
-            .load(
-                &artifact(2),
-                Install::default().requires(LEDGER, "ledger", 1),
-            )
-            .unwrap();
         let reloading = fixture
             .pool
             .spawner()
@@ -816,165 +766,163 @@ fn a_reload_lets_an_open_stream_finish_on_its_revision() {
     });
 }
 
-/// A packet limit far below the 64 KiB write chunk does not turn a stream into a clean end.
+/// A packet limit far below the 64 KiB write chunk never truncates a stream into a clean end.
+/// Breaking: the component host carries stream bytes through its bounded pipe, never as host
+/// packets, so the packet limit no longer applies to them: the stream arrives whole and exact,
+/// while the limit still bounds packets.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn a_small_packet_limit_never_truncates_a_stream_into_a_clean_end() {
-    engines(|interpreter, interpreted| {
+    engines(|interpreted| {
         let mut fixture = install(
-            interpreter,
             interpreted,
             Limits {
                 packet_bytes: 16 << 10,
                 ..limits(30_000)
             },
         );
-        let outcome = fixture
+        let received = fixture
             .root(async move |context, reference, _| {
                 let mut stream = open(&context, &reference, 4, 64 << 10, CHUNKS).await?;
-                Ok(drain(&mut stream).await)
+                drain(&mut stream).await.map_err(|(_, error)| error)
             })
             .unwrap();
         let mode = fixture.mode();
-        let Err((prefix, error)) = outcome else {
-            panic!("{mode}: an oversized binary packet was accepted");
-        };
-        assert!(
-            prefix.is_empty(),
-            "{mode}: bytes accepted before the limit check"
-        );
-        eprintln!("{mode}: small packet limit failed the stream: {error:?}");
+        assert_eq!(received.len(), 4 << 16, "{mode}");
+        assert!(exact(&received, 64 << 10), "{mode}");
         fixture.wait(|fixture| fixture.calls() == 0);
-        let errors = fixture.host.errors();
-        assert_eq!(errors.len(), 1, "{mode}: {errors:?}");
-        assert!(
-            errors[0].message.contains("packet limit"),
-            "{mode}: {errors:?}"
-        );
+        assert!(fixture.logged("producer:returned:4"), "{mode}");
         assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
+        assert!(fixture.host.errors().is_empty(), "{mode}");
         fixture.close();
     });
 }
 
-/// Data-only platform ports keep refusing a source stream export until their carrier exists.
+/// Data-only platform ports keep refusing a prepared source stream export: the public Node and
+/// browser data profile never carries a stream end.
 #[test]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn platform_data_ports_refuse_source_stream_exports() {
-    let engine = Engine::new(Limits::default()).unwrap();
-    let artifact = tembra_contracts::Artifact::decode(&artifact(1)).unwrap();
-    let bindings: BTreeMap<String, tembra_contracts::Binding> = artifact
-        .contract
-        .providers(
-            &BTreeMap::from([(
-                LEDGER.to_owned(),
-                tembra_contracts::OrbProvider {
-                    orb: "ledger".into(),
-                    api_version: 1,
-                },
-            )]),
-            &Default::default(),
-        )
-        .unwrap();
-    let error = engine
-        .open_port(
-            &artifact,
-            &bindings,
-            &Default::default(),
-            &Default::default(),
-        )
-        .err()
-        .expect("a data port refuses a stream export");
-    assert!(error.message.contains("stream"), "{error:?}");
+    for interpreted in [false, true] {
+        let (engine, _) = engine(interpreted, Limits::default());
+        let artifact = tembra_contracts::Artifact::decode(&artifact(1)).unwrap();
+        let bindings: BTreeMap<String, tembra_contracts::Binding> = artifact
+            .contract
+            .providers(
+                &BTreeMap::from([(
+                    LEDGER.to_owned(),
+                    tembra_contracts::OrbProvider {
+                        orb: "ledger".into(),
+                        api_version: 1,
+                    },
+                )]),
+                &Default::default(),
+            )
+            .unwrap();
+        let error = engine
+            .open_port(
+                &artifact,
+                &bindings,
+                &Default::default(),
+                &Default::default(),
+            )
+            .err()
+            .expect("a data port refuses a stream export");
+        assert!(error.message.contains("byte-stream"), "{error:?}");
+        assert!(error.message.contains("data only"), "{error:?}");
+        assert_eq!(engine.instances(), 0);
+    }
 }
 
-/// Data-only platform ports keep refusing stream imports until their carrier exists.
+/// Data-only platform ports keep refusing prepared source stream imports.
 #[test]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn platform_data_ports_refuse_source_stream_imports() {
-    const CONSUMER: &str = r#"
-package tembra-test:sourceimports;
-
-interface frames {
-  frames: async func(count: u32) -> stream<u8>;
-}
-
-interface total {
-  total: async func() -> u32;
-}
-
-world consumer {
-  import frames;
-  export total;
-}
-"#;
-    let artifact = Contract::from_source("source-imports.wit", CONSUMER, Some("consumer"))
-        .unwrap()
-        .source_artifact("globalThis.__tembraOrb={services:{}}", "consumer", 1)
-        .unwrap();
-    let artifact = tembra_contracts::Artifact::decode(&artifact).unwrap();
+    let artifact = tembra_contracts::Artifact::decode(&fixture("stream-reader")).unwrap();
     let bindings = artifact
         .contract
         .providers(
-            &BTreeMap::from([(
-                "tembra-test:sourceimports/frames".to_owned(),
-                tembra_contracts::OrbProvider {
-                    orb: "frames".into(),
-                    api_version: 1,
-                },
-            )]),
+            &BTreeMap::from([
+                (
+                    "tembra-test:streams/frames@1.0.0".to_owned(),
+                    tembra_contracts::OrbProvider {
+                        orb: "frames".into(),
+                        api_version: 1,
+                    },
+                ),
+                (
+                    "tembra-test:streams/aliased@1.0.0".to_owned(),
+                    tembra_contracts::OrbProvider {
+                        orb: "aliased".into(),
+                        api_version: 1,
+                    },
+                ),
+            ]),
             &Default::default(),
         )
         .unwrap();
-    let engine = Engine::new(Limits::default()).unwrap();
-    let error = engine
-        .open_port(
-            &artifact,
-            &bindings,
-            &Default::default(),
-            &Default::default(),
-        )
-        .err()
-        .expect("a data port refuses a stream import");
-    assert!(error.message.contains("byte-stream"), "{error:?}");
-    assert!(error.message.contains("data only"), "{error:?}");
-    assert_eq!(engine.instances(), 0);
+    for interpreted in [false, true] {
+        let (engine, _) = engine(interpreted, Limits::default());
+        let error = engine
+            .open_port(
+                &artifact,
+                &bindings,
+                &Default::default(),
+                &Default::default(),
+            )
+            .err()
+            .expect("a data port refuses a stream import");
+        assert!(error.message.contains("byte-stream"), "{error:?}");
+        assert!(error.message.contains("data only"), "{error:?}");
+        assert_eq!(engine.instances(), 0);
+    }
 }
 
 /// A source may throw any value: `throw undefined` after its head is a failure, never a clean
-/// end of the bytes it produced.
+/// end of the bytes it produced. Breaking: it traps and quarantines the revision, like any raw
+/// producer exception.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn a_producer_throwing_undefined_fails_the_read() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
-        let outcome = fixture
-            .root(async move |context, reference, _| {
-                let mut stream = open(&context, &reference, 4, 64 << 10, THROW_UNDEFINED).await?;
-                Ok(drain(&mut stream).await)
-            })
-            .unwrap();
+    engines(|interpreted| {
+        let mut fixture = install(interpreted, limits(30_000));
+        // The read's outcome, whatever the root reports.
+        let read = Rc::new(RefCell::new(None));
+        let seen = read.clone();
+        let outcome = fixture.root(async move |context, reference, _| {
+            let mut stream = open(&context, &reference, 4, 64 << 10, THROW_UNDEFINED).await?;
+            *seen.borrow_mut() = Some(drain(&mut stream).await);
+            Ok(())
+        });
         let mode = fixture.mode();
-        let Err((prefix, _)) = outcome else {
+        if let Err(error) = outcome {
+            // The root may also report the producer's trap.
+            assert!(error.message.contains("trap"), "{mode}: {error:?}");
+        }
+        let Some(Err((prefix, _))) = read.borrow_mut().take() else {
             panic!("{mode}: a producer throwing undefined ended cleanly");
         };
         assert!(prefix.len() <= 4 << 16, "{mode}");
         assert!(exact(&prefix, 64 << 10), "{mode}");
         fixture.wait(|fixture| fixture.calls() == 0);
-        assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
-        assert_eq!(fixture.host.errors().len(), 1, "{mode}");
-        fixture.close();
+        fixture.recorded_trap();
+        fixture.quarantined();
+        fixture.retire();
     });
 }
 
-/// After the caller closes the stream, the producer callback ends without awaiting the source's
-/// asynchronous cleanup (`return()`), so that cleanup cannot perform host operations: a
-/// dependency call issued from its `finally` once the callback ended is never admitted (both
-/// engines observe none). A dependency call admitted before the callback ended is cancelled and
-/// joined instead (`closing_a_stream_cancels_and_joins_its_admitted_dependency`). Either way
-/// nothing outlives the call, and the close is acknowledged after physical settlement.
+/// Closing the stream cancels the producer's call, so the source's asynchronous cleanup
+/// (`return()` and its `finally`) cannot perform host operations: its dependency call is never
+/// admitted. A dependency call admitted before the close is cancelled and joined instead
+/// (`closing_a_stream_cancels_and_joins_its_admitted_dependency`). Either way nothing outlives
+/// the call, and the close is acknowledged only after physical settlement. Breaking (D5): the
+/// refused cleanup call has no WIT error lane, so if the cleanup issues it, the producer traps;
+/// the close then reports the trap and the revision is quarantined.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn closing_a_stream_never_leaves_its_cleanup_detached() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
+    engines(|interpreted| {
+        let mut fixture = install(interpreted, limits(30_000));
         let (first, closed) = fixture
             .root(async move |context, reference, _| {
                 let mut stream = open(&context, &reference, 0, 1 << 10, CLEANUP).await?;
@@ -985,24 +933,30 @@ fn closing_a_stream_never_leaves_its_cleanup_detached() {
         let mode = fixture.mode();
         assert!(exact(&first, 1 << 10), "{mode}");
         // The close is acknowledged only once the producer's call physically settled.
-        assert!(closed.is_ok(), "{mode}: {closed:?}");
         assert_eq!(
             fixture.calls(),
             0,
             "{mode}: acknowledged before physical settlement"
         );
-        let seen = fixture.seen.borrow().clone();
+        // The cleanup's dependency call was never admitted.
         assert!(
-            seen.is_empty() || seen.iter().all(|(event, ..)| event == "cleanup"),
-            "{mode}: {seen:?}"
+            fixture.seen.borrow().is_empty(),
+            "{mode}: {:?}",
+            fixture.seen.borrow()
         );
-        eprintln!(
-            "{mode}: cleanup dependency calls completed before the close: {}",
-            seen.len()
-        );
-        assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
-        assert!(fixture.host.errors().is_empty(), "{mode}");
-        fixture.close();
+        eprintln!("{mode}: close after a cleanup dependency call: {closed:?}");
+        match closed {
+            Ok(()) => {
+                assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
+                assert!(fixture.host.errors().is_empty(), "{mode}");
+                fixture.close();
+            }
+            Err(error) => {
+                assert!(error.message.contains("trap"), "{mode}: {error:?}");
+                fixture.quarantined();
+                fixture.retire();
+            }
+        }
     });
 }
 
@@ -1011,10 +965,10 @@ fn closing_a_stream_never_leaves_its_cleanup_detached() {
 /// gate is held; the close is not acknowledged until the call has physically ended. An
 /// unrelated call of the consumer's own root keeps a live signal throughout.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn closing_a_stream_cancels_and_joins_its_admitted_dependency() {
-    engines(|interpreter, interpreted| {
-        let mut fixture = install(interpreter, interpreted, limits(30_000));
+    engines(|interpreted| {
+        let mut fixture = install(interpreted, limits(30_000));
         let mode = fixture.mode();
         let gates = fixture.gates.clone();
         let (release_physical, physical) = oneshot::channel();

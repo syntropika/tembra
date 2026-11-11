@@ -1,0 +1,16 @@
+package tembra-test:shapes@1.0.0;
+
+/// A stream shape outside the native source profile: only a `stream<u8>` that is the whole
+/// result of an asynchronous freestanding function is carried.
+interface frames {
+    frames: async func(input: stream<u8>) -> u32;
+}
+
+interface probe {
+    ping: func() -> u32;
+}
+
+world orb {
+    import frames;
+    export probe;
+}

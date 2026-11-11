@@ -70,19 +70,21 @@ Engine artifacts live in their owning package's `dist` directory.
 
 ## Isolated orbs
 
-Source orbs run in a reusable dquickts interpreter core module. Build it once; orb changes do not
-require rebuilding it. Compiled-only hosts do not need it.
+TypeScript and JavaScript orbs are prepared into real WebAssembly components. The authoring
+runtime combines pinned dquickts and componentize-qjs with wit-dylib bindings. Build that runtime
+once; editing an orb changes its module and snapshot without rebuilding the interpreter. Installed
+components carry their runtime, so native, Node and mobile hosts load only the component.
 
-The interpreter build requires WASI SDK 34 and the Rust nightly named by the justfile `nightly`
-variable, with the `wasm32-wasip1` target. The compiled Rust provider fixture uses the same nightly
-with the `wasm32-wasip3` target. The no-std probe uses `wasm32-unknown-unknown` with the component
-linker and explicit WASI 0.3 bindings, so compiler runtime CLI imports cannot affect its tests.
-The build pins and verifies the dquickts revision and the module's
-exact private imports and exports. Without a dquickts checkout, it clones one into the cache.
+The runtime build requires WASI SDK 34 and the workspace's stable Rust toolchain with
+`wasm32-wasip2`. Compiled Rust provider fixtures use the justfile's pinned nightly and
+`wasm32-wasip3`. The no-std probe uses `wasm32-unknown-unknown` and the component linker with
+explicit WASI 0.3 bindings. Cached source files are verified against the pinned Git archives and
+the versioned runtime patch before compilation; an edited cache is refused.
 
 ```sh
-rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip1 --target wasm32-wasip3 --target wasm32-unknown-unknown
-just build-interpreter <wasi-sdk> <cache-directory> [<dquickts-checkout>]
+rustup target add wasm32-wasip2
+rustup toolchain install "$(just --evaluate nightly)" --profile minimal --target wasm32-wasip3 --target wasm32-unknown-unknown
+just build-runtime <wasi-sdk> <cache-directory>
 just build-provider <provider-target-directory>
 just build-probe <provider-target-directory>
 just build-consumer <provider-target-directory>
@@ -94,10 +96,28 @@ just build-sockets <provider-target-directory>
 just build-http-handler <http-handler-target-directory>
 ```
 
-The interpreter recipe packages the same `interpreter.wasm` into `packages/ts/engine-node/dist` and
-`packages/ts/engine-wasm/dist/interpreter`. Use reusable cache and target directories.
+The runtime recipe packages `runtime.wasm` into `packages/ts/engine-node/dist` for authoring.
+The browser engine build separately packages the trusted, lazily loaded component compiler.
+Reuse cache and target directories. Componentizer tests require
+`TEMBRA_QJS_RUNTIME=/path/to/runtime.wasm`.
 
-Runtime acceptance uses real artifacts. Build the engines, interpreter and SDK first. Then run
+Public Orb imports use WASI 0.3. The JavaScript runtime currently retains internal WASI 0.2
+imports through a separate fixed context. Full versioned names keep those interfaces distinct;
+the internal context has no application environment, preopens or network. Internal randomness
+is predictable; security-sensitive code must use the granted public WASI random interfaces.
+
+Browser execution currently requires WebAssembly JSPI and a Content Security Policy allowing
+`script-src blob:` and `'wasm-unsafe-eval'`. The trusted host compiler generates glue from verified
+component bytes. No JavaScript sidecar supplied by an orb is evaluated. Chrome is qualified;
+other browsers require independent verification. An absent platform feature is refused explicitly.
+
+Callback completion is a quiescent boundary: no queued jobs or reachable pending promises may be
+retained for a later call. Detached host work keeps its originating call open until it settles.
+Uncaught exceptions outside a WIT `result` and raw stream-producer failures trap and quarantine the
+revision. `FinalizationRegistry` is unavailable. Invalid numeric import arguments throw catchable
+JavaScript errors before reaching the host; invalid export values trap at the canonical boundary.
+
+Runtime acceptance uses real artifacts. Build the engines, authoring runtime and SDK first. Then run
 every isolated orb suite with an output directory outside the checkout:
 
 ```sh
@@ -146,7 +166,7 @@ It contains arm64 device libraries and arm64/x86_64 libraries for the simulator 
 The minimum versions are iOS 15.1 and macOS 11.
 Swift Package Manager and CocoaPods compile the shared Swift sources.
 
-The mobile FFI crate is an internal build target, like the Node binding; the Swift, Kotlin and React Native packages distribute its compiled libraries. React Native native packaging also copies the qualified `packages/ts/engine-node/dist/interpreter.wasm`; build that shared interpreter before packaging the mobile module.
+The mobile FFI crate is an internal build target, like the Node binding; the Swift, Kotlin and React Native packages distribute its compiled libraries. Prepared source components carry their JavaScript runtime; React Native packaging needs no separate interpreter asset.
 
 The executor currently pins Wasmtime and `wasmtime-wasi` together to `51.0.0-rc.1`.
 This prerelease includes the [Android `openat2` API-level guard](https://github.com/bytecodealliance/wasmtime/commit/b67df87c061d548508aa7b9be692392f14b80770),
@@ -266,7 +286,7 @@ source tree.
 To test the mobile execution transport with real interpreter and compiled-provider bytes on the current Rust host:
 
 ```sh
-just test-mobile-wasm /path/to/interpreter.wasm /path/to/arithmetic-component.wasm /path/to/filesystem-probe.wasm /path/to/http-handler.wasm
+just test-mobile-wasm /path/to/prepared-fixtures /path/to/arithmetic-component.wasm /path/to/filesystem-probe.wasm /path/to/http-handler.wasm
 ```
 
 This checks portable execution, heap isolation, filesystem/network grants, compiled calls, foreign continuation delivery and invalidation. It complements application tests on iOS and Android; a successful host run does not establish handset qualification.

@@ -1,6 +1,11 @@
 //! Qualify cleanup, scope identity, concurrent calls and termination against the real engine.
+//!
+//! The Orbs are the prepared SDK sources `tests/source/test-safety` and `test-safety-causal`.
+#[path = "support/source.rs"]
+mod source;
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
+use source::fixture;
 use std::{
     rc::Rc,
     time::{Duration, Instant},
@@ -8,96 +13,42 @@ use std::{
 use tembra::Host;
 use tembra_executor_wasm::{Contract, Engine, Install, Limits};
 
-const WIT: &str = "package example:safety; interface checks { run: async func(mode: string) -> u32; } world test { export checks; }";
-const SOURCE: &str = r#"
-let saved;
-let savedContext;
-let deferredDenied = false;
-Promise.resolve().then(() => {
-  try { __hostSync('{"operation":"resource.declare","name":"rogue","version":1,"open":1,"close":2}'); }
-  catch { deferredDenied = true; }
-});
-globalThis.__tembraOrb = {services:{checks:{
-  create(self) {
-    const state = self.state(1,{validate:value => value < 1000});
-    if (!saved) saved = state;
-    return {state};
-  },
-  methods:{async run(environment,context,mode) {
-    if (mode === "save-context") { savedContext = context; return 1; }
-    if (mode === "stale-context") { try { savedContext.check(); } catch { return 2; } return 0; }
-    if (mode === "deferred") return deferredDenied ? 1 : 0;
-    if (mode === "cached") {
-      try { return saved.value; } catch { return 2; }
-    }
-    if (mode === "floating") {
-      (async () => {
-        try { await tembra.wait(3000); } catch {}
-        environment.state.update(context, () => 999);
-      })().catch(() => {});
-      return 1;
-    }
-    if (mode === "many") {
-      const results = await Promise.allSettled(Array.from({length:256}, () => tembra.wait(1)));
-      return results.length;
-    }
-    if (mode === "wait") { await tembra.wait(10); return 1; }
-    if (mode === "long-wait") { await tembra.wait(80); return 1; }
-    if (mode === "state-checks") {
-      const before = environment.state.value;
-      for (const invalid of [NaN,undefined,new Date(0),1001,-0]) {
-        let rejected = false;
-        try { environment.state.update(context,() => invalid); } catch { rejected = true; }
-        if (!rejected || environment.state.value !== before) throw new Error("Invalid state was adopted");
-      }
-      let computations = 0;
-      const selected = environment.state.select(value => { computations++; return {doubled:value*2}; });
-      const first = selected.value;
-      if (first !== selected.value || !Object.isFrozen(first) || computations !== 1) throw new Error("Readable identity changed");
-      environment.state.update(context,value => value+1);
-      if (selected.value.doubled !== 4 || computations !== 2 || first.doubled !== 2) throw new Error("Readable snapshot changed");
-      environment.state.update(context,() => before);
-      return 1;
-    }
-    if (mode === "hang") { await new Promise(() => {}); }
-    if (mode === "cpu") { while (true) {} }
-    return environment.state.value;
-  }}
-}}};"#;
+const CHECKS: &str = "safe::example:safety/checks";
 
-/// Run real callbacks, then prove each interpreter worker is released by native shutdown.
-#[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
-fn scope_cleanup_and_termination() {
-    let component =
-        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
-    let engine = Engine::new(Limits {
-        timeout_ms: 500,
+fn engine(interpreted: bool, timeout_ms: u64) -> Engine {
+    let limits = Limits {
+        timeout_ms,
         ..Limits::default()
-    })
+    };
+    if interpreted {
+        Engine::interpreted(limits)
+    } else {
+        Engine::new(limits)
+    }
     .unwrap()
-    .interpreter(&component)
-    .unwrap();
-    let contract = Contract::from_source("safety.wit", WIT, None).unwrap();
+}
+
+/// Run real callbacks, then prove each Store is released by native shutdown.
+#[test]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+fn scope_cleanup_and_termination() {
+    for interpreted in [false, true] {
+        cleanup_and_termination(interpreted);
+    }
+}
+
+fn cleanup_and_termination(interpreted: bool) {
+    let engine = engine(interpreted, 500);
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![
         engine
-            .load(
-                &contract.source_artifact(SOURCE, "safe", 1).unwrap(),
-                Install::default(),
-            )
+            .load(&fixture("test-safety"), Install::default())
             .unwrap(),
     ])
     .unwrap();
-    let one = Rc::new(
-        host.get("safe::example:safety/checks", vec!["one".into()], "alice")
-            .unwrap(),
-    );
-    let two = Rc::new(
-        host.get("safe::example:safety/checks", vec!["two".into()], "bob")
-            .unwrap(),
-    );
+    let one = Rc::new(host.get(CHECKS, vec!["one".into()], "alice").unwrap());
+    let two = Rc::new(host.get(CHECKS, vec!["two".into()], "bob").unwrap());
     pool.run_until(one.ready()).unwrap();
     pool.run_until(two.ready()).unwrap();
     let calls = (one.clone(), two.clone());
@@ -124,6 +75,8 @@ fn scope_cleanup_and_termination() {
                     .await?,
                 2
             );
+            // Detached work finishes before the next call starts; its context ended with its
+            // call, so it cannot update the state.
             let start = Instant::now();
             assert_eq!(
                 one.call::<_, Value>(&context, "run", json!(["floating"]))
@@ -169,11 +122,7 @@ fn scope_cleanup_and_termination() {
             let running = calls.call::<_, Value>(&context, "run", json!(["long-wait"]));
             let creating = async move {
                 futures_timer::Delay::new(Duration::from_millis(10)).await;
-                let reference = creating_host.get(
-                    "safe::example:safety/checks",
-                    vec!["during-call".into()],
-                    "alice",
-                )?;
+                let reference = creating_host.get(CHECKS, vec!["during-call".into()], "alice")?;
                 reference.ready().await?;
                 reference.release()?;
                 Ok::<(), tembra::Error>(())
@@ -191,80 +140,96 @@ fn scope_cleanup_and_termination() {
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
 
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+
+    // A promise no host operation settles and a busy loop are both bounded: the call fails, the
+    // revision is quarantined, and closing physically retires the Store.
     for mode in ["hang", "cpu"] {
         let host = Host::new(pool.spawner());
         host.install(vec![
             engine
-                .load(
-                    &contract.source_artifact(SOURCE, "limited", 1).unwrap(),
-                    Install::default(),
-                )
+                .load(&fixture("test-safety"), Install::default())
                 .unwrap(),
         ])
         .unwrap();
-        let reference = Rc::new(
-            host.get(
-                "limited::example:safety/checks",
-                vec!["main".into()],
-                "alice",
-            )
-            .unwrap(),
-        );
+        let reference = Rc::new(host.get(CHECKS, vec!["main".into()], "alice").unwrap());
         pool.run_until(reference.ready()).unwrap();
         let called = reference.clone();
+        let started = Instant::now();
         pool.run_until(host.root("alice", move |context| {
             async move {
                 let error = called
                     .call::<_, Value>(&context, "run", json!([mode]))
                     .await
                     .unwrap_err();
-                assert!(error.to_string().contains("interpreter trap"));
+                assert!(
+                    error.to_string().contains("trap") || error.to_string().contains("timed out"),
+                    "{mode}: {error}"
+                );
                 let error = called
                     .call::<_, Value>(&context, "run", json!(["read"]))
                     .await
                     .unwrap_err();
-                assert_eq!(error.reason, "wasm_executor_quarantined");
+                assert_eq!(error.reason, "wasm_executor_quarantined", "{mode}: {error}");
                 Ok(())
             }
             .boxed_local()
         }))
         .unwrap();
-        reference.release().unwrap();
-        pool.run_until(host.close()).unwrap();
-        assert_eq!(engine.instances(), 0);
+        // The `cpu` loop ends at the 500 ms callback limit, never at a test or OS deadline.
+        assert!(started.elapsed() < Duration::from_secs(10), "{mode}");
+        let _ = reference.release();
+        let _ = pool.run_until(host.close());
+        assert_eq!(engine.instances(), 0, "{mode}");
+        assert_eq!(engine.resources(), 0, "{mode}");
     }
 }
 
-/// Creating a new object on a causally occupied interpreter fails without quarantining that VM.
+/// The bridge provider world of `tests/source/test-safety-causal/contract.wit`, verbatim;
+/// installation compares the signature, so a drifted copy is refused.
+const BRIDGE: &str = r#"package example:safety-causal;
+
+/// Provided natively; the provider tries to create an object of the calling Orb.
+interface bridge {
+    bounce: async func() -> result<u32, string>;
+}
+
+world provider {
+    export bridge;
+}
+"#;
+
+/// `result<u32, string>` in the portable tagged spelling.
+#[derive(serde::Serialize)]
+#[serde(tag = "tag", content = "val", rename_all = "lowercase")]
+enum Bounced {
+    Ok(u32),
+    Err(String),
+}
+
+/// Creating a new object on a causally occupied revision fails within the admission bound
+/// without quarantining that revision.
+///
+/// The native bridge reports the refused creation through its WIT `result`, a business error the
+/// source caller returns as its own. (A dependency call failing without a WIT error lane would
+/// trap the calling source Orb instead: declared breaking semantics.)
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn causal_factory_wait_is_bounded_and_recoverable() {
-    let component =
-        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
-    let engine = Engine::new(Limits {
-        timeout_ms: 1000,
-        ..Limits::default()
-    })
-    .unwrap()
-    .interpreter(&component)
-    .unwrap();
-    let wit = "package example:safety; interface bridge { bounce: async func() -> u32; } interface checks { run: async func(mode:string) -> u32; } world provider {export bridge;} world test {import bridge;export checks;}";
-    let contract = Contract::from_source("checks.wit", wit, Some("test")).unwrap();
-    let source = format!(
-        r#"{SOURCE}
-const create=globalThis.__tembraOrb.services.checks.create;
-const run=globalThis.__tembraOrb.services.checks.methods.run;
-globalThis.__tembraOrb.services.checks.create=self => ({{...create(self),bridge:self.get("example:safety/bridge")}});
-globalThis.__tembraOrb.services.checks.methods.run=(e,c,mode) => mode === "reentry" ? e.bridge.bounce(c) : run(e,c,mode);
-"#
-    );
+    for interpreted in [false, true] {
+        causal_factory_wait(interpreted);
+    }
+}
+
+fn causal_factory_wait(interpreted: bool) {
+    let engine = engine(interpreted, 1000);
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     let creating = host.clone();
     let bridge = tembra::Orb::new("bridge", 1).service(
-        tembra::Service::new("bridge::example:safety/bridge", |_| Ok(()))
+        tembra::Service::new("bridge::example:safety-causal/bridge", |_| Ok(()))
             .signature(
-                Contract::from_bytes(&contract.encode().unwrap(), Some("provider"))
+                Contract::from_source("bridge.wit", BRIDGE, Some("provider"))
                     .unwrap()
                     .plan("bridge", 1, &Default::default())
                     .unwrap()
@@ -276,13 +241,21 @@ globalThis.__tembraOrb.services.checks.methods.run=(e,c,mode) => mode === "reent
             .method("bounce", move |_, _, _: Vec<Value>| {
                 let host = creating.clone();
                 async move {
-                    let next = host.get(
-                        "safe::example:safety/checks",
-                        vec!["reentrant".into()],
-                        "alice",
-                    )?;
-                    next.ready().await?;
-                    Ok(0_u32)
+                    let created = async {
+                        let next = host.get(
+                            "safe::example:safety-causal/checks",
+                            vec!["reentrant".into()],
+                            "alice",
+                        )?;
+                        next.ready().await?;
+                        next.release()?;
+                        Ok::<_, tembra::Error>(0_u32)
+                    }
+                    .await;
+                    Ok(match created {
+                        Ok(value) => Bounced::Ok(value),
+                        Err(error) => Bounced::Err(error.to_string()),
+                    })
                 }
             }),
     );
@@ -290,29 +263,38 @@ globalThis.__tembraOrb.services.checks.methods.run=(e,c,mode) => mode === "reent
         bridge,
         engine
             .load(
-                &contract.source_artifact(&source, "safe", 1).unwrap(),
-                Install::default().requires("example:safety/bridge", "bridge", 1),
+                &fixture("test-safety-causal"),
+                Install::default().requires("example:safety-causal/bridge", "bridge", 1),
             )
             .unwrap(),
     ])
     .unwrap();
     let reference = Rc::new(
-        host.get("safe::example:safety/checks", vec!["main".into()], "alice")
-            .unwrap(),
+        host.get(
+            "safe::example:safety-causal/checks",
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
     );
     pool.run_until(reference.ready()).unwrap();
     let called = reference.clone();
+    let started = Instant::now();
     pool.run_until(host.root("alice", move |context| {
         async move {
-            let error = called
-                .call::<_, Value>(&context, "run", json!(["reentry"]))
-                .await
-                .unwrap_err();
-            assert!(error.to_string().contains("factory admission"), "{error}");
+            let refused = called
+                .call::<_, Value>(&context, "reenter", json!([]))
+                .await?;
+            assert_eq!(refused["tag"], "err", "{refused}");
+            assert!(
+                refused["val"]
+                    .as_str()
+                    .unwrap()
+                    .contains("factory admission"),
+                "{refused}"
+            );
             assert_eq!(
-                called
-                    .call::<_, Value>(&context, "run", json!(["read"]))
-                    .await?,
+                called.call::<_, Value>(&context, "read", json!([])).await?,
                 1
             );
             Ok(())
@@ -320,7 +302,9 @@ globalThis.__tembraOrb.services.checks.methods.run=(e,c,mode) => mode === "reent
         .boxed_local()
     }))
     .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
     reference.release().unwrap();
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
 }

@@ -1,16 +1,20 @@
-//! Source Orbs use standard `wasi:sockets` TCP through the native host, end to end with the real
-//! interpreter: exact connect grants, incremental receive, and the standard resource lifetimes.
+//! Source Orbs use standard `wasi:sockets` TCP through the native host, end to end with a prepared
+//! SDK source Orb (`tests/source/test-sockets`): exact connect grants, incremental receive, and
+//! the standard resource lifetimes.
 //!
 //! Lifetime rules exercised here:
 //! - a `tcp-socket`, its `receive` stream and the stream's completion future are separate owned
 //!   resources; dropping the socket alone keeps the stream readable;
 //! - a connection closes once the guest drops every resource that keeps it open;
+//! - a pending read is abandoned the way the component runtime requires: cancelled, awaited,
+//!   then dropped;
 //! - a cancelled callback's pending read settles promptly, its `finally` cleanup still runs, and
-//!   the drops it makes close the connection before the callback retires;
+//!   the drops it makes close the connection before the callback retires; the callback reports
+//!   the revoked read through its WIT `result` lane, so the revision keeps serving;
 //! - none of this waits for an I/O deadline, and the next callback is unaffected.
 //!
-//! The raw guest calls the generated standard bindings (`__tembraStandard`). The authored
-//! TypeScript path is covered by `packages/ts/sdk/test/sockets.test.ts`.
+#[path = "support/source.rs"]
+mod source;
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::{
@@ -22,97 +26,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tembra::{Host, Reference};
-use tembra_executor_wasm::{Contract, Engine, Grants, Install, Limits, NetworkGrant};
+use tembra_executor_wasm::{Engine, Grants, Install, Limits, NetworkGrant};
 
 const SERVICE: &str = "raw::test:sockets/net";
-const WIT: &str = "package test:sockets; interface net { fetch: async func(port: u16) -> string; alive: async func(port: u16) -> string; abandon: async func(port: u16) -> bool; hold: async func(port: u16) -> bool; forbidden: async func(port: u16) -> bool; } world app { import wasi:sockets/types@0.3.0; export net; }";
-const SOURCE: &str = r#"const sockets = __tembraStandard['wasi:sockets/types@0.3.0'];
-const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
-// Chunked access shared with the SDK: one host read per call, one host write per chunk.
-const READ_CHUNK = Symbol.for('tembra.wasi.stream.read-chunk');
-const WRITE_CHUNKS = Symbol.for('tembra.wasi.stream.write-chunks');
-const ascii = (text) => Uint8Array.from(text, (character) => character.charCodeAt(0));
-const text = (bytes) => String.fromCharCode(...bytes);
-const connect = async (port) => {
-    const socket = sockets.TcpSocket.create('ipv4');
-    try {
-        await socket.connect({ tag: 'ipv4', val: { port, address: [127, 0, 0, 1] } });
-    } catch (error) {
-        socket[dispose]();
-        throw error;
-    }
-    return socket;
-};
-const drain = async (stream) => {
-    let all = '';
-    for (let chunk = await stream[READ_CHUNK](); chunk; chunk = await stream[READ_CHUNK]())
-        all += text(chunk);
-    return all;
-};
-globalThis.__tembraOrb = { services: { net: { methods: {
-    // Send PING, receive the first chunk, and only then send ACK: the peer sends the rest of
-    // its answer after ACK, so the first chunk was delivered before the rest existed.
-    async fetch(self, context, port) {
-        const socket = await connect(port);
-        const [stream, done] = socket.receive();
-        let seen;
-        const first = new Promise((resolve) => { seen = resolve; });
-        const sent = socket.send({ async *[WRITE_CHUNKS]() {
-            yield ascii('PING\n');
-            await first;
-            yield ascii('ACK\n');
-        } });
-        const head = await stream[READ_CHUNK]();
-        seen();
-        const rest = await drain(stream);
-        await sent;
-        await done;
-        stream[dispose]();
-        done[dispose]();
-        socket[dispose]();
-        return JSON.stringify({ first: head ? text(head) : null, all: (head ? text(head) : '') + rest });
-    },
-    // Dropping the socket alone releases only its own reference: the stream still reads.
-    async alive(self, context, port) {
-        const socket = await connect(port);
-        const [stream, done] = socket.receive();
-        socket[dispose]();
-        const all = await drain(stream);
-        await done;
-        stream[dispose]();
-        done[dispose]();
-        return all;
-    },
-    // A read is pending when the guest drops the stream, its future and the socket: dropping
-    // the last references closes the connection although the peer never sent anything.
-    async abandon(self, context, port) {
-        const socket = await connect(port);
-        const [stream, done] = socket.receive();
-        stream[READ_CHUNK]().catch(() => {});
-        stream[dispose]();
-        done[dispose]();
-        socket[dispose]();
-        return true;
-    },
-    // Waits for data that never comes; the caller cancels. The pending read is rejected and
-    // the guest's cleanup drops every resource of the connection.
-    async hold(self, context, port) {
-        const socket = await connect(port);
-        const [stream, done] = socket.receive();
-        try {
-            await stream[READ_CHUNK]();
-            return true;
-        } finally {
-            stream[dispose]();
-            done[dispose]();
-            socket[dispose]();
-        }
-    },
-    async forbidden(self, context, port) {
-        try { (await connect(port))[dispose](); return false; } catch { return true; }
-    }
-} } } };"#;
-
 type Script = fn(&mut TcpStream);
 
 /// Serve scripted peers in order and report when each observes the host's close.
@@ -160,20 +76,18 @@ fn later(socket: &mut TcpStream) {
 fn silent(_: &mut TcpStream) {}
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn source_sockets_stream_incrementally_and_follow_standard_lifetimes() {
     source_sockets(false);
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn interpreted_source_sockets_stream_incrementally_and_follow_standard_lifetimes() {
     source_sockets(true);
 }
 
 fn source_sockets(interpreted: bool) {
-    let interpreter =
-        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
     let (address, closed) = peers(vec![answer, later, silent, silent, answer]);
     let ungranted = TcpListener::bind("127.0.0.1:0").unwrap();
     ungranted.set_nonblocking(true).unwrap();
@@ -188,8 +102,6 @@ fn source_sockets(interpreted: bool) {
         Engine::new(limits)
     }
     .unwrap()
-    .interpreter(&interpreter)
-    .unwrap()
     .network("tcp")
     .unwrap();
     let mut install = Install::default();
@@ -201,13 +113,10 @@ fn source_sockets(interpreted: bool) {
         }],
         ..Grants::default()
     };
-    let contract = Contract::from_source("sockets.wit", WIT, Some("app")).unwrap();
-    let orb = engine
-        .load(
-            &contract.source_artifact(SOURCE, "raw", 1).unwrap(),
-            install,
-        )
-        .unwrap();
+    let artifact = source::fixture("test-sockets");
+    // The sockets import needs a network grant: an ungranted installation is refused.
+    assert!(engine.load(&artifact, Install::default()).is_err());
+    let orb = engine.load(&artifact, install).unwrap();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![orb]).unwrap();
@@ -292,7 +201,12 @@ fn source_sockets(interpreted: bool) {
         }
         .boxed_local()
     }));
-    assert!(outcome.is_err(), "{outcome:?}");
+    // The cancelled root fails, or the guest reports the revoked read through its `result`
+    // lane; it never completes as if data had arrived.
+    assert!(
+        outcome.as_ref().map_or(true, |value| value["tag"] == "err"),
+        "{outcome:?}"
+    );
     let settled = started.elapsed();
     let peer_closed = closed.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(

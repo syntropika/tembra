@@ -3,7 +3,7 @@ import type { calculation, ExampleIntegratedArithmetic100 as Arithmetic } from "
 import type { Context, Declaration, WitMethods } from "@syntropika/tembra-sdk";
 const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0);
 
-console.log("module log");
+// Module evaluation runs at build time without host authority: console output is refused here.
 
 /** Create a managed environment; executable callbacks stay in the isolated guest. */
 function create(self: Declaration) {
@@ -36,9 +36,12 @@ export default orb({
           return value;
         },
         async sum(environment: Environment, context: Context, input: calculation.Input) {
-          if (!(input.values instanceof Int32Array)) throw new Error("WIT list shape differs");
+          // The component runtime lifts list<s32> as an array of numbers.
+          if (!Array.isArray(input.values)) throw new Error("WIT list shape differs");
           const total = sum([...input.values]);
-          const doubled: number = await environment.arithmetic.double(total, context);
+          // `double` is a synchronous WIT function shared with the compiled Rust provider: the
+          // typed import blocks this callback and returns its value.
+          const doubled: number = environment.arithmetic.double(total, context);
           environment.total.update(context, () => doubled);
           return environment.total.value;
         },
@@ -55,6 +58,7 @@ export default orb({
           console.warn("method log");
           return 42;
         },
+        // The old private host protocol no longer exists; probing it fails the call.
         forbidden() {
           return (globalThis as unknown as { __hostSync(packet: string): number }).__hostSync(
             JSON.stringify({ operation: "state.declare", initial: 999, version: 1 }),
@@ -78,6 +82,8 @@ export default orb({
           return sum(values);
         },
         async pending() {
+          // The marker lets a caller cancel only after the wait was really entered.
+          console.info("pending: waiting");
           await tembra.wait(5000);
           return 1;
         },

@@ -1,0 +1,11 @@
+package test:builtins-denied;
+
+interface checks {
+    /// What the ambient JavaScript clock and random built-ins observe, as JSON.
+    probe: func() -> string;
+}
+
+/// No standard import and no grant.
+world app {
+    export checks;
+}

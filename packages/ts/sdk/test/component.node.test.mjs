@@ -12,6 +12,8 @@ import { createHost, directoryFilesystem } from "../dist/node.js";
 const probe = process.env.TEMBRA_WASM_PROBE;
 // The no-std pipeline component imports two other Orbs, one through P3 async lowering.
 const consumer = process.env.TEMBRA_WASM_CONSUMER;
+// Prepared source fixtures from scripts/test-wasm-fixtures.ts.
+const fixtures = process.env.TEMBRA_WASM_FIXTURES;
 const service = "example:probe/probe@1.0.0";
 const wit = path.resolve(import.meta.dirname, "../../../../crates/executor-wasm/tests/wit");
 const binding = createRequire(import.meta.url)("@syntropika/tembra-engine-node");
@@ -23,14 +25,11 @@ function checksum(rounds) {
   return value;
 }
 
-/** Package a raw component or closed source bundle as one Tembra artifact. */
-async function artifact(directory, world, name, { component, source } = {}) {
+/** Package a raw compiled component as one Tembra artifact. */
+async function artifact(directory, world, name, { component }) {
   const resolved = new binding.NodeContract(path.join(wit, directory), world);
-  const bytes = component === undefined ? undefined : new Uint8Array(await readFile(component));
   return new Uint8Array(
-    source === undefined
-      ? resolved.componentArtifact(bytes, name, 1)
-      : resolved.sourceArtifact(source, name, 1),
+    resolved.componentArtifact(new Uint8Array(await readFile(component)), name, 1),
   );
 }
 
@@ -186,22 +185,22 @@ const requires = {
   "example:pipeline/delayed@1.0.0": { orb: "delayed", apiVersion: 1 },
 };
 
-/** A closed source Orb whose single method waits before doubling. */
-function delayedSource(world, name, alias) {
-  return artifact("pipeline", world, name, {
-    source: `globalThis.__tembraOrb={services:{${alias}:{methods:{async double(_e,_c,value){await tembra.wait(40);return value*2;}}}}};`,
-  });
+/** A prepared source fixture from `scripts/test-wasm-fixtures.ts` (`tests/source/<name>`). */
+async function sourceFixture(name) {
+  return new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`)));
 }
 
 test(
   "a compiled Orb imports delayed TypeScript Orbs through the Node host",
-  { skip: !consumer, timeout: 60000 },
+  { skip: !consumer || !fixtures, timeout: 60000 },
   async () => {
     const host = createHost();
     try {
       await host.install([
-        { artifact: await delayedSource("arithmetic-provider", "arithmetic", "arithmetic") },
-        { artifact: await delayedSource("delayed-provider", "delayed", "delayed") },
+        // tests/source/test-pipeline-{arithmetic,delayed}: a synchronous WIT function is
+        // implemented synchronously; only the P3 async `delayed` provider waits (40 ms per call).
+        { artifact: await sourceFixture("test-pipeline-arithmetic") },
+        { artifact: await sourceFixture("test-pipeline-delayed") },
         {
           artifact: await artifact("pipeline", "consumer", "pipeline", { component: consumer }),
           requires,
@@ -209,11 +208,11 @@ test(
       ]);
       const reference = await host.get(`pipeline::${pipeline}`, "main");
       const started = performance.now();
-      // Synchronous WIT imports: the guest blocks while the source provider waits.
+      // Synchronous WIT imports: the guest blocks on the synchronous source provider.
       assert.equal(await reference.quadruple(6), 24);
-      // P3 async imports awaited from an async export.
+      // Three sequential P3 async imports awaited from an async export, each delayed 40 ms.
       assert.equal(await reference.octuple(3), 24);
-      assert.ok(performance.now() - started >= 200, "every dependency result was delayed");
+      assert.ok(performance.now() - started >= 120, "every delayed result was awaited");
       reference.release();
     } finally {
       await host.close();

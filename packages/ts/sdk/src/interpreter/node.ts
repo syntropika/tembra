@@ -13,27 +13,30 @@ export function directoryFilesystem(path: string): DirectoryFilesystem {
 }
 
 export interface InterpreterOptions {
-  engine?: Uint8Array;
   providers?: {
     filesystem?: Readonly<Record<string, DirectoryFilesystem>>;
     network?: readonly string[];
   };
-  limits?: { memoryBytes?: number; fuel?: number; packetBytes?: number; timeoutMs?: number };
+  limits?: {
+    memoryBytes?: number;
+    fuel?: number;
+    packetBytes?: number;
+    timeoutMs?: number;
+  };
   onLog?: (record: { orb: string; level: string; message: string }) => void;
 }
 
 /** Platform transport owns Stores; the common host still owns every lifecycle decision. */
 export class NodeExecution {
   #backend: NodeInterpreter | undefined;
-  #interpreter = false;
   readonly #binding = createRequire(import.meta.url)(
     "@syntropika/tembra-engine-node",
   ) as typeof import("@syntropika/tembra-engine-node");
 
-  /** Register host configuration without compiling an interpreter for metadata-only hosts. */
+  /** Register host configuration; component code is compiled only when installed. */
   constructor(readonly options: InterpreterOptions) {}
 
-  /** Materialize source bytes supplied directly through an Orb declaration. */
+  /** Materialize a verified component supplied through an Orb declaration. */
   async materialize(definition: OrbArtifact): Promise<OrbDefinition> {
     return this.open(new this.#binding.NodeArtifact(definition.artifact), definition);
   }
@@ -68,7 +71,7 @@ export class NodeExecution {
     const identity = JSON.parse(artifact.description()) as {
       name: string;
       apiVersion: number;
-      kind: "source" | "component";
+      kind: "component";
     };
     const prepared = query<InstallationPlan>(artifact, {
       kind: "install",
@@ -81,11 +84,6 @@ export class NodeExecution {
       http: this.options.providers?.network ?? [],
     });
     const backend = this.backend();
-    // Compiled components execute without the interpreter; only source revisions load it.
-    if (identity.kind === "source" && !this.#interpreter) {
-      backend.interpreter(this.options.engine ?? requireEngine());
-      this.#interpreter = true;
-    }
     const port = backend.open(
       artifact,
       JSON.stringify(prepared.bindings),
@@ -103,12 +101,4 @@ export class NodeExecution {
       throw error;
     }
   }
-}
-
-/** Read packaged engine bytes only when an isolated Orb first needs them. */
-function requireEngine(): Uint8Array {
-  const require = createRequire(import.meta.url);
-  return require("node:fs").readFileSync(
-    require.resolve("@syntropika/tembra-engine-node/interpreter.wasm"),
-  );
 }

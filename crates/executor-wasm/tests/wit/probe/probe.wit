@@ -4,6 +4,8 @@ package example:probe@1.0.0;
 interface probe {
     /// Run a bounded guest loop and return its wrapping checksum.
     spin: func(rounds: u32) -> u32;
+    /// Grow linear memory by 64 KiB pages; return the old page count or 0xffffffff on refusal.
+    grow: func(pages: u32) -> u32;
     /// Execute an unreachable instruction.
     trap: func();
     /// Open one path for reading through the preopen that contains it.

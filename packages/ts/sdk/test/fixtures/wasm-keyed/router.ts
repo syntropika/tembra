@@ -4,7 +4,7 @@ import type { ExampleKeyedCounter100 as Counter } from "./contract.wit";
 const COUNTER = "example:keyed/counter@1.0.0";
 // Deliberately retained past their callback and root, to prove the host refuses them later.
 let retainedContext: Context | undefined;
-let retainedCounter: { add(amount: number): Promise<number> } | undefined;
+let retainedCounter: { add(amount: number): number } | undefined;
 
 /** Report whether an operation was accepted or the message it was refused with. */
 async function outcome(operation: () => unknown): Promise<string> {

@@ -1,0 +1,19 @@
+package tembra-test:source-streams@1.0.0;
+
+/// A native dependency the producer calls while its stream is being read.
+interface ledger {
+    note: async func(event: string) -> string;
+}
+
+interface frames {
+    /// `count` chunks of `size` bytes; byte j of chunk i is (i + j) mod 256. `mode` selects the
+    /// producer's behaviour (see `orb.ts`).
+    frames: async func(count: u32, size: u32, mode: u32) -> stream<u8>;
+    /// A scalar call proving the revision still serves: `value` plus the revision number.
+    ping: func(value: u32) -> u32;
+}
+
+world producer {
+    import ledger;
+    export frames;
+}

@@ -29,8 +29,8 @@ internal class Execution : AutoCloseable {
     }
 
     /** Prepare portable execution outside the table lock and adopt it only into a live host. */
-    fun configure(configuration: String, bytes: ByteArray) {
-        val candidate = NativeInterpreter(configuration, bytes)
+    fun configure(configuration: String) {
+        val candidate = NativeInterpreter(configuration)
         try {
             live { check(engine == null) { "Execution is already configured" }; engine = candidate }
         } catch (error: Throwable) { candidate.close(); throw error }

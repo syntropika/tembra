@@ -1,0 +1,10 @@
+package tembra-test:reload@1.0.0;
+
+interface ledger {
+    add: func(amount: u32) -> u32;
+    revision: func() -> u32;
+}
+
+world ledger-orb {
+    export ledger;
+}

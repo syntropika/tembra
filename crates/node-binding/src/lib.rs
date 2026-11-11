@@ -1,5 +1,6 @@
 //! Thread-affine metadata-only Node-API adapter. JavaScript stays in the existing Node runtime.
 use napi_derive::napi;
+mod componentize;
 mod interpreter;
 
 /// Immutable Orb bytes and their checked prepared contract, shared by every installation.
@@ -100,18 +101,31 @@ pub struct NodeContract {
 
 #[napi]
 impl NodeContract {
-    /// Package a closed source bundle for the selected world.
+    /// Prepare a source Orb artifact from one closed ES module and the prebuilt QuickJS runtime
+    /// dylib. The module exports the world's functions and the private lifecycle; `hooks` names
+    /// the exported hook interfaces (JavaScript aliases) the Orb provides. The component is
+    /// built against the private source world, verified against this public contract and
+    /// packaged. Module evaluation never calls the host.
     #[napi]
     pub fn source_artifact(
         &self,
         source: String,
+        runtime: napi::bindgen_prelude::Uint8Array,
         name: String,
         api_version: u32,
+        hooks: Option<Vec<String>>,
     ) -> napi::Result<napi::bindgen_prelude::Buffer> {
-        self.contract
-            .source_artifact(&source, &name, api_version)
-            .map(Into::into)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
+        let hooks = hooks.unwrap_or_default().into_iter().collect();
+        componentize::source_artifact(
+            &self.contract,
+            &source,
+            &runtime,
+            &name,
+            api_version,
+            &hooks,
+        )
+        .map(Into::into)
+        .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
     }
 
     /// Package a checked component with its WIT-derived contribution roles.

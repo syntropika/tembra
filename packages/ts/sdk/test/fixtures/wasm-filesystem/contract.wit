@@ -2,6 +2,9 @@ package example:filesystem@1.0.0;
 
 interface scenario {
     roundtrip: async func() -> string;
+    /// The same scenario with a declared failure lane: a refused WASI call reports its
+    /// `error-code` tag as `err`.
+    roundtrip-checked: async func() -> result<string, string>;
 }
 
 world filesystem {

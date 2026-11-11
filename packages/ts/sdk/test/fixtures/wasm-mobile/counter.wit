@@ -1,0 +1,11 @@
+package tembra-mobile:counter@1.0.0;
+
+/// One counter per service environment; the factory reads its kernel key.
+interface counter {
+    /// Log through the Orb's attributed diagnostics and return the incremented count.
+    add: func() -> s32;
+}
+
+world app {
+    export counter;
+}

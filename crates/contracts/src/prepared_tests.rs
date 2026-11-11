@@ -233,8 +233,8 @@ fn shared_type_graphs_cannot_amplify_signature_expansion() {
         orb.u32(1);
         orb.bytes(&contract);
         let mut bytes = COMPONENT_HEADER.to_vec();
+        // The metadata is decoded and refused before any component verification.
         append_section(&mut bytes, "tembra:orb", &orb.finish());
-        append_section(&mut bytes, "tembra:source", b"globalThis.__tembraOrb={}");
         let error = Artifact::decode(&bytes).err().unwrap();
         assert!(error.0.contains("expand beyond"), "{error}");
     }
@@ -288,7 +288,8 @@ fn artifact_limit() -> usize {
     (4 << 20) + 1
 }
 
-fn source_artifact(contract: &PreparedContract, source: &str) -> Vec<u8> {
+/// An empty component with Orb metadata and the retired `tembra:source` text section.
+fn retired_source(contract: &PreparedContract) -> Vec<u8> {
     let identity = Identity {
         name: "prepared".into(),
         api_version: 1,
@@ -296,41 +297,24 @@ fn source_artifact(contract: &PreparedContract, source: &str) -> Vec<u8> {
     };
     let mut bytes = COMPONENT_HEADER.to_vec();
     append_section(&mut bytes, "tembra:orb", &encode_orb(&identity, contract));
-    append_section(&mut bytes, "tembra:source", source.as_bytes());
+    append_section(&mut bytes, "tembra:source", b"globalThis.__tembraOrb={}");
     bytes
 }
 
+/// Source text is no executable artifact: its retired section is unknown metadata, and the
+/// container is checked before anything is trusted.
 #[test]
-fn runtime_artifacts_decode_source_without_a_parser_and_refuse_extra_content() {
+fn retired_source_text_artifacts_are_refused() {
     let contract = PreparedContract::new(model()).unwrap();
-    let bytes = source_artifact(&contract, "globalThis.__tembraOrb={}");
-    let artifact = Artifact::decode(&bytes).unwrap();
-    assert_eq!(artifact.contract, contract);
-    assert_eq!(artifact.identity.world, "run");
-    assert!(matches!(
-        artifact.implementation,
-        ArtifactImplementation::Source(ref source) if source == "globalThis.__tembraOrb={}"
-    ));
-    let mut foreign = bytes.clone();
-    append_section(&mut foreign, "producers", b"x");
-    assert!(Artifact::decode(&foreign).is_err());
-    let mut code = bytes.clone();
-    code.extend([1, 1, 0]);
-    assert!(Artifact::decode(&code).is_err());
+    let bytes = retired_source(&contract);
+    let error = Artifact::decode(&bytes).err().unwrap();
+    assert!(error.0.contains("unsupported artifact metadata"), "{error}");
     let mut module = bytes.clone();
     module[4..8].copy_from_slice(&[1, 0, 0, 0]);
     assert!(Artifact::decode(&module).is_err());
-    let mut truncated = bytes.clone();
+    let mut truncated = bytes;
     truncated.pop();
     assert!(Artifact::decode(&truncated).is_err());
-    let mut duplicate = bytes.clone();
-    append_section(&mut duplicate, "tembra:source", b"other");
-    assert!(Artifact::decode(&duplicate).is_err());
-    // Source Orbs must satisfy the interpreter value profile on load.
-    let mut context = model();
-    context.types[1] = Kind::List(Ty::ErrorContext);
-    let context = PreparedContract::new(context).unwrap();
-    assert!(Artifact::decode(&source_artifact(&context, "")).is_err());
 }
 
 #[cfg(not(feature = "authoring"))]

@@ -7,9 +7,7 @@ impl Environment {
     /// Resolve immediate operations against the current host-issued scope only.
     pub(super) fn sync(&self, scope: &Scope, packet: &str) -> Result<Value> {
         let request = Request::decode(packet).map_err(failure)?;
-        if matches!(scope, Scope::Validation)
-            && !matches!(request, Request::StateRead { .. } | Request::Console { .. })
-        {
+        if matches!(scope, Scope::Validation) && !matches!(request, Request::StateRead { .. }) {
             return Err(failure(
                 "reload validators may only read their retained state",
             ));
@@ -18,7 +16,6 @@ impl Environment {
             Self::authorize(scope)?;
         }
         match request {
-            Request::Console { .. } => self.session.log(packet),
             Request::Address {} => {
                 let declaration = Self::declaration(scope)?;
                 let address = match self.service {
@@ -53,8 +50,9 @@ impl Environment {
                     let environment = self.clone();
                     declaration.validate_on_reload(move || {
                         environment.session.blocking(
-                            crate::abi::Operation::Declare,
+                            crate::protocol::Operation::Declare,
                             serde_json::to_string(&GuestCommand::Validate {
+                                environment: environment.id,
                                 callback,
                                 value: check_state.value()?.as_ref(),
                             })
@@ -240,6 +238,7 @@ impl Environment {
                             Scope::Open(signal),
                             Some(cancellation),
                             GuestCommand::Callback {
+                                environment: opening.id,
                                 callback: open,
                                 value: None,
                             },
@@ -258,6 +257,7 @@ impl Environment {
                             Scope::Call(context),
                             None,
                             GuestCommand::Callback {
+                                environment: closing.id,
                                 callback: close,
                                 value: Some(*value),
                             },
@@ -292,10 +292,11 @@ impl Environment {
             id,
             method,
             args,
+            binding,
         } = request
         {
             return self
-                .call_import(scope, owner, id, &method, args, stream, issued)
+                .call_import(scope, owner, id, (&binding, &method), args, stream, issued)
                 .await;
         }
         if stream {

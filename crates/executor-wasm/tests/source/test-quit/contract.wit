@@ -1,0 +1,11 @@
+package test:quit;
+
+interface run {
+    /// Exit with status 4 inside a guest `try`.
+    go: async func() -> string;
+}
+
+world app {
+    import wasi:cli/exit@0.3.0;
+    export run;
+}

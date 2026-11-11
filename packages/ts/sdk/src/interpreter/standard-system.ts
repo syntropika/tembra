@@ -1,5 +1,5 @@
 /** Browser providers for the standard clock and random interfaces. */
-import { abortable, cancelled, type Implementation } from "./standard-streams.ts";
+const cancelled = (): Error => new Error("Operation cancelled");
 
 /** Signed seconds since the epoch plus a nonnegative fractional nanosecond part. */
 export interface ClockInstant {
@@ -89,7 +89,10 @@ export function browserClocks(): ClockProvider {
     systemNow() {
       const milliseconds = Date.now();
       const seconds = Math.floor(milliseconds / 1000);
-      return { seconds: BigInt(seconds), nanoseconds: (milliseconds - seconds * 1000) * 1_000_000 };
+      return {
+        seconds: BigInt(seconds),
+        nanoseconds: (milliseconds - seconds * 1000) * 1_000_000,
+      };
     },
     // Browser privacy settings can coarsen these clocks further; embedders can supply their
     // actual resolution through a provider. No sub-millisecond precision is promised here.
@@ -130,53 +133,4 @@ export function browserRandom(): RandomProvider {
     return [view.getBigUint64(0, true), view.getBigUint64(8, true)] as const;
   };
   return { secure, insecure: secure, insecureSeed };
-}
-
-/** Require exact provider output before a value can be encoded or seed the VM. */
-function bytes(provider: (length: number) => Uint8Array, length: number): Uint8Array {
-  const result = provider(length);
-  if (!(result instanceof Uint8Array) || result.length !== length)
-    throw new Error("random provider returned the wrong byte length");
-  return result;
-}
-
-/** One method set per revision: in particular, get-insecure-seed stays stable for that Store. */
-export function systemMethods(
-  clocks: ClockProvider,
-  random: RandomProvider,
-): Record<string, Implementation> {
-  const randomBytes =
-    (secure: boolean): Implementation =>
-    (call, [length]: [bigint]) => {
-      const bound = BigInt(Math.max(0, call.host.packetBytes - 4));
-      return bytes(
-        (size) => (secure ? random.secure(size) : random.insecure(size)),
-        Number(length > bound ? bound : length),
-      );
-    };
-  const randomU64 = (secure: boolean) => () => {
-    const result = bytes((size) => (secure ? random.secure(size) : random.insecure(size)), 8);
-    return new DataView(result.buffer, result.byteOffset, result.byteLength).getBigUint64(0, true);
-  };
-  return {
-    "wasi:random/random@0.3.0#getRandomBytes": randomBytes(true),
-    "wasi:random/random@0.3.0#getRandomU64": randomU64(true),
-    "wasi:random/insecure@0.3.0#getInsecureRandomBytes": randomBytes(false),
-    "wasi:random/insecure@0.3.0#getInsecureRandomU64": randomU64(false),
-    "wasi:random/insecure-seed@0.3.0#getInsecureSeed": () => random.insecureSeed(),
-    "wasi:clocks/system-clock@0.3.0#now": () => clocks.systemNow(),
-    "wasi:clocks/system-clock@0.3.0#getResolution": () => clocks.systemResolution(),
-    "wasi:clocks/monotonic-clock@0.3.0#now": () => clocks.monotonicNow(),
-    "wasi:clocks/monotonic-clock@0.3.0#getResolution": () => clocks.monotonicResolution(),
-    "wasi:clocks/monotonic-clock@0.3.0#waitUntil": ({ signal, host }, [when]: [bigint]) =>
-      abortable(
-        host.physical(signal, () => clocks.waitUntil(when, signal)),
-        signal,
-      ),
-    "wasi:clocks/monotonic-clock@0.3.0#waitFor": ({ signal, host }, [duration]: [bigint]) =>
-      abortable(
-        host.physical(signal, () => clocks.waitUntil(clocks.monotonicNow() + duration, signal)),
-        signal,
-      ),
-  };
 }

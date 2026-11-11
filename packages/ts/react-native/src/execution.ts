@@ -188,15 +188,14 @@ export class MobileExecution implements MobileBackend {
   constructor(
     readonly native: Spec,
     readonly kernel: NativeKernelPort,
-    readonly options: MobileExecutionOptions & { engine?: Uint8Array },
+    readonly options: MobileExecutionOptions,
   ) {}
 
-  /** Configure the packaged engine and providers once, retrying a failed initialization. */
+  /** Configure portable execution and providers once, retrying a failed initialization. */
   private ready(): Promise<void> {
     if (!this.#ready) {
       const pending = this.native.configureExecution(
         this.kernel.handle,
-        this.options.engine ? base64(this.options.engine) : "",
         JSON.stringify({
           limits: this.options.limits ?? {},
           filesystem: Object.fromEntries(

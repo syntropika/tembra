@@ -14,7 +14,6 @@ Pod::Spec.new do |s|
   s.source_files = 'ios/**/*.{h,mm,swift}', 'native/swift/Sources/**/*.swift'
   s.public_header_files = 'ios/RCTTembra.h'
   s.vendored_frameworks = 'native/swift/TembraFFI.xcframework'
-  s.resource_bundles = { 'TembraInterpreter' => ['native/interpreter/tembra/interpreter.wasm'] }
   s.frameworks = 'Security', 'SystemConfiguration'
   s.libraries = 'c++', 'resolv'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }

@@ -1,0 +1,14 @@
+package tembra-test:failing@1.0.0;
+
+interface frames {
+    /// Produce `count` chunks, then fail as `mode` says: "none", "throw" or "reject".
+    frames: async func(count: u32, mode: string) -> stream<u8>;
+    /// An uncaught exception from a function without a result type.
+    explode: async func() -> u32;
+    /// A business error through a WIT result.
+    refuse: async func() -> result<u32, string>;
+}
+
+world failing {
+    export frames;
+}

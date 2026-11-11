@@ -1,0 +1,163 @@
+/// Private Tembra contract between the host and a prepared source Orb component.
+///
+/// It is never part of a user contract. The Tembra build adds it to the selected world before
+/// componentizing JavaScript; the host links it only for artifacts that carry the matching
+/// `tembra:runtime` section. Values typed by the user contract never cross this package: service
+/// calls, contributions, dependency calls and hook runs use the user's own WIT functions.
+package tembra:orb@0.1.0;
+
+/// Callbacks a source Orb exports. The host calls them only inside a callback it admitted.
+interface lifecycle {
+    enum lifetime {
+        referenced,
+        host,
+    }
+
+    enum composition {
+        series,
+        waterfall,
+        bail,
+    }
+
+    /// One service implemented by the module, keyed by its JavaScript alias.
+    record service {
+        alias: string,
+        methods: list<string>,
+        lifetime: option<lifetime>,
+        linger: option<u32>,
+        access: bool,
+    }
+
+    /// A hook this Orb provides, keyed by the JavaScript alias of its exported interface.
+    record hook {
+        alias: string,
+        composition: composition,
+    }
+
+    /// A contribution to a selected provider's hook, keyed by the import binding.
+    record contribution {
+        binding: string,
+        priority: s32,
+    }
+
+    /// The evaluated `orb` definition, checked against the contract before any factory runs.
+    record implementation {
+        name: string,
+        api-version: u32,
+        services: list<service>,
+        hooks: list<hook>,
+        contributes: list<contribution>,
+    }
+
+    /// Return the evaluated definition. It must not call the host.
+    describe: func() -> implementation;
+
+    /// Run the root factory (`service` is none) or a service factory for a host-issued
+    /// environment. Each environment is created once; factories are synchronous.
+    create: func(environment: u64, service: option<string>) -> result<_, string>;
+
+    /// Forget an environment the host retired.
+    release: func(environment: u64);
+
+    /// Run a state validator registered through `host.state-declare` on retained JSON state.
+    validate: func(callback: u32, value: string) -> result<_, string>;
+
+    /// Open a resource registered through `host.resource-declare`; returns its value slot.
+    open: async func(callback: u32) -> result<u32, string>;
+
+    /// Close one value slot returned by `open`.
+    close: async func(callback: u32, value: u32) -> result<_, string>;
+}
+
+/// Kernel operations of the current callback. Every function acts only under the authority the
+/// host issued to that callback; a selection never grants authority.
+interface host {
+    /// A host-issued handle. `scope` names the issuing environment when it is not the caller's.
+    record handle {
+        scope: option<u64>,
+        id: u32,
+    }
+
+    enum level {
+        log,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// A kernel snapshot. `value` is the kernel's JSON state text; it is absent when `known`
+    /// named the current revision.
+    record snapshot {
+        value: option<string>,
+        revision: string,
+        version: u32,
+    }
+
+    record address {
+        key: list<string>,
+        principal: string,
+    }
+
+    /// The host-issued environment of the current callback.
+    environment: func() -> u64;
+
+    /// Record an attributed diagnostic.
+    log: func(level: level, message: string);
+
+    /// The instance key and principal of the current service environment.
+    instance-address: func() -> result<address, string>;
+
+    /// The Orb root environment of a service environment; none for the root itself.
+    root: func() -> result<option<u64>, string>;
+
+    context-check: func() -> result<_, string>;
+
+    context-principal: func() -> result<string, string>;
+
+    context-cancel: func() -> result<_, string>;
+
+    signal-cancelled: func() -> result<bool, string>;
+
+    state-declare: func(initial: string, version: u32, validate: option<u32>) -> result<u32, string>;
+
+    state-read: func(state: handle, known: option<string>) -> result<snapshot, string>;
+
+    state-update: func(state: handle, value: string) -> result<snapshot, string>;
+
+    hook-declare: func(alias: string) -> result<u32, string>;
+
+    reference-declare: func(binding: string, key: list<string>) -> result<u32, string>;
+
+    reference-release: func(reference: handle) -> result<_, string>;
+
+    reference-status: func(reference: handle) -> result<string, string>;
+
+    reference-state: func(reference: handle, known: option<string>) -> result<snapshot, string>;
+
+    resource-declare: func(name: string, version: u32, open: u32, close: u32, dependencies: list<handle>) -> result<u32, string>;
+
+    resource-read: func(%resource: handle) -> result<u32, string>;
+
+    reference-ready: async func(reference: handle) -> result<_, string>;
+
+    /// Acquire a reference to a selected Orb import for the current context's root.
+    reference-acquire: async func(binding: string, key: list<string>) -> result<u32, string>;
+
+    wait: async func(milliseconds: u32) -> result<_, string>;
+
+    /// Target the next dependency import with this reference. The import must follow in the
+    /// same synchronous turn and belong to the reference's binding. None clears a selection
+    /// after an import argument is refused before the host call.
+    select: func(reference: option<handle>) -> result<_, string>;
+
+    /// Run this declared hook with the next call of its imported interface, in the same turn.
+    /// None clears a selection after an argument is refused before the host call.
+    select-hook: func(hook: option<handle>) -> result<_, string>;
+}
+
+/// The private additions every prepared source Orb world includes.
+world source {
+    import host;
+    export lifecycle;
+}

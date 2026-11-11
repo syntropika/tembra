@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -6,6 +6,8 @@ import ts from "typescript";
 import { witTypes } from "./src/tooling/wit.ts";
 
 const root = fileURLToPath(new URL("./", import.meta.url));
+// The private guest controls use declarations generated from their canonical WIT as well.
+await import("./scripts/guest-wit.ts");
 // The library uses the same official declarations as authored Orbs. They are build output,
 // not hand-maintained copies of the standard's resource and future signatures.
 const standard = { files: new Map<string, string>() };
@@ -21,6 +23,7 @@ for (const [file, contents] of standard.files) {
 const entrypoints = [
   "index",
   "guest",
+  "guest/shim",
   "host",
   "http",
   "runtime/adapters",
@@ -111,3 +114,12 @@ const emitted = declarations.emit(undefined, (file, contents) => {
   writeFileSync(file, rewritten);
 });
 if (emitted.emitSkipped) throw new Error("Declaration output failed");
+
+// TypeScript does not copy input declaration files when emitting declarations. Retain the
+// private WIT types beside the internal guest shim so the packaged graph remains complete.
+const guestTypes = path.join(root, "src/guest/.tembra");
+const guestDestination = path.join(root, "dist/guest/.tembra");
+await mkdir(guestDestination, { recursive: true });
+for (const file of await readdir(guestTypes))
+  if (file.endsWith(".d.ts"))
+    await copyFile(path.join(guestTypes, file), path.join(guestDestination, file));

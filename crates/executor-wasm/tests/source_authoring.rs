@@ -6,12 +6,8 @@ use tembra::{Host, portable::ByteStream};
 use tembra_executor_wasm::{Engine, Install, Limits};
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn an_authored_typescript_stream_reaches_rust_without_truncation() {
-    let interpreter = std::fs::read(
-        std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE is required"),
-    )
-    .unwrap();
     let fixtures = PathBuf::from(
         std::env::var_os("TEMBRA_WASM_FIXTURES").expect("TEMBRA_WASM_FIXTURES is required"),
     );
@@ -22,8 +18,6 @@ fn an_authored_typescript_stream_reaches_rust_without_truncation() {
         } else {
             Engine::new(Limits::default())
         }
-        .unwrap()
-        .interpreter(&interpreter)
         .unwrap();
         let mut pool = LocalPool::new();
         let host = Host::new(pool.spawner());
@@ -82,12 +76,8 @@ struct Summary {
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn authored_typescript_consumes_and_forwards_another_orbs_stream() {
-    let interpreter = std::fs::read(
-        std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE is required"),
-    )
-    .unwrap();
     let fixtures = PathBuf::from(
         std::env::var_os("TEMBRA_WASM_FIXTURES").expect("TEMBRA_WASM_FIXTURES is required"),
     );
@@ -105,8 +95,6 @@ fn authored_typescript_consumes_and_forwards_another_orbs_stream() {
         } else {
             Engine::new(limits)
         }
-        .unwrap()
-        .interpreter(&interpreter)
         .unwrap();
         let mut pool = LocalPool::new();
         let host = Host::new(pool.spawner());

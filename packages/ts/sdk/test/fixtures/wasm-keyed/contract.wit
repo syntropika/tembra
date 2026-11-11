@@ -10,9 +10,9 @@ interface counter {
 /// Selects counter instances at runtime with `Context.get`.
 interface router {
     /// Acquire `key` twice and `other` once in this root, add `amount` through each handle.
-    route: func(key: string, other: string, amount: u32) -> string;
+    route: async func(key: string, other: string, amount: u32) -> string;
     /// Run one named boundary probe and report its outcome.
-    probe: func(name: string) -> string;
+    probe: async func(name: string) -> string;
 }
 
 world provider {

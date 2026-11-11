@@ -59,15 +59,16 @@ export default orb({
               }
             })(),
           );
-          const result = await stdout(output);
-          const read = await done;
+          // Lifted WIT futures are handles: `read()` returns their value once.
+          const result = await stdout(output).read();
+          const read = await done.read();
           const error = await stderr(
             writeChunks(
               (async function* () {
                 yield new Uint8Array([0, 255, 128, 10]);
               })(),
             ),
-          );
+          ).read();
           if (result.tag !== "ok" || read.tag !== "ok" || error.tag !== "ok")
             throw new Error("standard stdio failed");
           return JSON.stringify({ length, first, last });

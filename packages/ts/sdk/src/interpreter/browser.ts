@@ -1,76 +1,107 @@
 import type { OrbDefinition, OrbArtifact, LoadOptions } from "../authoring/types.ts";
-import { BrowserPort } from "./browser-port.ts";
-import { checkInterpreter, CoreGuest } from "./core.ts";
 import type { BrowserNetworkProviders } from "./browser-network.ts";
 import type { FilesystemProvider } from "./filesystem.ts";
 import { BrowserCapabilities } from "./io.ts";
-import { Revision } from "./revision.ts";
-import { StandardHost } from "./standard-host.ts";
-import type { SystemProviders } from "./standard-system.ts";
-import { CLOCK_MONOTONIC } from "./abi.ts";
 import type { StdioProvider, StdioStreams } from "./standard-cli.ts";
+import {
+  browserClocks,
+  browserRandom,
+  checkedClocks,
+  revisionRandom,
+  type SystemProviders,
+} from "./standard-system.ts";
 import { query, type ContractPort, type InstallationPlan } from "./types.ts";
+import type { LogLevel } from "./host-protocol.ts";
+import {
+  type CoreLimits,
+  type InstrumentedCore,
+  requireJspi,
+  TrustedCompiler,
+} from "./component/compiler.ts";
+import {
+  dependencyImport,
+  hookImport,
+  HOST,
+  orbHost,
+  type ImportedFunction,
+} from "./component/host.ts";
+import { ComponentPort } from "./component/port.ts";
+import { ComponentRevision, LIFECYCLE, type Described } from "./component/revision.ts";
+import { converters, type GraphFunction } from "./component/values.ts";
+import {
+  checkPublicWasi,
+  publicWasi,
+  runtimeInternal,
+  runtimeInternals,
+} from "./component/wasi.ts";
 
 export interface BrowserInterpreterOptions {
-  /** URL of the interpreter core module; defaults to the packaged `interpreter.wasm`. */
-  engine?: string | URL;
   providers?: BrowserNetworkProviders &
     SystemProviders & {
       filesystem?: Readonly<Record<string, FilesystemProvider>>;
       stdio?: StdioProvider;
     };
   limits?: {
-    memoryBytes?: number;
+    /**
+     * Wall time of one guest callback, including its detached host work until physical
+     * completion; the instance is quarantined when it is exceeded.
+     */
     timeoutMs?: number;
-    instructionTicks?: number;
-    packetBytes?: number;
+    /**
+     * Guest linear memory of one instance in bytes (whole 64 KiB pages): initial memories of
+     * every core instantiation plus `memory.grow`. Tables, the GC heap and host buffers are not
+     * counted.
+     */
+    memoryBytes?: number;
+    /**
+     * Fuel of one admitted callback, and separately of instantiation: function entries and loop
+     * iterations, not instructions or time. Exhaustion traps and quarantines the revision.
+     */
+    fuel?: number;
   };
   onLog?: (record: { orb: string; level: string; message: string }) => void;
   contractsInput?: unknown;
 }
 interface BrowserArtifact extends ContractPort {
   description(): string;
-  source(): string;
+  sourceRuntime(): boolean;
+  component(): Uint8Array;
+  imports(): string;
+  contributions(): string;
   free(): void;
 }
 interface ContractModule {
   WasmArtifact: new (bytes: Uint8Array) => BrowserArtifact;
+  instrumentCore(bytes: Uint8Array, maximumPages: number): InstrumentedCore;
   default(input?: unknown): Promise<unknown>;
 }
 
-/** Compile the trusted interpreter once; a failed request may be retried by a later Orb. */
-async function compileEngine(url: URL): Promise<WebAssembly.Module> {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error("Engine module request failed");
-  const module = await WebAssembly.compile(await response.arrayBuffer());
-  checkInterpreter(module);
-  return module;
+const PAGE = 1 << 16;
+
+/** A limit is a positive safe integer; nothing else is coerced. */
+function positive(name: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0)
+    throw new Error(`limits.${name} must be a positive safe integer`);
+  return value;
 }
 
-/** A browser backend instantiates one isolated core module, memory and heap per Orb. */
-export class BrowserExecution {
-  #engine: Promise<WebAssembly.Module> | undefined;
+const LEVELS: readonly string[] = ["log", "debug", "info", "warn", "error"];
 
-  /** Keep the prepared-contract validator and trusted engine out of metadata-only hosts. */
+/**
+ * A browser backend: every Orb is a verified component, compiled by Tembra's trusted compiler and
+ * instantiated once per installed revision with its own memories, tables and host tables.
+ */
+export class BrowserExecution {
+  /** Keep the verifier and the lazily loaded trusted compiler out of metadata-only hosts. */
   constructor(
     readonly options: BrowserInterpreterOptions,
     readonly contracts: ContractModule,
+    readonly compiler: TrustedCompiler = new TrustedCompiler(),
   ) {}
 
-  /** Share compiled code between installations; every instance still owns its state. */
-  private engine(): Promise<WebAssembly.Module> {
-    if (!this.#engine) {
-      const compiled = compileEngine(new URL(this.options.engine!));
-      this.#engine = compiled;
-      compiled.catch(() => {
-        if (this.#engine === compiled) this.#engine = undefined;
-      });
-    }
-    return this.#engine;
-  }
-
-  /** Own one checked contract for exactly one installed revision. */
+  /** Own one verified artifact for exactly one installed revision. */
   async materialize(definition: OrbArtifact): Promise<OrbDefinition> {
+    // Verification runs on the actual component types before any guest code exists.
     const artifact = new this.contracts.WasmArtifact(definition.artifact);
     let released = false;
     const release = () => {
@@ -86,19 +117,20 @@ export class BrowserExecution {
     }
   }
 
-  /** Check installation authority before creating any guest heap or filesystem descriptors. */
+  /** Check installation authority before creating any guest instance or provider. */
   private async open(
     contract: BrowserArtifact,
     installation: LoadOptions,
     release: () => void,
   ): Promise<OrbDefinition> {
+    requireJspi();
     const identity = JSON.parse(contract.description()) as {
       name: string;
       apiVersion: number;
-      kind: string;
     };
-    if (identity.kind !== "source")
-      throw new Error("Compiled Orb execution is unavailable in this browser backend");
+    const source = contract.sourceRuntime();
+    const names = JSON.parse(contract.imports()) as string[];
+    checkPublicWasi(names);
     const prepared = query<InstallationPlan>(contract, {
       kind: "install",
       name: identity.name,
@@ -106,19 +138,26 @@ export class BrowserExecution {
       requires: installation.requires ?? {},
       grants: installation.grants ?? {},
       filesystem: Object.keys(this.options.providers?.filesystem ?? {}),
-      // Network grants resolve only against socket providers and HTTP grants only against HTTP
-      // providers, so one registry never satisfies the other kind of grant.
       network: Object.keys(this.options.providers?.network ?? {}),
       http: Object.keys(this.options.providers?.http ?? {}),
     });
-    const options = { ...identity, grants: installation.grants };
+    const graph = query<Described>(contract, { kind: "describe" });
+    const timeout = positive("timeoutMs", this.options.limits?.timeoutMs ?? 10000);
+    const memoryBytes = positive("memoryBytes", this.options.limits?.memoryBytes ?? 128 << 20);
+    const fuel = BigInt(positive("fuel", this.options.limits?.fuel ?? 100_000_000));
+    const maximumPages = Math.floor(memoryBytes / PAGE);
+    if (maximumPages < 1 || maximumPages > 0xffff)
+      throw new Error("limits.memoryBytes must hold between 1 and 65535 pages of 64 KiB");
+    const grants = installation.grants ?? {};
+    const system = grants.system ?? [];
+    const ended = new AbortController();
     let capabilities: BrowserCapabilities | undefined;
     let stdio: StdioStreams | undefined;
-    const port = new BrowserPort(
-      this.options.limits?.timeoutMs ?? 10000,
+    const port = new ComponentPort(
+      timeout,
       async () => {
+        ended.abort();
         const cleanup: Promise<unknown>[] = [Promise.resolve().then(() => capabilities?.dispose())];
-        // Until construction succeeds, this scope owns providers returned by the factory.
         if (stdio)
           for (const provider of new Set([stdio.stdin, stdio.stdout, stdio.stderr]))
             cleanup.push(Promise.resolve().then(() => provider?.close?.()));
@@ -133,122 +172,135 @@ export class BrowserExecution {
             "Provider cleanup failed",
           );
       },
-      (record) => {
-        if (!["log", "debug", "info", "warn", "error"].includes(record.level))
-          throw new Error("Invalid console level");
-        try {
-          this.options.onLog?.({
-            orb: options.name,
-            level: record.level,
-            message: String(record.message),
-          });
-        } catch {
-          /* Logging observers do not control the guest. */
-        }
-      },
-      this.options.limits?.packetBytes ?? 8 << 20,
+      fuel,
     );
     try {
-      const memory = this.options.limits?.memoryBytes ?? 128 << 20;
-      if (!Number.isSafeInteger(memory) || memory < 2 << 20 || memory > 0xffffffff)
-        throw new Error("Invalid interpreter memory bound");
-      capabilities = await BrowserCapabilities.open(
-        options.grants ?? {},
-        this.options.providers ?? {},
-      );
-      const description = query<{
-        imports: { binding: string; contract: string; type_only: boolean }[];
-      }>(contract, { kind: "describe" });
+      capabilities = await BrowserCapabilities.open(grants, this.options.providers ?? {});
+      if (system.includes("cli"))
+        stdio = this.options.providers?.stdio?.(identity.name, installation.cli ?? {}) ?? {};
+      const clocks = system.includes("clocks")
+        ? checkedClocks(this.options.providers?.clocks ?? browserClocks())
+        : undefined;
+      const random = system.includes("random")
+        ? revisionRandom(this.options.providers?.random ?? browserRandom())
+        : undefined;
+      const log = (level: LogLevel, message: string) => {
+        if (!LEVELS.includes(level)) return;
+        this.options.onLog?.({
+          orb: identity.name,
+          level,
+          message: String(message),
+        });
+      };
       // Each socket interface uses exactly the provider its import binding selected.
       const bound = (name: string) => {
-        const entry = description.imports.find((item) => item.contract === name);
+        const entry = graph.imports.find((item) => item.contract === name);
         const binding = entry && prepared.bindings[entry.binding];
         return binding?.kind === "host" ? binding.provider : undefined;
       };
-      if (options.grants?.system?.includes("cli"))
-        stdio = this.options.providers?.stdio?.(options.name, installation.cli ?? {});
-      // Standard WASI calls reach only the interfaces this revision imported and was granted.
-      port.standard = new StandardHost(
-        new Set(
-          description.imports
-            .filter((item) => item.type_only === false)
-            .map((item) => item.contract),
-        ),
-        capabilities.mounts,
-        this.options.limits?.packetBytes ?? 8 << 20,
-        {
-          clocks: this.options.providers?.clocks,
-          random: this.options.providers?.random,
-          // Standard `wasi:http` sends reach only providers granted for an exact origin.
+      const convert = converters(graph);
+      const revision = new ComponentRevision(port, contract, graph, timeout, source);
+      const imports: Record<string, unknown> = {
+        ...runtimeInternals(source ? names : [], clocks, (bytes) => port.panic(bytes)),
+        ...publicWasi(names, {
+          clocks,
+          random,
+          ...(stdio ? { cli: { options: installation.cli ?? {}, stdio } } : {}),
+          mounts: () => capabilities?.mounts ?? [],
+          host: port.wasi,
           http: capabilities.network,
+          ingress: (bridge) => (revision.ingressBridge = bridge as never),
           sockets: {
             types: capabilities.network.sockets(bound("wasi:sockets/types@0.3.0")),
             lookup: capabilities.network.sockets(bound("wasi:sockets/ip-name-lookup@0.3.0")),
           },
-          ...(options.grants?.system?.includes("cli")
-            ? {
-                cli: installation.cli,
-                stdio,
-              }
-            : { stdio: undefined }),
-        },
-      );
-      // The standard host now owns provider cleanup, including failed VM initialization.
-      stdio = undefined;
-      const { clocks, random } = port.standard;
-      // The instance links no filesystem, socket or environment capability.
-      port.guest = await CoreGuest.create(await this.engine(), memory, {
-        sync: (packet) => (typeof packet === "string" ? port.sync(packet) : port.sync(packet)),
-        log: (level, message) => port.log({ operation: "console", level, message }),
-        clock: (clock) => {
-          if (!options.grants?.system?.includes("clocks")) return 0n;
-          if (clock === CLOCK_MONOTONIC) return clocks.monotonicNow();
-          const instant = clocks.systemNow();
-          return instant.seconds * 1_000_000_000n + BigInt(instant.nanoseconds);
-        },
-      });
-      await port.load(
-        JSON.stringify({
-          source: contract.source(),
-          heap_bytes: Math.floor(memory / 2),
-          instruction_ticks: this.options.limits?.instructionTicks ?? 10000,
-          contract: description,
-          builtins: {
-            clock: options.grants?.system?.includes("clocks") ?? false,
-            seed: options.grants?.system?.includes("random")
-              ? random.insecureSeed().map(String)
-              : null,
-          },
         }),
+      };
+      const suspending: string[] = [];
+      const promising: string[] = [];
+      const functions = (entry: { functions?: Record<string, unknown> }): ImportedFunction[] =>
+        Object.entries(entry.functions ?? {}).map(([name, fn]) => ({
+          name,
+          spelling: graph.javascriptNames[name] ?? name,
+          values: convert(fn as GraphFunction),
+        }));
+      for (const entry of graph.exports)
+        for (const name of Object.keys(entry.functions ?? {}))
+          promising.push(`${entry.binding}#${name}`);
+      for (const name of names) {
+        if (Object.hasOwn(imports, name)) continue;
+        if (name === HOST && source) {
+          imports[name] = orbHost(port, log);
+          continue;
+        }
+        if (runtimeInternal(name) && !source)
+          throw new Error(`A compiled component may not import ${name}`);
+        const selected = graph.imports.find((item) => item.binding === name);
+        const service = selected && prepared.importServices[name];
+        if (selected && service && prepared.bindings[name]?.kind === "orb") {
+          imports[name] = dependencyImport(port, name, functions(selected));
+          for (const fn of Object.keys(selected.functions ?? {})) suspending.push(`${name}#${fn}`);
+          continue;
+        }
+        if (selected?.type_only) {
+          imports[name] = {};
+          continue;
+        }
+        const hook = source && !selected && graph.exports.find((item) => item.binding === name);
+        if (hook) {
+          const object: Record<string, unknown> = {};
+          for (const fn of functions(hook))
+            Object.assign(
+              object,
+              hookImport(port, () => revision.hookFor(name), fn),
+            );
+          imports[name] = object;
+          for (const fn of Object.keys(hook.functions ?? {})) suspending.push(`${name}#${fn}`);
+          continue;
+        }
+        throw new Error(`Browser component execution cannot provide import ${name}`);
+      }
+      const compiled = await this.compiler.compile({
+        component: contract.component(),
+        imports: names,
+        suspendingImports: suspending,
+        promisingExports: promising,
+        instrumentCore: (bytes, pages) => this.contracts.instrumentCore(bytes, pages),
+        maximumPages,
+      });
+      // One budget per instance: pages are shared by all its core modules; instantiation runs on
+      // its own finite fuel, and each admitted callback is refilled to `fuel`.
+      const limits: CoreLimits = {
+        fuel: new WebAssembly.Global({ value: "i64", mutable: true }, fuel),
+        pages: new WebAssembly.Global({ value: "i64", mutable: true }, BigInt(maximumPages)),
+      };
+      port.limits = limits;
+      const instance = await compiled.instantiate(imports, port.observer, limits);
+      port.exports = instance as never;
+      if (source && !instance[LIFECYCLE])
+        throw new Error("The component exports no Tembra lifecycle");
+      const description = await revision.describe(
+        identity,
+        JSON.parse(contract.contributions()) as Record<string, number>,
       );
-      return new Revision(port, contract, this.options.limits?.timeoutMs ?? 10000).definition(
-        options,
-        prepared,
-      );
+      return revision.definition(identity, prepared, description);
     } catch (error) {
       try {
         await port.close();
       } catch (disposal) {
-        throw new AggregateError(
-          [error, disposal],
-          "Interpreter initialization and disposal failed",
-        );
+        throw new AggregateError([error, disposal], "Component initialization and disposal failed");
       }
       throw error;
     }
   }
 }
 
-/** Load the optional interpreter assets and prepared-contract validator behind Tembra's facade. */
+/** Load the verifier behind Tembra's facade; the compiler loads on the first installation. */
 export async function createExecution(
   options: BrowserInterpreterOptions,
 ): Promise<BrowserExecution> {
-  // The engine package locates its own interpreter, so bundled SDK code needs no import map.
-  const engine =
-    options.engine === undefined
-      ? (await import("@syntropika/tembra-engine-wasm/assets")).interpreterURL()
-      : new URL(options.engine, globalThis.location?.href);
-  const contracts = (await import("@syntropika/tembra-engine-wasm/contracts")) as ContractModule;
+  const contracts =
+    (await import("@syntropika/tembra-engine-wasm/contracts")) as unknown as ContractModule;
   await contracts.default(options.contractsInput);
-  return new BrowserExecution({ ...options, engine }, contracts);
+  return new BrowserExecution(options, contracts);
 }

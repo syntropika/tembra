@@ -44,6 +44,7 @@ impl Writer {
         self.0.extend_from_slice(value.as_bytes());
     }
 
+    #[cfg(any(feature = "authoring", test))]
     pub(crate) fn bytes(&mut self, value: &[u8]) {
         self.len(value.len());
         self.0.extend_from_slice(value);

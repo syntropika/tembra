@@ -38,8 +38,6 @@ struct Logs {
 }
 
 fn engine(interpreted: bool, logs: Arc<Logs>) -> Engine {
-    let interpreter =
-        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
     let limits = Limits {
         timeout_ms: 30_000,
         ..Limits::default()
@@ -49,8 +47,6 @@ fn engine(interpreted: bool, logs: Arc<Logs>) -> Engine {
     } else {
         Engine::new(limits)
     }
-    .unwrap()
-    .interpreter(&interpreter)
     .unwrap()
     .on_log(move |record| {
         logs.messages.lock().unwrap().push(record.message.clone());
@@ -112,7 +108,11 @@ fn scenario(interpreted: bool) {
         ("retained-reference", "belongs to another root"),
         // Only selected WIT Orb imports can be acquired, and keys are lists of strings.
         ("unknown-import", "not a selected wit orb import"),
-        ("key-kind", "malformed"),
+        // The SDK refuses a malformed key before the host is asked.
+        (
+            "key-kind",
+            "refused: a reference key is a string or a list of strings",
+        ),
         // Explicit release is idempotent and observable while the root lasts.
         ("release", "released"),
     ] {
@@ -176,13 +176,13 @@ fn scenario(interpreted: bool) {
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn source_context_get_selects_root_scoped_instances() {
     scenario(false);
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_FIXTURES"]
 fn pulley_source_context_get_selects_root_scoped_instances() {
     scenario(true);
 }

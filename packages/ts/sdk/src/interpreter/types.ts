@@ -13,7 +13,12 @@ export interface Description {
   apiVersion?: number;
   services: Record<
     string,
-    { methods: string[]; lifetime?: Lifetime; linger?: number; access?: boolean }
+    {
+      methods: string[];
+      lifetime?: Lifetime;
+      linger?: number;
+      access?: boolean;
+    }
   >;
   hooks?: Record<string, "series" | "waterfall" | "bail">;
   contributes?: Record<string, number>;
@@ -87,6 +92,24 @@ export interface ExecutionScope {
   cancel(): void;
   sync(request: import("./host-protocol.ts").HostRequest): unknown;
   async(request: import("./host-protocol.ts").AsyncHostRequest): Promise<unknown>;
+  /**
+   * Component execution: call a selected Orb import with typed host-domain arguments (WIT 64-bit
+   * positions as `bigint`). `reference` is the guest's one-turn selection; without one, only a
+   * compiled component's default `main` handle applies. Answers the typed host-domain result.
+   */
+  call?(
+    reference: import("./host-protocol.ts").Handle | undefined,
+    binding: string,
+    method: string,
+    args: readonly unknown[],
+  ): Promise<unknown>;
+  /**
+   * Component execution: refuse a selection before it is recorded, as native `select` does: a
+   * reference must resolve for this callback (its issuing table and root); a hook must be issued.
+   */
+  checkSelection?(kind: "reference" | "hook", handle: import("./host-protocol.ts").Handle): void;
+  /** Component execution: run a declared hook of this Orb with a typed host-domain input. */
+  hook?(hook: import("./host-protocol.ts").Handle, input: unknown, alias: string): Promise<unknown>;
 }
 /** The guest service and method that serve incoming HTTP in one environment. */
 export interface IngressDispatch {

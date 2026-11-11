@@ -25,7 +25,11 @@ export type LogLevel = "log" | "debug" | "info" | "warn" | "error";
 
 /** Synchronous host operations. */
 export type HostRequest =
-  | { readonly operation: "console"; readonly level: LogLevel; readonly message: string }
+  | {
+      readonly operation: "console";
+      readonly level: LogLevel;
+      readonly message: string;
+    }
   | { readonly operation: "address" }
   | { readonly operation: "orb" }
   | { readonly operation: "signal.cancelled" }
@@ -74,6 +78,7 @@ export type AsyncHostRequest =
     }
   | ({
       readonly operation: "reference.call";
+      readonly binding: string;
       readonly method: string;
       readonly args: unknown;
     } & Handle)
@@ -86,6 +91,7 @@ export const WAIT_LIMIT_MILLISECONDS = 5000;
 type Kind =
   | "u32"
   | "string"
+  | "string?"
   | "keys"
   | "level"
   | "json"
@@ -127,7 +133,12 @@ const ASYNC = {
   "hook.run": { ...HANDLE, value: "json" },
   "reference.ready": HANDLE,
   "reference.acquire": { service: "string", key: "keys" },
-  "reference.call": { ...HANDLE, method: "string", args: "json" },
+  "reference.call": {
+    ...HANDLE,
+    binding: "string",
+    method: "string",
+    args: "json",
+  },
   wait: { milliseconds: "u32" },
 } as const satisfies Record<AsyncHostRequest["operation"], Schema>;
 const LEVELS: readonly string[] = ["log", "debug", "info", "warn", "error"];
@@ -189,6 +200,10 @@ function field(value: unknown, kind: Kind, invalid: () => Error): unknown {
   switch (kind) {
     case "u32":
       if (!isU32(value)) throw invalid();
+      return value;
+    case "string?":
+      if (absent) return undefined;
+      if (typeof value !== "string") throw invalid();
       return value;
     case "string":
       if (typeof value !== "string") throw invalid();

@@ -1,192 +1,249 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFile, lstat, mkdir, readFile, readdir, readlink, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  readlink,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import ts from "typescript";
-import { checkEngine, prepareBrowserEngine } from "./check-engine.ts";
-import * as abi from "../../../packages/ts/sdk/src/interpreter/abi.ts";
-import {
-  METHODS,
-  RESOURCES,
-  TYPES,
-  WRITABLE_FUTURES,
-} from "../../../packages/ts/sdk/src/interpreter/standard.ts";
 
-const revision = "b51e92c0c7ca3b0ae7afff1a1f2de8baf2e7a34a";
+// Editing an Orb reuses this dylib. Only a runtime or toolchain change rebuilds it.
+const quickjsRevision = "b51e92c0c7ca3b0ae7afff1a1f2de8baf2e7a34a";
+const runtimeRevision = "758687536ea711ede17369f53a90ddc3e97a8dbb";
 const root = import.meta.dir;
 const { values } = parseArgs({
   options: {
     sdk: { type: "string" },
     cache: { type: "string" },
-    source: { type: "string" },
-    toolchain: { type: "string", default: "nightly" },
+    "quickjs-source": { type: "string" },
+    "runtime-source": { type: "string" },
+    toolchain: { type: "string", default: "1.99.0" },
     package: { type: "boolean", default: false },
   },
 });
-if (!values.sdk || !values.cache)
-  throw new Error("Supply --sdk and --cache; optionally --source and --package");
+if (!values.sdk || !values.cache) throw new Error("Supply --sdk and --cache");
 const cache = path.resolve(values.cache);
 const sdk = path.resolve(values.sdk);
 await mkdir(cache, { recursive: true });
-const checkout = path.resolve(values.source ?? path.join(cache, "checkout"));
-if (
-  !(await Bun.file(path.join(checkout, "HEAD")).exists()) &&
-  !(await exists(path.join(checkout, ".git")))
-) {
-  if (values.source) throw new Error("The supplied source is not a Git checkout");
-  run("git", ["clone", "https://github.com/stencil-hq/dquickts", checkout]);
-}
-const archive = execFileSync("git", ["-C", checkout, "archive", revision], { maxBuffer: 64 << 20 });
-const source = path.join(cache, `dquickts-${revision}`);
-if (!(await exists(source))) {
-  await mkdir(source);
-  const archivePath = path.join(cache, "source.tar");
-  await writeFile(archivePath, archive);
-  run("tar", ["-xf", archivePath, "-C", source]);
-  const dtoa = path.join(source, "dtoa.c");
-  const text = await readFile(dtoa, "utf8");
-  if (text.split("#include <setjmp.h>").length !== 2)
-    throw new Error("Pinned dtoa include changed");
-  await writeFile(
-    dtoa,
-    text.replace("#include <setjmp.h>", "#if !defined(__wasi__)\n#include <setjmp.h>\n#endif"),
-  );
-}
-await verifySource(checkout, source);
-const bootstrap = path.join(cache, "bootstrap");
-const config = ts.readConfigFile(path.join(root, "tsconfig.json"), ts.sys.readFile);
-const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, root);
-const program = ts.createProgram(parsed.fileNames, parsed.options);
-const diagnostics = ts.getPreEmitDiagnostics(program);
-if (diagnostics.length)
-  throw new Error(
-    ts.formatDiagnosticsWithColorAndContext(diagnostics, {
-      getCurrentDirectory: () => root,
-      getCanonicalFileName: (name) => name,
-      getNewLine: () => "\n",
-    }),
-  );
-// The VM loads immutable metadata as data, avoiding JavaScript source parsing of escaped JSON.
-await mkdir(bootstrap, { recursive: true });
-await writeFile(
-  path.join(bootstrap, "standard-schema.json"),
-  JSON.stringify({ METHODS, RESOURCES, TYPES, WRITABLE_FUTURES }),
+const runtimePatch = path.join(root, "patches/runtime.patch");
+const runtimePatchBytes = await readFile(runtimePatch);
+const patchHash = digest(runtimePatchBytes);
+const enginePatchBytes = await readFile(path.join(root, "patches/dquickts.patch"));
+const enginePatchHash = digest(enginePatchBytes);
+const quickjs = await source(
+  "dquickts",
+  "https://github.com/stencil-hq/dquickts",
+  quickjsRevision,
+  values["quickjs-source"],
+  async (directory) => {
+    const patchFile = path.join(path.dirname(directory), "dquickts.patch");
+    await writeFile(patchFile, enginePatchBytes);
+    run(
+      "patch",
+      ["--batch", "--forward", "--fuzz=0", "-p1", "-i", patchFile],
+      undefined,
+      directory,
+    );
+  },
+  enginePatchHash,
 );
-const bundled = await Bun.build({
-  entrypoints: ["bridge", "state", "values", "standard", "runtime"].map((name) =>
-    path.join(root, "src", `${name}.ts`),
-  ),
-  outdir: bootstrap,
-  format: "iife",
-  target: "browser",
-  // Parse generated metadata as data. Compiling its object/array literals as JavaScript in
-  // every Orb spends fuel on bytecode that only reconstructs this immutable schema.
-  plugins: [
-    {
-      name: "standard-schema-data",
-      setup(builder) {
-        const table = path.resolve(root, "../../../packages/ts/sdk/src/interpreter/standard.ts");
-        builder.onResolve({ filter: /standard\.ts$/ }, (request) => {
-          if (path.resolve(request.resolveDir, request.path) === table)
-            return { path: "schema", namespace: "standard-schema-data" };
-        });
-        builder.onLoad({ filter: /.*/, namespace: "standard-schema-data" }, () => ({
-          contents: `
-            export const {METHODS, RESOURCES, TYPES, WRITABLE_FUTURES} = globalThis.__tembraStandardSchema;
-            delete globalThis.__tembraStandardSchema;
-          `,
-          loader: "js",
-        }));
+const runtime = await source(
+  "componentize-qjs",
+  "https://github.com/andreiltd/componentize-qjs",
+  runtimeRevision,
+  values["runtime-source"],
+  async (directory) => {
+    const patchFile = path.join(path.dirname(directory), "runtime.patch");
+    await writeFile(patchFile, runtimePatchBytes);
+    run("patch", ["--batch", "--forward", "-p1", "-i", patchFile], undefined, directory);
+    // The pinned lockfile stays authoritative. Only the four registry entries replaced by
+    // the pinned local dquickts workspace lose their registry identity; no resolution runs.
+    const file = path.join(directory, "Cargo.lock");
+    const lock = await readFile(file, "utf8");
+    let replaced = 0;
+    const patched = lock.replace(
+      /(\[\[package\]\]\nname = "rquickjs(?:-core|-macro|-sys)?"\nversion = "0\.14\.0"\n)source = "registry\+https:\/\/github.com\/rust-lang\/crates.io-index"\nchecksum = "[0-9a-f]+"\n/g,
+      (_match, header: string) => {
+        replaced++;
+        return header;
       },
-    },
-  ],
-  minify: { whitespace: true, syntax: true, identifiers: true },
-});
-if (!bundled.success) throw new AggregateError(bundled.logs, "Guest bootstrap build failed");
-// Rust requires literal link attributes; keep their names derived from the same ABI constants.
-await writeFile(
-  path.join(bootstrap, "host-imports.rs"),
-  `#[link(wasm_import_module = ${JSON.stringify(abi.IMPORT_MODULE)})]
-unsafe extern "C" {
-    #[link_name = ${JSON.stringify(abi.SYNC_IMPORT)}]
-    pub fn sync(packet: *const u8, length: usize) -> u32;
-    #[link_name = ${JSON.stringify(abi.SYNC_READ_IMPORT)}]
-    pub fn sync_read(destination: *mut u8, length: usize);
-}
-`,
+    );
+    if (replaced !== 4) throw new Error("Pinned QuickJS lock entries changed");
+    await writeFile(file, patched);
+  },
+  patchHash,
 );
-// The interpreter is a WASI preview 1 reactor core module. Its linear memory is imported so each
-// host instance supplies the configured maximum; the initial size is part of the private ABI.
-const target = "wasm32-wasip1";
+const target = "wasm32-wasip2";
 const sysroot = path.join(sdk, "share/wasi-sysroot");
-const env = {
+const env: NodeJS.ProcessEnv = {
   ...process.env,
   WASI_SDK: sdk,
+  WASI_SDK_PATH: sdk,
   RQUICKJS_SYS_NO_WASI_SDK: "1",
-  CC_wasm32_wasip1: path.join(sdk, "bin/clang"),
-  AR_wasm32_wasip1: path.join(sdk, "bin/llvm-ar"),
-  CFLAGS_wasm32_wasip1: `--sysroot=${sysroot}`,
-  BINDGEN_EXTRA_CLANG_ARGS_wasm32_wasip1: `--sysroot=${sysroot} -isystem ${path.join(sysroot, `include/${target}`)}`,
+  CC_wasm32_wasip2: path.join(sdk, "bin/clang"),
+  AR_wasm32_wasip2: path.join(sdk, "bin/llvm-ar"),
+  CFLAGS_wasm32_wasip2: `-fPIC -O3 --sysroot=${sysroot}`,
+  BINDGEN_EXTRA_CLANG_ARGS_wasm32_wasip2: `--sysroot=${sysroot} -isystem ${path.join(sysroot, `include/${target}`)}`,
   CARGO_TARGET_DIR: path.join(cache, "target"),
-  TEMBRA_GUEST_BOOTSTRAP_DIR: bootstrap,
-  TEMBRA_INTERPRETER_IMPORT_MODULE: abi.IMPORT_MODULE,
+  CARGO_TARGET_WASM32_WASIP2_LINKER: path.join(sdk, "bin/clang"),
+  CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS:
+    "-Clink-arg=-shared -Clink-arg=-Wl,--no-entry -Clink-arg=-Wl,--allow-undefined -Clto=fat -Copt-level=3",
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1",
+  CARGO_INCREMENTAL: "0",
 };
-const patch = `patch."https://github.com/stencil-hq/dquickts".rquickjs.path=${JSON.stringify(path.join(source, "rquickjs"))}`;
-const link = [
-  "-Clink-arg=--import-memory",
-  `-Clink-arg=--initial-memory=${abi.MEMORY_INITIAL_PAGES * abi.PAGE_BYTES}`,
-];
+// Cargo gives the encoded variable precedence over target-specific flags.
+delete env.CARGO_ENCODED_RUSTFLAGS;
 run(
-  "cargo",
+  "rustup",
   [
-    `+${values.toolchain}`,
+    "run",
+    values.toolchain ?? "1.99.0",
+    "cargo",
     "build",
     "--locked",
     "--release",
     "--target",
     target,
-    "--manifest-path",
-    path.join(root, "Cargo.toml"),
+    "--package",
+    "componentize-qjs-runtime",
+    "--no-default-features",
+    "--features",
+    "component-model-async",
     "--config",
-    patch,
-    "--config",
-    `target.${target}.rustflags=${JSON.stringify(link)}`,
+    `patch.crates-io.rquickjs.path=${JSON.stringify(path.join(quickjs, "rquickjs"))}`,
   ],
   env,
+  runtime,
 );
-const destination = path.join(cache, "engine.wasm");
-await copyFile(path.join(cache, `target/${target}/release/tembra_dquickts.wasm`), destination);
-const bytes = await readFile(destination);
-await checkEngine(bytes);
+const destination = path.join(cache, "runtime.wasm");
+const bytes = await readFile(
+  path.join(cache, `target/${target}/release/componentize_qjs_runtime.wasm`),
+);
+// This is a core dylib consumed by wit-dylib, not a separately installed Orb or host engine.
+const module = await WebAssembly.compile(bytes);
+const exports = new Set(WebAssembly.Module.exports(module).map((item) => item.name));
+for (const name of [
+  "init",
+  "wit_dylib_initialize",
+  "wit_dylib_export_async_call",
+  "wit_dylib_pop_u64",
+])
+  if (!exports.has(name)) throw new Error(`Runtime dylib export is missing: ${name}`);
+await writeFile(destination, bytes);
 const manifest = {
   engine: "dquickts",
-  protocol: `${abi.IMPORT_MODULE} (wasm32-wasip1 core reactor)`,
-  revision,
-  sourceArchiveSha256: createHash("sha256").update(archive).digest("hex"),
-  wasmSha256: createHash("sha256").update(bytes).digest("hex"),
-  bytes: bytes.length,
-  bun: Bun.version,
-  rust: execFileSync("rustc", [`+${values.toolchain}`, "-Vv"], { encoding: "utf8" }),
-  sdk: execFileSync(path.join(sdk, "bin/clang"), ["--version"], { encoding: "utf8" }),
+  quickjsRevision,
+  runtimeRevision,
+  patchSha256: patchHash,
+  enginePatchSha256: enginePatchHash,
+  wasmSha256: digest(bytes),
+  cargo: execFileSync("rustup", ["run", values.toolchain ?? "1.99.0", "cargo", "-V"], {
+    encoding: "utf8",
+  }),
+  rust: execFileSync("rustc", [`+${values.toolchain}`, "-Vv"], {
+    encoding: "utf8",
+  }),
+  sdk: execFileSync(path.join(sdk, "bin/clang"), ["--version"], {
+    encoding: "utf8",
+  }),
 };
-await writeFile(path.join(cache, "engine.json"), JSON.stringify(manifest, null, 2) + "\n");
+await writeFile(path.join(cache, "runtime.json"), JSON.stringify(manifest, null, 2) + "\n");
 if (values.package) {
-  const packages = path.resolve(root, "../../../packages/ts");
-  await mkdir(path.join(packages, "engine-node/dist"), { recursive: true });
-  await copyFile(destination, path.join(packages, "engine-node/dist/interpreter.wasm"));
-  await prepareBrowserEngine(bytes, path.join(packages, "engine-wasm/dist/interpreter"));
+  const output = path.resolve(root, "../../../packages/ts/engine-node/dist");
+  await mkdir(output, { recursive: true });
+  await copyFile(destination, path.join(output, "runtime.wasm"));
 }
 console.log(JSON.stringify({ module: destination, ...manifest }));
 
-/** Stop the build when a tool fails, retaining the compiler's own diagnostic. */
-function run(command: string, args: string[], env = process.env): void {
-  const result = spawnSync(command, args, { env, stdio: "inherit" });
+/** Archive only pinned Git objects; supplied working-tree edits never become runtime inputs. */
+async function source(
+  name: string,
+  repository: string,
+  revision: string,
+  supplied: string | undefined,
+  patch: (directory: string) => Promise<void>,
+  suffix = "wasi",
+): Promise<string> {
+  const checkout = path.resolve(supplied ?? path.join(cache, `${name}-checkout`));
+  if (!(await exists(checkout))) {
+    if (supplied) throw new Error(`Missing ${name} source checkout`);
+    run("git", ["clone", "--no-checkout", "--filter=blob:none", repository, checkout]);
+  }
+  const archive = execFileSync("git", ["-C", checkout, "archive", revision], {
+    maxBuffer: 64 << 20,
+  });
+  const directory = path.join(cache, `${name}-${revision}-${suffix}`);
+  // Reconstruct the expected tree on every build, so cache edits and unexpected files are
+  // rejected. Scratch ownership is local to this invocation; existing caches are never deleted.
+  const scratch = await mkdtemp(path.join(cache, `.prepare-${name}-`));
+  try {
+    const tar = path.join(scratch, "source.tar");
+    const expected = path.join(scratch, "source");
+    await mkdir(expected);
+    await writeFile(tar, archive);
+    run("tar", ["-xf", tar, "-C", expected]);
+    await patch(expected);
+    if (await exists(directory)) {
+      if (!(await lstat(directory)).isDirectory())
+        throw new Error(`Cached ${name} source must be a directory`);
+      if ((await treeDigest(directory)) !== (await treeDigest(expected)))
+        throw new Error(`Cached ${name} source differs from its pinned inputs: ${directory}`);
+    } else {
+      await rename(expected, directory);
+    }
+    return directory;
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+/** Hash file names, modes, symlink targets and bytes without following cached symlinks. */
+async function treeDigest(directory: string): Promise<string> {
+  const hash = createHash("sha256");
+  async function visit(current: string): Promise<void> {
+    for (const item of (await readdir(current, { withFileTypes: true })).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
+      const file = path.join(current, item.name);
+      const relative = path.relative(directory, file);
+      const stat = await lstat(file);
+      if (stat.isDirectory()) {
+        await visit(file);
+        continue;
+      }
+      if (!stat.isFile() && !stat.isSymbolicLink())
+        throw new Error(`Unsupported source entry: ${file}`);
+      const bytes = stat.isSymbolicLink()
+        ? Buffer.from(await readlink(file))
+        : await readFile(file);
+      hash.update(
+        `${relative}\0${stat.isSymbolicLink() ? "link" : stat.mode & 0o111}\0${bytes.length}\0`,
+      );
+      hash.update(bytes);
+    }
+  }
+  await visit(directory);
+  return hash.digest("hex");
+}
+
+function digest(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function run(command: string, args: string[], env = process.env, cwd?: string): void {
+  const result = spawnSync(command, args, { env, cwd, stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status}`);
 }
 
-/** Distinguish a missing owned path from other filesystem failures. */
 async function exists(file: string): Promise<boolean> {
   try {
     await lstat(file);
@@ -195,47 +252,4 @@ async function exists(file: string): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
-}
-
-/** Verify every cached byte and symlink against the pinned Git tree and the one WASI include patch. */
-async function verifySource(checkout: string, directory: string): Promise<void> {
-  const tree = execFileSync("git", ["-C", checkout, "ls-tree", "-rz", "--full-tree", revision], {
-    encoding: "utf8",
-    maxBuffer: 8 << 20,
-  });
-  const expected = new Set<string>();
-  for (const entry of tree.split("\0").filter(Boolean)) {
-    const match = /^(\d+) blob ([0-9a-f]{40})\t([\s\S]+)$/.exec(entry);
-    if (!match) throw new Error("Unsupported pinned source entry");
-    const mode = match[1]!;
-    const hash = match[2]!;
-    const relative = match[3]!;
-    const file = path.resolve(directory, relative);
-    if (!file.startsWith(directory + path.sep))
-      throw new Error("Pinned source escaped its directory");
-    const stat = await lstat(file);
-    if (stat.isSymbolicLink() !== (mode === "120000"))
-      throw new Error(`Cached source type differs: ${relative}`);
-    let data = mode === "120000" ? Buffer.from(await readlink(file)) : await readFile(file);
-    if (relative === "dtoa.c")
-      data = Buffer.from(
-        data
-          .toString()
-          .replace("#if !defined(__wasi__)\n#include <setjmp.h>\n#endif", "#include <setjmp.h>"),
-      );
-    const actual = createHash("sha1").update(`blob ${data.length}\0`).update(data).digest("hex");
-    if (actual !== hash) throw new Error(`Cached source differs: ${relative}`);
-    expected.add(relative);
-  }
-  /** Refuse untracked files without following cached symlinks. */
-  async function visit(current: string): Promise<void> {
-    for (const item of await readdir(current, { withFileTypes: true })) {
-      const file = path.join(current, item.name);
-      if (item.isDirectory()) await visit(file);
-      else if (!expected.delete(path.relative(directory, file)))
-        throw new Error("Unexpected cached source file");
-    }
-  }
-  await visit(directory);
-  if (expected.size) throw new Error("Cached source is incomplete");
 }

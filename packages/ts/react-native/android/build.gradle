@@ -21,7 +21,6 @@ react {
 
 android {
     namespace "com.tembra"
-    sourceSets.main.assets.srcDir("../native/interpreter")
     compileSdkVersion rootProject.ext.has("compileSdkVersion") ? rootProject.ext.compileSdkVersion : 36
     defaultConfig {
         minSdkVersion 24

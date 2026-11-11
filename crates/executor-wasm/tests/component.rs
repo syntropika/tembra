@@ -1,4 +1,4 @@
-//! Cross two actual Wasm Stores: TypeScript/dquickts and a compiled Rust WIT provider.
+//! Cross two actual component Stores: an SDK-built source Orb and a compiled Rust provider.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
@@ -7,19 +7,14 @@ use tembra_executor_wasm::{Contract, Engine, Install, Limits};
 
 /// Qualify real Canonical ABI calls and reject a component with a different declared signature.
 #[test]
-#[ignore = "requires TEMBRA_WASM_ENGINE, TEMBRA_WASM_ORB and TEMBRA_WASM_PROVIDER"]
+#[ignore = "requires TEMBRA_WASM_ORB and TEMBRA_WASM_PROVIDER"]
 fn typescript_calls_a_compiled_rust_orb() {
-    let interpreter =
-        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
     let component =
         std::fs::read(std::env::var_os("TEMBRA_WASM_PROVIDER").expect("TEMBRA_WASM_PROVIDER"))
             .unwrap();
     let bytes =
         std::fs::read(std::env::var_os("TEMBRA_WASM_ORB").expect("TEMBRA_WASM_ORB")).unwrap();
-    let engine = Engine::new(Limits::default())
-        .unwrap()
-        .interpreter(&interpreter)
-        .unwrap();
+    let engine = Engine::new(Limits::default()).unwrap();
     let wrong = Contract::from_source("wrong.wit","package example:integrated@1.0.0; interface arithmetic { double: func(value:string)->s32; } world provider { export arithmetic; }",None).unwrap();
     assert!(
         wrong

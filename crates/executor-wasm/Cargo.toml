@@ -68,10 +68,6 @@ tokio-rustls = { version = "0.26", default-features = false, features = [
 webpki-roots = "1"
 url = "2.5"
 
-[build-dependencies]
-sha2 = "0.10"
-wit-parser = "=0.261.0"
-
 [lints]
 workspace = true
 
@@ -81,5 +77,5 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = "3"
 wat = "=1.263.0"
-wit-component = "=0.261.0"
-wit-parser = "=0.261.0"
+wit-component = "=0.262.0"
+wit-parser = "=0.262.0"

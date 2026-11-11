@@ -1,0 +1,25 @@
+package tembra-mobile:io@1.0.0;
+
+/// Standard WASI 0.3 filesystem and socket probes through granted providers.
+interface files {
+    /// Read `/data/input` through the granted mount.
+    read: async func() -> string;
+    /// Try to open `/data/input` for writing; returns `ok` or the standard error code.
+    denied: async func() -> string;
+    /// Try to leave the preopen with `../secret`; returns `ok` or the standard error code.
+    escape: async func() -> string;
+    /// Send an HTTP/1.0 request over TCP to a granted loopback port and read the whole reply.
+    request: async func(port: u16) -> string;
+    /// Connect to a loopback port; returns `ok` or the standard error code.
+    connect: async func(port: u16) -> string;
+    /// Cancel a pending read, wait for it to settle, then drop the stream and the socket.
+    /// Returns `<read outcome>|<receive completion tag>`.
+    abandon: async func(port: u16) -> string;
+}
+
+world io {
+    import wasi:filesystem/types@0.3.0;
+    import wasi:filesystem/preopens@0.3.0;
+    import wasi:sockets/types@0.3.0;
+    export files;
+}

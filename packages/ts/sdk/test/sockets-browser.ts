@@ -175,11 +175,17 @@ function network(name: string, options: NetworkOptions) {
   const ledger = new Ledger();
   const listeners = new Map<
     number,
-    { queue: { socket: TcpBackend; connection: TcpConnection }[]; wake?: () => void }
+    {
+      queue: { socket: TcpBackend; connection: TcpConnection }[];
+      wake?: () => void;
+    }
   >();
   const inboxes = new Map<
     number,
-    { queue: { data: Uint8Array; remote: IpSocketAddress }[]; wake?: () => void }
+    {
+      queue: { data: Uint8Array; remote: IpSocketAddress }[];
+      wake?: () => void;
+    }
   >();
   let ephemeral = 49152;
   let serial = 0;
@@ -247,8 +253,10 @@ function network(name: string, options: NetworkOptions) {
       if (backlog < 1) throw new SocketProviderError({ tag: "invalid-argument" });
       backend.local ??= loopback(ephemeral++);
       const port = portOf(backend.local);
-      const box: { queue: { socket: TcpBackend; connection: TcpConnection }[]; wake?: () => void } =
-        { queue: [] };
+      const box: {
+        queue: { socket: TcpBackend; connection: TcpConnection }[];
+        wake?: () => void;
+      } = { queue: [] };
       listeners.set(port, box);
       listening = port;
       return {
@@ -266,7 +274,10 @@ function network(name: string, options: NetworkOptions) {
     const id = `${name}:udp#${++serial}`;
     ledger.created++;
     ledger.live.add(id);
-    const box: { queue: { data: Uint8Array; remote: IpSocketAddress }[]; wake?: () => void } = {
+    const box: {
+      queue: { data: Uint8Array; remote: IpSocketAddress }[];
+      wake?: () => void;
+    } = {
       queue: [],
     };
     const backend: UdpBackend & { local: IpSocketAddress | undefined } = {
@@ -284,7 +295,10 @@ function network(name: string, options: NetworkOptions) {
         const port = portOf(remote);
         if (port === 7101) {
           box.queue.push({ data: Uint8Array.of(66), remote: loopback(7102) });
-          box.queue.push({ data: data.slice().reverse(), remote: loopback(port) });
+          box.queue.push({
+            data: data.slice().reverse(),
+            remote: loopback(port),
+          });
           box.wake?.();
         }
       },
@@ -356,7 +370,7 @@ const relayed: Peer = async (ledger) => {
  * Generated `wasi:sockets` imports in an authored TypeScript Orb, compiled to a source artifact,
  * run by the shared Wasm interpreter in Chrome, with exact per-Orb provider grants.
  */
-export async function verifySocketScenario(engine?: URL): Promise<string> {
+export async function verifySocketScenario(): Promise<string> {
   const fixture = async (name: string) => {
     const response = await fetch(`/${name}.wasm`);
     if (!response.ok) throw new Error(`Missing fixture ${name}`);
@@ -372,8 +386,9 @@ export async function verifySocketScenario(engine?: URL): Promise<string> {
   const relay = network("relay", { full: false, peers: { 7200: relayed } });
   const host = await createHost({
     isolated: {
-      ...(engine ? { engine } : {}),
-      providers: { network: { loopback: local.provider, relay: relay.provider } },
+      providers: {
+        network: { loopback: local.provider, relay: relay.provider },
+      },
     },
   });
   const report: string[] = [];
@@ -433,24 +448,18 @@ export async function verifySocketScenario(engine?: URL): Promise<string> {
     local.ledger.settled("TCP exchange cleanup");
     report.push(`exchange ${SIZE} bytes each way, FIN both ways, one accept pull`);
 
-    // A connect pending at callback end is aborted; its late connection is closed, unpublished.
-    same(await probes.abandon(7001), "pending", "abandoned connect");
+    // A pending read is abandoned as the runtime requires: cancelled, awaited, then dropped. The
+    // drop cancels the provider read exactly once, before the callback physically completes.
+    same(await probes.idle(7002), "cancelled|ok", "idle receive cancel and drop");
     same(
-      [
-        local.ledger.calls["tcp.connect.aborted"],
-        local.ledger.find("late:download").reader,
-        local.ledger.find("late:upload").writer,
-      ],
-      [1, "cancelled", "aborted"],
-      "late connection discarded by the host",
+      [local.ledger.find("silent:download").reader, local.ledger.find("silent:upload").writer],
+      ["cancelled", "teardown"],
+      "receive drop and unsent direction on close",
     );
-    report.push("abandoned connect: provider aborted, late connection cancelled and aborted");
-
-    // Dropping a receive stream with a read pending cancels the provider read at once.
-    same(await probes.idle(7002), "dropped|ok", "idle receive drop");
-    same(local.ledger.find("silent:download").reader, "cancelled", "receive drop");
-    same(local.ledger.find("silent:upload").writer, "teardown", "unsent direction on close");
-    report.push("idle receive drop: pending read failed as dropped, provider read cancelled");
+    local.ledger.settled("idle receive cleanup");
+    report.push(
+      "idle receive: cancelled read, drop cancels the provider read, closed before the next callback",
+    );
 
     // UDP: the ungranted sender is filtered, refusals never reach the provider.
     const sends = local.ledger.calls["udp.send"] ?? 0;
@@ -509,7 +518,6 @@ export async function verifySocketScenario(engine?: URL): Promise<string> {
     peer?.release();
     await host.close();
   }
-  // The abandoned socket was held by the guest until retirement; nothing outlives the host.
   local.ledger.settled("loopback retirement");
   relay.ledger.settled("relay retirement");
   const calls = JSON.stringify([local.ledger.calls, relay.ledger.calls]);
@@ -528,5 +536,65 @@ export async function verifySocketScenario(engine?: URL): Promise<string> {
     "pendingJobs",
   ] as const)
     if (diagnostics[name] !== 0) throw new Error(`${name} survived socket retirement`);
+  report.push(await verifyAbandonedConnect(artifact));
   return `standard sockets: ${report.join("; ")}`;
+}
+
+/**
+ * Breaking semantics: a callback ends only after its host operations physically settle, so a
+ * connect left pending when the export returned keeps the callback open. A connect that never
+ * completes therefore reaches the callback deadline, which quarantines the revision. Retirement
+ * aborts the provider connect, discards the connection it delivers late (never published), and
+ * closes the socket the guest still held.
+ */
+async function verifyAbandonedConnect(artifact: Uint8Array): Promise<string> {
+  const local = network("abandon", { full: true, peers: { 7001: late } });
+  const host = await createHost({
+    isolated: {
+      providers: { network: { loopback: local.provider } },
+      limits: { timeoutMs: 1500 },
+    },
+  });
+  let probes;
+  try {
+    await host.install({
+      artifact,
+      grants: {
+        network: [{ provider: "loopback", connect: ["127.0.0.1:7001"] }],
+      },
+    });
+    probes = await host.get(`sockets::${PROBES}`, "main");
+    let failure = "";
+    try {
+      await probes.abandon(7001);
+    } catch (error) {
+      failure = String((error as Error)?.message ?? error);
+    }
+    if (!/wall time limit/.test(failure))
+      throw new Error(`abandoned connect: expected the callback deadline, got "${failure}"`);
+    let refused = "";
+    try {
+      await probes.abandon(7001);
+    } catch (error) {
+      refused = String((error as Error)?.message ?? error);
+    }
+    if (!/quarantined/.test(refused))
+      throw new Error(`abandoned connect: a quarantined revision answered "${refused}"`);
+  } finally {
+    probes?.release();
+    await host.close();
+  }
+  same(
+    [
+      local.ledger.calls["tcp.connect"],
+      local.ledger.calls["tcp.connect.aborted"],
+      local.ledger.find("late:download").reader,
+      local.ledger.find("late:upload").writer,
+      local.ledger.calls["tcp.close"],
+    ],
+    [1, 1, "cancelled", "aborted", 1],
+    "late connection discarded and held socket closed at retirement",
+  );
+  local.ledger.settled("abandoned connect retirement");
+  return "abandoned connect: deadline quarantine, provider aborted, late connection discarded, held socket closed";
 }

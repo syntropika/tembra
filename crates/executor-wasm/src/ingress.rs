@@ -70,6 +70,7 @@ use tembra::{Context, Host, Reference, Result};
 use tokio::sync::{oneshot, watch};
 
 mod carrier;
+mod refusal;
 pub(crate) use carrier::begin as begin_carrier;
 pub use carrier::{
     IngressEvent, IngressField, IngressPort, IngressRequestChunk, IngressRequestHead,
@@ -204,11 +205,6 @@ impl Exchange {
         drop(slot);
         drop(body);
         self.response_waker.wake();
-    }
-
-    /// Whether delivery has ended, whichever way.
-    pub(crate) fn ended(&self) -> bool {
-        self.delivery.borrow().is_some()
     }
 
     /// Resolve once delivery has ended, whichever way.

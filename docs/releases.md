@@ -32,7 +32,7 @@ workspace's TypeScript and Node type versions. A consumer compiled with `NodeNex
 must typecheck against every published SDK entry. It then runs with Node and Bun on
 native and WASM hosts, including error class identity across entrypoints. The
 installed build tooling, run with Bun, builds a source orb and packages the compiled
-Rust provider. The Node host executes both through the packaged interpreter.
+Rust provider. The Node host executes both through the common component backend. Source components already contain their runtime.
 Publication starts only after every build and packaging check passes.
 
 Select **Actions → Release → Run workflow** for a build rehearsal on the chosen ref.

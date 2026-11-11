@@ -30,6 +30,11 @@ impl exports::example::probe::probe::Guest for Probe {
         checksum
     }
 
+    /// Exercise the host's linear-memory bound without allocating through the Rust heap.
+    fn grow(pages: u32) -> u32 {
+        core::arch::wasm32::memory_grow::<0>(pages as usize) as u32
+    }
+
     /// Stop the component with a Wasm trap.
     fn trap() {
         core::arch::wasm32::unreachable()

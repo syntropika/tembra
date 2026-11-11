@@ -34,9 +34,11 @@ function later() {
 function observe(
   environment: Environment,
   name: string,
-  transmitted: PromiseLike<{ tag: string }>,
+  transmitted: { read(): Promise<{ tag: string }> },
 ) {
-  void transmitted.then((result) => environment.ledger.note(`${name}-transmitted:${result.tag}`));
+  void transmitted
+    .read()
+    .then((result) => environment.ledger.note(`${name}-transmitted:${result.tag}`));
 }
 
 export default orb({
@@ -113,6 +115,18 @@ export default orb({
             };
             throw Object.assign(new Error("refused"), {
               payload: payloads[path.slice("/refuse/".length)],
+            });
+          }
+          if (path === "/built-refuse") {
+            // A response built with body and trailers, dropped unsent; the handler then refuses.
+            const [built] = Response.new(
+              fields([]),
+              writeChunks([text("unsent")]),
+              Promise.resolve({ tag: "ok" as const, val: fields([["x-unsent", "1"]]) }),
+            );
+            built[Symbol.dispose]();
+            throw Object.assign(new Error("refused after building"), {
+              payload: { tag: "HTTP-request-denied" },
             });
           }
           if (path === "/trap") throw new Error("handler trap");

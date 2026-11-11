@@ -1,4 +1,4 @@
-//! Install interpreter-backed callbacks through the existing native Orb facade.
+//! Install component-backed callbacks through the existing native Orb facade.
 use crate::{
     bindings::{BoundMethod, Environment, Import, Roles},
     failure,

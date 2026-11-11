@@ -5,21 +5,15 @@ export default orb({
   services: {
     policy: {
       methods: {
+        // Without clock or random grants the runtime's internal clocks are frozen at the epoch
+        // and its random seed is fixed: ambient builtins never observe host time or entropy.
         inspect() {
-          const refused = (read: () => unknown) => {
-            try {
-              read();
-              return false;
-            } catch {
-              return true;
-            }
-          };
           return JSON.stringify({
-            now: refused(() => Date.now()),
-            date: refused(() => new Date()),
-            call: refused(() => Date()),
-            constructor: refused(() => new (new Date(0).constructor as DateConstructor)()),
-            random: refused(() => Math.random()),
+            now: Date.now(),
+            date: new Date().getTime(),
+            call: Date(),
+            constructor: new (new Date(0).constructor as DateConstructor)().getTime(),
+            random: Math.random(),
             pure: new Date(0).toISOString(),
           });
         },

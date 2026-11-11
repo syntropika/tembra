@@ -19,7 +19,7 @@ async function read(file: Descriptor, offset: bigint): Promise<Uint8Array> {
   const [stream, done] = file.readViaStream(offset);
   const chunks: Uint8Array[] = [];
   for await (const chunk of readChunks(stream)) chunks.push(chunk);
-  const result = await done;
+  const result = await done.read();
   if (result.tag !== "ok") throw new Error(`read failed: ${result.val.tag}`);
   const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
   let position = 0;
@@ -78,14 +78,18 @@ export default orb({
           return JSON.stringify({ size: stat.size.toString(), tail: Array.from(tail) });
         },
         async hang() {
-          // Waits until the caller cancels; cancellation must not revoke the retained file.
+          // Waits until the caller cancels; cancellation must not revoke the retained file. The
+          // marker lets a caller cancel only after the wait was really entered.
+          console.info("standard:waiting");
           await waitFor(60_000_000_000n);
           return "elapsed";
         },
         async abandon() {
           if (!retained) throw new Error("no retained descriptor");
-          // Pending callback work is revoked when the callback returns; the descriptor is not.
-          void waitFor(60_000_000_000n).catch(() => {});
+          // Finite detached work: the result returns at once, but the callback completes
+          // physically only after the 40 ms wait and the stat settle. The descriptor survives.
+          // (A never-ending detached wait is the B1 deadline case, tests/source/b1.)
+          void waitFor(40_000_000n).catch(() => {});
           void retained.stat().catch(() => {});
           return "returned";
         },
@@ -106,7 +110,7 @@ export default orb({
             largest = Math.max(largest, chunk.length);
             chunks++;
           }
-          const result = await done;
+          const result = await done.read();
           return JSON.stringify({ length, chunks, largest, matches, done: result.tag });
         },
         async denied() {

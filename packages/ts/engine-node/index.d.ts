@@ -21,7 +21,13 @@ export class NodeContract {
   /** Encoded WIT for type generation; the object retains the original import authority. */
   wit(): Uint8Array;
   request(packet: string): string;
-  sourceArtifact(source: string, name: string, apiVersion: number): Uint8Array;
+  sourceArtifact(
+    source: string,
+    runtime: Uint8Array,
+    name: string,
+    apiVersion: number,
+    hooks?: string[],
+  ): Uint8Array;
   componentArtifact(
     component: Uint8Array,
     name: string,
@@ -30,10 +36,9 @@ export class NodeContract {
   ): Uint8Array;
 }
 
-/** Isolated Wasmtime backend used by Tembra's optional interpreter facade. */
+/** Wasmtime component backend behind Tembra's isolated execution facade. */
 export class NodeInterpreter {
   constructor(configuration: string, log: (packet: string) => void);
-  interpreter(bytes: Uint8Array): void;
   open(artifact: NodeArtifact, bindings: string, grants: string, cli?: string): NodeInterpreterPort;
   instances(): number;
 }

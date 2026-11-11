@@ -29,7 +29,7 @@ async function exported(packageName: string, entry: string): Promise<string> {
 const imports = {
   "@syntropika/tembra-engine-wasm": await exported("engine", "."),
   "@syntropika/tembra-engine-wasm/contracts": await exported("engine", "./contracts"),
-  "@syntropika/tembra-engine-wasm/assets": await exported("engine", "./assets"),
+  "@syntropika/tembra-engine-wasm/compiler": await exported("engine", "./compiler"),
 };
 const entry = await exported("sdk", "./browser");
 const rootEntry = await exported("sdk", ".");
@@ -54,6 +54,7 @@ const output = new Map<string, string>(
   ),
 );
 const missing = new Set<string>();
+const nonce = crypto.randomUUID().replaceAll("-", "");
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -62,7 +63,7 @@ const server = Bun.serve({
     if (url.pathname === "/") {
       const bundled = url.searchParams.has("bundle");
       return new Response(
-        `<!doctype html><body>running<script type="importmap">${JSON.stringify({ imports })}</script><script type="module">
+        `<!doctype html><body>running<script nonce="${nonce}" type="importmap">${JSON.stringify({ imports })}</script><script nonce="${nonce}" type="module">
 try {
   const {createHost}=await import(${JSON.stringify(bundled ? "/bundle/browser.js" : entry)});
   const {TembraError}=await import(${JSON.stringify(bundled ? "/bundle/index.js" : rootEntry)});
@@ -83,7 +84,12 @@ try {
   document.body.textContent="PACKED_BROWSER_PASS";
 }catch(error){document.body.textContent="PACKED_BROWSER_FAIL "+(error.stack??error);}
 </script>`,
-        { headers: { "Content-Type": "text/html" } },
+        {
+          headers: {
+            "Content-Type": "text/html",
+            "Content-Security-Policy": `default-src 'self'; script-src 'self' 'nonce-${nonce}' blob: 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'`,
+          },
+        },
       );
     }
     const bundle = output.get(url.pathname);

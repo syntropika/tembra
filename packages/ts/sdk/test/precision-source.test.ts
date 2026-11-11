@@ -8,20 +8,21 @@ import { verifyPrecisionScenario } from "./precision-scenario.ts";
 
 const fixtures = process.env.TEMBRA_WASM_FIXTURES;
 
-test.skipIf(!fixtures)("Node: exact u64/s64 between the application and source Orbs", async () => {
-  const engine = process.env.TEMBRA_WASM_ENGINE;
-  const host = createHost(
-    engine ? { isolated: { engine: new Uint8Array(await readFile(engine)) } } : {},
-  );
-  try {
-    const report = await verifyPrecisionScenario(
-      host,
-      async (name) => new Uint8Array(await readFile(path.join(fixtures!, `${name}.wasm`))),
-    );
-    expect(report).toContain("application -> source -> source");
-  } finally {
-    await host.close();
-  }
-  expect(host.diagnostics().values).toBe(0);
-  expect(host.diagnostics().pendingJobs).toBe(0);
-});
+test.skipIf(!fixtures)(
+  "Node: exact u64/s64 between the application and source Orbs",
+  async () => {
+    const host = createHost();
+    try {
+      const report = await verifyPrecisionScenario(
+        host,
+        async (name) => new Uint8Array(await readFile(path.join(fixtures!, `${name}.wasm`))),
+      );
+      expect(report).toContain("application -> source -> source");
+    } finally {
+      await host.close();
+    }
+    expect(host.diagnostics().values).toBe(0);
+    expect(host.diagnostics().pendingJobs).toBe(0);
+  },
+  120_000,
+);

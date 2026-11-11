@@ -1,0 +1,13 @@
+package test:standard-peer;
+
+/// A second Orb sharing the process-wide filesystem admission.
+interface checks {
+    /// 96 concurrent filesystem calls.
+    burst: async func() -> string;
+}
+
+world app {
+    import wasi:filesystem/types@0.3.0;
+    import wasi:filesystem/preopens@0.3.0;
+    export checks;
+}

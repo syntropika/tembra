@@ -30,6 +30,37 @@ tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2" }
 tembra = { path = "../tembra", version = "=0.2.2" }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
+# In-process source-Orb componentizer (see `src/componentize.rs`). Versions match the
+# workspace WIT toolchain (0.262) and the single Wasmtime used by the executor (51.0.0-rc.1).
+anyhow = "1"
+indexmap = "2"
+rand = { version = "0.10", default-features = false, features = ["std_rng"] }
+tempfile = "3"
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+wasi-preview1-component-adapter-provider = "=50.0.1"
+wasm-compose = { version = "=0.262.0", default-features = false }
+wasm-encoder = { version = "=0.262.0", features = ["wasmparser"] }
+wasmparser = "=0.262.0"
+wasmtime = { version = "=51.0.0-rc.1", default-features = false, features = [
+  "anyhow",
+  "async",
+  "component-model",
+  "component-model-async",
+  "cranelift",
+  "runtime",
+  "std",
+] }
+wasmtime-wasi = { version = "=51.0.0-rc.1", default-features = false, features = ["p2"] }
+wasmtime-wizer = { version = "=51.0.0-rc.1", default-features = false, features = [
+  "component-model",
+  "wasmtime",
+] }
+wit-component = { version = "=0.262.0", features = ["dummy-module"] }
+wit-dylib = "=0.262.0"
+wit-parser = "=0.262.0"
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
 
 [build-dependencies]
 napi-build = "=2.6.0"

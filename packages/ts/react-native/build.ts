@@ -1,4 +1,4 @@
-import { cpSync, copyFileSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { root, run } from "../../../scripts/native.ts";
@@ -15,14 +15,12 @@ function stage(source: string, destination: string): void {
   cpSync(source, destination, { recursive: true });
 }
 
-/** Package the same qualified Wasm interpreter used by the other native hosts. */
-function interpreter(): void {
-  const destination = path.join(native, "interpreter/tembra");
-  mkdirSync(destination, { recursive: true });
-  copyFileSync(
-    path.join(root, "packages/ts/engine-node/dist/interpreter.wasm"),
-    path.join(destination, "interpreter.wasm"),
-  );
+/**
+ * Source Orbs are components that carry their own interpreter, so no engine asset is packaged.
+ * Drop a stale staged copy so the published `native` directory never ships one.
+ */
+function withoutEngineAsset(): void {
+  rmSync(path.join(native, "interpreter"), { recursive: true, force: true });
 }
 
 const [platform, ...args] = process.argv.slice(2);
@@ -31,7 +29,7 @@ if (platform === "bindings" && args.length === 0) {
   run([process.execPath, path.join(kotlin, "build.ts"), "bindings"]);
 } else if (platform === "ios" && args.length === 0) {
   run([process.execPath, path.join(swift, "build.ts"), "build"]);
-  interpreter();
+  withoutEngineAsset();
   stage(path.join(swift, "Sources"), path.join(native, "swift/Sources"));
   stage(
     path.join(swift, "native/TembraFFI.xcframework"),
@@ -39,7 +37,7 @@ if (platform === "bindings" && args.length === 0) {
   );
 } else if (platform === "android") {
   run([process.execPath, path.join(kotlin, "build.ts"), "android", ...args]);
-  interpreter();
+  withoutEngineAsset();
   stage(
     path.join(kotlin, "build/repository/dev/tembra/tembra-kotlin"),
     path.join(native, "maven/dev/tembra/tembra-kotlin"),

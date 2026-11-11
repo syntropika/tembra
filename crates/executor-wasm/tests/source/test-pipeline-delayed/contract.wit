@@ -1,0 +1,10 @@
+package example:pipeline@1.0.0;
+
+/// Provided by another Orb; the compiled consumer awaits it through P3 async lowering.
+interface delayed {
+    double: async func(value: s32) -> s32;
+}
+
+world delayed-provider {
+    export delayed;
+}

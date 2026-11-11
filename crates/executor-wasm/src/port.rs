@@ -1,9 +1,8 @@
 //! Platform adapters route scoped host callbacks without embedding another lifecycle engine.
-//! One port type serves source bundles and compiled components.
+//! One port type serves every component, compiled or built from source.
 use crate::{
-    Binding, Engine, Grants,
-    abi::Operation,
-    failure,
+    Binding, Engine, Grants, failure,
+    protocol::Operation,
     worker::{self, Event, Session},
 };
 use serde_json::Value;
@@ -46,7 +45,7 @@ pub(crate) enum Transport {
 impl Engine {
     /// Validate an artifact, its selected imports and grants before creating its endpoint.
     ///
-    /// Source bundles and compiled components return the same port: both execute behind one
+    /// Source-built and compiled components return the same port: both execute behind one
     /// session owner and answer the same scoped host requests.
     pub fn open_port(
         &self,
@@ -77,61 +76,48 @@ impl Engine {
             .plan(name, api_version, bindings)
             .map_err(failure)?;
         let capabilities = transport == Transport::Capabilities;
-        let source = matches!(
-            artifact.implementation,
-            tembra_contracts::ArtifactImplementation::Source(_)
-        );
         let imports = bindings
             .iter()
             .filter(|(_, binding)| matches!(binding, Binding::Orb { .. }))
             .map(|(name, _)| name);
-        if capabilities && !source {
-            contract.check_resource_profile().map_err(failure)?;
-            for name in imports {
-                contract
-                    .check_import_resource_profile(name)
-                    .map_err(failure)?;
-            }
+        // The native facade exchanges capabilities (resources and byte streams); data-only
+        // endpoints keep the data profiles.
+        let (exports, import): (_, fn(&_, &str) -> _) = if capabilities {
+            (
+                contract.check_resource_profile(),
+                tembra_contracts::PreparedContract::check_import_resource_profile,
+            )
         } else {
-            // A source export or import may return a whole byte stream only through the native
-            // facade; data-only endpoints keep the data profiles.
-            let (exports, import): (_, fn(&_, &str) -> _) = if capabilities {
-                (
-                    contract.check_source_profile(),
-                    tembra_contracts::PreparedContract::check_import_source_profile,
+            (
+                contract.check_value_profile(),
+                tembra_contracts::PreparedContract::check_import_value_profile,
+            )
+        };
+        let admitted =
+            exports.and_then(|()| imports.clone().try_for_each(|name| import(contract, name)));
+        if let Err(error) = admitted {
+            // Say so when only the capability transport is missing, not the shape itself.
+            let streams = contract.check_stream_profile().is_ok()
+                && imports
+                    .clone()
+                    .all(|name| contract.check_import_stream_profile(name).is_ok());
+            let resource_shapes = contract.check_resource_profile().is_ok()
+                && imports
+                    .clone()
+                    .all(|name| contract.check_import_resource_profile(name).is_ok());
+            return Err(failure(if !capabilities && streams {
+                format!(
+                    "{error}: byte-stream results are served only through the native Rust \
+                     facade; this endpoint exchanges data only"
+                )
+            } else if !capabilities && resource_shapes {
+                format!(
+                    "{error}: WIT resources are served only through the native Rust facade; \
+                     this endpoint exchanges data only"
                 )
             } else {
-                (
-                    contract.check_value_profile(),
-                    tembra_contracts::PreparedContract::check_import_value_profile,
-                )
-            };
-            let data =
-                exports.and_then(|()| imports.clone().try_for_each(|name| import(contract, name)));
-            if let Err(error) = data {
-                // Say so when only the capability transport is missing, not the shape itself.
-                let streams = contract.check_source_profile().is_ok()
-                    && imports
-                        .clone()
-                        .all(|name| contract.check_import_source_profile(name).is_ok());
-                let resource_shapes = contract.check_resource_profile().is_ok()
-                    && imports
-                        .clone()
-                        .all(|name| contract.check_import_resource_profile(name).is_ok());
-                return Err(failure(if !capabilities && streams {
-                    format!(
-                        "{error}: byte-stream results are served only through the native Rust \
-                         facade; this endpoint exchanges data only"
-                    )
-                } else if !source && resource_shapes {
-                    format!(
-                        "{error}: WIT resources are served only by compiled components installed \
-                         through the native Rust facade; this endpoint exchanges data only"
-                    )
-                } else {
-                    error.to_string()
-                }));
-            }
+                error.to_string()
+            }));
         }
         let checked = |description: &Value| {
             let implementation: tembra_contracts::Implementation =
@@ -147,33 +133,29 @@ impl Engine {
                 .map_err(failure)?;
             Ok::<_, tembra::Error>((services, hooks, ingress))
         };
-        let (session, description, (services, hooks, ingress)) = match &artifact.implementation {
-            tembra_contracts::ArtifactImplementation::Source(source) => {
-                let io =
-                    crate::io::SourceIo::new(&self.providers, &plan.host_imports, grants, cli)?;
-                let session = Session::start(self.clone(), name.into(), io)?;
-                let description = session.load(source, contract.describe())?;
-                let checked = checked(&description)?;
-                (session, description, checked)
-            }
-            tembra_contracts::ArtifactImplementation::Component(_) => {
-                let description = crate::component::describe(
-                    contract,
-                    name,
-                    api_version,
-                    &artifact.contributions,
-                );
-                let checked = checked(&description)?;
-                let session = self.component_session(
-                    artifact,
-                    &plan,
-                    &checked.0,
-                    bindings,
-                    (grants, cli),
-                    &checked.1,
-                )?;
-                (session, description, checked)
-            }
+        let (session, description, (services, hooks, ingress)) = if artifact.source_runtime {
+            // A source Orb describes itself; the description is checked before any factory.
+            self.source_session(
+                artifact,
+                &plan,
+                bindings,
+                (grants, cli),
+                checked,
+                |(services, hooks, _)| (services.as_slice(), hooks),
+            )?
+        } else {
+            let description =
+                crate::component::describe(contract, name, api_version, &artifact.contributions);
+            let checked = checked(&description)?;
+            let session = self.component_session(
+                artifact,
+                &plan,
+                &checked.0,
+                bindings,
+                (grants, cli),
+                &checked.1,
+            )?;
+            (session, description, checked)
         };
         hooks.apply(&mut plan);
         Ok(InterpreterPort {
@@ -318,7 +300,7 @@ impl Drop for PortTicket {
     }
 }
 
-/// This receiver contains no thread-affine kernel, callback or interpreter owner.
+/// This receiver contains no thread-affine kernel, callback or Store owner.
 pub struct PortEvents {
     events: async_channel::Receiver<Event>,
     done: Arc<AtomicBool>,
