@@ -276,13 +276,14 @@ requires JSPI; source Orbs reuse the interpreter without JSPI.
 Guests can use state reads, updates and selections, selected dependency
 references, resource dependencies, internal cooperative waits, console output,
 the granted filesystem, standard sockets and HTTP, and WIT-checked hook contributions.
-Source Orbs can also declare `series`, `waterfall` and `bail` hooks. See
+Source Orbs, and compiled Orbs whose artifact declares them, can also declare `series`,
+`waterfall` and `bail` hooks. See
 [portable hook contracts](../../docs/extensions.md#portable-hook-contracts).
 
 Not yet available:
 
 - guest tasks, listeners, state subscriptions and migration;
-- compiled hook providers and portable custom composition, middleware or observation;
+- portable custom composition, middleware or observation;
 - service access policies and exclusive or opaque resources;
 - causal reentry into the same interpreter;
 - durable checkpoint and restore;
