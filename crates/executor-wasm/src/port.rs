@@ -382,6 +382,12 @@ impl PortEvents {
                 let _ = reply.send(Err(refusal.into()));
                 None
             }
+            Event::Arguments { reply, .. } => {
+                let _ = reply.send(Err(
+                    "resource arguments require the native capability facade".into(),
+                ));
+                None
+            }
         }
     }
 }

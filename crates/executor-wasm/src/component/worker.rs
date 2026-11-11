@@ -19,6 +19,7 @@
 //! task group's authority synchronously, checks the installation's HTTP origin grants and then
 //! asks the originating call, through its own channel, whether its context is still admitted.
 use super::values;
+mod arguments;
 use crate::{
     Engine,
     abi::Operation,
@@ -103,6 +104,7 @@ pub(crate) struct ExportFunction {
 pub(crate) struct Roles {
     pub receiver: Option<String>,
     pub owned_results: bool,
+    pub owned_arguments: bool,
 }
 
 pub(crate) struct Import {
@@ -232,6 +234,8 @@ pub(crate) struct State {
     instances: super::resources::Instances,
     /// Imported resource slots the guest dropped, released at the end of the current call.
     dropped: Dropped,
+    /// Only these host-dynamic types were linked from checked Orb imports.
+    payloads: BTreeSet<u32>,
 }
 
 impl crate::worker::stream_adapter::AdapterStore for State {
@@ -553,6 +557,11 @@ async fn instantiate(
             )),
             instances: super::resources::Instances::new(engine.live_resources.clone()),
             dropped: Dropped::default(),
+            payloads: layout
+                .imports
+                .iter()
+                .flat_map(|import| import.resources.iter().map(|(_, payload)| *payload))
+                .collect(),
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -717,12 +726,13 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                         // typed value in the request event, never as a number.
                         let request = accessor.with(|mut access| {
                             let pipe = Arc::<Mutex<Pipe>>::default();
-                            request(access.data_mut(), &target, None, params, Some(pipe.clone()))
-                                .map(|receive| StreamReply {
+                            request(&mut access, &target, None, params, Some(pipe.clone())).map(
+                                |receive| StreamReply {
                                     reply: ImportReply::new(receive, None),
                                     pipe,
                                     held: false,
-                                })
+                                },
+                            )
                         });
                         Box::pin(async move {
                             let mut reply = request?;
@@ -758,12 +768,9 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                         let request = accessor.with(|mut access| {
                             let (selected, params) = select(&mut access, receiver, params)?;
                             let dropped = owned_results.then(|| access.get().dropped.clone());
-                            request(access.data_mut(), &target, selected, params, None).map(
-                                |receive| {
-                                    ImportReply::new(receive, dropped)
-                                        .with_result(ty.results().next())
-                                },
-                            )
+                            request(&mut access, &target, selected, params, None).map(|receive| {
+                                ImportReply::new(receive, dropped).with_result(ty.results().next())
+                            })
                         });
                         let payloads = payloads.clone();
                         Box::pin(async move {
@@ -786,7 +793,7 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                         let dropped = owned_results.then(|| store.data().dropped.clone());
                         let request =
                             select(&mut store, receiver, params).and_then(|(selected, params)| {
-                                request(store.data(), &target, selected, params, None).map(
+                                request(&mut store, &target, selected, params, None).map(
                                     |receive| {
                                         ImportReply::new(receive, dropped)
                                             .with_result(ty.results().next())
@@ -945,13 +952,13 @@ fn acquire_request(
 /// `selected` is the importer table slot a resource method's `self` named; every other function
 /// calls through the import's declared reference.
 fn request(
-    state: &State,
+    mut store: impl wasmtime::AsContextMut<Data = State>,
     (binding, method): &(String, String),
     selected: Option<u32>,
     params: &[Val],
     stream: Option<Arc<Mutex<Pipe>>>,
 ) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
-    let authority = import_authority(state)?;
+    let authority = import_authority(store.as_context().data())?;
     let id = match selected {
         Some(slot) => slot,
         None => *authority
@@ -959,10 +966,34 @@ fn request(
             .get(binding)
             .ok_or_else(|| wasmtime::Error::msg("dependency import has no declared reference"))?,
     };
+    let dropped = store.as_context().data().dropped.clone();
+    let mut moves = crate::worker::arguments::Moves::new(Vec::new(), dropped);
     let args = params
         .iter()
         .cloned()
-        .map(values::lift)
+        .map(|value| {
+            values::lift_with(value, &mut |resource| {
+                if !resource.owned() {
+                    return Err(crate::failure("only owned argument resources can transfer"));
+                }
+                let linked = store
+                    .as_context()
+                    .data()
+                    .payloads
+                    .iter()
+                    .any(|payload| ResourceType::host_dynamic(*payload) == resource.ty());
+                if !linked {
+                    return Err(crate::failure(
+                        "a fresh guest resource has no issued ownership claim",
+                    ));
+                }
+                let resource = wasmtime::component::ResourceDynamic::try_from_resource_any(
+                    resource, &mut store,
+                )
+                .map_err(crate::failure)?;
+                Ok(json!(moves.push(resource.rep())))
+            })
+        })
         .collect::<tembra::Result<Vec<_>>>()
         .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
     let packet = json!({
@@ -973,21 +1004,30 @@ fn request(
         "args": args,
     })
     .to_string();
-    if packet.len() > state.packet_bytes {
+    if packet.len() > store.as_context().data().packet_bytes {
         return Err(wasmtime::Error::msg("host packet limit exceeded"));
     }
     let (reply, receive) = oneshot::channel();
-    let event = match stream {
-        Some(pipe) => Event::Stream {
+    let event = if !moves.is_empty() {
+        Event::Arguments {
             packet,
+            moves,
             reply,
-            pipe,
-        },
-        None => Event::Host {
-            packet,
-            asynchronous: true,
-            reply,
-        },
+            pipe: stream,
+        }
+    } else {
+        match stream {
+            Some(pipe) => Event::Stream {
+                packet,
+                reply,
+                pipe,
+            },
+            None => Event::Host {
+                packet,
+                asynchronous: true,
+                reply,
+            },
+        }
     };
     authority
         .events
@@ -1273,6 +1313,7 @@ async fn serve(
                 environment,
                 receiver,
                 stream: command.stream.take(),
+                arguments: command.arguments.take(),
             };
             invoke(engine, store, call, &args, authority, groups).await
         }
@@ -1301,6 +1342,7 @@ async fn serve(
                 environment,
                 receiver: None,
                 stream: None,
+                arguments: None,
             };
             invoke(engine, store, call, &args, authority, groups).await
         }
@@ -1400,6 +1442,7 @@ struct Call {
     receiver: Option<u32>,
     /// The host-created end of a whole byte-stream result.
     stream: Option<StreamCall>,
+    arguments: Option<crate::worker::arguments::Arguments>,
 }
 
 /// Run one export as a staged concurrent call and settle it only after its task group finishes.
@@ -1417,6 +1460,7 @@ async fn invoke(
         environment,
         receiver,
         stream,
+        arguments: ownership,
     } = call;
     let ty = function.ty(&*store);
     let Some(args) = arguments.as_array() else {
@@ -1439,12 +1483,12 @@ async fn invoke(
         (None, None) => {}
         _ => return Ok(Err("the call's receiver differs from its export".into())),
     }
-    for ((_, ty), value) in ty.params().skip(lent).zip(args) {
-        match values::lower(ty, value) {
-            Ok(value) => lowered.push(value),
-            Err(error) => return Ok(Err(error.to_string())),
-        }
-    }
+    let prepared = match arguments::lower(store, &ty, args, lent, ownership)? {
+        Ok(prepared) => prepared,
+        Err(error) => return Ok(Err(error)),
+    };
+    lowered.extend(prepared.values);
+    let accepted = prepared.accepted;
     let args = lowered;
     let count = ty.results().len();
     let owned_results = roles.owned_results;
@@ -1482,6 +1526,11 @@ async fn invoke(
                     return Err(error);
                 }
             };
+            if let Some(accepted) = accepted {
+                accepted
+                    .send(())
+                    .map_err(|_| wasmtime::Error::msg("owned argument admission was abandoned"))?;
+            }
             let group = staged.group();
             {
                 let groups = lock(&groups)?;

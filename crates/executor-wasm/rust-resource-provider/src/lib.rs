@@ -166,6 +166,31 @@ impl Guest for Provider {
         }
     }
 
+    fn take(value: Session) -> u64 {
+        value.get::<Instance>().total()
+    }
+
+    async fn take_later(value: Session) -> u64 {
+        pace::wait(0).await;
+        value.get::<Instance>().total()
+    }
+
+    fn take_bundle(value: Bundle) -> alloc::vec::Vec<u64> {
+        let mut totals = vec![value.primary.get::<Instance>().total()];
+        if let Some(optional) = &value.optional {
+            totals.push(optional.get::<Instance>().total());
+        }
+        totals.extend(
+            value
+                .extras
+                .iter()
+                .map(|session| session.get::<Instance>().total()),
+        );
+        totals.push(value.count.get::<Counter>().hits());
+        totals.push(value.seed);
+        totals
+    }
+
     fn closed() -> u64 {
         CLOSED.0.get()
     }

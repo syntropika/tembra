@@ -17,13 +17,28 @@ import type { Handler } from "../authoring/types.ts";
 import type { Context } from "./context.ts";
 import type { Encoded } from "../interpreter/codec.ts";
 /** Internal platform-neutral resource transport; implementations keep their issuer state private. */
-export interface ResourceCapability {
+export interface ResourceReceiver {
+  redeem(
+    issuer: object,
+    environment: number,
+    expected: { readonly interface: string; readonly name: string },
+  ): object;
+}
+export interface ResourceLoan {
+  (): void;
+  readonly receiver: ResourceReceiver;
+}
+export interface ResourceCapability extends ResourceReceiver {
   readonly kind: "resource";
   readonly nominal: { readonly interface: string; readonly name: string };
   readonly reference: ReferenceRecord;
   anchor(session: Session, reference: ReferenceRecord): void;
-  lend(): () => void;
-  redeem(issuer: object, environment: number, expected: ResourceCapability["nominal"]): object;
+  lend(): ResourceLoan;
+  /** Move authority out of this wrapper; stale aliases keep no backend or claim. */
+  move(): ResourceCapability;
+  issuedBy(issuer: object): boolean;
+  /** Return an owner to its issuing component instance, without running its destructor. */
+  take(issuer: object, expected: ResourceCapability["nominal"]): object;
   whenClosed(operation: () => void): void;
   close(): void;
 }
@@ -53,6 +68,13 @@ export interface CapturedInvocation {
   output?: Encoded;
   receiver?: ResourceCapability;
   capabilities?: readonly (ResourceCapability | ByteStreamCapability)[];
+  arguments?: CapturedArguments;
+}
+/** Ownership is accepted only after checked preflight and entry into the receiving callback. */
+export interface CapturedArguments {
+  readonly owners: readonly ResourceCapability[];
+  readonly accepted: boolean;
+  accept(): void;
 }
 /** The ordinary checked data entry of a prepared backend, with physical retention. */
 type CapturedDataMethod = (
@@ -68,9 +90,10 @@ interface CapturedMethod {
     environment: any,
     context: Context,
     input: Encoded,
-    receiver?: ResourceCapability,
+    receiver?: ResourceReceiver,
     /** Register actual physical completion before the bounded result may resolve or reject. */
     retain?: (physical: Promise<void>) => void,
+    arguments_?: CapturedArguments,
   ): Promise<Encoded | CapturedDelivery>;
 }
 const capturedMethods = new WeakMap<Handler, CapturedMethod>();
@@ -83,7 +106,11 @@ export function bindCaptured(
   invokeData?: CapturedDataMethod,
 ): Handler {
   if (signature || invokeData)
-    capturedMethods.set(handle, { signature, invoke, ...(invokeData ? { invokeData } : {}) });
+    capturedMethods.set(handle, {
+      signature,
+      invoke,
+      ...(invokeData ? { invokeData } : {}),
+    });
   return handle;
 }
 

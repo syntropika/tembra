@@ -20,7 +20,9 @@ import {
   signatures,
   validateEnvironment,
   type CapturedDelivery,
+  type CapturedArguments,
   type ResourceCapability,
+  type ResourceReceiver,
   type AdaptedOrb,
   type AdaptedService,
 } from "#tembra-adapters";
@@ -46,7 +48,7 @@ import {
   type ResourceRoles,
 } from "./resources.ts";
 import { issueByteStream } from "./streams.ts";
-import { viewMethod } from "./host.ts";
+import { viewMethod, importedResource } from "./host.ts";
 import type { ComponentPort } from "./port.ts";
 import { ComponentScope, type BoundMethod, type CallbackScope, type ScopeOwner } from "./scope.ts";
 import { converters, type FunctionValues, type GraphFunction, type TypeGraph } from "./values.ts";
@@ -120,7 +122,7 @@ export class ComponentRevision implements ScopeOwner {
   readonly signatures = new Map<number, Signature>();
   readonly scopes = new Map<number, ComponentScope>();
   readonly importedResources = new Set<ResourceCapability>();
-  readonly #issuedResources = new Map<number, Set<ResourceOwner>>();
+  readonly #issuedResources = new Map<number, Set<() => void>>();
   /** The instance's incoming-HTTP bridge from the HTTP adapter (`wasi.ts`). */
   ingressBridge: IngressBridge | undefined;
   #closed = false;
@@ -135,8 +137,7 @@ export class ComponentRevision implements ScopeOwner {
       "abort",
       () => {
         for (const owner of this.importedResources) owner.close();
-        for (const owners of this.#issuedResources.values())
-          for (const owner of owners) owner.close();
+        for (const owners of this.#issuedResources.values()) for (const retire of owners) retire();
       },
       { once: true },
     );
@@ -153,8 +154,9 @@ export class ComponentRevision implements ScopeOwner {
     scope: CallbackScope,
     input: Encoded,
     roles: ResourceRoles = {},
-    receiver?: ResourceCapability,
+    receiver?: ResourceReceiver,
     retain?: (physical: Promise<void>) => void,
+    arguments_?: CapturedArguments,
   ): Promise<Encoded | CapturedDelivery> {
     const unlock = await this.gate.enter(undefined, scope.signal);
     let released = false;
@@ -169,7 +171,45 @@ export class ComponentRevision implements ScopeOwner {
       if (!!roles.receiver !== !!receiver)
         throw new Error("Resource receiver differs from signature");
       const borrowed = roles.receiver && receiver?.redeem(this, environment.id, roles.receiver);
-      const args = lift(shape.params, JSON.parse(input.text)) as unknown[];
+      const checkedInput = check(this.contract, slot, true, input);
+      let args = lift(shape.params, JSON.parse(checkedInput.text)) as unknown[];
+      const consumed = new Set<number>();
+      const uniqueOwners = new Set<ResourceCapability>();
+      const owners = arguments_?.owners ?? [];
+      const deliveries: {
+        owner: ResourceCapability;
+        nominal: import("./resources.ts").Nominal;
+        wrap?: (owner: ResourceCapability) => object;
+      }[] = [];
+      if (roles.arguments) {
+        if (!arguments_) throw new Error("Owned arguments require a private transfer");
+        if (arguments_.accepted) throw new Error("Ownership transfer was already accepted");
+        args = roles.arguments(args, (nominal, index) => {
+          if (
+            typeof index !== "number" ||
+            !Number.isInteger(index) ||
+            index < 0 ||
+            consumed.has(index)
+          )
+            throw new Error("An owned argument must redeem each attachment exactly once");
+          const owner = owners[index];
+          if (
+            !owner ||
+            owner.nominal.interface !== nominal.interface ||
+            owner.nominal.name !== nominal.name
+          )
+            throw new Error("Resource argument has another nominal type");
+          if (uniqueOwners.has(owner)) throw new Error("Duplicate owned argument attachment");
+          uniqueOwners.add(owner);
+          const own = owner.issuedBy(this);
+          const wrap = own ? undefined : importedResource(this.port, nominal).wrap;
+          consumed.add(index);
+          deliveries.push({ owner, nominal, ...(wrap ? { wrap } : {}) });
+          return deliveries.length - 1;
+        }) as unknown[];
+      }
+      if (consumed.size !== owners.length) throw new Error("Unused argument capability attachment");
+      const guestArgs = values.guestArguments(args);
       const call = () => {
         const exports = this.port.exports?.[key];
         if (!exports) throw new Error(`The component does not export ${key}`);
@@ -178,7 +218,23 @@ export class ComponentRevision implements ScopeOwner {
           spelling,
           roles,
           borrowed || undefined,
-          values.guestArguments(args),
+          guestArgs,
+          arguments_
+            ? () => {
+                arguments_.accept();
+                return roles.arguments
+                  ? (roles.arguments(guestArgs, (_nominal, index) => {
+                      const delivery = deliveries[index as number]!;
+                      if (!delivery.wrap) return delivery.owner.take(this, delivery.nominal);
+                      this.importedResources.add(delivery.owner);
+                      delivery.owner.whenClosed(() =>
+                        this.importedResources.delete(delivery.owner),
+                      );
+                      return delivery.wrap(delivery.owner);
+                    }) as unknown[])
+                  : guestArgs;
+              }
+            : undefined,
         );
       };
       if (roles.stream) {
@@ -209,7 +265,10 @@ export class ComponentRevision implements ScopeOwner {
         BigInt(environment.id),
         scope,
         async () => {
-          const result = await values.fromGuest(call);
+          const result = await values.fromGuest(call).catch((error: unknown) => {
+            if (arguments_?.accepted) this.port.poison(error);
+            throw error;
+          });
           if (!roles.result) return result;
           return roles.result(result, (nominal, raw) => {
             if (typeof raw !== "object" || raw === null)
@@ -232,8 +291,9 @@ export class ComponentRevision implements ScopeOwner {
             });
             let owners = this.#issuedResources.get(environment.id);
             if (!owners) this.#issuedResources.set(environment.id, (owners = new Set()));
-            owners.add(owner);
-            owner.whenClosed(() => owners.delete(owner));
+            const retire = owner.retirement();
+            owners.add(retire);
+            owner.whenRetired(() => owners.delete(retire));
             issued.push(owner);
             return issued.length - 1;
           });
@@ -424,7 +484,10 @@ export class ComponentRevision implements ScopeOwner {
             const slot = this.contract.bind(binding, method, true);
             const fn = functions?.[method];
             if (!fn) throw new Error(`Missing prepared signature for ${binding}#${method}`);
-            const roles = resourceRoles(graph, binding, { ...fn, name: method } as GraphFunction);
+            const roles = resourceRoles(graph, binding, {
+              ...fn,
+              name: method,
+            } as GraphFunction);
             const data = resourceDataFunction(fn as GraphFunction, roles);
             const shape = compile(data);
             const values = convert(data);
@@ -433,8 +496,9 @@ export class ComponentRevision implements ScopeOwner {
               environment: ComponentScope,
               context: Context,
               input: Encoded,
-              receiver?: ResourceCapability,
+              receiver?: ResourceReceiver,
               retain?: (physical: Promise<void>) => void,
+              arguments_?: CapturedArguments,
             ) =>
               this.invoke(
                 binding,
@@ -448,6 +512,7 @@ export class ComponentRevision implements ScopeOwner {
                 roles,
                 receiver,
                 retain,
+                arguments_,
               );
             const invokeData = async (
               environment: ComponentScope,
@@ -570,7 +635,7 @@ export class ComponentRevision implements ScopeOwner {
         // Environment release owns any remaining exported instances. Drain while the
         // environment is still registered, so each guest destructor runs exactly once.
         const owners = this.#issuedResources.get(environment.id);
-        for (const owner of owners ?? []) owner.close();
+        for (const retire of owners ?? []) retire();
         // Closing schedules drops through the port's physical cleanup queue.
         await this.port.settled();
         this.#issuedResources.delete(environment.id);

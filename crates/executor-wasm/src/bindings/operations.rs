@@ -282,6 +282,7 @@ impl Environment {
         scope: &Scope,
         packet: &str,
         stream: bool,
+        moves: Option<crate::worker::arguments::Moves>,
         issued: &crate::worker::Issued,
     ) -> Result<crate::worker::Reply> {
         let request = AsyncRequest::decode(packet).map_err(failure)?;
@@ -294,11 +295,11 @@ impl Environment {
         } = request
         {
             return self
-                .call_import(scope, owner, id, &method, args, stream, issued)
+                .call_import(scope, owner, id, &method, args, stream, moves, issued)
                 .await;
         }
-        if stream {
-            return Err(failure("a stream carrier carries only an import call"));
+        if stream || moves.is_some() {
+            return Err(failure("a capability carrier carries only an import call"));
         }
         if let AsyncRequest::ReferenceAcquire { service, key } = request {
             return self.acquire(scope, &service, key).await;

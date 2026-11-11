@@ -231,8 +231,20 @@ operations settle. If a quarantined task never acknowledges exit, shutdown keeps
 These capabilities travel only through the private component transport. Ordinary data-only
 host calls refuse a resource or stream result and close the complete batch. Result attachments
 are checked against their nominal WIT identities and consumed exactly once; malformed data,
-duplicate or unused attachments and failed delivery close every owner. Owned arguments, nested
-streams, non-byte stream elements and arbitrary futures remain outside this profile.
+duplicate or unused attachments and failed delivery close every owner.
+
+An `own<R>` argument moves a previously issued resource, including resource positions inside
+records, lists, tuples, simple options, variants and results. The sender immediately loses its
+backend and admission claim; existing physical borrows keep only their own pins. Returning the
+owner to its issuing revision consumes its original canonical resource handle. A different
+revision must import the defining Orb interface; its generated resource class holds the same
+original claim, including its method restrictions, rather than acquiring a new claim. The
+receiver acknowledges canonical admission before the host commits installed argument slots.
+Refusal before admission closes the entire moved batch; once admitted, retained guest resources
+remain owned until guest drop, retirement or physical shutdown.
+
+Fresh guest-local resources without an issued provider claim, foreign-defined resource results,
+nested streams, non-byte stream elements and arbitrary futures remain outside this profile.
 
 ### Keyed dependency references
 

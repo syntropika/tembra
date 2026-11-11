@@ -43,6 +43,7 @@ export class ComponentPort {
   readonly #completions = new Set<Promise<void>>();
   #destroying = false;
   readonly #destructorTasks = new Set<number>();
+  readonly #nestedDestructors = new Map<number, { callback: Callback; exited(): void }>();
   readonly #destructorPending = new Set<Promise<unknown>>();
   #destructorExited: (() => void) | undefined;
   /** The callback being entered right now; its export task starts synchronously. */
@@ -70,6 +71,24 @@ export class ComponentPort {
         this.#destructorTasks.add(id);
         return;
       }
+      // A guest can drop an owner returned through an own argument. JCO gives its canonical
+      // destructor a separate task; only the exact executing parent proves its admission.
+      if (entry === "<resource-drop>") {
+        const parent = this.#access?.currentRootTask();
+        const callback =
+          parent === null || parent === undefined
+            ? undefined
+            : (this.#tasks.get(parent) ?? this.#nestedDestructors.get(parent)?.callback);
+        if (callback) {
+          const exit = Promise.withResolvers<void>();
+          this.#nestedDestructors.set(id, { callback, exited: exit.resolve });
+          this.physical(callback, exit.promise);
+          return;
+        }
+        if (this.#admitted)
+          this.poison(new Error("A resource destructor started outside an admitted parent task"));
+        return;
+      }
       const callback = this.#admitting;
       if (!callback) {
         // Instantiation runs the component's own initialization before any admission.
@@ -85,6 +104,14 @@ export class ComponentPort {
       this.#tasks.set(id, callback);
     },
     taskExited: ({ id, rejected, error }) => {
+      const nested = this.#nestedDestructors.get(id);
+      if (nested) {
+        this.#nestedDestructors.delete(id);
+        if (rejected || error !== undefined)
+          this.poison(error ?? new Error("A component resource destructor ended rejected"));
+        nested.exited();
+        return;
+      }
       if (this.#destructorTasks.delete(id)) {
         if (rejected || error !== undefined)
           this.poison(error ?? new Error("A component resource destructor ended rejected"));
@@ -157,7 +184,13 @@ export class ComponentPort {
 
   #destructorPhysical(work: Promise<unknown>): void {
     const id = this.#access?.currentRootTask();
-    if (id === null || id === undefined || !this.#destructorTasks.has(id)) return;
+    if (id === null || id === undefined) return;
+    const nested = this.#nestedDestructors.get(id);
+    if (nested) {
+      this.physical(nested.callback, work);
+      return;
+    }
+    if (!this.#destructorTasks.has(id)) return;
     this.#destructorPending.add(work);
     const forget = () => this.#destructorPending.delete(work);
     work.then(forget, forget);
@@ -184,7 +217,7 @@ export class ComponentPort {
   current(): Callback {
     const id = this.#access?.currentRootTask();
     if (id !== null && id !== undefined) {
-      if (this.#destructorTasks.has(id))
+      if (this.#destructorTasks.has(id) || this.#nestedDestructors.has(id))
         throw new Error("A resource destructor holds no call authority");
       const owner = this.#tasks.get(id);
       if (!owner) throw new Error("Host import from a task outside any admitted callback");

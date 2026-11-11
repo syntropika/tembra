@@ -17,6 +17,21 @@ import type { Described } from "./revision.ts";
 import type { ReferenceBinding } from "../types.ts";
 import type { ReferenceClaim } from "./scope.ts";
 import type { FunctionValues, GraphFunction } from "./values.ts";
+import type { Nominal } from "./resources.ts";
+
+interface ImportedResource {
+  wrap(owner: ResourceCapability): object;
+  move(value: object): ResourceCapability;
+}
+const resourceBindings = new WeakMap<ComponentPort, Map<string, ImportedResource>>();
+const importedOwners = new WeakMap<ComponentPort, WeakMap<object, ResourceCapability>>();
+const resourceKey = (nominal: Nominal) => `${nominal.interface}\0${nominal.name}`;
+/** Resolve only the defining import's instance-specific class and ownership table. */
+export function importedResource(port: ComponentPort, nominal: Nominal): ImportedResource {
+  const binding = resourceBindings.get(port)?.get(resourceKey(nominal));
+  if (!binding) throw new Error("Missing imported defining resource class");
+  return binding;
+}
 
 /** One typed import function and its conversions. */
 export interface ImportedFunction {
@@ -224,8 +239,10 @@ export function resourceImport(
   functions: readonly (ImportedFunction & {
     readonly roles: import("./resources.ts").ResourceRoles;
   })[],
+  types: readonly Nominal[] = [],
 ): Record<string, unknown> {
-  const held = new WeakMap<object, ResourceCapability>();
+  let held = importedOwners.get(port);
+  if (!held) importedOwners.set(port, (held = new WeakMap()));
   const classes = new Map<string, { new (...args: unknown[]): object }>();
   const ownerOf = (value: object) => {
     const owner = held.get(value);
@@ -238,15 +255,47 @@ export function resourceImport(
     receiver?: ResourceCapability,
   ): Promise<unknown> & Disposable => {
     const callback = port.current();
-    const input = fn.values.hostArguments(args);
+    const converted = fn.values.hostArguments(args);
+    const moved: ResourceCapability[] = [];
+    let input: unknown[];
+    try {
+      input = fn.roles.arguments
+        ? (fn.roles.arguments(converted, (nominal, value) => {
+            const owner = importedResource(port, nominal).move(value as object);
+            moved.push(owner);
+            return moved.length - 1;
+          }) as unknown[])
+        : converted;
+    } catch (error) {
+      for (const owner of moved) owner.close();
+      throw error;
+    }
+    const transfer = {
+      owners: moved,
+      accepted: false,
+      accept() {
+        this.accepted = true;
+      },
+    };
     let abandoned = false;
     const issued: ResourceCapability[] = [];
     const pending = port.physical(
       callback,
       (async () => {
         const result = receiver
-          ? await callback.scope.resource!(receiver, binding, fn.spelling, input)
-          : await callback.scope.call(binding, fn.spelling, input);
+          ? await callback.scope.resource!(
+              receiver,
+              binding,
+              fn.spelling,
+              input,
+              ...(fn.roles.arguments ? ([transfer] as const) : []),
+            )
+          : await callback.scope.call(
+              binding,
+              fn.spelling,
+              input,
+              ...(fn.roles.arguments ? ([transfer] as const) : []),
+            );
         if (fn.roles.result) {
           try {
             const value = fn.roles.result(result, (nominal, value) => {
@@ -284,42 +333,65 @@ export function resourceImport(
           );
         }
         return fn.values.toGuest(result);
-      })(),
+      })().catch((error: unknown) => {
+        if (!transfer.accepted) for (const owner of moved) owner.close();
+        throw error;
+      }),
     );
     return Object.assign(pending, {
       [Symbol.dispose]() {
         abandoned = true;
+        if (!transfer.accepted) for (const owner of moved) owner.close();
         for (const owner of issued) owner.close();
       },
     });
   };
-  for (const fn of functions) {
-    for (const nominal of [
+  const nominals = [
+    ...types,
+    ...functions.flatMap((fn) => [
       ...(fn.roles.resource ? [fn.roles.resource] : []),
       ...(fn.roles.owned ?? []),
-    ]) {
-      if (classes.has(nominal.name)) continue;
-      const constructor = functions.find(
-        (item) => item.roles.construct && item.roles.resource?.name === nominal.name,
-      );
-      const Resource = class {
-        constructor(...args: unknown[]) {
-          if (!constructor) throw new Error("Resource has no constructor");
-          return invoke(constructor, args) as never;
+    ]),
+  ];
+  for (const nominal of nominals) {
+    if (classes.has(nominal.name)) continue;
+    const constructor = functions.find(
+      (item) => item.roles.construct && item.roles.resource?.name === nominal.name,
+    );
+    const Resource = class {
+      constructor(...args: unknown[]) {
+        if (!constructor) throw new Error("Resource has no constructor");
+        return invoke(constructor, args) as never;
+      }
+      [Symbol.dispose](): void {
+        const owner = held.get(this);
+        if (!owner) return;
+        held.delete(this);
+        try {
+          port.current().scope.releaseResource(owner);
+        } catch {
+          owner.close();
         }
-        [Symbol.dispose](): void {
-          const owner = held.get(this);
-          if (!owner) return;
-          held.delete(this);
-          try {
-            port.current().scope.releaseResource(owner);
-          } catch {
-            owner.close();
-          }
-        }
-      };
-      classes.set(nominal.name, Resource);
-    }
+      }
+    };
+    classes.set(nominal.name, Resource);
+    let bindings = resourceBindings.get(port);
+    if (!bindings) resourceBindings.set(port, (bindings = new Map()));
+    bindings.set(resourceKey(nominal), {
+      wrap(owner) {
+        const wrapper = Object.create(Resource.prototype) as object;
+        held.set(wrapper, owner);
+        return wrapper;
+      },
+      move(value) {
+        const owner = ownerOf(value);
+        if (owner.nominal.interface !== nominal.interface || owner.nominal.name !== nominal.name)
+          throw new Error("Resource has another nominal type");
+        const next = owner.move();
+        held.delete(value);
+        return next;
+      },
+    });
   }
   const output: Record<string, unknown> = {};
   for (const [name, Resource] of classes) output[bindingName(name, true)] = Resource;

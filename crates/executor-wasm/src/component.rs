@@ -74,7 +74,8 @@ fn layout(
                 .bind(&service.interface, method, true)
                 .map_err(failure)?;
             let role = resource_roles(contract, slot)?;
-            let roles = (role.receiver.is_some() || role.owned_results).then_some(role);
+            let roles = (role.receiver.is_some() || role.owned_results || role.owned_arguments)
+                .then_some(role);
             functions.insert(
                 slot,
                 worker::ExportFunction {
@@ -242,6 +243,7 @@ fn resource_roles(contract: &PreparedContract, slot: u32) -> Result<worker::Role
     Ok(worker::Roles {
         receiver: name(signature.receiver),
         owned_results: signature.owned_results,
+        owned_arguments: signature.owned_arguments,
     })
 }
 

@@ -19,6 +19,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     any::Any,
+    cell::RefCell,
     future::Future,
     rc::{Rc, Weak},
 };
@@ -74,6 +75,7 @@ impl Loan {
 pub struct Payload {
     value: Value,
     owned: Vec<Issued>,
+    moved: Vec<Moved>,
     receiver: Option<Loan>,
     streams: Vec<ByteStream>,
 }
@@ -84,6 +86,7 @@ impl Payload {
         Self {
             value,
             owned: Vec::new(),
+            moved: Vec::new(),
             receiver: None,
             streams: Vec::new(),
         }
@@ -105,6 +108,23 @@ impl Payload {
         u32::try_from(self.owned.len() - 1).expect("payload attachment count fits u32")
     }
 
+    /// Move an existing resource into an argument. The caller relinquishes its owner now;
+    /// refused admission consumes and closes it rather than recreating a Wasm handle.
+    pub fn attach_argument(&mut self, owner: Owned) -> Result<u32> {
+        Ok(self.attach_moved(Moved::from_shared(Rc::new(owner))?))
+    }
+
+    /// Attach a move already redeemed by a trusted executor, without duplicating its claim.
+    pub fn attach_moved(&mut self, moved: Moved) -> u32 {
+        self.moved.push(moved);
+        u32::try_from(self.moved.len() - 1).expect("payload attachment count fits u32")
+    }
+
+    /// Consume the typed owned arguments; their data positions are checked by the executor.
+    pub fn take_arguments(&mut self) -> Vec<Moved> {
+        std::mem::take(&mut self.moved)
+    }
+
     /// Attach a stream end and return its payload-local index for the data slot.
     pub fn attach_stream(&mut self, stream: ByteStream) -> u32 {
         self.streams.push(stream);
@@ -118,7 +138,10 @@ impl Payload {
 
     /// Whether the payload carries no capability at all.
     pub fn is_data(&self) -> bool {
-        self.receiver.is_none() && self.owned.is_empty() && self.streams.is_empty()
+        self.receiver.is_none()
+            && self.owned.is_empty()
+            && self.moved.is_empty()
+            && self.streams.is_empty()
     }
 
     /// Return the data of a data-only payload. Capabilities are refused, which drops and so
@@ -152,13 +175,14 @@ impl Payload {
         Ok(self)
     }
 
-    /// G1 admits no owned arguments. Pin implicit self outside the provider's payload so
+    /// Newly issued capabilities cannot become arguments without a calling claim. Existing
+    /// moved owners keep their exact claim. Pin implicit self outside the provider's payload so
     /// retaining that payload cannot keep a resource alive after the physical call settles.
     pub(crate) fn for_call(self) -> Result<(Self, Option<Rc<dyn Capability>>)> {
         if !self.owned.is_empty() {
             return Err(Error::invalid(
                 Reason::Arguments,
-                "owned arguments are not supported",
+                "an issued result cannot become an argument without an ownership claim",
             ));
         }
         if !self.streams.is_empty() {
@@ -233,8 +257,10 @@ impl FromPayload for Owned {
             .value
             .as_u64()
             .and_then(|index| usize::try_from(index).ok());
-        let single =
-            payload.receiver.is_none() && payload.streams.is_empty() && payload.owned.len() == 1;
+        let single = payload.receiver.is_none()
+            && payload.moved.is_empty()
+            && payload.streams.is_empty()
+            && payload.owned.len() == 1;
         let issued = index
             .filter(|index| single && *index == 0)
             .and_then(|_| payload.owned.pop())
@@ -262,11 +288,15 @@ impl FromPayload for Delivered {
         let Payload {
             value,
             owned,
+            moved,
             receiver,
             streams,
         } = payload;
-        if receiver.is_some() {
-            return Err(Error::invalid(Reason::Result, "a result cannot lend self"));
+        if receiver.is_some() || !moved.is_empty() {
+            return Err(Error::invalid(
+                Reason::Result,
+                "a result cannot carry argument moves or lend self",
+            ));
         }
         let owned = owned
             .into_iter()
@@ -286,6 +316,7 @@ impl FromPayload for ByteStream {
     fn from_payload(mut payload: Payload, _: &Origin) -> Result<Self> {
         let whole = payload.receiver.is_none()
             && payload.owned.is_empty()
+            && payload.moved.is_empty()
             && payload.streams.len() == 1
             && payload.value.as_u64() == Some(0);
         let stream = payload.streams.pop().filter(|_| whole).ok_or_else(|| {
@@ -342,8 +373,56 @@ impl Origin {
 /// An owned WIT resource handle held by native code. Dropping it is the WIT drop. It is not
 /// `Clone`. It closes its capability first and then releases its own admission claim.
 pub struct Owned {
+    capability: RefCell<Option<Rc<dyn Capability>>>,
+    anchor: RefCell<Option<Rc<Reference>>>,
+    nominal: Nominal,
+}
+
+/// One linear move of an existing owner. It retains the exact original admission claim;
+/// receiving it creates a new live wrapper, while all aliases of the sender stay revoked.
+/// The capability is closed only after this move and any physical borrows have ended.
+pub struct Moved {
     capability: Rc<dyn Capability>,
-    anchor: Reference,
+    anchor: Rc<Reference>,
+}
+
+impl Moved {
+    /// Revoke a table-owned sender before its admission can suspend. Existing physical calls
+    /// keep their own pins, but no alias can issue another method after the move.
+    pub fn from_shared(owner: Rc<Owned>) -> Result<Self> {
+        let capability = owner
+            .capability
+            .borrow_mut()
+            .take()
+            .ok_or_else(moved_owner)?;
+        let anchor = owner
+            .anchor
+            .borrow_mut()
+            .take()
+            .expect("a live owner has its claim");
+        Ok(Self { capability, anchor })
+    }
+
+    pub fn nominal(&self) -> &Nominal {
+        self.capability.nominal()
+    }
+
+    /// Inspect the original issuer backend without exposing or duplicating its authority.
+    pub fn with_backend<T: Capability, R>(&self, operation: impl FnOnce(&T) -> R) -> Option<R> {
+        (&*self.capability as &dyn Any)
+            .downcast_ref::<T>()
+            .map(operation)
+    }
+
+    /// Receive the moved owner under the same claim, never under the receiving Orb's claim.
+    pub fn receive(self) -> Owned {
+        let nominal = self.capability.nominal().clone();
+        Owned {
+            capability: RefCell::new(Some(self.capability)),
+            anchor: RefCell::new(Some(self.anchor)),
+            nominal,
+        }
+    }
 }
 
 impl Owned {
@@ -351,14 +430,22 @@ impl Owned {
     /// already gone, the capability is dropped, and so closed, with the error.
     fn anchor(issued: Issued, origin: &Origin) -> Result<Self> {
         let anchor = origin.anchor()?;
+        let nominal = issued.0.nominal().clone();
         Ok(Self {
-            capability: issued.0,
-            anchor,
+            capability: RefCell::new(Some(issued.0)),
+            anchor: RefCell::new(Some(Rc::new(anchor))),
+            nominal,
         })
     }
 
+    fn claim(&self) -> Result<(Rc<dyn Capability>, Rc<Reference>)> {
+        let capability = self.capability.borrow().clone().ok_or_else(moved_owner)?;
+        let anchor = self.anchor.borrow().clone().ok_or_else(moved_owner)?;
+        Ok((capability, anchor))
+    }
+
     pub fn nominal(&self) -> &Nominal {
-        self.capability.nominal()
+        &self.nominal
     }
 
     /// Call a method of this resource. The call is admitted on this handle's own claim with
@@ -369,10 +456,11 @@ impl Owned {
         method: &str,
         arguments: A,
     ) -> Result<R> {
+        let (capability, anchor) = self.claim()?;
         let payload = arguments
             .into_payload()?
-            .with_receiver(Loan(Rc::downgrade(&self.capability)))?;
-        self.anchor.call_borrowed(context, method, payload).await
+            .with_receiver(Loan(Rc::downgrade(&capability)))?;
+        anchor.call_borrowed(context, method, payload).await
     }
 
     /// Like [`Owned::call_portable`], with control of the admitted invocation: see
@@ -383,11 +471,20 @@ impl Owned {
         method: &str,
         arguments: A,
     ) -> Result<(crate::IssuedCall, LocalBoxFuture<'static, Result<R>>)> {
+        let (capability, anchor) = self.claim()?;
         let payload = arguments
             .into_payload()?
-            .with_receiver(Loan(Rc::downgrade(&self.capability)))?;
-        self.anchor.issue_borrowed(context, method, payload).await
+            .with_receiver(Loan(Rc::downgrade(&capability)))?;
+        anchor.issue_borrowed(context, method, payload).await
     }
+}
+
+fn moved_owner() -> Error {
+    Error::new(
+        core::Code::Gone,
+        Reason::Resource,
+        "resource ownership has moved",
+    )
 }
 
 /// What a portable provider returns: its logical result and, when the call keeps working after

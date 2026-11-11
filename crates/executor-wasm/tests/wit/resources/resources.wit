@@ -54,6 +54,10 @@ interface sessions {
   variant selection { empty, active(session) }
   open-pair: func(seed: u64) -> tuple<session, u64>;
   choose: func(seed: u64) -> selection;
+  /// Consume previously issued ownership through the ordinary canonical ABI.
+  take: func(value: session) -> u64;
+  take-bundle: func(value: bundle) -> list<u64>;
+  take-later: async func(value: session) -> u64;
   /// How many sessions this Store has destroyed.
   closed: func() -> u64;
   label: func() -> string;
@@ -67,6 +71,7 @@ interface views {
 
 /// A compiled importer's service over imported sessions.
 interface relay {
+  use sessions.{session};
   /// One keyed session as the importer observed it before dropping it.
   record keyed-session {
     key: tuple<string, string>,
@@ -88,6 +93,10 @@ interface relay {
   /// Consume nested resources through ordinary generated WIT bindings.
   nested: func(seed: u64, fail: bool) -> list<u64>;
   nested-shapes: func(seed: u64) -> list<u64>;
+  move-back: func(seed: u64) -> list<u64>;
+  move-later: async func(seed: u64) -> u64;
+  accept: func(value: session) -> u64;
+  accept-keep: func(value: session);
 
   /// Two sessions built with equal arguments plus one factory session, all dropped on return.
   pair: func(seed: u64, n: u64) -> list<u64>;

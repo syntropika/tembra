@@ -56,6 +56,76 @@ function harness(timeout = 1000) {
   };
 }
 
+test("a guest-internal destructor has an exact admitted parent, no caller authority, and physical exit", async () => {
+  const { port, start, exit, current } = harness();
+  const task = start("head");
+  await task.result;
+  current(task.id);
+  port.observer.taskStarted({ id: 50, entry: "<resource-drop>", isAsync: false });
+  current(50);
+  expect(() => port.current()).toThrow("no call authority");
+  const provider = deferred<void>();
+  port.wasi.cleanup(() => provider.promise);
+  current(null);
+  exit(task.id);
+  let settled = false;
+  const finished = task.finished.then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  exit(50);
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  provider.resolve();
+  await finished;
+  await task.physical;
+  expect(port.usable).toBe(true);
+  await port.close();
+});
+
+test("a resource-drop spelling cannot manufacture admission from an unrelated task or active callback", async () => {
+  for (const unrelated of [null, 999]) {
+    const { port, start, exit, current } = harness();
+    const task = start("head");
+    await task.result;
+    current(unrelated);
+    port.observer.taskStarted({ id: 50, entry: "<resource-drop>", isAsync: false });
+    await expect(task.finished).rejects.toThrow("outside an admitted parent");
+    exit(task.id);
+    await task.physical.catch(() => {});
+    expect(port.usable).toBe(false);
+    await port.close();
+  }
+});
+
+test("quarantine cannot acknowledge a nested destructor before its actual exit and provider cleanup", async () => {
+  const { port, start, exit, current } = harness(10);
+  const task = start("head");
+  await task.result;
+  current(task.id);
+  port.observer.taskStarted({ id: 50, entry: "<resource-drop>", isAsync: false });
+  current(50);
+  const provider = deferred<void>();
+  port.wasi.cleanup(() => provider.promise);
+  current(null);
+  await expect(task.finished).rejects.toThrow("wall time");
+  let settled = false;
+  const drained = port.settled().then(() => {
+    settled = true;
+  });
+  exit(task.id);
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  exit(50);
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  provider.resolve();
+  await drained;
+  expect(settled).toBe(true);
+  await port.close();
+});
+
 test("parked callbacks retain distinct authority and physical ownership across entry handoff", async () => {
   const { port, start, exit, current, disposed } = harness();
   const head = deferred<string>();

@@ -18,6 +18,8 @@ pub struct ResourceSignature<'a> {
     pub receiver: Option<&'a ResourceIdentity>,
     /// The result contains owned resources, possibly inside WIT containers.
     pub owned_results: bool,
+    /// Owned arguments transfer existing claims; implicit self remains a borrow.
+    pub owned_arguments: bool,
     pub stream_result: bool,
 }
 
@@ -66,7 +68,7 @@ impl PreparedContract {
                 )));
             }
             for (parameter, value) in parameters.iter().zip(values) {
-                self.validate(form, parameter.ty, value, 0)?;
+                self.validate_capabilities(form, parameter.ty, value)?;
                 self.respell(parameter.ty, value)?;
             }
         } else if signature.stream_result {
@@ -84,10 +86,10 @@ impl PreparedContract {
         Ok(value)
     }
 
-    /// Check exports for owned resources inside result containers, implicit method receiver
+    /// Check exports for owned argument and result containers, implicit method receiver
     /// borrows and whole byte-stream results of asynchronous freestanding functions.
     ///
-    /// Futures, other stream elements, nested or argument streams, resource arguments and
+    /// Futures, other stream elements, nested or argument streams and
     /// foreign-defined result resources need additional transfer rules and are refused. The
     /// incoming HTTP handler remains outside this transport, served through its host-local WASI
     /// adapter.
@@ -202,7 +204,8 @@ impl PreparedContract {
             .iter()
             .skip(usize::from(signature.receiver.is_some()))
         {
-            self.supported(parameter.ty, 0)?;
+            signature.owned_arguments |=
+                self.resource_value_type(interface, parameter.ty, 0, true)?;
         }
         if let Some(result) = function.result {
             if self.byte_stream(result) {
@@ -225,7 +228,7 @@ impl PreparedContract {
                     return Err(Error("constructor returns another resource type".into()));
                 }
             } else {
-                signature.owned_results = self.resource_result_type(interface, result, 0)?;
+                signature.owned_results = self.resource_value_type(interface, result, 0, false)?;
             }
         }
         if matches!(function.kind, FunctionKind::Constructor(_))
@@ -238,12 +241,13 @@ impl PreparedContract {
         Ok(signature)
     }
 
-    /// Validate the result profile recursively, while preserving nominal resource identity.
-    fn resource_result_type(
+    /// Validate a capability value recursively, while preserving nominal resource identity.
+    fn resource_value_type(
         &self,
         interface: &Interface,
         ty: Ty,
         depth: usize,
+        arguments: bool,
     ) -> Result<bool, Error> {
         if depth > crate::model::MAX_DEPTH {
             return Err(Error("WIT value nesting exceeds its limit".into()));
@@ -254,11 +258,34 @@ impl PreparedContract {
         };
         match self.kind(id) {
             Kind::Own(resource) => {
-                self.defined_resource(interface, *resource)?;
+                if arguments {
+                    let identity = self
+                        .resource_identity(Ty::Ref(*resource))
+                        .ok_or_else(|| Error("invalid argument resource".into()))?;
+                    let (Some(owner), Some(_)) = (&identity.interface, &identity.name) else {
+                        return Err(Error(
+                            "an anonymous resource has no portable type identity".into(),
+                        ));
+                    };
+                    if owner.starts_with("wasi:") {
+                        return Err(Error("WASI handles cannot transfer between Orbs".into()));
+                    }
+                    let imported = self.model().imports.iter().any(|entry| {
+                        matches!(&entry.item, Item::Interface(import)
+                            if import.contract.as_ref() == Some(owner))
+                    });
+                    if interface.contract.as_ref() != Some(owner) && !imported {
+                        return Err(Error(
+                            "a foreign owned argument requires its defining Orb import".into(),
+                        ));
+                    }
+                } else {
+                    self.defined_resource(interface, *resource)?;
+                }
                 Ok(true)
             }
             Kind::Alias(inner) | Kind::List(inner) => {
-                self.resource_result_type(interface, *inner, depth + 1)
+                self.resource_value_type(interface, *inner, depth + 1, arguments)
             }
             Kind::Option(inner) => {
                 if let Ty::Ref(id) = self.resolved(*inner)
@@ -266,14 +293,14 @@ impl PreparedContract {
                 {
                     return Err(Error("nested options require a tagged option codec".into()));
                 }
-                self.resource_result_type(interface, *inner, depth + 1)
+                self.resource_value_type(interface, *inner, depth + 1, arguments)
             }
             Kind::Record(fields) => fields.iter().try_fold(false, |found, field| {
-                self.resource_result_type(interface, field.ty, depth + 1)
+                self.resource_value_type(interface, field.ty, depth + 1, arguments)
                     .map(|next| found || next)
             }),
             Kind::Tuple(types) => types.iter().try_fold(false, |found, ty| {
-                self.resource_result_type(interface, *ty, depth + 1)
+                self.resource_value_type(interface, *ty, depth + 1, arguments)
                     .map(|next| found || next)
             }),
             Kind::Variant(cases) => {
@@ -281,7 +308,7 @@ impl PreparedContract {
                     .iter()
                     .filter_map(|case| case.ty)
                     .try_fold(false, |found, ty| {
-                        self.resource_result_type(interface, ty, depth + 1)
+                        self.resource_value_type(interface, ty, depth + 1, arguments)
                             .map(|next| found || next)
                     })
             }
@@ -290,7 +317,7 @@ impl PreparedContract {
                     .into_iter()
                     .flatten()
                     .try_fold(false, |found, ty| {
-                        self.resource_result_type(interface, ty, depth + 1)
+                        self.resource_value_type(interface, ty, depth + 1, arguments)
                             .map(|next| found || next)
                     })
             }
@@ -316,6 +343,29 @@ impl PreparedContract {
             self.map_owned(ty, value, &mut map)?;
         } else {
             self.check_result(Form::Native, function, value)?;
+        }
+        Ok(())
+    }
+
+    /// Rewrite moved-argument indices after checking the complete tuple, before any move is redeemed.
+    pub fn map_owned_arguments(
+        &self,
+        slot: u32,
+        value: &mut Value,
+        mut map: impl FnMut(&ResourceIdentity, u32) -> Result<u32, Error>,
+    ) -> Result<(), Error> {
+        let signature = self.resource_signature(slot)?;
+        let function = self.function(self.slots()[slot as usize]);
+        let parameters = &function.params[usize::from(signature.receiver.is_some())..];
+        let values = value
+            .as_array_mut()
+            .filter(|values| values.len() == parameters.len())
+            .ok_or_else(|| Error("WIT argument tuple differs".into()))?;
+        for (parameter, value) in parameters.iter().zip(values.iter()) {
+            self.validate_capabilities(Form::Native, parameter.ty, value)?;
+        }
+        for (parameter, value) in parameters.iter().zip(values) {
+            self.map_owned(parameter.ty, value, &mut map)?;
         }
         Ok(())
     }

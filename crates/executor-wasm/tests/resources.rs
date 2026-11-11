@@ -197,6 +197,13 @@ macro_rules! both_engines {
 }
 
 both_engines!(
+    owned_arguments_consume_the_sender_and_preserve_the_issuer,
+    invalid_owned_arguments_close_the_complete_batch_before_lowering,
+    a_moved_owner_keeps_active_borrows_and_its_original_permissions,
+    cancelled_owned_arguments_wait_for_canonical_execution_to_exit,
+    queued_owned_argument_cancellation_consumes_the_sender_without_admission,
+    a_moved_argument_cannot_widen_its_original_method_grant,
+    a_queued_destructor_trap_retires_every_imported_owner,
     nested_resources_preserve_identity_and_drop_each_owner,
     refused_nested_metadata_destroys_the_complete_resource_batch,
     native_owners_get_fresh_independent_instances,
@@ -221,6 +228,585 @@ both_engines!(
     a_compiled_importer_opens_independent_keyed_sessions,
     one_revision_serves_its_sessions_one_call_at_a_time,
 );
+
+/// A real canonical move returns imported handles to their issuer or transfers the same
+/// original claim into another Store. Stale sender aliases retain no resource or claim.
+fn owned_arguments_consume_the_sender_and_preserve_the_issuer(interpreted: bool) {
+    let (Some(provided), Some(consuming)) = (
+        fixture("TEMBRA_WASM_RESOURCE_PROVIDER"),
+        fixture("TEMBRA_WASM_RESOURCE_CONSUMER"),
+    ) else {
+        return;
+    };
+    let engine = engine(interpreted);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        pacer(Rc::default()),
+        provider(&engine, &provided, "store"),
+        consumer(&engine, &consuming, "relay", "store"),
+    ])
+    .unwrap();
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let relay = reference(&mut pool, &host, &format!("relay::{RELAY}"), "alice");
+    let called = store.clone();
+    let owner: Owned = root(&mut pool, &host, async move |context| {
+        called.call_portable(&context, "open", (KEYED_SEED,)).await
+    })
+    .unwrap();
+    let stale = Rc::new(owner);
+    let moved = tembra::portable::Moved::from_shared(stale.clone()).unwrap();
+    assert!(tembra::portable::Moved::from_shared(stale.clone()).is_err());
+    let old = stale.clone();
+    let refused = root(&mut pool, &host, async move |context| {
+        old.call_portable::<_, u64>(&context, TOTAL, ()).await
+    })
+    .unwrap_err();
+    assert_eq!(refused.code, tembra::core::Code::Gone);
+    let mut payload = Payload::data(json!([0]));
+    assert_eq!(payload.attach_moved(moved), 0);
+    let called = store.clone();
+    let total: u64 = root(&mut pool, &host, async move |context| {
+        called.call_portable(&context, "take", payload).await
+    })
+    .unwrap();
+    assert_eq!(total, KEYED_SEED);
+    assert_eq!(closed(&mut pool, &host, &store), 1);
+    assert_eq!(engine.resources(), 0, "a moved stale wrapper pins nothing");
+
+    let called = relay.clone();
+    let totals: Vec<u64> = root(&mut pool, &host, async move |context| {
+        called
+            .call_portable(&context, "move-back", (KEYED_SEED,))
+            .await
+    })
+    .unwrap();
+    assert_eq!(
+        totals,
+        [
+            KEYED_SEED,
+            KEYED_SEED,
+            KEYED_SEED + 1,
+            KEYED_SEED + 2,
+            KEYED_SEED + 3,
+            1,
+            KEYED_SEED
+        ]
+    );
+    assert_eq!(closed(&mut pool, &host, &store), 6);
+    assert_eq!(engine.resources(), 0);
+
+    let called = store.clone();
+    let owner: Owned = root(&mut pool, &host, async move |context| {
+        called.call_portable(&context, "open", (KEYED_SEED,)).await
+    })
+    .unwrap();
+    let mut payload = Payload::data(json!([0]));
+    payload.attach_argument(owner).unwrap();
+    let called = relay.clone();
+    let total: u64 = root(&mut pool, &host, async move |context| {
+        called.call_portable(&context, "accept", payload).await
+    })
+    .unwrap();
+    assert_eq!(total, KEYED_SEED);
+    assert_eq!(closed(&mut pool, &host, &store), 7);
+    assert_eq!(engine.resources(), 0);
+    drop(stale);
+    relay.release().unwrap();
+    store.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// Neither attachment indices, unused owners, duplicate slots nor invalid metadata can
+/// publish partial ownership. A refusal leaves a healthy provider usable.
+fn invalid_owned_arguments_close_the_complete_batch_before_lowering(interpreted: bool) {
+    let Some(provided) = fixture("TEMBRA_WASM_RESOURCE_PROVIDER") else {
+        return;
+    };
+    let engine = engine(interpreted);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        pacer(Rc::default()),
+        provider(&engine, &provided, "store"),
+    ])
+    .unwrap();
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let called = store.clone();
+    assert!(
+        root(&mut pool, &host, async move |context| {
+            called
+                .call_portable::<_, u64>(&context, "take", json!([0]))
+                .await
+        })
+        .is_err()
+    );
+    assert_eq!(engine.resources(), 0);
+    for (failure, expected_closed) in [(0, 4), (1, 8), (2, 12)] {
+        let called = store.clone();
+        let result: Delivered = root(&mut pool, &host, async move |context| {
+            called
+                .call_portable(&context, "open-bundle", (1_u64, false))
+                .await
+        })
+        .unwrap();
+        let mut value = result.value["val"].clone();
+        match failure {
+            0 => value["optional"] = json!(0), // Duplicate primary, leaving one unused.
+            1 => value["label"] = json!(7),    // Invalid data sibling.
+            _ => value["extras"] = json!([]),  // Valid shape with unused attachments.
+        }
+        let mut payload = Payload::data(json!([value]));
+        for owner in result.owned {
+            payload.attach_argument(owner).unwrap();
+        }
+        let called = store.clone();
+        let refused = root(&mut pool, &host, async move |context| {
+            called
+                .call_portable::<_, Vec<u64>>(&context, "take-bundle", payload)
+                .await
+        });
+        assert!(refused.is_err());
+        assert_eq!(closed(&mut pool, &host, &store), expected_closed);
+        assert_eq!(engine.resources(), 0);
+    }
+    let called = store.clone();
+    let counter: Owned = root(&mut pool, &host, async move |context| {
+        called.call_portable(&context, COUNTER, json!([])).await
+    })
+    .unwrap();
+    let mut payload = Payload::data(json!([0]));
+    payload.attach_argument(counter).unwrap();
+    let called = store.clone();
+    assert!(
+        root(&mut pool, &host, async move |context| {
+            called
+                .call_portable::<_, u64>(&context, "take", payload)
+                .await
+        })
+        .is_err()
+    );
+    assert_eq!(closed(&mut pool, &host, &store), 12);
+    assert_eq!(engine.resources(), 0);
+    store.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// Moving while a borrow suspends does not revoke that physical borrow or broaden the
+/// resource's original method grant. The receiving Store may retain it across calls.
+fn a_moved_owner_keeps_active_borrows_and_its_original_permissions(interpreted: bool) {
+    let (Some(provided), Some(consuming)) = (
+        fixture("TEMBRA_WASM_RESOURCE_PROVIDER"),
+        fixture("TEMBRA_WASM_RESOURCE_CONSUMER"),
+    ) else {
+        return;
+    };
+    let engine = engine(interpreted);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let pace = Rc::new(Pace::default());
+    host.install(vec![
+        pacer(pace.clone()),
+        provider(&engine, &provided, "store"),
+        consumer(&engine, &consuming, "relay", "store"),
+    ])
+    .unwrap();
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let relay = reference(&mut pool, &host, &format!("relay::{RELAY}"), "alice");
+    let called = store.clone();
+    let owner: Owned = root(&mut pool, &host, async move |context| {
+        called.call_portable(&context, "open", (5_u64,)).await
+    })
+    .unwrap();
+    let shared = Rc::new(owner);
+    let old = shared.clone();
+    let (open, gate) = futures::channel::oneshot::channel();
+    *pace.gate.borrow_mut() = Some(gate);
+    let (abort, registration) = AbortHandle::new_pair();
+    let owner = host.clone();
+    let caller = async move {
+        owner
+            .root("alice", move |context| {
+                async move {
+                    old.call_portable::<_, u64>(&context, PACED, (2_u64,))
+                        .await
+                        .map(drop)
+                }
+                .boxed_local()
+            })
+            .await
+    };
+    pool.spawner()
+        .spawn_local(Abortable::new(caller, registration).map(drop))
+        .unwrap();
+    until(&mut pool, || pace.waits.get() == 1);
+    let moved = tembra::portable::Moved::from_shared(shared.clone()).unwrap();
+    let mut payload = Payload::data(json!([0]));
+    payload.attach_moved(moved);
+    let received = Rc::new(RefCell::new(None));
+    let outcome = received.clone();
+    let owner = host.clone();
+    let called = relay.clone();
+    pool.spawner()
+        .spawn_local(async move {
+            let result = owner
+                .root("alice", move |context| {
+                    async move {
+                        called
+                            .call_portable::<_, u64>(&context, "accept", payload)
+                            .await
+                    }
+                    .boxed_local()
+                })
+                .await;
+            *outcome.borrow_mut() = Some(result);
+        })
+        .unwrap();
+    pool.run_until_stalled();
+    abort.abort();
+    pool.run_until_stalled();
+    assert!(received.borrow().is_none());
+    assert_eq!(engine.resources(), 1);
+    open.send(()).unwrap();
+    pool.run_until(host.settled());
+    assert_eq!(received.borrow_mut().take().unwrap().unwrap(), 25);
+    assert_eq!(closed(&mut pool, &host, &store), 1);
+    assert_eq!(engine.resources(), 0);
+
+    let service = sessions("store");
+    let owner: Owned = root(&mut pool, &host, async move |context| {
+        let narrowed = context.get(
+            &service,
+            vec!["main".into()],
+            AcquisitionOptions {
+                api_version: 1,
+                methods: BTreeSet::from(["open".into(), ADD.into()]),
+            },
+        )?;
+        narrowed.ready().await?;
+        narrowed.call_portable(&context, "open", (9_u64,)).await
+    })
+    .unwrap();
+    let mut payload = Payload::data(json!([0]));
+    payload.attach_argument(owner).unwrap();
+    let called = relay.clone();
+    root(&mut pool, &host, async move |context| {
+        called
+            .call_portable::<_, ()>(&context, "accept-keep", payload)
+            .await
+    })
+    .unwrap();
+    assert_eq!(engine.resources(), 1);
+    let called = relay.clone();
+    let total: u64 = root(&mut pool, &host, async move |context| {
+        called.call_portable(&context, "bump", (3_u64,)).await
+    })
+    .unwrap();
+    assert_eq!(total, 12);
+    let called = relay.clone();
+    root(&mut pool, &host, async move |context| {
+        called
+            .call_portable::<_, ()>(&context, "discard", json!([]))
+            .await
+    })
+    .unwrap();
+    assert_eq!(closed(&mut pool, &host, &store), 2);
+    assert_eq!(engine.resources(), 0);
+    drop(shared);
+    relay.release().unwrap();
+    store.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// The guest has accepted an own argument before it suspends. Abandoning its caller cannot
+/// roll that ownership back or detach the remaining physical execution.
+fn cancelled_owned_arguments_wait_for_canonical_execution_to_exit(interpreted: bool) {
+    let (Some(provided), Some(consuming)) = (
+        fixture("TEMBRA_WASM_RESOURCE_PROVIDER"),
+        fixture("TEMBRA_WASM_RESOURCE_CONSUMER"),
+    ) else {
+        return;
+    };
+    let engine = engine(interpreted);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let pace = Rc::new(Pace::default());
+    host.install(vec![
+        pacer(pace.clone()),
+        provider(&engine, &provided, "store"),
+        consumer(&engine, &consuming, "relay", "store"),
+    ])
+    .unwrap();
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let relay = reference(&mut pool, &host, &format!("relay::{RELAY}"), "alice");
+    let (open, gate) = futures::channel::oneshot::channel();
+    *pace.gate.borrow_mut() = Some(gate);
+    let (abort, registration) = AbortHandle::new_pair();
+    let owner = host.clone();
+    let called = relay.clone();
+    let caller = async move {
+        owner
+            .root("alice", move |context| {
+                async move {
+                    called
+                        .call_portable::<_, u64>(&context, "move-later", (KEYED_SEED,))
+                        .await
+                        .map(drop)
+                }
+                .boxed_local()
+            })
+            .await
+    };
+    pool.spawner()
+        .spawn_local(Abortable::new(caller, registration).map(drop))
+        .unwrap();
+    until(&mut pool, || pace.waits.get() == 1);
+    // The resource left the host's instance table: ownership is inside the suspended guest.
+    assert_eq!(engine.resources(), 0);
+    abort.abort();
+    pool.run_until_stalled();
+    assert_eq!(
+        engine.instances(),
+        2,
+        "logical abandonment cannot tear down a running Store"
+    );
+    let mut settlement = Box::pin(host.settled());
+    assert!(
+        pool.run_until(futures::future::poll_fn(|task| std::task::Poll::Ready(
+            settlement.as_mut().poll(task)
+        )))
+        .is_pending()
+    );
+    drop(settlement);
+    open.send(()).unwrap();
+    pool.run_until(host.settled());
+    assert_eq!(closed(&mut pool, &host, &store), 1);
+    assert_eq!(engine.resources(), 0);
+    relay.release().unwrap();
+    store.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}
+
+/// The target Store is demonstrably occupied before the transfer is submitted. Cancelling
+/// its queued invocation closes the moved owner without ever delivering it to guest code.
+fn queued_owned_argument_cancellation_consumes_the_sender_without_admission(interpreted: bool) {
+    let Some(provided) = fixture("TEMBRA_WASM_RESOURCE_PROVIDER") else {
+        return;
+    };
+    let engine = engine(interpreted);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let pace = Rc::new(Pace::default());
+    host.install(vec![
+        pacer(pace.clone()),
+        provider(&engine, &provided, "store"),
+    ])
+    .unwrap();
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let called = store.clone();
+    let (borrowed, moving): (Owned, Owned) = root(&mut pool, &host, async move |context| {
+        Ok((
+            called.call_portable(&context, "open", (1_u64,)).await?,
+            called.call_portable(&context, "open", (2_u64,)).await?,
+        ))
+    })
+    .unwrap();
+    let borrowed = Rc::new(borrowed);
+    let caller = borrowed.clone();
+    let (open, gate) = futures::channel::oneshot::channel();
+    *pace.gate.borrow_mut() = Some(gate);
+    let owner = host.clone();
+    pool.spawner()
+        .spawn_local(async move {
+            let _ = owner
+                .root("alice", move |context| {
+                    async move {
+                        caller
+                            .call_portable::<_, u64>(&context, PACED, (1_u64,))
+                            .await
+                            .map(drop)
+                    }
+                    .boxed_local()
+                })
+                .await;
+        })
+        .unwrap();
+    until(&mut pool, || pace.waits.get() == 1);
+    let stale = Rc::new(moving);
+    let mut payload = Payload::data(json!([0]));
+    payload.attach_moved(tembra::portable::Moved::from_shared(stale.clone()).unwrap());
+    let issued = Rc::new(RefCell::new(None));
+    let observed = issued.clone();
+    let refused = Rc::new(Cell::new(false));
+    let outcome = refused.clone();
+    let called = store.clone();
+    let owner = host.clone();
+    pool.spawner()
+        .spawn_local(async move {
+            let result = owner
+                .root("alice", move |context| {
+                    async move {
+                        let (call, result) = called
+                            .issue_portable::<_, u64>(&context, "take", payload)
+                            .await?;
+                        *observed.borrow_mut() = Some(call);
+                        result.await.map(drop)
+                    }
+                    .boxed_local()
+                })
+                .await;
+            outcome.set(result.is_err());
+        })
+        .unwrap();
+    until(&mut pool, || issued.borrow().is_some());
+    pool.run_until_stalled();
+    issued.borrow().as_ref().unwrap().cancel();
+    pool.run_until_stalled();
+    assert!(tembra::portable::Moved::from_shared(stale.clone()).is_err());
+    open.send(()).unwrap();
+    pool.run_until(host.settled());
+    assert!(refused.get());
+    assert_eq!(closed(&mut pool, &host, &store), 1);
+    assert_eq!(engine.resources(), 1);
+    drop(borrowed);
+    drop(stale);
+    assert_eq!(closed(&mut pool, &host, &store), 2);
+    assert_eq!(engine.resources(), 0);
+    store.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// The receiving Orb's broad import cannot replace a moved resource's narrower original
+/// admission claim. The compiled import sees the forbidden method and traps its revision.
+fn a_moved_argument_cannot_widen_its_original_method_grant(interpreted: bool) {
+    let (Some(provided), Some(consuming)) = (
+        fixture("TEMBRA_WASM_RESOURCE_PROVIDER"),
+        fixture("TEMBRA_WASM_RESOURCE_CONSUMER"),
+    ) else {
+        return;
+    };
+    let engine = engine(interpreted);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        pacer(Rc::default()),
+        provider(&engine, &provided, "store"),
+        consumer(&engine, &consuming, "relay", "store"),
+    ])
+    .unwrap();
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let relay = reference(&mut pool, &host, &format!("relay::{RELAY}"), "alice");
+    let service = sessions("store");
+    let owner: Owned = root(&mut pool, &host, async move |context| {
+        let reference = context.get(
+            &service,
+            vec!["main".into()],
+            AcquisitionOptions {
+                api_version: 1,
+                methods: BTreeSet::from(["open".into()]),
+            },
+        )?;
+        reference.ready().await?;
+        reference.call_portable(&context, "open", (3_u64,)).await
+    })
+    .unwrap();
+    let mut payload = Payload::data(json!([0]));
+    payload.attach_argument(owner).unwrap();
+    let called = relay.clone();
+    let error = root(&mut pool, &host, async move |context| {
+        called
+            .call_portable::<_, u64>(&context, "accept", payload)
+            .await
+    })
+    .unwrap_err();
+    assert!(error.message.contains("forbidden"), "{error}");
+    assert_eq!(closed(&mut pool, &host, &store), 1);
+    assert_eq!(engine.resources(), 0);
+    relay.release().unwrap();
+    store.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}
+
+/// A destructor queued behind another call must stay attached to that driver's settlement.
+/// Its trap otherwise has no live terminal receiver and leaves foreign owners in the table.
+fn a_queued_destructor_trap_retires_every_imported_owner(interpreted: bool) {
+    let (Some(provided), Some(consuming)) = (
+        fixture("TEMBRA_WASM_RESOURCE_PROVIDER"),
+        fixture("TEMBRA_WASM_RESOURCE_CONSUMER"),
+    ) else {
+        return;
+    };
+    let engine = engine(interpreted);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let pace = Rc::new(Pace::default());
+    host.install(vec![
+        pacer(pace.clone()),
+        provider(&engine, &provided, "store"),
+        consumer(&engine, &consuming, "relay", "store"),
+    ])
+    .unwrap();
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let relay = reference(&mut pool, &host, &format!("relay::{RELAY}"), "alice");
+    let called = relay.clone();
+    let holder: Owned = root(&mut pool, &host, async move |context| {
+        called
+            .call_portable(&context, "[constructor]holder", (u64::MAX,))
+            .await
+    })
+    .unwrap();
+    let (open, gate) = futures::channel::oneshot::channel();
+    *pace.gate.borrow_mut() = Some(gate);
+    let outcome = Rc::new(RefCell::new(None));
+    let observed = outcome.clone();
+    let owner = host.clone();
+    let called = relay.clone();
+    pool.spawner()
+        .spawn_local(async move {
+            let result = owner
+                .root("alice", move |context| {
+                    async move {
+                        called
+                            .call_portable::<_, u64>(&context, "paced", (4_u64, 2_u64))
+                            .await
+                    }
+                    .boxed_local()
+                })
+                .await;
+            *observed.borrow_mut() = Some(result);
+        })
+        .unwrap();
+    until(&mut pool, || pace.waits.get() == 1);
+    drop(holder); // The relay Store is occupied: this queues its destructor.
+    pool.run_until_stalled();
+    assert!(outcome.borrow().is_none());
+    assert_eq!(engine.resources(), 3); // Holder plus the two provider sessions.
+    open.send(()).unwrap();
+    pool.run_until(host.settled());
+    let error = outcome.borrow_mut().take().unwrap().unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("dependency import has no admitted invocation"),
+        "{error}"
+    );
+    assert_eq!(closed(&mut pool, &host, &store), 2);
+    assert_eq!(engine.resources(), 0);
+    relay.release().unwrap();
+    store.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}
 
 /// Fresh constructions with equal arguments, factory results, borrowed mutation and drops.
 fn native_owners_get_fresh_independent_instances(interpreted: bool) {

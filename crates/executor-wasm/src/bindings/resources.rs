@@ -17,15 +17,17 @@
 //! Every call still goes through the kernel: constructors and factories through the import's
 //! reference, and methods through the owned handle's own admission claim.
 use super::*;
-use crate::worker::Reply;
+mod arguments;
+use crate::worker::{Reply, arguments::Moves};
 use serde_json::json;
-use tembra::portable::{Capability, Delivered, Issued, Loan, Nominal, Owned, Payload};
+use tembra::portable::{Capability, Delivered, Issued, Loan, Moved, Nominal, Owned, Payload};
 
 /// Resource positions of one bound function: implicit `self` and owned result containers.
 #[derive(Clone, Default)]
 pub(crate) struct Roles {
     pub receiver: Option<Nominal>,
     pub owned_results: bool,
+    pub owned_arguments: bool,
     /// The whole result is a `stream<u8>`, served by [`Environment::invoke_stream`].
     pub stream: bool,
 }
@@ -38,12 +40,13 @@ impl Roles {
         Ok(Self {
             receiver: signature.receiver.map(nominal).transpose()?,
             owned_results: signature.owned_results,
+            owned_arguments: signature.owned_arguments,
             stream: signature.stream_result,
         })
     }
 
     pub(crate) fn is_data(&self) -> bool {
-        self.receiver.is_none() && !self.owned_results && !self.stream
+        self.receiver.is_none() && !self.owned_results && !self.owned_arguments && !self.stream
     }
 }
 
@@ -81,6 +84,9 @@ impl Drop for GuestInstance {
         let Some(issuer) = self.issuer.upgrade() else {
             return;
         };
+        if issuer.session.stopped() {
+            return;
+        }
         match holding(issuer.root.as_ref()) {
             // The destructor may drop imported resources the issuing revision holds.
             Some(root) => issuer.session.destroy(
@@ -93,6 +99,11 @@ impl Drop for GuestInstance {
             None => issuer
                 .session
                 .destroy(self.environment, self.instance, None),
+        }
+        if issuer.session.stopped()
+            && let Some(root) = holding(issuer.root.as_ref())
+        {
+            release_all(&root);
         }
     }
 }
@@ -136,6 +147,21 @@ pub(super) fn release_slot(table: &Handles, slot: u32) -> bool {
     released
 }
 
+/// Retire resources only once the Store and all its runtime work have actually stopped.
+pub(super) fn release_all(table: &Handles) {
+    let slots: Vec<_> = table
+        .references
+        .borrow()
+        .iter()
+        .filter_map(|(slot, handle)| {
+            matches!(handle.claim, Claim::Owned(_) | Claim::View { .. }).then_some(*slot)
+        })
+        .collect();
+    for slot in slots {
+        release_slot(table, slot);
+    }
+}
+
 /// Refusal of a call whose resource positions do not match its function.
 fn misuse(message: &str) -> tembra::Error {
     tembra::Error::new(tembra::core::Code::Invalid, "resource", message)
@@ -176,26 +202,8 @@ impl Environment {
             (Some(_), None) => return Err(misuse("a resource method requires its owned handle")),
             (None, Some(_)) => return Err(misuse("this function takes no resource receiver")),
         };
-        // Any other attachment is refused, which closes it.
-        let args = self
-            .contract
-            .to_resource_wire(slot, true, payload.into_data()?)
-            .map_err(failure)?;
-        let context = context.enter_execution()?;
-        let cancellation = context.signal();
-        let packet = GuestCommand::Invoke {
-            environment: self.id,
-            function: slot,
-            args: &args,
-            receiver,
-        };
         let value = self
-            .execute(
-                Scope::Call(context),
-                Some(cancellation),
-                packet,
-                Carrier::None,
-            )
+            .invoke_arguments(context, slot, receiver, payload, None)
             .await?;
         drop(loan);
         let mut value = self
@@ -243,6 +251,26 @@ impl Environment {
         Ok(instance)
     }
 
+    /// A foreign argument uses its defining Orb import's existing method table, never a
+    /// receiving service's authority or a new reference claim.
+    fn argument_import(&self, expected: &Nominal) -> Result<Rc<Import>> {
+        let binding = self
+            .contract
+            .model()
+            .imports
+            .iter()
+            .find(|entry| {
+                matches!(&entry.item, tembra_contracts::Item::Interface(interface)
+                if interface.contract.as_ref() == Some(&expected.interface))
+            })
+            .ok_or_else(|| misuse("an owned argument requires its defining Orb import"))?;
+        self.imports
+            .get(&binding.key)
+            .filter(|import| import.reference.is_none())
+            .cloned()
+            .ok_or_else(|| misuse("the defining resource import is not linked"))
+    }
+
     /// Forward one guest import call. The handle the guest named selects the callee: a service
     /// reference for freestanding functions, constructors and statics, or an owned resource for
     /// its methods.
@@ -259,6 +287,7 @@ impl Environment {
         method: &str,
         args: Value,
         stream: bool,
+        moves: Option<Moves>,
         issued: &crate::worker::Issued,
     ) -> Result<Reply> {
         let context = Self::context(scope)?;
@@ -284,7 +313,34 @@ impl Environment {
         }
         .map_err(failure)?;
         // The payload moves without re-encoding; a data result allocates no claim.
-        let payload = Payload::data(args);
+        let mut payload = Payload::data(Value::Null);
+        let moved = self.redeem_arguments(owner, moves)?;
+        let mut moved: Vec<_> = moved.into_iter().map(Some).collect();
+        let mut args = args;
+        self.contract
+            .map_owned_arguments(method.slot, &mut args, |identity, index| {
+                let expected = nominal(identity)
+                    .map_err(|error| tembra_contracts::Error(error.to_string()))?;
+                let moved = moved
+                    .get_mut(index as usize)
+                    .and_then(Option::take)
+                    .ok_or_else(|| {
+                        tembra_contracts::Error(
+                            "an owned argument redeems each attachment exactly once".into(),
+                        )
+                    })?;
+                if moved.nominal() != &expected {
+                    return Err(tembra_contracts::Error(
+                        "the owned argument has another nominal type".into(),
+                    ));
+                }
+                Ok(payload.attach_moved(moved))
+            })
+            .map_err(failure)?;
+        if moved.iter().any(Option::is_some) {
+            return Err(misuse("the arguments carry an unused resource attachment"));
+        }
+        let payload = payload.map_value(|_| Ok(args))?;
         let Delivered {
             value,
             owned,
@@ -414,6 +470,44 @@ impl Environment {
         }
         let (reference, import) = self.reference(scope, owner, id)?;
         Ok((Callee::Reference(reference), import))
+    }
+
+    /// Consume every source slot before admission can suspend. Validation failure closes the
+    /// entire supplied batch; an old wrapper alias can never regain ownership.
+    fn redeem_arguments(&self, owner: Option<ScopeId>, moves: Option<Moves>) -> Result<Vec<Moved>> {
+        let Some(moves) = moves else {
+            return Ok(Vec::new());
+        };
+        let table = self.selected_handles(owner)?;
+        let mut error = None;
+        let mut redeemed = Vec::new();
+        for slot in moves.redeem() {
+            let handle = {
+                let mut references = table.references.borrow_mut();
+                if matches!(
+                    references.get(&slot).map(|handle| &handle.claim),
+                    Some(Claim::Owned(_))
+                ) {
+                    references.remove(&slot)
+                } else {
+                    None
+                }
+            };
+            let result = match handle.map(|handle| handle.claim) {
+                Some(Claim::Owned(owned)) => Moved::from_shared(owned),
+                _ => Err(misuse("an owned argument names no live owner slot")),
+            };
+            match result {
+                Ok(moved) => redeemed.push(moved),
+                Err(refused) => {
+                    error.get_or_insert(refused);
+                }
+            }
+        }
+        match error {
+            Some(error) => Err(error),
+            None => Ok(redeemed),
+        }
     }
 
     /// Install an owned result in the Orb root table of this revision.

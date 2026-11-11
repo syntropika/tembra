@@ -29,28 +29,16 @@ impl Environment {
         slot: u32,
         payload: Payload,
     ) -> Result<Outcome> {
-        let args = self
-            .contract
-            .to_resource_wire(slot, true, payload.into_data()?)
-            .map_err(failure)?;
-        let context = context.enter_execution()?;
-        let cancellation = context.signal();
         let pipe = Arc::<Mutex<Pipe>>::default();
         let (head, published) = oneshot::channel();
-        let carrier = Carrier::Stream(StreamCall {
+        let stream = StreamCall {
             pipe: pipe.clone(),
             head,
-        });
+        };
         let environment = self.clone();
         let mut dispatch = async move {
-            let packet = GuestCommand::Invoke {
-                environment: environment.id,
-                function: slot,
-                args: &args,
-                receiver: None,
-            };
             environment
-                .execute(Scope::Call(context), Some(cancellation), packet, carrier)
+                .invoke_arguments(context, slot, None, payload, Some(stream))
                 .await
         }
         .boxed_local();

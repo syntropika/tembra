@@ -20,6 +20,7 @@ use std::{
 use tembra::Result;
 use tokio::sync::oneshot;
 
+pub(crate) mod arguments;
 pub(crate) mod diagnostics;
 
 /// Blocking threads of one Store's runtime, used by upstream WASI filesystem calls.
@@ -38,6 +39,13 @@ pub(crate) enum Event {
         asynchronous: bool,
         reply: oneshot::Sender<std::result::Result<String, String>>,
     },
+    /// Owned arguments consumed by the compiled import's canonical ABI, never serialized.
+    Arguments {
+        packet: String,
+        moves: arguments::Moves,
+        reply: oneshot::Sender<std::result::Result<String, String>>,
+        pipe: Option<Arc<Mutex<Pipe>>>,
+    },
     Done(std::result::Result<String, String>),
     /// Incoming HTTP carrier events of a platform exchange (`crate::ingress::IngressPort`).
     Ingress(crate::ingress::IngressEvent),
@@ -55,7 +63,6 @@ pub(crate) enum Event {
 /// How a guest's host request reached the host. A request on the stream carrier may only call
 /// an import whose whole result is a `stream<u8>`, and such an import is called only on it; the
 /// host checks this before it issues the call.
-#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Carried {
     /// A synchronous request: the guest stack waits for it.
     Sync,
@@ -63,6 +70,10 @@ pub(crate) enum Carried {
     Async,
     /// An asynchronous import call answered with a stream end, pumped into the Store's pipe.
     Stream,
+    Arguments {
+        moves: arguments::Moves,
+        stream: bool,
+    },
 }
 
 /// The dependency call one host request issued, if any. When the callback stops waiting for
@@ -152,6 +163,7 @@ pub(crate) struct Command {
     pub(crate) ingress: Option<crate::ingress::IngressCall>,
     /// The host-created end of a compiled call's byte-stream result; never serialized.
     pub(crate) stream: Option<StreamCall>,
+    pub(crate) arguments: Option<arguments::Arguments>,
 }
 
 /// Typed values a callback carries beside its packet. They never cross as JSON, so a guest
@@ -162,6 +174,10 @@ pub(crate) enum Carrier {
     None,
     Ingress(Box<crate::ingress::IngressCall>),
     Stream(StreamCall),
+    Arguments {
+        arguments: arguments::Arguments,
+        stream: Option<StreamCall>,
+    },
 }
 
 /// A compiled export's byte-stream result, created by the host before the call.
@@ -180,9 +196,13 @@ struct Owner {
     commands: Option<mpsc::Sender<Command>>,
     thread: Option<thread::JoinHandle<()>>,
     busy: Cell<bool>,
+    /// Cleanups queued during a callback stay with that driver's physical settlement.
+    cleanups: std::cell::RefCell<std::collections::VecDeque<Receiver<Event>>>,
     packet_bytes: usize,
     admission: Arc<futures::lock::Mutex<()>>,
     poison: Arc<Mutex<Option<String>>>,
+    /// Published only after Store, runtime and blocking work have physically exited.
+    stopped: Arc<std::sync::atomic::AtomicBool>,
     heap_bytes: usize,
     diagnostics: diagnostics::Diagnostics,
     admission_ms: u64,
@@ -190,11 +210,18 @@ struct Owner {
 }
 
 impl Owner {
+    fn close_cleanups(&self) {
+        for events in self.cleanups.borrow_mut().drain(..) {
+            close_replies(&events);
+        }
+    }
+
     /// Release buffered replies and refuse future calls; the first recorded reason wins.
     /// The abandoned callback's epoch ends first, so its pending standard work is revoked.
     fn abandon(&self, events: &Receiver<Event>, reason: &str) {
         self.io.scope().end_callback();
         close_replies(events);
+        self.close_cleanups();
         self.poison
             .lock()
             .expect("poison state")
@@ -206,6 +233,7 @@ impl Drop for Owner {
     /// Close the command stream and join only this interpreter's worker.
     fn drop(&mut self) {
         self.io.scope().end_callback();
+        self.close_cleanups();
         self.commands.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -218,6 +246,15 @@ impl Drop for Owner {
 pub(crate) struct Session(Rc<Owner>);
 
 impl Session {
+    /// Whether two environments belong to the same physical Store revision.
+    pub(crate) fn same_revision(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub(crate) fn stopped(&self) -> bool {
+        self.0.stopped.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Share the callback epoch so a foreign event receiver can end the callback.
     pub(crate) fn scope(&self) -> crate::io::CallbackScope {
         self.0.io.scope().clone()
@@ -267,11 +304,13 @@ impl Session {
         let poison = Arc::new(Mutex::new(None));
         let worker_poison = poison.clone();
         let instances = engine.active_instances.clone();
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stopped = stopped.clone();
         let thread = thread::Builder::new()
             .name("tembra-wasm".into())
             .spawn(move || {
                 instances.fetch_add(1, std::sync::atomic::Ordering::Release);
-                let count = Count(instances);
+                let count = Count(instances, worker_stopped);
                 // Compiled upstream work has a small fallback pool. Qualified source file calls
                 // run inline under the process-wide active budget in io::file_turn.
                 let runtime = tokio::runtime::Builder::new_current_thread()
@@ -295,9 +334,11 @@ impl Session {
             commands: Some(send),
             thread: Some(thread),
             busy: Cell::new(false),
+            cleanups: Default::default(),
             packet_bytes,
             admission: Arc::new(futures::lock::Mutex::new(())),
             poison,
+            stopped,
             heap_bytes,
             diagnostics,
             admission_ms,
@@ -384,8 +425,8 @@ impl Session {
     /// It needs no admission and no caller. When the revision is idle and holds imported
     /// resources (`release` is given), it runs now on this thread, and every imported slot its
     /// destructors drop is passed to `release`. It releases imported handles and local view
-    /// claims, granting the destructors no call authority. Otherwise the command is queued; the
-    /// slots its destructors drop then wait for this revision's next call or its root's release.
+    /// claims, granting the destructors no call authority. A busy callback's driver also owns
+    /// queued cleanup channels, including their releases and physical terminal completion.
     /// A failure is reported, never passed off as a clean release.
     fn cleanup(&self, packet: GuestCommand<'_>, release: Option<&mut dyn FnMut(u32)>) {
         let packet = serde_json::to_string(&packet).expect("serializable cleanup");
@@ -413,13 +454,18 @@ impl Session {
             return;
         }
         let (events, receive) = async_channel::bounded(1);
-        drop(receive);
+        if self.0.busy.get() && !poisoned {
+            self.0.cleanups.borrow_mut().push_back(receive);
+        } else {
+            drop(receive);
+        }
         let command = Command {
             operation: Operation::Start,
             packet,
             events,
             ingress: None,
             stream: None,
+            arguments: None,
         };
         if let Some(sender) = &self.0.commands {
             let _ = sender.send(command);
@@ -482,10 +528,11 @@ impl Session {
                 "concurrent or reentrant calls to this interpreter are not supported",
             ));
         }
-        let (ingress, stream) = match carrier {
-            Carrier::None => (None, None),
-            Carrier::Ingress(call) => (Some(*call), None),
-            Carrier::Stream(call) => (None, Some(call)),
+        let (ingress, stream, arguments) = match carrier {
+            Carrier::None => (None, None, None),
+            Carrier::Ingress(call) => (Some(*call), None, None),
+            Carrier::Stream(call) => (None, Some(call), None),
+            Carrier::Arguments { arguments, stream } => (None, stream, Some(arguments)),
         };
         let command = Command {
             operation,
@@ -493,6 +540,7 @@ impl Session {
             events: send,
             ingress,
             stream,
+            arguments,
         };
         // Transport streams opened by this callback belong to its epoch until it completes.
         self.0.io.scope().begin_callback();
@@ -565,6 +613,10 @@ impl Session {
                 }
                 Event::Stream { reply, .. } => {
                     let _ = reply.send(Err("declarations cannot import streams".into()));
+                }
+                Event::Arguments { reply, .. } => {
+                    let _ =
+                        reply.send(Err("declarations cannot transfer resource arguments".into()));
                 }
             }
         }
@@ -672,14 +724,48 @@ impl Session {
                         release.release();
                     }
                     while pending.next().await.is_some() {}
+                    let cleanup = self.finish_cleanups(&host).await;
                     guard.completed = true;
-                    return decode(result);
+                    return cleanup.and_then(|()| decode(result));
                 }
                 Event::Host {
                     packet,
                     asynchronous,
                     reply,
-                } => pending.push(self.answer(&host, packet, asynchronous, reply, None, &release)),
+                } => pending.push(self.answer(
+                    &host,
+                    packet,
+                    if asynchronous {
+                        Carried::Async
+                    } else {
+                        Carried::Sync
+                    },
+                    reply,
+                    None,
+                    &release,
+                )),
+                Event::Arguments {
+                    packet,
+                    moves,
+                    reply,
+                    pipe,
+                } => {
+                    let carried = Carried::Arguments {
+                        moves,
+                        stream: pipe.is_some(),
+                    };
+                    let stream = match pipe {
+                        Some(pipe) => {
+                            if streams.get() >= STREAM_IMPORTS {
+                                let _ = reply.send(Err(format!("a callback may have at most {STREAM_IMPORTS} stream imports outstanding")));
+                                continue;
+                            }
+                            Some((pipe, StreamSlot::take(&streams)))
+                        }
+                        None => None,
+                    };
+                    pending.push(self.answer(&host, packet, carried, reply, stream, &release));
+                }
                 Event::Stream {
                     packet,
                     reply,
@@ -695,7 +781,7 @@ impl Session {
                     pending.push(self.answer(
                         &host,
                         packet,
-                        true,
+                        Carried::Stream,
                         reply,
                         Some((pipe, slot)),
                         &release,
@@ -707,6 +793,64 @@ impl Session {
 }
 
 impl Session {
+    /// A queued destructor has no call authority. Only its imported-resource releases are
+    /// handled here; its completion belongs to the callback that was busy when it was queued.
+    async fn finish_cleanups(
+        &self,
+        host: &impl AsyncFn(&str, Carried, &Issued) -> Result<Reply>,
+    ) -> Result<()> {
+        let mut failed = None;
+        loop {
+            let events = self.0.cleanups.borrow_mut().pop_front();
+            let Some(events) = events else {
+                break;
+            };
+            loop {
+                match events.recv().await {
+                    Ok(Event::Host {
+                        packet,
+                        asynchronous: false,
+                        reply,
+                    }) => {
+                        let result = match crate::protocol::Request::decode(&packet) {
+                            Ok(crate::protocol::Request::ReferenceRelease { .. }) => {
+                                host(&packet, Carried::Sync, &Issued::default())
+                                    .await
+                                    .map(|reply| reply.value.to_string())
+                            }
+                            _ => Err(failure("a cleanup performs no other host operation")),
+                        };
+                        let _ = reply.send(encode(result, self.0.packet_bytes));
+                    }
+                    Ok(Event::Done(result)) => {
+                        if let Err(error) = result {
+                            failed.get_or_insert_with(|| failure(error));
+                        }
+                        break;
+                    }
+                    Ok(
+                        Event::Host { reply, .. }
+                        | Event::Arguments { reply, .. }
+                        | Event::Stream { reply, .. },
+                    ) => {
+                        let _ = reply.send(Err(
+                            "a cleanup performs no asynchronous host operation".into(),
+                        ));
+                    }
+                    Ok(Event::Ingress(_)) => {}
+                    Err(error) => {
+                        failed.get_or_insert_with(|| failure(error));
+                        break;
+                    }
+                }
+            }
+        }
+        match failed {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     /// Answer one host request of a callback. Capabilities installed for the answer are
     /// committed only once the worker received it; anything else rolls back. A stream import's
     /// delivered end is then pumped into its pipe, within this callback: the pump ends at the
@@ -725,7 +869,7 @@ impl Session {
         &'a self,
         host: &'a impl AsyncFn(&str, Carried, &Issued) -> Result<Reply>,
         packet: String,
-        asynchronous: bool,
+        carried: Carried,
         mut reply: oneshot::Sender<std::result::Result<String, String>>,
         stream: Option<(Arc<Mutex<Pipe>>, StreamSlot<'a>)>,
         release: &'a Release,
@@ -733,11 +877,6 @@ impl Session {
         async move {
             let issued = Issued::default();
             let _abandon = Abandon(&issued);
-            let carried = match (&stream, asynchronous) {
-                (Some(_), _) => Carried::Stream,
-                (None, true) => Carried::Async,
-                (None, false) => Carried::Sync,
-            };
             let result = {
                 let operation = std::pin::pin!(host(&packet, carried, &issued));
                 let closed = std::pin::pin!(reply.closed());
@@ -853,10 +992,14 @@ fn publish_after_shutdown(
 }
 
 /// Count one live Store until its thread has dropped the Store and its runtime.
-struct Count(Arc<std::sync::atomic::AtomicUsize>);
+struct Count(
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
 impl Drop for Count {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
+        self.1.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -929,6 +1072,8 @@ mod tests {
         let (started, ready) = mpsc::channel();
         let (release, blocked) = mpsc::channel();
         let (events, receive) = async_channel::bounded(1);
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stopped = stopped.clone();
         let thread = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -942,7 +1087,7 @@ mod tests {
             let poison = Mutex::new(None);
             publish_after_shutdown(
                 runtime,
-                Count(instances),
+                Count(instances, worker_stopped),
                 &poison,
                 &diagnostics::Diagnostics {
                     orb: "test".into(),
@@ -957,8 +1102,10 @@ mod tests {
             let _ = published.send(receive.recv_blocking());
         });
         let premature = observed.recv_timeout(Duration::from_millis(50));
+        assert!(!stopped.load(std::sync::atomic::Ordering::Acquire));
         release.send(()).unwrap();
         thread.join().unwrap();
+        assert!(stopped.load(std::sync::atomic::Ordering::Acquire));
         assert!(
             premature.is_err(),
             "quarantine preceded physical completion"
@@ -1016,7 +1163,23 @@ mod tests {
             !events.is_empty(),
             "the real synchronous import was not buffered"
         );
+        // A busy callback owns queued cleanup receivers too. Abandonment must close them
+        // before joining the worker, or their buffered synchronous replies can strand it.
+        let (queued, cleanup) = async_channel::bounded(1);
+        let (reply, mut answer) = oneshot::channel();
+        queued
+            .try_send(Event::Host {
+                packet: r#"{"operation":"reference.release","id":1}"#.into(),
+                asynchronous: false,
+                reply,
+            })
+            .unwrap();
+        session.0.cleanups.borrow_mut().push_back(cleanup);
         drop(guard);
+        assert!(matches!(
+            answer.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
         drop(events);
         let started = Instant::now();
         drop(session);

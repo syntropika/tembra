@@ -70,7 +70,11 @@ test("an early capability head keeps its provider invocation admitted until phys
     "resource-one",
     async (_environment, _context, _input, _receiver, retain) => {
       retain!(finished.promise);
-      return { value: encode(0), capabilities: [resource], finished: finished.promise };
+      return {
+        value: encode(0),
+        capabilities: [resource],
+        finished: finished.promise,
+      };
     },
   );
   await host.install({
@@ -82,7 +86,10 @@ test("an early capability head keeps its provider invocation admitted until phys
   const record = host.session.handles.reference(reference);
   try {
     await host.root(async (context) => {
-      const capture: CapturedInvocation = { signature: "resource-one", input: encode([]) };
+      const capture: CapturedInvocation = {
+        signature: "resource-one",
+        input: encode([]),
+      };
       await host.session.calls.invokePhysical(record, "open", [], context, capture);
       expect(capture.capabilities).toEqual([resource]);
       expect(host.diagnostics().calls).toBe(1);
@@ -153,7 +160,8 @@ test("a bounded receiver failure retains its loan and invocation until actual pr
     () => 0,
     "borrowed-timeout",
     async (_environment, _context, _input, receiver, retain) => {
-      expect(receiver).toBe(owner);
+      expect(receiver).toBeDefined();
+      expect(receiver).not.toBe(owner);
       retain!(actual.promise);
       throw new Error("bounded callback timeout");
     },

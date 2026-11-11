@@ -10,7 +10,7 @@
  * returned host-local handle. Every call runs under the admitted invocation of the callback that
  * issued it, with arguments and results checked by the import's own WIT signature.
  */
-import type { CapturedInvocation, ResourceCapability } from "#tembra-adapters";
+import type { CapturedInvocation, CapturedArguments, ResourceCapability } from "#tembra-adapters";
 import type { Declaration } from "../../authoring/declaration.ts";
 import type { DynamicReference } from "../../authoring/types.ts";
 import type { Context } from "../../runtime/context.ts";
@@ -59,13 +59,19 @@ export interface CallbackScope {
    * Call a plain Orb dependency import with host-domain arguments (WIT 64-bit positions as
    * `bigint`) and answer its checked host-domain result.
    */
-  call(binding: string, method: string, args: readonly unknown[]): Promise<unknown>;
+  call(
+    binding: string,
+    method: string,
+    args: readonly unknown[],
+    arguments_?: CapturedArguments,
+  ): Promise<unknown>;
   releaseResource(owner: ResourceCapability): void;
   resource?(
     owner: ResourceCapability,
     binding: string,
     method: string,
     args: readonly unknown[],
+    arguments_?: CapturedArguments,
   ): Promise<unknown>;
   /**
    * Acquire a reference view's provider at `key` for this callback's admitted invocation and
@@ -160,19 +166,28 @@ export class ComponentScope {
         }
         droppedResources.clear();
       },
-      call: async (binding, method, args) => {
+      call: async (binding, method, args, arguments_) => {
         live();
         const reference = (this.parent ?? this).defaults.get(binding);
         if (!reference) throw new Error("The component has no Orb dependency for this import");
         const bound = this.owner.importMethods.get(binding)?.get(method);
         if (!bound) throw new Error("Unknown prepared import method");
-        return this.call(reference, binding, bound, args, context, ended.signal);
+        return this.call(
+          reference,
+          binding,
+          bound,
+          args,
+          context,
+          ended.signal,
+          undefined,
+          arguments_,
+        );
       },
       releaseResource: (owner) => {
         if (ended.signal.aborted) owner.close();
         else droppedResources.add(owner);
       },
-      resource: async (owner, binding, method, args) => {
+      resource: async (owner, binding, method, args, arguments_) => {
         live();
         const bound = this.owner.importMethods.get(binding)?.get(method);
         if (!bound?.roles?.receiver) throw new Error("Not a prepared resource method");
@@ -181,7 +196,16 @@ export class ComponentScope {
           owner.nominal.name !== bound.roles.receiver.name
         )
           throw new Error("Resource has another nominal type");
-        return this.call(owner.reference, binding, bound, args, context, ended.signal, owner);
+        return this.call(
+          owner.reference,
+          binding,
+          bound,
+          args,
+          context,
+          ended.signal,
+          owner,
+          arguments_,
+        );
       },
       acquire: async (binding, key, abandoned) => {
         live();
@@ -229,7 +253,12 @@ export class ComponentScope {
     if (!service) throw new Error("Reference is not a selected WIT Orb import");
     return acquireReference(this.declaration, service, key, context, ended, (reference) => {
       const token: ReferenceClaim = Object.freeze({ binding });
-      claims.set(token, { owner: this.owner, binding, reference, root: context.root });
+      claims.set(token, {
+        owner: this.owner,
+        binding,
+        reference,
+        root: context.root,
+      });
       return token;
     });
   }
@@ -243,6 +272,7 @@ export class ComponentScope {
     context: Context,
     ended: AbortSignal,
     receiver?: ResourceCapability,
+    arguments_?: CapturedArguments,
   ): Promise<unknown> {
     checkSignal(ended);
     context.check();
@@ -256,9 +286,20 @@ export class ComponentScope {
     );
     const signature = this.owner.importSignatures.get(binding);
     const capture: CapturedInvocation | undefined = signature
-      ? { signature, input, ...(receiver ? { receiver } : {}) }
+      ? {
+          signature,
+          input,
+          ...(receiver ? { receiver } : {}),
+          ...(arguments_ ? { arguments: arguments_ } : {}),
+        }
       : undefined;
-    if ((bound.roles?.owned || bound.roles?.receiver || bound.roles?.stream) && !capture)
+    if (
+      (bound.roles?.owned ||
+        bound.roles?.receiver ||
+        bound.roles?.stream ||
+        bound.roles?.arguments) &&
+      !capture
+    )
       throw new Error("Resource transport requires an exact prepared signature");
     const session = this.declaration.session;
     const record = receiver ? receiver.reference : session.handles.reference(reference);

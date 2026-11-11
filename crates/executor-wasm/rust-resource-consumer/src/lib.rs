@@ -37,17 +37,30 @@ struct Relay;
 /// An exported resource owning an imported session; dropping it drops that session.
 struct Holder {
     session: Session,
+    /// One reserved fixture seed makes its destructor trap while owning an imported session.
+    fragile: bool,
 }
 
 impl exports::tembra_test::resources::relay::GuestHolder for Holder {
     fn new(seed: u64) -> Self {
         Self {
             session: Session::new(seed),
+            fragile: seed == u64::MAX,
         }
     }
 
     fn total(&self) -> u64 {
         self.session.total()
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        if self.fragile {
+            // A destructor has no Orb-call authority. The failed import traps before the field
+            // drop, so the host must retire its foreign owner after the Store physically exits.
+            views::describe();
+        }
     }
 }
 
@@ -77,6 +90,25 @@ impl exports::tembra_test::resources::relay::Guest for Relay {
             sessions::Selection::Active(session) => session.total(),
         };
         vec![pair.0.total(), pair.1, choice]
+    }
+
+    fn move_back(seed: u64) -> Vec<u64> {
+        let single = sessions::take(sessions::open(seed));
+        let mut values = sessions::take_bundle(sessions::open_bundle(seed, false).unwrap());
+        values.insert(0, single);
+        values
+    }
+
+    async fn move_later(seed: u64) -> u64 {
+        sessions::take_later(sessions::open(seed)).await
+    }
+
+    fn accept(value: Session) -> u64 {
+        value.total()
+    }
+
+    fn accept_keep(value: Session) {
+        KEPT.0.replace(Some(value));
     }
 
     fn pair(seed: u64, n: u64) -> Vec<u64> {

@@ -287,7 +287,8 @@ impl Environment {
             // Authority can expire while the callback waits behind another one.
             Self::authorize(&scope)?;
         }
-        self.session
+        let result = self
+            .session
             .dispatch(
                 admission,
                 cancellation.as_ref(),
@@ -295,11 +296,21 @@ impl Environment {
                 carrier,
                 async |packet, carried, issued| match carried {
                     Carried::Sync => self.sync(&scope, packet).map(Into::into),
-                    Carried::Async => self.asynchronous(&scope, packet, false, issued).await,
-                    Carried::Stream => self.asynchronous(&scope, packet, true, issued).await,
+                    Carried::Async => self.asynchronous(&scope, packet, false, None, issued).await,
+                    Carried::Stream => self.asynchronous(&scope, packet, true, None, issued).await,
+                    Carried::Arguments { moves, stream } => {
+                        self.asynchronous(&scope, packet, stream, Some(moves), issued)
+                            .await
+                    }
                 },
             )
-            .await
+            .await;
+        // A terminal event is delivered only after physical shutdown. Wasmtime does not run
+        // imported host-resource destructors on Store drop, so retire their owner table here.
+        if self.session.stopped() {
+            resources::release_all(self.parent.as_ref().unwrap_or(&self.handles));
+        }
+        result
     }
 
     /// Reject a scope whose root, invocation or opener was cancelled or has ended.

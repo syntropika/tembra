@@ -25,7 +25,7 @@ import { ComponentPort } from "./port.ts";
 import type { PreparedRecord } from "./prepared.ts";
 import { compiledDescription, ComponentRevision, type Described } from "./revision.ts";
 import { resourceDataFunction, resourceRoles } from "./resources.ts";
-import { converters, type GraphFunction } from "./values.ts";
+import { converters, type GraphFunction, type TypeGraph } from "./values.ts";
 import { checkPublicWasi, publicWasi } from "./wasi.ts";
 
 /** Browser options a compiled installation reads. */
@@ -86,7 +86,10 @@ export async function openComponent(
   release: () => void,
 ): Promise<OrbDefinition> {
   requireJspi();
-  const identity = JSON.parse(contract.description()) as { name: string; apiVersion: number };
+  const identity = JSON.parse(contract.description()) as {
+    name: string;
+    apiVersion: number;
+  };
   if (identity.name !== record.orb.name || identity.apiVersion !== record.orb.apiVersion)
     throw new Error("The prepared adapter was generated for another Orb identity");
   checkPublicWasi(record.imports);
@@ -172,8 +175,16 @@ export async function openComponent(
     for (const name of record.imports) {
       if (Object.hasOwn(imports, name)) continue;
       const selected = graph.imports.find((item) => item.binding === name);
+      const resourceGraph: TypeGraph = graph;
+      const resourceTypes = resourceGraph.types.flatMap(({ definition }) =>
+        definition.kind === "resource" &&
+        definition.owner === (selected?.contract ?? name) &&
+        definition.name
+          ? [{ interface: definition.owner, name: definition.name }]
+          : [],
+      );
       if (selected?.type_only) {
-        imports[name] = {};
+        imports[name] = resourceImport(port, name, [], resourceTypes);
         continue;
       }
       // `checkAdapter` admitted only Orb-bound dependency imports here.
@@ -196,6 +207,7 @@ export async function openComponent(
                 values: convert(resourceDataFunction(fn as GraphFunction, roles)),
               };
             }),
+            resourceTypes,
           );
     }
     // Pages are shared by all core modules. Instantiation has finite fuel; subsequent fuel

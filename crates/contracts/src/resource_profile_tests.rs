@@ -64,7 +64,6 @@ fn constructors_methods_statics_and_owned_factories_have_distinct_roles() {
 #[test]
 fn unsupported_transfers_and_async_containers_stay_closed() {
     for body in [
-        "resource session; take: func(value: own<session>);",
         "resource session; read: func(value: borrow<session>);",
         "read: func() -> stream<u8>;",
         "read: func() -> future<u64>;",
@@ -78,6 +77,90 @@ fn unsupported_transfers_and_async_containers_stay_closed() {
             "{body}"
         );
     }
+}
+
+#[test]
+fn owned_arguments_are_mapped_only_after_complete_shape_validation() {
+    let contract = contract(
+        "resource session { consume: func(other: session); } \
+        record batch { primary: session, extra: option<session>, rest: list<session>, seed: u64 } \
+        take: func(value: batch);",
+    );
+    contract.check_resource_profile().unwrap();
+    let slot = contract
+        .bind("test:resources/sessions@1.0.0", "take", true)
+        .unwrap();
+    let signature = contract.resource_signature(slot).unwrap();
+    assert!(signature.owned_arguments);
+    assert!(!signature.owned_results);
+    let mut value = serde_json::json!([{"primary":0,"extra":1,"rest":[2,3],"seed":u64::MAX}]);
+    let mut seen = Vec::new();
+    contract
+        .map_owned_arguments(slot, &mut value, |identity, index| {
+            assert_eq!(
+                identity.interface.as_deref(),
+                Some("test:resources/sessions@1.0.0")
+            );
+            assert_eq!(identity.name.as_deref(), Some("session"));
+            seen.push(index);
+            Ok(index + 10)
+        })
+        .unwrap();
+    assert_eq!(seen, [0, 1, 2, 3]);
+    assert_eq!(value[0]["primary"], 10);
+    assert_eq!(value[0]["rest"], serde_json::json!([12, 13]));
+    let wire = contract.to_resource_wire(slot, true, value).unwrap();
+    assert_eq!(wire[0]["seed"], u64::MAX.to_string());
+    for invalid in [
+        serde_json::json!([]),
+        serde_json::json!([{"primary":0,"extra":1,"rest":[2,3],"seed":"invalid"}]),
+    ] {
+        let mut invalid = invalid;
+        assert!(
+            contract
+                .map_owned_arguments(slot, &mut invalid, |_, _| panic!(
+                    "invalid sibling admitted a move"
+                ))
+                .is_err()
+        );
+    }
+    let consume = contract
+        .bind(
+            "test:resources/sessions@1.0.0",
+            "[method]session.consume",
+            true,
+        )
+        .unwrap();
+    let mut tuple = serde_json::json!([0]);
+    let signature = contract.resource_signature(consume).unwrap();
+    assert!(signature.receiver.is_some());
+    assert!(signature.owned_arguments);
+    contract
+        .map_owned_arguments(consume, &mut tuple, |_, index| Ok(index + 1))
+        .unwrap();
+    assert_eq!(tuple, serde_json::json!([1]));
+    assert!(
+        contract
+            .validate_slot(slot, true, &serde_json::json!([0]))
+            .is_err()
+    );
+}
+
+#[test]
+fn foreign_owned_arguments_require_their_defining_orb_import() {
+    let source = "package test:argument; interface provider { resource session; } \
+        interface receiver { use provider.{session}; take: func(value: session); } \
+        world missing { export receiver; } \
+        world linked { import provider; export receiver; }";
+    // WIT resolution inserts the defining interface automatically. A forged prepared model
+    // that omits it must still fail closed before executor linking.
+    let resolved = Contract::from_source("argument.wit", source, Some("missing")).unwrap();
+    let mut model = resolved.model().clone();
+    model.imports.clear();
+    let missing = PreparedContract::new(model).unwrap();
+    assert!(missing.check_resource_profile().is_err());
+    let linked = Contract::from_source("argument.wit", source, Some("linked")).unwrap();
+    linked.check_resource_profile().unwrap();
 }
 
 #[test]

@@ -22,6 +22,10 @@ import {
   verifyBrowserNestedResources,
   verifyBrowserResourceRefusal,
   verifyBrowserResourceReload,
+  verifyBrowserResourceArguments,
+  verifyBrowserForeignResourceArguments,
+  verifyBrowserMovedResourceReload,
+  verifyBrowserMovedResourceRefusal,
 } from "./component-resources-browser.ts";
 import {
   verifyBrowserByteStreams,
@@ -223,6 +227,38 @@ export async function verifyPreparedComponents(engine?: URL): Promise<string[]> 
       "compiled resource data-only refusal",
       () =>
         verifyBrowserResourceRefusal(base, [adapters.resourceProvider, adapters.resourceConsumer]),
+    ],
+    [
+      "compiled owned resource arguments and nested batches",
+      () =>
+        verifyBrowserResourceArguments(base, [
+          adapters.resourceProvider,
+          adapters.resourceConsumer,
+        ]),
+    ],
+    [
+      "compiled foreign owned resource arguments across roots",
+      () =>
+        verifyBrowserForeignResourceArguments(base, [
+          adapters.resourceProvider,
+          adapters.resourceConsumer,
+        ]),
+    ],
+    [
+      "compiled moved resource ownership across issuer reload",
+      () =>
+        verifyBrowserMovedResourceReload(base, [
+          adapters.resourceProvider,
+          adapters.resourceConsumer,
+        ]),
+    ],
+    [
+      "compiled moved resource authority and trap cleanup",
+      () =>
+        verifyBrowserMovedResourceRefusal(base, [
+          adapters.resourceProvider,
+          adapters.resourceConsumer,
+        ]),
     ],
     [
       "compiled resource identity across reload",
