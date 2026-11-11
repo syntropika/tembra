@@ -1052,3 +1052,7 @@ branch.
   per la strada B.
 - 11/11, 21:20: la PR #1 resta su `main`, anche se Javier
   continua su `feat/wasm-orb-runtime`.
+- 11/11, 22:50: Giacomo ha mandato a Javier un messaggio con
+  le scelte del ribase (le sue tenute dove si poteva, cosa è
+  cambiato nel suo codice). Aspettare la sua risposta prima
+  di cambiare di nuovo quelle parti.
