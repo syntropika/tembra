@@ -827,8 +827,8 @@ Poi:
    e `Manifest` (sezioni «Artifact» e «The manifest, the
    kernel's context and state validation»).
 
-Nota: alle 20:40 CET Javier ha pushato `aa88fef` su
-`feat/wasm-orb-runtime` («feat(browser): support compiled
+Nota: Javier ha pushato `aa88fef` (commit delle 19:46 CET,
+visto alle 20:45) su `feat/wasm-orb-runtime` («feat(browser): support compiled
 orb resources and byte streams»), non ancora in `main`. Con la
 PR ribasata ha in comune solo `crates/executor-wasm/README.md`,
 e il merge di prova è pulito.
