@@ -1,6 +1,6 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 20:35 CET
+- **Aggiornato:** 2026-11-11, 21:25 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   ora con base `main`
 - **Stato:** strada A. Ribase fatto, verificato e su origin
@@ -838,8 +838,17 @@ Poi:
    ```
 
 2. aggiornare il corpo della PR: cita ancora `CallbackRoles`
-   e `Manifest` (sezioni «Artifact» e «The manifest, the
-   kernel's context and state validation»).
+   e `Manifest`. La bozza nuova è sul server, in
+   `/home/claude/github/tembra/.worktrees/pr-body-865e4c6.md`.
+   Si applica con:
+
+   ```bash
+   gh pr edit 1 --body-file \
+     /home/claude/github/tembra/.worktrees/pr-body-865e4c6.md
+   ```
+
+CI sul ribase (run `43088224249`): alle 21:20 `quality` era
+verde in 12 minuti, `acceptance` ancora in corso.
 
 Nota: Javier ha pushato `aa88fef` su `feat/wasm-orb-runtime`
 (commit delle 19:46 CET, visto verso le 20:30), non ancora in
@@ -1010,3 +1019,5 @@ branch.
 - 11/11 sera: `tembra:orb` non è tornato, quindi strada A.
   La PR #1 resta la linea principale; il lifecycle serve solo
   per la strada B.
+- 11/11, 21:20: la PR #1 resta su `main`, anche se Javier
+  continua su `feat/wasm-orb-runtime`.
