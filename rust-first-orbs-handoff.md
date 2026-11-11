@@ -1,6 +1,6 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 21:25 CET
+- **Aggiornato:** 2026-11-11, 22:05 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   base `main`
 - **Stato:** strada A. Ribase fatto, verificato e pushato: la
@@ -830,12 +830,37 @@ alle 21:24 CET Claude l'ha lanciato:
 ```
 
 CI sulla PR: run `43095862614` (push) e `43095868722`
-(pull_request), su `f8d9cf2`.
+(pull_request), su `f8d9cf2`. Alle 22:00 CET GitHub Actions
+era in «major outage»: la run pull_request è finita come
+failure senza mai partire (job in coda, zero step), la push è
+rimasta in coda. Va rilanciata quando Actions torna:
+
+```bash
+gh run rerun 43095868722
+```
+
+Esito della run `43088224249` sul branch di passaggio, stesso
+commit `f8d9cf2`:
+
+- `quality` verde;
+- `acceptance` rossa su due test di `source_stream_imports.rs`:
+  `the_head_arrives_early_and_the_producer_is_backpressured`
+  (limite di tempo dell'interprete) e
+  `a_source_consumer_reads_a_compiled_producer_exactly_`
+  `and_sees_its_trap`.
+- Non sono della PR: le run di Javier sui suoi commit, senza
+  la PR, falliscono sugli stessi test (`aa88fef` il primo,
+  `27c608c` il secondo, più
+  `a_source_consumer_reads_native_and_source_producers_`
+  `exactly`). Sul `865e4c6` invece erano passati: sono test
+  intermittenti, sensibili ai tempi.
 
 Poi:
 
-1. cancellare il branch di passaggio, quando la sua run
-   `43088224249` è finita:
+1. cancellare il branch di passaggio (la sua run è finita).
+   Per Claude è bloccato dal classificatore («Git
+   Destructive»): Giacomo lo cancella dalla pagina dei branch
+   di GitHub, oppure manda in chat il comando esatto:
 
    ```bash
    git push origin --delete \
