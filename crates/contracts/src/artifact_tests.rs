@@ -29,6 +29,17 @@ fn component(contract: &Contract) -> Vec<u8> {
         .unwrap()
 }
 
+/// The digest a registered prepared browser adapter names for `bytes`.
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Decode the browser metadata of `bytes` as a host that registered their adapter.
+fn prepared(bytes: &[u8]) -> Result<PreparedComponent, Error> {
+    PreparedComponent::decode(bytes, &[sha256(bytes)])
+}
+
 fn append(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
     let section = CustomSection {
         name: Cow::Borrowed(name),
@@ -101,6 +112,13 @@ fn compiled_hook_declarations_travel_in_the_artifact_and_are_checked() {
     let decoded = Artifact::decode(&bytes).unwrap();
     assert_eq!(decoded.hooks, roles.hooks);
     assert!(decoded.contributions.is_empty());
+    // A browser decodes the same declaration from the metadata its prepared adapter names.
+    let browser = prepared(&bytes).unwrap();
+    assert_eq!(browser.hooks, roles.hooks);
+    assert_eq!(
+        browser.describe_hooks(),
+        serde_json::json!({ identity: "waterfall" })
+    );
     for refused in [
         ComponentRoles {
             hooks: [(identity.into(), HookComposition::Series)].into(),
@@ -121,6 +139,23 @@ fn compiled_hook_declarations_travel_in_the_artifact_and_are_checked() {
                 .component_artifact(&component, "gate", 1, &refused)
                 .is_err()
         );
+        // Forged metadata is refused by the browser decoder exactly as by the native one.
+        let mut forged = component.clone();
+        crate::artifact::append_section(
+            &mut forged,
+            "tembra:orb",
+            &crate::artifact::encode_orb_roles(
+                &Identity {
+                    name: "gate".into(),
+                    api_version: 1,
+                    world: "provider".into(),
+                },
+                contract.prepared(),
+                &refused,
+            ),
+        );
+        assert!(Artifact::decode(&forged).is_err());
+        assert!(prepared(&forged).is_err());
     }
     let packaged = Identity {
         name: "gate".into(),
@@ -169,6 +204,14 @@ fn compiled_service_policies_travel_in_the_artifact_and_are_checked() {
     assert!(decoded.contributions.is_empty());
     assert_eq!(decoded.hooks, roles.hooks);
     assert_eq!(decoded.services, roles.services);
+    // A browser decodes the same policies from the metadata its prepared adapter names.
+    let browser = prepared(&bytes).unwrap();
+    assert_eq!(browser.hooks, roles.hooks);
+    assert_eq!(browser.services, roles.services);
+    assert_eq!(
+        browser.describe_services(),
+        serde_json::json!({ ledger: { "lifetime": "host", "linger_ms": 0 } })
+    );
     let lingering = ComponentRoles {
         services: [(
             ledger.into(),
@@ -239,6 +282,7 @@ fn compiled_service_policies_travel_in_the_artifact_and_are_checked() {
             &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &refused),
         );
         assert!(Artifact::decode(&forged).is_err(), "{reason}");
+        assert!(prepared(&forged).is_err(), "{reason}");
     }
     let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
     crate::artifact::append_section(
