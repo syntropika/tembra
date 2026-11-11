@@ -1,33 +1,16 @@
 //! A source (TypeScript) Orb consuming the whole `stream<u8>` result of an imported Orb.
 //!
-//! The consumer is the SDK-authored fixture `tests/source/stream-reader` (reload replacement
-//! `stream-reader-v2`), prepared by the production SDK build into `TEMBRA_WASM_FIXTURES` and
-//! loaded through `Engine::load` (the native facade). Its producer is a native Orb, the source
-//! Orb `tests/source/stream-producer`, or the compiled S2 producer
-//! (`TEMBRA_WASM_STREAM_PRODUCER`); `tests/source/stream-relay` forwards an imported stream as its
-//! own whole result. Every case runs on Cranelift and on Pulley, through the real host, kernel
-//! references and roots.
+//! The consumer is a raw source bundle run by the packaged interpreter (`TEMBRA_WASM_ENGINE`),
+//! loaded through `Engine::load` (the native facade). Its producer is a native Orb, a source Orb,
+//! or the compiled S2 producer (`TEMBRA_WASM_STREAM_PRODUCER`). Every case runs on Cranelift and
+//! on Pulley, through the real host, kernel references and roots.
 //!
-//! The consumer imports no WASI interface and receives no grant. Each import is the typed WIT
-//! import of the selected dependency: the SDK selects the host-issued reference and calls the
-//! import in the same turn, and the host pumps the delivered end into a bounded pipe of the
-//! consumer's Store within its callback.
-//!
-//! Declared breaking semantics of the component runtime (COORDINATION, correction 5, and the
-//! executor handoff, defect 1): a dependency call has no WIT error lane here, so a failed import
-//! (a refused or failed head, a refused reentry, an exceeded bound) traps the importing callback
-//! and quarantines the consumer revision. A producer failure after its head is never a clean
-//! end either: a plain `stream<u8>` has no business-error lane, but the host owns the pump and
-//! fails the importer's next read (`Pipe::fail_producer`), so the importing callback traps at
-//! its physical drain and is quarantined. It never returns a successful truncated result, and a
-//! relay never ends its own stream cleanly after a truncated import. Only a producer that itself
-//! trapped (source or compiled) is quarantined; a native producer stays healthy. A WIT `result`
-//! business error is separate and stays recoverable.
+//! The consumer imports no WASI interface and receives no grant: its stream reader comes from
+//! the standard bootstrap, which a contract defining a stream loads without any WASI module. The
+//! import's request is the ordinary `reference.call` packet on the `STREAM_IMPORT` carrier; the
+//! host pumps the delivered end into a bounded pipe of the consumer's Store within its callback.
 use futures::{FutureExt, channel::oneshot, executor::LocalPool, task::LocalSpawnExt};
-#[path = "support/source.rs"]
-mod source;
 use serde_json::{Value, json};
-use source::fixture;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -41,12 +24,61 @@ use tembra::{
 };
 use tembra_executor_wasm::{Contract, Engine, Install, Limits};
 
+const WIT: &str = r#"
+package tembra-test:streams@1.0.0;
+
+interface frames {
+    frames: async func(count: u32, size: u32, mode: u32) -> stream<u8>;
+    ping: func(value: u32) -> u32;
+}
+
+interface aliased {
+    type bytes = stream<u8>;
+    frames: async func(count: u32, size: u32, mode: u32) -> bytes;
+    ping: func(value: u32) -> u32;
+}
+
+interface reader {
+    read: async func(count: u32, size: u32, mode: u32, take: u64, style: u32) -> tuple<u64, u32, u32>;
+    failure: async func(count: u32, size: u32, mode: u32) -> tuple<u64, string>;
+    ignore: async func(count: u32, size: u32, mode: u32) -> u32;
+    closing: async func(count: u32, size: u32) -> u32;
+    many: async func(n: u32, count: u32, size: u32) -> u64;
+    abandon: async func(count: u32, size: u32) -> u32;
+    forge: async func(which: u32) -> string;
+    ping: func(value: u32) -> u32;
+}
+
+interface relayed {
+    frames: async func(count: u32, size: u32, mode: u32) -> stream<u8>;
+}
+
+world consumer-orb {
+    import frames;
+    import aliased;
+    export reader;
+}
+
+world relay-orb {
+    import frames;
+    export relayed;
+}
+
+world producer-orb {
+    export frames;
+}
+
+world aliased-orb {
+    export aliased;
+}
+"#;
+
 const FRAMES: &str = "tembra-test:streams/frames@1.0.0";
 const ALIASED: &str = "tembra-test:streams/aliased@1.0.0";
 const READER: &str = "reader::tembra-test:streams/reader@1.0.0";
 const RELAY: &str = "relay::tembra-test:streams/relayed@1.0.0";
 const PRODUCER: &str = "frames::tembra-test:streams/frames@1.0.0";
-/// The pipe's byte capacity of the component host.
+/// The pipe's byte capacity (`worker::standard::PIPE_BYTES`).
 const PIPE_BYTES: usize = 64 << 10;
 
 /// Producer modes. The compiled S2 producer implements `CLEAN` and traps after its whole body
@@ -58,7 +90,7 @@ const FAIL_AFTER: u32 = 1;
 const QUIET: u32 = 4;
 /// Fail before the head.
 const FAIL_BEFORE: u32 = 5;
-/// Native only: wait for a physical gate (noting a cancellation seen first), then answer.
+/// Native only: wait for the call's own cancellation and then a physical gate, then answer.
 const GATED: u32 = 6;
 /// Source only: every chunk, then `throw undefined`.
 const THROW_UNDEFINED: u32 = 7;
@@ -77,21 +109,314 @@ const PROBE: u32 = 1000;
 const STARTED: u32 = 2000;
 const CLOSED: u32 = 3000;
 
-/// The compiled S2 producer; its tests require it.
-fn compiled_producer() -> Vec<u8> {
-    let path = std::env::var_os("TEMBRA_WASM_STREAM_PRODUCER")
-        .filter(|path| !path.is_empty())
-        .expect("TEMBRA_WASM_STREAM_PRODUCER names the compiled stream producer");
-    std::fs::read(path).unwrap()
+/// `JSON.stringify` of a `reference.call` request is ASCII here, so the forging helpers below
+/// encode and decode it byte for byte.
+fn consumer_source(revision: u32) -> String {
+    format!(
+        r#"
+const READ_CHUNK = Symbol.for("tembra.wasi.stream.read-chunk");
+const DISPOSE = Symbol.dispose ?? Symbol.for("Symbol.dispose");
+/** `readChunks` of `@syntropika/tembra-sdk` (`packages/ts/sdk/src/guest.ts`), interpreter path. */
+async function* readChunks(stream) {{
+  const read = stream[READ_CHUNK];
+  if (typeof read !== "function") throw new Error("not an interpreter byte stream");
+  try {{
+    for (let chunk = await read.call(stream); chunk; chunk = await read.call(stream)) yield chunk;
+  }} finally {{
+    stream[DISPOSE]?.();
+  }}
+}}
+/** Byte `j` of chunk `i` is `(i + j) mod 256`; count mismatches while advancing `at`. */
+function check(chunk, at, size) {{
+  let bad = 0;
+  for (let k = 0; k < chunk.length; k++) {{
+    if (chunk[k] !== ((at.index + at.offset) & 255)) bad++;
+    if (++at.offset === size) {{
+      at.offset = 0;
+      at.index++;
+    }}
+  }}
+  return bad;
+}}
+function message(error) {{
+  return error instanceof Error ? error.message : "thrown " + String(error);
+}}
+function ascii(text) {{
+  const bytes = new Uint8Array(text.length);
+  for (let at = 0; at < text.length; at++) bytes[at] = text.charCodeAt(at);
+  return bytes;
+}}
+/** A binary `STREAM_IMPORT` packet carrying `json`, plus `extra` trailing bytes. */
+function streamPacket(json, extra = 0) {{
+  const body = ascii(json);
+  const packet = new Uint8Array(6 + body.length + extra);
+  packet[1] = 10;
+  new DataView(packet.buffer).setUint32(2, body.length, true);
+  packet.set(body, 6);
+  return packet;
+}}
+function streamJson(packet) {{
+  const length = new DataView(packet.buffer, packet.byteOffset).getUint32(2, true);
+  let text = "";
+  for (let at = 0; at < length; at++) text += String.fromCharCode(packet[6 + at]);
+  return text;
+}}
+/** Rewrite the next host request once, then restore the real carrier. */
+function intercept(rewrite) {{
+  const original = globalThis.__hostAsync;
+  globalThis.__hostAsync = (packet) => {{
+    globalThis.__hostAsync = original;
+    return original(rewrite(packet, original));
+  }};
+}}
+async function refused(run) {{
+  try {{
+    await run();
+    return "accepted";
+  }} catch (error) {{
+    return message(error);
+  }}
+}}
+globalThis.__tembraOrb = {{ services: {{ reader: {{
+  create(self) {{
+    return {{
+      frames: self.get("{FRAMES}", ["main"]),
+      aliased: self.get("{ALIASED}", ["main"]),
+    }};
+  }},
+  methods: {{
+    ping(_environment, _context, value) {{ return value + {revision}; }},
+    async read(environment, context, count, size, mode, take, style) {{
+      const source = style >= {ALIAS} ? environment.aliased : environment.frames;
+      const how = style % {ALIAS};
+      const limit = take > BigInt(Number.MAX_SAFE_INTEGER) ? Infinity : Number(take);
+      const stream = await source.frames(count, size, mode, context);
+      const at = {{ index: 0, offset: 0 }};
+      let bytes = 0, bad = 0, reads = 0;
+      if (how === {BYTES}) {{
+        for await (const byte of stream) {{
+          if (byte !== ((at.index + at.offset) & 255)) bad++;
+          if (++at.offset === size) {{
+            at.offset = 0;
+            at.index++;
+          }}
+          if (++bytes >= limit) break;
+        }}
+      }} else {{
+        for await (const chunk of readChunks(stream)) {{
+          reads++;
+          bad += check(chunk, at, size);
+          bytes += chunk.length;
+          if (how === {PROBED} && reads === 1) await source.ping({PROBE}, context);
+          if (bytes >= limit) break;
+        }}
+      }}
+      return [BigInt(bytes), bad, reads];
+    }},
+    async failure(environment, context, count, size, mode) {{
+      let stream;
+      try {{
+        stream = await environment.frames.frames(count, size, mode, context);
+      }} catch (error) {{
+        return [0n, "import:" + message(error)];
+      }}
+      const at = {{ index: 0, offset: 0 }};
+      let bytes = 0, bad = 0;
+      try {{
+        for await (const chunk of readChunks(stream)) {{
+          bad += check(chunk, at, size);
+          bytes += chunk.length;
+        }}
+      }} catch (error) {{
+        return [BigInt(bytes), (bad ? "corrupt:" : "read:") + message(error)];
+      }}
+      return [BigInt(bytes), bad ? "corrupt" : "end"];
+    }},
+    async ignore(environment, context, count, size, mode) {{
+      await environment.frames.frames(count, size, mode, context);
+      return 7;
+    }},
+    async closing(environment, context, count, size) {{
+      const stream = await environment.frames.frames(count, size, {QUIET}, context);
+      const first = await stream[READ_CHUNK]();
+      if (first?.length !== size) throw new Error("the first chunk is missing");
+      stream[DISPOSE]();
+      // Answered only once the producer saw its stream closed, so this callback is still
+      // running when the close reaches it.
+      return await environment.frames.ping({CLOSED}, context);
+    }},
+    async many(environment, context, n, count, size) {{
+      const streams = await Promise.all(
+        Array.from({{ length: n }}, () => environment.frames.frames(count, size, {CLEAN}, context)),
+      );
+      let total = 0;
+      for (const stream of streams)
+        for await (const chunk of readChunks(stream)) total += chunk.length;
+      return BigInt(total);
+    }},
+    async abandon(environment, context, count, size) {{
+      const pending = environment.frames.frames(count, size, {GATED}, context);
+      pending.then((stream) => stream[DISPOSE]?.(), () => {{}});
+      // Answered once the gated call runs; the callback then ends with its import pending.
+      return await environment.frames.ping({STARTED}, context);
+    }},
+    async forge(environment, context, which) {{
+      const frames = environment.frames;
+      switch (which) {{
+        case 0:
+          // A scalar import call on the stream carrier.
+          intercept((packet) => streamPacket(packet));
+          return refused(() => frames.ping(1, context));
+        case 1:
+          // A stream import as an ordinary JSON request.
+          intercept((packet) => streamJson(packet));
+          return refused(() => frames.frames(1, 1, {CLEAN}, context));
+        case 2:
+          // Another host operation on the stream carrier.
+          intercept(() => streamPacket(JSON.stringify({{ operation: "wait", milliseconds: 1 }})));
+          return refused(() => frames.frames(1, 1, {CLEAN}, context));
+        case 3:
+          // Trailing bytes after the request.
+          intercept((packet) => streamPacket(streamJson(packet), 1));
+          return refused(() => frames.frames(1, 1, {CLEAN}, context));
+        case 4: {{
+          // Arguments outside the import's signature.
+          intercept((packet) => {{
+            const request = JSON.parse(streamJson(packet));
+            request.args = ["one", 1, 0];
+            return streamPacket(JSON.stringify(request));
+          }});
+          return refused(() => frames.frames(1, 1, {CLEAN}, context));
+        }}
+        case 5: {{
+          // A handle this environment never issued.
+          intercept((packet) => {{
+            const request = JSON.parse(streamJson(packet));
+            request.id = 999999;
+            return streamPacket(JSON.stringify(request));
+          }});
+          return refused(() => frames.frames(1, 1, {CLEAN}, context));
+        }}
+        case 6:
+          // An operation the standard carrier does not have.
+          intercept(() => Uint8Array.of(0, 11));
+          return refused(() => frames.frames(1, 1, {CLEAN}, context));
+        default:
+          throw new Error("unknown forgery");
+      }}
+    }},
+  }},
+}} }} }};
+"#
+    )
 }
 
-/// The consumer's contract, plus provider worlds for the native producers' signatures.
+/// The source producer; `writeChunks` transcribes `@syntropika/tembra-sdk`'s helper.
+fn producer_source() -> String {
+    format!(
+        r#"
+const WRITE_CHUNKS = Symbol.for("tembra.wasi.stream.write-chunks");
+function writeChunks(chunks) {{
+  const iterator = () =>
+    Symbol.asyncIterator in chunks ? chunks[Symbol.asyncIterator]() : chunks[Symbol.iterator]();
+  return {{
+    [WRITE_CHUNKS]: iterator,
+    async *[Symbol.asyncIterator]() {{ for await (const chunk of chunks) yield* chunk; }},
+  }};
+}}
+const PATTERN = new Uint8Array((1 << 16) + 256);
+for (let offset = 0; offset < 256; offset++) PATTERN[offset] = offset;
+for (let length = 256; length < PATTERN.length; length *= 2) PATTERN.copyWithin(length, 0, length);
+function chunk(index, size) {{
+  const start = index & 255;
+  return PATTERN.subarray(start, start + size);
+}}
+globalThis.__tembraOrb = {{ services: {{ frames: {{
+  methods: {{
+    ping(_environment, _context, value) {{ return value + 1; }},
+    async frames(_environment, _context, count, size, mode) {{
+      switch (mode) {{
+        case {CLEAN}:
+          return writeChunks((async function* () {{
+            let index = 0;
+            try {{
+              for (; index < count; index++) yield chunk(index, size);
+            }} finally {{
+              console.log("producer:returned:" + index);
+            }}
+          }})());
+        case {FAIL_AFTER}:
+          return writeChunks((async function* () {{
+            for (let index = 0; index < count; index++) {{
+              if (index === count >> 1) throw new Error("source producer failed after its head");
+              yield chunk(index, size);
+            }}
+          }})());
+        case {QUIET}:
+          return writeChunks((async function* () {{
+            try {{
+              yield chunk(0, size);
+              console.log("producer:quiet");
+              for (;;) await tembra.wait(5000);
+            }} finally {{
+              console.log("producer:returned");
+            }}
+          }})());
+        case {FAIL_BEFORE}:
+          throw new Error("source producer refused before its head");
+        case {THROW_UNDEFINED}:
+          return writeChunks((async function* () {{
+            for (let index = 0; index < count; index++) yield chunk(index, size);
+            throw undefined;
+          }})());
+        default:
+          throw new Error("unknown mode");
+      }}
+    }},
+  }},
+}} }} }};
+"#
+    )
+}
+
+/// A source Orb forwarding its imported stream as its own whole result.
+fn relay_source() -> String {
+    format!(
+        r#"
+globalThis.__tembraOrb = {{ services: {{ relayed: {{
+  create(self) {{
+    return {{ frames: self.get("{FRAMES}", ["main"]) }};
+  }},
+  methods: {{
+    async frames(environment, context, count, size, mode) {{
+      return await environment.frames.frames(count, size, mode, context);
+    }},
+  }},
+}} }} }};
+"#
+    )
+}
+
+fn interpreter() -> Option<Vec<u8>> {
+    let Some(path) = std::env::var_os("TEMBRA_WASM_ENGINE").filter(|path| !path.is_empty()) else {
+        eprintln!("skipped: TEMBRA_WASM_ENGINE names no packaged interpreter");
+        return None;
+    };
+    Some(std::fs::read(path).unwrap())
+}
+
+fn compiled_producer() -> Option<Vec<u8>> {
+    let Some(path) =
+        std::env::var_os("TEMBRA_WASM_STREAM_PRODUCER").filter(|path| !path.is_empty())
+    else {
+        eprintln!("skipped: TEMBRA_WASM_STREAM_PRODUCER names no compiled stream producer");
+        return None;
+    };
+    Some(std::fs::read(path).unwrap())
+}
+
 fn contract(world: &str) -> Contract {
-    let wit = format!(
-        "{}\nworld producer-orb {{ export frames; }}\nworld aliased-orb {{ export aliased; }}\n",
-        include_str!("source/stream-reader/contract.wit")
-    );
-    Contract::from_source("contract.wit", &wit, Some(world)).unwrap()
+    Contract::from_source("streams.wit", WIT, Some(world)).unwrap()
 }
 
 /// Byte `j` of chunk `i` is `(i + j) mod 256`.
@@ -246,21 +571,11 @@ fn native(native: Rc<Native>, orb: &str, world: &str) -> Orb {
                         (GATED, _) => {
                             native.note("gated:start");
                             native.started.set(true);
-                            // Its physical gate, or its own cancellation and then the gate.
+                            context.signal().cancelled().await;
+                            native.note("gated:signalled");
                             let physical = native.physical.borrow_mut().take();
-                            let cancelled = context.signal();
-                            let cancelled = std::pin::pin!(cancelled.cancelled());
                             if let Some(physical) = physical {
-                                match futures::future::select(cancelled, physical).await {
-                                    futures::future::Either::Left((_, physical)) => {
-                                        native.note("gated:signalled");
-                                        let _ = physical.await;
-                                    }
-                                    futures::future::Either::Right(_) => {}
-                                }
-                            } else {
-                                cancelled.await;
-                                native.note("gated:signalled");
+                                let _ = physical.await;
                             }
                             native.note("gated:end");
                         }
@@ -338,7 +653,11 @@ fn limits(timeout_ms: u64) -> Limits {
     }
 }
 
-fn engine(interpreted: bool, limits: Limits) -> (Engine, Arc<Mutex<Vec<String>>>) {
+fn engine(
+    interpreter: &[u8],
+    interpreted: bool,
+    limits: Limits,
+) -> (Engine, Arc<Mutex<Vec<String>>>) {
     let logs = Arc::<Mutex<Vec<String>>>::default();
     let sink = logs.clone();
     let engine = if interpreted {
@@ -347,19 +666,18 @@ fn engine(interpreted: bool, limits: Limits) -> (Engine, Arc<Mutex<Vec<String>>>
         Engine::new(limits)
     }
     .unwrap()
+    .interpreter(interpreter)
+    .unwrap()
     .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
     (engine, logs)
 }
 
-/// The prepared consumer: revision 1 (`stream-reader`) or its replacement (`stream-reader-v2`).
 fn consumer(engine: &Engine, revision: u32) -> Orb {
     engine
         .load(
-            &fixture(if revision == 1 {
-                "stream-reader"
-            } else {
-                "stream-reader-v2"
-            }),
+            &contract("consumer-orb")
+                .source_artifact(&consumer_source(revision), "reader", 1)
+                .unwrap(),
             Install::default()
                 .requires(FRAMES, "frames", 1)
                 .requires(ALIASED, "aliased", 1),
@@ -370,7 +688,9 @@ fn consumer(engine: &Engine, revision: u32) -> Orb {
 fn relay(engine: &Engine) -> Orb {
     engine
         .load(
-            &fixture("stream-relay"),
+            &contract("relay-orb")
+                .source_artifact(&relay_source(), "relay", 1)
+                .unwrap(),
             Install::default().requires(FRAMES, "frames", 1),
         )
         .unwrap()
@@ -380,7 +700,12 @@ fn producer(engine: &Engine, kind: Kind, native: &Rc<Native>, compiled: Option<&
     match kind {
         Kind::Native => self::native(native.clone(), "frames", "producer-orb"),
         Kind::Source => engine
-            .load(&fixture("stream-producer"), Install::default())
+            .load(
+                &contract("producer-orb")
+                    .source_artifact(&producer_source(), "frames", 1)
+                    .unwrap(),
+                Install::default(),
+            )
             .unwrap(),
         Kind::Compiled => engine
             .load(
@@ -402,8 +727,14 @@ fn producer(engine: &Engine, kind: Kind, native: &Rc<Native>, compiled: Option<&
     }
 }
 
-fn install(interpreted: bool, limits: Limits, kind: Kind, compiled: Option<&[u8]>) -> Fixture {
-    let (engine, logs) = engine(interpreted, limits);
+fn install(
+    interpreter: &[u8],
+    interpreted: bool,
+    limits: Limits,
+    kind: Kind,
+    compiled: Option<&[u8]>,
+) -> Fixture {
+    let (engine, logs) = engine(interpreter, interpreted, limits);
     let pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     let native = Rc::<Native>::default();
@@ -433,9 +764,12 @@ fn install(interpreted: bool, limits: Limits, kind: Kind, compiled: Option<&[u8]
 }
 
 /// Run `body` once on Cranelift and once on Pulley.
-fn engines(body: impl Fn(bool)) {
+fn engines(body: impl Fn(&[u8], bool)) {
+    let Some(interpreter) = interpreter() else {
+        return;
+    };
     for interpreted in [false, true] {
-        body(interpreted);
+        body(&interpreter, interpreted);
     }
 }
 
@@ -546,20 +880,6 @@ impl Fixture {
         self.reader.release().unwrap();
         self.producer.release().unwrap();
         self.pool.run_until(self.host.close()).unwrap();
-        self.closed();
-    }
-
-    /// Close a host where a revision was quarantined: closing reports its trap, and every kernel
-    /// record and Store is still physically gone.
-    fn retire(mut self) {
-        let _ = self.reader.release();
-        let _ = self.producer.release();
-        // Closing may report the trap; the Stores are retired either way.
-        let _ = self.pool.run_until(self.host.close());
-        self.closed();
-    }
-
-    fn closed(&self) {
         let diagnostics = self.host.kernel().diagnostics();
         assert_eq!(
             (
@@ -574,28 +894,6 @@ impl Fixture {
         );
         assert_eq!(self.engine.instances(), 0, "{}", self.mode());
         assert_eq!(self.engine.resources(), 0, "{}", self.mode());
-    }
-
-    /// The consumer revision was quarantined: its next ordinary call is refused.
-    fn consumer_quarantined(&mut self) {
-        let mode = self.mode();
-        let refused = self.call::<_, u32>("ping", (41_u32,)).unwrap_err();
-        assert_eq!(
-            refused.reason, "wasm_executor_quarantined",
-            "{mode}: {refused:?}"
-        );
-    }
-
-    /// The host recorded a component trap.
-    fn recorded_trap(&self) {
-        let errors = self.host.errors();
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("component trap")),
-            "{}: {errors:?}",
-            self.mode()
-        );
     }
 }
 
@@ -645,11 +943,11 @@ fn reads_exactly(fixture: &mut Fixture) {
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn a_source_consumer_reads_native_and_source_producers_exactly() {
-    engines(|interpreted| {
+    engines(|interpreter, interpreted| {
         for kind in [Kind::Native, Kind::Source] {
-            let mut fixture = install(interpreted, limits(30_000), kind, None);
+            let mut fixture = install(interpreter, interpreted, limits(30_000), kind, None);
             reads_exactly(&mut fixture);
             if kind == Kind::Native {
                 // The jco per-byte iterator, across more than one pipe.
@@ -670,63 +968,46 @@ fn a_source_consumer_reads_native_and_source_producers_exactly() {
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES and TEMBRA_WASM_STREAM_PRODUCER"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_STREAM_PRODUCER"]
 fn a_source_consumer_reads_a_compiled_producer_exactly_and_sees_its_trap() {
-    let compiled = compiled_producer();
-    engines(|interpreted| {
-        let mut fixture = install(interpreted, limits(30_000), Kind::Compiled, Some(&compiled));
+    let Some(compiled) = compiled_producer() else {
+        return;
+    };
+    engines(|interpreter, interpreted| {
+        let mut fixture = install(
+            interpreter,
+            interpreted,
+            limits(30_000),
+            Kind::Compiled,
+            Some(&compiled),
+        );
         reads_exactly(&mut fixture);
-        // The compiled producer traps after its whole body while holding its writer. The
-        // consumer's read fails at its physical drain: its callback traps instead of returning a
-        // truncated result, and both revisions are quarantined (the producer trapped itself).
+        // The compiled producer traps after its whole body while holding its writer: the
+        // consumer never sees a clean end.
         let mode = fixture.mode();
-        // The body exceeds the 64 KiB pipe, so the trap cannot happen before the head was
-        // delivered and the importer started draining (a tiny body may trap first, which fails
-        // the import itself instead).
-        let error = fixture
-            .call::<_, (u64, String)>("failure", (128_u32, 4096_u32, FAIL_AFTER))
-            .unwrap_err();
-        assert!(error.message.contains("trap"), "{mode}: {error:?}");
+        let (bytes, outcome) = fixture
+            .call::<_, (u64, String)>("failure", (4_u32, 1024_u32, FAIL_AFTER))
+            .unwrap();
+        assert!(bytes <= 4096, "{mode}: {bytes}");
+        assert!(outcome.starts_with("read:"), "{mode}: {outcome}");
         fixture.wait(|fixture| fixture.calls() == 0);
-        fixture.recorded_trap();
-        fixture.consumer_quarantined();
-        let refused = fixture.producer_ping().unwrap_err();
         assert_eq!(
-            refused.reason, "wasm_executor_quarantined",
-            "{mode}: {refused:?}"
+            fixture.call::<_, u32>("ping", (41_u32,)).unwrap(),
+            42,
+            "{mode}"
         );
-        fixture.retire();
-
-        // Through a source relay the native reader sees the exact prefix, then an error: never a
-        // clean end. The relay's import failed, so the relay is quarantined too.
-        let mut fixture = install(interpreted, limits(30_000), Kind::Compiled, Some(&compiled));
-        let relayed = install_relay(&mut fixture);
-        let (received, failure) =
-            read_relayed(&mut fixture, &relayed, "frames", FAIL_AFTER, usize::MAX).unwrap();
-        relayed_failure(
-            &mut fixture,
-            &relayed,
-            &received,
-            failure,
-            (COUNT * SIZE) as usize,
-        );
-        let refused = fixture.producer_ping().unwrap_err();
-        assert_eq!(
-            refused.reason, "wasm_executor_quarantined",
-            "{mode}: {refused:?}"
-        );
-        relayed.release().unwrap();
-        fixture.retire();
+        let _ = fixture.host.errors();
+        fixture.close();
     });
 }
 
 /// The head reaches the consumer before its producer finished, and the producer runs ahead only
 /// by the bounded buffers.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn the_head_arrives_early_and_the_producer_is_backpressured() {
-    engines(|interpreted| {
-        let mut fixture = install(interpreted, limits(30_000), Kind::Native, None);
+    engines(|interpreter, interpreted| {
+        let mut fixture = install(interpreter, interpreted, limits(30_000), Kind::Native, None);
         let mode = fixture.mode();
         let (count, size) = (256_u32, 4096_u32);
         let (bytes, mismatches, _) = fixture.read(count, size, CLEAN, u64::MAX, PROBED).unwrap();
@@ -744,191 +1025,90 @@ fn the_head_arrives_early_and_the_producer_is_backpressured() {
     });
 }
 
-/// What a native caller read from the relay: the bytes, then a failure if the read failed.
-type Relayed = (Vec<u8>, Option<tembra::Error>);
-
-/// Install the relay beside `fixture`'s Orbs and return its reference.
-fn install_relay(fixture: &mut Fixture) -> Rc<Reference> {
-    fixture.host.install(vec![relay(&fixture.engine)]).unwrap();
-    let relayed = Rc::new(
-        fixture
-            .host
-            .get(RELAY, vec!["main".into()], "alice")
-            .unwrap(),
-    );
-    fixture.pool.run_until(relayed.ready()).unwrap();
-    relayed
-}
-
-/// Read at most `take` bytes of the relayed `method(COUNT, SIZE, mode)`, then close it: `frames`
-/// returns the imported stream itself, `chunked` copies its chunks into a new stream.
-fn read_relayed(
-    fixture: &mut Fixture,
-    relayed: &Rc<Reference>,
-    method: &'static str,
-    mode: u32,
-    take: usize,
-) -> tembra::Result<Relayed> {
-    let relayed = relayed.clone();
-    fixture
-        .pool
-        .run_until(fixture.host.root("alice", move |context| {
-            async move {
-                let mut stream = relayed
-                    .call_portable::<_, ByteStream>(&context, method, (COUNT, SIZE, mode))
-                    .await?;
-                let mut received = Vec::new();
-                while received.len() < take {
-                    match futures::StreamExt::next(&mut stream).await {
-                        Some(Ok(chunk)) => received.extend(chunk),
-                        Some(Err(error)) => return Ok((received, Some(error))),
-                        None => return Ok((received, None)),
-                    }
-                }
-                stream.close().await?;
-                Ok((received, None))
-            }
-            .boxed_local()
-        }))
-}
-
-/// A relayed origin failure after its head: the native reader got an exact prefix of at most
-/// `most` bytes and then an error (never a clean end), the relay trapped at its physical drain and
-/// is quarantined, and nothing outlives the calls.
-fn relayed_failure(
-    fixture: &mut Fixture,
-    relayed: &Rc<Reference>,
-    received: &[u8],
-    failure: Option<tembra::Error>,
-    most: usize,
-) {
-    let mode = fixture.mode();
-    assert!(received.len() <= most, "{mode}: {}", received.len());
-    assert!(exact(received, SIZE as usize), "{mode}");
-    let failure = failure.unwrap_or_else(|| {
-        panic!(
-            "{mode}: a relayed truncated stream ended cleanly after {} bytes",
-            received.len()
-        )
-    });
-    eprintln!("{mode}: relayed failure after the head: {failure:?}");
-    fixture.wait(|fixture| fixture.calls() == 0);
-    let refused = read_relayed(fixture, relayed, "frames", CLEAN, usize::MAX).unwrap_err();
-    assert_eq!(
-        refused.reason, "wasm_executor_quarantined",
-        "{mode}: the relay kept serving after its import failed: {refused:?}"
-    );
-    fixture.wait(|fixture| fixture.calls() == 0);
-}
-
-/// A native caller reads a source relay that returns another source Orb's (or a native Orb's)
-/// stream as its own whole result, directly or chunk by chunk: exact bytes, and a close that
-/// reaches the origin.
-///
-/// An origin failure past its head is never a clean relayed end: the native reader receives an
-/// exact prefix and then an error, because the relay's next read of its import fails and the
-/// relay traps at its physical drain (it is quarantined). A source origin that trapped is
-/// quarantined and its trap recorded; a native origin stays healthy. An origin failing before its
-/// head fails the relay's import, which has no WIT error lane: the relay traps and is
-/// quarantined, and the caller's call fails. Each failure runs on its own installation.
+/// A native caller reads a source relay forwarding another source Orb's (or a native Orb's)
+/// stream: exact bytes, a failure that never ends cleanly, and a close that reaches the origin.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn a_source_relay_forwards_a_stream_from_source_or_native_to_native() {
-    engines(|interpreted| {
+    engines(|interpreter, interpreted| {
         for kind in [Kind::Source, Kind::Native] {
-            // Exact bytes, the imported stream returned directly or copied chunk by chunk.
-            let mut fixture = install(interpreted, limits(30_000), kind, None);
+            let mut fixture = install(interpreter, interpreted, limits(30_000), kind, None);
             let mode = fixture.mode();
-            let relayed = install_relay(&mut fixture);
-            for method in ["frames", "chunked"] {
-                let (received, failure) =
-                    read_relayed(&mut fixture, &relayed, method, CLEAN, usize::MAX).unwrap();
-                assert!(failure.is_none(), "{mode} {method}: {failure:?}");
-                assert_eq!(received.len(), (COUNT * SIZE) as usize, "{mode} {method}");
-                assert!(exact(&received, SIZE as usize), "{mode} {method}");
-            }
-            fixture.wait(|fixture| fixture.calls() == 0);
-            relayed.release().unwrap();
-            assert!(
-                fixture.host.errors().is_empty(),
-                "{mode}: {:?}",
-                fixture.host.errors()
+            fixture.host.install(vec![relay(&fixture.engine)]).unwrap();
+            let relayed = Rc::new(
+                fixture
+                    .host
+                    .get(RELAY, vec!["main".into()], "alice")
+                    .unwrap(),
             );
-            fixture.settled();
-            assert_eq!(fixture.producer_ping().unwrap(), 2, "{mode}");
-            fixture.close();
-
-            // A failure after the origin's head.
-            let mut fixture = install(interpreted, limits(30_000), kind, None);
-            let relayed = install_relay(&mut fixture);
-            let (received, failure) =
-                read_relayed(&mut fixture, &relayed, "frames", FAIL_AFTER, usize::MAX).unwrap();
-            relayed_failure(
-                &mut fixture,
-                &relayed,
-                &received,
-                failure,
-                (COUNT / 2 * SIZE) as usize,
-            );
-            if kind == Kind::Native {
-                // The native origin's function did not trap: it keeps serving.
-                assert_eq!(fixture.producer_ping().unwrap(), 2, "{mode}");
-            } else {
-                // The source origin trapped and was quarantined; the host recorded the trap.
-                fixture.recorded_trap();
-                let refused = fixture.producer_ping().unwrap_err();
-                assert_eq!(
-                    refused.reason, "wasm_executor_quarantined",
-                    "{mode}: {refused:?}"
-                );
-            }
-            relayed.release().unwrap();
-            fixture.retire();
-
+            fixture.pool.run_until(relayed.ready()).unwrap();
+            let read = |fixture: &mut Fixture, mode: u32, take: usize| {
+                let relayed = relayed.clone();
+                fixture
+                    .pool
+                    .run_until(fixture.host.root("alice", move |context| {
+                        async move {
+                            let mut stream = relayed
+                                .call_portable::<_, ByteStream>(
+                                    &context,
+                                    "frames",
+                                    (COUNT, SIZE, mode),
+                                )
+                                .await?;
+                            let mut received = Vec::new();
+                            while received.len() < take {
+                                match futures::StreamExt::next(&mut stream).await {
+                                    Some(Ok(chunk)) => received.extend(chunk),
+                                    Some(Err(error)) => return Ok((received, Some(error))),
+                                    None => return Ok((received, None)),
+                                }
+                            }
+                            stream.close().await?;
+                            Ok((received, None))
+                        }
+                        .boxed_local()
+                    }))
+            };
+            let (received, failure) = read(&mut fixture, CLEAN, usize::MAX).unwrap();
+            assert!(failure.is_none(), "{mode}: {failure:?}");
+            assert_eq!(received.len(), (COUNT * SIZE) as usize, "{mode}");
+            assert!(exact(&received, SIZE as usize), "{mode}");
+            // A failure after the origin's head reaches the native reader as an error.
+            let (received, failure) = read(&mut fixture, FAIL_AFTER, usize::MAX).unwrap();
+            assert!(failure.is_some(), "{mode}: a failed origin ended cleanly");
+            assert!(received.len() <= (COUNT / 2 * SIZE) as usize, "{mode}");
+            assert!(exact(&received, SIZE as usize), "{mode}");
             // A failure before the origin's head fails the relayed call.
-            let mut fixture = install(interpreted, limits(30_000), kind, None);
-            let relayed = install_relay(&mut fixture);
-            let error = read_relayed(&mut fixture, &relayed, "frames", FAIL_BEFORE, usize::MAX)
-                .unwrap_err();
-            assert!(error.message.contains("trap"), "{mode}: {error:?}");
-            fixture.wait(|fixture| fixture.calls() == 0);
-            let refused =
-                read_relayed(&mut fixture, &relayed, "frames", CLEAN, usize::MAX).unwrap_err();
-            assert_eq!(
-                refused.reason, "wasm_executor_quarantined",
-                "{mode}: {refused:?}"
+            let error = read(&mut fixture, FAIL_BEFORE, usize::MAX).unwrap_err();
+            assert!(
+                error.message.contains("refused before its head"),
+                "{mode}: {error:?}"
             );
-            fixture.wait(|fixture| fixture.calls() == 0);
-            relayed.release().unwrap();
-            fixture.retire();
-        }
-        // Last, for every origin (blocked on the stream-close request in COORDINATION):
-        // closing the relayed stream after one chunk of a quiet origin reaches the origin,
-        // which stops.
-        for kind in [Kind::Source, Kind::Native] {
-            let mut fixture = install(interpreted, limits(30_000), kind, None);
-            let mode = fixture.mode();
-            let relayed = install_relay(&mut fixture);
-            let (received, failure) =
-                read_relayed(&mut fixture, &relayed, "frames", QUIET, 1).unwrap();
+            // Closing after one chunk reaches the origin, which stops.
+            let closes = fixture.native.closes.get();
+            let (received, failure) = read(&mut fixture, QUIET, 1).unwrap();
             assert!(
                 failure.is_none() && received.len() == SIZE as usize,
-                "{mode}: {failure:?}"
+                "{mode}"
             );
             if kind == Kind::Native {
-                // The quiet origin was closed and ended physically.
+                // The quiet origin was closed; every origin with a head ended physically.
                 fixture.wait(|fixture| {
-                    fixture.native.closes.get() == 1 && fixture.native.ended.get() == 1
+                    fixture.native.closes.get() > closes && fixture.native.ended.get() == 3
                 });
             } else {
                 fixture.wait(|fixture| fixture.logged("producer:returned"));
             }
             fixture.wait(|fixture| fixture.calls() == 0);
             relayed.release().unwrap();
+            // The failed origin's error is recorded by the host, not swallowed.
+            let errors = fixture.host.errors();
             assert!(
-                fixture.host.errors().is_empty(),
-                "{mode}: {:?}",
-                fixture.host.errors()
+                kind == Kind::Native
+                    || errors
+                        .iter()
+                        .any(|error| error.message.contains("failed after its head")),
+                "{mode}: {errors:?}"
             );
             fixture.settled();
             assert_eq!(fixture.producer_ping().unwrap(), 2, "{mode}");
@@ -940,10 +1120,10 @@ fn a_source_relay_forwards_a_stream_from_source_or_native_to_native() {
 /// Returning without reading, stopping after a prefix, and an explicit close each ask the
 /// producer to stop at once, never through the timeout; its physical end is still awaited.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn returning_early_or_closing_stops_the_producer() {
-    engines(|interpreted| {
-        let mut fixture = install(interpreted, limits(30_000), Kind::Native, None);
+    engines(|interpreter, interpreted| {
+        let mut fixture = install(interpreter, interpreted, limits(30_000), Kind::Native, None);
         let mode = fixture.mode();
         let started = Instant::now();
         // Returned while the producer is quiet.
@@ -971,7 +1151,7 @@ fn returning_early_or_closing_stops_the_producer() {
         fixture.close();
 
         // A source producer, backpressured or quiet, ends its callback when its reader is gone.
-        let mut fixture = install(interpreted, limits(30_000), Kind::Source, None);
+        let mut fixture = install(interpreter, interpreted, limits(30_000), Kind::Source, None);
         let mode = fixture.mode();
         let started = Instant::now();
         let (bytes, _, _) = fixture.read(256, 4096, CLEAN, 4096, CHUNKS).unwrap();
@@ -999,71 +1179,51 @@ fn returning_early_or_closing_stops_the_producer() {
     });
 }
 
-/// A producer failure is never a clean end of exact data. Breaking (declared component
-/// semantics):
-/// - before the head, the import fails; it has no WIT error lane, so the consumer traps and its
-///   revision is quarantined (a source producer's uncaught exception quarantines it too);
-/// - after the head, the consumer's next read fails at its physical drain: its callback traps
-///   instead of returning a truncated result, and the consumer is quarantined (never a successful
-///   `ping` afterwards). A source producer's raw exception traps it too, so the host records the
-///   trap and quarantines the producer; a native producer's function stays healthy. The exact
-///   prefix before the failure is asserted through the relay
-///   (`a_source_relay_forwards_a_stream_from_source_or_native_to_native`).
-///
-/// Each failure runs on its own installation.
+/// A producer failure before the head rejects the import; after the head it fails the read
+/// after an exact prefix. Neither is ever a clean end.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn producer_failures_are_errors_before_and_after_the_head() {
-    engines(|interpreted| {
+    engines(|interpreter, interpreted| {
         for kind in [Kind::Native, Kind::Source] {
-            let mut fixture = install(interpreted, limits(30_000), kind, None);
+            let mut fixture = install(interpreter, interpreted, limits(30_000), kind, None);
             let mode = fixture.mode();
-            let error = fixture
-                .call::<_, (u64, String)>("failure", (4_u32, 1024_u32, FAIL_BEFORE))
-                .unwrap_err();
-            assert!(error.message.contains("trap"), "{mode}: {error:?}");
-            fixture.wait(|fixture| fixture.calls() == 0);
-            fixture.consumer_quarantined();
-            if kind == Kind::Native {
-                assert_eq!(fixture.producer_ping().unwrap(), 2, "{mode}");
-            } else {
-                let refused = fixture.producer_ping().unwrap_err();
-                assert_eq!(
-                    refused.reason, "wasm_executor_quarantined",
-                    "{mode}: {refused:?}"
-                );
-            }
-            fixture.retire();
-
-            let after_head = if kind == Kind::Source {
-                vec![FAIL_AFTER, THROW_UNDEFINED]
-            } else {
-                vec![FAIL_AFTER]
-            };
-            for producer in after_head {
-                let mut fixture = install(interpreted, limits(30_000), kind, None);
-                let error = fixture
+            let mut failure = |producer: u32| {
+                fixture
                     .call::<_, (u64, String)>("failure", (4_u32, 1024_u32, producer))
-                    .unwrap_err();
+                    .unwrap()
+            };
+            let (bytes, outcome) = failure(FAIL_BEFORE);
+            assert_eq!(bytes, 0, "{mode}");
+            assert!(
+                outcome.starts_with("import:") && outcome.contains("refused before its head"),
+                "{mode}: {outcome}"
+            );
+            let (bytes, outcome) = failure(FAIL_AFTER);
+            assert!(bytes <= 2048, "{mode}: {bytes}");
+            assert!(outcome.starts_with("read:"), "{mode}: {outcome}");
+            if kind == Kind::Native {
                 assert!(
-                    error.message.contains("trap"),
-                    "{mode} {producer}: {error:?}"
+                    outcome.contains("failed after its head"),
+                    "{mode}: {outcome}"
                 );
-                fixture.wait(|fixture| fixture.calls() == 0);
-                fixture.consumer_quarantined();
-                if kind == Kind::Native {
-                    assert_eq!(fixture.producer_ping().unwrap(), 2, "{mode}");
-                    fixture.retire();
-                } else {
-                    fixture.recorded_trap();
-                    let refused = fixture.producer_ping().unwrap_err();
-                    assert_eq!(
-                        refused.reason, "wasm_executor_quarantined",
-                        "{mode} {producer}: {refused:?}"
-                    );
-                    fixture.retire();
-                }
             }
+            if kind == Kind::Source {
+                let (bytes, outcome) = failure(THROW_UNDEFINED);
+                assert!(bytes <= 4096, "{mode}: {bytes}");
+                assert!(outcome.starts_with("read:"), "{mode}: {outcome}");
+                // Both failed producer callbacks are recorded by the host.
+                let errors = fixture.host.errors();
+                assert!(
+                    errors
+                        .iter()
+                        .any(|error| error.message.contains("failed after its head")),
+                    "{mode}: {errors:?}"
+                );
+            }
+            fixture.settled();
+            assert_eq!(fixture.producer_ping().unwrap(), 2, "{mode}");
+            fixture.close();
         }
     });
 }
@@ -1071,10 +1231,10 @@ fn producer_failures_are_errors_before_and_after_the_head() {
 /// Root cancellation ends the import without quarantine; the callback timeout is terminal for
 /// the consumer. Either way the producer is closed and physically ends.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn cancellation_and_timeout_close_the_producer() {
-    engines(|interpreted| {
-        let mut fixture = install(interpreted, limits(30_000), Kind::Native, None);
+    engines(|interpreter, interpreted| {
+        let mut fixture = install(interpreter, interpreted, limits(30_000), Kind::Native, None);
         let mode = fixture.mode();
         let reference = fixture.reader.clone();
         let outcome = fixture
@@ -1096,53 +1256,45 @@ fn cancellation_and_timeout_close_the_producer() {
                 }
                 .boxed_local()
             }));
-        eprintln!("{mode}: cancelled read: {outcome:?}");
-        // The cancellation fails the call, or the consumer returns what it read before its
-        // import ended; it is never a quarantine.
-        match outcome {
-            Ok(Ok((bytes, mismatches, _))) => {
-                assert!(
-                    bytes <= 4096 && mismatches == 0,
-                    "{mode}: {bytes} {mismatches}"
-                )
-            }
-            Ok(Err(error)) | Err(error) => assert_ne!(
-                error.reason, "wasm_executor_quarantined",
-                "{mode}: {error:?}"
-            ),
-        }
+        let error = outcome.unwrap().unwrap_err();
+        assert_ne!(
+            error.reason, "wasm_executor_quarantined",
+            "{mode}: {error:?}"
+        );
         fixture.wait(|fixture| fixture.native.closes.get() == 1 && fixture.native.ended.get() == 1);
         fixture.settled();
         fixture.close();
 
-        let mut fixture = install(interpreted, limits(1_500), Kind::Native, None);
+        let mut fixture = install(interpreter, interpreted, limits(1_500), Kind::Native, None);
         let mode = fixture.mode();
         let started = Instant::now();
         let error = fixture.read(4, 1024, QUIET, u64::MAX, CHUNKS).unwrap_err();
         assert!(started.elapsed() >= Duration::from_millis(1_400), "{mode}");
-        assert!(error.message.contains("timed out"), "{mode}: {error:?}");
+        assert!(error.message.contains("wall time"), "{mode}: {error:?}");
         fixture.wait(|fixture| {
             fixture.native.closes.get() == 1
                 && fixture.native.ended.get() == 1
                 && fixture.calls() == 0
         });
-        fixture.consumer_quarantined();
+        let refused = fixture.call::<_, u32>("ping", (1_u32,)).unwrap_err();
+        assert_eq!(
+            refused.reason, "wasm_executor_quarantined",
+            "{mode}: {refused:?}"
+        );
         assert_eq!(fixture.producer_ping().unwrap(), 2, "{mode}");
-        fixture.retire();
+        let _ = fixture.host.errors();
+        fixture.close();
     });
 }
 
 /// A reload while the consumer reads lets the stream finish on the old revision; new calls reach
 /// the replacement.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn a_reload_lets_an_open_import_finish_on_its_revision() {
-    engines(|interpreted| {
-        let mut fixture = install(interpreted, limits(30_000), Kind::Native, None);
+    engines(|interpreter, interpreted| {
+        let mut fixture = install(interpreter, interpreted, limits(30_000), Kind::Native, None);
         let mode = fixture.mode();
-        // Prepare the replacement before the stream opens: its compilation is not part of the
-        // open call's budget.
-        let replacement = consumer(&fixture.engine, 2);
         let (open, gate) = oneshot::channel();
         *fixture.native.probe_gate.borrow_mut() = Some(gate);
         let reading = {
@@ -1168,6 +1320,7 @@ fn a_reload_lets_an_open_import_finish_on_its_revision() {
                 .unwrap()
         };
         fixture.wait(|fixture| fixture.native.probed.get().is_some());
+        let replacement = consumer(&fixture.engine, 2);
         let reloading = fixture
             .pool
             .spawner()
@@ -1192,69 +1345,45 @@ fn a_reload_lets_an_open_import_finish_on_its_revision() {
     });
 }
 
-/// Breaking: the private stream request packets are gone, so they cannot be forged. Each typed
-/// import is the dependency's own WIT import, called through the reference the SDK selected in
-/// the same turn. What a guest can still attempt is refused at the component boundary before
-/// anything is called, catchably: arguments outside the import's signature (the selection is
-/// cleared, so a valid call of the same callback goes on), a released reference, a reference
-/// whose root claim ended with an earlier root, the context of an ended callback, and a binding
-/// the contract does not import.
+/// A forged request is refused before anything is called: a data import on the stream carrier,
+/// a stream import as a data request, another operation, a malformed packet, invalid arguments
+/// or a foreign handle.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
-fn typed_import_refusals_happen_before_any_call() {
-    engines(|interpreted| {
-        let mut fixture = install(interpreted, limits(30_000), Kind::Native, None);
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn forged_stream_requests_are_refused_before_any_call() {
+    engines(|interpreter, interpreted| {
+        let mut fixture = install(interpreter, interpreted, limits(30_000), Kind::Native, None);
         let mode = fixture.mode();
-        // A reference acquired with `Context.get` serves its own root.
-        assert_eq!(
-            fixture.call::<_, u32>("retain", [0_u32; 0]).unwrap(),
-            2,
-            "{mode}"
-        );
-        assert_eq!(fixture.native.pings.get(), 1, "{mode}");
         for (which, expected) in [
-            (0, "RangeError"),
-            (2, "root"),
-            (3, "Context callback has ended"),
-            (4, "not a selected WIT Orb import"),
-            // Last: a released reference that `select` failed to refuse traps the consumer.
-            (1, "released"),
+            (0, "does not return a byte stream"),
+            (1, "called only on its stream carrier"),
+            (2, "carries only an import call"),
+            (3, "trailing bytes"),
+            (4, "does not match U32"),
+            (5, "handle"),
+            (6, "unknown standard operation"),
         ] {
             let refusal = fixture.call::<_, String>("forge", (which,)).unwrap();
-            eprintln!("{mode} {which}: {refusal}");
             assert!(refusal.contains(expected), "{mode} {which}: {refusal}");
-            assert!(
-                !refusal.starts_with("accepted"),
-                "{mode} {which}: {refusal}"
-            );
             assert!(fixture.native.calls.borrow().is_empty(), "{mode} {which}");
+            assert_eq!(fixture.native.pings.get(), 0, "{mode} {which}");
         }
-        // Besides `retain`'s own call, only the valid call after the refused argument reached the
-        // producer.
-        assert_eq!(fixture.native.pings.get(), 2, "{mode}");
         fixture.settled();
         assert!(fixture.native.calls.borrow().is_empty(), "{mode}");
-        assert!(
-            fixture.host.errors().is_empty(),
-            "{mode}: {:?}",
-            fixture.host.errors()
-        );
         fixture.close();
     });
 }
 
-/// Sixteen imports may be outstanding at once; the seventeenth is refused and every delivered
-/// end is closed and physically ended. Breaking: the refused import has no WIT error lane, so
-/// the consumer traps and its revision is quarantined, as for a compiled importer.
+/// Sixteen imports may be outstanding at once; the seventeenth is refused, the delivered ends
+/// are closed, and the revision keeps serving.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn outstanding_stream_imports_are_bounded() {
-    engines(|interpreted| {
-        let mut fixture = install(interpreted, limits(30_000), Kind::Native, None);
+    engines(|interpreter, interpreted| {
+        let mut fixture = install(interpreter, interpreted, limits(30_000), Kind::Native, None);
         let mode = fixture.mode();
         let total: u64 = fixture.call("many", (16_u32, 20_u32, 4096_u32)).unwrap();
         assert_eq!(total, 16 * 20 * 4096, "{mode}");
-        fixture.settled();
         let closes = fixture.native.closes.get();
         let error = fixture
             .call::<_, u64>("many", (17_u32, 20_u32, 4096_u32))
@@ -1263,28 +1392,23 @@ fn outstanding_stream_imports_are_bounded() {
             error.message.contains("stream imports outstanding"),
             "{mode}: {error:?}"
         );
+        assert_ne!(error.reason, "wasm_executor_quarantined", "{mode}");
         // Every delivered end of the refused callback was closed and physically ended.
         fixture.wait(|fixture| {
-            fixture.native.closes.get() == closes + 16
-                && fixture.native.ended.get() == 32
-                && fixture.calls() == 0
+            fixture.native.closes.get() == closes + 16 && fixture.native.ended.get() == 32
         });
-        fixture.consumer_quarantined();
-        assert_eq!(fixture.producer_ping().unwrap(), 2, "{mode}");
-        fixture.retire();
+        fixture.settled();
+        fixture.close();
     });
 }
 
-/// A callback that returns while its stream import is still pending is joined: its call settles
-/// only after that import physically ended, and the late head is closed exactly once.
-/// Breaking (DESIGN §3, detached work): returning no longer cancels the pending import. It stays
-/// part of the call's task group, keeping the revision busy until it settles (or the call's
-/// timeout quarantines the revision).
+/// A callback ending while its stream import is still pending cancels that call and settles
+/// only after its physical end; the late head is closed exactly once.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
-fn an_abandoned_pending_import_is_joined() {
-    engines(|interpreted| {
-        let mut fixture = install(interpreted, limits(30_000), Kind::Native, None);
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn an_abandoned_pending_import_is_cancelled_and_joined() {
+    engines(|interpreter, interpreted| {
+        let mut fixture = install(interpreter, interpreted, limits(30_000), Kind::Native, None);
         let mode = fixture.mode();
         let (release, physical) = oneshot::channel();
         *fixture.native.physical.borrow_mut() = Some(physical);
@@ -1315,9 +1439,16 @@ fn an_abandoned_pending_import_is_joined() {
                 })
                 .unwrap();
         }
-        fixture.wait(|fixture| fixture.native.started.get());
-        // Physically held: the consumer's call has not settled, and nothing cancelled the import.
-        for _ in 0..250 {
+        fixture.wait(|fixture| {
+            fixture
+                .native
+                .log
+                .borrow()
+                .iter()
+                .any(|line| line == "gated:signalled")
+        });
+        // Logically cancelled, physically held: the consumer's call has not settled.
+        for _ in 0..50 {
             fixture.pool.run_until_stalled();
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -1327,15 +1458,6 @@ fn an_abandoned_pending_import_is_joined() {
         );
         assert_eq!(fixture.native.closes.get(), 0, "{mode}");
         assert_eq!(fixture.calls(), 2, "{mode}");
-        assert!(
-            !fixture
-                .native
-                .log
-                .borrow()
-                .iter()
-                .any(|line| line == "gated:signalled"),
-            "{mode}"
-        );
         release.send(()).unwrap();
         fixture.wait(|_| answer.borrow().is_some());
         assert_eq!(
@@ -1350,96 +1472,108 @@ fn an_abandoned_pending_import_is_joined() {
         fixture.wait(|fixture| fixture.native.closes.get() == 1 && fixture.calls() == 0);
         fixture.settled();
         assert_eq!(fixture.native.closes.get(), 1, "{mode}");
-        assert!(
-            fixture.host.errors().is_empty(),
-            "{mode}: {:?}",
-            fixture.host.errors()
-        );
         fixture.close();
     });
 }
 
 /// A producer calling back into its busy consumer is refused at once, not at a timeout.
-/// Breaking: the producer's failure fails the consumer's import, which has no WIT error lane, so
-/// the consumer traps and its revision is quarantined, as for a compiled importer.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn a_producer_calling_back_into_its_consumer_is_refused() {
-    engines(|interpreted| {
-        let mut fixture = install(interpreted, limits(5_000), Kind::Native, None);
+    engines(|interpreter, interpreted| {
+        let mut fixture = install(interpreter, interpreted, limits(5_000), Kind::Native, None);
         let mode = fixture.mode();
         *fixture.native.reenter.borrow_mut() = Some(fixture.reader.clone());
         let started = Instant::now();
-        let error = fixture
+        let (bytes, outcome) = fixture
             .call::<_, (u64, String)>("failure", (1_u32, 1_u32, REENTER))
-            .unwrap_err();
+            .unwrap();
         assert!(started.elapsed() < Duration::from_secs(2), "{mode}");
-        assert!(error.message.contains("reentr"), "{mode}: {error:?}");
+        assert_eq!(bytes, 0, "{mode}");
+        assert!(
+            outcome.starts_with("import:") && outcome.contains("reentr"),
+            "{mode}: {outcome}"
+        );
         fixture.native.reenter.borrow_mut().take();
-        fixture.wait(|fixture| fixture.calls() == 0);
-        fixture.consumer_quarantined();
-        assert_eq!(fixture.producer_ping().unwrap(), 2, "{mode}");
-        fixture.retire();
+        fixture.settled();
+        fixture.close();
     });
 }
 
-/// Stream imports stay outside the public data profile (platform ports), and every other stream
-/// shape stays refused for a source importer on the native facade too, before anything runs.
-/// (`stream<u32>` is refused earlier still: the SDK build accepts no other numeric stream element,
-/// so no artifact of it can exist.)
+/// Stream imports stay outside the data profile (platform ports), and every other stream shape
+/// stays refused for a source importer on the native facade too.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn refused_import_profiles() {
-    for interpreted in [false, true] {
-        let (engine, _) = engine(interpreted, limits(30_000));
-        let bindings = |names: &[&str]| -> BTreeMap<String, tembra_contracts::Binding> {
-            names
-                .iter()
-                .map(|name| {
-                    (
-                        (*name).to_owned(),
-                        tembra_contracts::Binding::Orb {
-                            name: "frames".into(),
-                            api_version: 1,
-                        },
-                    )
-                })
-                .collect()
-        };
-        let artifact = tembra_contracts::Artifact::decode(&fixture("stream-reader")).unwrap();
+    let Some(interpreter) = interpreter() else {
+        return;
+    };
+    let (engine, _) = engine(&interpreter, false, limits(30_000));
+    let bindings = |names: &[&str]| -> BTreeMap<String, tembra_contracts::Binding> {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_owned(),
+                    tembra_contracts::Binding::Orb {
+                        name: "frames".into(),
+                        api_version: 1,
+                    },
+                )
+            })
+            .collect()
+    };
+    let artifact = tembra_contracts::Artifact::decode(
+        &contract("consumer-orb")
+            .source_artifact(&consumer_source(1), "reader", 1)
+            .unwrap(),
+    )
+    .unwrap();
+    let error = engine
+        .open_port(
+            &artifact,
+            &bindings(&[FRAMES, ALIASED]),
+            &Default::default(),
+            &Default::default(),
+        )
+        .err()
+        .expect("a platform port refuses stream imports");
+    assert!(
+        error
+            .message
+            .contains("served only through the native Rust facade"),
+        "{error}"
+    );
+    for shape in [
+        "frames: func() -> stream<u8>;",
+        "frames: async func(input: stream<u8>) -> u32;",
+        "frames: async func() -> list<stream<u8>>;",
+        "frames: async func() -> option<stream<u8>>;",
+        "frames: async func() -> stream<u32>;",
+        "frames: async func() -> future<u8>;",
+        "resource session { frames: async func() -> stream<u8>; }",
+    ] {
+        let wit = format!(
+            "package tembra-test:shapes@1.0.0; interface frames {{ {shape} }} \
+             interface probe {{ ping: func() -> u32; }} \
+             world orb {{ import frames; export probe; }}"
+        );
+        let artifact = Contract::from_source("shapes.wit", &wit, Some("orb"))
+            .unwrap()
+            .source_artifact(
+                "globalThis.__tembraOrb = { services: { probe: { methods: { ping() { return 1; } } } } };",
+                "orb",
+                1,
+            )
+            .unwrap();
         let error = engine
-            .open_port(
+            .load(
                 &artifact,
-                &bindings(&[FRAMES, ALIASED]),
-                &Default::default(),
-                &Default::default(),
+                Install::default().requires("tembra-test:shapes/frames@1.0.0", "frames", 1),
             )
             .err()
-            .expect("a platform port refuses stream imports");
-        assert!(
-            error
-                .message
-                .contains("served only through the native Rust facade"),
-            "{error}"
-        );
-        for shape in [
-            "stream-shape-sync",
-            "stream-shape-argument",
-            "stream-shape-list",
-            "stream-shape-option",
-            "stream-shape-future",
-            "stream-shape-resource",
-        ] {
-            let error = engine
-                .load(
-                    &fixture(shape),
-                    Install::default().requires("tembra-test:shapes/frames@1.0.0", "frames", 1),
-                )
-                .err()
-                .unwrap_or_else(|| panic!("{shape} was admitted"));
-            eprintln!("{shape}: {error}");
-            assert!(!error.message.is_empty(), "{shape}");
-        }
-        assert_eq!(engine.instances(), 0);
+            .unwrap_or_else(|| panic!("{shape} was admitted"));
+        assert!(!error.message.is_empty(), "{shape}");
     }
+    assert_eq!(engine.instances(), 0);
 }

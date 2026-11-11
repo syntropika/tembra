@@ -74,6 +74,7 @@ WebAssembly, build it into a `.wasm` artifact and load it with `tembra-executor-
 use tembra_executor_wasm::{Engine, Install, Limits};
 
 let engine = Engine::new(Limits::default())?
+    .interpreter(&interpreter_bytes)? // only for TypeScript source orbs
     .filesystem("data", data_directory)?
     .network("outbound")?;
 let orb = engine.load(&artifact_bytes, Install::default().requires(import, "provider", 1))?;

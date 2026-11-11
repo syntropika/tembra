@@ -1,7 +1,9 @@
-//! Isolated component Stores execute callbacks while the existing host owns Orb lifecycle.
+//! Isolated interpreters execute callbacks while the existing host owns Orb lifecycle.
+/// Shared with the guest, which uses the encoder/decoder halves the host does not.
+#[allow(dead_code)]
+mod abi;
 mod adapter;
 mod bindings;
-mod clocks;
 mod component;
 mod dns;
 mod engine;
@@ -15,6 +17,11 @@ mod providers;
 mod sockets;
 mod stdio;
 mod worker;
+// The build script's generator qualification rules are unit-tested with the host.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../codegen/mod.rs"]
+mod codegen;
 
 pub use engine::{Engine, Limits, LogRecord};
 pub use install::{Cli, Input, Install, Output, ReaderFactory, WriterFactory};

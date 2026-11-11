@@ -11,7 +11,7 @@ import {
   type Method,
   type Result,
 } from "wasi:http/types@0.3.0";
-import { readChunks, writeChunks, type WitFuture } from "./guest.ts";
+import { readChunks, writeChunks } from "./guest.ts";
 import { decodeText, encodeText, Utf8Decoder } from "./http/bytes.ts";
 import { events, type ServerSentEvent } from "./http/events.ts";
 
@@ -129,7 +129,7 @@ export async function fetch(url: string, options: HttpRequest = {}): Promise<Htt
   let headers: Fields | undefined;
   let timeouts: RequestOptions | undefined;
   let request: Request | undefined;
-  let upload: WitFuture<Result<void, ErrorCode>> | undefined;
+  let upload: PromiseLike<Result<void, ErrorCode>> | undefined;
   try {
     headers = fields(options.headers);
     if (options.timeouts) {
@@ -185,7 +185,7 @@ export async function fetch(url: string, options: HttpRequest = {}): Promise<Htt
 }
 
 /** Snapshot child fields before transferring the response to its body stream. */
-function response(value: Response, upload: WitFuture<Result<void, ErrorCode>>): HttpResponse {
+function response(value: Response, upload: PromiseLike<Result<void, ErrorCode>>): HttpResponse {
   const status = value.getStatusCode();
   const fields = value.getHeaders();
   let headers: HttpHeaders;
@@ -194,12 +194,12 @@ function response(value: Response, upload: WitFuture<Result<void, ErrorCode>>): 
   } finally {
     drop(fields);
   }
-  // The handling result is created only when the body is consumed. A pending promise created
-  // here would belong to the callback that received the response, so a response retained
-  // across callbacks would leave its first callback with unsettled work.
-  let finish: ((result: Result<void, ErrorCode>) => void) | undefined;
-  let stream: AsyncIterable<Uint8Array> | undefined;
-  let complete: WitFuture<Result<Fields | undefined, ErrorCode>> | undefined;
+  let finish!: (result: Result<void, ErrorCode>) => void;
+  const handled = new Promise<Result<void, ErrorCode>>((resolve) => {
+    finish = resolve;
+  });
+  let stream: AsyncIterable<number> | undefined;
+  let complete: PromiseLike<Result<Fields | undefined, ErrorCode>> | undefined;
   let consumed = false;
   let ended = false;
   let closed = false;
@@ -207,8 +207,7 @@ function response(value: Response, upload: WitFuture<Result<void, ErrorCode>>): 
   const trailers = (): Promise<HttpHeaders> => {
     if (!complete)
       return Promise.reject(new Error("Consume the HTTP body before reading trailers"));
-    // A lifted future is a handle, not a thenable: `read()` returns its value once.
-    return (trailing ??= complete.read().then((state) => {
+    return (trailing ??= Promise.resolve(complete).then((state) => {
       const fields = result(state);
       try {
         return new HttpHeaders(fields?.copyAll());
@@ -222,7 +221,7 @@ function response(value: Response, upload: WitFuture<Result<void, ErrorCode>>): 
     closed = true;
     drop(upload);
     if (!ended) {
-      finish?.({ tag: "err", val: { tag: "internal-error", val: "response closed" } });
+      finish({ tag: "err", val: { tag: "internal-error", val: "response closed" } });
       if (stream) {
         drop(stream);
         drop(complete);
@@ -237,14 +236,11 @@ function response(value: Response, upload: WitFuture<Result<void, ErrorCode>>): 
       try {
         // Keep an untouched response revision-owned across callbacks. The handling future
         // belongs to the callback that actually consumes its body.
-        const handled = new Promise<Result<void, ErrorCode>>((resolve) => {
-          finish = resolve;
-        });
         [stream, complete] = Response.consumeBody(value, handled);
         yield* readChunks(stream);
-        finish!({ tag: "ok", val: undefined });
+        finish({ tag: "ok", val: undefined });
         await trailers();
-        result(await upload.read());
+        result(await upload);
         ended = true;
       } finally {
         await close();

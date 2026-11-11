@@ -12,35 +12,14 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# The real verifier: every artifact is a component whose actual WIT types are checked against its
-# prepared contract before any browser glue is generated. Metadata and hashes are never trusted.
-tembra-contracts = { path = "../contracts" }
-# Reads the verified component's exact top-level import names for the trusted glue generator.
-wasmparser = "=0.262.0"
-# Re-encodes generated core modules with fuel and memory-page limits (src/limits.rs).
-wasm-encoder = { version = "=0.262.0", features = ["wasmparser"] }
-serde_json.workspace = true
+# Runtime model only: no WIT parser, component decoder or compiled-component verifier.
+tembra-contracts = { path = "../contracts", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.129"
 
 [dev-dependencies]
-wit-component = { version = "=0.262.0", features = ["dummy-module"] }
-wit-parser = "=0.262.0"
-# Encoder tests execute instrumented modules; same pin and features as tembra-executor-wasm.
-wat = "=1.263.0"
-wasmtime = { version = "=51.0.0-rc.1", default-features = false, features = [
-  "anyhow",
-  "component-model",
-  "component-model-async",
-  "async",
-  "cranelift",
-  "parallel-compilation",
-  "pulley",
-  "runtime",
-  "std",
-  "task-group-hook",
-] }
+serde_json.workspace = true
 
 [lints]
 workspace = true

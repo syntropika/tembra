@@ -8,11 +8,9 @@
 //! the call's own invocation; it never travels with the stream end.
 //!
 //! A clean end is reported only once that work has succeeded; a trap, timeout or failed
-//! dispatch fails the read instead. Closing the end, or dropping it unread, closes the pipe and
-//! cancels the stream call's own invocation and the calls it issued, never the caller's root or
-//! sibling calls: a producer parked in an admitted dependency observes the cancellation, and
-//! its next write sees the pipe dropped. The close is acknowledged only after the call's
-//! physical end. A caller refusing the head is also a close.
+//! dispatch fails the read instead. Closing the end closes the pipe, so the guest's next write
+//! sees it dropped; a producer that never writes again ends only at the call's timeout. A
+//! caller refusing the head is also a close, observed by the producer at its next write.
 use super::*;
 use crate::worker::{Pipe, StreamCall};
 use futures::{FutureExt, channel::oneshot, future::Either};
@@ -38,7 +36,6 @@ impl Environment {
             .map_err(failure)?;
         let context = context.enter_execution()?;
         let cancellation = context.signal();
-        let invocation = context.clone();
         let pipe = Arc::<Mutex<Pipe>>::default();
         let (head, published) = oneshot::channel();
         let carrier = Carrier::Stream(StreamCall {
@@ -69,27 +66,13 @@ impl Environment {
         let settlement = Rc::new(RefCell::new(Settlement::default()));
         let mut head = Payload::data(Value::Null);
         let index = head.attach_stream(ByteStream::new(Source {
-            pipe: pipe.clone(),
+            pipe,
             settlement: settlement.clone(),
         }));
         let head = head.map_value(|_| Ok(serde_json::json!(index)));
         let guard = Settle(Some(settlement));
         Ok(Outcome::continuing(head, async move {
-            // Closing the end, or dropping it unread, cancels this call's own invocation and
-            // the calls it issued; the call then still runs to its physical end. The
-            // cancellation runs here, outside the end's own borrow.
-            let closed = futures::future::poll_fn(|context| {
-                pipe.lock().expect("pipe").poll_reader_closed(context)
-            });
-            let result = match futures::future::select(&mut dispatch, std::pin::pin!(closed)).await
-            {
-                Either::Left((result, _)) => result,
-                Either::Right(((), _)) => {
-                    let _ = invocation.cancel_invocation();
-                    dispatch.await
-                }
-            };
-            let result = result.map(drop);
+            let result = dispatch.await.map(drop);
             guard.finish(result.clone());
             result
         }))
@@ -209,10 +192,10 @@ impl ByteSource for Source {
 ///
 /// - at the stream's end, which the end reports only after its producer physically succeeded;
 ///   the guest reads the end after the data;
-/// - at a failure of the producer: a plain `stream<u8>` carries no error, so the guest's next
-///   read fails its Store instead of reporting an end (the importer's revision is quarantined);
-/// - at a cancellation of the end, or when the importer callback's epoch `ended`: the pipe is
-///   failed, so the guest's reader sees its writer dropped;
+/// - at a failure or cancellation of the end, or when the importer callback's epoch `ended`;
+///   the pipe is failed, so the guest's reader sees its writer dropped. A plain `stream<u8>`
+///   carries no error, so that guest cannot tell this from an end; the cause stays recorded on
+///   the host;
 /// - when the guest closed its reader, abandoned the import, or its Store stopped: the pipe is
 ///   closed, and dropping the end here asks the producer to stop, once.
 pub(crate) async fn pump(
@@ -236,14 +219,8 @@ pub(crate) async fn pump(
                         ended.await;
                         return ended_call(&pipe);
                     }
-                    // A cancelled end is a close; any other failure is the producer's.
-                    Either::Left((Some(Err(error)), _))
-                        if error.code == tembra::core::Code::Cancelled =>
-                    {
-                        return pipe.lock().expect("pipe").fail(error.message);
-                    }
                     Either::Left((Some(Err(error)), _)) => {
-                        return pipe.lock().expect("pipe").fail_producer(error.message);
+                        return pipe.lock().expect("pipe").fail(error.message);
                     }
                     Either::Right(_) => return ended_call(&pipe),
                 }

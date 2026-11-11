@@ -205,21 +205,6 @@ impl Pair {
         );
         assert_eq!(self.engine.instances(), 0);
     }
-
-    /// Close a host whose revisions were quarantined: closing reports the trap that retired
-    /// them, and every kernel record and Store must still be gone.
-    fn retire(mut self) {
-        self.consumer.release().unwrap();
-        self.producer.release().unwrap();
-        let closed = self.pool.run_until(self.host.close());
-        assert!(closed.is_err_and(|error| error.message.contains("trap")));
-        let diagnostics = self.host.kernel().diagnostics();
-        assert_eq!(
-            (diagnostics.calls, diagnostics.references, diagnostics.roots),
-            (0, 0, 0)
-        );
-        assert_eq!(self.engine.instances(), 0);
-    }
 }
 
 /// Byte `j` of chunk `i` is `(i + j) mod 256`; the consumer's order-sensitive checksum.
@@ -285,31 +270,33 @@ fn stopping_early_or_abandoning_the_import_lets_the_producer_finish() {
     });
 }
 
-/// A plain byte stream has no error lane, so a producer that fails after its head never looks
-/// like a clean, short end: the importing Store's next read fails, the consumer's call fails
-/// with the propagated cause instead of returning a partial result, and both revisions are
-/// quarantined once everything physically settled.
 #[test]
 #[ignore = "requires TEMBRA_WASM_STREAM_PRODUCER and TEMBRA_WASM_STREAM_CONSUMER"]
-fn a_producer_failure_fails_the_consumer_instead_of_ending_its_stream() {
+fn a_producer_failure_ends_the_consumer_stream_and_is_recorded() {
     engines(|producer, consumer, interpreted| {
         for mode in [TRAP_HOLDING, TRAP_AFTER_END] {
             let mut pair = compiled(producer, consumer, interpreted, 30_000);
+            // A plain byte stream has no error: the consumer sees its end after a prefix of the
+            // data. A recorded failure ends the delivered end at once, before bytes it had not
+            // yet handed on, so the prefix may be anything up to the whole stream.
             // Exceed the producer pipe: the trap cannot happen until its head was delivered
             // and the importer started draining. A tiny body could trap before that head,
             // which legitimately fails the import itself instead of an already-open stream.
-            let error = pair.sum(128, 4096, mode, u64::MAX).unwrap_err();
-            assert!(
-                error.message.contains("imported stream failed"),
-                "{interpreted} {mode}: {error}"
+            let (read, sum) = pair.sum(128, 4096, mode, u64::MAX).unwrap();
+            assert!(read <= 128 * 4096, "{interpreted} {mode}: {read}");
+            assert_eq!(
+                (read, sum),
+                checksum(128, 4096, read),
+                "{interpreted} {mode}"
             );
-            // Both Stores physically settle before anything is asserted about their revisions.
-            pair.wait(|pair| pair.calls() == 0);
+            pair.settled();
+            let errors = pair.host.errors();
+            assert!(
+                errors.iter().any(|error| error.message.contains("trap")),
+                "{interpreted} {mode}: {errors:?}"
+            );
             assert!(quarantined(&pair.producer_ping().unwrap_err()));
-            assert!(quarantined(
-                &pair.call::<_, u32>("ping", (1_u32,)).unwrap_err()
-            ));
-            pair.retire();
+            pair.close();
         }
     });
 }

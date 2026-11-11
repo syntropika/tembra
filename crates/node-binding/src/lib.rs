@@ -1,9 +1,8 @@
 //! Thread-affine metadata-only Node-API adapter. JavaScript stays in the existing Node runtime.
 use napi_derive::napi;
-mod componentize;
 mod interpreter;
 
-/// A checked contract whose component bytes can be released after materialization.
+/// Immutable Orb bytes and their checked prepared contract, shared by every installation.
 #[napi]
 pub struct NodeArtifact {
     pub(crate) artifact: tembra_contracts::Artifact,
@@ -24,12 +23,6 @@ impl NodeArtifact {
     #[napi]
     pub fn description(&self) -> String {
         self.artifact.describe().to_string()
-    }
-
-    /// Retain the signatures for calls without keeping a second copy of executable bytes.
-    #[napi]
-    pub fn release_component(&mut self) {
-        self.artifact.component = Vec::new();
     }
 
     /// Bind one prepared signature before invoking any executable callback.
@@ -107,44 +100,18 @@ pub struct NodeContract {
 
 #[napi]
 impl NodeContract {
-    /// Prepare a source Orb artifact from one closed ES module and the prebuilt QuickJS runtime
-    /// dylib. The module exports the world's functions and the private lifecycle; `hooks` names
-    /// the exported hook interfaces (JavaScript aliases) the Orb provides. The component is
-    /// built against the private source world, its runtime core is replaced by an import of the
-    /// pinned shared runtime (the build fails if the dylib does not produce that core), and the
-    /// thin component is verified against this public contract and packaged. Module evaluation
-    /// never calls the host.
+    /// Package a closed source bundle for the selected world.
     #[napi]
     pub fn source_artifact(
         &self,
         source: String,
-        runtime: napi::bindgen_prelude::Uint8Array,
         name: String,
         api_version: u32,
-        hooks: Option<Vec<String>>,
     ) -> napi::Result<napi::bindgen_prelude::Buffer> {
-        let hooks = hooks.unwrap_or_default().into_iter().collect();
-        componentize::source_artifact(
-            &self.contract,
-            &source,
-            &runtime,
-            &name,
-            api_version,
-            &hooks,
-        )
-        .map(Into::into)
-        .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
-    }
-
-    /// Derive the runtime core module that source Orbs built from the runtime dylib embed, for
-    /// packaging to compare with the pinned shared runtime asset. It never packs an Orb.
-    #[napi]
-    pub fn source_runtime(
-        runtime: napi::bindgen_prelude::Uint8Array,
-    ) -> napi::Result<napi::bindgen_prelude::Buffer> {
-        componentize::source_runtime(&runtime)
+        self.contract
+            .source_artifact(&source, &name, api_version)
             .map(Into::into)
-            .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     /// Package a checked component with its WIT-derived contribution roles.

@@ -2,7 +2,7 @@ import type { Grants } from "../authoring/types.ts";
 import type { HttpProvider } from "./http-provider.ts";
 import { type Address, isImplicit, key, parseSocketAddress } from "./socket-addresses.ts";
 import type { SocketProvider } from "./socket-provider.ts";
-import type { HttpClient } from "./component/wasi-http.ts";
+import type { HttpClient } from "./standard-http.ts";
 
 export interface BrowserNetworkProviders {
   http?: Readonly<Record<string, HttpProvider>>;

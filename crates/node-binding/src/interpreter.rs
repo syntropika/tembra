@@ -77,15 +77,14 @@ struct Configuration {
     network: Vec<String>,
 }
 
-/// A native backend for Orb components, including source Orbs that carry their own interpreter;
-/// ordinary Node callbacks remain outside its VM.
+/// A lazily constructed native interpreter backend; ordinary Node callbacks remain outside its VM.
 #[napi]
 pub struct NodeInterpreter {
     pub(super) engine: Engine,
 }
 #[napi]
 impl NodeInterpreter {
-    /// Configure the shared Wasm engine and register host-selected providers without any grants.
+    /// Compile the supplied reusable engine and register host-selected providers without any grants.
     #[napi(constructor)]
     pub fn new(configuration: String, log: LogCallback) -> napi::Result<Self> {
         let configuration: Configuration =
@@ -106,7 +105,14 @@ impl NodeInterpreter {
         Ok(Self { engine })
     }
 
-    /// Materialize a fresh isolated revision from a source or compiled Orb component artifact.
+    /// Configure interpreter code lazily; hosts that install only compiled components never load it.
+    #[napi]
+    pub fn interpreter(&mut self, bytes: Uint8Array) -> napi::Result<()> {
+        self.engine = self.engine.clone().interpreter(&bytes).map_err(js_error)?;
+        Ok(())
+    }
+
+    /// Materialize a fresh isolated revision from a closed source or compiled artifact.
     ///
     /// Both kinds return the same scoped port; compiled dependency calls arrive as ordinary host
     /// events on the dispatch bridge, never on libuv worker threads.

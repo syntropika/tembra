@@ -14,10 +14,6 @@ interface requests {
     interrupt: async func(url: string, observed: string) -> string;
     open: async func(url: string) -> u16;
     read: async func() -> string;
-    /// The same read with a declared failure lane: "no response" is a recoverable err.
-    read-checked: async func() -> result<string, string>;
-    /// A request whose refusal (an ungranted origin) is caught: its error-code reaches the err lane.
-    attempt: async func(url: string, upload: bool) -> result<string, string>;
     close: async func();
 }
 

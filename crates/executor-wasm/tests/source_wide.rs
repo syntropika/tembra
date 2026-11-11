@@ -1,12 +1,10 @@
 //! WIT `u64`/`s64` values cross real source Orbs exactly, against typed Rust and compiled peers.
 //!
-//! The provider and relay source Orbs are the prepared TypeScript precision fixtures
-//! (`<TEMBRA_WASM_FIXTURES>/precision.wasm` and `precision-relay.wasm`). Their WIT is copied
-//! below; installation compares every signature, so a drifted copy is refused. Compiled peers are
-//! encoded from core modules, and the source hook Orbs are the prepared SDK fixtures
-//! `tests/source/test-tally-{provider,extension}`. Every case runs on Cranelift and Pulley.
-#[path = "support/source.rs"]
-mod source;
+//! The provider and relay source Orbs are the packaged TypeScript precision fixtures
+//! (`<TEMBRA_WASM_FIXTURES>/precision.wasm` and `precision-relay.wasm`) on the packaged
+//! interpreter (`TEMBRA_WASM_ENGINE`). Their WIT is copied below; installation compares every
+//! signature, so a drifted copy is refused. Compiled peers are encoded from core modules, and the
+//! hook Orbs are closed source bundles packaged here. Every case runs on Cranelift and Pulley.
 use futures::{FutureExt, executor::LocalPool};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -258,7 +256,15 @@ fn component(wit: &str, world: &str, module: &str, name: &str) -> Vec<u8> {
         .unwrap()
 }
 
+/// The packaged fixture artifact `<TEMBRA_WASM_FIXTURES>/<name>.wasm`.
+fn fixture(name: &str) -> Vec<u8> {
+    let directory = std::env::var_os("TEMBRA_WASM_FIXTURES").expect("TEMBRA_WASM_FIXTURES");
+    std::fs::read(std::path::Path::new(&directory).join(format!("{name}.wasm"))).unwrap()
+}
+
 fn engine(interpreted: bool) -> Engine {
+    let interpreter =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
     let limits = Limits {
         timeout_ms: 30_000,
         ..Limits::default()
@@ -268,6 +274,8 @@ fn engine(interpreted: bool) -> Engine {
     } else {
         Engine::new(limits)
     }
+    .unwrap()
+    .interpreter(&interpreter)
     .unwrap()
 }
 
@@ -353,7 +361,7 @@ fn leg(engine: &Engine, provider: Kind, relay: Option<Kind>) {
     let numbers = match provider {
         Kind::Native => native_provider(),
         Kind::Source => engine
-            .load(&source::fixture("precision"), Install::default())
+            .load(&fixture("precision"), Install::default())
             .unwrap(),
         Kind::Compiled => engine
             .load(
@@ -369,7 +377,7 @@ fn leg(engine: &Engine, provider: Kind, relay: Option<Kind>) {
         Some(Kind::Source) => {
             orbs.push(
                 engine
-                    .load(&source::fixture("precision-relay"), requires())
+                    .load(&fixture("precision-relay"), requires())
                     .unwrap(),
             );
             format!("relay::{RELAY}")
@@ -436,13 +444,13 @@ fn calls(interpreted: bool) {
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
 fn source_64_bit_calls_are_exact_against_native_source_and_compiled_peers() {
     calls(false);
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
 fn pulley_source_64_bit_calls_are_exact_against_native_source_and_compiled_peers() {
     calls(true);
 }
@@ -499,11 +507,19 @@ fn tally() -> Hook<Entry, Entry> {
     Hook::waterfall(TALLY).signature(signature)
 }
 
-/// The SDK-authored source provider `tests/source/test-tally-provider`: its guest runs the hook
-/// through the hook's typed WIT function.
+/// A source provider whose guest runs the hook (the guest `hook.run` packet path).
 fn source_hook_provider(engine: &Engine) -> Orb {
+    let source = r#"globalThis.__tembraOrb={name:"tools",apiVersion:1,
+        hooks:{tally:{composition:"waterfall"}},
+        services:{runner:{create(self){return self.hook("tally");},
+            methods:{run(hook,context,input){return hook.run(context,input);}}}}};"#;
     engine
-        .load(&source::fixture("test-tally-provider"), Install::default())
+        .load(
+            &hook_contract("provider")
+                .source_artifact(source, "tools", 1)
+                .unwrap(),
+            Install::default(),
+        )
         .unwrap()
 }
 
@@ -528,12 +544,23 @@ fn native_hook_provider() -> Orb {
     )
 }
 
-/// The SDK-authored source contributor `tests/source/test-tally-extension`. It refuses anything
-/// but `bigint` integers, so a lossy JavaScript number cannot pass silently.
+/// A source contributor (the contribution packet path). It refuses anything but `bigint`
+/// integers, so a lossy JavaScript number cannot pass silently.
 fn source_contributor(engine: &Engine) -> Orb {
+    let source = format!(
+        r#"globalThis.__tembraOrb={{name:"extension",apiVersion:1,
+        contributes:{{"{TALLY}":{{priority:0,handle(root,context,input){{
+            context.check();
+            if(typeof input.total!=="bigint"||typeof input.delta!=="bigint")
+                throw new Error("a 64-bit integer did not arrive as a bigint");
+            return {{total:input.total-1n,delta:input.delta+1n,note:input.note+"+source"}};
+        }}}}}}}};"#
+    );
     engine
         .load(
-            &source::fixture("test-tally-extension"),
+            &hook_contract("extension")
+                .source_artifact(&source, "extension", 1)
+                .unwrap(),
             Install::default().requires(TALLY, "tools", 1),
         )
         .unwrap()
@@ -561,7 +588,7 @@ fn native_contributor() -> Orb {
 
 fn hooks(interpreted: bool) {
     let engine = engine(interpreted);
-    for source_provider in [false, true] {
+    for source_provider in [true, false] {
         let provider = if source_provider {
             source_hook_provider(&engine)
         } else {
@@ -611,50 +638,29 @@ fn hooks(interpreted: bool) {
                 "source provider: {source_provider}"
             );
         }
-        // The source participant's exact subtraction refuses to go below zero: its `-1n` is not
-        // a `u64`, so the canonical lowering of its result refuses it. The hook function has no
-        // WIT error lane, so this is a trap of the contributor's revision (declared breaking
-        // semantics), never a wrapped value.
+        // The source participant's exact subtraction refuses to go below zero.
         let below = serde_json::to_value((Entry {
             total: 0,
             delta: 0,
             note: String::new(),
         },))
         .unwrap();
-        let refused = portable_call(&mut pool, &host, &runner, "run", below)
-            .expect_err("a negative u64 result was accepted");
-        assert!(
-            refused.message.contains("trap"),
-            "source provider {source_provider}: {refused}"
-        );
-        // The quarantined contributor never runs again: a valid input now fails too.
-        let valid = serde_json::to_value((Entry {
-            total: 3,
-            delta: 0,
-            note: String::new(),
-        },))
-        .unwrap();
-        let after = portable_call(&mut pool, &host, &runner, "run", valid);
-        assert!(
-            after.is_err(),
-            "source provider {source_provider}: the trapped contributor kept serving: {after:?}"
-        );
-        let _ = runner.release();
-        // Closing may report the quarantined revisions; every Store is physically retired.
-        let _ = pool.run_until(host.close());
+        assert!(portable_call(&mut pool, &host, &runner, "run", below).is_err());
+        runner.release().unwrap();
+        pool.run_until(host.close()).unwrap();
         assert_eq!(engine.instances(), 0);
-        assert_eq!(engine.resources(), 0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
     }
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn source_64_bit_hooks_and_contributions_are_exact() {
     hooks(false);
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn pulley_source_64_bit_hooks_and_contributions_are_exact() {
     hooks(true);
 }

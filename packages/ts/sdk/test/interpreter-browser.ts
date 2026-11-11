@@ -1,6 +1,5 @@
 import {
   createHost,
-  FilesystemError,
   fetchHttpProvider,
   memoryFilesystem,
   opfsFilesystem,
@@ -18,8 +17,8 @@ import { verifyPrecisionScenario } from "./precision-scenario.ts";
 import { verifyContextAcquireScenario } from "./context-acquire-scenario.ts";
 
 /** Chrome entry of the same keyed-acquisition scenario used by the packaged Node consumer. */
-export async function verifyContextAcquireBrowser(): Promise<string> {
-  const host = await createHost({});
+export async function verifyContextAcquireBrowser(engine?: URL): Promise<string> {
+  const host = await createHost({ isolated: engine ? { engine } : {} });
   try {
     return await verifyContextAcquireScenario(host, source);
   } finally {
@@ -28,8 +27,8 @@ export async function verifyContextAcquireBrowser(): Promise<string> {
 }
 
 /** Chrome entry of the exact u64/s64 scenario; called once the 64-bit fixtures are built. */
-export async function verifyPrecisionBrowser(): Promise<string> {
-  const host = await createHost({});
+export async function verifyPrecisionBrowser(engine?: URL): Promise<string> {
+  const host = await createHost({ isolated: engine ? { engine } : {} });
   try {
     return await verifyPrecisionScenario(host, source);
   } finally {
@@ -44,22 +43,15 @@ async function source(name: string): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-/** Install two source components through one shared runtime and make independent typed calls. */
-export async function verifyArithmeticSource(): Promise<void> {
-  const host = await createHost({});
+/** Run one call on the selected engine; omitting `engine` uses the package-located default. */
+export async function verifyEngineSelection(engine?: URL): Promise<void> {
+  const host = await createHost({ isolated: engine ? { engine } : {} });
   try {
-    await host.install([
-      { artifact: await source("arithmetic-source") },
-      { artifact: await source("cpu-source") },
-    ]);
+    await host.install({ artifact: await source("arithmetic-source") });
     const reference = await host.get("arithmetic::example:integrated/arithmetic@1.0.0", "main");
     const doubled = await reference.double(3);
     if (doubled !== 6) throw new Error(`Engine selection returned ${doubled}`);
     reference.release();
-    const other = await host.get("cpu::example:integrated/arithmetic@1.0.0", "main");
-    if ((await other.double(3)) !== 6)
-      throw new Error("The second source component did not answer");
-    other.release();
   } finally {
     await host.close();
   }
@@ -67,14 +59,12 @@ export async function verifyArithmeticSource(): Promise<void> {
 }
 
 /** Qualify actual Wasm callbacks, isolated descriptors, OPFS persistence and bounded termination. */
-export async function verifyBrowserInterpreter(): Promise<void> {
-  await verifySetupRetry();
+export async function verifyBrowserInterpreter(engine?: URL): Promise<void> {
+  await verifySetupRetry(engine);
   const memory = memoryFilesystem({ "input.txt": "initial" });
   const root = await navigator.storage.getDirectory();
   const directoryName = `tembra-${crypto.randomUUID()}`;
-  const directory = await root.getDirectoryHandle(directoryName, {
-    create: true,
-  });
+  const directory = await root.getDirectoryHandle(directoryName, { create: true });
   const nested = await directory.getDirectoryHandle("nested", { create: true });
   const seeded = await (await nested.getFileHandle("input.txt", { create: true })).createWritable();
   await seeded.write("seeded");
@@ -100,6 +90,7 @@ export async function verifyBrowserInterpreter(): Promise<void> {
   });
   const host = await createHost({
     isolated: {
+      ...(engine ? { engine } : {}),
       providers: {
         filesystem: { memory: tracked(memory), durable: tracked(durable) },
         http: {
@@ -129,13 +120,8 @@ export async function verifyBrowserInterpreter(): Promise<void> {
       },
     },
   });
-  const requires = {
-    "example:integrated/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 },
-  };
-  const calculator: OrbArtifact = {
-    artifact: await source("calculator"),
-    requires,
-  };
+  const requires = { "example:integrated/arithmetic@1.0.0": { orb: "arithmetic", apiVersion: 1 } };
+  const calculator: OrbArtifact = { artifact: await source("calculator"), requires };
   const storage = async (
     name: string,
     provider: string,
@@ -166,12 +152,7 @@ export async function verifyBrowserInterpreter(): Promise<void> {
         artifact: await source("online"),
         requires,
         grants: {
-          http: [
-            {
-              provider: "mock",
-              origins: ["https://api.example.test", location.origin],
-            },
-          ],
+          http: [{ provider: "mock", origins: ["https://api.example.test", location.origin] }],
         },
       },
       await storage("writer", "memory", true),
@@ -217,8 +198,9 @@ export async function verifyBrowserInterpreter(): Promise<void> {
     equal((await rejects(host.install(calculator))).includes("Use reload"), true);
     equal(host.diagnostics().codeVersion, installedVersion);
     equal(calculation.state.value, 24);
-    // Breaking semantics: a non-`result` export that throws traps and quarantines its revision,
-    // so each failing method is proven on its own installation below.
+    await rejects(calculation.fail());
+    await rejects(calculation.forbidden());
+    await rejects(calculation.malformed());
     equal(await calculation.recover(), 42);
     equal(await calculation.fanout(), 24);
     stage = "WASI HTTP provider";
@@ -261,9 +243,7 @@ export async function verifyBrowserInterpreter(): Promise<void> {
     equal(await persistent.read("/data/nested/input.txt"), "seeded");
     durableReader.release();
     stage = "concurrent effects";
-    // `double` is a synchronous WIT import (COORDINATION #6): it completes inside the guest's
-    // turn before `Promise.race` starts, so the dependency's value wins.
-    equal(await calculation.race(), 12);
+    equal(await calculation.race(), -1);
     // Returning the race's value does not release the callback before admitted work settles.
     equal(messages.includes("slow-finished"), true);
     equal(await calculation.recover(), 42);
@@ -281,22 +261,21 @@ export async function verifyBrowserInterpreter(): Promise<void> {
         await pending;
       }),
     );
-    // Neither JCO nor the runtime can cancel a guest task: the cancelled host work fails the
-    // export, which quarantines the revision. Later calls are refused.
-    equal(String(await rejects(calculation.recover())).includes("quarantined"), true);
+    equal(await calculation.recover(), 42);
     stage = "termination";
-    await host.install({ artifact: await source("suspended-source") });
-    await rejects(host.get("suspended::example:integrated/arithmetic@1.0.0", "broken"));
-    {
-      const reference = await host.get("suspended::example:integrated/arithmetic@1.0.0", "main");
+    for (const [name, input] of [
+      ["cpu", 1],
+      ["suspended", 2],
+    ] as const) {
+      await host.install({ artifact: await source(`${name}-source`) });
+      await rejects(host.get(`${name}::example:integrated/arithmetic@1.0.0`, "broken"));
+      const reference = await host.get(`${name}::example:integrated/arithmetic@1.0.0`, "main");
       equal(await reference.double(3), 6);
-      // The detached wait stays with this callback until its task really exits; the next call
-      // is admitted only afterwards.
+      await rejects(reference.double(5));
+      equal(await reference.double(3), 6);
       equal(await reference.double(4), 42);
       equal(await reference.double(3), 6);
-      // A throw from a non-`result` export traps and quarantines the revision.
-      await rejects(reference.double(5));
-      equal(String(await rejects(reference.double(3))).includes("quarantined"), true);
+      await rejects(reference.double(input));
       reference.release();
     }
     calculation.release();
@@ -323,176 +302,15 @@ export async function verifyBrowserInterpreter(): Promise<void> {
     }
   }
   if (primary) throw new Error(String(primary));
-  for (const method of ["fail", "forbidden", "malformed"]) await trapsAndQuarantines(method);
   equal(messages.includes("slow-finished"), true);
   equal(mounts, 0);
   equal(host.diagnostics().values, 0);
 }
 
-/**
- * The real async B1 export returns before its detached host wait ends. That physical work must
- * remain inside the callback deadline; expiry quarantines the revision before another call.
- */
-export async function verifyDetachedWorkRefusal(): Promise<void> {
-  const host = await createHost({ isolated: { limits: { timeoutMs: 1500 } } });
-  try {
-    await host.install({ artifact: await source("b1") });
-    const reference = (await host.get("b1::tembra-test:b1/probe@1.0.0", "main")) as any;
-    try {
-      let refused = false;
-      try {
-        await reference.detach(5000);
-      } catch {
-        refused = true;
-      }
-      if (!refused) throw new Error("Detached work outlived its callback deadline");
-      let quarantined = false;
-      try {
-        await reference.observed();
-      } catch (error) {
-        quarantined = /quarantined/.test(String(error));
-      }
-      if (!quarantined) throw new Error("A timed-out revision accepted another call");
-    } finally {
-      reference.release();
-    }
-  } finally {
-    await host.close();
-  }
-}
-
-/**
- * Fuel bounds a synchronous source loop: `while (true) {}` ends with a fuel trap well before the
- * callback deadline, the revision is quarantined and an independent revision still works.
- */
-export async function verifySourceCpuLimit(): Promise<string> {
-  const timeoutMs = 20000;
-  const host = await createHost({
-    isolated: { limits: { timeoutMs, fuel: 50_000_000 } },
-  });
-  try {
-    await host.install({ artifact: await source("cpu-source") });
-    const reference = (await host.get("cpu::example:integrated/arithmetic@1.0.0", "main")) as any;
-    try {
-      if ((await reference.double(3)) !== 6) throw new Error("cpu-source does not double");
-      const started = performance.now();
-      let trapped = false;
-      try {
-        await reference.double(1);
-      } catch {
-        trapped = true;
-      }
-      const elapsed = performance.now() - started;
-      if (!trapped) throw new Error("An endless source loop returned");
-      if (elapsed >= timeoutMs) throw new Error("Fuel did not end the loop before the deadline");
-      let quarantined = false;
-      try {
-        await reference.double(3);
-      } catch (error) {
-        quarantined = /quarantined/.test(String(error));
-      }
-      if (!quarantined) throw new Error("A fuel trap did not quarantine the revision");
-      return `source loop trapped by fuel in ${Math.round(elapsed)} ms`;
-    } finally {
-      reference.release();
-    }
-  } finally {
-    await host.close();
-  }
-}
-
-/** A compiled component's loop and memory growth are bounded by the same instance limits. */
-export async function verifyCompiledLimits(): Promise<string> {
-  const timeoutMs = 20000;
-  const host = await createHost({
-    isolated: {
-      limits: { timeoutMs, fuel: 50_000_000, memoryBytes: 8 << 20 },
-      providers: { filesystem: { memory: memoryFilesystem() } },
-    },
-  });
-  try {
-    await host.install({
-      artifact: await source("compiled-probe"),
-      grants: { filesystem: [{ provider: "memory", mount: "/data", writable: false }] },
-    });
-    const api = (await host.get("probe::example:probe/probe@1.0.0", "main")) as any;
-    try {
-      if ((await api.spin(0)) !== 0) throw new Error("Compiled probe does not answer");
-      // `grow` accepts 64 KiB pages and returns the old size or -1 (as u32) on refusal.
-      if ((await api.grow(16)) === 0xffffffff) throw new Error("A grow within budget was refused");
-      if ((await api.grow(1024)) !== 0xffffffff) throw new Error("A grow over budget was accepted");
-      const started = performance.now();
-      let trapped = false;
-      try {
-        await api.spin(0xffffffff);
-      } catch {
-        trapped = true;
-      }
-      const elapsed = performance.now() - started;
-      if (!trapped || elapsed >= timeoutMs) throw new Error("Fuel did not end the compiled loop");
-      let quarantined = false;
-      try {
-        await api.spin(0);
-      } catch (error) {
-        quarantined = /quarantined/.test(String(error));
-      }
-      if (!quarantined) throw new Error("A compiled fuel trap did not quarantine");
-      return `compiled loop trapped by fuel in ${Math.round(elapsed)} ms; grow over 8 MiB refused`;
-    } finally {
-      api.release();
-    }
-  } finally {
-    await host.close();
-  }
-}
-
-/** One calculator installation whose failing non-`result` method traps and quarantines it. */
-async function trapsAndQuarantines(method: string): Promise<void> {
-  const host = await createHost();
-  try {
-    await host.install([
-      { artifact: await source("arithmetic-source") },
-      {
-        artifact: await source("calculator"),
-        requires: {
-          "example:integrated/arithmetic@1.0.0": {
-            orb: "arithmetic",
-            apiVersion: 1,
-          },
-        },
-      },
-    ]);
-    const calculation = (await host.get(
-      "calculator::example:integrated/calculation@1.0.0",
-      "main",
-    )) as any;
-    try {
-      let trapped = false;
-      try {
-        await calculation[method]();
-      } catch {
-        trapped = true;
-      }
-      if (!trapped) throw new Error(`${method} succeeded`);
-      let quarantined = false;
-      try {
-        await calculation.recover();
-      } catch (error) {
-        quarantined = /quarantined/.test(String(error));
-      }
-      if (!quarantined) throw new Error(`${method}: a trapped revision accepted another call`);
-    } finally {
-      calculation.release();
-    }
-  } finally {
-    await host.close();
-  }
-}
-
 /** A transient validator download failure must not poison later installations on the same host. */
-async function verifySetupRetry(): Promise<void> {
+async function verifySetupRetry(engine?: URL): Promise<void> {
   const artifact = await source("arithmetic-source");
-  const host = await createHost({});
+  const host = await createHost({ isolated: engine ? { engine } : {} });
   const fetch = globalThis.fetch;
   let refused = false;
   globalThis.fetch = Object.assign(
@@ -533,26 +351,11 @@ async function verifySetupRetry(): Promise<void> {
 function counted(provider: FilesystemProvider) {
   const state = { opened: 0, live: 0 };
   const originals = new WeakMap<Descriptor, Descriptor>();
-  function wrap<T extends Descriptor>(descriptor: T, audits: Set<() => Promise<void>>): T {
+  function wrap<T extends Descriptor>(descriptor: T): T {
     let closed = false;
-    const markClosed = () => {
-      if (closed) return;
-      closed = true;
-      if (descriptor.type === "file") state.live--;
-      audits.delete(verifyDisposed);
-    };
-    const verifyDisposed = async () => {
-      const refused = await descriptor.stat().then(
-        () => false,
-        (error: unknown) => error instanceof FilesystemError && error.code === "bad-descriptor",
-      );
-      if (!refused) throw new Error("Filesystem disposal retained a usable descriptor");
-      markClosed();
-    };
     if (descriptor.type === "file") {
       state.opened++;
       state.live++;
-      audits.add(verifyDisposed);
     }
     const unwrap = (other: Descriptor) => originals.get(other) ?? other;
     const base = {
@@ -561,8 +364,9 @@ function counted(provider: FilesystemProvider) {
       sync: () => descriptor.sync(),
       isSameObject: (other: Descriptor) => descriptor.isSameObject(unwrap(other)),
       close() {
+        if (!closed && descriptor.type === "file") state.live--;
+        closed = true;
         descriptor.close();
-        markClosed();
       },
     };
     const wrapped: Descriptor =
@@ -584,7 +388,7 @@ function counted(provider: FilesystemProvider) {
         : ({
             ...base,
             type: "directory",
-            openAt: async (path, options) => wrap(await descriptor.openAt(path, options), audits),
+            openAt: async (path, options) => wrap(await descriptor.openAt(path, options)),
             statAt: (path) => descriptor.statAt(path),
             readDirectory: () => descriptor.readDirectory(),
             createDirectoryAt: (path) => descriptor.createDirectoryAt(path),
@@ -601,16 +405,10 @@ function counted(provider: FilesystemProvider) {
     provider: {
       open(mount: string, writable: boolean) {
         const instance = provider.open(mount, writable);
-        const audits = new Set<() => Promise<void>>();
         return {
           writable: instance.writable,
-          openRoot: () => wrap(instance.openRoot(), audits),
-          async dispose() {
-            await instance.dispose();
-            // A mount closes its own descriptors directly, bypassing wrapper.close(). Verify
-            // those real descriptors are unusable before accounting for their release.
-            await Promise.all([...audits].map((verify) => verify()));
-          },
+          openRoot: () => wrap(instance.openRoot()),
+          dispose: () => instance.dispose(),
         };
       },
     } satisfies FilesystemProvider,
@@ -620,29 +418,19 @@ function counted(provider: FilesystemProvider) {
 /**
  * Run the standard WASI source scenario and its boundary probes on supplied memory and actual
  * OPFS providers: raw non-UTF-8 bytes, exact u64 offsets, retained descriptors, external abort,
- * denied grants, disposed resources, isolated descriptor indices and cleanup on retirement.
+ * denied grants, forged/foreign handles and cleanup on revision retirement.
  */
-export async function verifyStandardScenario(): Promise<string[]> {
-  // Every part runs; failures are reported together so one cannot hide another.
-  const report: string[] = [];
-  const failures: unknown[] = [];
-  const part = async (name: string, run: () => Promise<string>) => {
-    try {
-      report.push(await run());
-    } catch (error) {
-      failures.push(new Error(`${name}: ${String(error)}`, { cause: error }));
-    }
-  };
-  await part("system", systemOn);
-  await part("http", verifyHttpScenario);
-  await part("raw http", verifyRawHttpScenario);
-  await part("sockets", verifySocketScenario);
+export async function verifyStandardScenario(engine?: URL): Promise<string[]> {
+  const report = [
+    await systemOn(engine),
+    await verifyHttpScenario(engine),
+    await verifyRawHttpScenario(engine),
+    await verifySocketScenario(engine),
+  ];
   const pattern = Uint8Array.from({ length: 4100 }, (_, index) => index % 256);
   const root = await navigator.storage.getDirectory();
   const directoryName = `tembra-standard-${crypto.randomUUID()}`;
-  const directory = await root.getDirectoryHandle(directoryName, {
-    create: true,
-  });
+  const directory = await root.getDirectoryHandle(directoryName, { create: true });
   const writable = await (
     await directory.getFileHandle("bytes.bin", { create: true })
   ).createWritable();
@@ -660,21 +448,24 @@ export async function verifyStandardScenario(): Promise<string[]> {
       ["opfs", await opfsFilesystem(directory)],
     ] as const) {
       const { state, provider } = counted(base);
-      await part(`${kind} standard`, async () => `${kind}: ${await standardOn(provider, state)}`);
-      await part(
-        `${kind} filesystem`,
-        async () => `${kind} filesystem: ${await filesystemOn(provider, kind)}`,
-      );
+      try {
+        report.push(`${kind}: ${await standardOn(provider, state, engine)}`);
+      } catch (error) {
+        throw new Error(`${kind} standard scenario: ${String(error)}`, { cause: error });
+      }
+      try {
+        report.push(`${kind} filesystem: ${await filesystemOn(provider, kind, engine)}`);
+      } catch (error) {
+        throw new Error(`${kind} filesystem scenario: ${String(error)}`, { cause: error });
+      }
     }
     const injected = counted(memoryFilesystem());
-    report.push(`injected filesystem: ${await filesystemOn(injected.provider, "memory")}`);
+    report.push(`injected filesystem: ${await filesystemOn(injected.provider, "memory", engine)}`);
     if (injected.state.opened < 1 || injected.state.live !== 0)
       throw new Error("Injected provider did not observe balanced file ownership");
   } finally {
     await root.removeEntry(directoryName, { recursive: true });
   }
-  if (failures.length)
-    throw new AggregateError(failures, failures.map((failure) => String(failure)).join("; "));
   return report;
 }
 
@@ -682,9 +473,10 @@ export async function verifyStandardScenario(): Promise<string[]> {
 async function filesystemOn(
   provider: FilesystemProvider,
   kind: "memory" | "opfs",
+  engine?: URL,
 ): Promise<string> {
   const host = await createHost({
-    isolated: { providers: { filesystem: { data: provider } } },
+    isolated: { ...(engine ? { engine } : {}), providers: { filesystem: { data: provider } } },
   });
   let outcome: string;
   try {
@@ -722,6 +514,7 @@ async function filesystemOn(
 async function standardOn(
   provider: FilesystemProvider,
   state: { opened: number; live: number },
+  engine?: URL,
 ): Promise<string> {
   const same = (actual: unknown, expected: unknown, label: string) => {
     if (JSON.stringify(actual) !== JSON.stringify(expected))
@@ -738,13 +531,10 @@ async function standardOn(
     throw new Error("Forbidden operation succeeded");
   };
   const filesystem = [{ provider: "data", mount: "/data", writable: false }];
-  const grants = {
-    system: ["clocks", "random"] as ("clocks" | "random")[],
-    filesystem,
-  };
+  const grants = { system: ["clocks", "random"] as ("clocks" | "random")[], filesystem };
   const probing = { filesystem };
   const host = await createHost({
-    isolated: { providers: { filesystem: { data: provider } } },
+    isolated: { ...(engine ? { engine } : {}), providers: { filesystem: { data: provider } } },
   });
   const artifacts = {
     standard: await source("standard"),
@@ -764,10 +554,7 @@ async function standardOn(
       host.install({ artifact: artifacts.standard, grants: { filesystem } }),
     );
     const unmounted = await failure(
-      host.install({
-        artifact: artifacts.standard,
-        grants: { system: grants.system },
-      }),
+      host.install({ artifact: artifacts.standard, grants: { system: grants.system } }),
     );
     same(state.opened, 0, "denied installs opened files");
     await host.install([
@@ -813,13 +600,8 @@ async function standardOn(
         }),
       ),
     );
-    // Standard clock cancellation ends its wait early, as on the native host; the caller's
-    // cancelled invocation does not revoke this revision's retained descriptors.
-    same(await scenario.reuse(), reused, "retained descriptor after clock cancellation");
-    const started = performance.now();
+    same(await scenario.reuse(), reused, "reuse after external abort");
     same(await timed("abandon", () => scenario.abandon()), "returned", "abandon");
-    if (performance.now() - started < 30)
-      throw new Error("Detached standard work ended before its physical wait settled");
     same(await timed("reuse after abandon", () => scenario.reuse()), reused, "reuse after abandon");
     same(
       JSON.parse(await scenario.denied()),
@@ -833,40 +615,41 @@ async function standardOn(
     );
     const boundary = await host.get("boundary::example:standard/probes@1.0.0", "main");
     const peer = await host.get("boundary-peer::example:standard/probes@1.0.0", "main");
-    const probes = JSON.parse(await boundary.probes());
-    same(probes.seams, [], "private packet seams are absent");
-    if (!/disposed|dropped|transferred/i.test(probes.droppedObject))
-      throw new Error(`Disposed descriptor was not refused: ${probes.droppedObject}`);
+    same(
+      JSON.parse(await boundary.probes()),
+      {
+        modules: ["wasi:filesystem/preopens@0.3.0", "wasi:filesystem/types@0.3.0"],
+        forged: "unknown or dropped handle",
+        wrongType: "handle has a different type",
+        dropped: "unknown or dropped handle",
+        droppedObject: "expected a live wasi:filesystem/types@0.3.0#descriptor handle",
+        unimported: "standard interface is not imported by this Orb",
+      },
+      "boundary probes",
+    );
     const own = await boundary.descriptor();
-    same(await boundary.inspect(own), "accepted", "own descriptor");
-    await peer.descriptor();
-    const peerOnly = await peer.descriptor();
-    same(await peer.inspect(peerOnly), "accepted", "peer descriptor");
-    same(await boundary.inspect(peerOnly), "unknown descriptor", "descriptor indices stay local");
+    same(await boundary.inspect(own), "accepted", "own handle");
+    same(
+      await boundary.inspect(await peer.descriptor()),
+      "unknown or dropped handle",
+      "foreign handle",
+    );
     // Retirement: reloading drops the old revision's handles and closes its opened files.
     const live = state.live;
     if (live < 1) throw new Error("The retained descriptor is not open before retirement");
     await host.reload([{ artifact: artifacts.standard, grants }]);
     const after = await failure(scenario.reuse());
-    if (!/unreachable|component trap/.test(after))
-      throw new Error(`The fresh revision did not reject its missing descriptor: ${after}`);
-    same(
-      (await failure(scenario.reuse())).includes("quarantined"),
-      true,
-      "the uncaught missing-descriptor error quarantines its fresh revision",
-    );
+    if (!after.includes("no retained descriptor"))
+      throw new Error(`Reloaded revision still sees a descriptor: ${after}`);
     // The retired revision is disposed once no reference pins its scopes; only its file closes.
     const unpinned = state.live;
     scenario.release();
     const retiring = performance.now();
-    // Boundary probes retain preopened directories; every opened file must close on retirement.
-    while (state.live !== 0 && performance.now() - retiring < 2000)
+    // The retained and large files close; only the boundary Orb's undropped probe file remains.
+    while (state.live !== 1 && performance.now() - retiring < 2000)
       await new Promise((resolve) => setTimeout(resolve, 10));
-    same(state.live, 0, "files open after the retired revision was released");
-    const retired = {
-      live: state.live,
-      ms: Math.round(performance.now() - retiring),
-    };
+    same(state.live, 1, "files open after the retired revision was released");
+    const retired = { live: state.live, ms: Math.round(performance.now() - retiring) };
     for (const reference of [boundary, peer]) reference.release();
     await host.close();
     same(state.live, 0, "files open after host close");
@@ -887,7 +670,7 @@ async function standardOn(
 }
 
 /** The authored source uses configured clocks, seed, binary stdio and contained exit in Chrome. */
-async function systemOn(): Promise<string> {
+async function systemOn(engine?: URL): Promise<string> {
   const input = Uint8Array.from({ length: 131075 }, (_, index) => index % 251);
   const output: Uint8Array[] = [],
     errors: Uint8Array[] = [];
@@ -898,6 +681,7 @@ async function systemOn(): Promise<string> {
     clockReads = 0;
   const host = await createHost({
     isolated: {
+      ...(engine ? { engine } : {}),
       providers: {
         clocks: {
           systemNow() {
@@ -957,15 +741,14 @@ async function systemOn(): Promise<string> {
     await host.install({ artifact: await source("ambient") });
     const policy = await host.get("ambient::example:system/policy@1.0.0", "main");
     try {
-      // Without
-      // the clocks and random grants the runtime's own clock reads a frozen zero and its random
-      // source is a fixed non-secret sequence. Nothing is refused, and no provider is touched.
-      const frozen = JSON.parse(await policy.inspect());
-      same([frozen.now, frozen.date, frozen.constructor], [0, 0, 0]);
-      same(Date.parse(frozen.call), 0);
-      same(frozen.pure, "1970-01-01T00:00:00.000Z");
-      if (typeof frozen.random !== "number" || frozen.random < 0 || frozen.random >= 1)
-        throw new Error(`Frozen runtime random returned ${String(frozen.random)}`);
+      same(JSON.parse(await policy.inspect()), {
+        now: true,
+        date: true,
+        call: true,
+        constructor: true,
+        random: true,
+        pure: "1970-01-01T00:00:00.000Z",
+      });
     } finally {
       policy.release();
     }
@@ -1003,9 +786,8 @@ async function systemOn(): Promise<string> {
       same(result.secureU64, 0xababababababababn.toString());
       same(result.insecureU64, 0xcdcdcdcdcdcdcdcdn.toString());
       same(result.seed, ["2596069104", "305419897"]);
-      // The runtime's private random source always returns a value in [0, 1).
-      if (typeof result.random !== "number" || !(result.random >= 0 && result.random < 1))
-        throw new Error(`Math.random returned ${String(result.random)}`);
+      // Same observable seed tuple and first value as the native source-builtins regression.
+      same(result.random, 0.0011805466946974708);
       same([seeds, opened, result.seedStable, result.terminal], [1, 1, true, true]);
       same(result.date, 1700000001123);
       same(result.arguments, ["probe", "--bytes"]);
@@ -1048,5 +830,5 @@ async function systemOn(): Promise<string> {
   }
   same(closed, 2);
   same([host.diagnostics().values, host.diagnostics().pendingJobs], [0, 0]);
-  return "system: deterministic clocks/random, binary stdio, frozen ambient authority and contained exit passed";
+  return "system: deterministic clocks/random, binary stdio, denied builtins and contained exit passed";
 }

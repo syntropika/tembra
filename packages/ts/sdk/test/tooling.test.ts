@@ -44,10 +44,8 @@ test("build emits Wasm data and refuses unresolved modules and native runtime de
   }
 });
 
-test("source initialization stays inside Wasm and inspection never activates factories", async () => {
+test("preparation and artifact inspection never execute author code in the host realm", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "tembra-artifact-data-"));
-  const marker = `tembra-realm-${crypto.randomUUID()}`;
-  Reflect.set(globalThis, marker, "host-only");
   try {
     await writeFile(
       path.join(root, "contract.wit"),
@@ -55,9 +53,7 @@ test("source initialization stays inside Wasm and inspection never activates fac
     );
     await writeFile(
       path.join(root, "orb.ts"),
-      `if (Reflect.get(globalThis, ${JSON.stringify(marker)}) !== undefined) throw new Error('host realm is visible');
-Reflect.set(globalThis, ${JSON.stringify(marker)}, 'guest-only');
-export default {name:'data',apiVersion:1,create(){throw new Error('factory must not run during preparation');},services:{values:{methods:{read:()=>42}}}} as const;`,
+      "throw new Error('author code must not execute'); export default {name:'data',apiVersion:1,services:{values:{methods:{read:()=>42}}}} as const;",
     );
     const [artifact] = await build({
       root,
@@ -65,9 +61,7 @@ export default {name:'data',apiVersion:1,create(){throw new Error('factory must 
     });
     const loaded = new NodeArtifact(new Uint8Array(await readFile(artifact!.path)));
     expect(JSON.parse(loaded.description())).toMatchObject({ name: "data", kind: "source" });
-    expect(Reflect.get(globalThis, marker)).toBe("host-only");
   } finally {
-    Reflect.deleteProperty(globalThis, marker);
     await rm(root, { recursive: true, force: true });
   }
 });

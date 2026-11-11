@@ -1,7 +1,4 @@
-//! Qualify native cancellation of prepared SDK source callbacks against the real engine. The Orb
-//! is `tests/source/test-cancellation`.
-#[path = "support/source.rs"]
-mod source;
+//! Qualify native cancellation of interpreted source callbacks against the real engine.
 use async_channel::Receiver;
 use futures::{
     FutureExt,
@@ -13,23 +10,36 @@ use futures::{
 use serde_json::{Value, json};
 use std::{rc::Rc, time::Duration};
 use tembra::Host;
-use tembra_executor_wasm::{Engine, Install, Limits};
+use tembra_executor_wasm::{Contract, Engine, Install, Limits};
+
+const WIT: &str = "package example:cancellation; interface run { slow: async func() -> u32; read: func() -> u32; } world orb { export run; }";
+
+/// The guest attributes every observable step to a log marker so tests never infer progress from time.
+const SOURCE: &str = r#"
+globalThis.__tembraOrb = {services:{run:{methods:{
+  async slow() {
+    console.log("slow:started");
+    try { await tembra.wait(4000); } catch { console.log("slow:cancelled"); return 0; }
+    return 1;
+  },
+  read() { console.log("read:executed"); return 7; },
+}}}};"#;
 
 /// A bound that only a regressed implementation reaches; passing runs never wait for it.
 const STALL: Duration = Duration::from_secs(3);
 
-/// Native code or portable Pulley, forwarding attributed guest logs to the test thread.
-fn engine(interpreted: bool) -> (Engine, Receiver<String>) {
+/// Load the packaged interpreter and forward attributed guest logs to the test thread.
+fn engine() -> (Engine, Receiver<String>) {
+    let bytes =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
     let (send, receive) = async_channel::unbounded();
-    let engine = if interpreted {
-        Engine::interpreted(Limits::default())
-    } else {
-        Engine::new(Limits::default())
-    }
-    .unwrap()
-    .on_log(move |record| {
-        let _ = send.try_send(record.message.clone());
-    });
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .interpreter(&bytes)
+        .unwrap()
+        .on_log(move |record| {
+            let _ = send.try_send(record.message.clone());
+        });
     (engine, receive)
 }
 
@@ -95,20 +105,18 @@ fn spawn_call(
 
 /// A cancelled call queued behind a live callback rejects before its guest code runs.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn cancelled_queued_source_call_rejects_before_admission() {
-    for interpreted in [false, true] {
-        queued_cancellation(interpreted);
-    }
-}
-
-fn queued_cancellation(interpreted: bool) {
-    let (engine, logs) = engine(interpreted);
+    let (engine, logs) = engine();
+    let contract = Contract::from_source("cancellation.wit", WIT, Some("orb")).unwrap();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![
         engine
-            .load(&source::fixture("test-cancellation"), Install::default())
+            .load(
+                &contract.source_artifact(SOURCE, "probe", 1).unwrap(),
+                Install::default(),
+            )
             .unwrap(),
     ])
     .unwrap();
@@ -122,11 +130,11 @@ fn queued_cancellation(interpreted: bool) {
     );
     pool.run_until(reference.ready()).unwrap();
 
-    // The first root occupies the revision until its own cancellation settles the wait.
+    // The first root occupies the interpreter until its own cancellation settles the wait.
     let (context_a, finish_a) = spawn_call(&mut pool, &host, &reference, "alice", "slow");
     until_marker(&mut pool, &logs, "slow:started");
 
-    // The second root passes kernel admission and parks on the revision's admission queue.
+    // The second root passes kernel admission and parks on the interpreter admission queue.
     let (context_b, finish_b) = spawn_call(&mut pool, &host, &reference, "bob", "read");
     pool.run_until_stalled();
     context_b.cancel().unwrap();

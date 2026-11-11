@@ -11,7 +11,7 @@ import { NativeKernelPort } from "./kernel.ts";
 export * from "@syntropika/tembra-sdk";
 export type { Host };
 export type ReactNativeHostOptions = Omit<HostOptions, "kernel" | "native"> & {
-  isolated?: MobileExecutionOptions;
+  isolated?: MobileExecutionOptions & { engine?: Uint8Array };
 };
 
 /**

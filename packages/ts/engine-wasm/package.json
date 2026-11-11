@@ -22,23 +22,17 @@
       "default": "./dist/contracts.js"
     },
     "./contracts_bg.wasm": "./dist/contracts_bg.wasm",
-    "./compiler": {
-      "types": "./dist/compiler.d.ts",
-      "default": "./dist/compiler.js"
+    "./assets": {
+      "types": "./dist/assets.d.ts",
+      "default": "./dist/assets.js"
     },
-    "./runtime": {
-      "types": "./dist/runtime.d.ts",
-      "default": "./dist/runtime.js"
-    }
+    "./interpreter": "./dist/interpreter/interpreter.wasm"
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "build": "bun build.ts"
-  },
-  "dependencies": {
-    "@bytecodealliance/jco-transpile": "0.23.0"
   },
   "engines": {
     "node": ">=22"

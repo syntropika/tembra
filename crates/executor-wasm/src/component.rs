@@ -2,9 +2,8 @@
 //!
 //! A component cannot describe itself at runtime, so its implementation description is derived
 //! from the prepared WIT contract and checked by the same `check_implementation` as a source
-//! description. Its Store then serves the private host protocol of every component.
+//! bundle. Its Store then serves the same private host protocol as the interpreter.
 pub(crate) mod resources;
-mod source;
 mod values;
 pub(crate) mod worker;
 use crate::{Binding, Engine, Grants, failure, worker::Session};
@@ -229,7 +228,6 @@ pub(crate) fn check_component_imports(
     engine: &wasmtime::Engine,
     component: &wasmtime::component::Component,
     grants: &Grants,
-    source: bool,
 ) -> Result<()> {
     use wasmtime::component::types::ComponentItem;
     // Request and response types are admitted without an outgoing grant only for a binary that
@@ -242,8 +240,7 @@ pub(crate) fn check_component_imports(
         let ComponentItem::ComponentInstance(instance) = item.ty else {
             continue;
         };
-        // A source runtime's WASI 0.2 internals are served from a fixed context, never grants.
-        if !name.starts_with("wasi:") || (source && tembra_contracts::runtime_internal(name)) {
+        if !name.starts_with("wasi:") {
             continue;
         }
         if instance
@@ -270,111 +267,34 @@ impl Engine {
         (grants, cli): (&Grants, &crate::Cli),
         hooks: &tembra_contracts::HookPlan,
     ) -> Result<Session> {
+        let tembra_contracts::ArtifactImplementation::Component(bytes) = &artifact.implementation
+        else {
+            return Err(failure("compiled execution requires a component artifact"));
+        };
         let layout = layout(&artifact.contract, services, bindings, hooks)?;
-        let (session, initialized) =
-            self.spawn_component(artifact, plan, layout, (grants, cli), None)?;
-        ready(initialized)?;
-        Ok(session)
-    }
-
-    /// Start a prepared source Orb's Store and check its own description before any factory.
-    ///
-    /// The Store is instantiated with the contract's dependency imports, then its
-    /// `lifecycle.describe` result is checked by `check`, exactly like the description a source
-    /// bundle reported. Only a checked description yields the layout of callable exports.
-    pub(crate) fn source_session<C>(
-        &self,
-        artifact: &tembra_contracts::Artifact,
-        plan: &Plan,
-        bindings: &BTreeMap<String, Binding>,
-        (grants, cli): (&Grants, &crate::Cli),
-        check: impl FnOnce(&Value) -> Result<C>,
-        parts: impl FnOnce(&C) -> (&[ServiceBinding], &tembra_contracts::HookPlan),
-    ) -> Result<(Session, Value, C)> {
-        let preliminary = layout(
-            &artifact.contract,
-            &[],
-            bindings,
-            &tembra_contracts::HookPlan::default(),
-        )?;
-        let (described, description) = mpsc::channel();
-        let (send, checked) = mpsc::channel();
-        let source = worker::Source {
-            contract: artifact.contract.clone(),
-            clocks: std::sync::Mutex::new(None),
-            described,
-            checked,
-            diagnostics: None,
-        };
-        let (session, initialized) =
-            self.spawn_component(artifact, plan, preliminary, (grants, cli), Some(source))?;
-        let description = match description.recv() {
-            Ok(Ok(description)) => description,
-            Ok(Err(error)) => {
-                return Err(failure(format!("source Orb description failed: {error}")));
-            }
-            // Initialization failed before describing; the readiness channel says why.
-            Err(_) => {
-                ready(initialized)?;
-                return Err(failure("source Orb stopped before describing itself"));
-            }
-        };
-        let checked = check(&description).and_then(|checked| {
-            let (services, hooks) = parts(&checked);
-            let layout = layout(&artifact.contract, services, bindings, hooks)?;
-            Ok((checked, layout))
-        });
-        let (checked, layout) = match checked {
-            Ok(checked) => checked,
-            Err(error) => {
-                // Close the layout channel first: the Store stops before any factory runs, and
-                // only then can the session owner join it.
-                drop(send);
-                drop(session);
-                return Err(error);
-            }
-        };
-        send.send(layout)
-            .map_err(|_| failure("source Orb stopped before its layout was checked"))?;
-        ready(initialized)?;
-        Ok((session, description, checked))
-    }
-
-    /// Admit the binary's imports, prepare its grants and spawn its worker.
-    fn spawn_component(
-        &self,
-        artifact: &tembra_contracts::Artifact,
-        plan: &Plan,
-        layout: worker::Layout,
-        (grants, cli): (&Grants, &crate::Cli),
-        source: Option<worker::Source>,
-    ) -> Result<(Session, mpsc::Receiver<std::result::Result<(), String>>)> {
-        let bytes = &artifact.component;
         // Admit the binary's actual imports before preparing any provider: a refused
         // installation opens no CLI file and invokes no configured factory.
-        let component = self.compiled(bytes)?;
-        check_component_imports(&self.engine, &component.component, grants, source.is_some())?;
+        let component = self.compiled(bytes)?.as_ref().clone();
+        check_component_imports(&self.engine, &component, grants)?;
         let prepared = self.providers.context(&plan.host_imports, grants, cli)?;
-        // A source runtime's internal clocks follow the installation's clocks grant.
-        if let Some(source) = &source {
-            *source.clocks.lock().map_err(failure)? = prepared.clocks;
-        }
         // The WASI context and whether the bound name-lookup provider grants resolution.
         let wasi = (prepared.wasi, prepared.resolve);
-        // The revision's callback epochs, shared by its session and its Store's call scopes.
-        let scope = crate::io::CallbackScope::default();
+        // Compiled Orbs use their WASI preopens and sockets; the source I/O helpers stay empty.
+        let io = crate::io::SourceIo::new(
+            &self.providers,
+            &[],
+            &Grants::default(),
+            &crate::Cli::default(),
+        )?;
         let (ready, initialized) = mpsc::channel();
+        let scope = io.scope().clone();
         let engine = self.clone();
         let grants = std::sync::Arc::new(grants.clone());
         let session = Session::spawn(
             self,
             artifact.identity.name.clone(),
-            scope.clone(),
-            move |commands, poison, diagnostics| {
-                let source = source.map(|source| worker::Source {
-                    diagnostics: Some(diagnostics),
-                    ..source
-                });
+            io,
+            move |commands, poison, _diagnostics| {
                 worker::run(
                     engine,
                     component,
@@ -383,20 +303,14 @@ impl Engine {
                     layout,
                     ready,
                     (commands, scope, poison),
-                    source,
                 )
             },
         )?;
-        Ok((session, initialized))
-    }
-}
-
-/// Wait until the worker instantiated (and, for a source Orb, prepared) its Store.
-fn ready(initialized: mpsc::Receiver<std::result::Result<(), String>>) -> Result<()> {
-    match initialized.recv() {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(failure(error)),
-        Err(_) => Err(failure("component worker stopped during initialization")),
+        match initialized.recv() {
+            Ok(Ok(())) => Ok(session),
+            Ok(Err(error)) => Err(failure(error)),
+            Err(_) => Err(failure("component worker stopped during initialization")),
+        }
     }
 }
 
@@ -450,7 +364,7 @@ mod admission_tests {
         let engine = crate::Engine::new(crate::Limits::default()).unwrap();
         let bytes = wat::parse_str(wat).unwrap();
         let component = wasmtime::component::Component::new(&engine.engine, bytes).unwrap();
-        check_component_imports(&engine.engine, &component, grants, false)
+        check_component_imports(&engine.engine, &component, grants)
     }
 
     #[test]
@@ -479,11 +393,8 @@ mod admission_tests {
         let path = std::env::var_os("TEMBRA_WASM_PROBE").expect("TEMBRA_WASM_PROBE");
         let engine = crate::Engine::new(crate::Limits::default()).unwrap();
         let component = wasmtime::component::Component::from_file(&engine.engine, path).unwrap();
-        check_component_imports(&engine.engine, &component, &grants(false, true), false).unwrap();
-        assert!(
-            check_component_imports(&engine.engine, &component, &grants(true, false), false)
-                .is_err()
-        );
+        check_component_imports(&engine.engine, &component, &grants(false, true)).unwrap();
+        assert!(check_component_imports(&engine.engine, &component, &grants(true, false)).is_err());
     }
 }
 

@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
+import { createContext, runInContext } from "node:vm";
 import { TembraError } from "../src/error.ts";
 import { Encoded, check, encode, packet } from "../src/interpreter/codec.ts";
 import { decodeHostRequest } from "../src/interpreter/host-protocol.ts";
@@ -296,6 +298,85 @@ test("unchanged state reads omit the value but still check ownership and lifetim
   );
   closed = true;
   expect(() => reader.sync({ operation: "state.read", id, known: "5" })).toThrow(/gone/);
+});
+
+/** Load one guest script into a fresh realm, bundled as the interpreter build bundles it. */
+async function guest(name: string, globals: Record<string, unknown>) {
+  const built = await Bun.build({
+    entrypoints: [
+      fileURLToPath(new URL(`../../../../crates/executor-wasm/guest/src/${name}`, import.meta.url)),
+    ],
+    format: "iife",
+    target: "node",
+  });
+  if (!built.success) throw new AggregateError(built.logs);
+  const context = createContext(globals);
+  runInContext(await built.outputs[0]!.text(), context);
+  return context;
+}
+
+test("guest readables name their retained revision and refuse an omitted changed value", async () => {
+  const context = await guest("state.ts", {});
+  const state = context.__tembraState as {
+    readable(read: (known: string | undefined) => unknown): {
+      readonly value: unknown;
+      adopt(snapshot: unknown): unknown;
+    };
+  };
+  // Host replies are decoded inside the guest realm, exactly like the interpreter's JSON.parse.
+  const decoded = (text: string) => runInContext(`JSON.parse(${JSON.stringify(text)})`, context);
+  const requests: (string | undefined)[] = [];
+  let reply = decoded('{"value":{"count":1},"revision":"1","version":1}');
+  const view = state.readable((known) => {
+    requests.push(known);
+    return reply as never;
+  });
+  const first = view.value;
+  expect(first).toEqual({ count: 1 });
+  expect(Object.isFrozen(first)).toBe(true);
+  reply = decoded('{"revision":"1","version":1}');
+  expect(view.value).toBe(first);
+  reply = decoded('{"value":{"count":2},"revision":"2","version":1}');
+  expect(view.value).toEqual({ count: 2 });
+  reply = decoded('{"revision":"3","version":1}');
+  expect(() => view.value).toThrow(/omitted a changed state value/);
+  expect(requests).toEqual([undefined, "1", "1", "2"]);
+  // Updates still adopt the value carried with their new revision.
+  expect(view.adopt(decoded('{"value":{"count":4},"revision":"4","version":1}'))).toEqual({
+    count: 4,
+  });
+});
+
+test("guest lowering refuses coercions that JSON would hide", async () => {
+  const graph = {
+    javascriptNames: { values: "values", read: "read", name: "name", flag: "flag" },
+    types: [
+      { id: 0, definition: { kind: { record: { fields: [{ name: "name", type: "string" }] } } } },
+      { id: 1, definition: { kind: { flags: { flags: ["flag"] } } } },
+      { id: 2, definition: { kind: { enum: { cases: ["fast"] } } } },
+    ],
+    imports: [],
+    exports: [
+      {
+        binding: "values",
+        contract: "example:codec/values@1.0.0",
+        functions: { read: { params: [{ name: "name", type: "string" }], result: 0 } },
+      },
+    ],
+  };
+  const context = await guest("values.ts", { __tembraContract: graph });
+  const values = context.__tembraValues as {
+    invoke(service: string, method: string, callback: () => unknown): Promise<unknown>;
+    arguments(service: string, method: string, args: unknown[]): unknown[];
+  };
+  const hostile = { toJSON: () => "coerced" };
+  await expect(values.invoke("values", "read", () => ({ name: hostile }))).rejects.toThrow(
+    /JavaScript string/,
+  );
+  expect(() => values.arguments("values", "read", [1])).toThrow(/JavaScript string/);
+  expect(JSON.stringify(await values.invoke("values", "read", () => ({ name: "ok" })))).toBe(
+    '{"name":"ok"}',
+  );
 });
 
 test("array capture refuses indexed accessors without invoking them and refuses inherited holes", () => {

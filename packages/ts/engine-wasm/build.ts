@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import ts from "typescript";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const destination = fileURLToPath(new URL("./dist/", import.meta.url));
@@ -21,10 +21,7 @@ if (features) args.push("--features", features);
 
 /** Stop packaging when a compiler or binding-generation step fails. */
 function run(command: string, arguments_: string[]): void {
-  const result = spawnSync(command, arguments_, {
-    cwd: root,
-    stdio: "inherit",
-  });
+  const result = spawnSync(command, arguments_, { cwd: root, stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} exited with ${result.status}`);
 }
@@ -67,60 +64,19 @@ run("wasm-bindgen", [
   ),
 ]);
 
-// Keep compilation lazy at runtime and ship a browser-only trusted implementation. Removing
-// Node branches here lets applications bundle it without adding Node polyfills.
-const compilerEntry = fileURLToPath(new URL("./compiler.ts", import.meta.url));
-const compilerVendor = Bun.resolveSync(
-  "@bytecodealliance/jco-transpile/component",
-  import.meta.dir,
-);
-const compilerAssets = new Set<string>();
-const compiler = await Bun.build({
-  entrypoints: [compilerEntry],
+// Keep the asset locator beside the generated loaders and its interpreter directory.
+const assets = await Bun.build({
+  entrypoints: [fileURLToPath(new URL("./assets.ts", import.meta.url))],
   outdir: destination,
-  naming: "compiler.js",
+  naming: "assets.js",
   target: "browser",
   format: "esm",
-  define: { process: "undefined" },
-  plugins: [
-    {
-      name: "component-compiler-assets",
-      setup(builder) {
-        builder.onLoad({ filter: /js-component-bindgen-component\.js$/ }, (args) => {
-          const contents = readFileSync(args.path, "utf8").replace(
-            /new URL\('\.\/(js-component-bindgen-component\.core[0-9]*\.wasm)', import\.meta\.url\)/g,
-            (_match, name: string) => {
-              compilerAssets.add(name);
-              return `new URL("./compiler/${name}", import.meta.url)`;
-            },
-          );
-          return { contents, loader: "js" };
-        });
-      },
-    },
-  ],
 });
-if (!compiler.success)
-  throw new AggregateError(compiler.logs, "Browser component compiler build failed");
-if (compilerAssets.size !== 2) throw new Error("Pinned component compiler assets changed");
-mkdirSync(path.join(destination, "compiler"), { recursive: true });
-for (const name of compilerAssets)
-  copyFileSync(
-    path.join(path.dirname(compilerVendor), name),
-    path.join(destination, "compiler", name),
-  );
-writeFileSync(path.join(destination, "compiler.d.ts"), readFileSync(compilerEntry, "utf8"));
-
-// TypeScript Orbs reference this immutable core instead of embedding another copy. The SDK
-// resolves this package-owned URL only after a verified artifact requests the shared runtime.
-const runtime = readFileSync(path.join(root, "crates/contracts/runtime/dquickts.wasm"));
-const runtimeHash = createHash("sha256").update(runtime).digest("hex");
-writeFileSync(path.join(destination, "dquickts.wasm"), runtime);
-writeFileSync(
-  path.join(destination, "runtime.js"),
-  `export default new URL("./dquickts.wasm?sha256=${runtimeHash}", import.meta.url);\n`,
+if (!assets.success) throw new AggregateError(assets.logs, "Engine asset locator build failed");
+const declarations = ts.transpileDeclaration(
+  readFileSync(new URL("./assets.ts", import.meta.url), "utf8"),
+  { fileName: "assets.ts" },
 );
-writeFileSync(
-  path.join(destination, "runtime.d.ts"),
-  "declare const runtime: URL;\nexport default runtime;\n",
-);
+if (declarations.diagnostics?.length)
+  throw new Error("Engine asset locator declaration generation failed");
+writeFileSync(path.join(destination, "assets.d.ts"), declarations.outputText);

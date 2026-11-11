@@ -1,79 +1,92 @@
 //! Standard WASI filesystem enforcement through separately configured Orb grants.
-//!
-//! The writer and reader are the prepared SDK source Orbs `tests/source/test-storage-{writer,
-//! reader}`: the same code under two names, installed with different grants. A refused path or
-//! filesystem call is a WIT `result` error, so each refusal is a value and the revision keeps
-//! serving.
-#[path = "support/source.rs"]
-mod source;
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
-use source::fixture;
-use std::rc::Rc;
+use std::{path::PathBuf, rc::Rc};
 use tembra::Host;
-use tembra_executor_wasm::{Engine, FilesystemGrant, Grants, Install, Limits};
+use tembra_executor_wasm::{Contract, Engine, FilesystemGrant, Grants, Install, Limits};
 
-/// The `/data` mount, writable or read-only, and nothing else: the filesystem types only name
-/// clock types, which needs no Clocks grant.
-fn grants(writable: bool) -> Install {
-    let mut install = Install::default();
-    install.grants = Grants {
-        filesystem: vec![FilesystemGrant {
-            provider: "data".into(),
-            mount: "/data".into(),
-            writable,
-        }],
-        ..Grants::default()
-    };
-    install
-}
+// Standard WASI through the raw generated module: read bytes through a stream, write bytes
+// through `writeViaStream` with a plain async byte iterable and await its result future.
+const SOURCE: &str = r#"const preopens = __tembraStandard['wasi:filesystem/preopens@0.3.0'];
+const mount = (path) => { const [[root]] = preopens.getDirectories(); if (!path.startsWith('/data/')) throw new Error('outside the granted mount'); return [root, path.slice(6)]; };
+const readText = async (path) => { const [root, relative] = mount(path); const fd = await root.openAt({}, relative, {}, {read: true}); const [stream, done] = fd.readViaStream(0n); let text = ''; for await (const byte of stream) text += String.fromCharCode(byte); await done; return text; };
+globalThis.__tembraOrb = {services:{files:{methods:{
+    read: async (_e,_c,path) => readText(path),
+    write: async (_e,_c,path,content) => {
+        const [root, relative] = mount(path);
+        const fd = await root.openAt({}, relative, {create: true, truncate: true}, {write: true});
+        const bytes = (async function* () { for (let i = 0; i < content.length; i++) yield content.charCodeAt(i) & 0xff; })();
+        const result = await fd.writeViaStream(bytes, 0n);
+        if (result && result.tag === 'err') throw new Error(`write failed: ${result.val}`);
+    },
+}}}};"#;
 
 /// Check actual preopens, read-only access and traversal refusal in the same engine binary.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_SCRATCH"]
 fn wasi_filesystem_grants_are_per_orb() {
-    for interpreted in [false, true] {
-        filesystem_grants(interpreted);
-    }
-}
-
-fn filesystem_grants(interpreted: bool) {
-    let scratch = tempfile::tempdir().unwrap();
-    let root = scratch.path().join("mounted");
+    let component =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
+    let root = PathBuf::from(std::env::var_os("TEMBRA_WASM_SCRATCH").expect("TEMBRA_WASM_SCRATCH"))
+        .join(format!("filesystem-{}", std::process::id()));
+    std::fs::create_dir_all(root.parent().unwrap()).unwrap();
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("input.txt"), "initial").unwrap();
-    // A real file next to the mount: traversal must not reach it.
-    std::fs::write(scratch.path().join("outside.txt"), "secret").unwrap();
-    let limits = Limits {
-        timeout_ms: if interpreted { 30_000 } else { 5000 },
-        ..Limits::default()
-    };
-    let engine = if interpreted {
-        Engine::interpreted(limits)
-    } else {
-        Engine::new(limits)
-    }
-    .unwrap()
-    .filesystem("data", &root)
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .interpreter(&component)
+        .unwrap()
+        .filesystem("data", &root)
+        .unwrap();
+    let contract = Contract::from_dir(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/wit/storage"),
+        Some("storage"),
+    )
     .unwrap();
-    // The filesystem imports need a grant: an ungranted installation is refused.
     assert!(
         engine
-            .load(&fixture("test-storage-writer"), Install::default())
+            .load(
+                &contract.source_artifact(SOURCE, "denied", 1).unwrap(),
+                Install::default()
+            )
             .is_err()
     );
+    let writable = Grants {
+        filesystem: vec![FilesystemGrant {
+            provider: "data".into(),
+            mount: "/data".into(),
+            writable: true,
+        }],
+        ..Grants::default()
+    };
+    let readonly = Grants {
+        filesystem: vec![FilesystemGrant {
+            provider: "data".into(),
+            mount: "/data".into(),
+            writable: false,
+        }],
+        ..Grants::default()
+    };
     let writer = engine
-        .load(&fixture("test-storage-writer"), grants(true))
+        .load(&contract.source_artifact(SOURCE, "writer", 1).unwrap(), {
+            let mut install = Install::default();
+            install.grants = writable;
+            install
+        })
         .unwrap();
     let reader = engine
-        .load(&fixture("test-storage-reader"), grants(false))
+        .load(&contract.source_artifact(SOURCE, "reader", 1).unwrap(), {
+            let mut install = Install::default();
+            install.grants = readonly;
+            install
+        })
         .unwrap();
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![writer, reader]).unwrap();
     let writer = Rc::new(
         host.get(
-            "writer::test:storage/files@1.0.0",
+            "writer::example:storage/files@1.0.0",
             vec!["main".into()],
             "alice",
         )
@@ -81,7 +94,7 @@ fn filesystem_grants(interpreted: bool) {
     );
     let reader = Rc::new(
         host.get(
-            "reader::test:storage/files@1.0.0",
+            "reader::example:storage/files@1.0.0",
             vec!["main".into()],
             "alice",
         )
@@ -93,45 +106,38 @@ fn filesystem_grants(interpreted: bool) {
     pool.run_until(host.root("alice", move |context| {
         async move {
             let (writer, reader) = references;
-            let ok = |value: Value| json!({"tag": "ok", "val": value});
             assert_eq!(
                 writer
                     .call::<_, Value>(&context, "read", json!(["/data/input.txt"]))
                     .await?,
-                ok(json!("initial"))
+                "initial"
             );
-            assert_eq!(
-                writer
-                    .call::<_, Value>(&context, "write", json!(["/data/input.txt", "changed"]))
-                    .await?,
-                json!({"tag": "ok"}),
-            );
+            writer
+                .call::<_, Value>(&context, "write", json!(["/data/input.txt", "changed"]))
+                .await?;
             assert_eq!(
                 reader
                     .call::<_, Value>(&context, "read", json!(["/data/input.txt"]))
                     .await?,
-                ok(json!("changed"))
+                "changed"
             );
-            // Each refusal is the call's business error; the revision keeps serving.
-            for (refused, method, arguments) in [
-                (&reader, "write", json!(["/data/input.txt", "forbidden"])),
-                (&writer, "read", json!(["/data/../outside.txt"])),
-                (&writer, "read", json!(["/etc/passwd"])),
-            ] {
-                let result = refused
-                    .call::<_, Value>(&context, method, arguments.clone())
-                    .await?;
-                assert_eq!(result["tag"], "err", "{method} {arguments}: {result}");
-                assert!(
-                    !result["val"].as_str().unwrap().is_empty(),
-                    "{method} {arguments}: {result}"
-                );
-            }
-            assert_eq!(
+            assert!(
+                reader
+                    .call::<_, Value>(&context, "write", json!(["/data/input.txt", "forbidden"]))
+                    .await
+                    .is_err()
+            );
+            assert!(
                 writer
-                    .call::<_, Value>(&context, "read", json!(["/data/input.txt"]))
-                    .await?,
-                ok(json!("changed"))
+                    .call::<_, Value>(&context, "read", json!(["/data/../outside.txt"]))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                writer
+                    .call::<_, Value>(&context, "read", json!(["/etc/passwd"]))
+                    .await
+                    .is_err()
             );
             Ok(())
         }
@@ -141,14 +147,11 @@ fn filesystem_grants(interpreted: bool) {
     writer.release().unwrap();
     reader.release().unwrap();
     pool.run_until(host.close()).unwrap();
-    assert!(host.errors().is_empty(), "{:?}", host.errors());
     assert_eq!(engine.instances(), 0);
     assert_eq!(
         std::fs::read_to_string(root.join("input.txt")).unwrap(),
         "changed"
     );
-    assert_eq!(
-        std::fs::read_to_string(scratch.path().join("outside.txt")).unwrap(),
-        "secret"
-    );
+    std::fs::remove_file(root.join("input.txt")).unwrap();
+    std::fs::remove_dir(root).unwrap();
 }

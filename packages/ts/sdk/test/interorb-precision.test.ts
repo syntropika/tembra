@@ -186,7 +186,6 @@ const consumer = (target: string, tallies: string[]) => {
     async invoke(_method, args, scope) {
       const sum = await scope.async({
         operation: "reference.call",
-        binding: NUMBERS,
         id: reference,
         method: "add",
         args,

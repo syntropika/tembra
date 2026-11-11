@@ -28,8 +28,8 @@ final class Execution: @unchecked Sendable {
     }
 
     /** Configure the portable engine outside the table lock, then adopt it only into a live host. */
-    func configure(_ configuration: String) throws {
-        let candidate = try NativeInterpreter(configuration: configuration)
+    func configure(_ configuration: String, bytes: Data) throws {
+        let candidate = try NativeInterpreter(configuration: configuration, interpreter: bytes)
         try live {
             guard engine == nil else { throw MobileError.Execution(diagnostic: "Execution is already configured") }
             engine = candidate

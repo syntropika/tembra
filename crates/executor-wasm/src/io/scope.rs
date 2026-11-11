@@ -43,8 +43,7 @@ impl CallbackScope {
         self.0.active.send_replace(None);
     }
 
-    /// Whether a callback is active (tests).
-    #[cfg(test)]
+    /// Whether a callback is active.
     pub(crate) fn active(&self) -> bool {
         self.0.active.borrow().is_some()
     }

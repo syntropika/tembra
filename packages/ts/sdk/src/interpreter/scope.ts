@@ -14,23 +14,6 @@ import {
 import type { Revision } from "./revision.ts";
 import { check, encode, VALUE_LIMIT } from "./codec.ts";
 import { lift } from "./wit-shape.ts";
-import type { Handle } from "./host-protocol.ts";
-
-/** The revision tables a scope resolves guest numbers against (interpreter or component). */
-export type ScopeOwner = Pick<
-  Revision,
-  "hooks" | "imports" | "importMethods" | "importSignatures" | "signatures" | "contract" | "scopes"
-> & {
-  /** Run a registered resource `open` callback under the issued signal-only authority. */
-  resourceOpen(environment: number, callback: number, scope: ExecutionScope): Promise<number>;
-  /** Run a registered resource `close` callback under the closing context. */
-  resourceClose(
-    environment: number,
-    callback: number,
-    value: number,
-    scope: ExecutionScope,
-  ): Promise<unknown>;
-};
 
 const scopeEnded = Object.freeze(new Error("Interpreter callback scope ended"));
 
@@ -64,18 +47,13 @@ export class Scope {
   readonly resources = new Map<number, Resource<number>>();
   readonly hooks = new Map<
     number,
-    {
-      handle: ReturnType<Declaration["hook"]>;
-      binding: import("./types.ts").HookBinding;
-    }
+    { handle: ReturnType<Declaration["hook"]>; binding: import("./types.ts").HookBinding }
   >();
-  /** A compiled component's default `main` reference per Orb import binding (root scope only). */
-  readonly defaults = new Map<string, DynamicReference>();
   #next = 0;
 
   /** Retain only issued declarations; service scopes inherit their own revision's Orb resources. */
   constructor(
-    readonly revision: ScopeOwner,
+    readonly revision: Revision,
     readonly declaration: Declaration,
     readonly service: string | null,
   ) {
@@ -107,126 +85,7 @@ export class Scope {
         ended ??= new AbortController();
         return this.async(request, authority, ended.signal);
       },
-      checkSelection: (kind, handle) => {
-        if (cancelled) throw scopeEnded;
-        if (kind === "reference") this.reference(handle, authority);
-        else this.handle(this.selected(handle.scope).hooks, handle.id, "hook");
-      },
-      call: (reference, binding, method, args) => {
-        if (cancelled) return Promise.reject(scopeEnded);
-        ended ??= new AbortController();
-        return this.typedCall(reference, binding, method, args, authority, ended.signal);
-      },
-      hook: (hook, input, alias) => {
-        if (cancelled) return Promise.reject(scopeEnded);
-        ended ??= new AbortController();
-        return this.typedHook(hook, input, alias, authority, ended.signal);
-      },
     };
-  }
-
-  /**
-   * Declare the default `main` handle of each Orb import for a compiled component, whose plain
-   * import calls select no reference. Only the root factory declares them.
-   */
-  declareDefaults(declaration: Declaration): void {
-    for (const [binding, service] of this.revision.imports)
-      this.defaults.set(binding, declaration.get(service, ["main"]));
-  }
-
-  /** The Orb root scope of this environment. */
-  private root(): Scope {
-    return this.parent ?? this;
-  }
-
-  /**
-   * A typed dependency call of a component. The guest selected `reference` in the same turn (a
-   * selection, never authority) or, for compiled components, the root's default handle applies.
-   * Arguments are checked under the import's own WIT signature before the provider sees them.
-   */
-  private async typedCall(
-    selected: Handle | undefined,
-    binding: string,
-    method: string,
-    args: readonly unknown[],
-    authority: Authority,
-    ended: AbortSignal,
-  ): Promise<unknown> {
-    checkSignal(ended);
-    const context = this.context(authority);
-    let reference: DynamicReference;
-    if (selected) {
-      const slot = this.reference(selected, authority);
-      if (slot.binding !== binding)
-        throw new Error("The selected reference belongs to another import");
-      reference = slot.reference;
-    } else {
-      const fallback = this.root().defaults.get(binding);
-      if (!fallback) throw new Error("A source Orb dependency call requires a selected reference");
-      reference = fallback;
-    }
-    const bound = this.revision.importMethods.get(binding)?.get(method);
-    if (!bound) throw new Error("Unknown prepared import method");
-    const shape = this.revision.signatures.get(bound.slot);
-    // Typed guest values are captured once, with WIT 64-bit positions read as bigint.
-    const input = check(
-      this.revision.contract,
-      bound.slot,
-      true,
-      encode(args, VALUE_LIMIT, shape?.params),
-    );
-    const signature = this.revision.importSignatures.get(binding);
-    const capture: CapturedInvocation | undefined = signature ? { signature, input } : undefined;
-    const record = this.declaration.session.handles.reference(reference);
-    if (!record.methods.has(bound.name)) throw new Error("Reference does not expose this method");
-    const result =
-      (await this.declaration.session.calls.invokePhysical(
-        record,
-        bound.name,
-        lift(shape?.params, JSON.parse(input.text)) as unknown[],
-        context,
-        capture,
-      )) ?? null;
-    checkSignal(ended);
-    const output =
-      capture?.output ??
-      check(this.revision.contract, bound.slot, false, encode(result, VALUE_LIMIT, shape?.result));
-    return lift(shape?.result, JSON.parse(output.text));
-  }
-
-  /** Run a declared hook with a typed input; participants see checked host-domain values. */
-  private async typedHook(
-    selected: Handle,
-    value: unknown,
-    alias: string,
-    authority: Authority,
-    ended: AbortSignal,
-  ): Promise<unknown> {
-    checkSignal(ended);
-    const context = this.context(authority);
-    const { handle, binding } = this.handle(
-      this.selected(selected.scope).hooks,
-      selected.id,
-      "hook",
-    );
-    if (binding.alias !== alias) throw new Error("The selected hook belongs to another interface");
-    const shape = this.revision.signatures.get(binding.slot);
-    const input = check(
-      this.revision.contract,
-      binding.slot,
-      true,
-      encode([value], VALUE_LIMIT, shape?.params),
-    );
-    const [lifted] = lift(shape?.params, JSON.parse(input.text)) as [unknown];
-    const result = (await handle.run(context, lifted)) ?? null;
-    checkSignal(ended);
-    const output = check(
-      this.revision.contract,
-      binding.slot,
-      false,
-      encode(result, VALUE_LIMIT, shape?.result),
-    );
-    return lift(shape?.result, JSON.parse(output.text));
   }
 
   /** Require the actual admitted call for writes and dependent invocations. */
@@ -299,9 +158,7 @@ export class Scope {
       case "state.declare": {
         const declaration = this.factory(authority);
         const id = this.allocate();
-        const state = declaration.state(request.initial, {
-          version: request.version,
-        });
+        const state = declaration.state(request.initial, { version: request.version });
         this.states.set(id, state);
         if (request.validate !== null) this.validators.push(request.validate);
         return id;
@@ -361,9 +218,15 @@ export class Scope {
           version: request.version,
           deps: dependencies,
           open: (signal: AbortSignal) =>
-            this.revision.resourceOpen(this.id, open, this.exchange({ signal })),
+            this.revision.execute(
+              JSON.stringify({ kind: "callback", callback: open, value: null }),
+              this.exchange({ signal }),
+            ) as Promise<number>,
           close: (value: number, context: Context) =>
-            this.revision.resourceClose(this.id, close, value, this.exchange({ context })),
+            this.revision.execute(
+              JSON.stringify({ kind: "callback", callback: close, value }),
+              this.exchange({ context }),
+            ),
         };
         const resource = declaration.resource<number>(request.name, options);
         const id = this.allocate();
@@ -445,11 +308,7 @@ export class Scope {
     for (const [handle, slot] of this.references)
       if (slot.root !== undefined && !session.rootReferences.has(slot.root))
         this.references.delete(handle);
-    this.references.set(id, {
-      reference,
-      binding: request.service,
-      root: context.root,
-    });
+    this.references.set(id, { reference, binding: request.service, root: context.root });
     return id;
   }
 
@@ -506,8 +365,6 @@ export class Scope {
       case "reference.call": {
         const context = this.context(authority);
         const { reference, binding } = this.reference(request, authority);
-        if (request.binding !== binding)
-          throw new Error("The selected reference belongs to another import");
         const bound = this.revision.importMethods.get(binding)?.get(request.method);
         if (!bound) throw new Error("Unknown prepared import method");
         const method = bound.name;

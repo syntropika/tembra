@@ -9,8 +9,7 @@ export interface Spec extends TurboModule {
   request(handle: string, metadata: string): string;
   /** Release a kernel and report whether its handle was still live. */
   releaseKernel(handle: string): boolean;
-  /** Configure portable execution and host providers; the native library supplies the shared interpreter. */
-  configureExecution(handle: string, configuration: string): Promise<void>;
+  configureExecution(handle: string, engine: string, configuration: string): Promise<void>;
   createArtifact(handle: string, bytes: string): string;
   artifactDescription(handle: string, artifact: string): string;
   artifactRequest(handle: string, artifact: string, packet: string): string;

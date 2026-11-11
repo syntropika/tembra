@@ -1,2 +1,0 @@
-# Unified diffs require the context prefix on empty lines.
-crates/executor-wasm/guest/patches/*.patch -whitespace

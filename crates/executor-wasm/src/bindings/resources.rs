@@ -245,23 +245,13 @@ impl Environment {
         scope: &Scope,
         owner: Option<ScopeId>,
         id: u32,
-        (called, method): (&str, &str),
+        method: &str,
         args: Value,
         stream: bool,
         issued: &crate::worker::Issued,
     ) -> Result<Reply> {
         let context = Self::context(scope)?;
         let (callee, binding) = self.callee(scope, owner, id)?;
-        // The selected reference or owned resource must belong to the import that was called.
-        let expected = self
-            .imports
-            .get(called)
-            .ok_or_else(|| failure("the called import is not a selected WIT Orb import"))?;
-        if !Rc::ptr_eq(expected, &binding) {
-            return Err(misuse(
-                "the selected reference belongs to another import binding",
-            ));
-        }
         let method = binding
             .methods
             .get(method)

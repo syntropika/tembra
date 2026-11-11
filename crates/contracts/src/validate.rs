@@ -215,14 +215,13 @@ impl PreparedContract {
         self.check_exports(false)
     }
 
-    /// Classify exports that are data plus a `stream<u8>` returned as the whole result of an
-    /// asynchronous freestanding function.
+    /// Require the exports of a source Orb: the data profile, plus a `stream<u8>` returned as the
+    /// whole result of an asynchronous freestanding function.
     ///
     /// The stream end never travels as data: only the native facade's capability transport
-    /// carries it, so data-only endpoints keep [`Self::check_value_profile`] and use this check
-    /// only to explain that refusal. Stream arguments, nested streams, other element types,
-    /// futures and resources do not match.
-    pub fn check_stream_profile(&self) -> Result<(), Error> {
+    /// carries it, so data-only endpoints keep [`Self::check_value_profile`]. Stream arguments,
+    /// nested streams, other element types, futures and resources stay refused.
+    pub fn check_source_profile(&self) -> Result<(), Error> {
         self.check_exports(true)
     }
 
@@ -255,12 +254,12 @@ impl PreparedContract {
         self.check_import(binding, false)
     }
 
-    /// Classify an Orb import that is data plus a `stream<u8>` returned as the whole result of an
-    /// asynchronous freestanding function.
+    /// Check an Orb import of a source Orb: the data profile, plus a `stream<u8>` returned as the
+    /// whole result of an asynchronous freestanding function.
     ///
-    /// As for [`Self::check_stream_profile`], only the native facade's capability transport
+    /// As for [`Self::check_source_profile`], only the native facade's capability transport
     /// carries the stream end; data-only endpoints keep [`Self::check_import_value_profile`].
-    pub fn check_import_stream_profile(&self, binding: &str) -> Result<(), Error> {
+    pub fn check_import_source_profile(&self, binding: &str) -> Result<(), Error> {
         self.check_import(binding, true)
     }
 

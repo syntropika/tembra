@@ -114,35 +114,6 @@ export default orb({
             environment.value.response = undefined;
           }
         },
-        // A caught HTTP refusal: the thrown `HttpError` reaches the `result` lane as its message.
-        async attempt(_environment: Environment, _context: Context, url: string, upload: boolean) {
-          async function* chunks() {
-            yield Uint8Array.of(1, 2);
-            yield Uint8Array.of(3, 4);
-          }
-          const response = await fetch(
-            url,
-            upload
-              ? {
-                  method: "POST",
-                  body: chunks(),
-                  trailers: Promise.resolve([["x-upload", "complete"]] as [string, string][]),
-                }
-              : {},
-          );
-          return response.text();
-        },
-        // A thrown error reaches the declared `result` lane as its message (`string` err).
-        async readChecked(environment: Environment) {
-          const response = environment.value.response;
-          if (!response) throw new Error("No response is open");
-          try {
-            return await response.text();
-          } finally {
-            await response.close();
-            environment.value.response = undefined;
-          }
-        },
         async close(environment: Environment) {
           await environment.value.response?.close();
           environment.value.response = undefined;

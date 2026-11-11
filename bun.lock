@@ -36,9 +36,6 @@
     "packages/ts/engine-wasm": {
       "name": "@syntropika/tembra-engine-wasm",
       "version": "0.2.2",
-      "dependencies": {
-        "@bytecodealliance/jco-transpile": "0.23.0",
-      },
     },
     "packages/ts/react-native": {
       "name": "@syntropika/tembra-react-native",

@@ -151,8 +151,8 @@ RCT_EXPORT_MODULE(NativeTembra)
 }
 
 /** Forward one host-owned execution operation to the Swift storage. */
-- (void)configureExecution:(NSString *)handle configuration:(NSString *)configuration resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
-  [_storage configureExecution:handle configuration:configuration resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
+- (void)configureExecution:(NSString *)handle engine:(NSString *)engine configuration:(NSString *)configuration resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  [_storage configureExecution:handle engine:engine configuration:configuration resolve:^(NSString *value) { resolve(value); } reject:^(NSString *message) { reject(@"tembra_execution", message, nil); }];
 }
 
 /** Forward one host-owned execution operation to the Swift storage. */

@@ -151,7 +151,7 @@ impl Environment {
         };
         let scope = Scope::Declaration(declaration);
         environment.session.blocking(
-            crate::protocol::Operation::Declare,
+            crate::abi::Operation::Declare,
             serde_json::to_string(&GuestCommand::Create {
                 environment: id,
                 service: environment.service.as_deref(),

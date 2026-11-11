@@ -96,7 +96,7 @@ handler. Use the raw form to preserve request bytes.
 
 Guest factories stay synchronous. The native worker pauses at a host request while the mobile bridge asynchronously delivers its response. This avoids invoking Hermes callbacks synchronously from a native interpreter stack. The shared SDK still owns admission, state, references, resources, cancellation and reload. Native invalidation revokes pending replies and drains physical work outside the UI thread. Logging is attributed by the host and retained in bounded batches between native exchanges.
 
-Every source Orb is a prepared component referencing the shared JavaScript interpreter core. The native library includes that core once; each Orb receives its own Store and heap. The application needs no separate interpreter asset or engine option. Metadata-only hosts do not instantiate components. `host.load()` still requires an application-supplied loader; `host.install({ artifact, grants })` accepts bytes directly.
+The native archive includes the same `interpreter.wasm` as the other native hosts. An optional `isolated.engine` byte array overrides it for qualification. Metadata-only hosts do not initialize the interpreter. `host.load()` still requires an application-supplied loader; `host.install({ artifact, grants })` accepts bytes directly.
 
 ## Close the host
 

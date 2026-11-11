@@ -166,13 +166,15 @@ ${entries}
 import { TembraError } from "@syntropika/tembra-sdk";
 import { createHost as nodeHost } from "@syntropika/tembra-sdk/node";
 import init from "@syntropika/tembra-engine-wasm";
+import { interpreterURL } from "@syntropika/tembra-engine-wasm/assets";
 
 const [relayFile, arithmeticFile] = process.argv.slice(2);
 if (!relayFile || !arithmeticFile) throw new Error("Usage: consumer <relay.wasm> <arithmetic.wasm>");
 
-const compiler = new URL(import.meta.resolve("@syntropika/tembra-engine-wasm/compiler"));
-for (const name of ["js-component-bindgen-component.core.wasm", "js-component-bindgen-component.core2.wasm"])
-  await WebAssembly.compile(new Uint8Array(readFileSync(new URL("./compiler/" + name, compiler))));
+const interpreter = interpreterURL();
+if (interpreter.href !== import.meta.resolve("@syntropika/tembra-engine-wasm/interpreter"))
+  throw new Error("Packed interpreter locator differs from the exported asset");
+await WebAssembly.compile(new Uint8Array(readFileSync(interpreter)));
 await init({
   module_or_path: new Uint8Array(
     readFileSync(new URL(import.meta.resolve("@syntropika/tembra-engine-wasm/tembra_bg.wasm"))),
@@ -206,7 +208,7 @@ for (const [label, create] of [
   }
 }
 
-// Execute prepared source and compiled Orbs through the same installed component backend.
+// Execute the isolated source Orb and the compiled provider through the installed interpreter.
 const host = nodeHost();
 try {
   await host.load(arithmeticFile);

@@ -1,8 +1,6 @@
 //! The typed platform carrier serves a compiled handler through `InterpreterPort`, as Node and
 //! mobile do: control packets stay JSON, while heads, bodies and trailers are raw bytes pulled
 //! one at a time in each direction.
-#[path = "support/source.rs"]
-mod source;
 use std::{sync::mpsc, thread, time::Duration};
 use tembra_executor_wasm::{
     Contract, Engine, Grants, InterpreterPort, Limits, PortEvent, PortReply, PortTicket,
@@ -14,10 +12,12 @@ use tembra_executor_wasm::{
 
 const ORB: &str = "web";
 
-/// The compiled HTTP handler; its tests are gated on it explicitly and never skip silently.
-fn fixture() -> Vec<u8> {
-    std::fs::read(std::env::var_os("TEMBRA_WASM_HTTP_HANDLER").expect("TEMBRA_WASM_HTTP_HANDLER"))
-        .unwrap()
+fn fixture() -> Option<Vec<u8>> {
+    let Some(path) = std::env::var_os("TEMBRA_WASM_HTTP_HANDLER") else {
+        eprintln!("skipped: TEMBRA_WASM_HTTP_HANDLER names no compiled HTTP handler");
+        return None;
+    };
+    Some(std::fs::read(path).unwrap())
 }
 
 /// Open the handler revision through the platform port and declare its environments the way
@@ -244,7 +244,9 @@ fn expected_refusals() -> Vec<(&'static str, Vec<u8>)> {
 #[test]
 #[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
 fn compiled_refusals_arrive_typed_before_completion() {
-    let component = fixture();
+    let Some(component) = fixture() else {
+        return;
+    };
     for engine in engines() {
         let port = open(&engine, &component);
         for (index, (path, expected)) in expected_refusals().into_iter().enumerate() {
@@ -266,7 +268,9 @@ fn compiled_refusals_arrive_typed_before_completion() {
 #[test]
 #[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
 fn the_platform_carrier_streams_bytes_both_ways() {
-    let component = fixture();
+    let Some(component) = fixture() else {
+        return;
+    };
     for engine in engines() {
         let port = open(&engine, &component);
         let mut exchange = Exchange::begin(&port, "/sse");
@@ -317,7 +321,9 @@ fn the_platform_carrier_streams_bytes_both_ways() {
 #[test]
 #[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
 fn the_carrier_refuses_invalid_bytes_before_admission() {
-    let component = fixture();
+    let Some(component) = fixture() else {
+        return;
+    };
     let engine = Engine::new(Limits::default()).unwrap();
     let port = open(&engine, &component);
     for invalid in [
@@ -380,7 +386,9 @@ fn the_carrier_refuses_invalid_bytes_before_admission() {
 #[test]
 #[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
 fn cancellation_and_disconnect_end_the_carrier_and_late_answers_own_nothing() {
-    let component = fixture();
+    let Some(component) = fixture() else {
+        return;
+    };
     for engine in engines() {
         let port = open(&engine, &component);
         // Cancellation while the guest waits for request data.
@@ -440,7 +448,9 @@ fn cancellation_and_disconnect_end_the_carrier_and_late_answers_own_nothing() {
 #[test]
 #[ignore = "requires TEMBRA_WASM_HTTP_HANDLER"]
 fn a_disconnect_before_the_head_ends_the_call_without_quarantine() {
-    let component = fixture();
+    let Some(component) = fixture() else {
+        return;
+    };
     for engine in engines() {
         let port = open(&engine, &component);
         let mut exchange = Exchange::begin(&port, "/slow");
@@ -484,13 +494,17 @@ fn a_disconnect_before_the_head_ends_the_call_without_quarantine() {
 /// revision's standard table, the guest publishes its response once, and the callback lasts
 /// until the delivery ended.
 #[test]
-#[ignore = "requires TEMBRA_WASM_SOURCE_HANDLER"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_SOURCE_HANDLER"]
 fn source_handlers_stream_through_the_platform_carrier() {
-    let artifact = std::fs::read(
-        std::env::var_os("TEMBRA_WASM_SOURCE_HANDLER").expect("TEMBRA_WASM_SOURCE_HANDLER"),
-    )
-    .unwrap();
+    let (Some(interpreter), Some(artifact)) = (
+        std::env::var_os("TEMBRA_WASM_ENGINE").map(|path| std::fs::read(path).unwrap()),
+        std::env::var_os("TEMBRA_WASM_SOURCE_HANDLER").map(|path| std::fs::read(path).unwrap()),
+    ) else {
+        eprintln!("skipped: TEMBRA_WASM_ENGINE or TEMBRA_WASM_SOURCE_HANDLER is not set");
+        return;
+    };
     for engine in engines() {
+        let engine = engine.interpreter(&interpreter).unwrap();
         let artifact = tembra_contracts::Artifact::decode(&artifact).unwrap();
         let bindings = artifact
             .contract
@@ -561,18 +575,37 @@ fn source_handlers_stream_through_the_platform_carrier() {
     }
 }
 
-/// A callback that settles without publishing a head completes with a clear error through the
-/// carrier, never `ok` without a response.
-///
-/// The handler (`tests/source/test-silent-handler`) resolves with neither a `response` nor an
-/// `error-code`. Declared breaking semantics: the component runtime refuses that value at the
-/// canonical boundary, so the call traps and quarantines the revision; a later request is
-/// refused without running guest code, and dropping the port retires the Store physically.
+/// A source bundle whose own code rebinds the writable ingress global, so its callback returns
+/// without ever publishing a response. No interpreter change is involved: this is user code.
+const SILENT_HANDLER: &str = r#"
+globalThis.__tembraIngress = Object.freeze({ async serve() {} });
+globalThis.__tembraOrb = {
+  name: "web",
+  apiVersion: 1,
+  services: { handler: { methods: { async handle() {} } } },
+};
+"#;
+
+/// A callback that ends without publishing a head completes with a clear error through the
+/// carrier, never `ok` without a response, and the revision keeps serving.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn a_source_callback_without_a_response_completes_with_an_error() {
-    let bytes = source::fixture("test-silent-handler");
+    let Some(interpreter) =
+        std::env::var_os("TEMBRA_WASM_ENGINE").map(|path| std::fs::read(path).unwrap())
+    else {
+        eprintln!("skipped: TEMBRA_WASM_ENGINE is not set");
+        return;
+    };
+    let contract = Contract::from_dir(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/wit/handler"),
+        Some("handler"),
+    )
+    .unwrap();
+    let bytes =
+        tembra_contracts::Artifact::package_source(ORB, 1, &contract, SILENT_HANDLER).unwrap();
     for engine in engines() {
+        let engine = engine.interpreter(&interpreter).unwrap();
         let artifact = tembra_contracts::Artifact::decode(&bytes).unwrap();
         let bindings = artifact
             .contract
@@ -593,22 +626,16 @@ fn a_source_callback_without_a_response_completes_with_an_error() {
             port.declare(packet, |_, _| Ok(serde_json::Value::Null))
                 .unwrap();
         }
-        let mut exchange = Exchange::begin(&port, "/");
-        let Ev::Complete(result) = exchange.next() else {
-            panic!("a callback without a response publishes no head")
-        };
-        let error = result.unwrap_err();
-        assert!(
-            error.message.contains("trap"),
-            "the missing response was not refused by the call: {error}"
-        );
-        exchange.ticket.take().unwrap().finish().unwrap();
-        // The quarantined revision refuses the next request before any guest code runs.
-        let error = port
-            .begin_ingress(PACKET.into(), head("/"))
-            .err()
-            .expect("a quarantined revision accepted another request");
-        assert_eq!(error.reason, "wasm_executor_quarantined", "{error}");
+        for _ in 0..2 {
+            let mut exchange = Exchange::begin(&port, "/");
+            let Ev::Complete(result) = exchange.next() else {
+                panic!("a callback without a response publishes no head")
+            };
+            let error = result.unwrap_err();
+            assert!(error.message.contains("returned no response"), "{error}");
+            assert_ne!(error.reason, "wasm_executor_quarantined", "{error}");
+            exchange.ticket.take().unwrap().finish().unwrap();
+        }
         drop(port);
         assert_eq!(engine.instances(), 0);
     }

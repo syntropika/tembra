@@ -20,10 +20,7 @@ interface calculation {
 }
 
 interface network {
-    /// Strict: a failure (for example a cancelled send) traps and quarantines the revision.
     fetch-and-sum: async func(url: string) -> s32;
-    /// The same request with a declared failure lane: a cancelled send is recoverable.
-    fetch-and-sum-checked: async func(url: string) -> result<s32, string>;
     first-event: async func(url: string) -> string;
 }
 

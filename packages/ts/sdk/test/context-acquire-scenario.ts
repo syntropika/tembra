@@ -25,7 +25,7 @@ export async function verifyContextAcquireScenario(
       ["retained-context", "refused: context callback has ended"],
       ["retained-reference", "belongs to another root"],
       ["unknown-import", "not a selected wit orb import"],
-      ["key-kind", "a reference key is a string or a list of strings"],
+      ["key-kind", "malformed"],
       ["release", "released"],
     ] as const) {
       const result = String(await run("alice", "probe", probe)).toLowerCase();

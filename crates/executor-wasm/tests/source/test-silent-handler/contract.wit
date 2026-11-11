@@ -1,6 +1,0 @@
-package example:ingress@1.0.0;
-
-/// An incoming HTTP handler with no other import.
-world handler {
-    export wasi:http/handler@0.3.0;
-}

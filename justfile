@@ -1,7 +1,7 @@
 # Build executable adapters before running integration tests.
 set positional-arguments
 
-# Pinned nightly for compiled Wasm fixtures; the reusable authoring runtime uses stable Rust.
+# Pinned nightly for the interpreter core module and compiled Wasm fixtures; CI reads this value.
 nightly := "nightly-2026-10-15"
 
 default:
@@ -51,9 +51,10 @@ test-no-hooks:
 test-doc:
     cargo test --locked --workspace --all-features --doc
 
-# Build the pinned authoring runtime once; source Orb edits reuse it without rebuilding Rust.
-build-runtime sdk cache:
-    bun crates/executor-wasm/guest/build.ts --sdk "$1" --cache "$2" --package
+# Build the reusable dquickts interpreter and package it into the engine packages; Orb edits reuse it.
+# Without a dquickts checkout, the build clones one into the cache and still verifies the pinned revision.
+build-interpreter sdk cache source="" toolchain=nightly:
+    bun crates/executor-wasm/guest/build.ts --sdk "$1" --cache "$2" ${3:+--source "$3"} --toolchain "$4" --package
 
 # Compile the example Rust provider component; reuse the target directory between runs.
 build-provider target-dir toolchain=nightly:
@@ -95,17 +96,17 @@ build-http-handler target-dir toolchain=nightly:
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-http-handler/Cargo.toml --target-dir "$1/handler" -- -Clinker=wasm-component-ld
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-http-handler/Cargo.toml --target-dir "$1/proxy" --features proxy -- -Clinker=wasm-component-ld
 
-# Rebuild the embedded WASI stream adapter used by the component host (64 KiB shadow stack).
+# Rebuild the private source-path stream adapter the executor embeds (64 KiB shadow stack).
 build-stream-adapter target-dir toolchain=nightly:
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/stream-adapter/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld -Clink-arg=-zstack-size=65536
-    cp "$1/wasm32-unknown-unknown/release/tembra_stream_adapter.wasm" crates/executor-wasm/src/worker/stream_adapter.wasm
+    cp "$1/wasm32-unknown-unknown/release/tembra_stream_adapter.wasm" crates/executor-wasm/src/worker/standard/stream_adapter.wasm
 
 # Verify the embedded stream adapter is byte-identical to a fresh build of its source.
 check-stream-adapter target-dir toolchain=nightly:
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/stream-adapter/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld -Clink-arg=-zstack-size=65536
-    cmp "$1/wasm32-unknown-unknown/release/tembra_stream_adapter.wasm" crates/executor-wasm/src/worker/stream_adapter.wasm
+    cmp "$1/wasm32-unknown-unknown/release/tembra_stream_adapter.wasm" crates/executor-wasm/src/worker/standard/stream_adapter.wasm
 
-# Execute isolated Orb acceptance on native Rust, Node and Chrome after the packaged runtime build.
+# Execute isolated Orb acceptance on native Rust, Node and Chrome after the packaged interpreter build.
 test-wasm-acceptance *args:
     bun scripts/test-wasm-acceptance.ts "$@"
 
@@ -166,5 +167,5 @@ test-kotlin: build-kotlin
     gradle -p packages/kotlin :jvm:test
 
 # Exercise the portable mobile transport with real source and compiled guests.
-test-mobile-wasm fixtures provider probe handler:
-    TEMBRA_WASM_FIXTURES="{{absolute_path(fixtures)}}" TEMBRA_WASM_PROVIDER="{{absolute_path(provider)}}" TEMBRA_WASM_PROBE="{{absolute_path(probe)}}" TEMBRA_WASM_HTTP_HANDLER="{{absolute_path(handler)}}" cargo test --locked -p tembra-mobile --test execution --test compiled_filesystem --test compiled_imports -- --include-ignored
+test-mobile-wasm engine provider probe handler:
+    TEMBRA_WASM_ENGINE="{{absolute_path(engine)}}" TEMBRA_WASM_PROVIDER="{{absolute_path(provider)}}" TEMBRA_WASM_PROBE="{{absolute_path(probe)}}" TEMBRA_WASM_HTTP_HANDLER="{{absolute_path(handler)}}" cargo test --locked -p tembra-mobile --test execution --test compiled_filesystem -- --ignored

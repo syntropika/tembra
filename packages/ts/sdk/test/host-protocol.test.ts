@@ -113,13 +113,3 @@ test("Context.get acquisition names only an import binding and a key list", () =
   ])
     expect(outcome(decodeAsyncHostRequest, packet)).toBe("malformed");
 });
-
-test("component calls preserve their import binding and reject malformed identities", () => {
-  const call = { operation: "reference.call" as const, id: 1, method: "run", args: [] };
-  expect(
-    decodeAsyncHostRequest(JSON.stringify({ ...call, binding: "example:app/service@1.0.0" })),
-  ).toEqual({ ...call, binding: "example:app/service@1.0.0" });
-  expect(outcome(decodeAsyncHostRequest, JSON.stringify(call))).toBe("malformed");
-  for (const binding of [null, 1, true, {}, []])
-    expect(outcome(decodeAsyncHostRequest, JSON.stringify({ ...call, binding }))).toBe("malformed");
-});

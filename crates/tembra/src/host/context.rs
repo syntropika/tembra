@@ -148,20 +148,6 @@ impl Context {
         Ok(())
     }
 
-    /// Cancel this context's admitted invocation and the calls it issued. Its root and sibling
-    /// invocations stay live. Doing so again, or after the invocation ended, does nothing.
-    pub fn cancel_invocation(&self) -> Result<()> {
-        let call = self.invocation()?;
-        let Ok(cancelled) = self.host.kernel().cancel_call(call.id) else {
-            return Ok(());
-        };
-        for call in cancelled {
-            self.host.cancel_call_signal(call);
-        }
-        self.host.flush();
-        Ok(())
-    }
-
     /// Read the identity retained by this root.
     pub fn principal(&self) -> Result<String> {
         self.host.kernel().root_principal(self.root)
@@ -367,87 +353,5 @@ impl Host {
                 self.0.errors.borrow_mut().push(error);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod invocation_tests {
-    use crate::{Host, Orb, Reference, Service};
-    use futures::{FutureExt, executor::LocalPool};
-    use std::{cell::RefCell, rc::Rc};
-
-    /// An invocation cancels itself and the call it issued; its root and a sibling stay live.
-    #[test]
-    fn cancelling_an_invocation_spares_its_root_and_siblings() {
-        let mut pool = LocalPool::new();
-        let host = Host::new(pool.spawner());
-        let leaf: Rc<RefCell<Option<Rc<Reference>>>> = Rc::default();
-        let nested = leaf.clone();
-        let orb = Orb::new("calls", 1)
-            .service(
-                Service::new("worker", |_| Ok(()))
-                    .method("stop", move |_, context, (): ()| {
-                        let reference = nested.borrow().clone().unwrap();
-                        async move {
-                            let held = reference
-                                .call_portable::<_, bool>(&context, "hold", ())
-                                .boxed_local();
-                            let (held, ()) = futures::future::join(held, async {
-                                context.cancel_invocation().unwrap();
-                            })
-                            .await;
-                            let fresh = reference
-                                .call_portable::<_, bool>(&context, "hold", ())
-                                .await
-                                .unwrap_err();
-                            Ok((
-                                held?,
-                                context.signal().is_cancelled(),
-                                format!("{:?}", fresh.code),
-                            ))
-                        }
-                    })
-                    .method("sibling", |_, context, (): ()| async move {
-                        Ok(context.signal().is_cancelled())
-                    }),
-            )
-            .service(Service::new("leaf", |_| Ok(())).method(
-                "hold",
-                |_, context, (): ()| async move {
-                    context.signal().cancelled().await;
-                    Ok(context.signal().is_cancelled())
-                },
-            ));
-        host.install(vec![orb]).unwrap();
-        let worker = Rc::new(host.get("worker", vec!["main".into()], "alice").unwrap());
-        let held = Rc::new(host.get("leaf", vec!["main".into()], "alice").unwrap());
-        *leaf.borrow_mut() = Some(held.clone());
-        pool.run_until(worker.ready()).unwrap();
-        pool.run_until(held.ready()).unwrap();
-        let called = worker.clone();
-        let (stopped, sibling, root) = pool
-            .run_until(host.root("alice", move |context| {
-                async move {
-                    let stopped = called
-                        .call_portable::<_, (bool, bool, String)>(&context, "stop", ())
-                        .await?;
-                    let sibling = called
-                        .call_portable::<_, bool>(&context, "sibling", ())
-                        .await?;
-                    Ok((stopped, sibling, context.signal().is_cancelled()))
-                }
-                .boxed_local()
-            }))
-            .unwrap();
-        // The issued call observed the cancellation, the invocation's own signal fired and it
-        // gained no fresh authority; the root and a later sibling call stayed live.
-        assert_eq!(stopped, (true, true, "Cancelled".to_owned()));
-        assert!(!sibling);
-        assert!(!root);
-        assert_eq!(host.kernel().diagnostics().calls, 0);
-        drop(worker);
-        drop(held);
-        leaf.borrow_mut().take();
-        pool.run_until(host.close()).unwrap();
     }
 }

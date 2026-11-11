@@ -2,7 +2,7 @@
 use futures::executor::block_on;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tembra_contracts::Contract;
+use tembra_contracts::{Artifact, Contract};
 use tembra_mobile::{NativeArtifact, NativeInterpreter, NativePort};
 
 /// Drive one exchange like the SDK mobile driver: host requests are answered as they arrive and
@@ -26,12 +26,7 @@ fn exchange(port: &Arc<NativePort>, command: Value, declaration: bool) -> Value 
             "unexpected host operation {packet}"
         );
         let value = match packet["operation"].as_str().unwrap() {
-            // A service environment's Orb root; these tests create the root as environment 1.
-            "orb" if command["service"].is_null() => Value::Null,
-            "orb" => json!(1),
-            "state.declare" => json!(1),
-            // The SDK checks its admitted callback before standard HTTP sends.
-            "context.check" => Value::Null,
+            "orb" => Value::Null,
             "address" => json!({"key":[],"principal":"test"}),
             operation => panic!("unexpected operation {operation}"),
         };
@@ -45,21 +40,14 @@ fn exchange(port: &Arc<NativePort>, command: Value, declaration: bool) -> Value 
     }
 }
 
-/// Prepared source component fixtures (`TEMBRA_WASM_FIXTURES`), built by the SDK from
-/// `packages/ts/sdk/test/fixtures/wasm-mobile` with the packaged runtime.
-fn fixture(name: &str) -> Arc<NativeArtifact> {
-    let directory = std::env::var_os("TEMBRA_WASM_FIXTURES")
-        .expect("TEMBRA_WASM_FIXTURES names the prepared source fixture directory");
-    let path = std::path::Path::new(&directory).join(format!("{name}.wasm"));
-    let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-    NativeArtifact::new(bytes).unwrap()
-}
-
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn portable_source_transport_preserves_factories_and_isolates_heaps() {
-    let artifact = fixture("mobile-counter");
-    let backend = NativeInterpreter::new("{}".into()).unwrap();
+    let engine = std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").unwrap()).unwrap();
+    let contract = Contract::from_source("mobile.wit", "package test:mobile; interface counter { add: func() -> s32; } world app { export counter; }", Some("app")).unwrap();
+    let bytes = Artifact::package_source("counter", 1, contract.prepared(), "globalThis.__tembraOrb = { services: { counter: { create(self) { self.key; self.key; return { value: 0 }; }, methods: { add(self) { console.log(\"mobile\"); return ++self.value; } } } } };").unwrap();
+    let artifact = NativeArtifact::new(bytes).unwrap();
+    let backend = NativeInterpreter::new("{}".into(), engine).unwrap();
     let first = backend
         .open(artifact.clone(), "{}".into(), "{}".into(), None)
         .unwrap();
@@ -113,7 +101,6 @@ fn portable_source_transport_preserves_factories_and_isolates_heaps() {
         .unwrap();
     let request: Value = serde_json::from_str(&block_on(abandoned.receive()).unwrap()).unwrap();
     assert_eq!(request["event"], "host");
-    assert_eq!(request["packet"], json!({"operation":"orb"}).to_string());
     // Register a foreign-style continuation while the VM still waits on its first host reply.
     // The next synchronous host request must wake it from an OS stack rather than a Wasmtime fiber.
     struct ForeignWake(std::sync::mpsc::Sender<String>);
@@ -135,7 +122,7 @@ fn portable_source_transport_preserves_factories_and_isolates_heaps() {
     abandoned
         .reply(
             request["id"].as_u64().unwrap() as u32,
-            json!({"ok":1}).to_string(),
+            json!({"ok":{"key":[],"principal":"test"}}).to_string(),
         )
         .unwrap();
     assert_eq!(
@@ -144,9 +131,7 @@ fn portable_source_transport_preserves_factories_and_isolates_heaps() {
         "tembra-mobile-events"
     );
     let second: Value = serde_json::from_str(&block_on(next).unwrap()).unwrap();
-    // The factory's key read is still waiting on the host when the host abandons it.
     assert_eq!(second["event"], "host");
-    assert_eq!(second["packet"], json!({"operation":"address"}).to_string());
     let start = std::time::Instant::now();
     abandoned.invalidate();
     abandoned.release(2).unwrap();
@@ -157,7 +142,7 @@ fn portable_source_transport_preserves_factories_and_isolates_heaps() {
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
@@ -192,12 +177,55 @@ fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
         let _ = stream.read_to_end(&mut rest);
         let _ = closed.send(Instant::now());
     });
-    let artifact = fixture("mobile-io");
+    let contract = Contract::from_source("mobile.wit", "package test:mobile; interface files { read: async func() -> string; denied: async func() -> bool; escape: async func() -> bool; request: async func(port: u16) -> string; abandon: async func(port: u16) -> bool; } world app { import wasi:filesystem/types@0.3.0; import wasi:filesystem/preopens@0.3.0; import wasi:sockets/types@0.3.0; export files; }", Some("app")).unwrap();
+    let source = r#"const preopens = __tembraStandard['wasi:filesystem/preopens@0.3.0'];
+    const mount = (path) => { const [[root]] = preopens.getDirectories(); if (!path.startsWith('/data/')) throw new Error('outside the granted mount'); return [root, path.slice(6)]; };
+    const readText = async (path) => { const [root, relative] = mount(path); const fd = await root.openAt({}, relative, {}, {read: true}); const [stream, done] = fd.readViaStream(0n); let text = ''; for await (const byte of stream) text += String.fromCharCode(byte); await done; return text; };
+    const ascii = (text) => Uint8Array.from(text, (character) => character.charCodeAt(0));
+    const sockets = __tembraStandard['wasi:sockets/types@0.3.0'];
+    const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
+    const connect = async (port) => {
+        const socket = sockets.TcpSocket.create('ipv4');
+        await socket.connect({ tag: 'ipv4', val: { port, address: [127, 0, 0, 1] } });
+        return socket;
+    };
+    globalThis.__tembraOrb = { services: { files: { methods: {
+        async read() { return await readText('/data/input'); },
+        async denied() { try { const [root, relative] = mount('/data/input'); await root.openAt({}, relative, {truncate: true}, {write: true}); return false; } catch { return true; } },
+        async escape() { try { const [[root]] = preopens.getDirectories(); await root.openAt({}, '../secret', {}, {read: true}); return false; } catch { return true; } },
+        async request(self, context, port) {
+            const socket = await connect(port);
+            const sent = socket.send(ascii('GET /mobile HTTP/1.0\r\n\r\n'));
+            const [stream, done] = socket.receive();
+            let text = '';
+            for await (const byte of stream) text += String.fromCharCode(byte);
+            await sent;
+            await done;
+            return text;
+        },
+        async abandon(self, context, port) {
+            // A read is pending when the guest drops its stream and socket: dropping the last
+            // references closes the connection although the peer never sent anything.
+            const socket = await connect(port);
+            const [stream, done] = socket.receive();
+            stream[Symbol.asyncIterator]().next().catch(() => {});
+            stream[dispose]?.();
+            done[dispose]?.();
+            socket[dispose]?.();
+            return true;
+        }
+    } } } };"#;
+    let artifact = NativeArtifact::new(
+        Artifact::package_source("files", 1, contract.prepared(), source).unwrap(),
+    )
+    .unwrap();
     let grants = json!({"system":["clocks"],"filesystem":[{"provider":"data","mount":"/data","writable":false}],"network":[{"provider":"tcp","connect":[address.to_string()]}]});
     let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"files","apiVersion":1,"requires":{},"grants":grants,"filesystem":["data"],"network":["tcp"]}).to_string())).unwrap();
     assert!(installation.get("error").is_none(), "{installation}");
+    let engine = std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").unwrap()).unwrap();
     let backend = NativeInterpreter::new(
         json!({"filesystem":{"data":directory.path()},"network":["tcp"]}).to_string(),
+        engine,
     )
     .unwrap();
     let port = backend
@@ -226,28 +254,15 @@ fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
         )
     };
     assert_eq!(call("read", json!([])), "mobile-file");
-    // Standard WASI 0.3 error codes: the read-only grant refuses writing, and no path leaves
-    // the preopen.
-    assert_eq!(call("denied", json!([])), "not-permitted");
-    assert_eq!(call("escape", json!([])), "not-permitted");
-    // A loopback listener outside the socket grant is refused before any connection is made.
-    let ungranted = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    ungranted.set_nonblocking(true).unwrap();
-    assert_eq!(
-        call("connect", json!([ungranted.local_addr().unwrap().port()])),
-        "access-denied"
-    );
-    assert_eq!(
-        ungranted.accept().unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
-    );
+    assert_eq!(call("denied", json!([])), true);
+    assert_eq!(call("escape", json!([])), true);
     assert_eq!(
         call("request", json!([address.port()])),
         "HTTP/1.0 200 OK\r\n\r\nmobile"
     );
     // Dropping an idle stream and its socket closes the connection promptly.
     let started = Instant::now();
-    assert_eq!(call("abandon", json!([address.port()])), "cancelled|ok");
+    assert_eq!(call("abandon", json!([address.port()])), true);
     let closed = observed.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(closed.duration_since(started) < Duration::from_secs(2));
     assert!(started.elapsed() < Duration::from_secs(5));
@@ -264,7 +279,7 @@ fn portable_source_io_obeys_read_only_mounts_and_network_destinations() {
 
 /// Exercise source HTTP through the real mobile transport, including a body that never reaches EOF.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn portable_http_streams_through_the_host_provider() {
     use std::{
         io::{Read, Write},
@@ -291,11 +306,48 @@ fn portable_http_streams_through_the_host_provider() {
         assert_eq!(socket.read_to_end(&mut rest).unwrap(), 0);
         closed.send(()).unwrap();
     });
-    let artifact = fixture("mobile-web");
+    let contract = Contract::from_source("http.wit", "package test:mobile; interface web { first: async func(url: string) -> string; } world app { import wasi:http/types@0.3.0; import wasi:http/client@0.3.0; export web; }", Some("app")).unwrap();
+    let source = r#"globalThis.__tembraOrb = { services: { web: { methods: {
+        async first(_self, _context, url) {
+            // Standard wasi:http only: build the request, send it, read the first event or
+            // the whole short body, then drop the stream.
+            const types = __tembraStandard['wasi:http/types@0.3.0'];
+            const client = __tembraStandard['wasi:http/client@0.3.0'];
+            const [, , authority, ...path] = url.split('/');
+            const done = Promise.resolve({ tag: 'ok', val: undefined });
+            const [request] = types.Request.new(new types.Fields(), undefined, done, undefined);
+            request.setScheme({ tag: 'HTTP' });
+            request.setAuthority(authority);
+            request.setPathWithQuery('/' + path.join('/'));
+            const response = await client.send(request);
+            // The response-handling future: resolved `err` on close, like the SDK's close().
+            let finish;
+            const handled = new Promise((resolve) => { finish = resolve; });
+            const [body, trailers] = types.Response.consumeBody(response, handled);
+            const bytes = [];
+            for await (const byte of body) {
+                bytes.push(byte);
+                if (bytes.length > 1 && bytes[bytes.length - 1] === 10 && bytes[bytes.length - 2] === 10) break;
+            }
+            // Release the whole response, like the SDK's close(): the stream (ended by the
+            // loop) and the trailers future, so the host may close the connection now.
+            const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
+            body[dispose]?.();
+            trailers[dispose]?.();
+            finish({ tag: 'err', val: { tag: 'internal-error', val: 'response closed' } });
+            return String.fromCharCode(...bytes);
+        }
+    } } } };"#;
+    let artifact = NativeArtifact::new(
+        Artifact::package_source("web", 1, contract.prepared(), source).unwrap(),
+    )
+    .unwrap();
     let grants = json!({"http":[{"provider":"outbound","origins":[format!("http://{address}")]}]});
     let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"web","apiVersion":1,"requires":{},"grants":grants,"filesystem":[],"network":["outbound"],"http":["outbound"]}).to_string())).unwrap();
     assert!(installation.get("error").is_none(), "{installation}");
-    let backend = NativeInterpreter::new(json!({"network":["outbound"]}).to_string()).unwrap();
+    let engine = std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").unwrap()).unwrap();
+    let backend =
+        NativeInterpreter::new(json!({"network":["outbound"]}).to_string(), engine).unwrap();
     let port = backend
         .open(
             artifact,
@@ -319,11 +371,7 @@ fn portable_http_streams_through_the_host_provider() {
         json!({"kind":"invoke","environment":2,"service":"web","method":"first","args":[format!("http://{address}/events")]}),
         false,
     );
-    // Status and head are visible; the body stops after the first event of an endless stream.
-    assert_eq!(
-        value,
-        json!({"tag":"ok","val":"200|text/event-stream|data: hello\n\n"})
-    );
+    assert_eq!(value, "data: hello\n\n");
     // Closing the idle SSE response closed the connection before the callback completed,
     // while the Orb is still installed.
     observed.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -337,7 +385,7 @@ fn portable_http_streams_through_the_host_provider() {
 /// A cancelled caller revokes its callback's pending standard HTTP send (native, in-Store: no
 /// host packet is involved); the connection closes and the Store keeps serving.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn portable_cancel_interrupts_a_pending_http_send_without_quarantine() {
     use std::{
         io::{Read, Write},
@@ -374,11 +422,48 @@ fn portable_cancel_interrupts_a_pending_http_send_without_quarantine() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
             .unwrap();
     });
-    let artifact = fixture("mobile-web");
+    let contract = Contract::from_source("http.wit", "package test:mobile; interface web { first: async func(url: string) -> string; } world app { import wasi:http/types@0.3.0; import wasi:http/client@0.3.0; export web; }", Some("app")).unwrap();
+    let source = r#"globalThis.__tembraOrb = { services: { web: { methods: {
+        async first(_self, _context, url) {
+            // Standard wasi:http only: build the request, send it, read the first event or
+            // the whole short body, then drop the stream.
+            const types = __tembraStandard['wasi:http/types@0.3.0'];
+            const client = __tembraStandard['wasi:http/client@0.3.0'];
+            const [, , authority, ...path] = url.split('/');
+            const done = Promise.resolve({ tag: 'ok', val: undefined });
+            const [request] = types.Request.new(new types.Fields(), undefined, done, undefined);
+            request.setScheme({ tag: 'HTTP' });
+            request.setAuthority(authority);
+            request.setPathWithQuery('/' + path.join('/'));
+            const response = await client.send(request);
+            // The response-handling future: resolved `err` on close, like the SDK's close().
+            let finish;
+            const handled = new Promise((resolve) => { finish = resolve; });
+            const [body, trailers] = types.Response.consumeBody(response, handled);
+            const bytes = [];
+            for await (const byte of body) {
+                bytes.push(byte);
+                if (bytes.length > 1 && bytes[bytes.length - 1] === 10 && bytes[bytes.length - 2] === 10) break;
+            }
+            // Release the whole response, like the SDK's close(): the stream (ended by the
+            // loop) and the trailers future, so the host may close the connection now.
+            const dispose = Symbol.dispose ?? Symbol.for('Symbol.dispose');
+            body[dispose]?.();
+            trailers[dispose]?.();
+            finish({ tag: 'err', val: { tag: 'internal-error', val: 'response closed' } });
+            return String.fromCharCode(...bytes);
+        }
+    } } } };"#;
+    let artifact = NativeArtifact::new(
+        Artifact::package_source("web", 1, contract.prepared(), source).unwrap(),
+    )
+    .unwrap();
     let grants = json!({"http":[{"provider":"outbound","origins":[format!("http://{address}")]}]});
     let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"web","apiVersion":1,"requires":{},"grants":grants,"filesystem":[],"network":["outbound"],"http":["outbound"]}).to_string())).unwrap();
     assert!(installation.get("error").is_none(), "{installation}");
-    let backend = NativeInterpreter::new(json!({"network":["outbound"]}).to_string()).unwrap();
+    let engine = std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").unwrap()).unwrap();
+    let backend =
+        NativeInterpreter::new(json!({"network":["outbound"]}).to_string(), engine).unwrap();
     let port = backend
         .open(
             artifact,
@@ -412,41 +497,18 @@ fn portable_cancel_interrupts_a_pending_http_send_without_quarantine() {
             cancelled
         })
     };
-    // Standard HTTP is native: besides the SDK's synchronous admission check before sending,
-    // the only event is the callback's completion.
-    let complete = loop {
-        let event: Value = serde_json::from_str(&block_on(port.receive()).unwrap()).unwrap();
-        if event["event"] == "complete" {
-            break event;
-        }
-        assert_eq!(
-            event["packet"],
-            json!({"operation":"context.check"}).to_string(),
-            "unexpected host operation {event}"
-        );
-        port.reply(
-            event["id"].as_u64().unwrap() as u32,
-            json!({"ok":null}).to_string(),
-        )
-        .unwrap();
-    };
+    // Standard HTTP is native: the only event is the callback's completion.
+    let complete: Value = serde_json::from_str(&block_on(port.receive()).unwrap()).unwrap();
+    assert_eq!(
+        complete["event"], "complete",
+        "unexpected host operation {complete}"
+    );
     let cancelled = canceller.join().unwrap();
     port.finish().unwrap();
     let settled = cancelled.elapsed();
-    // The revoked send settles with a standard error; the callback reports it through its
-    // declared WIT `result` lane, so it is a recoverable business error rather than a trap.
-    let returned: Value =
-        serde_json::from_str(complete["result"]["ok"].as_str().unwrap_or_else(|| {
-            panic!("the revoked send must complete through the result lane: {complete}")
-        }))
-        .unwrap();
-    assert_eq!(returned["tag"], "err", "{complete}");
     assert!(
-        returned["val"]
-            .as_str()
-            .unwrap()
-            .starts_with("HTTP operation failed"),
-        "{complete}"
+        complete["result"].get("error").is_some(),
+        "the revoked send must fail its callback: {complete}"
     );
     assert!(
         settled < Duration::from_secs(2),
@@ -458,116 +520,8 @@ fn portable_cancel_interrupts_a_pending_http_send_without_quarantine() {
     // A stale cancellation outside any exchange does nothing, and the Store is not quarantined.
     port.cancel().unwrap();
     let started = Instant::now();
-    assert_eq!(
-        exchange(&port, invoke("values"), false),
-        json!({"tag":"ok","val":"200||hello"})
-    );
+    assert_eq!(exchange(&port, invoke("values"), false), "hello");
     assert!(started.elapsed() < Duration::from_secs(5));
-    port.release(2).unwrap();
-    port.release(1).unwrap();
-    port.shutdown().unwrap();
-    assert_eq!(backend.instances(), 0);
-    server.join().unwrap();
-}
-
-/// Without a declared failure lane, a revoked standard send is an uncaught exception of a
-/// non-`result` export: by the component semantics it traps, so the revision fails closed. The
-/// connection still closes, later calls are refused and cleanup leaves no Store behind.
-#[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
-fn portable_cancel_of_a_strict_callback_fails_closed() {
-    use std::{
-        io::Read,
-        net::TcpListener,
-        sync::mpsc,
-        time::{Duration, Instant},
-    };
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let (entered, waiting) = mpsc::channel();
-    let (closed, observed) = mpsc::channel();
-    let server = std::thread::spawn(move || {
-        let (mut stalled, _) = listener.accept().unwrap();
-        stalled
-            .set_read_timeout(Some(Duration::from_secs(15)))
-            .unwrap();
-        let mut request = Vec::new();
-        let mut byte = [0];
-        while !request.ends_with(b"\r\n\r\n") {
-            stalled.read_exact(&mut byte).unwrap();
-            request.push(byte[0]);
-        }
-        assert!(request.starts_with(b"GET /stalled HTTP/1.1\r\n"));
-        entered.send(()).unwrap();
-        let _ = stalled.read_to_end(&mut Vec::new());
-        closed.send(Instant::now()).unwrap();
-    });
-    let artifact = fixture("mobile-web");
-    let grants = json!({"http":[{"provider":"outbound","origins":[format!("http://{address}")]}]});
-    let installation: Value = serde_json::from_str(&artifact.request(json!({"kind":"install","name":"web","apiVersion":1,"requires":{},"grants":grants,"filesystem":[],"network":["outbound"],"http":["outbound"]}).to_string())).unwrap();
-    assert!(installation.get("error").is_none(), "{installation}");
-    let backend = NativeInterpreter::new(json!({"network":["outbound"]}).to_string()).unwrap();
-    let port = backend
-        .open(
-            artifact,
-            installation["ok"]["bindings"].to_string(),
-            grants.to_string(),
-            None,
-        )
-        .unwrap();
-    exchange(
-        &port,
-        json!({"kind":"create","environment":1,"service":null}),
-        true,
-    );
-    exchange(
-        &port,
-        json!({"kind":"create","environment":2,"service":"web"}),
-        true,
-    );
-    let invoke = |path: &str| json!({"kind":"invoke","environment":2,"service":"web","method":"strict","args":[format!("http://{address}/{path}")]});
-    port.begin(invoke("stalled").to_string(), false).unwrap();
-    let canceller = {
-        let port = port.clone();
-        std::thread::spawn(move || {
-            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
-            std::thread::sleep(Duration::from_millis(100));
-            let cancelled = Instant::now();
-            port.cancel().unwrap();
-            cancelled
-        })
-    };
-    let complete = loop {
-        let event: Value = serde_json::from_str(&block_on(port.receive()).unwrap()).unwrap();
-        if event["event"] == "complete" {
-            break event;
-        }
-        assert_eq!(
-            event["packet"],
-            json!({"operation":"context.check"}).to_string(),
-            "unexpected host operation {event}"
-        );
-        port.reply(
-            event["id"].as_u64().unwrap() as u32,
-            json!({"ok":null}).to_string(),
-        )
-        .unwrap();
-    };
-    let cancelled = canceller.join().unwrap();
-    port.finish().unwrap();
-    assert!(cancelled.elapsed() < Duration::from_secs(2));
-    // The uncaught failure is a trap, reported as an error, never as a value.
-    assert!(complete["result"].get("ok").is_none(), "{complete}");
-    let message = complete["result"]["error"]["message"].as_str().unwrap();
-    assert!(message.contains("component trap"), "{complete}");
-    let closed = observed.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(closed.duration_since(cancelled) < Duration::from_secs(2));
-    // Fail closed: the trapped revision admits no further callback.
-    let refused = port.begin(invoke("values").to_string(), false).unwrap_err();
-    assert!(
-        format!("{refused:?}").contains("quarantined"),
-        "{refused:?}"
-    );
     port.release(2).unwrap();
     port.release(1).unwrap();
     port.shutdown().unwrap();
@@ -591,7 +545,7 @@ fn portable_compiled_orb_calls_the_same_wit_abi() {
             .unwrap(),
     )
     .unwrap();
-    let backend = NativeInterpreter::new("{}".into()).unwrap();
+    let backend = NativeInterpreter::new("{}".into(), vec![]).unwrap();
     let port = backend
         .open(artifact, "{}".into(), "{}".into(), None)
         .unwrap();
@@ -634,7 +588,7 @@ fn portable_compiled_handler_streams_through_the_typed_carrier() {
     .unwrap();
     let bindings =
         json!({"wasi:http/types@0.3.0": {"kind": "host", "provider": "wasi:http/handler@0.3.0"}});
-    let backend = NativeInterpreter::new("{}".into()).unwrap();
+    let backend = NativeInterpreter::new("{}".into(), vec![]).unwrap();
     let port = backend
         .open(artifact, bindings.to_string(), "{}".into(), None)
         .unwrap();

@@ -117,7 +117,7 @@ impl PreparedContract {
     }
 
     /// Every hook interface has one callback. Roles are explicit; its input and output come from WIT.
-    pub(crate) fn hook_interface(&self, alias: &str) -> Result<(&str, &crate::Function), Error> {
+    fn hook_interface(&self, alias: &str) -> Result<(&str, &crate::Function), Error> {
         let mut matches = self
             .model()
             .exports

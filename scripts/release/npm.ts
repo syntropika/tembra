@@ -15,14 +15,10 @@ import { manifest, nodePlatforms, npmPackages } from "./metadata.ts";
 export function checkArtifacts(root: string, version: string): void {
   const required = [
     ...nodePlatforms.map((platform) => `engine-node/dist/tembra-${platform}.node`),
-    "engine-node/dist/runtime.wasm",
-    "engine-wasm/dist/compiler.js",
-    "engine-wasm/dist/compiler.d.ts",
-    "engine-wasm/dist/runtime.js",
-    "engine-wasm/dist/runtime.d.ts",
-    "engine-wasm/dist/dquickts.wasm",
-    "engine-wasm/dist/compiler/js-component-bindgen-component.core.wasm",
-    "engine-wasm/dist/compiler/js-component-bindgen-component.core2.wasm",
+    "engine-node/dist/interpreter.wasm",
+    "engine-wasm/dist/interpreter/interpreter.wasm",
+    "engine-wasm/dist/assets.js",
+    "engine-wasm/dist/assets.d.ts",
     "engine-wasm/dist/contracts.js",
     "engine-wasm/dist/contracts_bg.wasm",
     "engine-wasm/dist/tembra.js",
@@ -39,19 +35,13 @@ export function checkArtifacts(root: string, version: string): void {
     if (!existsSync(path.join(root, "packages/ts", file)))
       throw new Error(`Missing release artifact: ${file}`);
   }
-  const pinnedCore = readFileSync(path.join(root, "crates/contracts/runtime/dquickts.wasm"));
-  const browserCore = readFileSync(path.join(root, "packages/ts/engine-wasm/dist/dquickts.wasm"));
-  if (!pinnedCore.equals(browserCore))
-    throw new Error("Browser interpreter differs from the pinned native core");
   const aar = path.join(
     root,
     "packages/ts/react-native/native/maven/dev/tembra/tembra-kotlin",
     version,
     `tembra-kotlin-${version}.aar`,
   );
-  const entries = execFileSync("unzip", ["-Z1", aar], {
-    encoding: "utf8",
-  }).split("\n");
+  const entries = execFileSync("unzip", ["-Z1", aar], { encoding: "utf8" }).split("\n");
   for (const abi of ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"]) {
     if (!entries.includes(`jni/${abi}/libtembra_mobile.so`))
       throw new Error(`Android archive is missing ${abi}`);
@@ -74,9 +64,7 @@ export function stagePackage(root: string, name: string, output: string, version
   rmSync(destination, { recursive: true, force: true });
   mkdirSync(destination, { recursive: true });
   for (const file of item.files)
-    cpSync(path.join(source, file), path.join(destination, file), {
-      recursive: true,
-    });
+    cpSync(path.join(source, file), path.join(destination, file), { recursive: true });
   cpSync(path.join(root, "LICENSE"), path.join(destination, "LICENSE"));
   if (!existsSync(path.join(destination, "README.md")))
     cpSync(path.join(root, "README.md"), path.join(destination, "README.md"));
@@ -156,9 +144,7 @@ export async function publishNpm(
       { signal: AbortSignal.timeout(30_000) },
     );
     if (response.ok) {
-      const existing = (await response.json()) as {
-        dist?: { integrity?: string };
-      };
+      const existing = (await response.json()) as { dist?: { integrity?: string } };
       if (existing.dist?.integrity !== item.integrity)
         throw new Error(`Published bytes differ for ${item.name}@${item.version}`);
       console.log(`Already published: ${item.name}@${item.version}`);

@@ -4,14 +4,12 @@
 //! 0 is undecided by both guests and reaches the native fallback, 1 is decided by the compiled
 //! contributor before the source one could answer, and 2 continues past the compiled `none` to
 //! the source `some`. Series results are WIT void, which the portable boundary carries as null.
-#[path = "support/source.rs"]
-mod source;
 use futures::{FutureExt, executor::LocalPool};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use tembra::{Hook, Host, Orb, Service, core::Requirement};
-use tembra_executor_wasm::{Contract, Engine, Install};
+use tembra_executor_wasm::{Contract, Engine, Install, Limits};
 
 const GUARD: &str = "example:hooks/guard@1.0.0";
 const AUDIT: &str = "example:hooks/audit@1.0.0";
@@ -45,14 +43,30 @@ fn requires() -> Install {
         .requires(CHOICE, "tools", 1)
 }
 
-/// The SDK-authored source contributor `tests/source/test-hooks-extension`: its contributions
-/// update a resource owned by its Orb root.
+/// A source contributor whose contributions update a resource owned by its Orb root.
 ///
 /// Managed state belongs to one service object, so the Orb root keeps its observations in a
 /// root-owned resource; the reporter service reads that resource through `Declaration.orb`.
 fn source_extension(engine: &Engine) -> Orb {
+    let source = format!(
+        r#"globalThis.__tembraOrb={{name:"extension",apiVersion:1,
+        create(self){{return {{counts:self.resource("counts",{{open(){{return {{audit:0,choices:0}};}}}})}};}},
+        services:{{reporter:{{create(self){{return self.orb;}},
+            methods:{{read(root){{const {{audit,choices}}=root.counts.value;return {{audit,choices}};}}}}}}}},
+        contributes:{{
+            "{GUARD}":{{priority:0,handle(root,context,input){{context.check();return {{value:input.value+2,blocked:true}};}}}},
+            "{AUDIT}":{{priority:0,handle(root,context,input){{context.check();root.counts.value.audit+=input;}}}},
+            "{CHOICE}":{{priority:0,handle(root,context,input){{context.check();root.counts.value.choices+=1;
+                return input===2?84:input===1?11:undefined;}}}}
+        }}}};"#
+    );
     engine
-        .load(&source::fixture("test-hooks-extension"), requires())
+        .load(
+            &contract("extension")
+                .source_artifact(&source, "extension", 1)
+                .unwrap(),
+            requires(),
+        )
         .unwrap()
 }
 
@@ -149,11 +163,24 @@ fn native_provider() -> Orb {
         )
 }
 
-/// The SDK-authored source provider `tests/source/test-hooks-provider`, declaring the same three
-/// compositions.
+/// A source provider declaring the same three compositions.
 fn source_provider(engine: &Engine) -> Orb {
+    let source = r#"globalThis.__tembraOrb={name:"tools",apiVersion:1,
+        hooks:{guard:{composition:"waterfall"},audit:{composition:"series"},choice:{composition:"bail"}},
+        services:{runner:{
+            create(self){return {guard:self.hook("guard"),audit:self.hook("audit"),choice:self.hook("choice")};},
+            methods:{
+                run(hooks,context,input){return hooks.guard.run(context,input);},
+                audit(hooks,context,input){return hooks.audit.run(context,input);},
+                choose(hooks,context,input){return hooks.choice.run(context,input);}
+            }}}};"#;
     engine
-        .load(&source::fixture("test-hooks-provider"), Install::default())
+        .load(
+            &contract("provider")
+                .source_artifact(source, "tools", 1)
+                .unwrap(),
+            Install::default(),
+        )
         .unwrap()
 }
 
@@ -239,15 +266,24 @@ fn run(engine: Engine, component: &[u8], native: bool) {
 }
 
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES and TEMBRA_WASM_CONTRIBUTOR"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_CONTRIBUTOR"]
 fn compiled_source_and_native_participants_compose_series_bail_and_waterfall_hooks() {
+    let interpreter =
+        std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE")).unwrap();
     let component = std::fs::read(
         std::env::var_os("TEMBRA_WASM_CONTRIBUTOR").expect("TEMBRA_WASM_CONTRIBUTOR"),
     )
     .unwrap();
     for native in [true, false] {
-        for engine in source::engines() {
-            run(engine, &component, native);
+        for engine in [
+            Engine::new(Limits::default()).unwrap(),
+            Engine::interpreted(Limits::default()).unwrap(),
+        ] {
+            run(
+                engine.interpreter(&interpreter).unwrap(),
+                &component,
+                native,
+            );
         }
     }
 }

@@ -1,146 +1,286 @@
-// The public HTTP helper inside a real source component on the Node host. Providers own HTTP and
-// TLS; this covers the helper's request construction, refusals and resource ownership on the
-// canonical WIT boundary. Streaming, trailers, retained and dropped responses and throwing uploads
-// run in http-source.node.test.mjs with the shared wasm-http fixture.
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { createServer, type Server } from "node:http";
-import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+// The public HTTP helper bundled with the real generated guest bindings and browser host.
+// Providers own HTTP/TLS; this test exercises the binary resource/stream/future boundary.
+import { expect, test } from "bun:test";
+import { createContext, runInContext } from "node:vm";
 import path from "node:path";
-import { createHost } from "../src/node.ts";
-import { build } from "../src/tooling/index.ts";
+import { StandardHost } from "../src/interpreter/standard-host.ts";
+import { fetchHttpProvider } from "../src/interpreter/fetch-http-provider.ts";
+import { resolver } from "../src/tooling/resolver.ts";
 
-const sdk = path.resolve(import.meta.dir, "..");
-const WIT = `package test:helper;
-interface probe {
-  denied: async func(url: string) -> string;
-  invalid: async func(url: string) -> string;
-  captured: async func(url: string) -> string;
-  ownership: func() -> string;
-}
-world app { import wasi:http/client@0.3.0; export probe; }`;
-const SOURCE = `import { orb } from ${JSON.stringify(path.join(sdk, "src/guest.ts"))};
-import { fetch, HttpError } from ${JSON.stringify(path.join(sdk, "src/http.ts"))};
-import { Fields, Request } from "wasi:http/types@0.3.0";
+const imports = new Set(["wasi:http/client@0.3.0", "wasi:http/types@0.3.0"]);
+const bootstrap = await Bun.build({
+  entrypoints: [
+    path.resolve(import.meta.dir, "../../../../crates/executor-wasm/guest/src/standard.ts"),
+  ],
+  format: "iife",
+  target: "node",
+});
+const helper = await Bun.build({
+  entrypoints: ["tembra:test-http"],
+  plugins: [
+    {
+      name: "test-entry",
+      setup(builder) {
+        builder.onResolve({ filter: /^tembra:test-http$/ }, () => ({
+          path: "http",
+          namespace: "test-entry",
+        }));
+        builder.onLoad({ filter: /.*/, namespace: "test-entry" }, () => ({
+          contents: `import * as http from ${JSON.stringify(path.resolve(import.meta.dir, "../src/http.ts"))}; globalThis.__httpModule = http;`,
+          loader: "js",
+        }));
+      },
+    },
+    resolver(
+      path.resolve(import.meta.dir, ".."),
+      { entry: "src/http.ts", wit: "wit/http.wit" },
+      imports,
+    ),
+  ],
+  format: "iife",
+  target: "browser",
+});
+for (const built of [bootstrap, helper]) if (!built.success) throw new AggregateError(built.logs);
+const scripts = await Promise.all([bootstrap, helper].map((built) => built.outputs[0]!.text()));
 
-/** The error class and WIT error code an operation was refused with. */
-async function refusal(operation: () => Promise<unknown>): Promise<string> {
-  try {
-    await operation();
-    return "accepted";
-  } catch (error) {
-    const code = error instanceof HttpError ? String((error.code as { tag?: string })?.tag ?? error.code) : "";
-    return \`\${(error as Error).name}:\${code}\`;
-  }
-}
-
-export default orb({ name: "helper", apiVersion: 1, services: { probe: { methods: {
-  async denied(_e: unknown, _c: unknown, url: string) {
-    return refusal(() => fetch(url));
-  },
-  async invalid(_e: unknown, _c: unknown, url: string) {
-    return refusal(() => fetch(url, { headers: { "bad header": "x" } }));
-  },
-  async captured(_e: unknown, _c: unknown, url: string) {
-    const body = Uint8Array.of(97, 98, 99);
-    const pending = fetch(url, { method: "POST", body });
-    body.fill(122);
-    const response = await pending;
-    return response.text();
-  },
-  ownership() {
-    const fields = new Fields();
-    fields.append("x-raw", Uint8Array.of(255));
-    let refused = "accepted";
-    try {
-      Request.new(fields, {} as never, Promise.resolve({ tag: "ok", val: undefined }), undefined);
-    } catch (error) {
-      refused = (error as Error).name;
-    }
-    // The owned headers precede the bad body: refused argument lowering must not move them.
-    const kept = fields.get("x-raw").map((bytes) => bytes[0]).join(",");
-    fields[Symbol.dispose]();
-    return \`\${refused}:\${kept}\`;
-  },
-} } } });
-`;
-
-let server: Server;
-let origin = "";
-let artifact: Uint8Array;
-const received: { method: string; body: string }[] = [];
-
-beforeAll(async () => {
-  server = createServer((request, response) => {
-    let body = "";
-    request.on("data", (chunk) => (body += chunk));
-    request.on("end", () => {
-      received.push({ method: request.method!, body });
-      response.end(body || "ok");
-    });
+async function guest(fetch: NonNullable<Parameters<typeof fetchHttpProvider>[0]>) {
+  const provider = fetchHttpProvider(fetch);
+  const standard = new StandardHost(imports, [], 8 << 20, {
+    http: { provider: (url) => (url.origin === "https://example.test" ? provider : undefined) },
   });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const directory = await mkdtemp(
-    path.join(process.env.TEMBRA_TEST_ARTIFACTS ?? tmpdir(), "tembra-http-helper-"),
-  );
-  try {
-    await writeFile(path.join(directory, "contract.wit"), WIT);
-    await writeFile(path.join(directory, "orb.ts"), SOURCE);
-    const [built] = await build({
-      root: directory,
-      outDir: path.join(directory, "dist"),
-      builds: { helper: { entry: "orb.ts", wit: "contract.wit", world: "app", minify: false } },
-    });
-    artifact = new Uint8Array(await readFile(built!.path));
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-}, 120_000);
+  const globals: any = {
+    Uint8Array,
+    DataView,
+    Symbol,
+    __tembraContract: { imports: [...imports].map((contract) => ({ contract, type_only: false })) },
+    __hostSyncBytes: (packet: Uint8Array) => standard.sync(packet),
+    __hostAsync: (packet: Uint8Array) => standard.async(packet).then((reply) => reply.bytes),
+  };
+  const context = createContext(globals);
+  for (const script of scripts) runInContext(script!, context);
+  return {
+    fetch: globals.__httpModule.fetch as typeof import("../src/http.ts").fetch,
+    types: globals.__tembraStandard[
+      "wasi:http/types@0.3.0"
+    ] as typeof import("wasi:http/types@0.3.0"),
+    standard,
+    async boundary() {
+      globals.__tembraSweepStandard(true);
+      standard.endCallback();
+      await standard.settled();
+    },
+    async dispose() {
+      globals.__tembraSweepStandard(true);
+      await standard.dispose();
+      expect(standard.size).toBe(0);
+      expect(standard.inputBytes).toBe(0);
+    },
+  };
+}
 
-afterAll(() => {
-  server?.close();
+test("HTTP helper sends a standard request and consumes a streamed body once", async () => {
+  const calls: { url: string; init: RequestInit }[] = [];
+  const engine = await guest(async (url, init) => {
+    calls.push({ url: String(url), init: init! });
+    return new Response('"hé🌍"', { status: 201, headers: { "content-type": "application/json" } });
+  });
+  try {
+    const response = await engine.fetch("https://example.test/path?q=2&q=1", {
+      method: "POST",
+      body: "hé🌍",
+      headers: { "Content-Type": "text/plain" },
+    });
+    expect(response.status).toBe(201);
+    expect(response.ok).toBe(true);
+    expect(await response.json()).toBe("hé🌍");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://example.test/path?q=2&q=1");
+    expect(calls[0]!.init.method).toBe("POST");
+    expect(calls[0]!.init.body).toEqual(new TextEncoder().encode("hé🌍"));
+    expect(calls[0]!.init.redirect).toBe("manual");
+    expect([...(await response.trailers())]).toEqual([]);
+    await expect(response.text()).rejects.toThrow("already been consumed");
+    await engine.boundary();
+  } finally {
+    await engine.dispose();
+  }
 });
 
-/** Run one probe on a fresh host whose HTTP grant names only `granted`. */
-async function probe<T>(granted: string, run: (probe: any) => Promise<T>): Promise<T> {
-  const host = createHost({ isolated: { providers: { network: ["outbound"] } } });
+test("an untouched HTTP response survives a callback boundary", async () => {
+  const engine = await guest(async () => new Response("retained"));
   try {
-    await host.install({
-      artifact,
-      grants: { http: [{ provider: "outbound", origins: [granted] }] },
-    });
-    const reference: any = await host.get("helper::test:helper/probe", "main");
-    try {
-      return await run(reference);
-    } finally {
-      reference.release();
-    }
+    const response = await engine.fetch("https://example.test/retained");
+    await engine.boundary();
+    expect(await response.text()).toBe("retained");
+    await engine.boundary();
   } finally {
-    await host.close();
+    await engine.dispose();
   }
-}
+});
 
-test("grant denial and invalid requests are typed refusals that never reach the server", async () => {
-  received.length = 0;
-  const [denied, invalid] = await probe("http://127.0.0.1:1", async (helper) => [
-    await helper.denied(`${origin}/denied`),
-    await helper.invalid(`${origin}/invalid`),
-  ]);
-  expect(denied).toMatch(/^HttpError:/);
-  expect(invalid).not.toMatch(/^TypeError/);
-  expect(invalid).not.toBe("accepted");
-  expect(received).toEqual([]);
-}, 60_000);
+test("closing an untouched response cancels its host body once", async () => {
+  let closes = 0;
+  const engine = await guest(
+    async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("data: first\n\n"));
+          },
+          cancel() {
+            closes++;
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  );
+  try {
+    const response = await engine.fetch("https://example.test/events");
+    await response.close();
+    await response.close();
+    await engine.boundary();
+    expect(closes).toBe(1);
+    await expect(response.text()).rejects.toThrow("closed");
+  } finally {
+    await engine.dispose();
+  }
+});
+
+test("a throwing request producer never commits a truncated upload to Fetch", async () => {
+  let sent = 0;
+  const engine = await guest(async () => {
+    sent++;
+    return new Response("unexpected");
+  });
+  async function* broken() {
+    yield new Uint8Array(1000);
+    throw new Error("producer failed");
+  }
+  try {
+    await expect(
+      engine.fetch("https://example.test/upload", {
+        method: "POST",
+        body: broken(),
+        trailers: Promise.resolve({ "x-finished": "unused" }),
+      }),
+    ).rejects.toThrow();
+    expect(sent).toBe(0);
+    await engine.boundary();
+    expect(engine.standard.size).toBe(0);
+  } finally {
+    await engine.dispose();
+  }
+});
+
+test("grant denial and invalid requests do not call the HTTP provider", async () => {
+  let sent = 0;
+  const engine = await guest(async () => {
+    sent++;
+    return new Response("unexpected");
+  });
+  try {
+    await expect(engine.fetch("https://denied.test/")).rejects.toThrow("HTTP-request-denied");
+    for (const method of ["CONNECT", "trace", "TRACK"])
+      await expect(engine.fetch("https://example.test/", { method })).rejects.toThrow("forbidden");
+    for (const method of ["get", "HEAD"])
+      await expect(engine.fetch("https://example.test/", { method, body: "" })).rejects.toThrow(
+        "body",
+      );
+    for (const url of ["relative", "ftp://example.test/", "https://user:pass@example.test/"])
+      await expect(engine.fetch(url)).rejects.toThrow("absolute");
+    expect(sent).toBe(0);
+    await engine.boundary();
+  } finally {
+    await engine.dispose();
+  }
+});
+
+test("generated resource constructors and statics preserve ownership on a refused argument", async () => {
+  const engine = await guest(async () => new Response("unused"));
+  try {
+    const { Fields, Request, RequestOptions } = engine.types;
+    const fields = new Fields();
+    fields.append("x-raw", Uint8Array.of(255));
+    expect(fields.copyAll()).toEqual([["x-raw", Uint8Array.of(255)]]);
+    expect(Fields.name).toBe("Fields");
+    const baseline = engine.standard.size;
+    // The owned headers precede the bad body: failed argument encoding must not move them.
+    expect(() =>
+      Request.new(
+        fields,
+        {} as AsyncIterable<number>,
+        Promise.resolve({ tag: "ok", val: undefined }),
+        undefined,
+      ),
+    ).toThrow("AsyncIterable");
+    expect(fields.get("x-raw")).toEqual([Uint8Array.of(255)]);
+    expect(engine.standard.size).toBe(baseline);
+    const options = new RequestOptions();
+    options.setFirstByteTimeout(123456n);
+    expect(options.getFirstByteTimeout()).toBe(123456n);
+    const copy = options.clone();
+    expect(copy.getFirstByteTimeout()).toBe(123456n);
+    copy[Symbol.dispose]();
+    options[Symbol.dispose]();
+    fields[Symbol.dispose]();
+    expect(engine.standard.size).toBe(0);
+  } finally {
+    await engine.dispose();
+  }
+});
+
+test("standard request and header refusals preserve typed errors without a TypeError", async () => {
+  let calls = 0;
+  const engine = await guest(async () => {
+    calls++;
+    return new Response("unexpected");
+  });
+  try {
+    for (const [url, options, code] of [
+      ["https://example.test/a b", {}, undefined],
+      ["https://example.test/a?q=1 2", {}, undefined],
+      ["https://example.test/", { method: "BAD METHOD" }, undefined],
+      ["https://example.test/", { headers: { "bad name": "x" } }, "invalid-syntax"],
+    ] as const) {
+      const error = (await engine.fetch(url, options).catch((error: unknown) => error)) as {
+        name: string;
+        code: { tag: string } | undefined;
+        message: string;
+      };
+      expect(error.name).toBe("HttpError");
+      expect(error.code?.tag).toBe(code);
+      expect(error.message).toContain(code ?? "request rejected");
+    }
+    await expect(engine.fetch("https://exa mple.test/")).rejects.toThrow(
+      "host contains whitespace",
+    );
+    const refused = (await engine
+      .fetch("https://example.test/", { timeouts: { connect: 1n } })
+      .catch((error: unknown) => error)) as { name: string; code: { tag: string } };
+    expect(refused.name).toBe("HttpError");
+    expect(refused.code.tag).toBe("internal-error");
+    expect(calls).toBe(0);
+    await engine.boundary();
+    expect(engine.standard.size).toBe(0);
+  } finally {
+    await engine.dispose();
+  }
+});
 
 test("a byte body is captured when fetch is called", async () => {
-  received.length = 0;
-  expect(await probe(origin, (helper) => helper.captured(`${origin}/captured`))).toBe("abc");
-  expect(received).toEqual([{ method: "POST", body: "abc" }]);
-}, 60_000);
-
-test("a refused resource argument preserves ownership of earlier owned arguments", async () => {
-  expect(await probe(origin, (helper) => helper.ownership())).toBe("TypeError:255");
-}, 60_000);
+  let sent: Uint8Array | undefined;
+  const engine = await guest(async (_url, init) => {
+    sent = init.body as Uint8Array;
+    return new Response("ok");
+  });
+  try {
+    const bytes = Uint8Array.of(1, 2, 3);
+    const pending = engine.fetch("https://example.test/", { method: "POST", body: bytes });
+    bytes.fill(0);
+    expect(await (await pending).text()).toBe("ok");
+    expect(sent).toEqual(Uint8Array.of(1, 2, 3));
+    await engine.boundary();
+  } finally {
+    await engine.dispose();
+  }
+});

@@ -1,8 +1,8 @@
 // `Host.handleHttp` through the real kernel, the SDK root and the isolated `Revision`: the head
 // resolves early while the root (and the handler's context authority) lives until the physical
 // call ended. The contract answer and the interpreter port are test doubles at the backend seam;
-// incoming-HTTP semantics of the browser host are covered by the Chrome `ingress-browser.ts` scenario and the
-// real guest component path by the same Chrome scenario.
+// incoming-HTTP semantics of the browser host are covered by `standard-ingress.test.ts` and the
+// real guest bootstrap by `ingress-guest.test.ts`.
 import { expect, test } from "bun:test";
 import { isolate } from "#tembra-adapters";
 import { createHost } from "../src/node.ts";

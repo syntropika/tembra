@@ -1,52 +1,57 @@
 import { expect, test } from "bun:test";
 import { readChunks, writeChunks } from "../src/guest.ts";
 
-/** A lifted `stream<u8>` as the component runtime exposes it: chunks plus an explicit drop. */
-function lifted(chunks: Uint8Array[]) {
-  let dropped = 0;
+const READ_CHUNK = Symbol.for("tembra.wasi.stream.read-chunk");
+
+test("readChunks returns interpreter chunks unchanged without per-byte iteration", async () => {
+  const chunks = [Uint8Array.of(0, 255, 128), Uint8Array.of(7)];
+  let iterated = false;
   const stream = {
-    drop() {
-      dropped++;
+    async [READ_CHUNK]() {
+      return chunks.shift();
     },
-    async *[Symbol.asyncIterator]() {
-      yield* chunks;
+    async *[Symbol.asyncIterator](): AsyncGenerator<number> {
+      iterated = true;
+      yield 0;
     },
   };
-  return { stream, dropped: () => dropped };
-}
-
-test("readChunks yields the runtime's chunks unchanged and drops the stream", async () => {
-  const first = Uint8Array.of(1, 2);
-  const second = Uint8Array.of(3);
-  const { stream, dropped } = lifted([first, second]);
-  const seen: Uint8Array[] = [];
-  for await (const chunk of readChunks(stream)) seen.push(chunk);
-  expect(seen).toEqual([first, second]);
-  expect(seen[0]).toBe(first);
-  expect(dropped()).toBe(1);
+  const read: Uint8Array[] = [];
+  for await (const chunk of readChunks(stream)) read.push(chunk);
+  expect(read).toEqual([Uint8Array.of(0, 255, 128), Uint8Array.of(7)]);
+  expect(iterated).toBe(false);
 });
 
-test("readChunks drops the stream when the reader stops early", async () => {
-  const { stream, dropped } = lifted([Uint8Array.of(1), Uint8Array.of(2)]);
-  const reader = readChunks(stream);
-  await reader.next();
-  await reader.return();
-  expect(dropped()).toBe(1);
-});
-
-test("writeChunks passes async sources through and adapts synchronous ones lazily", async () => {
-  const source = (async function* () {
-    yield Uint8Array.of(9);
-  })();
-  expect(writeChunks(source)).toBe(source);
-  let pulled = 0;
-  function* chunks() {
-    pulled++;
-    yield Uint8Array.of(4, 5);
+test("readChunks batches any other byte iterable into bounded chunks", async () => {
+  async function* bytes(): AsyncGenerator<number> {
+    for (let index = 0; index < (64 << 10) + 3; index++) yield index % 256;
   }
-  const adapted = writeChunks(chunks());
-  expect(pulled).toBe(0);
-  const seen: Uint8Array[] = [];
-  for await (const chunk of adapted) seen.push(chunk);
-  expect(seen).toEqual([Uint8Array.of(4, 5)]);
+  const read: Uint8Array[] = [];
+  for await (const chunk of readChunks(bytes())) read.push(chunk);
+  expect(read.map((chunk) => chunk.length)).toEqual([64 << 10, 3]);
+  expect(Array.from(read[1]!)).toEqual([0, 1, 2]);
+});
+
+test("writeChunks exposes chunks to the interpreter and bytes to any other consumer", async () => {
+  const WRITE_CHUNKS = Symbol.for("tembra.wasi.stream.write-chunks");
+  const source = writeChunks([Uint8Array.of(1, 2), Uint8Array.of(3)]);
+  const chunks = (source as unknown as Record<symbol, () => Iterator<Uint8Array>>)[WRITE_CHUNKS]!();
+  expect([chunks.next().value, chunks.next().value, chunks.next().done]).toEqual([
+    Uint8Array.of(1, 2),
+    Uint8Array.of(3),
+    true,
+  ]);
+  const bytes: number[] = [];
+  for await (const byte of source) bytes.push(byte);
+  expect(bytes).toEqual([1, 2, 3]);
+  // readChunks over a non-interpreter iterable still batches correctly.
+  const read: Uint8Array[] = [];
+  for await (const chunk of readChunks(
+    writeChunks(
+      (async function* () {
+        yield Uint8Array.of(9);
+      })(),
+    ),
+  ))
+    read.push(chunk);
+  expect(read).toEqual([Uint8Array.of(9)]);
 });

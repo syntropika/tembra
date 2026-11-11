@@ -40,7 +40,7 @@ function* pattern(size: number, seed: number): Generator<Uint8Array> {
 }
 
 /** Read a byte stream to its end, checking each chunk's edges against the pattern. */
-async function drain(stream: AsyncIterable<Uint8Array>, seed: number): Promise<number> {
+async function drain(stream: AsyncIterable<number>, seed: number): Promise<number> {
   let total = 0;
   for await (const chunk of readChunks(stream)) {
     const last = total + chunk.length - 1;
@@ -77,13 +77,12 @@ export default orb({
           const [upload, uploaded] = accepted.receive();
           // End of stream arrives only after the client's half-close.
           const up = await drain(upload, 1);
-          // Lifted WIT futures are handles: `read()` returns their value once.
-          const sentResult = await sent.read();
-          const uploadResult = await uploaded.read();
+          const sentResult = await sent;
+          const uploadResult = await uploaded;
           const echoed = accepted.send(writeChunks(pattern(size, 2)));
           const down = await drain(download, 2);
-          const echoResult = await echoed.read();
-          const downloadResult = await downloaded.read();
+          const echoResult = await echoed;
+          const downloadResult = await downloaded;
           return [
             listening,
             peers,
@@ -108,21 +107,16 @@ export default orb({
           using socket = TcpSocket.create("ipv4");
           await socket.connect(loopback(port));
           const [stream, done] = socket.receive();
-          // A readable end with a pending read must not be dropped: cancel the read, await it,
-          // then drop the stream (the runtime refuses "cancel and await before dropping").
-          const readable = stream as unknown as {
-            read(count: number): Promise<Uint8Array>;
-            cancelRead(): unknown;
-          } & Disposable;
-          const reading = readable.read(64).then(
-            (bytes) => (bytes.length ? "data" : "cancelled"),
-            () => "cancelled",
-          );
+          const reading = stream[Symbol.asyncIterator]()
+            .next()
+            .then(
+              (next) => (next.done ? "end" : "data"),
+              () => "dropped",
+            );
           await tembra.wait(20);
-          readable.cancelRead();
+          (stream as unknown as Disposable)[Symbol.dispose]();
           const read = await reading;
-          readable[Symbol.dispose]();
-          return `${read}|${(await done.read()).tag}`;
+          return `${read}|${(await done).tag}`;
         },
         async datagrams(
           _environment: unknown,

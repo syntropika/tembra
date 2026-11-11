@@ -1,10 +1,12 @@
 //! Keep Wasmtime on an owned worker; only scope-bound requests cross to the native host.
 //!
-//! One session owns one component Store per Orb revision, compiled or built from source, on a
-//! dedicated thread. The Store speaks the private host protocol (see `component::worker`);
-//! this owner serializes its callbacks, admits them and publishes its terminal state.
-use crate::protocol::{GuestCommand, Operation};
-use crate::{Engine, failure};
+//! One session owns one Store per Orb revision. A source revision runs the interpreter core
+//! module behind the private fixed-buffer ABI in `abi.rs`. Its preview 1 imports carry no
+//! filesystem or network authority; generated WASI calls use its separately granted context.
+//! A compiled revision runs its component on the same owner and
+//! speaks the same private host protocol (see `component::worker`).
+use crate::protocol::GuestCommand;
+use crate::{Engine, abi::Operation, failure};
 use async_channel::{Receiver, Sender};
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use serde_json::Value;
@@ -22,11 +24,13 @@ pub(crate) mod diagnostics;
 
 /// Blocking threads of one Store's runtime, used by upstream WASI filesystem calls.
 const STORE_BLOCKING_THREADS: usize = 2;
-mod pipe;
-pub(crate) mod stream_adapter;
+mod runtime;
+mod standard;
+mod steps;
+pub(crate) mod wasi;
 
-pub(crate) use pipe::{Pipe, PipeConsumer};
-pub(crate) use stream_adapter::Compiled as StreamAdapter;
+pub(crate) use runtime::check;
+pub(crate) use standard::{Pipe, PipeConsumer, StreamAdapter, adapter as stream_adapter};
 
 pub(crate) enum Event {
     Host {
@@ -179,17 +183,17 @@ struct Owner {
     packet_bytes: usize,
     admission: Arc<futures::lock::Mutex<()>>,
     poison: Arc<Mutex<Option<String>>>,
+    heap_bytes: usize,
     diagnostics: diagnostics::Diagnostics,
     admission_ms: u64,
-    /// The callback epochs of this revision's admitted callbacks.
-    scope: crate::io::CallbackScope,
+    io: crate::io::SourceIo,
 }
 
 impl Owner {
     /// Release buffered replies and refuse future calls; the first recorded reason wins.
     /// The abandoned callback's epoch ends first, so its pending standard work is revoked.
     fn abandon(&self, events: &Receiver<Event>, reason: &str) {
-        self.scope.end_callback();
+        self.io.scope().end_callback();
         close_replies(events);
         self.poison
             .lock()
@@ -199,9 +203,9 @@ impl Owner {
 }
 
 impl Drop for Owner {
-    /// Close the command stream and join only this revision's worker.
+    /// Close the command stream and join only this interpreter's worker.
     fn drop(&mut self) {
-        self.scope.end_callback();
+        self.io.scope().end_callback();
         self.commands.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -216,7 +220,18 @@ pub(crate) struct Session(Rc<Owner>);
 impl Session {
     /// Share the callback epoch so a foreign event receiver can end the callback.
     pub(crate) fn scope(&self) -> crate::io::CallbackScope {
-        self.0.scope.clone()
+        self.0.io.scope().clone()
+    }
+
+    /// Start one source Store with this installation's checked standard context.
+    pub(crate) fn start(engine: Engine, orb: String, io: crate::io::SourceIo) -> Result<Self> {
+        let worker = engine.clone();
+        let standard = io
+            .take_standard()
+            .ok_or_else(|| failure("source installation context was already used"))?;
+        Self::spawn(&engine, orb, io, move |commands, poison, diagnostics| {
+            runtime::run(worker, commands, poison, diagnostics, standard)
+        })
     }
 
     /// Run one Store loop on a dedicated thread behind the shared admission and poison owner.
@@ -226,7 +241,7 @@ impl Session {
     pub(crate) fn spawn<F, Run>(
         engine: &Engine,
         orb: String,
-        scope: crate::io::CallbackScope,
+        io: crate::io::SourceIo,
         run: F,
     ) -> Result<Self>
     where
@@ -241,6 +256,7 @@ impl Session {
     {
         let (send, receive) = mpsc::channel();
         let packet_bytes = engine.limits.packet_bytes;
+        let heap_bytes = engine.limits.memory_bytes / 2;
         let diagnostics = diagnostics::Diagnostics {
             orb,
             sink: engine.logger.clone(),
@@ -282,13 +298,14 @@ impl Session {
             packet_bytes,
             admission: Arc::new(futures::lock::Mutex::new(())),
             poison,
+            heap_bytes,
             diagnostics,
             admission_ms,
-            scope,
+            io,
         })))
     }
 
-    /// Reserve the serialized Store before the host enters a synchronous factory.
+    /// Reserve the serialized interpreter before the host enters a synchronous factory.
     pub(crate) async fn reserve_factory(&self) -> Result<futures::lock::OwnedMutexGuard<()>> {
         let admission = std::pin::pin!(self.0.admission.clone().lock_owned());
         let deadline = std::pin::pin!(futures_timer::Delay::new(std::time::Duration::from_millis(
@@ -302,6 +319,30 @@ impl Session {
                 "factory admission exceeded its wait limit; possible causal reentry",
             )),
         }
+    }
+
+    /// Load source without issuing any host authority to module initialization.
+    pub(crate) fn load(&self, source: &str, contract: Value) -> Result<Value> {
+        let packet = crate::protocol::Load {
+            source: source.into(),
+            heap_bytes: self.0.heap_bytes,
+            contract,
+            instruction_ticks: crate::protocol::DEFAULT_INSTRUCTION_TICKS,
+            builtins: self.0.io.builtins(),
+        };
+        self.blocking(
+            Operation::Load,
+            serde_json::to_string(&packet).map_err(failure)?,
+            |packet, _| self.log(packet),
+        )
+    }
+
+    /// Accept diagnostics independently of execution authority and attribute them to this revision.
+    pub(crate) fn log(&self, packet: &str) -> Result<Value> {
+        self.0
+            .diagnostics
+            .accept(packet)
+            .unwrap_or_else(|| Err(failure("module initialization has no host capability")))
     }
 
     /// Queue pure guest bookkeeping after the native scope's last owner is released.
@@ -353,7 +394,7 @@ impl Session {
             });
             if let Err(error) = outcome {
                 let cause = self.0.poison.lock().expect("poison state").clone();
-                self.0.diagnostics.emit(
+                let _ = self.0.diagnostics.emit(
                     crate::protocol::LogLevel::Error,
                     match cause {
                         Some(cause) => format!("revision quarantined: {cause}"),
@@ -426,11 +467,11 @@ impl Session {
             ));
         }
         if packet.len() > self.0.packet_bytes {
-            return Err(failure("host packet exceeds its configured limit"));
+            return Err(failure("interpreter packet exceeds its configured limit"));
         }
         if self.0.busy.replace(true) {
             return Err(failure(
-                "concurrent or reentrant calls to this revision are not supported",
+                "concurrent or reentrant calls to this interpreter are not supported",
             ));
         }
         let (ingress, stream) = match carrier {
@@ -446,7 +487,7 @@ impl Session {
             stream,
         };
         // Transport streams opened by this callback belong to its epoch until it completes.
-        self.0.scope.begin_callback();
+        self.0.io.scope().begin_callback();
         if self
             .0
             .commands
@@ -455,9 +496,9 @@ impl Session {
             .send(command)
             .is_err()
         {
-            self.0.scope.end_callback();
+            self.0.io.scope().end_callback();
             self.0.busy.set(false);
-            return Err(failure("component worker has stopped"));
+            return Err(failure("interpreter worker has stopped"));
         }
         Ok(receive)
     }
@@ -493,7 +534,7 @@ impl Session {
                 // Carrier events exist only on platform ingress exchanges.
                 Event::Ingress(_) => {}
                 Event::Done(result) => {
-                    self.0.scope.end_callback();
+                    self.0.io.scope().end_callback();
                     guard.completed = true;
                     return decode(result);
                 }
@@ -521,7 +562,7 @@ impl Session {
         }
     }
 
-    /// Wait for the serialized Store; a cancelled caller leaves the queue before guest code.
+    /// Wait for the serialized interpreter; a cancelled caller leaves the queue before guest code.
     pub(crate) async fn admit(
         &self,
         cancellation: Option<&tembra::Cancellation>,
@@ -591,7 +632,7 @@ impl Session {
                 match futures::future::select(next, cancelled).await {
                     futures::future::Either::Left((event, _)) => event,
                     futures::future::Either::Right(_) => {
-                        self.0.scope.end_callback();
+                        self.0.io.scope().end_callback();
                         revoked = true;
                         release.release();
                         continue;
@@ -618,7 +659,7 @@ impl Session {
                 Event::Done(result) => {
                     // End this callback's epoch before waiting, so abandoned requests settle now;
                     // their completion is still awaited. A stopped Store only signals them.
-                    self.0.scope.end_callback();
+                    self.0.io.scope().end_callback();
                     if self.0.poison.lock().expect("poison state").is_some() {
                         release.release();
                     }
@@ -727,7 +768,7 @@ impl Session {
                 delivery.commit();
             }
             if let (Some(end), Some((pipe, _slot))) = (end, stream) {
-                crate::bindings::pump(end, pipe, self.0.scope.cancelled()).await;
+                crate::bindings::pump(end, pipe, self.0.io.scope().cancelled()).await;
             }
         }
         .boxed_local()
@@ -763,7 +804,7 @@ impl Drop for Busy<'_> {
         } else {
             self.owner.abandon(
                 self.events,
-                "component callback driver ended before physical settlement",
+                "interpreter callback driver ended before physical settlement",
             );
         }
     }
@@ -795,7 +836,7 @@ fn publish_after_shutdown(
             .send_blocking(Event::Done(Err(error.clone())))
             .is_err()
         {
-            diagnostics.emit(
+            let _ = diagnostics.emit(
                 crate::protocol::LogLevel::Error,
                 format!("revision quarantined: {error}"),
             );
@@ -836,7 +877,8 @@ pub(crate) fn encode(result: Result<String>, limit: usize) -> std::result::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use crate::{Contract, Limits};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn callback_release_wakes_each_waiter_once_after_repeated_polls() {
@@ -917,5 +959,291 @@ mod tests {
             matches!(observed.recv().unwrap(), Ok(Event::Done(Err(error))) if error == "quarantined")
         );
         observer.join().unwrap();
+    }
+
+    /// Abandon an actual buffered synchronous import and prove Store destruction cannot hang.
+    #[test]
+    #[ignore = "requires TEMBRA_WASM_ENGINE"]
+    fn abandoned_buffered_sync_import_releases_worker() {
+        let bytes =
+            std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE"))
+                .unwrap();
+        let engine = Engine::new(Limits {
+            timeout_ms: 500,
+            ..Limits::default()
+        })
+        .unwrap()
+        .interpreter(&bytes)
+        .unwrap();
+        let session = Session::start(
+            engine.clone(),
+            "abandoned".into(),
+            crate::io::SourceIo::new(
+                &engine.providers,
+                &[],
+                &crate::Grants::default(),
+                &crate::Cli::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let contract = Contract::from_source("checks.wit","package example:abandon; interface checks { run: func() -> u32; } world test { export checks; }",None).unwrap();
+        session.load(r#"globalThis.__tembraOrb={services:{checks:{create(){__hostSync('{"operation":"state.read"}');return {}},methods:{run(){return 1}}}}};"#,contract.describe()).unwrap();
+        let events = session
+            .begin(
+                Operation::Declare,
+                serde_json::json!({"kind":"create","environment":1,"service":"checks"}).to_string(),
+            )
+            .unwrap();
+        let guard = Busy {
+            owner: &session.0,
+            events: &events,
+            completed: false,
+        };
+        let started = Instant::now();
+        while events.is_empty() && started.elapsed() < Duration::from_millis(400) {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            !events.is_empty(),
+            "the real synchronous import was not buffered"
+        );
+        drop(guard);
+        drop(events);
+        let started = Instant::now();
+        drop(session);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(engine.instances(), 0);
+    }
+
+    /// Load the real interpreter into a bare Store for transport-level checks.
+    fn transport(memory_bytes: usize) -> (Engine, tokio::runtime::Runtime) {
+        let bytes =
+            std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE"))
+                .unwrap();
+        let engine = Engine::new(Limits {
+            memory_bytes,
+            ..Limits::default()
+        })
+        .unwrap()
+        .interpreter(&bytes)
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        (engine, runtime)
+    }
+
+    /// Snapshot capture requires a loaded idle heap and returns its bytes through the ABI.
+    #[test]
+    #[ignore = "requires TEMBRA_WASM_ENGINE"]
+    fn idle_heap_snapshot_capture() {
+        let (engine, runtime) = transport(Limits::default().memory_bytes);
+        let contract = Contract::from_source("checks.wit", "package example:capture; interface checks { run: func() -> u32; } world test { export checks; }", None).unwrap();
+        runtime.block_on(async {
+            let diagnostics = diagnostics::Diagnostics {
+                orb: "capture".into(),
+                sink: None,
+            };
+            let (mut store, driver) = runtime::instantiate(
+                &engine,
+                diagnostics,
+                crate::io::StandardContext {
+                    clocks: None,
+                    resolve: false,
+                    wasi: wasmtime_wasi::WasiCtxBuilder::new(),
+                    allowed: Default::default(),
+                    scope: {
+                        let scope = crate::io::CallbackScope::default();
+                        scope.begin_callback();
+                        scope
+                    },
+                    grants: Default::default(),
+                },
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            assert!(driver.capture(&mut store).await.unwrap().is_err());
+            let load = serde_json::json!({
+                "source": "globalThis.__tembraOrb={services:{checks:{methods:{run(){return 1}}}}};",
+                "heap_bytes": 32 << 20,
+                "contract": contract.describe(),
+            });
+            let outcome = driver
+                .call(Operation::Load, load.to_string(), &mut store)
+                .await
+                .unwrap();
+            assert!(outcome.value.is_ok() && !outcome.interrupted);
+            let snapshot = driver.capture(&mut store).await.unwrap().unwrap();
+            assert!(snapshot.len() > 1024, "snapshot has heap contents");
+        });
+    }
+
+    /// The host-supplied memory maximum bounds total linear memory independently of the VM heap.
+    #[test]
+    #[ignore = "requires TEMBRA_WASM_ENGINE"]
+    fn imported_memory_maximum_bounds_linear_memory_beyond_the_heap_limit() {
+        let memory_bytes = 8 << 20;
+        let (engine, runtime) = transport(memory_bytes);
+        let contract = Contract::from_source("checks.wit", "package example:memory; interface checks { run: func() -> u32; } world test { export checks; }", None).unwrap();
+        runtime.block_on(async {
+            let diagnostics = diagnostics::Diagnostics {
+                orb: "memory".into(),
+                sink: None,
+            };
+            let (mut store, driver) = runtime::instantiate(
+                &engine,
+                diagnostics,
+                crate::io::StandardContext {
+                    clocks: None,
+                    resolve: false,
+                    wasi: wasmtime_wasi::WasiCtxBuilder::new(),
+                    allowed: Default::default(),
+                    scope: { let scope = crate::io::CallbackScope::default(); scope.begin_callback(); scope },
+                    grants: Default::default(),
+                },
+                Default::default()
+            )
+            .await
+            .unwrap();
+            // The VM heap limit is deliberately larger than the linear-memory maximum.
+            let load = serde_json::json!({
+                "source": "const chunks=[];for(let i=0;i<64;i++)chunks.push(new Uint8Array(1<<20));globalThis.__tembraOrb={services:{checks:{methods:{run(){return 1}}}}};",
+                "heap_bytes": 256 << 20,
+                "contract": contract.describe(),
+            });
+            let outcome = driver.call(Operation::Load, load.to_string(), &mut store).await;
+            let failed = outcome.map_or(true, |outcome| outcome.value.is_err() && outcome.interrupted);
+            assert!(failed, "allocation beyond the memory maximum must fail the instance");
+            let memory = store.data().memory.unwrap();
+            assert!(memory.data_size(&store) <= memory_bytes);
+        });
+    }
+
+    /// Start a session whose fuel and wall time leave the guest tick bound as the first limit.
+    fn tick_bounded_session(orb: &str) -> (Engine, Session) {
+        let bytes =
+            std::fs::read(std::env::var_os("TEMBRA_WASM_ENGINE").expect("TEMBRA_WASM_ENGINE"))
+                .unwrap();
+        let engine = Engine::new(Limits {
+            fuel: 10_000_000_000,
+            timeout_ms: 5000,
+            ..Limits::default()
+        })
+        .unwrap()
+        .interpreter(&bytes)
+        .unwrap();
+        let session = Session::start(
+            engine.clone(),
+            orb.into(),
+            crate::io::SourceIo::new(
+                &engine.providers,
+                &[],
+                &crate::Grants::default(),
+                &crate::Cli::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        (engine, session)
+    }
+
+    /// Source factories cannot enter through dispatch, and refusals do not corrupt declarations.
+    #[test]
+    #[ignore = "requires TEMBRA_WASM_ENGINE"]
+    fn source_commands_cannot_cross_execution_entrypoints() {
+        let (_engine, session) = tick_bounded_session("entrypoints");
+        let contract = Contract::from_source("checks.wit", "package example:entrypoints; interface checks { run: func() -> u32; } world test { export checks; }", None).unwrap();
+        session.load(r#"globalThis.__tembraOrb={create(){return {value:7}},services:{checks:{methods:{run(environment){return environment.value}}}}};"#,contract.describe()).unwrap();
+        let create =
+            serde_json::json!({"kind":"create","environment":1,"service":null}).to_string();
+        let invoke = serde_json::json!({"kind":"invoke","environment":1,"service":"checks","method":"run","args":[]}).to_string();
+        let no_host =
+            |_: &str, _: bool| -> tembra::Result<Value> { panic!("no host requests expected") };
+        let error = session
+            .blocking(Operation::Start, create.clone(), no_host)
+            .unwrap_err();
+        assert!(
+            error.message.contains("Unknown interpreter command"),
+            "{error}"
+        );
+        let error = session
+            .blocking(Operation::Declare, invoke.clone(), no_host)
+            .unwrap_err();
+        assert!(
+            error.message.contains("Only factory declarations"),
+            "{error}"
+        );
+        session
+            .blocking(Operation::Declare, create, no_host)
+            .unwrap();
+        assert_eq!(
+            session.blocking(Operation::Start, invoke, no_host).unwrap(),
+            serde_json::json!(7)
+        );
+    }
+
+    /// Quarantine actual JavaScript tick exhaustion even when it returns without a Wasm trap.
+    #[test]
+    #[ignore = "requires TEMBRA_WASM_ENGINE"]
+    fn exhausted_guest_with_queued_reactions_is_quarantined() {
+        let (engine, session) = tick_bounded_session("exhausted");
+        let contract = Contract::from_source("checks.wit", "package example:exhausted; interface checks { run: func() -> u32; } world test { export checks; }", None).unwrap();
+        let source = r#"globalThis.__tembraOrb={services:{checks:{methods:{run(){
+          for(let i=0;i<4000;i++) Promise.resolve().then(()=>i+1);
+          while(true){}
+        }}}}};"#;
+        session.blocking(Operation::Load, serde_json::json!({"source":source,"heap_bytes":64<<20,"contract":contract.describe(),"instruction_ticks":50}).to_string(), |_,_| Ok(Value::Null)).unwrap();
+        let error = session.blocking(Operation::Start, serde_json::json!({"kind":"invoke","environment":1,"service":"checks","method":"run","args":[]}).to_string(), |_,_| Ok(Value::Null)).unwrap_err();
+        assert!(error.to_string().contains("interrupted"), "{error}");
+        assert!(
+            !error.to_string().contains("interpreter trap"),
+            "test must reach the guest tick limit: {error}"
+        );
+        let error = session.begin(Operation::Start, "{}".into()).err().unwrap();
+        assert_eq!(error.reason, "wasm_executor_quarantined");
+        drop(session);
+        assert_eq!(engine.instances(), 0);
+    }
+
+    /// Cleanup after a settled callback receives the configured tick bound, not the default.
+    #[test]
+    #[ignore = "requires TEMBRA_WASM_ENGINE"]
+    fn cleanup_uses_the_configured_instruction_bound() {
+        let (engine, session) = tick_bounded_session("cleanup");
+        let contract = Contract::from_source("checks.wit", "package example:cleanup; interface checks { run: func() -> u32; } world test { export checks; }", None).unwrap();
+        // The rejection handler runs only when cleanup revokes the unsent wait effect. Its loop
+        // fits the default budget but not the configured one.
+        let source = r#"globalThis.__tembraOrb={services:{checks:{methods:{run(){
+          tembra.wait(1).catch(()=>{for(let i=0;i<5000000;i++){}});
+          return 1;
+        }}}}};"#;
+        let load = crate::protocol::Load {
+            source: source.into(),
+            heap_bytes: 64 << 20,
+            contract: contract.describe(),
+            instruction_ticks: 50,
+            builtins: Default::default(),
+        };
+        session
+            .blocking(
+                Operation::Load,
+                serde_json::to_string(&load).unwrap(),
+                |_, _| Ok(Value::Null),
+            )
+            .unwrap();
+        let error = session.blocking(Operation::Start, serde_json::json!({"kind":"invoke","environment":1,"service":"checks","method":"run","args":[]}).to_string(), |_,_| Ok(Value::Null)).unwrap_err();
+        // The default budget would let cleanup finish and return `Ok(1)`.
+        assert!(error.to_string().contains("interrupted"), "{error}");
+        assert!(
+            !error.to_string().contains("interpreter trap"),
+            "test must reach the guest tick limit: {error}"
+        );
+        let error = session.begin(Operation::Start, "{}".into()).err().unwrap();
+        assert_eq!(error.reason, "wasm_executor_quarantined");
+        drop(session);
+        assert_eq!(engine.instances(), 0);
     }
 }

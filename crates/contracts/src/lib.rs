@@ -20,16 +20,12 @@ mod prepare;
 mod provenance;
 mod resource_profile;
 mod selection;
-#[doc(hidden)]
-pub mod shared;
-mod shared_runtime;
 mod signatures;
-mod source;
 #[cfg(feature = "authoring")]
 mod standard;
 mod validate;
 
-pub use artifact::{Artifact, Identity};
+pub use artifact::{Artifact, Identity, Implementation as ArtifactImplementation};
 #[cfg(feature = "authoring")]
 pub use authoring::Contract;
 pub use hooks::{ContributionBinding, HookBinding, HookComposition, HookPlan};
@@ -45,10 +41,6 @@ pub use permissions::{FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCa
 pub use port::envelope;
 pub use resource_profile::ResourceSignature;
 pub use selection::OrbProvider;
-pub use shared_runtime::{SharedRuntime, shared_runtime_import};
-pub use source::{
-    HOST, LIFECYCLE, RUNTIME_INTERNALS, SOURCE_PACKAGE, SOURCE_WIT, runtime_internal,
-};
 pub use validate::javascript_name;
 
 /// A diagnostic produced before an Orb enters the kernel.
@@ -92,10 +84,6 @@ mod provenance_tests;
 mod resource_identity_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod resource_profile_tests;
-#[cfg(all(test, feature = "authoring"))]
-mod shared_tests;
-#[cfg(all(test, feature = "authoring"))]
-mod source_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod tests;
 #[cfg(all(test, feature = "authoring"))]

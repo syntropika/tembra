@@ -88,14 +88,12 @@ async function settled(host: Awaited<ReturnType<typeof createHost>>): Promise<vo
 }
 
 /** Serve the authored handler in Chrome and check each required behaviour. */
-export async function verifyIngressScenario(): Promise<string> {
+export async function verifyIngressScenario(engine?: URL): Promise<string> {
   const handler = await fixture("ingress");
   const ledger = await fixture("ledger");
-  const requires = {
-    "example:ingress/ledger@1.0.0": { orb: "ledger", apiVersion: 1 },
-  };
+  const requires = { "example:ingress/ledger@1.0.0": { orb: "ledger", apiVersion: 1 } };
   const report: string[] = [];
-  const host = await createHost({});
+  const host = await createHost({ isolated: { ...(engine ? { engine } : {}) } });
   try {
     await host.install({ artifact: ledger });
     await host.install({ artifact: handler, requires });
@@ -206,7 +204,9 @@ export async function verifyIngressScenario(): Promise<string> {
       [true, { tag: "HTTP-request-denied" }],
       "handler error-code",
     );
-    report.push("handler error-code reported after settlement");
+    const trapped = await host.handleHttp(ORB, request("/trap")).catch((error) => error);
+    same(trapped instanceof Error && !(trapped instanceof HttpHandlerError), true, "handler trap");
+    report.push("handler error-code and trap reported after settlement");
 
     // Disconnects: while idle in a request read, and while writing.
     const idleBody = source();
@@ -229,18 +229,19 @@ export async function verifyIngressScenario(): Promise<string> {
     );
     report.push("disconnect while idle in a request read and while writing");
 
-    // Ignoring an upload, on either result lane, still ends its application-owned iterator.
-    const ignored = source();
-    await text(await host.handleHttp(ORB, request("/revision", ignored.body)));
+    // Cancellation through the caller's signal.
+    const cancel = new AbortController();
+    const slow = await host.handleHttp(ORB, request("/slow"), { signal: cancel.signal });
+    const slowEvents = slow.body[Symbol.asyncIterator]();
+    await slowEvents.next();
+    const pending = slowEvents.next().then(
+      () => "delivered",
+      () => "rejected",
+    );
+    cancel.abort();
+    same(await pending, "rejected", "cancelled delivery");
     await settled(host);
-    same(ignored.state.returned, 1, "ignored successful request body returned");
-    const refusedBody = source();
-    const bodyError = await host
-      .handleHttp(ORB, request("/error", refusedBody.body))
-      .catch((error) => error);
-    same(bodyError instanceof HttpHandlerError, true, "typed refusal with an unread upload");
-    await settled(host);
-    same(refusedBody.state.returned, 1, "ignored refused request body returned");
+    report.push("cancellation through the caller's signal");
 
     // Reload: an in-flight stream drains on the old revision; new requests reach the new one.
     const before = Number(await text(await host.handleHttp(ORB, request("/revision"))));
@@ -312,7 +313,7 @@ export async function verifyIngressScenario(): Promise<string> {
 
   // Timeout covers the body and is terminal for the revision.
   const limited = await createHost({
-    isolated: { limits: { timeoutMs: 1500 } },
+    isolated: { ...(engine ? { engine } : {}), limits: { timeoutMs: 1500 } },
   });
   try {
     await limited.install({ artifact: ledger });
@@ -328,46 +329,5 @@ export async function verifyIngressScenario(): Promise<string> {
     await limited.close();
   }
   report.push("timeout covers the streamed body and retires the revision");
-  // Caller cancellation of a running producer quarantines its revision.
-  const cancelling = await createHost({});
-  try {
-    await cancelling.install({ artifact: ledger });
-    await cancelling.install({ artifact: handler, requires });
-    const host = cancelling;
-    // Cancellation through the caller's signal.
-    const cancel = new AbortController();
-    const slow = await host.handleHttp(ORB, request("/slow"), {
-      signal: cancel.signal,
-    });
-    const slowEvents = slow.body[Symbol.asyncIterator]();
-    await slowEvents.next();
-    const pending = slowEvents.next().then(
-      () => "delivered",
-      () => "rejected",
-    );
-    cancel.abort();
-    same(await pending, "rejected", "cancelled delivery");
-    await settled(host);
-  } finally {
-    await cancelling.close();
-  }
-  report.push("cancellation through the caller's signal rejects the pending read");
-  // A trap quarantines its revision, so it runs on its own installation.
-  const trapping = await createHost({});
-  try {
-    await trapping.install({ artifact: ledger });
-    await trapping.install({ artifact: handler, requires });
-    const trapped = await trapping.handleHttp(ORB, request("/trap")).catch((error) => error);
-    same(trapped instanceof Error && !(trapped instanceof HttpHandlerError), true, "handler trap");
-    const rejectedBody = source();
-    const after = await trapping
-      .handleHttp(ORB, request("/revision", rejectedBody.body))
-      .catch((error) => String(error));
-    same(/quarantined/.test(String(after)), true, "trapped revision refuses later requests");
-    same(rejectedBody.state.returned, 1, "unentered request body returned");
-  } finally {
-    await trapping.close();
-  }
-  report.push("handler trap quarantines its revision");
   return `incoming HTTP: ${report.join("; ")}`;
 }

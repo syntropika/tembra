@@ -1,11 +1,9 @@
 //! Own immutable Orb data and its prepared contract before creating any executable guest.
 //!
-//! An artifact is a real WebAssembly component with `tembra:orb` (identity and compact contract)
-//! appended. A source Orb built from JavaScript also carries `tembra:runtime`, naming the private
-//! package it was built against. The actual WIT types are verified against the contract by the
-//! native `authoring` verifier before any linking; metadata is never trusted alone. A source
-//! component imports the pinned shared runtime core instead of embedding it
-//! ([`crate::SharedRuntime`]); a compiled component imports no core module.
+//! An artifact is a WebAssembly component container. Source Orbs are an empty component carrying
+//! only `tembra:orb` (identity and compact contract) and `tembra:source`. Compiled Orbs append
+//! `tembra:orb` to the real component, whose actual WIT types are verified against the contract
+//! by the native `authoring` verifier before any linking.
 use crate::{Error, PreparedContract, codec::Reader, model::MAX_NAME};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -13,6 +11,7 @@ use std::collections::BTreeMap;
 /// Header of an empty WebAssembly component: magic, version 0x0d, layer 1.
 pub(crate) const COMPONENT_HEADER: [u8; 8] = *b"\0asm\x0d\0\x01\0";
 const ORB: &str = "tembra:orb";
+const SOURCE: &str = "tembra:source";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -22,21 +21,19 @@ pub struct Identity {
     pub world: String,
 }
 
+/// A closed source bundle or compiled component, never executable host JavaScript.
+pub enum Implementation {
+    Source(String),
+    Component(Vec<u8>),
+}
+
 /// The prepared contract and payload stay together; platform bindings expose an opaque handle.
 pub struct Artifact {
     pub identity: Identity,
     pub contract: PreparedContract,
-    /// The verified component bytes, including the appended metadata sections.
-    pub component: Vec<u8>,
-    /// Compiled callback roles; a source Orb describes its contributions through its lifecycle.
+    pub implementation: Implementation,
+    /// Compiled callback roles; source bundles declare their contributions in executable code.
     pub contributions: BTreeMap<String, i32>,
-    /// Built from JavaScript against [`crate::SOURCE_PACKAGE`]: the component exports
-    /// [`crate::LIFECYCLE`], describes its implementation itself and may import the fixed
-    /// [`crate::RUNTIME_INTERNALS`].
-    pub source_runtime: bool,
-    /// The component imports the pinned [`crate::SharedRuntime`] core, which the host supplies:
-    /// native engines link it, other hosts expand it inline. Always true for a source component.
-    pub shared_runtime: bool,
 }
 
 impl Identity {
@@ -56,46 +53,66 @@ impl Identity {
 }
 
 impl Artifact {
+    /// Package a source Orb for an already prepared contract; no WIT parser is involved.
+    pub fn package_source(
+        name: &str,
+        api_version: u32,
+        contract: &PreparedContract,
+        source: &str,
+    ) -> Result<Vec<u8>, Error> {
+        let identity = Identity {
+            name: name.into(),
+            api_version,
+            world: contract.world().to_owned(),
+        };
+        identity.validate()?;
+        contract.check_source_profile()?;
+        let mut bytes = COMPONENT_HEADER.to_vec();
+        append_section(&mut bytes, ORB, &encode_orb(&identity, contract));
+        append_section(&mut bytes, SOURCE, source.as_bytes());
+        Ok(bytes)
+    }
+
     /// Decode immutable data once; compiled components are checked against their real types.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let mut container = Container::parse(bytes)?;
         let orb = container
             .take(ORB)
             .ok_or_else(|| Error("missing artifact identity".into()))?;
-        let runtime = container.take(crate::source::RUNTIME_SECTION);
+        let source = container.take(SOURCE);
         if !container.tembra.is_empty() {
             return Err(Error("unsupported artifact metadata section".into()));
         }
         let (identity, contract, contributions) = decode_orb(orb)?;
-        if let Some(runtime) = runtime {
-            if runtime != crate::SOURCE_PACKAGE.as_bytes() {
-                return Err(Error(format!(
-                    "source component requires runtime package {}",
-                    crate::SOURCE_PACKAGE
-                )));
-            }
+        let implementation = if let Some(source) = source {
             if !contributions.is_empty() {
                 return Err(Error(
-                    "source components describe their implementation in their lifecycle".into(),
+                    "source artifacts declare contributions in their bundle".into(),
                 ));
             }
-            verify_source(&contract, bytes)?;
+            if bytes[..8] != COMPONENT_HEADER || container.other {
+                return Err(Error(
+                    "source artifacts may only contain Orb metadata and source".into(),
+                ));
+            }
+            contract.check_source_profile()?;
+            Implementation::Source(
+                String::from_utf8(source.to_vec()).map_err(|error| Error(error.to_string()))?,
+            )
         } else {
             verify_component(&contract, bytes)?;
             contract.check_contribution_roles(&contributions)?;
-        }
-        let shared_runtime = runtime_reference(runtime.is_some(), bytes)?;
+            Implementation::Component(bytes.to_vec())
+        };
         Ok(Self {
             identity,
             contract,
-            component: bytes.to_vec(),
+            implementation,
             contributions,
-            source_runtime: runtime.is_some(),
-            shared_runtime,
         })
     }
 
-    /// Describe registration data without copying component bytes through JSON.
+    /// Describe registration data without copying source or component bytes through JSON.
     pub fn describe(&self) -> serde_json::Value {
         #[derive(Serialize)]
         struct Description<'a> {
@@ -105,35 +122,13 @@ impl Artifact {
         }
         serde_json::to_value(Description {
             identity: &self.identity,
-            kind: if self.source_runtime {
-                "source"
-            } else {
-                "component"
+            kind: match self.implementation {
+                Implementation::Source(_) => "source",
+                Implementation::Component(_) => "component",
             },
         })
         .expect("serializable artifact identity")
     }
-}
-
-/// Check the component's core-module imports: a source component imports the pinned shared
-/// runtime exactly as it is packaged, and a compiled component imports no core module. Reports
-/// whether the runtime is imported.
-pub(crate) fn runtime_reference(source: bool, bytes: &[u8]) -> Result<bool, Error> {
-    let shared = crate::shared_runtime::references(bytes)?;
-    if shared && !source {
-        return Err(Error(
-            "compiled components must be self-contained; only source components may import the \
-             shared source runtime"
-                .into(),
-        ));
-    }
-    if source && !shared {
-        return Err(Error(format!(
-            "source components must import the pinned shared source runtime {}; rebuild the Orb",
-            crate::SharedRuntime::SHA256
-        )));
-    }
-    Ok(shared)
 }
 
 /// Check a compiled component's actual imports and exports against the prepared contract.
@@ -151,27 +146,11 @@ fn verify_component(_: &PreparedContract, _: &[u8]) -> Result<(), Error> {
     ))
 }
 
-/// Check a source component's actual WIT against the public contract and private package.
-#[cfg(feature = "authoring")]
-fn verify_source(contract: &PreparedContract, bytes: &[u8]) -> Result<(), Error> {
-    crate::source::verify_source(contract, bytes)
-}
-
-/// Runtimes without the component verifier refuse source components instead of trusting metadata.
-#[cfg(not(feature = "authoring"))]
-fn verify_source(_: &PreparedContract, _: &[u8]) -> Result<(), Error> {
-    Err(Error(
-        "source component artifacts require the native component verifier".into(),
-    ))
-}
-
 /// Encode identity and contract into one compact `tembra:orb` payload.
-#[cfg(any(feature = "authoring", test))]
 pub(crate) fn encode_orb(identity: &Identity, contract: &PreparedContract) -> Vec<u8> {
     encode_orb_contributions(identity, contract, &BTreeMap::new())
 }
 
-#[cfg(any(feature = "authoring", test))]
 pub(crate) fn encode_orb_contributions(
     identity: &Identity,
     contract: &PreparedContract,
@@ -215,7 +194,6 @@ fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract, BTreeMap<Stri
 }
 
 /// Append a custom section to a WebAssembly binary.
-#[cfg(any(feature = "authoring", test))]
 pub(crate) fn append_section(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
     use crate::codec::Writer;
     let mut payload = Writer::default();

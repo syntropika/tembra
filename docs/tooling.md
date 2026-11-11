@@ -2,13 +2,7 @@
 
 Build tooling turns an orb into one immutable `.wasm` artifact before installation.
 Import it from `@syntropika/tembra-sdk/tooling` and run it with Bun.
-It needs the built Node engine (`just build-node`). Source builds also need the pinned
-authoring runtime (`just build-runtime <wasi-sdk> <cache-directory>`); compiled inputs do not.
-
-Source artifacts reference the shared interpreter core supplied by the matching engine package.
-They contain their own initialized snapshot and WIT adapters, rather than another interpreter copy.
-The host checks the runtime reference before instantiation; source builds fail if their authoring
-runtime differs from the pinned core. Independent compiled artifacts need no JavaScript runtime.
+It needs the built Node engine (`just build-node`). It does not need the interpreter.
 
 ```ts
 import { build } from "@syntropika/tembra-sdk/tooling";
@@ -41,9 +35,8 @@ For each source build, `build()`:
 1. compiles the WIT file and selects `world`;
 2. generates the TypeScript declarations from WIT;
 3. typechecks the entry, its imports and project-selected ambient declarations against the guest globals;
-4. bundles the entry and its installed dependencies into a closed ES module whose remaining imports are declared WIT interfaces;
-5. componentizes it with the pinned dquickts runtime and generated Canonical ABI bindings;
-6. verifies the actual component types and packages the encoded contract and identity.
+4. bundles the entry and its installed dependencies into one closed script;
+5. writes the script and the encoded contract into the artifact.
 
 The orb imports WIT types from the contract file directly:
 
@@ -63,23 +56,8 @@ packages. It rejects Node builtins, native addons, dynamic module names and any 
 unresolved in the bundle. Minification is enabled by default; set `minify: false` to disable it.
 `define` replaces identifiers at build time.
 
-The bundle runs in dquickts inside its component. Node and DOM APIs are not
-available. Synchronous WIT methods and factories must return synchronously; use `async func`
-for asynchronous methods. Module initialization cannot call the host or write console output. The orb receives filesystem and network access only through granted WASI imports.
-
-## Resource lifetimes
-
-An asynchronous WASI call may borrow its resource until the call settles. Await that call
-inside the resource's `using` scope. Returning an un-awaited promise can dispose the resource
-while it is still borrowed; the component runtime refuses that operation.
-
-Standard futures returned by the guest bindings expose `read()` and `drop()`. For a direct
-stream read, cancel a pending read with `cancelRead()`, await its settlement, and then dispose
-the stream. Disposing it while the read is pending is refused. SDK byte and HTTP helpers
-provide the usual consumption and cleanup paths.
-
-An uncaught error escaping a non-`result` WIT export traps and quarantines its revision.
-Declare a WIT `result` lane and handle the failure when the caller should be able to recover.
+The bundle runs in the dquickts interpreter, not in Node or a browser. Node and DOM APIs are not
+available. The orb receives filesystem and network access only through granted WASI imports.
 
 ## Compiled orbs
 

@@ -42,11 +42,7 @@ import { lift, shapes, type Signature, type WitFunction, type WitTypes } from ".
 /** The contract's `describe` answer, as far as this adapter reads it. */
 type Described = WitTypes & {
   imports: { binding: string; functions?: Record<string, WitFunction> }[];
-  exports: {
-    binding: string;
-    contract?: string;
-    functions?: Record<string, WitFunction>;
-  }[];
+  exports: { binding: string; contract?: string; functions?: Record<string, WitFunction> }[];
 };
 
 /** One isolated revision translates callbacks into ordinary SDK declarations and calls. */
@@ -78,24 +74,6 @@ export class Revision {
       scope.cancel();
       this.active = false;
     }
-  }
-
-  /** A registered resource `open` callback of the interpreter guest. */
-  resourceOpen(environment: number, callback: number, scope: ExecutionScope): Promise<number> {
-    return this.execute(
-      JSON.stringify({ kind: "callback", environment, callback, value: null }),
-      scope,
-    ) as Promise<number>;
-  }
-
-  /** A registered resource `close` callback of the interpreter guest. */
-  resourceClose(
-    environment: number,
-    callback: number,
-    value: number,
-    scope: ExecutionScope,
-  ): Promise<unknown> {
-    return this.execute(JSON.stringify({ kind: "callback", environment, callback, value }), scope);
   }
 
   /**
@@ -279,12 +257,7 @@ export class Revision {
               );
               const text = await this.executeText(
                 packet(
-                  {
-                    kind: "invoke",
-                    environment: environment.id,
-                    service: alias,
-                    method: spelling,
-                  },
+                  { kind: "invoke", environment: environment.id, service: alias, method: spelling },
                   "args",
                   input,
                 ),
@@ -329,9 +302,7 @@ export class Revision {
           : binding.composition === "bail"
             ? bail()
             : waterfall();
-      hooks[binding.name] = Object.assign(hook, {
-        [signature]: binding.signature,
-      });
+      hooks[binding.name] = Object.assign(hook, { [signature]: binding.signature });
     }
     const contributes: Record<string, Record<string, Contribution>> = {};
     for (const binding of checked.hooks.contributions) {
@@ -400,11 +371,7 @@ export class Revision {
         try {
           for (const callback of scope.validators)
             await this.declare(
-              packet(
-                { kind: "validate", environment: environment.id, callback },
-                "value",
-                encode(value),
-              ),
+              packet({ kind: "validate", callback }, "value", encode(value)),
               scope.exchange({ validation: true }),
             );
         } finally {

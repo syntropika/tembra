@@ -1,9 +1,0 @@
-package tembra-test:selection@1.0.0;
-
-interface math {
-    double: func(value: u8) -> u8;
-}
-
-world provider {
-    export math;
-}

@@ -79,18 +79,34 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
 }
 
 #[test]
-fn compiled_artifacts_round_trip_with_their_component_bytes() {
+fn source_and_compiled_artifacts_round_trip_without_executing_source() {
     let contract = contract(
         "package test:artifact; interface values { read: func() -> u32; } world run { export values; }",
     );
+    let source = contract
+        .source_artifact("throw new Error('must not execute')", "example", 1)
+        .unwrap();
+    let decoded = Artifact::decode(&source).unwrap();
+    assert_eq!(
+        match &decoded.implementation {
+            ArtifactImplementation::Source(source) => Some(source.as_str()),
+            _ => None,
+        },
+        Some("throw new Error('must not execute')")
+    );
+    assert_eq!(decoded.identity.name, "example");
     let compiled = component(&contract);
     let packed = contract
         .component_artifact(&compiled, "example", 1, &Default::default())
         .unwrap();
     let decoded = Artifact::decode(&packed).unwrap();
-    assert_eq!(decoded.identity.name, "example");
-    assert!(!decoded.source_runtime);
-    assert_eq!(decoded.component, packed);
+    assert_eq!(
+        match decoded.implementation {
+            ArtifactImplementation::Component(bytes) => bytes,
+            _ => panic!("expected component"),
+        },
+        packed
+    );
 
     assert!(
         contract
@@ -103,9 +119,8 @@ fn compiled_artifacts_round_trip_with_their_component_bytes() {
 fn malformed_duplicate_unknown_and_forged_artifact_metadata_is_rejected() {
     let contract = contract("package test:artifact; world run {}");
     let original = contract
-        .component_artifact(&component(&contract), "example", 1, &Default::default())
+        .source_artifact("globalThis.__tembraOrb={}", "example", 1)
         .unwrap();
-    // The retired `tembra:source` text section is unknown metadata like any other.
     for (name, data) in [
         ("tembra:source", b"other".as_slice()),
         ("tembra:unknown", b"value"),
@@ -136,7 +151,10 @@ fn nested_component_metadata_cannot_override_the_containing_orb() {
     let packed = contract
         .component_artifact(&compiled.finish(), "example", 1, &Default::default())
         .unwrap();
-    assert_eq!(Artifact::decode(&packed).unwrap().component, packed);
+    assert!(matches!(
+        Artifact::decode(&packed).unwrap().implementation,
+        ArtifactImplementation::Component(_)
+    ));
 }
 
 #[test]
@@ -474,13 +492,11 @@ fn compiled_resource_exports_are_verified_but_need_a_capability_transport() {
     let artifact = Artifact::decode(&bytes).unwrap();
     artifact.contract.check_resource_profile().unwrap();
     assert!(artifact.contract.check_value_profile().is_err());
-    // A source Orb is a real component too: it may serve the same resources.
-    let source = crate::shared_tests::thin(component(
-        &declared.source_world(&Default::default()).unwrap(),
-    ));
-    declared
-        .source_component_artifact(&source, "sessions", 1)
-        .unwrap();
+    assert!(
+        declared
+            .source_artifact("export default {}", "sessions", 1)
+            .is_err()
+    );
 
     let nested = contract(
         "package test:unsupported; interface handles { resource handle; \
@@ -493,21 +509,45 @@ fn compiled_resource_exports_are_verified_but_need_a_capability_transport() {
     );
 }
 
-/// The stream classifier matches a `stream<u8>` only as the whole result of an asynchronous
-/// freestanding function; the data profile still refuses it.
+/// Source Orbs admit a `stream<u8>` only as the whole result of an asynchronous freestanding
+/// function; the data profile still refuses it, and a forged artifact is refused on decode.
 #[test]
-fn stream_profile_matches_only_whole_async_byte_stream_results() {
+fn source_artifacts_admit_only_whole_async_byte_stream_results() {
     let world = |body: &str| {
         format!(
             "package test:streams@1.0.0; interface frames {{ {body} }} world orb {{ export frames; }}"
         )
+    };
+    // Bypass `package_source`, so only `decode` checks the profile.
+    let forge = |contract: &Contract| {
+        let identity = Identity {
+            name: "orb".into(),
+            api_version: 1,
+            world: contract.prepared().world().to_owned(),
+        };
+        let mut forged = crate::artifact::COMPONENT_HEADER.to_vec();
+        crate::artifact::append_section(
+            &mut forged,
+            "tembra:orb",
+            &crate::artifact::encode_orb_contributions(
+                &identity,
+                contract.prepared(),
+                &BTreeMap::new(),
+            ),
+        );
+        crate::artifact::append_section(&mut forged, "tembra:source", b"globalThis.__tembraOrb={}");
+        forged
     };
     for accepted in [
         "frames: async func(count: u32, label: string) -> stream<u8>; ping: func() -> u32;",
         "type bytes = stream<u8>; frames: async func() -> bytes;",
     ] {
         let contract = contract(&world(accepted));
-        contract.prepared().check_stream_profile().unwrap();
+        let bytes = contract
+            .source_artifact("globalThis.__tembraOrb={}", "orb", 1)
+            .unwrap();
+        assert!(Artifact::decode(&bytes).is_ok(), "{accepted}");
+        assert!(Artifact::decode(&forge(&contract)).is_ok(), "{accepted}");
         assert!(
             contract.prepared().check_value_profile().is_err(),
             "{accepted}"
@@ -528,16 +568,20 @@ fn stream_profile_matches_only_whole_async_byte_stream_results() {
     for shape in refused {
         let contract = contract(&world(shape));
         assert!(
-            contract.prepared().check_stream_profile().is_err(),
+            contract
+                .source_artifact("globalThis.__tembraOrb={}", "orb", 1)
+                .is_err(),
             "{shape}"
         );
+        assert!(Artifact::decode(&forge(&contract)).is_err(), "{shape}");
     }
 }
 
-/// The import stream classifier follows exactly the export rule; the data import profile, which
-/// data ports keep, still refuses it.
+/// A source Orb's import admits a `stream<u8>` only as the whole result of an asynchronous
+/// freestanding function, under exactly the export rule; the data import profile, which data
+/// ports keep, still refuses it.
 #[test]
-fn stream_import_profile_matches_only_whole_async_byte_stream_results() {
+fn source_imports_admit_only_whole_async_byte_stream_results() {
     const BINDING: &str = "test:streams/frames@1.0.0";
     let world = |body: &str| {
         format!(
@@ -552,11 +596,15 @@ fn stream_import_profile_matches_only_whole_async_byte_stream_results() {
     ] {
         let contract = contract(&world(accepted));
         let prepared = contract.prepared();
-        prepared.check_import_stream_profile(BINDING).unwrap();
+        prepared.check_import_source_profile(BINDING).unwrap();
         assert!(
             prepared.check_import_value_profile(BINDING).is_err(),
             "{accepted}"
         );
+        // Packaging profiles exports only; the import is checked when it is bound.
+        contract
+            .source_artifact("globalThis.__tembraOrb={}", "orb", 1)
+            .unwrap();
     }
     for refused in [
         "frames: func() -> stream<u8>;",
@@ -576,7 +624,7 @@ fn stream_import_profile_matches_only_whole_async_byte_stream_results() {
         assert!(
             contract
                 .prepared()
-                .check_import_stream_profile(BINDING)
+                .check_import_source_profile(BINDING)
                 .is_err(),
             "{refused}"
         );
@@ -584,7 +632,7 @@ fn stream_import_profile_matches_only_whole_async_byte_stream_results() {
     assert!(
         contract(&world("ping: func() -> u32;"))
             .prepared()
-            .check_import_stream_profile("test:streams/missing@1.0.0")
+            .check_import_source_profile("test:streams/missing@1.0.0")
             .is_err()
     );
 }

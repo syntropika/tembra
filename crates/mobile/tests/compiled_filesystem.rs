@@ -45,9 +45,11 @@ fn portable_compiled_filesystem_enforces_standard_preopen_permissions() {
             .unwrap(),
     )
     .unwrap();
-    let backend =
-        NativeInterpreter::new(json!({"filesystem":{"data":directory.path()}}).to_string())
-            .unwrap();
+    let backend = NativeInterpreter::new(
+        json!({"filesystem":{"data":directory.path()}}).to_string(),
+        vec![],
+    )
+    .unwrap();
     assert!(
         backend
             .open(artifact.clone(), "{}".into(), "{}".into(), None)

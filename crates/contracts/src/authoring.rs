@@ -3,7 +3,7 @@
 //! This module is the only user of `wit-parser` and `wit-component`. Runtime queries are answered
 //! by the prepared contract it produces, so tooling and runtimes share one implementation.
 use crate::{
-    Error, PreparedContract,
+    Artifact, Error, PreparedContract,
     artifact::{Container, Identity, append_section, encode_orb_contributions},
 };
 use std::{collections::BTreeSet, path::Path};
@@ -231,6 +231,16 @@ impl Contract {
         Ok(())
     }
 
+    /// Package a closed source bundle for the selected world.
+    pub fn source_artifact(
+        &self,
+        source: &str,
+        name: &str,
+        api_version: u32,
+    ) -> Result<Vec<u8>, Error> {
+        Artifact::package_source(name, api_version, &self.prepared, source)
+    }
+
     /// Package a component with typed contribution roles; WIT owns every callback signature.
     pub fn component_artifact(
         &self,
@@ -253,7 +263,6 @@ impl Contract {
             ));
         }
         self.check_component_exports(component)?;
-        crate::artifact::runtime_reference(false, component)?;
         let mut bytes = component.to_vec();
         append_section(
             &mut bytes,
@@ -266,30 +275,19 @@ impl Contract {
 
 /// Require exact exports and check every retained executable import against its declared signature.
 pub(crate) fn verify_component(expected: &PreparedContract, bytes: &[u8]) -> Result<(), Error> {
-    compare_world(expected, &decode_component(bytes)?)
-}
-
-/// Prepare an actual component's WIT. A decoded component has no import provenance.
-pub(crate) fn decode_component(bytes: &[u8]) -> Result<PreparedContract, Error> {
     let wit_component::DecodedWasm::Component(resolve, world) =
         wit_component::decode(bytes).map_err(parser)?
     else {
         return Err(Error("expected an executable WebAssembly component".into()));
     };
-    crate::prepare::world(&resolve, world, None)
-}
-
-/// Compare exact export signatures and every retained import against the expected world.
-pub(crate) fn compare_world(
-    expected: &PreparedContract,
-    actual: &PreparedContract,
-) -> Result<(), Error> {
+    // A decoded component has no import provenance; only signatures are compared here.
+    let actual = crate::prepare::world(&resolve, world, None)?;
     if expected.signatures(true)? != actual.signatures(true)? {
         return Err(Error(
             "component export signatures differ from the selected WIT world".into(),
         ));
     }
-    if expected.used_import_signatures(actual)? != actual.signatures(false)? {
+    if expected.used_import_signatures(&actual)? != actual.signatures(false)? {
         return Err(Error(
             "component import signatures differ from the selected WIT world".into(),
         ));

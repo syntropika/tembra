@@ -66,11 +66,6 @@ test("Codegen accepts the binary carrier with a synchronous buffer take", () => 
     parameters: strings(2),
     result: "PromiseTypeAnnotation<StringTypeAnnotation>",
   });
-  // The native library supplies the shared interpreter; no engine bytes cross this bridge.
-  expect(signature("configureExecution")).toEqual({
-    parameters: strings(2),
-    result: "PromiseTypeAnnotation<VoidTypeAnnotation>",
-  });
   for (const name of ["portPullResponse", "portDisconnect"])
     expect(signature(name)).toEqual({
       parameters: strings(2),

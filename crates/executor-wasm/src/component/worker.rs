@@ -21,7 +21,7 @@
 use super::values;
 use crate::{
     Engine,
-    protocol::Operation,
+    abi::Operation,
     worker::{Command, Event, Pipe, PipeConsumer, StreamCall, Terminal},
 };
 use async_channel::Sender;
@@ -35,8 +35,8 @@ use tokio::sync::oneshot;
 use wasmtime::{
     Store, StoreLimits, StoreLimitsBuilder,
     component::{
-        Accessor, Func, Linker, Resource, ResourceTable, ResourceType, TaskGroupHook, TaskGroupId,
-        TypedFunc, Val, types::ComponentFunc,
+        Accessor, Component, Func, Linker, Resource, ResourceTable, ResourceType, TaskGroupHook,
+        TaskGroupId, TypedFunc, Val, types::ComponentFunc,
     },
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -65,8 +65,6 @@ type Handler = TypedFunc<(Resource<p3::Request>,), (Result<Resource<p3::Response
 /// Callable exports resolved once per Store.
 struct Exports {
     functions: BTreeMap<(String, String), Func>,
-    /// A prepared source Orb's lifecycle callbacks.
-    lifecycle: Option<super::source::Shared>,
     /// The actual resource types of exports that lend `self` or return an owned resource.
     roles: BTreeMap<(String, String), Resolved>,
     handler: Option<Handler>,
@@ -121,9 +119,6 @@ pub(crate) struct ImportFunction {
 #[derive(Clone)]
 struct Authority {
     events: Sender<Event>,
-    /// The host-issued environment the call runs in, observed by `tembra:orb/host.environment`.
-    /// State validators and resource callbacks run outside any one environment.
-    environment: Option<u64>,
     /// Orb root environment whose handle table holds the dependency references and every
     /// owned imported resource of this Store.
     scope: u64,
@@ -204,7 +199,7 @@ pub(crate) struct State {
     hooks: crate::http::Hooks,
     /// The same transport the hooks use; calls mark its command boundary.
     transport: crate::http::Transport,
-    pub(super) table: ResourceTable,
+    table: ResourceTable,
     limits: StoreLimits,
     groups: Arc<Mutex<Groups>>,
     packet_bytes: usize,
@@ -217,17 +212,13 @@ pub(crate) struct State {
     instances: super::resources::Instances,
     /// Imported resource slots the guest dropped, released at the end of the current call.
     dropped: Dropped,
-    /// Whether this Store runs a prepared source Orb; such an Orb has no default dependency.
-    source: bool,
-    /// Fixed context of a source Orb runtime's WASI 0.2 internals; never the installation's.
-    pub(super) internal: WasiCtx,
-    /// The pending one-turn selection of a source Orb.
-    pub(super) selection: Option<super::source::Selection>,
-    /// The session's attributed log sink for a source Orb's `host.log`.
-    pub(super) diagnostics: Option<crate::worker::diagnostics::Diagnostics>,
 }
 
 impl crate::worker::stream_adapter::AdapterStore for State {
+    type Permit = ();
+
+    const GUEST_STREAMS: bool = true;
+
     /// Socket streams and sends belong to the call that uses them, at the same boundary as HTTP
     /// bodies.
     fn commands(&self) -> &crate::http::Commands {
@@ -268,19 +259,7 @@ impl crate::sockets::CallCancellation for State {
 /// caller's cancellation.
 fn link_wasi(linker: &mut Linker<State>) -> wasmtime::Result<()> {
     use wasmtime_wasi::p3;
-    // Clock waits end with the running call's cancellation; reading the clocks is upstream's.
-    p3::bindings::clocks::types::add_to_linker::<State, wasmtime_wasi::clocks::WasiClocks>(
-        linker,
-        <State as wasmtime_wasi::clocks::WasiClocksView>::clocks,
-    )?;
-    p3::bindings::clocks::system_clock::add_to_linker::<State, wasmtime_wasi::clocks::WasiClocks>(
-        linker,
-        <State as wasmtime_wasi::clocks::WasiClocksView>::clocks,
-    )?;
-    p3::bindings::clocks::monotonic_clock::add_to_linker::<State, crate::clocks::CallClocks>(
-        linker,
-        <State as wasmtime_wasi::clocks::WasiClocksView>::clocks,
-    )?;
+    p3::clocks::add_to_linker(linker)?;
     p3::random::add_to_linker(linker)?;
     p3::cli::add_to_linker(linker)?;
     p3::filesystem::add_to_linker(linker)?;
@@ -392,19 +371,6 @@ enum Packet {
     Release {
         environment: u64,
     },
-    /// A source Orb's state validator, run on retained JSON state.
-    Validate {
-        environment: u64,
-        callback: u32,
-        value: Value,
-    },
-    /// A source Orb's resource opener (`value` absent) or closer.
-    Callback {
-        environment: u64,
-        callback: u32,
-        #[serde(default)]
-        value: Option<u32>,
-    },
     Destroy {
         environment: u64,
         instance: u32,
@@ -425,10 +391,9 @@ struct Environments {
 
 /// Instantiate the component, report readiness, then serve commands until the owner closes or a
 /// call fails terminally.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     engine: Engine,
-    component: Arc<crate::engine::Compiled>,
+    component: Component,
     wasi: (WasiCtxBuilder, bool),
     grants: Arc<crate::Grants>,
     layout: Layout,
@@ -439,7 +404,6 @@ pub(crate) async fn run(
         crate::io::CallbackScope,
         Arc<Mutex<Option<String>>>,
     ),
-    source: Option<Source>,
 ) -> Terminal {
     let transport = crate::http::Transport::default();
     let terminal = live(
@@ -447,7 +411,6 @@ pub(crate) async fn run(
         ready,
         calls,
         &transport,
-        source,
     )
     .await;
     // The Store is gone: aborted connection drivers drop on the next runtime turn and close
@@ -462,7 +425,7 @@ pub(crate) async fn run(
 async fn live(
     (engine, component, wasi, grants, layout): (
         Engine,
-        Arc<crate::engine::Compiled>,
+        Component,
         (WasiCtxBuilder, bool),
         Arc<crate::Grants>,
         Layout,
@@ -474,36 +437,17 @@ async fn live(
         Arc<Mutex<Option<String>>>,
     ),
     transport: &crate::http::Transport,
-    source: Option<Source>,
 ) -> Terminal {
     let groups = Arc::new(Mutex::new(Groups {
         scope,
         ..Groups::default()
     }));
     let instance = instantiate(
-        &engine,
-        &component,
-        wasi,
-        grants,
-        &layout,
-        &groups,
-        transport,
-        source.as_ref(),
+        &engine, &component, wasi, grants, &layout, &groups, transport,
     )
     .await;
-    let prepared = match instance {
-        Ok((mut store, instance)) => {
-            match prepare(&engine, &mut store, &instance, layout, source).await {
-                Ok(Some((layout, exports))) => Ok((store, layout, exports)),
-                // The owner refused the description and dropped its layout channel.
-                Ok(None) => return Vec::new(),
-                Err(error) => Err(error),
-            }
-        }
-        Err(error) => Err(error),
-    };
-    let (mut store, layout, exports) = match prepared {
-        Ok(prepared) => prepared,
+    let (mut store, exports) = match instance {
+        Ok(instance) => instance,
         Err(error) => {
             let _ = ready.send(Err(format!("component initialization failed: {error:#}")));
             return Vec::new();
@@ -546,31 +490,21 @@ async fn live(
 }
 
 /// Link granted WASI and the selected Orb imports, then instantiate within the callback bound.
-#[allow(clippy::too_many_arguments)]
 async fn instantiate(
     engine: &Engine,
-    compiled: &crate::engine::Compiled,
+    component: &Component,
     (mut wasi, resolve): (WasiCtxBuilder, bool),
     grants: Arc<crate::Grants>,
     layout: &Layout,
     groups: &Arc<Mutex<Groups>>,
     transport: &crate::http::Transport,
-    source: Option<&Source>,
-) -> wasmtime::Result<(Store<State>, wasmtime::component::Instance)> {
-    let component = &compiled.component;
+) -> wasmtime::Result<(Store<State>, Exports)> {
     let mut linker = Linker::<State>::new(&engine.engine);
-    // Shared code receives only what this Orb's own instances pass it.
-    compiled.link(&mut linker)?;
     link_wasi(&mut linker)?;
     // Linking grants nothing: installation requires an HTTP grant for each wasi:http import and
     // every request is checked against its granted origins.
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
     link_imports(&mut linker, layout)?;
-    if let Some(source) = source {
-        super::source::link_host(&mut linker)?;
-        super::source::link_internals(&mut linker)?;
-        super::source::link_hooks(&mut linker, &engine.engine, component, &source.contract)?;
-    }
     let mut store = Store::new(
         &engine.engine,
         State {
@@ -594,12 +528,6 @@ async fn instantiate(
             )),
             instances: super::resources::Instances::new(engine.live_resources.clone()),
             dropped: Dropped::default(),
-            source: source.is_some(),
-            internal: super::source::internal_context(
-                source.and_then(|source| source.clocks.lock().ok()?.take()),
-            ),
-            selection: None,
-            diagnostics: source.and_then(|source| source.diagnostics.clone()),
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -621,90 +549,6 @@ async fn instantiate(
     )
     .await
     .map_err(|_| wasmtime::Error::msg("component initialization timed out"))??;
-    Ok((store, instance))
-}
-
-/// The source Orb parts of a Store: its checked contract, the installation's clocks for its
-/// runtime internals, and the channels through which the owner checks its description.
-pub(crate) struct Source {
-    pub contract: tembra_contracts::PreparedContract,
-    pub clocks: Mutex<Option<crate::providers::Clocks>>,
-    /// Receives the evaluated `lifecycle.describe` result before any factory runs.
-    pub described: mpsc::Sender<std::result::Result<Value, String>>,
-    /// Delivers the layout of the checked description, or closes to refuse it.
-    pub checked: mpsc::Receiver<Layout>,
-    /// The session's attributed log sink, set when the worker starts.
-    pub diagnostics: Option<crate::worker::diagnostics::Diagnostics>,
-}
-
-/// Describe a source Orb and wait for its checked layout, then resolve the callable exports.
-/// `None` means the owner refused the description.
-async fn prepare(
-    engine: &Engine,
-    store: &mut Store<State>,
-    instance: &wasmtime::component::Instance,
-    layout: Layout,
-    source: Option<Source>,
-) -> wasmtime::Result<Option<(Layout, Exports)>> {
-    let Some(source) = source else {
-        let exports = resolve(store, instance, &layout, None)?;
-        return Ok(Some((layout, exports)));
-    };
-    let lifecycle = super::source::Lifecycle::resolve(store, instance)?;
-    // No authority is bound: a describe that calls the host is refused.
-    let described =
-        plain(engine, store, lifecycle.describe, Vec::new())
-            .await
-            .and_then(|results| {
-                super::source::description(results.first().ok_or_else(|| {
-                    wasmtime::Error::msg("lifecycle description returned nothing")
-                })?)
-            });
-    let failed = described.as_ref().err().map(|error| format!("{error:#}"));
-    let _ = source
-        .described
-        .send(described.map_err(|error| format!("{error:#}")));
-    if let Some(error) = failed {
-        return Err(wasmtime::Error::msg(error));
-    }
-    let Ok(layout) = source.checked.recv() else {
-        return Ok(None);
-    };
-    let exports = resolve(store, instance, &layout, Some(Arc::new(lifecycle)))?;
-    Ok(Some((layout, exports)))
-}
-
-/// Run one export with no bound authority: any host request it makes is refused.
-async fn plain(
-    engine: &Engine,
-    store: &mut Store<State>,
-    function: Func,
-    args: Vec<Val>,
-) -> wasmtime::Result<Vec<Val>> {
-    let count = function.ty(&*store).results().len();
-    store.set_fuel(engine.limits.fuel)?;
-    let call = store.run_concurrent(async move |accessor: &Accessor<State>| {
-        let mut results = vec![Val::Bool(false); count];
-        let staged = accessor
-            .with(|mut access| function.start_call_concurrent(&mut access, &args, &mut results))?;
-        function.finish_call_concurrent(accessor, staged).await?;
-        Ok::<_, wasmtime::Error>(results)
-    });
-    tokio::time::timeout(
-        std::time::Duration::from_millis(engine.limits.timeout_ms),
-        call,
-    )
-    .await
-    .map_err(|_| wasmtime::Error::msg("component call timed out"))??
-}
-
-/// Resolve the checked exports, resource roles and incoming HTTP handler of one instance.
-fn resolve(
-    mut store: &mut Store<State>,
-    instance: &wasmtime::component::Instance,
-    layout: &Layout,
-    lifecycle: Option<super::source::Shared>,
-) -> wasmtime::Result<Exports> {
     let mut exports = BTreeMap::new();
     let mut roles = BTreeMap::new();
     for (alias, export) in &layout.exports {
@@ -761,12 +605,14 @@ fn resolve(
         }
         None => None,
     };
-    Ok(Exports {
-        functions: exports,
-        lifecycle,
-        roles,
-        handler,
-    })
+    Ok((
+        store,
+        Exports {
+            functions: exports,
+            roles,
+            handler,
+        },
+    ))
 }
 
 /// Define each selected dependency function; WASI imports remain the installation's grants.
@@ -871,7 +717,7 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                         let dropped = own_result.map(|_| store.data().dropped.clone());
                         let request =
                             select(&mut store, receiver, params).and_then(|(selected, params)| {
-                                request(store.data_mut(), &target, selected, params, None)
+                                request(store.data(), &target, selected, params, None)
                                     .map(|receive| ImportReply::new(receive, dropped))
                             });
                         Box::new(async move {
@@ -923,7 +769,7 @@ fn owned(
 }
 
 /// Lower a checked data result with the import's actual type.
-pub(super) fn lower_result(ty: &ComponentFunc, value: &Value) -> wasmtime::Result<Option<Val>> {
+fn lower_result(ty: &ComponentFunc, value: &Value) -> wasmtime::Result<Option<Val>> {
     match ty.results().next() {
         Some(ty) => {
             Ok(Some(values::lower(ty, value).map_err(|error| {
@@ -938,7 +784,7 @@ pub(super) fn lower_result(ty: &ComponentFunc, value: &Value) -> wasmtime::Resul
 }
 
 /// Store the single result an import function returns, if it has one.
-pub(super) fn store_result(results: &mut [Val], value: Option<Val>) -> wasmtime::Result<()> {
+fn store_result(results: &mut [Val], value: Option<Val>) -> wasmtime::Result<()> {
     match (results.first_mut(), value) {
         (Some(result), Some(value)) => *result = value,
         (None, None) => {}
@@ -951,75 +797,34 @@ pub(super) fn store_result(results: &mut [Val], value: Option<Val>) -> wasmtime:
     Ok(())
 }
 
-/// The authority bound to the task group the runtime has entered, if any.
-fn current(state: &State) -> wasmtime::Result<Authority> {
-    let groups = state
-        .groups
-        .lock()
-        .map_err(|_| wasmtime::Error::msg("task-group attribution is poisoned"))?;
-    groups
-        .current
-        .and_then(|group| groups.bound.get(&group))
-        .map(|bound| bound.authority.clone())
-        .ok_or_else(|| wasmtime::Error::msg("host request has no admitted invocation"))
-}
-
-/// The environment of the admitted call whose task group is running.
-pub(super) fn current_environment(state: &State) -> wasmtime::Result<u64> {
-    current(state)?
-        .environment
-        .ok_or_else(|| wasmtime::Error::msg("this callback runs outside an environment"))
-}
-
-/// Publish one bounded host request on the channel of the call whose task group issued it.
-pub(super) fn host_request(
-    state: &State,
-    packet: Value,
-    asynchronous: bool,
-) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
-    let authority = current(state)?;
-    let packet = packet.to_string();
-    if packet.len() > state.packet_bytes {
-        return Err(wasmtime::Error::msg("host packet limit exceeded"));
-    }
-    let (reply, receive) = oneshot::channel();
-    authority
-        .events
-        .try_send(Event::Host {
-            packet,
-            asynchronous,
-            reply,
-        })
-        .map_err(|_| wasmtime::Error::msg("host operation queue is full or closed"))?;
-    Ok(receive)
-}
-
 /// Capture the issuing task group's authority and publish one bounded `reference.call` request.
 ///
-/// `selected` is the importer table slot a resource method's `self` named. A compiled Orb's
-/// other functions call through the import's declared default reference; a source Orb's call
-/// through the reference it selected in the same turn, which must belong to this binding.
+/// `selected` is the importer table slot a resource method's `self` named; every other function
+/// calls through the import's declared reference.
 fn request(
-    state: &mut State,
+    state: &State,
     (binding, method): &(String, String),
     selected: Option<u32>,
     params: &[Val],
     stream: Option<Arc<Mutex<Pipe>>>,
 ) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
-    let authority = current(state)
-        .map_err(|_| wasmtime::Error::msg("dependency import has no admitted invocation"))?;
-    let (scope, id) = match (selected, state.source) {
-        (Some(slot), _) => (Some(authority.scope), slot),
-        (None, true) => {
-            let handle = super::source::take_reference(state)?;
-            (handle.scope, handle.id)
-        }
-        (None, false) => (
-            Some(authority.scope),
-            *authority.handles.get(binding).ok_or_else(|| {
-                wasmtime::Error::msg("dependency import has no declared reference")
-            })?,
-        ),
+    let authority = {
+        let groups = state
+            .groups
+            .lock()
+            .map_err(|_| wasmtime::Error::msg("task-group attribution is poisoned"))?;
+        groups
+            .current
+            .and_then(|group| groups.bound.get(&group))
+            .map(|bound| bound.authority.clone())
+            .ok_or_else(|| wasmtime::Error::msg("dependency import has no admitted invocation"))?
+    };
+    let id = match selected {
+        Some(slot) => slot,
+        None => *authority
+            .handles
+            .get(binding)
+            .ok_or_else(|| wasmtime::Error::msg("dependency import has no declared reference"))?,
     };
     let args = params
         .iter()
@@ -1029,11 +834,10 @@ fn request(
         .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
     let packet = json!({
         "operation": "reference.call",
-        "scope": scope,
+        "scope": authority.scope,
         "id": id,
         "method": method,
         "args": args,
-        "binding": binding,
     })
     .to_string();
     if packet.len() > state.packet_bytes {
@@ -1202,8 +1006,7 @@ async fn serve(
         Err(error) => return Ok(Err(format!("malformed component command: {error}"))),
     };
     let expected = match packet {
-        Packet::Create { .. } | Packet::Validate { .. } => Operation::Declare,
-        Packet::Callback { .. } => Operation::Start,
+        Packet::Create { .. } => Operation::Declare,
         Packet::Invoke { .. }
         | Packet::Contribute { .. }
         | Packet::Release { .. }
@@ -1236,23 +1039,6 @@ async fn serve(
         }
         packet => packet,
     };
-    if let Some(lifecycle) = exports.lifecycle.clone() {
-        match packet {
-            Packet::Invoke { .. } | Packet::Ingress { .. } | Packet::Destroy { .. } => {}
-            packet => {
-                return lifecycle_command(
-                    engine,
-                    store,
-                    &lifecycle,
-                    packet,
-                    environments,
-                    groups,
-                    command,
-                )
-                .await;
-            }
-        }
-    }
     match packet {
         Packet::Create {
             environment,
@@ -1341,155 +1127,10 @@ async fn serve(
             };
             ingress(engine, store, handler, call, authority, groups).await
         }
-        Packet::Invoke { .. }
-        | Packet::Contribute { .. }
-        | Packet::Validate { .. }
-        | Packet::Callback { .. }
-        | Packet::Unsupported => Ok(Err(
+        Packet::Invoke { .. } | Packet::Contribute { .. } | Packet::Unsupported => Ok(Err(
             "compiled components have no guest callbacks of this kind".into(),
         )),
     }
-}
-
-/// Serve a prepared source Orb's lifecycle command through its `tembra:orb/lifecycle` export.
-///
-/// Each callback is a staged call bound to the command's own channel, so host requests made by
-/// the factory, validator or resource callback are served under that command's scope only.
-async fn lifecycle_command(
-    engine: &Engine,
-    store: &mut Store<State>,
-    lifecycle: &super::source::Lifecycle,
-    packet: Packet,
-    environments: &mut Environments,
-    groups: &Arc<Mutex<Groups>>,
-    command: &mut Command,
-) -> wasmtime::Result<std::result::Result<String, String>> {
-    let limit = engine.limits.packet_bytes;
-    let bound = |environment: Option<u64>, scope: u64| Authority {
-        events: command.events.clone(),
-        environment,
-        scope,
-        handles: Arc::default(),
-    };
-    // A callback of a declared state or resource runs in its declaring environment, and
-    // imported resources it drops return to that environment's Orb root table.
-    let declared = |environment: u64| {
-        let root = environments
-            .parents
-            .get(&environment)
-            .copied()
-            .unwrap_or(environment);
-        bound(Some(environment), root)
-    };
-    let (function, args, authority) = match packet {
-        Packet::Create {
-            environment,
-            service,
-        } => {
-            // A service environment records its Orb root; a root has no default dependencies.
-            let root = match &service {
-                Some(_) => {
-                    let root = match declaration(
-                        &command.events,
-                        json!({"operation": "orb"}),
-                        limit,
-                    )
-                    .await
-                    {
-                        Ok(root) => root,
-                        Err(error) => return Ok(Err(error)),
-                    };
-                    match root.as_u64() {
-                        Some(root) if environments.roots.contains_key(&root) => {
-                            environments.parents.insert(environment, root);
-                            root
-                        }
-                        Some(_) => {
-                            return Ok(Err("service environment has no declared Orb root".into()));
-                        }
-                        // A host-local service without an Orb root owns its own handle table.
-                        None => {
-                            environments.roots.insert(environment, Arc::default());
-                            environment
-                        }
-                    }
-                }
-                None => {
-                    environments.roots.insert(environment, Arc::default());
-                    environment
-                }
-            };
-            let service = service.map(|service| Box::new(Val::String(service)));
-            (
-                lifecycle.create,
-                vec![Val::U64(environment), Val::Option(service)],
-                bound(Some(environment), root),
-            )
-        }
-        Packet::Release { environment } => {
-            let root = environments.parents.remove(&environment);
-            environments.roots.remove(&environment);
-            let authority = bound(Some(environment), root.unwrap_or(environment));
-            let call = (lifecycle.release, environment, None, None);
-            execute(
-                engine,
-                store,
-                call,
-                vec![Val::U64(environment)],
-                authority,
-                groups,
-            )
-            .await?;
-            if let Some(root) = root {
-                let dropped = store.data().dropped.clone();
-                release_dropped(&dropped, &(command.events.clone(), root)).await;
-            }
-            return Ok(Ok("null".into()));
-        }
-        Packet::Validate {
-            environment,
-            callback,
-            value,
-        } => (
-            lifecycle.validate,
-            vec![Val::U32(callback), Val::String(value.to_string())],
-            declared(environment),
-        ),
-        Packet::Callback {
-            environment,
-            callback,
-            value: None,
-        } => (
-            lifecycle.open,
-            vec![Val::U32(callback)],
-            declared(environment),
-        ),
-        Packet::Callback {
-            environment,
-            callback,
-            value: Some(value),
-        } => (
-            lifecycle.close,
-            vec![Val::U32(callback), Val::U32(value)],
-            declared(environment),
-        ),
-        _ => {
-            return Ok(Err(
-                "source Orbs have no guest callbacks of this kind".into()
-            ));
-        }
-    };
-    let environment = authority.environment.unwrap_or_default();
-    let (mut results, _) = execute(
-        engine,
-        store,
-        (function, environment, None, None),
-        args,
-        authority,
-        groups,
-    )
-    .await?;
-    Ok(super::source::outcome(results.pop()).map(|value| value.to_string()))
 }
 
 /// The admitted call's authority: its own event channel and its Orb root's dependency handles.
@@ -1511,7 +1152,6 @@ fn authority(
     };
     Ok(Authority {
         events: command.events.clone(),
-        environment: Some(environment),
         scope: root,
         handles,
     })
@@ -1616,47 +1256,9 @@ async fn invoke(
             Err(error) => return Ok(Err(error.to_string())),
         }
     }
-    let (results, instance) = execute(
-        engine,
-        store,
-        (function, environment, roles.own_result, stream),
-        lowered,
-        authority,
-        groups,
-    )
-    .await?;
-    let value = match instance {
-        Some(instance) => json!(instance),
-        None => match results.into_iter().next().map(values::lift).transpose() {
-            Ok(value) => value.unwrap_or(Value::Null),
-            Err(error) => return Ok(Err(error.to_string())),
-        },
-    };
-    let text = value.to_string();
-    if text.len() > engine.limits.packet_bytes {
-        return Ok(Err("component result exceeds the packet limit".into()));
-    }
-    Ok(Ok(text))
-}
-
-/// Run one staged call under its bound authority until its task group physically finishes.
-///
-/// Returns the results and, for an owned resource result, the host-issued instance id.
-async fn execute(
-    engine: &Engine,
-    store: &mut Store<State>,
-    (function, environment, own_result, stream): (
-        Func,
-        u64,
-        Option<ResourceType>,
-        Option<StreamCall>,
-    ),
-    args: Vec<Val>,
-    authority: Authority,
-    groups: &Arc<Mutex<Groups>>,
-) -> wasmtime::Result<(Vec<Val>, Option<u32>)> {
-    let ty = function.ty(&*store);
+    let args = lowered;
     let count = ty.results().len();
+    let own_result = roles.own_result;
     let releases = (authority.events.clone(), authority.scope);
     let dropped = store.data().dropped.clone();
     store.set_fuel(engine.limits.fuel)?;
@@ -1761,7 +1363,18 @@ async fn execute(
     )
     .await
     .map_err(|_| wasmtime::Error::msg("component call timed out"))???;
-    Ok((results, instance))
+    let value = match instance {
+        Some(instance) => json!(instance),
+        None => match results.into_iter().next().map(values::lift).transpose() {
+            Ok(value) => value.unwrap_or(Value::Null),
+            Err(error) => return Ok(Err(error.to_string())),
+        },
+    };
+    let text = value.to_string();
+    if text.len() > engine.limits.packet_bytes {
+        return Ok(Err("component result exceeds the packet limit".into()));
+    }
+    Ok(Ok(text))
 }
 
 /// Publish a whole `stream<u8>` result: convert it exactly once, pipe it into the host-created

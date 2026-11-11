@@ -34,12 +34,10 @@ export default orb({
           const stream = await environment.frames.frames(count, size, context);
           let bytes = 0;
           let checksum = 0;
-          // The runtime lifts stream<u8> as Uint8Array chunks; iterate their bytes one by one.
-          for await (const chunk of stream)
-            for (const byte of chunk) {
-              bytes++;
-              checksum += byte;
-            }
+          for await (const byte of stream) {
+            bytes++;
+            checksum += byte;
+          }
           return { bytes: BigInt(bytes), checksum: BigInt(checksum) };
         },
         async forward(environment: Environment, context: Context, count: number, size: number) {

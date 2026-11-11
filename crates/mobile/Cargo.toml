@@ -38,8 +38,8 @@ uniffi = "=0.32.2"
 [dev-dependencies]
 tempfile = "3"
 wat = "=1.263.0"
-wit-component = "=0.262.0"
-wit-parser = "=0.262.0"
+wit-component = "=0.261.0"
+wit-parser = "=0.261.0"
 
 [lints]
 workspace = true

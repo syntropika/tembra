@@ -1,6 +1,6 @@
 import { BrowserNetwork, type BrowserNetworkProviders } from "./browser-network.ts";
 import type { FilesystemProvider } from "./filesystem.ts";
-import type { StandardMount } from "./component/wasi-filesystem.ts";
+import type { StandardMount } from "./standard-filesystem.ts";
 import type { Grants } from "../authoring/types.ts";
 
 /**

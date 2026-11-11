@@ -1,7 +1,15 @@
 // Execute real source and compiled Orbs on native Rust, Node and Chrome from one set of artifacts.
-// The packaged authoring runtime must already exist; see DEVELOP.md#isolated-orbs.
+// The packaged interpreter must already exist; see DEVELOP.md#isolated-orbs.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { stagePackage } from "./release/npm.ts";
@@ -66,9 +74,11 @@ const resourceProvider = path.resolve(values["resource-provider"]);
 const resourceConsumer = path.resolve(values["resource-consumer"]);
 const streamProducer = path.resolve(values["stream-producer"]);
 const streamConsumer = path.resolve(values["stream-consumer"]);
-const runtime = path.join(root, "packages/ts/engine-node/dist/runtime.wasm");
+const engine = path.join(root, "packages/ts/engine-node/dist/interpreter.wasm");
+const browserEngine = path.join(root, "packages/ts/engine-wasm/dist/interpreter");
 for (const file of [
-  runtime,
+  engine,
+  path.join(browserEngine, "interpreter.wasm"),
   provider,
   probe,
   consumer,
@@ -83,6 +93,9 @@ for (const file of [
   streamConsumer,
 ])
   if (!existsSync(file)) throw new Error(`Missing acceptance input: ${file}`);
+// Native, Node and browser suites must qualify the same packaged interpreter bytes.
+if (!readFileSync(engine).equals(readFileSync(path.join(browserEngine, "interpreter.wasm"))))
+  throw new Error("The Node and browser packages contain different interpreters");
 const temporary = path.join(out, "tmp");
 mkdirSync(temporary, { recursive: true });
 
@@ -134,7 +147,7 @@ if (!values.fixtures)
     contributor,
   ]);
 const environment = {
-  TEMBRA_QJS_RUNTIME: runtime,
+  TEMBRA_WASM_ENGINE: engine,
   TEMBRA_WASM_FIXTURES: fixtures,
   TEMBRA_WASM_ORB: path.join(fixtures, "calculator.wasm"),
   TEMBRA_WASM_PROVIDER: provider,
@@ -172,8 +185,14 @@ for (const suite of selected) {
       UV_THREADPOOL_SIZE: "1",
     });
   } else if (suite === "browser") {
-    // Every platform executes the same prepared component artifacts.
+    // The packaged default runs the full suite, then a copied override directory runs it again.
     run(bun, ["scripts/test-wasm-browser.ts"], environment);
+    const alternate = fresh("browser-engine");
+    cpSync(browserEngine, alternate, { recursive: true });
+    run(bun, ["scripts/test-wasm-browser.ts"], {
+      ...environment,
+      TEMBRA_WASM_BROWSER_ENGINE: alternate,
+    });
     run(bun, ["run", "test:browser"]);
   } else if (suite === "example") {
     const example = fresh("example");

@@ -53,7 +53,7 @@ fn consumer(backend: &NativeInterpreter) -> Arc<NativePort> {
 /// The platform scope declares the default-key reference, then serves delayed dependency calls.
 #[test]
 fn portable_compiled_imports_use_scoped_host_events() {
-    let backend = NativeInterpreter::new("{}".into()).unwrap();
+    let backend = NativeInterpreter::new("{}".into(), vec![]).unwrap();
     let port = consumer(&backend);
     let description: Value = serde_json::from_str(&port.description().unwrap()).unwrap();
     assert_eq!(
@@ -103,9 +103,8 @@ fn portable_compiled_imports_use_scoped_host_events() {
     assert_eq!(
         calls,
         vec![
-            // Compiled calls identify their actual WIT import before scoped dispatch.
-            json!({"operation":"reference.call","scope":1,"id":7,"binding":MATH,"method":"double","args":[5]}),
-            json!({"operation":"reference.call","scope":1,"id":7,"binding":MATH,"method":"double","args":[10]}),
+            json!({"operation":"reference.call","scope":1,"id":7,"method":"double","args":[5]}),
+            json!({"operation":"reference.call","scope":1,"id":7,"method":"double","args":[10]}),
         ]
     );
     assert_eq!(backend.instances(), 1);
@@ -118,7 +117,7 @@ fn portable_compiled_imports_use_scoped_host_events() {
 /// A refused dependency call traps the synchronous import and quarantines only this Store.
 #[test]
 fn portable_compiled_import_refusal_quarantines_the_importer() {
-    let backend = NativeInterpreter::new("{}".into()).unwrap();
+    let backend = NativeInterpreter::new("{}".into(), vec![]).unwrap();
     let port = consumer(&backend);
     exchange(
         &port,

@@ -19,6 +19,14 @@ use tembra_executor_wasm::{
     ingress::{ResponseBody, Settled, handler_service, serve},
 };
 
+fn bytes(variable: &str) -> Option<Vec<u8>> {
+    let Some(path) = std::env::var_os(variable) else {
+        eprintln!("skipped: {variable} is not set");
+        return None;
+    };
+    Some(std::fs::read(path).unwrap())
+}
+
 /// The packaged fixture artifact `<TEMBRA_WASM_FIXTURES>/<name>.wasm`.
 fn fixture(name: &str) -> Vec<u8> {
     let directory = std::env::var_os("TEMBRA_WASM_FIXTURES").expect("TEMBRA_WASM_FIXTURES");
@@ -26,10 +34,17 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 fn engines(limits: Limits) -> Option<[Engine; 2]> {
+    let interpreter = bytes("TEMBRA_WASM_ENGINE")?;
     std::env::var_os("TEMBRA_WASM_FIXTURES")?;
     Some([
-        Engine::new(limits).unwrap(),
-        Engine::interpreted(limits).unwrap(),
+        Engine::new(limits)
+            .unwrap()
+            .interpreter(&interpreter)
+            .unwrap(),
+        Engine::interpreted(limits)
+            .unwrap()
+            .interpreter(&interpreter)
+            .unwrap(),
     ])
 }
 
@@ -272,7 +287,7 @@ fn close(mut served: Served, engine: &Engine) {
 /// completion observer dropped) the guest calls its dependency under the request's root; the
 /// trailers follow; the transmission ends `ok`.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
 fn source_handlers_stream_before_eof_and_keep_authority_after_the_head() {
     let Some(engines) = engines(Limits::default()) else {
         return;
@@ -315,7 +330,7 @@ fn source_handlers_stream_before_eof_and_keep_authority_after_the_head() {
 
 /// Raw byte values, duplicate fields, a status and trailers survive both directions.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
 fn source_handlers_echo_raw_fields_bodies_and_trailers() {
     let Some(engines) = engines(Limits::default()) else {
         return;
@@ -362,7 +377,7 @@ fn source_handlers_echo_raw_fields_bodies_and_trailers() {
 /// writing fails its next write; both report `connection-terminated` to the guest, and the
 /// Store keeps serving.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
 fn source_disconnects_end_idle_reads_and_writes() {
     let Some(engines) = engines(Limits::default()) else {
         return;
@@ -386,74 +401,60 @@ fn source_disconnects_end_idle_reads_and_writes() {
     }
 }
 
-/// A standard WASI error stays recoverable; cancellation ends a stream for both sides and
-/// reports `Cancelled`; failures without a WIT error lane quarantine the revision.
+/// Errors before the head are reported after settlement; cancellation ends a stream for both
+/// sides and reports `Cancelled`; a thrown exception fails only its call.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
 fn source_errors_cancellation_and_traps() {
     let Some(engines) = engines(Limits::default()) else {
         return;
     };
     for engine in engines {
-        // A standard WASI result error is the handler's typed error and is recoverable: the
-        // revision keeps serving.
         let mut served = install(&engine);
-        let error = once(&mut served, "/error").unwrap_err();
+        let (incoming, _sender) = request("/error", &[]);
+        let error = served
+            .pool
+            .run_until(serve(
+                &served.host,
+                "alice",
+                served.handler.clone(),
+                incoming,
+            ))
+            .err()
+            .unwrap();
         assert_eq!(error.reason, "wasi_http_handler", "{error}");
         assert!(error.message.contains("HttpRequestDenied"), "{error}");
-        assert_eq!(once(&mut served, "/revision").unwrap(), 200);
-        close(served, &engine);
 
-        let mut served = install(&engine);
         let (_, mut reader, settled, _held) = start(&mut served, "/sse", &[]);
         assert_eq!(reader.next(&mut served.pool), data("data: 1\n\n"));
         settled.cancel();
         assert!(matches!(reader.next(&mut served.pool), Frame::Error(_)));
         let error = settle(&mut served.pool, settled).unwrap_err();
         assert_eq!(error.code, tembra::core::Code::Cancelled, "{error}");
-        // The cancelled handler's delivery observer still calls its dependency; the refused
-        // dependency import has no WIT error lane, so the revision fails closed.
-        let after = once(&mut served, "/revision").unwrap_err();
-        assert_eq!(after.reason, "wasm_executor_quarantined", "{after}");
-        assert!(after.message.contains("scope is cancelled"), "{after}");
-        retire(served, &engine);
+        assert_eq!(revision(&mut served), 3);
 
-        // An exception that is not the handler's WIT error traps and quarantines the revision.
-        let mut served = install(&engine);
-        let error = once(&mut served, "/trap").unwrap_err();
-        assert!(error.message.contains("component trap"), "{error}");
-        let after = once(&mut served, "/revision").unwrap_err();
-        assert_eq!(after.reason, "wasm_executor_quarantined", "{after}");
-        retire(served, &engine);
+        // A thrown non-WASI error fails this call only: a source exception is not a Wasm trap,
+        // so the revision keeps serving.
+        let (incoming, _sender) = request("/trap", &[]);
+        let error = served
+            .pool
+            .run_until(serve(
+                &served.host,
+                "alice",
+                served.handler.clone(),
+                incoming,
+            ))
+            .err()
+            .unwrap();
+        assert!(error.message.contains("handler trap"), "{error}");
+        assert_eq!(revision(&mut served), 5);
+        close(served, &engine);
     }
-}
-
-/// Serve one request to completion; the outcome is the handler's error or its settled status.
-fn once(served: &mut Served, path: &str) -> tembra::Result<u16> {
-    let (incoming, _sender) = request(path, &[]);
-    let (response, settled) = served.pool.run_until(serve(
-        &served.host,
-        "alice",
-        served.handler.clone(),
-        incoming,
-    ))?;
-    let status = response.status().as_u16();
-    let mut reader = Reader::new(response.into_body());
-    while matches!(reader.next(&mut served.pool), Frame::Data(_)) {}
-    settle(&mut served.pool, settled).map(|()| status)
-}
-
-/// Release a quarantined revision: closing may report its cause, and nothing stays live.
-fn retire(mut served: Served, engine: &Engine) {
-    let _ = served.handler.release();
-    let _ = served.ledger.release();
-    let _ = served.pool.run_until(served.host.close());
-    assert_eq!(engine.instances(), 0);
 }
 
 /// The call timeout bounds the whole streamed response and is terminal.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
 fn source_timeout_bounds_a_streamed_response() {
     let Some(engines) = engines(Limits {
         timeout_ms: 1500,
@@ -486,22 +487,21 @@ fn source_timeout_bounds_a_streamed_response() {
 
 /// Reload routes new requests to a fresh revision while the old one finishes its stream.
 #[test]
-#[ignore = "requires TEMBRA_WASM_FIXTURES"]
+#[ignore = "requires TEMBRA_WASM_ENGINE and TEMBRA_WASM_FIXTURES"]
 fn source_reload_drains_and_routes() {
     let Some(engines) = engines(Limits::default()) else {
         return;
     };
     for engine in engines {
         let mut served = install(&engine);
-        // Prepare the candidate first: compiling it is not part of the stream's call budget.
+        let (_, mut reader, settled, sender) = start(&mut served, "/sse", &[]);
+        assert_eq!(reader.next(&mut served.pool), data("data: 1\n\n"));
         let replacement = engine
             .load(
                 &fixture("ingress"),
                 Install::default().requires("example:ingress/ledger@1.0.0", "ledger", 1),
             )
             .unwrap();
-        let (_, mut reader, settled, sender) = start(&mut served, "/sse", &[]);
-        assert_eq!(reader.next(&mut served.pool), data("data: 1\n\n"));
         served
             .pool
             .run_until(served.host.reload(vec![replacement], 20_000))

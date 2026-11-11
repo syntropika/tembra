@@ -9,28 +9,15 @@ const MIN = -(1n << 63n);
 const SMAX = (1n << 63n) - 1n;
 const NUMBERS = "example:precision/numbers@1.0.0";
 
-/**
- * Compare WIT values structurally. Record fields are named, so object key order is not data:
- * keys are canonicalized recursively. List order, bigints and typed-array element kinds are
- * preserved exactly.
- */
 function same(actual: unknown, expected: unknown, what: string): void {
-  const canonical = (value: unknown): unknown => {
-    if (typeof value === "bigint") return `${value}n`;
-    if (ArrayBuffer.isView(value))
-      return {
-        [value.constructor.name]: [...(value as unknown as Iterable<unknown>)].map(canonical),
-      };
-    if (Array.isArray(value)) return value.map(canonical);
-    if (value && typeof value === "object")
-      return Object.fromEntries(
-        Object.keys(value)
-          .sort()
-          .map((key) => [key, canonical((value as Record<string, unknown>)[key])]),
-      );
-    return value;
-  };
-  const text = (value: unknown) => JSON.stringify(canonical(value));
+  const text = (value: unknown) =>
+    JSON.stringify(value, (_key, item) =>
+      typeof item === "bigint"
+        ? `${item}n`
+        : ArrayBuffer.isView(item)
+          ? [...(item as never)]
+          : item,
+    );
   if (text(actual) !== text(expected))
     throw new Error(`${what}: expected ${text(expected)}, got ${text(actual)}`);
 }
@@ -95,21 +82,13 @@ export async function verifyPrecisionScenario(
       );
       for (const bad of [1, "1", MAX + 1n, -1n, Object(1n)])
         await refused(() => numbers.add(bad, 0n), `${name}: refused ${String(bad)}`);
-      report.push(name);
-    }
-    // A sum outside u64 is refused by the provider's own export lowering. That is a trap which
-    // quarantines the provider revision, so it runs last: once directly, then, on a reloaded
-    // provider revision, through the relay.
-    for (const [name, numbers] of [
-      ["application -> source", direct],
-      ["application -> source -> source", relayed],
-    ] as const) {
-      if (numbers === relayed) await host.reload([{ artifact: await fixture("precision") }]);
+      // The provider's own lowering refuses a sum outside u64.
       const overflow = await numbers.add(MAX, 1n).then(
         () => "accepted",
         () => "refused",
       );
       same(overflow, "refused", `${name}: u64 overflow refused by the guest`);
+      report.push(name);
     }
   } finally {
     direct.release();
