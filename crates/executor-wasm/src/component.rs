@@ -74,7 +74,7 @@ fn layout(
                 .bind(&service.interface, method, true)
                 .map_err(failure)?;
             let role = resource_roles(contract, slot)?;
-            let roles = (role.receiver.is_some() || role.own_result.is_some()).then_some(role);
+            let roles = (role.receiver.is_some() || role.owned_results).then_some(role);
             functions.insert(
                 slot,
                 worker::ExportFunction {
@@ -176,7 +176,8 @@ fn layout(
                         spelling: javascript_name(&function.name),
                         asynchronous: true,
                         receiver: None,
-                        own_result: None,
+                        owned_results: false,
+                        payloads: Vec::new(),
                         stream: false,
                         acquire: payload(Some(&view.resource))?,
                     });
@@ -193,7 +194,8 @@ fn layout(
                     spelling: javascript_name(&function.name),
                     asynchronous,
                     receiver: payload(signature.receiver)?,
-                    own_result: payload(signature.own_result)?,
+                    owned_results: signature.owned_results,
+                    payloads: resources.iter().map(|(_, payload)| *payload).collect(),
                     stream: signature.stream_result,
                     acquire: None,
                 })
@@ -239,7 +241,7 @@ fn resource_roles(contract: &PreparedContract, slot: u32) -> Result<worker::Role
     };
     Ok(worker::Roles {
         receiver: name(signature.receiver),
-        own_result: name(signature.own_result),
+        owned_results: signature.owned_results,
     })
 }
 

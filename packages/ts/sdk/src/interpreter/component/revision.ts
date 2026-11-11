@@ -164,7 +164,7 @@ export class ComponentRevision implements ScopeOwner {
       unlock();
     };
     let continued = false;
-    let issued: ResourceOwner | undefined;
+    const issued: ResourceOwner[] = [];
     try {
       if (!!roles.receiver !== !!receiver)
         throw new Error("Resource receiver differs from signature");
@@ -198,7 +198,7 @@ export class ComponentRevision implements ScopeOwner {
           // deadline and active-group fuel remain owned until physical completion.
           task.park();
           release();
-          return { value, capability: owner, finished };
+          return { value, capabilities: [owner], finished };
         } catch (error) {
           owner?.close();
           await finished.catch(() => undefined);
@@ -209,42 +209,41 @@ export class ComponentRevision implements ScopeOwner {
         BigInt(environment.id),
         scope,
         async () => {
-          if (!roles.own) return values.fromGuest(call);
-          const raw = await call();
-          if (typeof raw !== "object" || raw === null)
-            throw new Error("Owned result is not a resource");
-          const owner = new ResourceOwner(roles.own, this, environment.id, raw, () => {
-            return this.port.cleanup(async () => {
-              const unlock = await this.gate.enter();
-              try {
-                if (this.scopes.has(environment.id))
-                  await this.port.destroy(() => {
-                    const dispose = (raw as Disposable)[Symbol.dispose];
-                    if (typeof dispose !== "function")
-                      throw new Error("Resource has no destructor");
-                    dispose.call(raw);
-                  });
-              } finally {
-                unlock();
-              }
+          const result = await values.fromGuest(call);
+          if (!roles.result) return result;
+          return roles.result(result, (nominal, raw) => {
+            if (typeof raw !== "object" || raw === null)
+              throw new Error("Owned result is not a resource");
+            const owner = new ResourceOwner(nominal, this, environment.id, raw, () => {
+              return this.port.cleanup(async () => {
+                const unlock = await this.gate.enter();
+                try {
+                  if (this.scopes.has(environment.id))
+                    await this.port.destroy(() => {
+                      const dispose = (raw as Disposable)[Symbol.dispose];
+                      if (typeof dispose !== "function")
+                        throw new Error("Resource has no destructor");
+                      dispose.call(raw);
+                    });
+                } finally {
+                  unlock();
+                }
+              });
             });
+            let owners = this.#issuedResources.get(environment.id);
+            if (!owners) this.#issuedResources.set(environment.id, (owners = new Set()));
+            owners.add(owner);
+            owner.whenClosed(() => owners.delete(owner));
+            issued.push(owner);
+            return issued.length - 1;
           });
-          let owners = this.#issuedResources.get(environment.id);
-          if (!owners) this.#issuedResources.set(environment.id, (owners = new Set()));
-          owners.add(owner);
-          owner.whenClosed(() => owners.delete(owner));
-          issued = owner;
-          return null;
         },
         retain,
       );
-      if (roles.own) {
-        const value = check(this.contract, slot, false, encode(0));
-        return { value, capability: issued! };
-      }
-      return check(this.contract, slot, false, encode(result, VALUE_LIMIT, shape.result));
+      const value = check(this.contract, slot, false, encode(result, VALUE_LIMIT, shape.result));
+      return roles.owned ? { value, capabilities: issued } : value;
     } catch (error) {
-      issued?.close();
+      for (const owner of issued) owner.close();
       throw error;
     } finally {
       if (!continued) {
@@ -464,7 +463,7 @@ export class ComponentRevision implements ScopeOwner {
               );
               const output = await invoke(environment, context, input, undefined, retain);
               if (!(output instanceof Encoded)) {
-                output.capability?.close();
+                for (const capability of output.capabilities ?? []) capability.close();
                 await output.finished;
                 throw new Error("A data-only caller cannot receive a host capability");
               }
@@ -533,7 +532,7 @@ export class ComponentRevision implements ScopeOwner {
             await physical?.catch(() => undefined);
           }
           if (!(result instanceof Encoded)) {
-            result.capability?.close();
+            for (const capability of result.capabilities ?? []) capability.close();
             throw new Error("A contribution cannot carry a host capability");
           }
           const value = lift(

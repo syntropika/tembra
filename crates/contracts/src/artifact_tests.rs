@@ -508,11 +508,12 @@ fn compiled_resource_exports_are_verified_but_need_a_capability_transport() {
         "package test:unsupported; interface handles { resource handle; \
          open: func() -> option<own<handle>>; } world run { export handles; }",
     );
-    assert!(
-        nested
-            .component_artifact(&component(&nested), "nested", 1, &Default::default())
-            .is_err()
-    );
+    let bytes = nested
+        .component_artifact(&component(&nested), "nested", 1, &Default::default())
+        .unwrap();
+    let artifact = Artifact::decode(&bytes).unwrap();
+    artifact.contract.check_resource_profile().unwrap();
+    assert!(artifact.contract.check_value_profile().is_err());
 }
 
 /// Source Orbs admit a `stream<u8>` only as the whole result of an asynchronous freestanding

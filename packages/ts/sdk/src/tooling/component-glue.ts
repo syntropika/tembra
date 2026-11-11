@@ -246,7 +246,43 @@ export function fixSchedulerTurns(source: string): string {
   );
 }
 
+/**
+ * JCO 0.23.0 lifts list elements into function-scoped `var` temporaries. Each resource's
+ * destructor then closes the final iteration's handle/object, leaking earlier elements.
+ * Bind both temporaries to their lexical block. Match the complete pinned ownership block:
+ * changing an unrelated variable or accepting a partial vendor shape would hide a compiler bug.
+ */
+const RESOURCE_CLOSURE = new RegExp(
+  [
+    String.raw`var (handle\d+) = [^\n]+;\n\s*var (rsc\d+) = new\.target === ([\w$]+) \? this : Object\.create\(\3\.prototype\);\n`,
+    String.raw`\s*Object\.defineProperty\(\2, symbolRscHandle, \{ writable: true, value: \1\}\);\n`,
+    String.raw`\s*finalizationRegistry(\d+)\.register\(\2, \1, \2\);\n`,
+    String.raw`\s*Object\.defineProperty\(\2, symbolDispose, \{ writable: true, value: function \(\) \{\n`,
+    String.raw`\s*finalizationRegistry\4\.unregister\(\2\);\n`,
+    String.raw`\s*const handleEntry = rscTableRemove\(handleTable\d+, \1\);\n`,
+    String.raw`\s*\2\[symbolDispose\] = emptyFunc;\n\s*\2\[symbolRscHandle\] = undefined;\n`,
+    String.raw`\s*callResourceDestructor\(\{ componentIdx: \d+, dtor: exports\d+\["\d+"\], rep: handleEntry\.rep \}\);\n\s*\}\}\);`,
+  ].join(""),
+  "g",
+);
+
+export function fixResourceClosures(source: string): string {
+  const sites = [...source.matchAll(/Object\.defineProperty\(rsc\d+, symbolDispose,/g)].length;
+  let changed = 0;
+  const output = source.replace(RESOURCE_CLOSURE, (block) => {
+    changed++;
+    return block.replace(/\bvar (handle\d+|rsc\d+) =/g, "let $1 =");
+  });
+  if (changed !== sites)
+    throw new Error(
+      `unsupported trusted compiler output: resource destructor closure (expected JCO ${JCO_VERSION})`,
+    );
+  return output;
+}
+
 /** Apply every required rewrite to generated glue, in the order the anchors expect. */
 export function prepareGlue(source: string): string {
-  return fixSchedulerTurns(fixLiftOwnTables(fixResultErrExit(instrumentGlue(source))));
+  return fixSchedulerTurns(
+    fixResourceClosures(fixLiftOwnTables(fixResultErrExit(instrumentGlue(source)))),
+  );
 }

@@ -54,6 +54,31 @@ impl exports::tembra_test::resources::relay::GuestHolder for Holder {
 impl exports::tembra_test::resources::relay::Guest for Relay {
     type Holder = Holder;
 
+    fn nested(seed: u64, fail: bool) -> Vec<u64> {
+        match sessions::open_bundle(seed, fail) {
+            Err(_) => vec![],
+            Ok(bundle) => {
+                let mut totals = vec![bundle.primary.total()];
+                if let Some(optional) = &bundle.optional {
+                    totals.push(optional.total());
+                }
+                totals.extend(bundle.extras.iter().map(Session::total));
+                totals.push(bundle.count.hits());
+                totals.push(bundle.seed);
+                totals
+            }
+        }
+    }
+
+    fn nested_shapes(seed: u64) -> Vec<u64> {
+        let pair = sessions::open_pair(seed);
+        let choice = match sessions::choose(seed) {
+            sessions::Selection::Empty => 0,
+            sessions::Selection::Active(session) => session.total(),
+        };
+        vec![pair.0.total(), pair.1, choice]
+    }
+
     fn pair(seed: u64, n: u64) -> Vec<u64> {
         let first = Session::new(seed);
         // Equal arguments, distinct instance.

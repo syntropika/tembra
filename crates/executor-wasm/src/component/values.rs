@@ -3,10 +3,21 @@ use crate::failure;
 use serde_json::{Value, json};
 use tembra::Result;
 use tembra_contracts::javascript_name;
-use wasmtime::component::{Type, Val};
+use wasmtime::component::{ResourceAny, ResourceType, Type, Val};
 
 /// Lower already WIT-validated data using the executable component's own parameter types.
 pub(super) fn lower(ty: Type, value: &Value) -> Result<Val> {
+    lower_with(ty, value, &mut |_, _| {
+        Err(failure("a data value cannot carry a resource"))
+    })
+}
+
+/// Lower resources through an issuer-checked callback while reusing the ordinary data codec.
+pub(super) fn lower_with(
+    ty: Type,
+    value: &Value,
+    resource: &mut impl FnMut(ResourceType, &Value) -> Result<Val>,
+) -> Result<Val> {
     let invalid = || failure("portable value differs from the component ABI type");
     Ok(match ty {
         Type::Bool => Val::Bool(value.as_bool().ok_or_else(invalid)?),
@@ -64,7 +75,7 @@ pub(super) fn lower(ty: Type, value: &Value) -> Result<Val> {
                 .as_array()
                 .ok_or_else(invalid)?
                 .iter()
-                .map(|value| lower(list.ty(), value))
+                .map(|value| lower_with(list.ty(), value, resource))
                 .collect::<Result<_>>()?,
         ),
         Type::Record(record) => Val::Record(
@@ -73,7 +84,7 @@ pub(super) fn lower(ty: Type, value: &Value) -> Result<Val> {
                 .map(|field| {
                     Ok((
                         field.name.into(),
-                        lower(field.ty, &value[javascript_name(field.name)])?,
+                        lower_with(field.ty, &value[javascript_name(field.name)], resource)?,
                     ))
                 })
                 .collect::<Result<_>>()?,
@@ -82,13 +93,13 @@ pub(super) fn lower(ty: Type, value: &Value) -> Result<Val> {
             tuple
                 .types()
                 .zip(value.as_array().ok_or_else(invalid)?)
-                .map(|(ty, value)| lower(ty, value))
+                .map(|(ty, value)| lower_with(ty, value, resource))
                 .collect::<Result<_>>()?,
         ),
         Type::Option(option) => Val::Option(if value.is_null() {
             None
         } else {
-            Some(Box::new(lower(option.ty(), value)?))
+            Some(Box::new(lower_with(option.ty(), value, resource)?))
         }),
         Type::Variant(variant) => {
             let tag = value["tag"].as_str().ok_or_else(invalid)?;
@@ -99,13 +110,13 @@ pub(super) fn lower(ty: Type, value: &Value) -> Result<Val> {
             Val::Variant(
                 tag.into(),
                 case.ty
-                    .map(|ty| lower(ty, &value["val"]).map(Box::new))
+                    .map(|ty| lower_with(ty, &value["val"], resource).map(Box::new))
                     .transpose()?,
             )
         }
         Type::Result(result) => {
-            let payload = |ty: Option<Type>| {
-                ty.map(|ty| lower(ty, &value["val"]).map(Box::new))
+            let mut payload = |ty: Option<Type>| {
+                ty.map(|ty| lower_with(ty, &value["val"], resource).map(Box::new))
                     .transpose()
             };
             Val::Result(match value["tag"].as_str() {
@@ -122,6 +133,7 @@ pub(super) fn lower(ty: Type, value: &Value) -> Result<Val> {
                 .map(str::to_owned)
                 .collect(),
         ),
+        Type::Own(ty) => resource(ty, value)?,
         _ => {
             return Err(failure(
                 "component value requires an additional portable codec",
@@ -132,6 +144,16 @@ pub(super) fn lower(ty: Type, value: &Value) -> Result<Val> {
 
 /// Lift actual ABI values before independently checking the declared WIT result.
 pub(super) fn lift(value: Val) -> Result<Value> {
+    lift_with(value, &mut |_| {
+        Err(failure("a data result cannot carry a resource"))
+    })
+}
+
+/// Lift every nested resource through the same issuer-owned table as whole resource results.
+pub(super) fn lift_with(
+    value: Val,
+    resource: &mut impl FnMut(ResourceAny) -> Result<Value>,
+) -> Result<Value> {
     Ok(match value {
         Val::Bool(value) => json!(value),
         Val::S8(value) => json!(value),
@@ -146,23 +168,26 @@ pub(super) fn lift(value: Val) -> Result<Value> {
         Val::Float64(value) => float(value)?,
         Val::Char(value) => json!(value.to_string()),
         Val::String(value) => json!(value),
-        Val::List(values) | Val::Tuple(values) => {
-            Value::Array(values.into_iter().map(lift).collect::<Result<_>>()?)
-        }
+        Val::List(values) | Val::Tuple(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| lift_with(value, resource))
+                .collect::<Result<_>>()?,
+        ),
         Val::Record(fields) => Value::Object(
             fields
                 .into_iter()
-                .map(|(name, value)| Ok((javascript_name(&name), lift(value)?)))
+                .map(|(name, value)| Ok((javascript_name(&name), lift_with(value, resource)?)))
                 .collect::<Result<_>>()?,
         ),
         Val::Option(value) => value
-            .map(|value| lift(*value))
+            .map(|value| lift_with(*value, resource))
             .transpose()?
             .unwrap_or(Value::Null),
-        Val::Variant(tag, value) => tagged(tag, value)?,
+        Val::Variant(tag, value) => tagged(tag, value, resource)?,
         Val::Result(result) => match result {
-            Ok(value) => tagged("ok".into(), value)?,
-            Err(value) => tagged("err".into(), value)?,
+            Ok(value) => tagged("ok".into(), value, resource)?,
+            Err(value) => tagged("err".into(), value, resource)?,
         },
         Val::Enum(value) => json!(value),
         Val::Flags(names) => Value::Object(
@@ -171,6 +196,7 @@ pub(super) fn lift(value: Val) -> Result<Value> {
                 .map(|name| (javascript_name(&name), Value::Bool(true)))
                 .collect(),
         ),
+        Val::Resource(value) => resource(value)?,
         _ => {
             return Err(failure(
                 "component result requires an additional portable codec",
@@ -195,9 +221,33 @@ fn float(value: f64) -> Result<Value> {
 }
 
 /// Preserve tagged result and variant payloads, including their absence.
-fn tagged(tag: String, value: Option<Box<Val>>) -> Result<Value> {
+fn tagged(
+    tag: String,
+    value: Option<Box<Val>>,
+    resource: &mut impl FnMut(ResourceAny) -> Result<Value>,
+) -> Result<Value> {
     Ok(match value {
-        Some(value) => json!({"tag":tag,"val":lift(*value)?}),
+        Some(value) => json!({"tag":tag,"val":lift_with(*value, resource)?}),
         None => json!({"tag":tag}),
     })
+}
+
+/// Inspect every resource before conversion, so a rejected sibling cannot strand later handles.
+pub(super) fn resources(value: &Val, visit: &mut impl FnMut(ResourceAny)) {
+    match value {
+        Val::Resource(resource) => visit(*resource),
+        Val::List(values) | Val::Tuple(values) => {
+            for value in values {
+                resources(value, visit);
+            }
+        }
+        Val::Record(fields) => {
+            for (_, value) in fields {
+                resources(value, visit);
+            }
+        }
+        Val::Option(Some(value)) | Val::Variant(_, Some(value)) => resources(value, visit),
+        Val::Result(Ok(Some(value)) | Err(Some(value))) => resources(value, visit),
+        _ => {}
+    }
 }

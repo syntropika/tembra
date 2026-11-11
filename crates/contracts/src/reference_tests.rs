@@ -279,7 +279,9 @@ fn view_method_slots_carry_only_data_while_resource_wire_keeps_the_receiver() {
     let add = plain.bind(VIEW, "[method]counter.add", false).unwrap();
     assert!(plain.validate_slot(add, true, &json!([5])).is_err());
     assert!(plain.check_import_value_profile(VIEW).is_err());
-    assert!(plain.check_import_resource_profile(VIEW).is_err());
+    // Without the role this is now a real provider-owned resource factory (a nested result),
+    // not a keyed reference view. Admission still compares its distinct nominal signature.
+    plain.check_import_resource_profile(VIEW).unwrap();
     assert_eq!(
         plain.import_services(&orb_binding()).unwrap()[VIEW],
         format!("keyed::{VIEW}")

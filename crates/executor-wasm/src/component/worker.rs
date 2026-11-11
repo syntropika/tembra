@@ -82,7 +82,7 @@ struct Target {
 #[derive(Clone, Default)]
 struct Resolved {
     receiver: Option<ResourceType>,
-    own_result: Option<ResourceType>,
+    owned_results: bool,
 }
 
 pub(crate) struct Export {
@@ -102,7 +102,7 @@ pub(crate) struct ExportFunction {
 /// Resource positions of one function, by the local name of the defining resource.
 pub(crate) struct Roles {
     pub receiver: Option<String>,
-    pub own_result: Option<String>,
+    pub owned_results: bool,
 }
 
 pub(crate) struct Import {
@@ -125,8 +125,10 @@ pub(crate) struct ImportFunction {
     pub asynchronous: bool,
     /// The dynamic type of the implicit `self` borrow, for resource methods.
     pub receiver: Option<u32>,
-    /// The dynamic type of a whole owned result.
-    pub own_result: Option<u32>,
+    /// Whether the result contains owned resources, including nested positions.
+    pub owned_results: bool,
+    /// Dynamic resource types linked by this import, for recursive result lowering.
+    pub payloads: Vec<u32>,
     /// The whole result is a `stream<u8>`, read from a pipe the host fills.
     pub stream: bool,
     /// Dynamic host resource type returned inside the acquisition result.
@@ -594,7 +596,7 @@ async fn instantiate(
             if let Some(role) = &exported.roles {
                 let resolved = Resolved {
                     receiver: resource(&role.receiver)?,
-                    own_result: resource(&role.own_result)?,
+                    owned_results: role.owned_results,
                 };
                 roles.insert(*id, resolved);
             }
@@ -704,7 +706,9 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                 )?;
                 continue;
             }
-            let (receiver, own_result) = (function.receiver, function.own_result);
+            let receiver = function.receiver;
+            let owned_results = function.owned_results;
+            let payloads = Arc::new(function.payloads.clone());
             if function.stream {
                 instance.func_new_concurrent(
                     &function.name,
@@ -753,20 +757,23 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                         // is still the caller's when its authority is captured.
                         let request = accessor.with(|mut access| {
                             let (selected, params) = select(&mut access, receiver, params)?;
-                            let dropped = own_result.map(|_| access.get().dropped.clone());
-                            request(access.data_mut(), &target, selected, params, None)
-                                .map(|receive| ImportReply::new(receive, dropped))
+                            let dropped = owned_results.then(|| access.get().dropped.clone());
+                            request(access.data_mut(), &target, selected, params, None).map(
+                                |receive| {
+                                    ImportReply::new(receive, dropped)
+                                        .with_result(ty.results().next())
+                                },
+                            )
                         });
+                        let payloads = payloads.clone();
                         Box::pin(async move {
                             // The guest may abandon this call at any await; the reply guard then
                             // queues a committed owned slot for release instead of stranding it.
                             let mut reply = request?;
                             let value = reply.settle().await?;
-                            let value = match own_result {
-                                Some(payload) => accessor
-                                    .with(|mut access| owned(&mut access, &value, payload))?,
-                                None => lower_result(&ty, &value)?,
-                            };
+                            let value = accessor.with(|mut access| {
+                                lower_owned_result(&mut access, &ty, &value, &payloads)
+                            })?;
                             reply.delivered();
                             store_result(results, value)
                         })
@@ -776,19 +783,21 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                 instance.func_new_async(
                     &function.name,
                     move |mut store, ty, params, results| {
-                        let dropped = own_result.map(|_| store.data().dropped.clone());
+                        let dropped = owned_results.then(|| store.data().dropped.clone());
                         let request =
                             select(&mut store, receiver, params).and_then(|(selected, params)| {
-                                request(store.data(), &target, selected, params, None)
-                                    .map(|receive| ImportReply::new(receive, dropped))
+                                request(store.data(), &target, selected, params, None).map(
+                                    |receive| {
+                                        ImportReply::new(receive, dropped)
+                                            .with_result(ty.results().next())
+                                    },
+                                )
                             });
+                        let payloads = payloads.clone();
                         Box::new(async move {
                             let mut reply = request?;
                             let value = reply.settle().await?;
-                            let value = match own_result {
-                                Some(payload) => owned(&mut store, &value, payload)?,
-                                None => lower_result(&ty, &value)?,
-                            };
+                            let value = lower_owned_result(&mut store, &ty, &value, &payloads)?;
                             reply.delivered();
                             store_result(results, value)
                         })
@@ -843,6 +852,29 @@ fn lower_result(ty: &ComponentFunc, value: &Value) -> wasmtime::Result<Option<Va
             "dependency result differs from its import",
         )),
     }
+}
+
+/// Lower nested resource slots only through dynamic types linked by this exact import.
+fn lower_owned_result(
+    mut store: impl wasmtime::AsContextMut,
+    ty: &ComponentFunc,
+    value: &Value,
+    payloads: &[u32],
+) -> wasmtime::Result<Option<Val>> {
+    let Some(ty) = ty.results().next() else {
+        return lower_result(ty, value);
+    };
+    values::lower_with(ty, value, &mut |expected, value| {
+        let payload = payloads
+            .iter()
+            .copied()
+            .find(|payload| ResourceType::host_dynamic(*payload) == expected)
+            .ok_or_else(|| crate::failure("result resource is not linked by this import"))?;
+        let slot = slot(value).ok_or_else(|| crate::failure("resource result names no slot"))?;
+        super::resources::owned_value(&mut store, slot, payload).map_err(crate::failure)
+    })
+    .map(Some)
+    .map_err(|error| wasmtime::Error::msg(error.to_string()))
 }
 
 /// Store the single result an import function returns, if it has one.
@@ -999,7 +1031,8 @@ struct ImportReply {
     /// The release queue, for an import whose result is an owned resource.
     owned: Option<Dropped>,
     /// The slot received but not yet held by the guest.
-    pending: Option<u32>,
+    pending: Vec<u32>,
+    result: Option<wasmtime::component::Type>,
     delivered: bool,
 }
 
@@ -1011,9 +1044,29 @@ impl ImportReply {
         Self {
             receive,
             owned,
-            pending: None,
+            pending: Vec::new(),
+            result: None,
             delivered: false,
         }
+    }
+
+    fn with_result(mut self, result: Option<wasmtime::component::Type>) -> Self {
+        self.result = result;
+        self
+    }
+
+    fn slots(&self, value: &Value) -> Vec<u32> {
+        let Some(ty) = &self.result else {
+            return slot(value).into_iter().collect();
+        };
+        let mut slots = Vec::new();
+        let _ = values::lower_with(ty.clone(), value, &mut |_, value| {
+            let id = slot(value).ok_or_else(|| crate::failure("resource result names no slot"))?;
+            slots.push(id);
+            // Only collect the slots: this temporary ABI value is never lowered.
+            Ok(Val::Bool(false))
+        });
+        slots
     }
 
     /// Await the checked result; a refusal traps the importer, which quarantines its Store.
@@ -1035,14 +1088,14 @@ impl ImportReply {
         };
         let value: Value = serde_json::from_str(&text)?;
         if self.owned.is_some() {
-            self.pending = slot(&value);
+            self.pending = self.slots(&value);
         }
         Ok(Ok(value))
     }
 
     /// The guest now holds the result.
     fn delivered(&mut self) {
-        self.pending = None;
+        self.pending.clear();
         self.delivered = true;
     }
 }
@@ -1056,15 +1109,15 @@ impl Drop for ImportReply {
         // published a slot we can drain, or receive a refusal and roll back its delivery.
         self.receive.close();
         // Received but never held, or accepted by the channel but never read.
-        let slot = self
-            .pending
-            .take()
-            .or_else(|| match self.receive.try_recv() {
-                Ok(Ok(text)) => serde_json::from_str(&text).ok().as_ref().and_then(slot),
-                _ => None,
-            });
-        if let (Some(slot), Ok(mut dropped)) = (slot, dropped.lock()) {
-            dropped.push(slot);
+        let mut slots = std::mem::take(&mut self.pending);
+        if slots.is_empty()
+            && let Ok(Ok(text)) = self.receive.try_recv()
+            && let Ok(value) = serde_json::from_str(&text)
+        {
+            slots = self.slots(&value);
+        }
+        if let Ok(mut dropped) = dropped.lock() {
+            dropped.extend(slots);
         }
     }
 }
@@ -1394,7 +1447,7 @@ async fn invoke(
     }
     let args = lowered;
     let count = ty.results().len();
-    let own_result = roles.own_result;
+    let owned_results = roles.owned_results;
     let releases = (authority.events.clone(), authority.scope);
     let dropped = store.data().dropped.clone();
     store.set_fuel(engine.limits.fuel)?;
@@ -1457,7 +1510,7 @@ async fn invoke(
             }
             Ok::<_, wasmtime::Error>(results)
         };
-        let mut results = {
+        let results = {
             let mut work = std::pin::pin!(work);
             // The caller's cancellation closes the bodies this call is reading at once, so a
             // guest parked in a body read gets its end and returns; the call finishes normally.
@@ -1486,25 +1539,25 @@ async fn invoke(
         crate::worker::stream_adapter::sweep(accessor).await?;
         // Imported resources the guest dropped are released before the call completes.
         release_dropped(&dropped, &releases).await;
-        // An owned result stays in this Store; only its host-issued id leaves.
-        let instance = match own_result {
-            Some(expected) => Some(keep(accessor, results.pop(), &expected, environment).await?),
-            None => None,
+        // Every owned result stays in this Store, including handles nested in data containers.
+        let value = match results.into_iter().next() {
+            Some(value) if owned_results => {
+                keep(accessor, value, environment, engine.limits.packet_bytes).await?
+            }
+            Some(value) => values::lift(value).map_err(|error| error.to_string()),
+            None => Ok(Value::Null),
         };
-        Ok::<_, wasmtime::Error>((results, instance))
+        Ok::<_, wasmtime::Error>(value)
     });
-    let (results, instance) = tokio::time::timeout(
+    let value = tokio::time::timeout(
         std::time::Duration::from_millis(engine.limits.timeout_ms),
         call,
     )
     .await
     .map_err(|_| wasmtime::Error::msg("component call timed out"))???;
-    let value = match instance {
-        Some(instance) => json!(instance),
-        None => match results.into_iter().next().map(values::lift).transpose() {
-            Ok(value) => value.unwrap_or(Value::Null),
-            Err(error) => return Ok(Err(error.to_string())),
-        },
+    let value = match value {
+        Ok(value) => value,
+        Err(error) => return Ok(Err(error)),
     };
     let text = value.to_string();
     if text.len() > engine.limits.packet_bytes {
@@ -1559,26 +1612,52 @@ impl wasmtime::component::StreamConsumer<State> for Carried {
     }
 }
 
-/// File an owned result of the export's actual resource type under the calling environment.
+/// File every owned resource nested in a result, rolling back the complete batch on failure.
 async fn keep(
     accessor: &Accessor<State>,
-    result: Option<Val>,
-    expected: &ResourceType,
+    value: Val,
     environment: u64,
-) -> wasmtime::Result<u32> {
-    match result {
-        Some(Val::Resource(resource)) if resource.owned() && resource.ty() == *expected => {
-            accessor.with(|mut store| store.data_mut().instances.insert(environment, resource))
+    packet_bytes: usize,
+) -> wasmtime::Result<std::result::Result<Value, String>> {
+    let mut resources = Vec::new();
+    values::resources(&value, &mut |resource| resources.push(resource));
+    let checked = values::lift_with(value.clone(), &mut |resource| {
+        if !resource.owned() {
+            return Err(crate::failure("a result cannot return a borrowed resource"));
         }
-        Some(Val::Resource(resource)) => {
-            if resource.owned() {
-                resource.resource_drop_concurrent(accessor).await?;
+        Ok(json!(0))
+    });
+    let mut inserted = Vec::new();
+    let lifted = checked.and_then(|_| {
+        values::lift_with(value, &mut |resource| {
+            let instance = accessor
+                .with(|mut store| store.data_mut().instances.insert(environment, resource))
+                .map_err(crate::failure)?;
+            inserted.push(instance);
+            Ok(json!(instance))
+        })
+    });
+    let lifted = lifted.and_then(|value| {
+        if value.to_string().len() > packet_bytes {
+            return Err(crate::failure("component result exceeds the packet limit"));
+        }
+        Ok(value)
+    });
+    match lifted {
+        Ok(value) => Ok(Ok(value)),
+        Err(error) => {
+            accessor.with(|mut store| {
+                for id in inserted {
+                    store.data_mut().instances.remove(environment, id);
+                }
+            });
+            for resource in resources {
+                if resource.owned() {
+                    resource.resource_drop_concurrent(accessor).await?;
+                }
             }
-            Err(wasmtime::Error::msg(
-                "export returned another resource type",
-            ))
+            Ok(Err(error.to_string()))
         }
-        _ => Err(wasmtime::Error::msg("export returned no owned resource")),
     }
 }
 

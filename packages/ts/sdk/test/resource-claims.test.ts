@@ -70,7 +70,7 @@ test("an early capability head keeps its provider invocation admitted until phys
     "resource-one",
     async (_environment, _context, _input, _receiver, retain) => {
       retain!(finished.promise);
-      return { value: encode(0), capability: resource, finished: finished.promise };
+      return { value: encode(0), capabilities: [resource], finished: finished.promise };
     },
   );
   await host.install({
@@ -84,7 +84,7 @@ test("an early capability head keeps its provider invocation admitted until phys
     await host.root(async (context) => {
       const capture: CapturedInvocation = { signature: "resource-one", input: encode([]) };
       await host.session.calls.invokePhysical(record, "open", [], context, capture);
-      expect(capture.capability).toBe(resource);
+      expect(capture.capabilities).toEqual([resource]);
       expect(host.diagnostics().calls).toBe(1);
       finished.resolve();
       await Promise.allSettled([...host.session.jobs]);

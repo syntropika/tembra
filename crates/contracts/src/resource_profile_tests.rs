@@ -39,7 +39,7 @@ fn constructors_methods_statics_and_owned_factories_have_distinct_roles() {
             .unwrap();
         let signature = contract.resource_signature(slot).unwrap();
         assert_eq!(signature.receiver, receiver.then_some(&identity), "{name}");
-        assert_eq!(signature.own_result, result.then_some(&identity), "{name}");
+        assert_eq!(signature.owned_results, result, "{name}");
     }
     assert!(contract.check_value_profile().is_err());
     assert!(
@@ -66,9 +66,6 @@ fn unsupported_transfers_and_async_containers_stay_closed() {
     for body in [
         "resource session; take: func(value: own<session>);",
         "resource session; read: func(value: borrow<session>);",
-        "resource session; create: func() -> option<own<session>>;",
-        "resource session; create: func() -> list<own<session>>;",
-        "resource session; create: func() -> result<own<session>, string>;",
         "read: func() -> stream<u8>;",
         "read: func() -> future<u64>;",
     ] {
@@ -243,7 +240,7 @@ fn whole_byte_stream_results_of_async_exports_are_the_only_stream_shape() {
         .unwrap();
     let signature = frames.resource_signature(slot).unwrap();
     assert!(signature.stream_result);
-    assert!(signature.receiver.is_none() && signature.own_result.is_none());
+    assert!(signature.receiver.is_none() && !signature.owned_results);
     // Arguments are exact data; the result's data names its one attachment.
     let arguments = frames
         .to_resource_wire(slot, true, serde_json::json!([u64::MAX, "a"]))
@@ -288,4 +285,65 @@ fn whole_byte_stream_results_of_async_exports_are_the_only_stream_shape() {
             "{body}"
         );
     }
+}
+
+#[test]
+fn owned_results_are_checked_and_mapped_inside_typed_containers() {
+    use serde_json::json;
+    let contract = contract(
+        "resource session; resource other; record bundle { first: session, rest: list<option<session>>, other: result<other, string>, seed: u64 } open: func() -> result<bundle, string>;",
+    );
+    contract.check_resource_profile().unwrap();
+    let slot = contract
+        .bind("test:resources/sessions@1.0.0", "open", true)
+        .unwrap();
+    assert!(contract.resource_signature(slot).unwrap().owned_results);
+    let value = json!({"tag":"ok","val":{"first":0,"rest":[1,null,2],"other":{"tag":"ok","val":3},"seed":u64::MAX}});
+    let wire = contract
+        .to_resource_wire(slot, false, value.clone())
+        .unwrap();
+    assert_eq!(wire["val"]["seed"], "18446744073709551615");
+    assert_eq!(
+        contract.from_resource_wire(slot, false, wire).unwrap(),
+        value
+    );
+    let mut rewritten = value;
+    let mut names = Vec::new();
+    contract
+        .map_owned_result(slot, &mut rewritten, |identity, index| {
+            names.push((identity.name.clone().unwrap(), index));
+            Ok(index + 10)
+        })
+        .unwrap();
+    assert_eq!(
+        names,
+        [
+            ("session".into(), 0),
+            ("session".into(), 1),
+            ("session".into(), 2),
+            ("other".into(), 3)
+        ]
+    );
+    assert_eq!(rewritten["val"]["rest"], json!([11, null, 12]));
+    assert!(contract.to_wire(slot, false, rewritten.clone()).is_err());
+    let mut malformed = rewritten;
+    malformed["val"]["seed"] = json!("wrong");
+    let mut called = false;
+    assert!(
+        contract
+            .map_owned_result(slot, &mut malformed, |_, index| {
+                called = true;
+                Ok(index)
+            })
+            .is_err()
+    );
+    assert!(
+        !called,
+        "all data must be validated before any ownership changes"
+    );
+    assert!(
+        contract
+            .from_resource_wire(slot, false, json!({"tag":"err","val":"no"}))
+            .is_ok()
+    );
 }

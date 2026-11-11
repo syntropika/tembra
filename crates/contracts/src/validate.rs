@@ -416,13 +416,35 @@ impl PreparedContract {
         }
     }
 
-    /// Check values recursively without silently truncating fields or numeric widths.
+    /// Check data without admitting capability indices at ordinary value boundaries.
     pub(crate) fn validate(
         &self,
         form: Form,
         ty: Ty,
         value: &Value,
         depth: usize,
+    ) -> Result<(), Error> {
+        self.validate_inner(form, ty, value, depth, false)
+    }
+
+    /// Check the data lane of an already admitted capability shape. An index grants no authority.
+    pub(crate) fn validate_capabilities(
+        &self,
+        form: Form,
+        ty: Ty,
+        value: &Value,
+    ) -> Result<(), Error> {
+        self.validate_inner(form, ty, value, 0, true)
+    }
+
+    /// Check values recursively without silently truncating fields or numeric widths.
+    fn validate_inner(
+        &self,
+        form: Form,
+        ty: Ty,
+        value: &Value,
+        depth: usize,
+        capabilities: bool,
     ) -> Result<(), Error> {
         if depth > MAX_DEPTH {
             return Err(Error("WIT value nesting exceeds its limit".into()));
@@ -463,7 +485,7 @@ impl PreparedContract {
                 Form::Native => integral && value.as_i64().is_some(),
                 Form::Wire => canonical(value, true),
             },
-            Ty::Ref(id) => return self.validate_kind(form, id, value, depth),
+            Ty::Ref(id) => return self.validate_kind(form, id, value, depth, capabilities),
             Ty::ErrorContext => {
                 return Err(Error("WIT type requires a dedicated value codec".into()));
             }
@@ -476,16 +498,25 @@ impl PreparedContract {
     }
 
     /// Check a value against one type definition, using its cached member spellings.
-    fn validate_kind(&self, form: Form, id: u32, value: &Value, depth: usize) -> Result<(), Error> {
+    fn validate_kind(
+        &self,
+        form: Form,
+        id: u32,
+        value: &Value,
+        depth: usize,
+        capabilities: bool,
+    ) -> Result<(), Error> {
         let kind = self.kind(id);
         let valid = match kind {
-            Kind::Alias(ty) => return self.validate(form, *ty, value, depth + 1),
+            Kind::Alias(ty) => {
+                return self.validate_inner(form, *ty, value, depth + 1, capabilities);
+            }
             Kind::List(ty) => {
                 let values = value
                     .as_array()
                     .ok_or_else(|| Error("expected WIT list".into()))?;
                 for value in values {
-                    self.validate(form, *ty, value, depth + 1)?;
+                    self.validate_inner(form, *ty, value, depth + 1, capabilities)?;
                 }
                 true
             }
@@ -500,7 +531,7 @@ impl PreparedContract {
                     let field_value = object
                         .get(&**spelling)
                         .ok_or_else(|| Error(format!("missing WIT field {}", field.name)))?;
-                    self.validate(form, field.ty, field_value, depth + 1)?;
+                    self.validate_inner(form, field.ty, field_value, depth + 1, capabilities)?;
                 }
                 true
             }
@@ -510,13 +541,13 @@ impl PreparedContract {
                     .filter(|values| values.len() == types.len())
                     .ok_or_else(|| Error("WIT tuple length differs".into()))?;
                 for (ty, value) in types.iter().zip(values) {
-                    self.validate(form, *ty, value, depth + 1)?;
+                    self.validate_inner(form, *ty, value, depth + 1, capabilities)?;
                 }
                 true
             }
             Kind::Option(ty) => {
                 if !value.is_null() {
-                    self.validate(form, *ty, value, depth + 1)?;
+                    self.validate_inner(form, *ty, value, depth + 1, capabilities)?;
                 }
                 true
             }
@@ -537,7 +568,7 @@ impl PreparedContract {
                     .iter()
                     .find(|case| case.name == tag)
                     .ok_or_else(|| Error("unknown WIT variant case".into()))?;
-                self.tagged(form, value, case.ty, depth)?;
+                self.tagged(form, value, case.ty, depth, capabilities)?;
                 true
             }
             Kind::Result { ok, err } => {
@@ -546,8 +577,11 @@ impl PreparedContract {
                     Some("err") => *err,
                     _ => return Err(Error("result needs an ok or err tag".into())),
                 };
-                self.tagged(form, value, ty, depth)?;
+                self.tagged(form, value, ty, depth, capabilities)?;
                 true
+            }
+            Kind::Own(_) if capabilities => {
+                return self.validate_inner(form, Ty::U32, value, depth + 1, false);
             }
             other => return Err(Error(format!("unsupported WIT value {}", other.as_str()))),
         };
@@ -559,7 +593,14 @@ impl PreparedContract {
     }
 
     /// Validate a tagged payload and refuse undeclared keys or missing payloads.
-    fn tagged(&self, form: Form, value: &Value, ty: Option<Ty>, depth: usize) -> Result<(), Error> {
+    fn tagged(
+        &self,
+        form: Form,
+        value: &Value,
+        ty: Option<Ty>,
+        depth: usize,
+        capabilities: bool,
+    ) -> Result<(), Error> {
         let object = value
             .as_object()
             .ok_or_else(|| Error("expected tagged WIT object".into()))?;
@@ -568,13 +609,14 @@ impl PreparedContract {
             return Err(Error("tagged WIT fields differ".into()));
         }
         if let Some(ty) = ty {
-            self.validate(
+            self.validate_inner(
                 form,
                 ty,
                 object
                     .get("val")
                     .ok_or_else(|| Error("missing WIT payload".into()))?,
                 depth + 1,
+                capabilities,
             )?;
         }
         Ok(())

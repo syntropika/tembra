@@ -19,6 +19,7 @@ import type { HttpHandlerResponse } from "../src/interpreter/http-ingress.ts";
 import { verifyKeyedCompiledScenario } from "./keyed-compiled-scenario.ts";
 import {
   verifyBrowserResourceOwnership,
+  verifyBrowserNestedResources,
   verifyBrowserResourceRefusal,
   verifyBrowserResourceReload,
 } from "./component-resources-browser.ts";
@@ -212,6 +213,11 @@ export async function verifyPreparedComponents(engine?: URL): Promise<string[]> 
           adapters.resourceProvider,
           adapters.resourceConsumer,
         ]),
+    ],
+    [
+      "compiled nested resource results",
+      () =>
+        verifyBrowserNestedResources(base, [adapters.resourceProvider, adapters.resourceConsumer]),
     ],
     [
       "compiled resource data-only refusal",

@@ -212,8 +212,12 @@ its destructor.
 
 This transport currently covers compiled exporters with native or compiled callers through
 the Rust facade. Source Orbs and the Node/mobile JSON ports refuse inter-Orb resource contracts until
-their capability carriers are implemented. General resource arguments, nested resource
-results and futures remain outside this resource profile. Byte streams have a separate linear
+their capability carriers are implemented. Compiled callers use ordinary generated WIT bindings
+for owned results nested in records, lists, tuples, simple options, variants and results. Native
+executor adapters receive the same data shape and its separately owned attachments through
+`portable::Delivered`; no numeric value grants authority. Refused or undelivered batches close
+all owners. General resource arguments and futures remain outside this resource profile.
+Byte streams have a separate linear
 attachment described below.
 
 ## Portable byte streams

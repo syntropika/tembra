@@ -197,6 +197,8 @@ macro_rules! both_engines {
 }
 
 both_engines!(
+    nested_resources_preserve_identity_and_drop_each_owner,
+    refused_nested_metadata_destroys_the_complete_resource_batch,
     native_owners_get_fresh_independent_instances,
     owned_handles_outlive_their_reference_and_root_with_its_admission,
     forged_and_mistyped_receivers_are_refused_before_lowering,
@@ -1745,6 +1747,132 @@ fn one_revision_serves_its_sessions_one_call_at_a_time(interpreted: bool) {
     assert_eq!(closed(&mut pool, &host, &store), 1);
     drop(b);
     assert_eq!(closed(&mut pool, &host, &store), 2);
+    assert_eq!(engine.resources(), 0);
+    store.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// The same generated WIT record/result/list/option bindings work for native and compiled callers.
+fn nested_resources_preserve_identity_and_drop_each_owner(interpreted: bool) {
+    let (Some(provided), Some(consuming)) = (
+        fixture("TEMBRA_WASM_RESOURCE_PROVIDER"),
+        fixture("TEMBRA_WASM_RESOURCE_CONSUMER"),
+    ) else {
+        return;
+    };
+    let engine = engine(interpreted);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        pacer(Rc::default()),
+        provider(&engine, &provided, "store"),
+        consumer(&engine, &consuming, "relay", "store"),
+    ])
+    .unwrap();
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let relay = reference(&mut pool, &host, &format!("relay::{RELAY}"), "alice");
+    let seed = u64::MAX - 10;
+    let called = relay.clone();
+    let totals: Vec<u64> = root(&mut pool, &host, async move |context| {
+        called
+            .call_portable(&context, "nested", (seed, false))
+            .await
+    })
+    .unwrap();
+    assert_eq!(totals, [seed, seed + 1, seed + 2, seed + 3, 1, seed]);
+    assert_eq!(closed(&mut pool, &host, &store), 4);
+    assert_eq!(engine.resources(), 0);
+    for (seed, fail, expected, destroyed) in [(0, false, vec![0, 1, 0], 5), (1, true, vec![], 5)] {
+        let called = relay.clone();
+        let totals: Vec<u64> = root(&mut pool, &host, async move |context| {
+            called.call_portable(&context, "nested", (seed, fail)).await
+        })
+        .unwrap();
+        assert_eq!(totals, expected);
+        assert_eq!(closed(&mut pool, &host, &store), destroyed);
+        assert_eq!(engine.resources(), 0);
+    }
+    let called = store.clone();
+    let result: Delivered = root(&mut pool, &host, async move |context| {
+        called
+            .call_portable(&context, "open-bundle", (seed, false))
+            .await
+    })
+    .unwrap();
+    assert_eq!(result.value["tag"], "ok");
+    assert_eq!(result.value["val"]["seed"], json!(seed));
+    assert_eq!(result.value["val"]["primary"], 0);
+    assert_eq!(result.value["val"]["optional"], 1);
+    assert_eq!(result.value["val"]["extras"], json!([2, 3]));
+    assert_eq!(result.value["val"]["count"], 4);
+    assert_eq!(result.owned.len(), 5);
+    assert!(result.streams.is_empty());
+    assert_eq!(engine.resources(), 5);
+    for owner in &result.owned[..4] {
+        assert_eq!(owner.nominal().name, "session");
+    }
+    assert_eq!(result.owned[4].nominal().name, "counter");
+    drop(result);
+    assert_eq!(closed(&mut pool, &host, &store), 9);
+    assert_eq!(engine.resources(), 0);
+    for (seed, expected, destroyed) in [
+        (seed, vec![seed, seed, seed + 1], 11),
+        (0, vec![0, 0, 0], 12),
+    ] {
+        let called = relay.clone();
+        let totals: Vec<u64> = root(&mut pool, &host, async move |context| {
+            called
+                .call_portable(&context, "nested-shapes", (seed,))
+                .await
+        })
+        .unwrap();
+        assert_eq!(totals, expected);
+        assert_eq!(closed(&mut pool, &host, &store), destroyed);
+        assert_eq!(engine.resources(), 0);
+    }
+
+    relay.release().unwrap();
+    store.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// Refusing the data sibling of owned resources must destroy every handle before the next call.
+fn refused_nested_metadata_destroys_the_complete_resource_batch(interpreted: bool) {
+    let Some(bytes) = fixture("TEMBRA_WASM_RESOURCE_PROVIDER") else {
+        return;
+    };
+    let limits = Limits {
+        packet_bytes: 16_384,
+        timeout_ms: 30_000,
+        ..Limits::default()
+    };
+    let engine = if interpreted {
+        Engine::interpreted(limits)
+    } else {
+        Engine::new(limits)
+    }
+    .unwrap();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        pacer(Rc::default()),
+        provider(&engine, &bytes, "store"),
+    ])
+    .unwrap();
+    let store = reference(&mut pool, &host, &sessions("store"), "alice");
+    let called = store.clone();
+    let result = root(&mut pool, &host, async move |context| {
+        called
+            .call_portable::<_, Delivered>(&context, "open-padded", (100_u64, 32768_u32))
+            .await
+    });
+    let error = result.err().expect("oversized metadata must be refused");
+    assert!(error.message.contains("packet limit"), "{error}");
+    assert_eq!(closed(&mut pool, &host, &store), 4);
     assert_eq!(engine.resources(), 0);
     store.release().unwrap();
     pool.run_until(host.close()).unwrap();

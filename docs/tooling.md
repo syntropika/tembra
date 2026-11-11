@@ -183,8 +183,9 @@ interpreter and remain dynamically loadable without generating per-Orb browser b
 
 Prepared compiled components use the same bounded WIT capability profile as the native executor:
 
-- A constructor or factory may return one owned resource as its complete result. Its methods
-  borrow `self`; the provider keeps the resource in its own component instance.
+- A constructor or factory may return owned resources as its result, including resources nested
+  in records, lists, tuples, simple options, variants and results. Its methods borrow `self`;
+  the provider keeps each resource in its own component instance.
 - An asynchronous freestanding function may return `stream<u8>` as its complete result. The
   receiver pulls bounded chunks rather than collecting the body before returning the stream.
 
@@ -196,7 +197,13 @@ interface sessions {
         constructor(seed: u64);
         add: func(value: u64) -> u64;
     }
-    open: func(seed: u64) -> session;
+    record batch {
+        primary: session,
+        optional: option<session>,
+        extra: list<session>,
+        seed: u64,
+    }
+    open: func(seed: u64) -> result<batch, string>;
 }
 
 interface frames {
@@ -222,7 +229,9 @@ that the guest exited: invocation and resource pins remain until the actual task
 operations settle. If a quarantined task never acknowledges exit, shutdown keeps waiting.
 
 These capabilities travel only through the private component transport. Ordinary data-only
-host calls refuse a resource or stream result and close it. Owned arguments, nested handles or
+host calls refuse a resource or stream result and close the complete batch. Result attachments
+are checked against their nominal WIT identities and consumed exactly once; malformed data,
+duplicate or unused attachments and failed delivery close every owner. Owned arguments, nested
 streams, non-byte stream elements and arbitrary futures remain outside this profile.
 
 ### Keyed dependency references

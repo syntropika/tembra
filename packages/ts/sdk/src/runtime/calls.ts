@@ -124,14 +124,15 @@ export class Calls {
         let retained: Promise<void> | undefined;
         let physicalFailure: { error: unknown } | undefined;
         let published = false;
-        let capability: CapturedInvocation["capability"];
+        let capabilities: NonNullable<CapturedInvocation["capabilities"]> = [];
         let reported = false;
         const reportFailure = (error: unknown) => {
           outcome = Outcome.Error;
           if (reported) return;
           reported = true;
-          if (capability?.kind === "bytes")
-            capability.reportFailure(error, (cause) => session.report(cause));
+          const stream = capabilities.find((capability) => capability.kind === "bytes");
+          if (stream?.kind === "bytes")
+            stream.reportFailure(error, (cause) => session.report(cause));
           else session.report(error);
         };
         const retain = (actual: Promise<void>) => {
@@ -193,7 +194,7 @@ export class Calls {
             );
             if (output instanceof Encoded) capture!.output = output;
             else {
-              capability = output.capability;
+              capabilities = output.capabilities ?? [];
               published = true;
               // The bounded outcome reports failures promptly; it never substitutes for
               // actual task exit once the prepared backend registered physical retention.
@@ -205,7 +206,7 @@ export class Calls {
                   }),
                 );
                 if (!retainedSource) {
-                  capability?.close();
+                  for (const capability of capabilities) capability.close();
                   throw new Error(
                     "A prepared continuation must retain its actual physical operation",
                   );
@@ -213,17 +214,19 @@ export class Calls {
               }
               try {
                 checkSignal(entered.signal);
-                if (capability?.kind === "resource") capability.anchor(session, reference);
-                else if (capability?.kind === "bytes") {
-                  capability.bind(entered);
-                  let owned = this.#rootCapabilities.get(entered.root);
-                  if (!owned) this.#rootCapabilities.set(entered.root, (owned = new Set()));
-                  owned.add(capability);
+                for (const capability of capabilities) {
+                  if (capability.kind === "resource") capability.anchor(session, reference);
+                  else {
+                    capability.bind(entered);
+                    let owned = this.#rootCapabilities.get(entered.root);
+                    if (!owned) this.#rootCapabilities.set(entered.root, (owned = new Set()));
+                    owned.add(capability);
+                  }
                 }
                 capture!.output = output.value;
-                if (capability) capture!.capability = capability;
+                capture!.capabilities = capabilities;
               } catch (error) {
-                capability?.close();
+                for (const capability of capabilities) capability.close();
                 throw error;
               }
             }

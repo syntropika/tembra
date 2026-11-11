@@ -240,29 +240,36 @@ export function resourceImport(
     const callback = port.current();
     const input = fn.values.hostArguments(args);
     let abandoned = false;
-    let issued: ResourceCapability | undefined;
+    const issued: ResourceCapability[] = [];
     const pending = port.physical(
       callback,
       (async () => {
         const result = receiver
           ? await callback.scope.resource!(receiver, binding, fn.spelling, input)
           : await callback.scope.call(binding, fn.spelling, input);
-        if (fn.roles.own) {
-          const owner = result as ResourceCapability;
-          if (owner?.kind !== "resource") throw new Error("Missing owned resource result");
-          issued = owner;
-          if (abandoned) {
-            owner.close();
-            throw new Error("Resource delivery abandoned");
+        if (fn.roles.result) {
+          try {
+            const value = fn.roles.result(result, (nominal, value) => {
+              const owner = value as ResourceCapability;
+              if (
+                owner?.kind !== "resource" ||
+                owner.nominal.interface !== nominal.interface ||
+                owner.nominal.name !== nominal.name
+              )
+                throw new Error("Missing matching owned resource result");
+              issued.push(owner);
+              if (abandoned) throw new Error("Resource delivery abandoned");
+              const Resource = classes.get(nominal.name);
+              if (!Resource) throw new Error("Missing imported resource class");
+              const wrapper = Object.create(Resource.prototype) as object;
+              held.set(wrapper, owner);
+              return wrapper;
+            });
+            return fn.values.toGuest(value);
+          } catch (error) {
+            for (const owner of issued) owner.close();
+            throw error;
           }
-          const Resource = classes.get(fn.roles.own.name);
-          if (!Resource) {
-            owner.close();
-            throw new Error("Missing imported resource class");
-          }
-          const value = Object.create(Resource.prototype) as object;
-          held.set(value, owner);
-          return value;
         }
         if (fn.roles.stream) {
           // The stream's host adapter strips producer-private JCO representations.
@@ -282,33 +289,37 @@ export function resourceImport(
     return Object.assign(pending, {
       [Symbol.dispose]() {
         abandoned = true;
-        issued?.close();
+        for (const owner of issued) owner.close();
       },
     });
   };
   for (const fn of functions) {
-    const nominal = fn.roles.resource ?? fn.roles.own;
-    if (!nominal || classes.has(nominal.name)) continue;
-    const constructor = functions.find(
-      (item) => item.roles.construct && item.roles.resource?.name === nominal.name,
-    );
-    const Resource = class {
-      constructor(...args: unknown[]) {
-        if (!constructor) throw new Error("Resource has no constructor");
-        return invoke(constructor, args) as never;
-      }
-      [Symbol.dispose](): void {
-        const owner = held.get(this);
-        if (!owner) return;
-        held.delete(this);
-        try {
-          port.current().scope.releaseResource(owner);
-        } catch {
-          owner.close();
+    for (const nominal of [
+      ...(fn.roles.resource ? [fn.roles.resource] : []),
+      ...(fn.roles.owned ?? []),
+    ]) {
+      if (classes.has(nominal.name)) continue;
+      const constructor = functions.find(
+        (item) => item.roles.construct && item.roles.resource?.name === nominal.name,
+      );
+      const Resource = class {
+        constructor(...args: unknown[]) {
+          if (!constructor) throw new Error("Resource has no constructor");
+          return invoke(constructor, args) as never;
         }
-      }
-    };
-    classes.set(nominal.name, Resource);
+        [Symbol.dispose](): void {
+          const owner = held.get(this);
+          if (!owner) return;
+          held.delete(this);
+          try {
+            port.current().scope.releaseResource(owner);
+          } catch {
+            owner.close();
+          }
+        }
+      };
+      classes.set(nominal.name, Resource);
+    }
   }
   const output: Record<string, unknown> = {};
   for (const [name, Resource] of classes) output[bindingName(name, true)] = Resource;

@@ -18,18 +18,20 @@ for (const installed of [false, true])
         retain!(physical.promise);
         return {
           value: encode(0),
-          capability: issueByteStream(
-            {
-              async read() {
-                return { done: true };
+          capabilities: [
+            issueByteStream(
+              {
+                async read() {
+                  return { done: true };
+                },
+                [Symbol.dispose]() {
+                  drops++;
+                },
               },
-              [Symbol.dispose]() {
-                drops++;
-              },
-            },
-            physical.promise,
-            context.signal,
-          ),
+              physical.promise,
+              context.signal,
+            ),
+          ],
           finished: physical.promise,
         };
       },
@@ -47,7 +49,7 @@ for (const installed of [false, true])
         await host.session.calls.invokePhysical(record, "open", [], context, capture);
         expect(host.diagnostics().calls).toBe(1);
         if (!installed) return; // Nobody installs a receiver before the root drops the head.
-        const owner = capture.capability;
+        const owner = capture.capabilities?.[0];
         if (owner?.kind !== "bytes") throw new Error("Missing byte stream capability");
         const iterator = receiveByteStream(
           owner,
@@ -94,18 +96,20 @@ test("a bounded stream timeout reports promptly while shutdown retains actual pr
       retain!(actual.promise);
       return {
         value: encode(0),
-        capability: issueByteStream(
-          {
-            async read() {
-              return { done: true };
+        capabilities: [
+          issueByteStream(
+            {
+              async read() {
+                return { done: true };
+              },
+              [Symbol.dispose]() {
+                dropped++;
+              },
             },
-            [Symbol.dispose]() {
-              dropped++;
-            },
-          },
-          bounded.promise,
-          context.signal,
-        ),
+            bounded.promise,
+            context.signal,
+          ),
+        ],
         finished: bounded.promise,
       };
     },

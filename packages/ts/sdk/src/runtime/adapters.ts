@@ -41,7 +41,7 @@ export interface ByteStreamCapability {
 /** Private capability lane, available only between matched prepared handlers. */
 export interface CapturedDelivery {
   readonly value: Encoded;
-  readonly capability?: ResourceCapability | ByteStreamCapability;
+  readonly capabilities?: readonly (ResourceCapability | ByteStreamCapability)[];
   /** Bounded provider outcome after an early result head; actual work uses the retain sink. */
   readonly finished?: Promise<void>;
 }
@@ -52,7 +52,7 @@ export interface CapturedInvocation {
   readonly input: Encoded;
   output?: Encoded;
   receiver?: ResourceCapability;
-  capability?: ResourceCapability | ByteStreamCapability;
+  capabilities?: readonly (ResourceCapability | ByteStreamCapability)[];
 }
 /** The ordinary checked data entry of a prepared backend, with physical retention. */
 type CapturedDataMethod = (

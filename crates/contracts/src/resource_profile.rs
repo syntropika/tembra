@@ -11,18 +11,19 @@ use crate::{
 use serde_json::Value;
 
 /// Capability roles of a checked function. `receiver` is the implicit first `self` parameter;
-/// `own_result` is an owned resource returned as the complete result; `stream_result` marks a
+/// `owned_results` marks resource handles anywhere in the result; `stream_result` marks a
 /// `stream<u8>` returned as the complete result of an asynchronous freestanding function.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ResourceSignature<'a> {
     pub receiver: Option<&'a ResourceIdentity>,
-    pub own_result: Option<&'a ResourceIdentity>,
+    /// The result contains owned resources, possibly inside WIT containers.
+    pub owned_results: bool,
     pub stream_result: bool,
 }
 
 impl PreparedContract {
     /// Encode the data part of a capability call. Implicit `self` travels separately as a
-    /// host-issued loan; a top-level owned result names a payload-local attachment index.
+    /// host-issued loan; each owned result position names a payload-local attachment index.
     /// This validates shapes only. The caller must validate the attachment and its issuer.
     pub fn to_resource_wire(
         &self,
@@ -68,11 +69,14 @@ impl PreparedContract {
                 self.validate(form, parameter.ty, value, 0)?;
                 self.respell(parameter.ty, value)?;
             }
-        } else if signature.own_result.is_some() || signature.stream_result {
+        } else if signature.stream_result {
             // The result's data names its one payload attachment.
             self.validate(form, Ty::U32, &value, 0)?;
         } else {
-            self.check_result(form, function, &value)?;
+            match function.result {
+                Some(ty) => self.validate_capabilities(form, ty, &value)?,
+                None => self.check_result(form, function, &value)?,
+            }
             if let Some(result) = function.result {
                 self.respell(result, &mut value)?;
             }
@@ -80,10 +84,10 @@ impl PreparedContract {
         Ok(value)
     }
 
-    /// Check exports for top-level owned results, implicit method receiver borrows and whole
-    /// byte-stream results of asynchronous freestanding functions.
+    /// Check exports for owned resources inside result containers, implicit method receiver
+    /// borrows and whole byte-stream results of asynchronous freestanding functions.
     ///
-    /// Futures, other stream elements, nested or argument streams and handles, and
+    /// Futures, other stream elements, nested or argument streams, resource arguments and
     /// foreign-defined result resources need additional transfer rules and are refused. The
     /// incoming HTTP handler remains outside this transport, served through its host-local WASI
     /// adapter.
@@ -213,22 +217,172 @@ impl PreparedContract {
             } else if let Ty::Ref(ty) = self.resolved(result)
                 && let Kind::Own(resource) = self.kind(ty)
             {
-                signature.own_result = Some(self.defined_resource(interface, *resource)?);
+                self.defined_resource(interface, *resource)?;
+                signature.owned_results = true;
                 if let FunctionKind::Constructor(declared) = function.kind
                     && self.resolved(Ty::Ref(declared)) != self.resolved(Ty::Ref(*resource))
                 {
                     return Err(Error("constructor returns another resource type".into()));
                 }
             } else {
-                self.supported(result, 0)?;
+                signature.owned_results = self.resource_result_type(interface, result, 0)?;
             }
         }
-        if matches!(function.kind, FunctionKind::Constructor(_)) && signature.own_result.is_none() {
+        if matches!(function.kind, FunctionKind::Constructor(_))
+            && !function.result.is_some_and(|result| matches!(self.resolved(result), Ty::Ref(id) if matches!(self.kind(id), Kind::Own(_))))
+        {
             return Err(Error(
                 "resource constructor must return its owned resource".into(),
             ));
         }
         Ok(signature)
+    }
+
+    /// Validate the result profile recursively, while preserving nominal resource identity.
+    fn resource_result_type(
+        &self,
+        interface: &Interface,
+        ty: Ty,
+        depth: usize,
+    ) -> Result<bool, Error> {
+        if depth > crate::model::MAX_DEPTH {
+            return Err(Error("WIT value nesting exceeds its limit".into()));
+        }
+        let Ty::Ref(id) = ty else {
+            self.supported(ty, depth)?;
+            return Ok(false);
+        };
+        match self.kind(id) {
+            Kind::Own(resource) => {
+                self.defined_resource(interface, *resource)?;
+                Ok(true)
+            }
+            Kind::Alias(inner) | Kind::List(inner) => {
+                self.resource_result_type(interface, *inner, depth + 1)
+            }
+            Kind::Option(inner) => {
+                if let Ty::Ref(id) = self.resolved(*inner)
+                    && matches!(self.kind(id), Kind::Option(_))
+                {
+                    return Err(Error("nested options require a tagged option codec".into()));
+                }
+                self.resource_result_type(interface, *inner, depth + 1)
+            }
+            Kind::Record(fields) => fields.iter().try_fold(false, |found, field| {
+                self.resource_result_type(interface, field.ty, depth + 1)
+                    .map(|next| found || next)
+            }),
+            Kind::Tuple(types) => types.iter().try_fold(false, |found, ty| {
+                self.resource_result_type(interface, *ty, depth + 1)
+                    .map(|next| found || next)
+            }),
+            Kind::Variant(cases) => {
+                cases
+                    .iter()
+                    .filter_map(|case| case.ty)
+                    .try_fold(false, |found, ty| {
+                        self.resource_result_type(interface, ty, depth + 1)
+                            .map(|next| found || next)
+                    })
+            }
+            Kind::Result { ok, err } => {
+                [*ok, *err]
+                    .into_iter()
+                    .flatten()
+                    .try_fold(false, |found, ty| {
+                        self.resource_result_type(interface, ty, depth + 1)
+                            .map(|next| found || next)
+                    })
+            }
+            _ => self.supported(ty, depth).map(|()| false),
+        }
+    }
+
+    /// Rewrite each owned-result index through its exact WIT resource identity.
+    ///
+    /// Shapes and all data leaves are checked before the first callback. The caller must redeem
+    /// every attachment exactly once and reject unused attachments; numbers alone confer no
+    /// authority. Callback failure may partially rewrite `value`, which must then be discarded.
+    pub fn map_owned_result(
+        &self,
+        slot: u32,
+        value: &mut Value,
+        mut map: impl FnMut(&ResourceIdentity, u32) -> Result<u32, Error>,
+    ) -> Result<(), Error> {
+        self.resource_signature(slot)?;
+        let function = self.function(self.slots()[slot as usize]);
+        if let Some(ty) = function.result {
+            self.validate_capabilities(Form::Native, ty, value)?;
+            self.map_owned(ty, value, &mut map)?;
+        } else {
+            self.check_result(Form::Native, function, value)?;
+        }
+        Ok(())
+    }
+
+    fn map_owned(
+        &self,
+        ty: Ty,
+        value: &mut Value,
+        map: &mut impl FnMut(&ResourceIdentity, u32) -> Result<u32, Error>,
+    ) -> Result<(), Error> {
+        let Ty::Ref(id) = ty else {
+            return Ok(());
+        };
+        match self.kind(id) {
+            Kind::Own(resource) => {
+                let identity = self
+                    .resource_identity(Ty::Ref(*resource))
+                    .ok_or_else(|| Error("invalid resource identity".into()))?;
+                let index = value
+                    .as_u64()
+                    .and_then(|index| u32::try_from(index).ok())
+                    .ok_or_else(|| Error("resource index must be u32".into()))?;
+                *value = Value::from(map(identity, index)?);
+            }
+            Kind::Alias(inner) => self.map_owned(*inner, value, map)?,
+            Kind::Option(inner) if !value.is_null() => self.map_owned(*inner, value, map)?,
+            Kind::List(inner) => {
+                for value in value.as_array_mut().expect("checked list") {
+                    self.map_owned(*inner, value, map)?;
+                }
+            }
+            Kind::Record(fields) => {
+                for (field, spelling) in fields.iter().zip(self.spellings(id)) {
+                    self.map_owned(
+                        field.ty,
+                        value.get_mut(&**spelling).expect("checked field"),
+                        map,
+                    )?;
+                }
+            }
+            Kind::Tuple(types) => {
+                for (ty, value) in types
+                    .iter()
+                    .zip(value.as_array_mut().expect("checked tuple"))
+                {
+                    self.map_owned(*ty, value, map)?;
+                }
+            }
+            Kind::Variant(cases) => {
+                let ty = cases
+                    .iter()
+                    .find(|case| value["tag"] == case.name)
+                    .expect("checked case")
+                    .ty;
+                if let Some(ty) = ty {
+                    self.map_owned(ty, &mut value["val"], map)?;
+                }
+            }
+            Kind::Result { ok, err } => {
+                let ty = if value["tag"] == "ok" { *ok } else { *err };
+                if let Some(ty) = ty {
+                    self.map_owned(ty, &mut value["val"], map)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Whether `ty` is exactly `stream<u8>`.

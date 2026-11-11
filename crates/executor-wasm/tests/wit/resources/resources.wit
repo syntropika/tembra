@@ -39,6 +39,21 @@ interface sessions {
   /// A keyed factory: every call returns a fresh, independent session, even for an equal key.
   /// The key is ordinary typed data that the instance keeps; it selects no kernel object.
   open-keyed: func(key: tuple<string, string>, seed: u64) -> session;
+  /// Multiple owned resources travel inside the ordinary WIT result, never as numeric authority.
+  record bundle {
+    primary: session,
+    optional: option<session>,
+    extras: list<session>,
+    count: counter,
+    seed: u64,
+    label: string,
+  }
+  /// A resource batch with controllable metadata size, used to qualify packet refusal cleanup.
+  open-padded: func(seed: u64, padding: u32) -> bundle;
+  open-bundle: func(seed: u64, fail: bool) -> result<bundle, string>;
+  variant selection { empty, active(session) }
+  open-pair: func(seed: u64) -> tuple<session, u64>;
+  choose: func(seed: u64) -> selection;
   /// How many sessions this Store has destroyed.
   closed: func() -> u64;
   label: func() -> string;
@@ -69,6 +84,10 @@ interface relay {
     constructor(seed: u64);
     total: func() -> u64;
   }
+
+  /// Consume nested resources through ordinary generated WIT bindings.
+  nested: func(seed: u64, fail: bool) -> list<u64>;
+  nested-shapes: func(seed: u64) -> list<u64>;
 
   /// Two sessions built with equal arguments plus one factory session, all dropped on return.
   pair: func(seed: u64, n: u64) -> list<u64>;

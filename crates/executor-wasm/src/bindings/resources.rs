@@ -1,7 +1,8 @@
 //! WIT resources of compiled revisions at the native capability boundary.
 //!
-//! **Exporter.** A function whose result is a whole `own<R>` returns a host-issued instance id
-//! from its Store. It immediately becomes an [`Issued`] capability backed by a
+//! **Exporter.** Each `own<R>` in a result returns a host-issued instance id from its Store,
+//! including positions in records, options, lists and tagged payloads. Each immediately becomes
+//! an [`Issued`] capability backed by a
 //! [`GuestInstance`]. A method receives its implicit `self` only as the call's [`Loan`], which is
 //! redeemed here: the loan must come from this very environment and have the method's
 //! resource type. Its instance id never comes from the guest or a JSON value.
@@ -20,11 +21,11 @@ use crate::worker::Reply;
 use serde_json::json;
 use tembra::portable::{Capability, Delivered, Issued, Loan, Nominal, Owned, Payload};
 
-/// Resource positions of one bound function: the implicit `self` and a whole owned result.
+/// Resource positions of one bound function: implicit `self` and owned result containers.
 #[derive(Clone, Default)]
 pub(crate) struct Roles {
     pub receiver: Option<Nominal>,
-    pub own_result: Option<Nominal>,
+    pub owned_results: bool,
     /// The whole result is a `stream<u8>`, served by [`Environment::invoke_stream`].
     pub stream: bool,
 }
@@ -36,13 +37,13 @@ impl Roles {
         let signature = contract.resource_signature(slot).map_err(failure)?;
         Ok(Self {
             receiver: signature.receiver.map(nominal).transpose()?,
-            own_result: signature.own_result.map(nominal).transpose()?,
+            owned_results: signature.owned_results,
             stream: signature.stream_result,
         })
     }
 
     pub(crate) fn is_data(&self) -> bool {
-        self.receiver.is_none() && self.own_result.is_none() && !self.stream
+        self.receiver.is_none() && !self.owned_results && !self.stream
     }
 }
 
@@ -197,31 +198,27 @@ impl Environment {
             )
             .await?;
         drop(loan);
-        let Some(nominal) = &roles.own_result else {
-            let value = self
-                .contract
-                .from_resource_wire(slot, false, value)
-                .map_err(failure)?;
+        let mut value = self
+            .contract
+            .from_resource_wire(slot, false, value)
+            .map_err(failure)?;
+        if !roles.owned_results {
             return Ok(Payload::data(value));
-        };
-        let instance = value
-            .as_u64()
-            .and_then(|id| u32::try_from(id).ok())
-            .ok_or_else(|| failure("compiled resource result is not an instance id"))?;
-        // Owned before anything else can fail, so a refused result is destroyed, not leaked.
-        let issued = Issued::new(GuestInstance {
-            nominal: nominal.clone(),
-            issuer: Rc::downgrade(&self.handles),
-            environment: self.id,
-            instance,
-        });
+        }
         let mut result = Payload::data(Value::Null);
-        let index = result.attach(issued);
-        result.map_value(|_| {
-            self.contract
-                .from_resource_wire(slot, false, json!(index))
-                .map_err(failure)
-        })
+        self.contract
+            .map_owned_result(slot, &mut value, |identity, instance| {
+                let nominal = nominal(identity)
+                    .map_err(|error| tembra_contracts::Error(error.to_string()))?;
+                Ok(result.attach(Issued::new(GuestInstance {
+                    nominal,
+                    issuer: Rc::downgrade(&self.handles),
+                    environment: self.id,
+                    instance,
+                })))
+            })
+            .map_err(failure)?;
+        result.map_value(|_| Ok(value))
     }
 
     /// Redeem a `self` loan: a live compiled instance issued by this very environment, of the
@@ -339,7 +336,7 @@ impl Environment {
         if !streams.is_empty() {
             return Err(failure("the result carries an unexpected stream"));
         }
-        let Some(expected) = &roles.own_result else {
+        if !roles.owned_results {
             if !owned.is_empty() {
                 return Err(failure("the result carries an unexpected resource"));
             }
@@ -350,22 +347,47 @@ impl Environment {
             }
             .map_err(failure)?;
             return Ok(value.into());
-        };
-        let mut owned = owned.into_iter();
-        let (Some(handle), None) = (owned.next(), owned.next()) else {
-            return Err(failure("an owned result names exactly one resource"));
-        };
-        if value != json!(0) || handle.nominal() != expected {
-            return Err(failure("the owned result has another type"));
         }
-        let (slot, delivery) = self.install(handle, binding.clone())?;
+        let mut value = value;
+        let mut owned: Vec<_> = owned.into_iter().map(Some).collect();
+        let mut delivery: Option<Delivery> = None;
+        self.contract
+            .map_owned_result(method.slot, &mut value, |identity, index| {
+                let expected = nominal(identity)
+                    .map_err(|error| tembra_contracts::Error(error.to_string()))?;
+                let handle = owned
+                    .get_mut(index as usize)
+                    .and_then(Option::take)
+                    .ok_or_else(|| {
+                        tembra_contracts::Error(
+                            "an owned result must redeem each attachment exactly once".into(),
+                        )
+                    })?;
+                if handle.nominal() != &expected {
+                    return Err(tembra_contracts::Error(
+                        "the owned result has another nominal type".into(),
+                    ));
+                }
+                let (slot, installed) = self
+                    .install(handle, binding.clone())
+                    .map_err(|error| tembra_contracts::Error(error.to_string()))?;
+                match &mut delivery {
+                    Some(delivery) => delivery.slots.extend(installed.into_slots()),
+                    None => delivery = Some(installed),
+                }
+                Ok(slot)
+            })
+            .map_err(failure)?;
+        if owned.iter().any(Option::is_some) {
+            return Err(failure("the result carries an unused resource attachment"));
+        }
         let value = self
             .contract
-            .to_resource_wire(method.slot, false, json!(slot))
+            .to_resource_wire(method.slot, false, value)
             .map_err(failure)?;
         Ok(Reply {
             value,
-            delivery: Some(delivery),
+            delivery,
             stream: None,
         })
     }
@@ -445,6 +467,10 @@ impl Delivery {
             table: Rc::downgrade(table),
             slots: vec![slot],
         }
+    }
+
+    fn into_slots(mut self) -> Vec<u32> {
+        std::mem::take(&mut self.slots)
     }
 
     /// The guest received the reply and now owns the installed handles.

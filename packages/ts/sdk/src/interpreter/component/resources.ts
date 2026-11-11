@@ -11,7 +11,11 @@ export interface Nominal {
 }
 export interface ResourceRoles {
   readonly receiver?: Nominal | undefined;
-  readonly own?: Nominal | undefined;
+  readonly owned?: readonly Nominal[] | undefined;
+  /** Map only own positions in the host-domain result; other values remain ordinary data. */
+  readonly result?:
+    | ((value: unknown, own: (nominal: Nominal, value: unknown) => unknown) => unknown)
+    | undefined;
   readonly stream?: boolean | undefined;
   readonly resource?: Nominal | undefined;
   readonly member?: string | undefined;
@@ -124,13 +128,74 @@ export function resourceRoles(graph: TypeGraph, binding: string, fn: GraphFuncti
     if (form === "method" || form === "async-method") receiver = resource;
     if (!constructor) member = fn.name?.split(".").at(-1);
   }
-  const result = definitions.get(resolve(fn.result) as number)?.kind;
-  const own =
-    typeof result === "object" && result.handle?.own !== undefined
-      ? nominal(result.handle.own)
-      : undefined;
-  const stream = typeof result === "object" && resolve(result.stream) === "u8";
-  return { receiver, own, stream, resource, member, construct: constructor };
+  const owned = new Map<string, Nominal>();
+  type MapOwn = (value: unknown, own: (nominal: Nominal, value: unknown) => unknown) => unknown;
+  const mapper = (type: unknown): MapOwn | undefined => {
+    const kind = definitions.get(resolve(type) as number)?.kind;
+    if (typeof kind !== "object") return undefined;
+    if (kind.handle?.own !== undefined) {
+      const identity = nominal(kind.handle.own);
+      owned.set(identity.name, identity);
+      return (value, own) => own(identity, value);
+    }
+    if (kind.list !== undefined) {
+      const item = mapper(kind.list);
+      return item
+        ? (value, own) => (value as unknown[]).map((value) => item(value, own))
+        : undefined;
+    }
+    if (kind.option !== undefined) {
+      const inner = mapper(kind.option);
+      return inner ? (value, own) => (value == null ? value : inner(value, own)) : undefined;
+    }
+    if (kind.record) {
+      const fields = kind.record.fields.map(
+        ({ name, type }) => [graph.javascriptNames[name]!, mapper(type)] as const,
+      );
+      if (!fields.some(([, map]) => map)) return undefined;
+      return (value, own) => {
+        const output = { ...(value as Record<string, unknown>) };
+        for (const [name, map] of fields) if (map) output[name] = map(output[name], own);
+        return output;
+      };
+    }
+    if (kind.tuple) {
+      const fields = kind.tuple.types.map(mapper);
+      return fields.some(Boolean)
+        ? (value, own) =>
+            (value as unknown[]).map((value, index) => {
+              const map = fields[index];
+              return map ? map(value, own) : value;
+            })
+        : undefined;
+    }
+    if (kind.variant || kind.result) {
+      const cases = kind.variant?.cases ?? [
+        { name: "ok", type: kind.result!.ok },
+        { name: "err", type: kind.result!.err },
+      ];
+      const maps = new Map(cases.map(({ name, type }) => [name, mapper(type)]));
+      if (![...maps.values()].some(Boolean)) return undefined;
+      return (value, own) => {
+        const tagged = value as { tag: string; val?: unknown };
+        const map = maps.get(tagged.tag);
+        return map ? { tag: tagged.tag, val: map(tagged.val, own) } : value;
+      };
+    }
+    return undefined;
+  };
+  const resultKind = definitions.get(resolve(fn.result) as number)?.kind;
+  const stream = typeof resultKind === "object" && resolve(resultKind.stream) === "u8";
+  const result = mapper(fn.result);
+  return {
+    receiver,
+    owned: owned.size ? [...owned.values()] : undefined,
+    result,
+    stream,
+    resource,
+    member,
+    construct: constructor,
+  };
 }
 
 /** The signature of the checked data lane: self and whole capabilities travel separately. */
@@ -138,7 +203,7 @@ export function resourceDataFunction(fn: GraphFunction, roles: ResourceRoles): G
   return {
     ...fn,
     params: roles.receiver ? fn.params.slice(1) : fn.params,
-    result: roles.own || roles.stream ? undefined : fn.result,
+    result: roles.stream ? undefined : fn.result,
   };
 }
 

@@ -141,3 +141,39 @@ export async function verifyBrowserResourceReload(
     equal(await provider.label(), "sessions", "replacement is not quarantined by stale owner");
   });
 }
+
+/** Nested WIT result/record/option/list values carry nominal owners and exact 64-bit metadata. */
+export async function verifyBrowserNestedResources(
+  base: object,
+  components: PreparedComponent[],
+): Promise<void> {
+  await using(base, components, async (host, provider, relay) => {
+    const seed = (1n << 64n) - 11n;
+    const totals = await relay.nested(seed, false);
+    for (const [index, expected] of [seed, seed + 1n, seed + 2n, seed + 3n, 1n, seed].entries())
+      equal(totals[index], expected, `nested resource ${index}`);
+    equal(totals.length, 6, "all nested resources were callable");
+    equal(await provider.closed(), 4n, "nested session owners destroyed exactly once");
+    const empty = await relay.nested(0n, false);
+    equal(empty.length, 3, "none and empty list carry no resource");
+    equal(empty[0], 0n, "primary with no optional session");
+    equal(await provider.closed(), 5n, "only primary was allocated");
+    equal((await relay.nested(1n, true)).length, 0, "err result carries no resource");
+    equal(await provider.closed(), 5n, "err result allocated no resource");
+    const refused = await provider["open-bundle"](seed, false).catch((error: unknown) => error);
+    if (!(refused instanceof Error))
+      throw new Error("Data caller received nested resource authority");
+    equal(await provider.closed(), 9n, "refused nested batch physically destroyed");
+    for (const [value, expected, destroyed] of [
+      [seed, [seed, seed, seed + 1n], 11n],
+      [0n, [0n, 0n, 0n], 12n],
+    ] as const) {
+      const result = await relay["nested-shapes"](value);
+      equal(result.length, expected.length, "tuple and variant result length");
+      for (const [index, value] of expected.entries())
+        equal(result[index], value, `tuple/variant item ${index}`);
+      equal(await provider.closed(), destroyed, "tuple and variant owners destroyed exactly once");
+    }
+    equal(host.errors().length, 0, "nested result leaves no lifecycle failures");
+  });
+}

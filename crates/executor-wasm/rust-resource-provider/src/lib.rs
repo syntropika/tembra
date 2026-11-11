@@ -5,7 +5,7 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::{string::String, vec};
 use core::cell::Cell;
 
 #[global_allocator]
@@ -19,7 +19,8 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 use exports::tembra_test::resources::sessions::{
-    Guest, GuestCounter, GuestFragile, GuestSession, Session,
+    Bundle, Counter as CounterHandle, Guest, GuestCounter, GuestFragile, GuestSession, Selection,
+    Session,
 };
 use tembra_test::resources::pace;
 
@@ -124,6 +125,45 @@ impl Guest for Provider {
 
     fn open_keyed(key: (String, String), seed: u64) -> Session {
         Session::new(Instance::keyed(key, seed))
+    }
+
+    fn open_padded(seed: u64, padding: u32) -> Bundle {
+        let mut bundle = Self::open_bundle(seed, false).unwrap();
+        bundle.label = "x".repeat(padding as usize);
+        bundle
+    }
+
+    fn open_bundle(seed: u64, fail: bool) -> Result<Bundle, String> {
+        if fail {
+            return Err("refused".into());
+        }
+        Ok(Bundle {
+            primary: Session::new(Instance::new(seed)),
+            optional: (seed != 0).then(|| Session::new(Instance::new(seed + 1))),
+            extras: if seed == 0 {
+                vec![]
+            } else {
+                vec![
+                    Session::new(Instance::new(seed + 2)),
+                    Session::new(Instance::new(seed + 3)),
+                ]
+            },
+            count: CounterHandle::new(Counter::new()),
+            seed,
+            label: "bundle".into(),
+        })
+    }
+
+    fn open_pair(seed: u64) -> (Session, u64) {
+        (Session::new(Instance::new(seed)), seed)
+    }
+
+    fn choose(seed: u64) -> Selection {
+        if seed == 0 {
+            Selection::Empty
+        } else {
+            Selection::Active(Session::new(Instance::new(seed + 1)))
+        }
     }
 
     fn closed() -> u64 {

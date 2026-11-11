@@ -54,7 +54,7 @@ const own = () => {
   const issuer = {};
   const value = {};
   let destroyed = 0;
-  const owner = new ResourceOwner(nominal, issuer, 7, value, () => {
+  const owner = new ResourceOwner({ ...nominal }, issuer, 7, value, () => {
     destroyed++;
   });
   return { owner, issuer, value, destroyed: () => destroyed };
@@ -63,9 +63,9 @@ const own = () => {
 describe("compiled resource data positions", () => {
   test("whole owned results and implicit self use a separate capability lane", () => {
     const roles = resourceRoles(graph, binding, constructor);
-    expect(roles.own).toEqual(nominal);
+    expect(roles.owned).toEqual([nominal]);
     expect(roles.construct).toBe(true);
-    expect(resourceDataFunction(constructor, roles).result).toBeUndefined();
+    expect(resourceDataFunction(constructor, roles).result).toBe(constructor.result);
     const method = resourceRoles(graph, binding, add);
     expect(method.receiver).toEqual(nominal);
     expect(resourceDataFunction(add, method).params).toEqual([{ name: "n", type: "u64" }]);
@@ -296,15 +296,110 @@ test("an issued resource dropped while its provider is busy waits outside that c
     encode([]),
     roles,
   );
-  if (output instanceof Encoded || !output.capability) throw new Error("Missing issued resource");
+  if (output instanceof Encoded || !output.capabilities?.length)
+    throw new Error("Missing issued resource");
   const unlock = await revision.gate.enter();
   const held = Promise.withResolvers<void>();
   const active = port.run(7n, scope(), () => held.promise).finally(unlock);
-  output.capability.close();
+  output.capabilities[0]!.close();
   held.resolve();
   await active;
   await port.settled();
   expect(destroyed).toBe(1);
   expect(port.usable).toBe(true);
   await port.close();
+});
+
+describe("nested capability result admission", () => {
+  const nested: TypeGraph = {
+    javascriptNames: { first: "first", rest: "rest" },
+    types: [
+      ...graph.types,
+      { id: 4, definition: { kind: { list: 1 } } },
+      {
+        id: 5,
+        definition: {
+          kind: {
+            record: {
+              fields: [
+                { name: "first", type: 1 },
+                { name: "rest", type: 4 },
+              ],
+            },
+          },
+        },
+      },
+    ],
+  };
+  const fn: GraphFunction = { name: "open", kind: "freestanding", params: [], result: 5 };
+  const roles = resourceRoles(nested, binding, fn);
+
+  test("the same WIT mapper traverses containers without touching ordinary data", () => {
+    const seen: unknown[] = [];
+    const mapped = roles.result!({ first: "a", rest: ["b", "c"] }, (type, value) => {
+      expect(type).toEqual(nominal);
+      seen.push(value);
+      return seen.length - 1;
+    });
+    expect(roles.owned).toEqual([nominal]);
+    expect(seen).toEqual(["a", "b", "c"]);
+    expect(mapped).toEqual({ first: 0, rest: [1, 2] });
+  });
+
+  test("duplicate, unused, mistyped and cancelled batches close every attachment", async () => {
+    for (const variant of ["duplicate", "unused", "mistyped", "cancelled"] as const) {
+      const first = own();
+      const second = own();
+      if (variant === "mistyped") Object.assign(second.owner.nominal, { name: "other" });
+      const importedResources = new Set<ResourceOwner>();
+      const reference = { methods: new Set(["open"]) };
+      let cancelled = false;
+      const owner = {
+        contract: { validate: () => '{"ok":null}' },
+        imports: new Map([[binding, "provider"]]),
+        importMethods: new Map([[binding, new Map([["open", { name: "open", slot: 0, roles }]])]]),
+        importSignatures: new Map([[binding, "nested-signature"]]),
+        signatures: new Map([[0, { params: undefined, result: undefined }]]),
+        views: new Map(),
+        scopes: new Map(),
+        importedResources,
+      } as unknown as ScopeOwner;
+      const declaration = {
+        environment: { id: 1 },
+        get: () => reference,
+        session: {
+          handles: { reference: () => reference },
+          calls: {
+            invokePhysical: async (
+              _record: unknown,
+              _name: unknown,
+              _args: unknown,
+              _context: unknown,
+              capture: { output: Encoded; capabilities: ResourceOwner[] },
+            ) => {
+              capture.output = encode({
+                first: 0,
+                rest: variant === "unused" ? [] : [variant === "duplicate" ? 0 : 1],
+              });
+              capture.capabilities = [first.owner, second.owner];
+              cancelled = variant === "cancelled";
+            },
+          },
+          report() {},
+        },
+      } as unknown as Declaration;
+      const context = {
+        root: 1,
+        check() {
+          if (cancelled) throw new Error("cancelled");
+        },
+      } as unknown as Context;
+      const scope = new ComponentScope(owner, declaration, null).exchange(context);
+      await expect(scope.call(binding, "open", [])).rejects.toThrow();
+      expect(first.destroyed()).toBe(1);
+      expect(second.destroyed()).toBe(1);
+      expect(importedResources.size).toBe(0);
+      if (variant === "mistyped") Object.assign(second.owner.nominal, nominal);
+    }
+  });
 });

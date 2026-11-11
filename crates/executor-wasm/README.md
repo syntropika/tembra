@@ -163,8 +163,9 @@ Guest result text is checked before decoding. Unchanged state reads transfer onl
 kernel revision, while still checking the handle and its owner's lifetime.
 
 Compiled components are checked against their full exported signatures and called
-through the Canonical ABI. The native Rust facade additionally supports whole owned
-resource results, implicit borrowed method receivers and whole `stream<u8>` results of async
+through the Canonical ABI. The native Rust facade additionally supports owned resource
+results, including handles nested in records, lists, tuples, simple options, variants and results,
+implicit borrowed method receivers and whole `stream<u8>` results of async
 freestanding exports and imports; see
 [owned WIT resources](../../docs/rust.md#owned-wit-resources) and
 [portable byte streams](../../docs/rust.md#portable-byte-streams). Source Orbs installed
@@ -284,8 +285,8 @@ Not yet available:
 - service access policies and exclusive or opaque resources;
 - causal reentry into the same interpreter;
 - durable checkpoint and restore;
-- owned arguments, nested capability values, non-byte streams and arbitrary futures beyond the
-  bounded inter-Orb resource and byte-stream profile.
+- owned arguments, nested streams, non-byte streams and arbitrary futures beyond the bounded
+  inter-Orb resource and byte-stream profile.
 
 Replacement refuses a provider whose initial activation is still pending, and an
 active native one-shot task blocks replacement.

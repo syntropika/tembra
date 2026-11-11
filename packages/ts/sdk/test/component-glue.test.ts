@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { fixLiftOwnTables, fixSchedulerTurns } from "../src/tooling/component-glue.ts";
+import {
+  fixLiftOwnTables,
+  fixSchedulerTurns,
+  fixResourceClosures,
+} from "../src/tooling/component-glue.ts";
 
 const HEADER =
   '"use components";\nexport function instantiate(getCoreModule, imports, instantiateCore, options) {\n';
@@ -302,5 +306,88 @@ describe("pinned JCO owned-resource lifts", () => {
       EXPORTED_TABLE + EXPORTED_LIFT + "_liftFlatOwn({ unknown: true })",
     ])
       expect(() => fixLiftOwnTables(source)).toThrow("unsupported trusted compiler output");
+  });
+});
+
+/** The actual pinned shape emitted once per list element by the resource lifting generator. */
+const RESOURCE_LIST = `function lift(handles) {
+  const values = [];
+  for (let i = 0; i < handles.length; i++) {
+    var handle1 = handles[i];
+    var rsc0 = new.target === Session ? this : Object.create(Session.prototype);
+    Object.defineProperty(rsc0, symbolRscHandle, { writable: true, value: handle1});
+    finalizationRegistry0.register(rsc0, handle1, rsc0);
+    Object.defineProperty(rsc0, symbolDispose, { writable: true, value: function () {
+      finalizationRegistry0.unregister(rsc0);
+      const handleEntry = rscTableRemove(handleTable0, handle1);
+      rsc0[symbolDispose] = emptyFunc;
+      rsc0[symbolRscHandle] = undefined;
+      callResourceDestructor({ componentIdx: 0, dtor: exports0["4"], rep: handleEntry.rep });
+    }});
+    values.push(rsc0);
+  }
+  return values;
+}`;
+
+function liftedResources(source: string) {
+  const destroyed: number[] = [];
+  const handleTable = new Map([
+    [11, { rep: 101 }],
+    [12, { rep: 102 }],
+  ]);
+  const lift = new Function(
+    "Session",
+    "symbolRscHandle",
+    "symbolDispose",
+    "finalizationRegistry0",
+    "rscTableRemove",
+    "handleTable0",
+    "emptyFunc",
+    "callResourceDestructor",
+    "exports0",
+    source + "\nreturn lift;",
+  )(
+    class Session {},
+    Symbol("handle"),
+    Symbol.dispose,
+    { register() {}, unregister() {} },
+    (table: typeof handleTable, handle: number) => {
+      const entry = table.get(handle);
+      if (!entry) throw new Error("unknown handle");
+      table.delete(handle);
+      return entry;
+    },
+    handleTable,
+    () => {},
+    ({ rep }: { rep: number }) => destroyed.push(rep),
+    { "4": () => {} },
+  ) as (handles: number[]) => Disposable[];
+  return { values: lift([11, 12]), destroyed, handleTable };
+}
+
+describe("pinned JCO resource destructor closures", () => {
+  test("the upstream list closure aliases the last handle; lexical cells drop both exactly once", () => {
+    const broken = liftedResources(RESOURCE_LIST);
+    broken.values[0]![Symbol.dispose]();
+    broken.values[1]![Symbol.dispose]();
+    expect(broken.destroyed).toEqual([102]);
+    expect([...broken.handleTable.keys()]).toEqual([11]);
+    const fixed = liftedResources(fixResourceClosures(RESOURCE_LIST));
+    fixed.values[0]![Symbol.dispose]();
+    fixed.values[1]![Symbol.dispose]();
+    fixed.values[0]![Symbol.dispose]();
+    expect(fixed.destroyed).toEqual([101, 102]);
+    expect(fixed.handleTable.size).toBe(0);
+  });
+
+  test("unrelated code stays identical and ownership-shape drift fails closed", () => {
+    expect(fixResourceClosures("var ordinary = 1;")).toBe("var ordinary = 1;");
+    for (const source of [
+      RESOURCE_LIST.replace("handleTable0, handle1", "handleTable0, handle2"),
+      RESOURCE_LIST.replace("finalizationRegistry0.unregister", "finalizationRegistry1.unregister"),
+      RESOURCE_LIST.replace("rep: handleEntry.rep", "rep: handle1"),
+      fixResourceClosures(RESOURCE_LIST),
+    ])
+      expect(() => fixResourceClosures(source)).toThrow("unsupported trusted compiler output");
   });
 });

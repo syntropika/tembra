@@ -258,7 +258,7 @@ export class ComponentScope {
     const capture: CapturedInvocation | undefined = signature
       ? { signature, input, ...(receiver ? { receiver } : {}) }
       : undefined;
-    if ((bound.roles?.own || bound.roles?.receiver || bound.roles?.stream) && !capture)
+    if ((bound.roles?.owned || bound.roles?.receiver || bound.roles?.stream) && !capture)
       throw new Error("Resource transport requires an exact prepared signature");
     const session = this.declaration.session;
     const record = receiver ? receiver.reference : session.handles.reference(reference);
@@ -275,36 +275,55 @@ export class ComponentScope {
       checkSignal(ended);
       context.check();
     } catch (error) {
-      capture?.capability?.close();
+      for (const owner of capture?.capabilities ?? []) owner.close();
       throw error;
     }
-    if (bound.roles?.own || bound.roles?.stream) {
-      const owner = capture?.capability;
-      if (!owner || (bound.roles.own ? owner.kind !== "resource" : owner.kind !== "bytes")) {
-        owner?.close();
-        throw new Error("Prepared provider returned no matching capability");
+    if (bound.roles?.owned || bound.roles?.stream) {
+      const capabilities = capture?.capabilities ?? [];
+      try {
+        if (!capture?.output) throw new Error("Prepared provider returned no captured result");
+        const output = check(this.owner.contract, bound.slot, false, capture.output);
+        const value = lift(shape?.result, JSON.parse(output.text));
+        if (bound.roles.stream) {
+          const owner = capabilities[0];
+          if (capabilities.length !== 1 || value !== 0 || owner?.kind !== "bytes")
+            throw new Error("A byte stream result names exactly one stream attachment");
+          return owner;
+        }
+        const consumed = new Set<number>();
+        const result = bound.roles.result!(value, (nominal, index) => {
+          if (
+            typeof index !== "number" ||
+            !Number.isInteger(index) ||
+            index < 0 ||
+            consumed.has(index)
+          )
+            throw new Error("An owned result must redeem each attachment exactly once");
+          const owner = capabilities[index];
+          if (
+            owner?.kind !== "resource" ||
+            owner.nominal.interface !== nominal.interface ||
+            owner.nominal.name !== nominal.name
+          )
+            throw new Error("Resource has another nominal type");
+          consumed.add(index);
+          return owner;
+        });
+        if (consumed.size !== capabilities.length)
+          throw new Error("Unused result capability attachment");
+        for (const owner of capabilities) {
+          if (owner.kind !== "resource") throw new Error("Unexpected stream attachment");
+          this.owner.importedResources?.add(owner);
+          owner.whenClosed(() => this.owner.importedResources?.delete(owner));
+        }
+        return result;
+      } catch (error) {
+        for (const owner of capabilities) owner.close();
+        throw error;
       }
-      if (!capture?.output || capture.output.text !== "0") {
-        owner.close();
-        throw new Error("A capability result names exactly one attachment");
-      }
-      if (
-        bound.roles.own &&
-        owner.kind === "resource" &&
-        (owner.nominal.interface !== bound.roles.own.interface ||
-          owner.nominal.name !== bound.roles.own.name)
-      ) {
-        owner.close();
-        throw new Error("Resource has another nominal type");
-      }
-      if (owner.kind === "resource") {
-        this.owner.importedResources?.add(owner);
-        owner.whenClosed(() => this.owner.importedResources?.delete(owner));
-      }
-      return owner;
     }
-    if (capture?.capability) {
-      capture.capability.close();
+    if (capture?.capabilities?.length) {
+      for (const owner of capture.capabilities) owner.close();
       throw new Error("A data result cannot carry a capability");
     }
     // The provider may be an ordinary host implementation returning hostile JavaScript: reply

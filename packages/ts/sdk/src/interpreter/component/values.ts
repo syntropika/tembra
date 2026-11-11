@@ -112,7 +112,8 @@ export function converters(graph: TypeGraph): (fn: GraphFunction) => FunctionVal
     if (typeof kind === "string")
       throw new Error(`WIT ${kind} values are unavailable in browser component execution`);
     if (kind.type !== undefined) return compile(kind.type);
-    if (kind.enum !== undefined || kind.flags !== undefined) return IDENTITY;
+    if (kind.enum !== undefined || kind.flags !== undefined || kind.handle?.own !== undefined)
+      return IDENTITY;
     if (kind.list !== undefined) {
       const element = resolve(kind.list);
       const Typed = typeof element === "string" ? TYPED[element] : undefined;
