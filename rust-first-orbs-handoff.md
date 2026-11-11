@@ -842,10 +842,10 @@ Poi:
      feat/rust-first-orbs-rebased
    ```
 
-2. aggiornare il corpo della PR: cita ancora `CallbackRoles`
-   e `Manifest`. La bozza nuova è sul server, in
+2. aggiornare il corpo della PR. Fatto da Claude alle 21:27
+   CET, con l'ok di Giacomo. La bozza applicata è sul server, in
    `/home/claude/github/tembra/.worktrees/pr-body-865e4c6.md`.
-   Si applica con:
+   Applicata con:
 
    ```bash
    gh pr edit 1 --body-file \
