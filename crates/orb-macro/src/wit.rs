@@ -1,9 +1,9 @@
 //! The WIT text derived from the module items, and the consumed packages it refers to.
-use crate::{Function, Service, Shape, WitResource};
+use crate::{Composition, Declared, Function, Service, Shape, ShapeKind, WitResource};
 use heck::{ToKebabCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 use syn::{
@@ -16,11 +16,39 @@ pub(crate) fn kebab(ident: &Ident) -> String {
     ident.to_string().to_kebab_case()
 }
 
-/// The items of the module that enter the WIT: its exported types, its services and its resources.
+/// The items of the module that enter the WIT: its exported types, its services, its resources
+/// and its declared hooks, of which the derived ones are interfaces of the package.
 pub(crate) struct Items<'a> {
     pub shapes: &'a [Shape],
     pub services: &'a [Service],
     pub resources: &'a [WitResource],
+    pub declared: &'a [Declared],
+}
+
+/// The names of the shapes a derived hook reaches through its input, directly or through the
+/// fields of another shape: they are defined in the first derived hook's interface.
+pub(crate) fn hook_shapes(shapes: &[Shape], declared: &[Declared]) -> BTreeSet<String> {
+    let by_name: BTreeMap<String, &Shape> = shapes
+        .iter()
+        .map(|shape| (shape.ident.to_string(), shape))
+        .collect();
+    let mut pending: Vec<Ident> = Vec::new();
+    for (input, _) in declared
+        .iter()
+        .filter_map(|declaration| declaration.input.as_ref())
+    {
+        references(input, &mut pending);
+    }
+    let mut reached = BTreeSet::new();
+    while let Some(ident) = pending.pop() {
+        let name = ident.to_string();
+        if let Some(shape) = by_name.get(&name)
+            && reached.insert(name)
+        {
+            pending.extend(shape.references.iter().cloned());
+        }
+    }
+    reached
 }
 
 /// Which kernel interfaces the world uses.
@@ -30,11 +58,12 @@ pub(crate) struct Kernel {
     pub context: bool,
 }
 
-/// Write the package: one interface per derived service, the types in the first of them and
-/// borrowed by the others with `use`, each WIT resource in the interface of the service that
-/// owns it, then a world using the kernel's interfaces for its states, resources and context,
-/// importing every consumed interface, importing and exporting every hook, and exporting every
-/// interface, derived or implemented.
+/// Write the package: one interface per derived hook, with its callback `apply` and, in the first
+/// of them, the types the hooks reach; one interface per derived service, the other types in the
+/// first of them and borrowed by the others with `use`, each WIT resource in the interface of the
+/// service that owns it; then a world using the kernel's interfaces for its states, resources and
+/// context, importing every consumed interface, importing and exporting every hook, consumed or
+/// derived, and exporting every service interface, derived or implemented.
 pub(crate) fn render<'a>(
     package: &str,
     world: &str,
@@ -47,14 +76,66 @@ pub(crate) fn render<'a>(
         shapes,
         services,
         resources,
+        declared,
     } = items;
     let mut wit = format!("package {package};\n");
+    let derived_hooks: Vec<&Declared> = declared
+        .iter()
+        .filter(|declaration| declaration.input.is_some())
+        .collect();
     let derived: Vec<&Service> = services
         .iter()
         .filter(|service| service.implements.is_none())
         .collect();
     let owner_of =
         |resource: &WitResource| kebab(resource.service.as_ref().expect("resolved owner"));
+    let in_hooks = hook_shapes(shapes, declared);
+    let first_hook = derived_hooks.first().map(|hook| kebab(&hook.ident));
+    let first_service = derived.first().map(|service| kebab(&service.ident));
+    // An interface borrows with `use` the shapes it mentions and another interface defines: the
+    // hooks' shapes from the first derived hook, the others from the first derived service.
+    let borrow = |wit: &mut String, mentioned: &[Ident], from: Option<&str>, hooks: bool| {
+        let Some(from) = from else {
+            return;
+        };
+        let names: Vec<String> = shapes
+            .iter()
+            .filter(|shape| {
+                mentioned.contains(&shape.ident)
+                    && in_hooks.contains(&shape.ident.to_string()) == hooks
+            })
+            .map(|shape| kebab(&shape.ident))
+            .collect();
+        if !names.is_empty() {
+            wit.push_str(&format!("  use {from}.{{{}}};\n", names.join(", ")));
+        }
+    };
+    for (index, hook) in derived_hooks.iter().enumerate() {
+        let (input, spelling) = hook.input.as_ref().expect("a derived hook");
+        wit.push('\n');
+        for doc in &hook.docs {
+            wit.push_str(&format!("///{doc}\n"));
+        }
+        wit.push_str(&format!("interface {} {{\n", kebab(&hook.ident)));
+        if index == 0 {
+            for shape in shapes
+                .iter()
+                .filter(|shape| in_hooks.contains(&shape.ident.to_string()))
+            {
+                wit.push_str(&shape.wit);
+            }
+        } else {
+            let mut mentioned = Vec::new();
+            references(input, &mut mentioned);
+            borrow(&mut wit, &mentioned, first_hook.as_deref(), true);
+        }
+        let result = match hook.composition {
+            Composition::Series => String::new(),
+            Composition::Waterfall => format!(" -> {spelling}"),
+            Composition::Bail => format!(" -> option<{spelling}>"),
+        };
+        wit.push_str(&format!("  apply: func(input: {spelling}){result};\n}}\n"));
+    }
     for (index, service) in derived.iter().enumerate() {
         wit.push('\n');
         for doc in &service.docs {
@@ -62,22 +143,6 @@ pub(crate) fn render<'a>(
         }
         let name = kebab(&service.ident);
         wit.push_str(&format!("interface {name} {{\n"));
-        if index == 0 {
-            for shape in shapes {
-                wit.push_str(&shape.wit);
-            }
-        } else if !shapes.is_empty() {
-            let names = shapes
-                .iter()
-                .map(|shape| kebab(&shape.ident))
-                .collect::<Vec<_>>()
-                .join(", ");
-            wit.push_str(&format!(
-                "  use {}.{{{names}}};\n",
-                kebab(&derived[0].ident)
-            ));
-        }
-        // A resource of another service that this one hands out is borrowed with `use`.
         let mut mentioned = Vec::new();
         for function in &service.functions {
             for (_, ty, _) in &function.params {
@@ -87,6 +152,26 @@ pub(crate) fn render<'a>(
                 references(ty, &mut mentioned);
             }
         }
+        if index == 0 {
+            // The shapes defined here may name a hook's shape in their fields.
+            for shape in shapes
+                .iter()
+                .filter(|shape| !in_hooks.contains(&shape.ident.to_string()))
+            {
+                mentioned.extend(shape.references.iter().cloned());
+            }
+            borrow(&mut wit, &mentioned, first_hook.as_deref(), true);
+            for shape in shapes
+                .iter()
+                .filter(|shape| !in_hooks.contains(&shape.ident.to_string()))
+            {
+                wit.push_str(&shape.wit);
+            }
+        } else {
+            borrow(&mut wit, &mentioned, first_service.as_deref(), false);
+            borrow(&mut wit, &mentioned, first_hook.as_deref(), true);
+        }
+        // A resource of another service that this one hands out is borrowed with `use`.
         let mut borrowed: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for resource in resources {
             if owner_of(resource) != name && mentioned.contains(&resource.ident) {
@@ -129,6 +214,10 @@ pub(crate) fn render<'a>(
     }
     for hook in hooks {
         wit.push_str(&format!("  import {hook};\n  export {hook};\n"));
+    }
+    for hook in &derived_hooks {
+        let name = kebab(&hook.ident);
+        wit.push_str(&format!("  import {name};\n  export {name};\n"));
     }
     for service in services {
         match &service.implements {
@@ -549,6 +638,7 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
     }
     wit.push_str(&format!("  record {} {{\n", kebab(&item.ident)));
     let mut references = Vec::new();
+    let mut named = Vec::new();
     for field in &fields.named {
         let Some(ident) = &field.ident else {
             return Err(syn::Error::new(field.span(), "a record field needs a name"));
@@ -559,12 +649,14 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
             wit_type(&field.ty)?
         ));
         self::references(&field.ty, &mut references);
+        named.push((ident.clone(), field.ty.clone()));
     }
     wit.push_str("  }\n");
     Ok(Shape {
         ident: item.ident.clone(),
         wit,
         references,
+        kind: ShapeKind::Record(named),
     })
 }
 
@@ -582,16 +674,21 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
     let keyword = if plain { "enum" } else { "variant" };
     wit.push_str(&format!("  {keyword} {} {{\n", kebab(&item.ident)));
     let mut references = Vec::new();
+    let mut cases = Vec::new();
     for variant in &item.variants {
         let case = kebab(&variant.ident);
         match &variant.fields {
-            Fields::Unit => wit.push_str(&format!("    {case},\n")),
+            Fields::Unit => {
+                wit.push_str(&format!("    {case},\n"));
+                cases.push((variant.ident.clone(), None));
+            }
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 wit.push_str(&format!(
                     "    {case}({}),\n",
                     wit_type(&fields.unnamed[0].ty)?
                 ));
                 self::references(&fields.unnamed[0].ty, &mut references);
+                cases.push((variant.ident.clone(), Some(fields.unnamed[0].ty.clone())));
             }
             _ => {
                 return Err(syn::Error::new(
@@ -602,10 +699,16 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
         }
     }
     wit.push_str("  }\n");
+    let kind = if plain {
+        ShapeKind::Enum(cases.into_iter().map(|(case, _)| case).collect())
+    } else {
+        ShapeKind::Variant(cases)
+    };
     Ok(Shape {
         ident: item.ident.clone(),
         wit,
         references,
+        kind,
     })
 }
 

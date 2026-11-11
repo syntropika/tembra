@@ -86,6 +86,16 @@ struct Shape {
     ident: Ident,
     wit: String,
     references: Vec<Ident>,
+    /// How the type is built, for the conversions between the two sides of a derived hook.
+    kind: ShapeKind,
+}
+
+/// The construction of a shape: the named fields of a record, the cases of an enum, the cases of
+/// a variant with their payload.
+enum ShapeKind {
+    Record(Vec<(Ident, Type)>),
+    Enum(Vec<Ident>),
+    Variant(Vec<(Ident, Option<Type>)>),
 }
 
 /// An exported interface: a unit struct marked `#[service]` with an `impl` block of `pub fn`, and
@@ -156,13 +166,20 @@ struct Contribution {
     result: Option<Type>,
 }
 
-/// A hook declaration: a unit struct marked `#[hook("ns:name/hook@version", composition = c)]`.
-/// The Orb exports the hook's interface, as the portable hook contract requires of a provider,
-/// and imports it as the typed entry to the plan the kernel runs.
+/// A hook declaration: a unit struct marked `#[hook(composition = c, input = Type)]`, which
+/// derives the hook's interface from the module under the struct's name, or
+/// `#[hook("ns:name/hook@version", composition = c)]`, which names an interface of a consumed
+/// package. The Orb exports the hook's interface, as the portable hook contract requires of a
+/// provider, and imports it as the typed entry to the plan the kernel runs.
 struct Declared {
+    /// The hook's identity: named on the attribute, or derived from the package and the struct.
     hook: String,
     composition: Composition,
     ident: Ident,
+    docs: Vec<String>,
+    /// The callback's input when the hook is derived from the module: the author's type and its
+    /// WIT spelling. `None` for a hook named from a consumed package.
+    input: Option<(Type, String)>,
 }
 
 /// How the kernel composes the contributions of a hook.
@@ -322,7 +339,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         match item {
             Item::Struct(mut s) => {
                 if let Some(attribute) = take(&mut s.attrs, "hook") {
-                    declared.push(declaration(&s, &attribute)?);
+                    declared.push(declaration(&s, &attribute, &package)?);
                     passthrough.push(Item::Struct(s));
                 } else if let Some(attribute) = take(&mut s.attrs, "wit_resource") {
                     wit_resources.push(wit_resource(&s, &attribute)?);
@@ -625,6 +642,35 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             ),
         ));
     }
+    // A derived hook is an interface of the package too: its name is free of the world's and of
+    // the derived services'.
+    for declaration in declared
+        .iter()
+        .filter(|declaration| declaration.input.is_some())
+    {
+        let name = wit::kebab(&declaration.ident);
+        if name == world {
+            return Err(syn::Error::new(
+                declaration.ident.span(),
+                format!(
+                    "`{}` is also the name of the world, taken from the module; rename one of them",
+                    declaration.ident
+                ),
+            ));
+        }
+        if let Some(service) = services
+            .iter()
+            .find(|service| service.implements.is_none() && wit::kebab(&service.ident) == name)
+        {
+            return Err(syn::Error::new(
+                declaration.ident.span(),
+                format!(
+                    "`{}` names both a hook and the service `{}`; rename one of them",
+                    declaration.ident, service.ident
+                ),
+            ));
+        }
+    }
     let hooks: BTreeMap<String, i32> = contributions
         .iter()
         .map(|contribution| (contribution.hook.clone(), contribution.priority))
@@ -728,9 +774,17 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .iter()
         .filter_map(|resource| resource.constructor.as_ref())
         .flat_map(|constructor| &constructor.params);
-    for (ident, ty, _) in derived_functions
+    let input_ident = format_ident!("input");
+    let hook_inputs: Vec<&Type> = declared
+        .iter()
+        .filter_map(|declaration| declaration.input.as_ref())
+        .map(|(ty, _)| ty)
+        .collect();
+    for (ident, ty) in derived_functions
         .flat_map(|function| &function.params)
         .chain(constructor_params)
+        .map(|(ident, ty, _)| (ident, ty))
+        .chain(hook_inputs.iter().map(|ty| (&input_ident, *ty)))
     {
         let mut mentioned = Vec::new();
         wit::references(ty, &mut mentioned);
@@ -749,7 +803,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
 
     // Only the types a service method or a resource uses, directly or through another type,
     // enter the WIT; a state no method mentions stays an ordinary struct, with serde derives.
-    let shapes = reachable(candidates, &services, &wit_resources, &mut passthrough)?;
+    let shapes = reachable(
+        candidates,
+        &services,
+        &wit_resources,
+        &hook_inputs,
+        &mut passthrough,
+    )?;
     for item in &mut passthrough {
         if let Item::Struct(item) = item
             && states.iter().any(|state| state.ident == item.ident)
@@ -880,9 +940,20 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     }
-    let callbacks = match (&wit_dir, hooks.is_empty() && declarations.is_empty()) {
+    // The callback of a contributed hook, or of a declared one named from a consumed package, is
+    // read from that package; a hook derived from `input = Type` needs no directory.
+    let consumed_hooks: Vec<&String> = hooks
+        .keys()
+        .chain(
+            declarations
+                .iter()
+                .filter(|(_, declaration)| declaration.input.is_none())
+                .map(|(hook, _)| hook),
+        )
+        .collect();
+    let callbacks = match (&wit_dir, consumed_hooks.is_empty()) {
         (_, true) => Default::default(),
-        (Some(dir), false) => wit::callbacks(dir, hooks.keys().chain(declarations.keys()))?,
+        (Some(dir), false) => wit::callbacks(dir, consumed_hooks.iter().copied())?,
         (None, false) => {
             return Err(syn::Error::new(
                 Span::call_site(),
@@ -890,7 +961,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             ));
         }
     };
-    for declaration in declarations.values() {
+    for declaration in declarations
+        .values()
+        .filter(|declaration| declaration.input.is_none())
+    {
         let callback = &callbacks[&declaration.hook];
         let (fits, rule) = match declaration.composition {
             Composition::Series => (callback.series, "a series callback returns nothing"),
@@ -918,8 +992,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             shapes: &shapes,
             services: &services,
             resources: &wit_resources,
+            declared: &declared,
         },
-        hooks.keys().chain(declarations.keys()),
+        consumed_hooks.iter().copied(),
         &options.imports,
         wit::Kernel {
             state: !states.is_empty(),
@@ -935,17 +1010,37 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let attrs = module.attrs;
     let ns_ident = format_ident!("{}", namespace.to_snake_case());
     let name_ident = format_ident!("{}", name.to_snake_case());
-    let shape_idents = shapes.iter().map(|shape| &shape.ident).collect::<Vec<_>>();
     // The generated types carry the author's names and public fields, so the author's functions
-    // and the generated traits speak about one type. A shape is reached from a derived service,
-    // so a module with shapes has a first derived service.
-    let reexports = match services.iter().find(|service| service.implements.is_none()) {
-        Some(first) if !shapes.is_empty() => {
-            let first_interface = format_ident!("{}", first.ident.to_string().to_snake_case());
-            quote! { pub use exports::#ns_ident::#name_ident::#first_interface::{#(#shape_idents),*}; }
+    // and the generated traits speak about one type. A type a derived hook reaches is defined in
+    // the first derived hook's interface, any other in the first derived service's.
+    let hook_shapes = wit::hook_shapes(&shapes, &declared);
+    let interface_module = |ident: &Ident| format_ident!("{}", ident.to_string().to_snake_case());
+    let first_hook = declared
+        .iter()
+        .find(|declaration| declaration.input.is_some())
+        .map(|declaration| interface_module(&declaration.ident));
+    let first_service = services
+        .iter()
+        .find(|service| service.implements.is_none())
+        .map(|service| interface_module(&service.ident));
+    let mut grouped: Vec<(Ident, Vec<&Ident>)> = Vec::new();
+    for shape in &shapes {
+        let interface = if hook_shapes.contains(&shape.ident.to_string()) {
+            &first_hook
+        } else {
+            &first_service
+        };
+        let interface = interface
+            .clone()
+            .expect("a shape is reached from a hook or a derived service");
+        match grouped.iter_mut().find(|(known, _)| *known == interface) {
+            Some((_, idents)) => idents.push(&shape.ident),
+            None => grouped.push((interface, vec![&shape.ident])),
         }
-        _ => quote! {},
-    };
+    }
+    let reexports = grouped.iter().map(|(interface, idents)| {
+        quote! { pub use exports::#ns_ident::#name_ident::#interface::{#(#idents),*}; }
+    });
     // A derived service's bridge forwards each function to the author's; a result that is a
     // resource is wrapped into the bindings' handle type, and the resources of the service's
     // interface are the author's structs.
@@ -1028,10 +1123,15 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             let [ns, package, interface] = hook_path(hook);
             quote! { pub use exports::#ns::#package::#interface; }
         })
-        .chain(declarations.keys().map(|hook| {
-            let [ns, package, interface] = hook_path(hook);
-            quote! { pub use self::#ns::#package::#interface; }
-        }));
+        .chain(
+            declarations
+                .iter()
+                .filter(|(_, declaration)| declaration.input.is_none())
+                .map(|(hook, _)| {
+                    let [ns, package, interface] = hook_path(hook);
+                    quote! { pub use self::#ns::#package::#interface; }
+                }),
+        );
     let contribution_bridges = contributions.iter().map(|contribution| {
         let [ns, package, interface] = hook_path(&contribution.hook);
         let callback = format_ident!("{}", callbacks[&contribution.hook].name.to_snake_case());
@@ -1106,7 +1206,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .then(|| quote! { extern crate alloc as __tembra_alloc; });
     let state_code = state_code(&states);
     let resource_code = resource_code(&resources);
-    let declaration_code = declaration_code(&declared, &callbacks)?;
+    let declaration_code = declaration_code(&declared, &callbacks, &shapes, &hook_shapes)?;
     let wit_literal = LitStr::new(&wit, Span::call_site());
     let wit_bytes = LitByteStr::new(wit.as_bytes(), Span::call_site());
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
@@ -1169,7 +1269,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
 
             #generate
 
-            #reexports
+            #(#reexports)*
             #context_module
             #(#consumed_modules)*
             #(#hook_modules)*
@@ -1605,13 +1705,14 @@ fn implemented_service(
     })
 }
 
-/// Keep, in module order, the candidate types that a derived service's method or a resource's
-/// function reaches; the others go back to the module as ordinary Rust. A reference to a type the
-/// module does not declare is an error; a resource is a type of its own.
+/// Keep, in module order, the candidate types that a derived service's method, a resource's
+/// function or a derived hook's input reaches; the others go back to the module as ordinary Rust.
+/// A reference to a type the module does not declare is an error; a resource is a type of its own.
 fn reachable(
     candidates: Vec<(Item, Shape)>,
     services: &[Service],
     resources: &[WitResource],
+    hook_inputs: &[&Type],
     passthrough: &mut Vec<Item>,
 ) -> syn::Result<Vec<Shape>> {
     let declared: BTreeMap<String, usize> = candidates
@@ -1648,6 +1749,9 @@ fn reachable(
             mention(function, &mut pending);
         }
     }
+    for input in hook_inputs {
+        wit::references(input, &mut pending);
+    }
     let mut kept = BTreeSet::new();
     while let Some(ident) = pending.pop() {
         if resources.iter().any(|resource| resource.ident == ident) {
@@ -1657,7 +1761,7 @@ fn reachable(
             return Err(syn::Error::new(
                 ident.span(),
                 format!(
-                    "`{ident}` is used by a service method but is not a struct or enum of this module"
+                    "`{ident}` is used by a service method or a hook but is not a struct or enum of this module"
                 ),
             ));
         };
@@ -1772,65 +1876,163 @@ fn contribution(function: &ItemFn, attribute: &Attribute) -> syn::Result<Contrib
 
 /// Read a hook declaration: a unit struct, with the hook's name and its composition on the
 /// attribute.
-fn declaration(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Declared> {
+fn declaration(
+    item: &syn::ItemStruct,
+    attribute: &Attribute,
+    package: &str,
+) -> syn::Result<Declared> {
+    const FORMS: &str = "#[hook(composition = series | waterfall | bail, input = Type)] derives the hook from the module, #[hook(\"ns:name/hook@version\", composition = ...)] names an existing one";
     if !matches!(item.fields, Fields::Unit) {
         return Err(syn::Error::new(
             attribute.span(),
-            "a hook declaration is a unit struct: #[hook(\"ns:name/hook@version\", composition = waterfall)] pub struct Name;",
+            format!("a hook declaration is a unit struct: {FORMS}"),
         ));
     }
-    let (hook, composition) = attribute.parse_args_with(|input: syn::parse::ParseStream| {
-        let hook: LitStr = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let key: Ident = input.parse()?;
-        if key != "composition" {
-            return Err(syn::Error::new(
-                key.span(),
-                "unknown option; a declared hook names its composition: #[hook(\"ns:name/hook@version\", composition = series | waterfall | bail)]",
-            ));
+    let mut hook: Option<LitStr> = None;
+    let mut composition = None;
+    let mut input: Option<Type> = None;
+    attribute.parse_args_with(|stream: syn::parse::ParseStream| {
+        if stream.peek(LitStr) {
+            hook = Some(stream.parse()?);
+            if !stream.is_empty() {
+                stream.parse::<Token![,]>()?;
+            }
         }
-        input.parse::<Token![=]>()?;
-        let value: Ident = input.parse()?;
-        let composition = match value.to_string().as_str() {
-            "series" => Composition::Series,
-            "waterfall" => Composition::Waterfall,
-            "bail" => Composition::Bail,
-            _ => {
+        while !stream.is_empty() {
+            let key: Ident = stream.parse()?;
+            stream.parse::<Token![=]>()?;
+            match key.to_string().as_str() {
+                "composition" => {
+                    let value: Ident = stream.parse()?;
+                    composition = Some(match value.to_string().as_str() {
+                        "series" => Composition::Series,
+                        "waterfall" => Composition::Waterfall,
+                        "bail" => Composition::Bail,
+                        _ => {
+                            return Err(syn::Error::new(
+                                value.span(),
+                                "the composition is series, waterfall or bail",
+                            ));
+                        }
+                    });
+                }
+                "input" => input = Some(stream.parse()?),
+                _ => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!("unknown option; {FORMS}"),
+                    ));
+                }
+            }
+            if !stream.is_empty() {
+                stream.parse::<Token![,]>()?;
+            }
+        }
+        Ok(())
+    })?;
+    let Some(composition) = composition else {
+        return Err(syn::Error::new(
+            attribute.span(),
+            format!("a declared hook names its composition; {FORMS}"),
+        ));
+    };
+    let (hook, input) = match (hook, input) {
+        (Some(hook), None) => {
+            let id = hook.value();
+            if !id.contains(':') || !id.contains('/') || id.contains(['"', '\\']) {
                 return Err(syn::Error::new(
-                    value.span(),
-                    "the composition is series, waterfall or bail",
+                    hook.span(),
+                    "a hook is named ns:name/interface@version",
                 ));
             }
-        };
-        Ok((hook, composition))
-    })?;
-    let id = hook.value();
-    if !id.contains(':') || !id.contains('/') || id.contains(['"', '\\']) {
-        return Err(syn::Error::new(
-            hook.span(),
-            "a hook is named ns:name/interface@version",
-        ));
-    }
+            (id, None)
+        }
+        (None, Some(input)) => {
+            // The input crosses to the import by value, or by reference for a string or a list;
+            // the bindings take other containers in borrowed forms the macro does not spell.
+            let plain =
+                match &input {
+                    Type::Path(path) => !path.path.segments.last().is_some_and(|segment| {
+                        segment.ident == "Option" || segment.ident == "Result"
+                    }),
+                    _ => false,
+                };
+            if !plain {
+                return Err(syn::Error::new(
+                    input.span(),
+                    "a hook's input is a record, an enum, a variant, a scalar, a string or a list",
+                ));
+            }
+            let spelling = wit::wit_type(&input)?;
+            (
+                identity(package, &wit::kebab(&item.ident)),
+                Some((input, spelling)),
+            )
+        }
+        (Some(hook), Some(_)) => {
+            return Err(syn::Error::new(
+                hook.span(),
+                format!(
+                    "a declared hook either names an existing interface or derives one from its input, not both; {FORMS}"
+                ),
+            ));
+        }
+        (None, None) => {
+            return Err(syn::Error::new(
+                attribute.span(),
+                format!("a declared hook names an existing interface or its input type; {FORMS}"),
+            ));
+        }
+    };
     Ok(Declared {
-        hook: id,
+        hook,
         composition,
         ident: item.ident.clone(),
+        docs: wit::docs(&item.attrs),
+        input,
     })
 }
 
 /// The code of the declared hooks: for each, the export the contract requires, which traps
 /// because the contributions answer the hook, and `run` on the author's struct, which calls the
-/// matching import so the kernel runs the plan.
+/// matching import so the kernel runs the plan. A derived hook's `run` speaks the module's own
+/// types and converts them to and from the import side of the bindings.
 fn declaration_code(
     declared: &[Declared],
     callbacks: &BTreeMap<String, wit::Callback>,
+    shapes: &[Shape],
+    hook_shapes: &BTreeSet<String>,
 ) -> syn::Result<proc_macro2::TokenStream> {
     if declared.is_empty() {
         return Ok(quote! {});
     }
+    // The types the derived hooks reach are defined in the first derived hook's interface, on
+    // both sides of the bindings.
+    let defining = declared
+        .iter()
+        .find(|declaration| declaration.input.is_some())
+        .map(|declaration| hook_path(&declaration.hook));
+    let (import_types, export_types) = match &defining {
+        Some([ns, package, interface]) => (
+            quote! { self::#ns::#package::#interface },
+            quote! { exports::#ns::#package::#interface },
+        ),
+        None => (quote! {}, quote! {}),
+    };
+    let conversions = defining
+        .is_some()
+        .then(|| conversions(shapes, hook_shapes, &export_types, &import_types));
     let items = declared
         .iter()
         .map(|declaration| {
+            if let Some((input, _)) = &declaration.input {
+                return Ok(derived_hook_code(
+                    declaration,
+                    input,
+                    hook_shapes,
+                    &import_types,
+                ));
+            }
             let callback = &callbacks[&declaration.hook];
             let [ns, package, interface] = hook_path(&declaration.hook);
             let name = format_ident!("{}", callback.name.to_snake_case());
@@ -1872,7 +2074,217 @@ fn declaration_code(
             })
         })
         .collect::<syn::Result<Vec<_>>>()?;
-    Ok(quote! { #(#items)* })
+    Ok(quote! { #(#items)* #conversions })
+}
+
+/// The code of a hook derived from `input = Type`: the export the contract requires, which traps
+/// because the contributions answer the hook, and `run` on the author's struct, which converts
+/// the module's types to the import side of the bindings, calls the hook's import so the kernel
+/// runs the plan, and converts the composed result back.
+fn derived_hook_code(
+    declaration: &Declared,
+    input: &Type,
+    hook_shapes: &BTreeSet<String>,
+    import_types: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let [ns, package, interface] = hook_path(&declaration.hook);
+    let ident = &declaration.ident;
+    let import_input = respell(input, hook_shapes, import_types);
+    let (result, settle) = match declaration.composition {
+        Composition::Series => (quote! {}, None),
+        Composition::Waterfall => (
+            quote! { -> #input },
+            Some(convert(input, quote! { answer })),
+        ),
+        Composition::Bail => {
+            let item = convert(input, quote! { item });
+            (
+                quote! { -> ::core::option::Option<#input> },
+                Some(quote! { answer.map(|item| #item) }),
+            )
+        }
+    };
+    let message = format!(
+        "the hook {} is declared by this Orb: its contributions answer it, this export never does",
+        declaration.hook
+    );
+    let doc = format!(
+        " Run the hook `{}`: the kernel calls its contributions in plan order and returns the composed result.",
+        declaration.hook
+    );
+    let converted = convert(input, quote! { input });
+    // A string or a list crosses to an import by reference, as the bindings take them.
+    let by_reference = matches!(input, Type::Path(path)
+        if path.path.segments.last().is_some_and(|segment| segment.ident == "String" || segment.ident == "Vec"));
+    let argument = if by_reference {
+        quote! { &input }
+    } else {
+        quote! { input }
+    };
+    let call = quote! { self::#ns::#package::#interface::apply(#argument) };
+    let body = match settle {
+        Some(settle) => quote! { let answer = #call; #settle },
+        None => quote! { #call; },
+    };
+    quote! {
+        impl exports::#ns::#package::#interface::Guest for __TembraExports {
+            fn apply(_input: #input) #result {
+                ::core::panic!(#message)
+            }
+        }
+        impl #ident {
+            #[doc = #doc]
+            pub fn run(input: #input) #result {
+                let input: #import_input = #converted;
+                #body
+            }
+        }
+    }
+}
+
+/// `From` in both directions between the two sides of the bindings for each type a derived hook
+/// reaches: the export side, which the module's functions use, and the import side, which the
+/// typed entry to the plan uses. The two are distinct Rust types of one WIT definition.
+fn conversions(
+    shapes: &[Shape],
+    hook_shapes: &BTreeSet<String>,
+    export: &proc_macro2::TokenStream,
+    import: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let impls = shapes
+        .iter()
+        .filter(|shape| hook_shapes.contains(&shape.ident.to_string()))
+        .map(|shape| {
+            let ident = &shape.ident;
+            let body = |from: &proc_macro2::TokenStream| match &shape.kind {
+                ShapeKind::Record(fields) => {
+                    let fields = fields.iter().map(|(field, ty)| {
+                        let value = convert(ty, quote! { value.#field });
+                        quote! { #field: #value }
+                    });
+                    quote! { Self { #(#fields),* } }
+                }
+                ShapeKind::Enum(cases) => {
+                    let arms = cases
+                        .iter()
+                        .map(|case| quote! { #from::#ident::#case => Self::#case });
+                    quote! { match value { #(#arms,)* } }
+                }
+                ShapeKind::Variant(cases) => {
+                    let arms = cases.iter().map(|(case, payload)| match payload {
+                        Some(ty) => {
+                            let item = convert(ty, quote! { item });
+                            quote! { #from::#ident::#case(item) => Self::#case(#item) }
+                        }
+                        None => quote! { #from::#ident::#case => Self::#case },
+                    });
+                    quote! { match value { #(#arms,)* } }
+                }
+            };
+            let to_import = body(export);
+            let to_export = body(import);
+            quote! {
+                impl ::core::convert::From<#export::#ident> for #import::#ident {
+                    fn from(value: #export::#ident) -> Self { #to_import }
+                }
+                impl ::core::convert::From<#import::#ident> for #export::#ident {
+                    fn from(value: #import::#ident) -> Self { #to_export }
+                }
+            }
+        });
+    quote! { #(#impls)* }
+}
+
+/// An expression converting `value`, of the author's type `ty` on one side of the bindings, to the
+/// other side: containers are rebuilt element by element, everything else goes through `Into`,
+/// the identity for scalars and strings, the generated `From` for the module's types.
+fn convert(ty: &Type, value: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    match ty {
+        Type::Path(path) => {
+            let Some(segment) = path.path.segments.last() else {
+                return quote! { ::core::convert::Into::into(#value) };
+            };
+            let arguments: Vec<&Type> = match &segment.arguments {
+                syn::PathArguments::AngleBracketed(arguments) => arguments
+                    .args
+                    .iter()
+                    .filter_map(|argument| match argument {
+                        syn::GenericArgument::Type(ty) => Some(ty),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            match (segment.ident.to_string().as_str(), arguments.as_slice()) {
+                ("Vec", [item]) => {
+                    let item = convert(item, quote! { item });
+                    quote! { #value.into_iter().map(|item| #item).collect() }
+                }
+                ("Option", [item]) => {
+                    let item = convert(item, quote! { item });
+                    quote! { #value.map(|item| #item) }
+                }
+                ("Result", [ok, err]) => {
+                    let ok = convert(ok, quote! { item });
+                    let err = convert(err, quote! { item });
+                    quote! { match #value { Ok(item) => Ok(#ok), Err(item) => Err(#err) } }
+                }
+                _ => quote! { ::core::convert::Into::into(#value) },
+            }
+        }
+        Type::Tuple(tuple) if tuple.elems.is_empty() => value,
+        Type::Tuple(tuple) => {
+            let names: Vec<Ident> = (0..tuple.elems.len())
+                .map(|index| format_ident!("item{index}"))
+                .collect();
+            let converted = tuple
+                .elems
+                .iter()
+                .zip(&names)
+                .map(|(ty, name)| convert(ty, quote! { #name }));
+            quote! { { let (#(#names),*) = #value; (#(#converted),*) } }
+        }
+        _ => quote! { ::core::convert::Into::into(#value) },
+    }
+}
+
+/// The author's type as the import side of the bindings spells it: a type of the module that a
+/// hook reaches lives in `module` there, everything else keeps its spelling.
+fn respell(
+    ty: &Type,
+    hook_shapes: &BTreeSet<String>,
+    module: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    match ty {
+        Type::Path(path) => {
+            let segments: Vec<&syn::PathSegment> = path.path.segments.iter().collect();
+            let Some((last, prefix)) = segments.split_last() else {
+                return quote! { #ty };
+            };
+            let ident = &last.ident;
+            if prefix.is_empty() && hook_shapes.contains(&ident.to_string()) {
+                return quote! { #module::#ident };
+            }
+            let syn::PathArguments::AngleBracketed(arguments) = &last.arguments else {
+                return quote! { #ty };
+            };
+            let leading = &path.path.leading_colon;
+            let prefix = prefix.iter().map(|segment| quote! { #segment:: });
+            let arguments = arguments.args.iter().map(|argument| match argument {
+                syn::GenericArgument::Type(ty) => respell(ty, hook_shapes, module),
+                other => quote! { #other },
+            });
+            quote! { #leading #(#prefix)* #ident<#(#arguments),*> }
+        }
+        Type::Tuple(tuple) => {
+            let elements = tuple
+                .elems
+                .iter()
+                .map(|ty| respell(ty, hook_shapes, module));
+            quote! { (#(#elements,)*) }
+        }
+        _ => quote! { #ty },
+    }
 }
 
 /// Whether a type is `Result<(), String>`, the answer of a state's validator.

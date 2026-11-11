@@ -573,3 +573,272 @@ fn a_state_enters_the_wit_only_when_a_method_mentions_it() {
     );
     assert!(!generated.contains("pub use exports :: example :: ledger :: pinned :: { Balance }"));
 }
+
+const GATE: &str = "mod gate {
+    /// Each contributor may change the admission or block it.
+    #[hook(composition = waterfall, input = Admission)]
+    pub struct Guard;
+    /// One admission.
+    pub struct Admission { pub value: i32, pub blocked: bool }
+    #[service]
+    pub struct Admissions;
+    impl Admissions {
+        pub fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }) }
+    }
+}";
+
+/// A hook declared from `input = Type` is an interface of the package, derived from the struct:
+/// its types are defined there and borrowed by the services, the world imports and exports it,
+/// the manifest declares it, and `run` speaks the module's own types through generated
+/// conversions to the import side of the bindings.
+#[test]
+fn a_declared_hook_is_derived_from_its_input() {
+    let module = expanded("example:gate@1.0.0", GATE);
+    assert_eq!(
+        wit(&module),
+        "package example:gate@1.0.0;\n\n/// Each contributor may change the admission or block it.\ninterface guard {\n  /// One admission.\n  record admission {\n    value: s32,\n    blocked: bool,\n  }\n  apply: func(input: admission) -> admission;\n}\n\ninterface admissions {\n  use guard.{admission};\n  admit: func(value: s32) -> admission;\n}\n\nworld gate {\n  import guard;\n  export guard;\n  export admissions;\n}\n"
+    );
+    assert_eq!(
+        manifest(&module).as_deref(),
+        Some(
+            r#"{"contributes":{},"declares":{"example:gate/guard@1.0.0":"waterfall"},"services":{}}"#
+        )
+    );
+    let generated = tokens(&module);
+    for expected in [
+        "pub use exports :: example :: gate :: guard :: { Admission } ;",
+        "pub fn run (input : Admission) -> Admission",
+        "let input : self :: example :: gate :: guard :: Admission = :: core :: convert :: Into :: into (input) ;",
+        "let answer = self :: example :: gate :: guard :: apply (input) ;",
+        "impl :: core :: convert :: From < exports :: example :: gate :: guard :: Admission > for self :: example :: gate :: guard :: Admission",
+        "impl :: core :: convert :: From < self :: example :: gate :: guard :: Admission > for exports :: example :: gate :: guard :: Admission",
+        "Self { value : :: core :: convert :: Into :: into (value . value) , blocked : :: core :: convert :: Into :: into (value . blocked) }",
+        "fn apply (_input : Admission) -> Admission",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    assert!(
+        !generated.contains("pub use self :: example :: gate :: guard ;"),
+        "{generated}"
+    );
+}
+
+/// The composition shapes the callback: a series hook returns nothing, a bail hook an option.
+#[test]
+fn a_derived_hook_follows_its_composition() {
+    let series = expanded(
+        "example:gate@1.0.0",
+        &GATE.replace("composition = waterfall", "composition = series"),
+    );
+    assert!(
+        wit(&series).contains("  apply: func(input: admission);\n"),
+        "{}",
+        wit(&series)
+    );
+    assert!(
+        tokens(&series).contains("pub fn run (input : Admission) {"),
+        "{}",
+        tokens(&series)
+    );
+    let bail = expanded(
+        "example:gate@1.0.0",
+        &GATE.replace("composition = waterfall", "composition = bail"),
+    );
+    assert!(
+        wit(&bail).contains("  apply: func(input: admission) -> option<admission>;\n"),
+        "{}",
+        wit(&bail)
+    );
+    assert!(
+        tokens(&bail).contains(
+            "pub fn run (input : Admission) -> :: core :: option :: Option < Admission >"
+        ),
+        "{}",
+        tokens(&bail)
+    );
+    assert!(
+        tokens(&bail).contains("answer . map (| item | :: core :: convert :: Into :: into (item))"),
+        "{}",
+        tokens(&bail)
+    );
+}
+
+/// A scalar input needs no record and no conversion; a list crosses to the import by reference;
+/// the shapes a hook reaches, through lists, options and variants, get conversions each.
+#[test]
+fn a_derived_hook_converts_what_its_input_reaches() {
+    let scalar = expanded(
+        "example:gate@1.0.0",
+        &GATE
+            .replace("input = Admission", "input = i32")
+            .replace(
+                "pub fn admit(value: i32) -> Admission { Guard::run(Admission { value, blocked: false }) }",
+                "pub fn admit(value: i32) -> i32 { Guard::run(value) }",
+            ),
+    );
+    assert!(
+        wit(&scalar).contains("interface guard {\n  apply: func(input: s32) -> s32;\n}"),
+        "{}",
+        wit(&scalar)
+    );
+    assert!(!wit(&scalar).contains("use guard"), "{}", wit(&scalar));
+    assert!(!tokens(&scalar).contains("convert :: From"));
+    let list = expanded(
+        "example:gate@1.0.0",
+        &GATE.replace("input = Admission", "input = Vec<Admission>"),
+    );
+    assert!(
+        wit(&list).contains("apply: func(input: list<admission>) -> list<admission>;"),
+        "{}",
+        wit(&list)
+    );
+    assert!(
+        tokens(&list).contains("self :: example :: gate :: guard :: apply (& input)"),
+        "{}",
+        tokens(&list)
+    );
+    let nested = expanded(
+        "example:gate@1.0.0",
+        "mod gate {
+            #[hook(composition = waterfall, input = Admission)]
+            pub struct Guard;
+            pub struct Admission { pub tags: Vec<Tag>, pub note: Option<Note>, pub kind: Kind }
+            pub enum Tag { Hot, Cold }
+            pub enum Kind { Plain, Weighted(u32) }
+            pub struct Note { pub text: String }
+            #[service]
+            pub struct Admissions;
+            impl Admissions { pub fn count() -> u32 { 0 } }
+        }",
+    );
+    let text = wit(&nested);
+    for expected in [
+        "  record admission {\n",
+        "  enum tag {\n",
+        "  variant kind {\n",
+        "  record note {\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    assert!(
+        text.contains("interface admissions {\n  count: func() -> u32;\n}"),
+        "{text}"
+    );
+    let generated = tokens(&nested);
+    for expected in [
+        "From < exports :: example :: gate :: guard :: Tag > for self :: example :: gate :: guard :: Tag",
+        "From < exports :: example :: gate :: guard :: Note > for self :: example :: gate :: guard :: Note",
+        "value . tags . into_iter () . map (| item | :: core :: convert :: Into :: into (item)) . collect ()",
+        "value . note . map (| item | :: core :: convert :: Into :: into (item))",
+        "Kind :: Weighted (item) => Self :: Weighted (:: core :: convert :: Into :: into (item))",
+        "Tag :: Hot => Self :: Hot",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+}
+
+/// A declaration names an existing interface or derives one, never both or neither; its input is a
+/// type of the module or a scalar, string or list; its name is free of the world's and the services'.
+#[test]
+fn a_derived_hook_is_refused_when_ill_formed() {
+    let error = refused(
+        "example:gate@1.0.0",
+        &GATE.replace(
+            "#[hook(composition = waterfall, input = Admission)]",
+            "#[hook(\"example:admission/guard@1.0.0\", composition = waterfall, input = Admission)]",
+        ),
+    );
+    assert!(error.contains("not both"), "{error}");
+    let error = refused(
+        "example:gate@1.0.0",
+        &GATE.replace(", input = Admission", ""),
+    );
+    assert!(
+        error.contains("names an existing interface or its input type"),
+        "{error}"
+    );
+    let error = refused(
+        "example:gate@1.0.0",
+        &GATE.replace("input = Admission", "input = Missing"),
+    );
+    assert!(
+        error.contains("is not a struct or enum of this module"),
+        "{error}"
+    );
+    let error = refused(
+        "example:gate@1.0.0",
+        &GATE.replace("input = Admission", "input = Option<Admission>"),
+    );
+    assert!(error.contains("a hook's input is a record"), "{error}");
+    let error = refused(
+        "example:gate@1.0.0",
+        &GATE.replace("pub struct Guard;", "pub struct Gate;"),
+    );
+    assert!(error.contains("also the name of the world"), "{error}");
+    let error = refused(
+        "example:gate@1.0.0",
+        &GATE.replace("pub struct Guard;", "pub struct Admissions;"),
+    );
+    assert!(
+        error.contains("names both a hook and the service"),
+        "{error}"
+    );
+    let error = refused(
+        "example:gate@1.0.0",
+        &GATE.replace("pub struct Guard;", "pub struct Guard { pub n: u32 }"),
+    );
+    assert!(
+        error.contains("a hook declaration is a unit struct"),
+        "{error}"
+    );
+}
+
+const ADMISSION_WIT: &str = "package example:admission@1.0.0;
+interface guard {
+  record admission { value: s32, blocked: bool }
+  apply: func(input: admission) -> admission;
+}
+";
+
+const SHARED_GATE: &str = "mod gate {
+    #[hook(\"example:admission/guard@1.0.0\", composition = waterfall)]
+    pub struct Guard;
+    #[service]
+    pub struct Admissions;
+    impl Admissions {
+        pub fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value, blocked: false }).value }
+    }
+}";
+
+/// A hook declared from a consumed package keeps that package's types: the world imports and
+/// exports the identity, the import module is re-exported under the interface's name and `run`
+/// takes its types; the composition must fit the callback.
+#[test]
+fn a_declared_hook_may_name_a_consumed_interface() {
+    let dir = consumed("admission", ADMISSION_WIT);
+    let module = orb_with(options("example:gate@1.0.0", Some(&dir)), SHARED_GATE)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        wit(&module).contains(
+            "world gate {\n  import example:admission/guard@1.0.0;\n  export example:admission/guard@1.0.0;\n  export admissions;\n}"
+        ),
+        "{}",
+        wit(&module)
+    );
+    let generated = tokens(&module);
+    assert!(
+        generated.contains("pub use self :: example :: admission :: guard ;"),
+        "{generated}"
+    );
+    assert!(
+        generated.contains("pub fn run (input : self :: example :: admission :: guard :: Admission) -> self :: example :: admission :: guard :: Admission"),
+        "{generated}"
+    );
+    let error = refused_with(
+        options("example:gate@1.0.0", Some(&dir)),
+        &SHARED_GATE.replace("composition = waterfall", "composition = series"),
+    );
+    assert!(error.contains("does not fit a series hook"), "{error}");
+    let error = refused("example:gate@1.0.0", SHARED_GATE);
+    assert!(error.contains("hooks need wit ="), "{error}");
+}
