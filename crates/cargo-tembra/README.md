@@ -26,15 +26,17 @@ crate depends on the macro by path; outside the checkout, pass `--tembra <root>`
 A component built with the macro carries the module's WIT in a `tembra:wit` custom section and
 its manifest in a `tembra:manifest` section: the hooks it declares, with the composition from
 `#[hook(..., composition = c)]`, the hooks it contributes to, with the priority from
-`#[hook(..., priority = n)]`, and the services that chose a lifetime or a linger with
-`#[service(lifetime = host)]` or `#[service(linger_ms = n)]`. `build` takes the contract from
-there, so it is the text the macro
-derived: `///` comments included, and with the hook imports the linker drops because nothing calls
-them. The packages the Orb consumes, such as a hook's interface, are nested after it from the
-component's types; the standard packages that ship with `tembra-contracts`, WASI and the kernel's
-`tembra:guest`, are not. Any other component gets a contract derived from its types alone, with
-the world name from the metadata and every interface the world both imports and exports a
-contribution at priority 0.
+`#[hook(..., priority = n)]`, the services that chose a lifetime or a linger with
+`#[service(lifetime = host)]` or `#[service(linger_ms = n)]`, and the directory of the WIT packages
+the module consumes, as `wit = "dir"` wrote it. `build` takes the contract from there, so it is
+the text the macro derived: `///` comments included, and with the hook imports the linker drops
+because nothing calls them. The packages the Orb consumes, a hook's interface, an interface it
+implements or imports, are nested after it whole, read from that directory, so an imported
+interface keeps the functions the component never calls and names the same interface its provider
+exports; a component without that directory gets them from its own types. The standard packages
+that ship with `tembra-contracts`, WASI and the kernel's `tembra:guest`, are not nested. Any other
+component gets a contract derived from its types alone, with the world name from the metadata and
+every interface the world both imports and exports a contribution at priority 0.
 
 The contract goes to `contract/`, not `wit/`: `wit-bindgen` loads a `wit` directory inside the
 crate on its own, even with an inline WIT, and finding the package twice it panics with

@@ -83,8 +83,11 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
 
     // 2. The contract is an output: the WIT the macro embedded in the component, or the one
     //    derived from its types, written to contract/<world>.wit. Not wit/: wit-bindgen loads a
-    //    directory of that name on its own and finds the package twice.
-    let (text, world) = contract_text(&component, &resolve, world_id, &world)?;
+    //    directory of that name on its own and finds the package twice. The packages the module
+    //    consumes are nested whole from the directory the macro named.
+    let embedded = embedded_manifest(&component)?;
+    let consumed = embedded.wit.as_ref().map(|dir| manifest_dir.join(dir));
+    let (text, world) = contract_text(&component, &resolve, world_id, &world, consumed.as_deref())?;
     let wit_dir = manifest_dir.join("contract");
     let wit_file = wit_dir.join(format!("{world}.wit"));
     std::fs::create_dir_all(&wit_dir)?;
@@ -99,7 +102,7 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     //    with what composition, and which are contributions, with what priority, travels in the
     //    component with the lifetime each service chose: the macro writes them from the #[hook]
     //    and #[service] attributes.
-    let orb_manifest = crate::component::manifest(&contract, &embedded_manifest(&component)?)?;
+    let orb_manifest = crate::component::manifest(&contract, &embedded)?;
     let artifact = contract
         .component_artifact(&component, &orb_name, api_version, &orb_manifest)
         .map_err(|error| anyhow::anyhow!("{error}"))
