@@ -196,6 +196,13 @@ the claim: a retained guest handle cannot use it in another root or after expiry
 callbacks cannot acquire instances. Declared factory dependencies keep their existing scope
 ownership. This keyed-reference API does not transfer WIT resource handles or streams.
 
+A compiled component may import the kernel's own interfaces, served by the executor without a
+provider or a grant: `tembra:guest/state` and `tembra:guest/resources`, each with the export that
+answers it, and `tembra:guest/context`, which stands alone and gives a call the principal and the
+cancellation of the invocation that issued it, the key and principal of the object it runs on, and
+the host's log with the host's attribution. The compiled manifest packaged with the artifact gives
+each service its lifetime and linger, as a source bundle declares them in code.
+
 ## WASI coverage
 
 The bundled WIT definitions contain all six packages of the pinned WASI 0.3

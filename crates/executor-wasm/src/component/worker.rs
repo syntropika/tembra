@@ -32,6 +32,12 @@
 //! `hook.run` on the channel of the call that physically issued it, and the kernel runs the
 //! plan of contributions exactly as it does for a source provider.
 //!
+//! A component importing `tembra:guest/context` reads the kernel's view of its call: the
+//! principal and the cancellation of the call that physically issued the import, through the
+//! existing `context.principal`, `signal.cancelled` and `context.cancel` requests, the host's
+//! log through `console`, and the address of the object the call runs on, which the worker asks
+//! for with `address` while each environment is declared and keeps for its calls.
+//!
 //! Standard `wasi:http` imports use upstream `wasmtime-wasi-http` P3 resources and its sender.
 //! Each request is attributed the same way as a dependency import: the hook captures the entered
 //! task group's authority synchronously, checks the installation's HTTP origin grants and then
@@ -82,6 +88,8 @@ pub(crate) struct Layout {
     /// The hooks this Orb declares: the import binding of each, to the alias of its export,
     /// which `hook.declare` names.
     pub hooks: BTreeMap<String, String>,
+    /// The component imports `tembra:guest/context`: its calls read the kernel's view of them.
+    pub context: bool,
 }
 
 /// The standard handler's `handle`, typed against the host's own request and response
@@ -133,7 +141,8 @@ pub(crate) enum Role {
     Dependency,
     /// A type anchor of a contribution; calling it traps.
     Contribution,
-    /// The kernel's own state interface, served for the object running the call.
+    /// One of the kernel's own interfaces (state, resources, context), served for the call that
+    /// issues it.
     Kernel,
     /// The typed entry to a hook this Orb declares; calling it runs the plan through the kernel.
     Hook,
@@ -169,6 +178,9 @@ struct Authority {
     resources: Arc<BTreeMap<String, u32>>,
     /// The root's hook handles by import binding, for running the hooks this Orb declares.
     hooks: Arc<BTreeMap<String, u32>>,
+    /// The kernel address of the environment's object (key and principal), for the context
+    /// interface; declared only for components importing it.
+    address: Option<Arc<Value>>,
 }
 
 struct Bound {
@@ -445,6 +457,8 @@ struct Environments {
     callbacks: BTreeMap<u32, ResourceCallback>,
     next_callback: u32,
     hooks: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
+    /// The kernel address of each environment's object, asked while it was declared.
+    addresses: BTreeMap<u64, Arc<Value>>,
 }
 
 /// One numbered callback of a root resource: its opener or its closer.
@@ -771,6 +785,17 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                                     let request = resource_request(store.data(), &name, params);
                                     Box::new(
                                         async move { settle_resource(request?, results).await },
+                                    )
+                                },
+                            )?;
+                        }
+                        guest::CONTEXT => {
+                            instance.func_new_async(
+                                &function.name,
+                                move |store, ty, params, results| {
+                                    let answer = context_request(store.data(), &name, params);
+                                    Box::new(
+                                        async move { settle_context(answer?, &ty, results).await },
                                     )
                                 },
                             )?;
@@ -1225,6 +1250,66 @@ async fn hook_settle(
     Ok(serde_json::from_str(&text)?)
 }
 
+/// How a kernel context function is answered.
+enum ContextAnswer {
+    /// From the issuing call's authority, without the host: the object's declared address.
+    Local(Arc<Value>),
+    /// By the host, on the issuing call's channel; the reply is lowered with the import's type.
+    Host(oneshot::Receiver<std::result::Result<String, String>>),
+}
+
+/// Capture the issuing call's authority and answer one function of the kernel's context
+/// interface: the object's address from the authority, the call's principal and cancellation
+/// and the log through the existing synchronous requests of the call's channel.
+fn context_request(
+    state: &State,
+    function: &str,
+    params: &[Val],
+) -> wasmtime::Result<ContextAnswer> {
+    let authority = issuing_authority(state, "the kernel context needs an admitted invocation")?;
+    let packet = match (function, params) {
+        ("object", []) => {
+            let address = authority.address.clone().ok_or_else(|| {
+                wasmtime::Error::msg("the address of this environment's object was not declared")
+            })?;
+            return Ok(ContextAnswer::Local(address));
+        }
+        ("principal", []) => json!({"operation": "context.principal"}),
+        ("cancelled", []) => json!({"operation": "signal.cancelled"}),
+        ("cancel", []) => json!({"operation": "context.cancel"}),
+        ("log", [level, message]) => {
+            let lift = |value: &Val| {
+                values::lift(value.clone()).map_err(|error| wasmtime::Error::msg(error.to_string()))
+            };
+            json!({"operation": "console", "level": lift(level)?, "message": lift(message)?})
+        }
+        _ => return Err(wasmtime::Error::msg("unknown kernel context function")),
+    }
+    .to_string();
+    Ok(ContextAnswer::Host(synchronous(state, &authority, packet)?))
+}
+
+/// Lower a context answer with the import's actual type; a refusal traps the caller.
+async fn settle_context(
+    answer: ContextAnswer,
+    ty: &ComponentFunc,
+    results: &mut [Val],
+) -> wasmtime::Result<()> {
+    let value = match answer {
+        ContextAnswer::Local(address) => Value::clone(&address),
+        ContextAnswer::Host(receive) => {
+            let text = receive
+                .await
+                .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+                .map_err(|message| {
+                    wasmtime::Error::msg(format!("kernel context refused: {message}"))
+                })?;
+            serde_json::from_str(&text)?
+        }
+    };
+    store_result(results, lower_result(ty, &value)?)
+}
+
 /// Capture the issuing call's authority and publish one `resource.read` for a root resource the
 /// component named; the kernel answers with the handle the component gave it when it opened.
 fn resource_request(
@@ -1397,6 +1482,7 @@ async fn serve(
             environments.states.remove(&environment);
             environments.resources.remove(&environment);
             environments.hooks.remove(&environment);
+            environments.addresses.remove(&environment);
             environments
                 .callbacks
                 .retain(|_, callback| callback.environment != environment);
@@ -1476,6 +1562,7 @@ async fn serve(
                     .get(&environment)
                     .cloned()
                     .unwrap_or_default(),
+                address: environments.addresses.get(&environment).cloned(),
             };
             let call = Call {
                 function,
@@ -1558,6 +1645,7 @@ fn authority(
             .cloned()
             .unwrap_or_default(),
         hooks: environments.hooks.get(&root).cloned().unwrap_or_default(),
+        address: environments.addresses.get(&environment).cloned(),
     })
 }
 
@@ -1613,6 +1701,14 @@ async fn declare(
     } = runtime;
     if layout.imports.is_empty() && !layout.state_init && !layout.resource_init {
         return Ok(());
+    }
+    // The address of this environment's object, which the kernel tells only while the
+    // environment is declared; the context interface answers `object` from it.
+    if layout.context {
+        let address = declaration(events, json!({"operation": "address"}), limit).await?;
+        environments
+            .addresses
+            .insert(environment, Arc::new(address));
     }
     let Some(alias) = service else {
         let mut handles = BTreeMap::new();
@@ -1674,6 +1770,7 @@ async fn declare(
             state: None,
             resources: Arc::default(),
             hooks,
+            address: environments.addresses.get(&environment).cloned(),
         };
         let call = Call {
             function,
@@ -1765,6 +1862,7 @@ async fn declare(
             .cloned()
             .unwrap_or_default(),
         hooks: environments.hooks.get(&root).cloned().unwrap_or_default(),
+        address: environments.addresses.get(&environment).cloned(),
     };
     let call = Call {
         function,
