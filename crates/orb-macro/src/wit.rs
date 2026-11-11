@@ -20,6 +20,7 @@ pub(crate) fn kebab(ident: &Ident) -> String {
 pub(crate) struct Kernel {
     pub state: bool,
     pub resources: bool,
+    pub context: bool,
 }
 
 /// Write the package: one interface per service, the types in the first interface and borrowed by
@@ -88,6 +89,9 @@ pub(crate) fn render<'a>(
             "  import {GUEST_RESOURCES};\n  export {GUEST_RESOURCES_INIT};\n"
         ));
     }
+    if kernel.context {
+        wit.push_str(&format!("  import {GUEST_CONTEXT};\n"));
+    }
     for hook in hooks {
         wit.push_str(&format!("  import {hook};\n  export {hook};\n"));
     }
@@ -103,6 +107,7 @@ const GUEST_STATE: &str = "tembra:guest/state@1.0.0";
 const GUEST_STATE_INIT: &str = "tembra:guest/state-init@1.0.0";
 const GUEST_RESOURCES: &str = "tembra:guest/resources@1.0.0";
 const GUEST_RESOURCES_INIT: &str = "tembra:guest/resources-init@1.0.0";
+const GUEST_CONTEXT: &str = "tembra:guest/context@1.0.0";
 
 /// The kernel's `tembra:guest` package in nested form, appended to the inline WIT so the bindings
 /// of a state resolve it; `cargo tembra` reads the same package from `tembra-contracts`.

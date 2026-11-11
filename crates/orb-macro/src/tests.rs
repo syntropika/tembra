@@ -5,11 +5,18 @@ use syn::{Expr, Item, ItemMod, Lit, UnOp};
 
 /// Expand a module under `#[orb(package = ...)]` and parse the generated module back.
 fn orb(package: &str, module: &str) -> syn::Result<ItemMod> {
+    orb_with(
+        Options {
+            package: Some(package.to_owned()),
+            wit: None,
+            context: false,
+        },
+        module,
+    )
+}
+
+fn orb_with(options: Options, module: &str) -> syn::Result<ItemMod> {
     let module: ItemMod = syn::parse_str(module).expect("a module");
-    let options = Options {
-        package: Some(package.to_owned()),
-        wit: None,
-    };
     syn::parse2(expand(options, module)?)
 }
 
@@ -18,7 +25,10 @@ fn expanded(package: &str, module: &str) -> ItemMod {
 }
 
 fn refused(package: &str, module: &str) -> String {
-    orb(package, module).err().expect("an error").to_string()
+    match orb(package, module) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("the module was accepted"),
+    }
 }
 
 fn items(module: &ItemMod) -> &[Item] {
@@ -102,6 +112,35 @@ fn a_service_lifetime_goes_to_the_manifest_and_leaves_the_wit_alone() {
             r#"{"contributes":{},"declares":{},"services":{"example:book/ledger@1.0.0":{"lifetime":"referenced","linger_ms":2500}}}"#
         )
     );
+}
+
+/// `context` on the attribute imports the kernel's context interface, alone, and re-exports its
+/// generated module under its own name.
+#[test]
+fn the_context_option_imports_the_kernel_interface() {
+    let module = orb_with(
+        Options {
+            package: Some(PACKAGE.to_owned()),
+            wit: None,
+            context: true,
+        },
+        &ledger("#[service]"),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        wit(&module)
+            .contains("world book {\n  import tembra:guest/context@1.0.0;\n  export ledger;\n}"),
+        "{}",
+        wit(&module)
+    );
+    assert!(
+        items(&module)
+            .iter()
+            .any(|item| matches!(item, Item::Use(reexport)
+        if quote::quote!(#reexport).to_string().contains("tembra :: guest :: context")))
+    );
+    let plain = expanded(PACKAGE, &ledger("#[service]"));
+    assert!(!wit(&plain).contains("context"));
 }
 
 #[test]
