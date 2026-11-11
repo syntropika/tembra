@@ -163,6 +163,7 @@ impl Engine {
                     api_version,
                     &artifact.contributions,
                     &artifact.hooks,
+                    &artifact.services,
                 );
                 let checked = checked(&description)?;
                 let session = self.component_session(

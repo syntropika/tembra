@@ -245,8 +245,8 @@ impl Contract {
     ///
     /// Contribution roles name exported hook callbacks. Reference roles map an imported
     /// reference-view binding to the provider interface it addresses. Hook roles name the hooks
-    /// the component declares, which it cannot state in WIT. Each is checked here and again
-    /// whenever the artifact is decoded.
+    /// the component declares, and service roles the lifetime of its services, which it cannot
+    /// state in WIT. Each is checked here and again whenever the artifact is decoded.
     pub fn component_artifact(
         &self,
         component: &[u8],

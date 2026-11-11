@@ -4,7 +4,10 @@
 //! only `tembra:orb` (identity and compact contract) and `tembra:source`. Compiled Orbs append
 //! `tembra:orb` to the real component, whose actual WIT types are verified against the contract
 //! by the native `authoring` verifier before any linking.
-use crate::{Error, HookComposition, PreparedContract, codec::Reader, model::MAX_NAME};
+use crate::{
+    Error, HookComposition, Lifetime, PreparedContract, ServicePolicy, codec::Reader,
+    model::MAX_NAME,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -25,9 +28,10 @@ pub struct Identity {
 ///
 /// `contributions` maps exported hook callbacks to their priority. `references` maps an imported
 /// reference-view binding to the provider interface identity it addresses. `hooks` maps an
-/// exported hook interface the component declares to its composition. Source artifacts carry none
-/// of them: their contributions and hooks live in the bundle and they cannot import reference
-/// views.
+/// exported hook interface the component declares to its composition, and `services` maps an
+/// exported service interface to the ownership policy the kernel applies to its objects. Source
+/// artifacts carry none of them: their contributions, hooks and service lifetimes live in the
+/// bundle and they cannot import reference views.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComponentRoles {
@@ -37,6 +41,8 @@ pub struct ComponentRoles {
     pub references: BTreeMap<String, String>,
     #[serde(default)]
     pub hooks: BTreeMap<String, HookComposition>,
+    #[serde(default)]
+    pub services: BTreeMap<String, ServicePolicy>,
 }
 
 /// A closed source bundle or compiled component, never executable host JavaScript.
@@ -56,6 +62,9 @@ pub struct Artifact {
     /// Hooks a compiled component declares, with their composition; source bundles declare
     /// their hooks in executable code.
     pub hooks: BTreeMap<String, HookComposition>,
+    /// Ownership policies of a compiled component's services; source bundles declare their
+    /// services' lifetimes in executable code.
+    pub services: BTreeMap<String, ServicePolicy>,
 }
 
 impl Identity {
@@ -117,9 +126,10 @@ impl Artifact {
                     "source artifacts cannot carry reference view roles".into(),
                 ));
             }
-            if !roles.hooks.is_empty() {
+            if !roles.hooks.is_empty() || !roles.services.is_empty() {
                 return Err(Error(
-                    "source artifacts declare their hooks in their bundle".into(),
+                    "source artifacts declare their hooks and service lifetimes in their bundle"
+                        .into(),
                 ));
             }
             if bytes[..8] != COMPONENT_HEADER || container.other {
@@ -140,6 +150,7 @@ impl Artifact {
         let ComponentRoles {
             contributions,
             hooks,
+            services,
             references: _,
         } = roles;
         Ok(Self {
@@ -148,6 +159,7 @@ impl Artifact {
             implementation,
             contributions,
             hooks,
+            services,
         })
     }
 
@@ -224,12 +236,14 @@ impl PreparedComponent {
             contributions,
             references,
             hooks,
+            services,
         } = roles;
-        // Compiled hook definitions are outside the prepared browser profile; refusing them
-        // keeps the browser from running such an Orb differently.
-        if !hooks.is_empty() {
+        // Compiled hook definitions and service policies are outside the prepared browser
+        // profile; refusing them keeps the browser from running such an Orb differently.
+        if !hooks.is_empty() || !services.is_empty() {
             return Err(Error(
-                "prepared browser adapters do not support declared hooks".into(),
+                "prepared browser adapters do not support declared hooks or service policies"
+                    .into(),
             ));
         }
         contract.check_contribution_roles(&contributions)?;
@@ -277,9 +291,9 @@ pub(crate) fn encode_orb(identity: &Identity, contract: &PreparedContract) -> Ve
 }
 
 /// Encode identity, contract and roles. Every payload spells every role map, even when empty:
-/// contributions with their priorities, declared hooks with their composition, then reference
-/// views with their targets. The format is deliberately not compatible with payloads written
-/// before reference roles.
+/// contributions with their priorities, declared hooks with their composition, service policies
+/// with their lifetime and linger, then reference views with their targets. The format is
+/// deliberately not compatible with payloads written before reference roles.
 pub(crate) fn encode_orb_roles(
     identity: &Identity,
     contract: &PreparedContract,
@@ -302,6 +316,15 @@ pub(crate) fn encode_orb_roles(
             HookComposition::Waterfall => 1,
             HookComposition::Bail => 2,
         });
+    }
+    writer.len(roles.services.len());
+    for (identity, policy) in &roles.services {
+        writer.str(identity);
+        writer.byte(match policy.lifetime {
+            Lifetime::Referenced => 0,
+            Lifetime::Host => 1,
+        });
+        writer.u32(policy.linger_ms);
     }
     writer.len(roles.references.len());
     for (binding, target) in &roles.references {
@@ -337,6 +360,22 @@ fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract, ComponentRole
         };
         if roles.hooks.insert(binding, composition).is_some() {
             return Err(Error("duplicate compiled hook declaration".into()));
+        }
+    }
+    for _ in 0..reader.count(crate::model::MAX_ITEMS)? {
+        let identity = reader.str()?;
+        let lifetime = match reader.byte()? {
+            0 => Lifetime::Referenced,
+            1 => Lifetime::Host,
+            _ => return Err(Error("unknown compiled service lifetime".into())),
+        };
+        let linger_ms = reader.u32()?;
+        let policy = ServicePolicy {
+            lifetime,
+            linger_ms,
+        };
+        if roles.services.insert(identity, policy).is_some() {
+            return Err(Error("duplicate compiled service policy".into()));
         }
     }
     for _ in 0..reader.count(crate::model::MAX_ITEMS)? {
