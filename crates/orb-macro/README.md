@@ -203,6 +203,13 @@ declaration of that service's state, as JSON with its version, and binds it to t
 retains for the object. The executor serves both interfaces itself; the installer requires and
 grants nothing for them.
 
+A state may carry its own rule, `pub fn validate(&self) -> Result<(), String>` in an `impl`
+block. Then `Count::update` returns `Result<Count, String>`: the closure's result is validated
+before the kernel stores it, and a refusal leaves the previous value in place. The same validator
+answers the kernel on a reload, when the new instance is asked whether it accepts the value it
+inherits: a refusal fails the reload and the running revision keeps serving, as the
+[state example](../../examples/rust-orb-state/README.md) shows for an update.
+
 Two rules follow from the kernel, not from the macro. A service's state is reached only by the
 methods of that service: a call runs on one object, and the kernel refuses an update from any
 other context. An Orb's root is not an object, so a hook contribution, which runs in the root, has
@@ -305,7 +312,8 @@ build` reads them and packages the contract exactly as written here, with the `/
    callbacks included, with a trapping callback for each declared hook, and `export!`;
    with a declared hook, `run` on its struct, calling the hook's import;
 8. with a state, `Default` and the `read`/`update` functions on each state type, over a hidden
-   module that maps the kernel's JSON to the type with `serde_json`;
+   module that maps the kernel's JSON to the type with `serde_json`, and the kernel's `validate`
+   callback, which runs the state's own validator on the value a reload would adopt;
 9. with a resource, one slot in the component's memory per resource, filled by `open` and
    emptied by `close`, and the `with` function on each resource type.
 

@@ -143,6 +143,59 @@ fn the_context_option_imports_the_kernel_interface() {
     assert!(!wit(&plain).contains("context"));
 }
 
+const COUNTER: &str = "mod tally {
+    #[state]
+    pub struct Count { pub total: i64 }
+    impl Count {
+        pub fn validate(&self) -> Result<(), String> {
+            if self.total < 0 { Err(String::from(\"negative\")) } else { Ok(()) }
+        }
+    }
+    #[service]
+    pub struct Counter;
+    impl Counter {
+        pub fn add(by: i64) -> Result<Count, String> { Count::update(|count| count.total += by) }
+    }
+}";
+
+/// A state with a validator declares itself validated and its `update` answers the refusal; the
+/// validator has one shape.
+#[test]
+fn a_validated_state_declares_so_and_updates_fallibly() {
+    let module = expanded("example:counter@1.0.0", COUNTER);
+    let generated = quote::quote!(#module).to_string();
+    assert!(generated.contains("validated : true"), "{generated}");
+    assert!(generated.contains("value . validate () ? ;"), "{generated}");
+    assert!(
+        wit(&module).contains("add: func(by: s64) -> result<count, string>;"),
+        "{}",
+        wit(&module)
+    );
+    let plain = expanded(
+        "example:counter@1.0.0",
+        &COUNTER.replace(
+            "pub fn validate(&self) -> Result<(), String>",
+            "fn check(&self) -> Result<(), String>",
+        ),
+    );
+    assert!(
+        quote::quote!(#plain)
+            .to_string()
+            .contains("validated : false")
+    );
+    for wrong in [
+        "pub fn validate(&mut self) -> Result<(), String>",
+        "pub fn validate(&self) -> bool",
+        "pub fn validate() -> Result<(), String>",
+    ] {
+        let error = refused(
+            "example:counter@1.0.0",
+            &COUNTER.replace("pub fn validate(&self) -> Result<(), String>", wrong),
+        );
+        assert!(error.contains("validator is"), "{wrong}: {error}");
+    }
+}
+
 #[test]
 fn a_host_lifetime_cannot_linger_and_unknown_options_are_refused() {
     let error = refused(
