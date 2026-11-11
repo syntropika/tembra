@@ -374,9 +374,10 @@ JCO runs only during preparation. The browser receives generated bindings and in
 modules; each installation gets separate memory, providers, grants and execution budgets.
 The verifier matches the uploaded artifact's SHA-256 against the registered adapter. An arbitrary
 compiled upload cannot introduce executable JavaScript. Prepared components require JSPI and support
-typed data imports, exports, contributions and standard WASI adapters. Inter-Orb WIT resources,
-streams and futures are refused in the browser; compiled hook definitions remain outside this
-profile. Source Orbs remain dynamically loadable without JSPI or a per-Orb adapter.
+typed data imports, exports, contributions and standard WASI adapters, and, as on native hosts,
+the hooks they declare, kernel state, root resources and the call's context (`tembra:guest`) and
+their services' lifetimes. Inter-Orb WIT resources, streams and futures are refused in the browser.
+Source Orbs remain dynamically loadable without JSPI or a per-Orb adapter.
 
 Custom filesystem providers implement `FilesystemProvider.open()` and return an owned
 `MountedFilesystem` with `openRoot()` and `dispose()`. Descriptors expose typed byte, metadata

@@ -176,6 +176,23 @@ prepared bindings and core modules; each installation gets fresh memories, handl
 execution budgets. Prepared components require the browser's JavaScript Promise Integration
 support. Raw compiled artifacts without a registered adapter are refused.
 
+A Rust Orb written with `#[orb]` is already an artifact once `cargo tembra build` packaged it, with
+the roles its component declares: the hooks it declares and its services' lifetimes. Prepare those
+exact bytes rather than building the component again:
+
+```ts
+import { prepareBrowserComponent } from "@syntropika/tembra-sdk/tooling";
+
+const artifact = await Bun.file("counter/artifacts/counter.orb.wasm").bytes();
+const sha256 = new Bun.CryptoHasher("sha256").update(artifact).digest("hex");
+await prepareBrowserComponent(artifact, sha256, "dist/tembra/counter/browser");
+```
+
+The adapter serves the kernel interfaces the Orb imports (`tembra:guest` state, root resources and
+the call's context) and runs the hooks it declares, as native hosts do: each operation becomes the
+host request a source Orb issues and reaches the same kernel logic, so the Orb behaves alike on
+every host.
+
 Source JS/TS targets do not use this step. Their closed scripts run through the shared dquickts
 interpreter and remain dynamically loadable without generating per-Orb browser bindings.
 
