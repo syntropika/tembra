@@ -26,6 +26,7 @@ interface ledger {
 interface frames {
   frames: async func(count: u32, size: u32, mode: u32) -> stream<u8>;
   ping: func(value: u32) -> u32;
+  cooperate: async func(fail: bool, milliseconds: u32) -> u32;
 }
 
 world producer {
@@ -89,6 +90,27 @@ globalThis.__tembraOrb = {{ services: {{ frames: {{
   }},
   methods: {{
     ping(_environment, _context, value) {{ return value + {revision}; }},
+    async cooperate(environment, context, fail, milliseconds) {{
+      try {{
+        await environment.ledger.note("cooperate", context);
+        const waiting = tembra.wait(milliseconds);
+        console.log("cooperate:waiting");
+        await waiting;
+        let refused = false;
+        try {{
+          await environment.ledger.note("forbidden", context);
+        }} catch (error) {{
+          if (!String(error).includes("expired/root")) throw error;
+          refused = true;
+        }}
+        if (!refused) throw new Error("an ended root admitted an import");
+        console.log("cooperate:revoked");
+        if (fail) throw new Error("author failed after root end");
+        return 42;
+      }} finally {{
+        console.log("cooperate:returned");
+      }}
+    }},
     async frames(environment, context, count, size, mode) {{
       switch (mode) {{
         case {CHUNKS}:
@@ -194,6 +216,8 @@ type Seen = Rc<RefCell<Vec<(String, String, String)>>>;
 /// Gated ledger calls, and the order of what they and the test observed.
 #[derive(Default)]
 struct Gates {
+    /// Release the callback only after its consumer has ended the logical root.
+    cooperative: RefCell<Option<oneshot::Receiver<()>>>,
     log: RefCell<Vec<String>>,
     /// Held by a `gated` call after it observed its own cancellation: its physical end.
     physical: RefCell<Option<oneshot::Receiver<()>>>,
@@ -235,6 +259,13 @@ fn ledger(seen: Seen, gates: Rc<Gates>) -> Orb {
                 let seen = seen.clone();
                 let gates = gates.clone();
                 async move {
+                    if event == "cooperate" {
+                        gates.note("cooperate:start");
+                        let gate = gates.cooperative.borrow_mut().take().unwrap();
+                        gate.await.unwrap();
+                        gates.note("cooperate:end");
+                        return Ok("cooperate".into());
+                    }
                     if event == "gated" {
                         gates.note("gated:start");
                         context.signal().cancelled().await;
@@ -701,6 +732,98 @@ fn dropping_a_stream_of_an_idle_producer_ends_its_callback() {
         let errors = fixture.host.errors();
         assert!(errors.is_empty(), "{mode}: {errors:?}");
         fixture.close();
+    });
+}
+
+/// A physical callback may cooperate after logical root end, while imports remain revoked.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ENGINE"]
+fn cooperative_waits_settle_after_root_end_without_restoring_authority() {
+    engines(|interpreter, interpreted| {
+        for (fail, cancel) in [(false, false), (true, false), (false, true)] {
+            let mut fixture = install(interpreter, interpreted, limits(30_000));
+            let milliseconds = if cancel { 5000_u32 } else { 0 };
+            let (release, gate) = oneshot::channel();
+            *fixture.gates.cooperative.borrow_mut() = Some(gate);
+            let gates = fixture.gates.clone();
+            let (context, signal, issued, result) = fixture
+                .root(async move |context, reference, _| {
+                    let (issued, result) = reference
+                        .issue_portable::<_, u32>(&context, "cooperate", (fail, milliseconds))
+                        .await?;
+                    let deadline = Instant::now() + Duration::from_secs(20);
+                    while !gates.logged("cooperate:start") {
+                        assert!(Instant::now() < deadline, "the callback was never admitted");
+                        futures_timer::Delay::new(Duration::from_millis(2)).await;
+                    }
+                    let signal = context.signal();
+                    Ok((context, signal, issued, result))
+                })
+                .unwrap();
+            let mode = fixture.mode();
+            let error = context.check().unwrap_err();
+            assert_eq!(error.code, tembra::core::Code::Expired, "{mode}: {error:?}");
+            assert!(
+                !signal.is_cancelled(),
+                "{mode}: root end is not cancellation"
+            );
+            assert!(
+                fixture.calls() > 0,
+                "{mode}: the callback ended before its gate"
+            );
+            release.send(()).unwrap();
+            let closing = if cancel {
+                fixture.wait(|fixture| fixture.logged("cooperate:waiting"));
+                let closing = Instant::now();
+                issued.cancel();
+                assert!(
+                    !signal.is_cancelled(),
+                    "{mode}: cancelling one call cancelled its root"
+                );
+                Some(closing)
+            } else {
+                None
+            };
+            let outcome = fixture.pool.run_until(result);
+            if cancel {
+                let error = outcome.unwrap_err();
+                // The retained signal or the Store's revocation can observe this first.
+                assert!(
+                    error.message.contains("callback cancelled")
+                        || error
+                            .message
+                            .contains("cancelled/call: operation was cancelled"),
+                    "{mode}: {error:?}"
+                );
+            } else if fail {
+                let error = outcome.unwrap_err();
+                assert!(
+                    error.message.contains("author failed after root end"),
+                    "{mode}: {error:?}"
+                );
+            } else {
+                assert_eq!(outcome.unwrap(), 42, "{mode}");
+            }
+            fixture.wait(|fixture| fixture.calls() == 0);
+            if let Some(closing) = closing {
+                assert!(closing.elapsed() < Duration::from_secs(10), "{mode}");
+                assert!(
+                    !fixture.logged("cooperate:revoked"),
+                    "{mode}: the cancelled wait continued into its next operation"
+                );
+            } else {
+                assert!(fixture.logged("cooperate:revoked"), "{mode}");
+            }
+            assert!(fixture.logged("cooperate:returned"), "{mode}");
+            assert!(
+                fixture.seen.borrow().is_empty(),
+                "{mode}: an import escaped revocation"
+            );
+            assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
+            let errors = fixture.host.errors();
+            assert!(errors.is_empty(), "{mode}: {errors:?}");
+            fixture.close();
+        }
     });
 }
 

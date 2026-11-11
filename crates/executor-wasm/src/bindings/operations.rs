@@ -350,7 +350,17 @@ impl Environment {
                 if milliseconds > WAIT_LIMIT_MILLISECONDS {
                     return Err(failure("timer exceeds the callback wait limit"));
                 }
-                let signal = Self::signal(scope, "timer requires an active callback")?;
+                // A timer cooperates with an already admitted callback; it grants no new
+                // root authority. Logical root end revokes imports, but physical callbacks
+                // still settle under their retained signal and the Store's callback bound.
+                let signal = match scope {
+                    Scope::Call(context) => context.signal(),
+                    Scope::Open(signal) => signal.clone(),
+                    Scope::Declaration(_) | Scope::Validation => {
+                        return Err(failure("timer requires an active callback"));
+                    }
+                };
+                signal.check()?;
                 let wait = std::pin::pin!(futures_timer::Delay::new(
                     std::time::Duration::from_millis(milliseconds.into())
                 ));
