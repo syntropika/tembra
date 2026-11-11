@@ -1,9 +1,10 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 18:20 CET
+- **Aggiornato:** 2026-11-11, 19:45 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft)
-- **Stato:** in attesa di Javier. Non toccare la PR finché
-  il base non è chiaro.
+- **Stato:** strada A. Il piano del ribase sulla punta del
+  base (`865e4c6`) è pronto e aspetta l'ok di Giacomo. Non
+  toccare la PR e non pushare codice.
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -36,12 +37,19 @@ come dice «Inizia qui», poi riprendi da
    ```bash
    git worktree add .worktrees/notes \
      notes/rust-first-orbs
+   git worktree add .worktrees/pr \
+     feat/rust-first-orbs
    git worktree add .worktrees/lifecycle \
      feat/rust-first-orbs-lifecycle
    ```
 
-   La PR originale (`feat/rust-first-orbs`) serve solo per la
-   strada A, che ha i suoi passi.
+   La PR #1 (`feat/rust-first-orbs`, worktree `pr`) è la linea
+   principale. Il lifecycle serve solo per la strada B.
+
+   Sul server i tre worktree esistono già, in
+   `/home/claude/github/tembra/.worktrees/`, e `/.worktrees/`
+   è in `.git/info/exclude`. Controllare con
+   `git worktree list`.
 
 3. Installare gli strumenti come dice `DEVELOP.md`, sezione
    «Tools»:
@@ -66,7 +74,12 @@ come dice «Inizia qui», poi riprendi da
      --profile minimal --target wasm32-unknown-unknown
    ```
 
-4. Prova veloce, dal worktree `.worktrees/lifecycle`:
+   Sul server (11/11) era già tutto installato, alle versioni
+   fissate. `~/github/mise.toml` fornisce anche cargo-machete
+   e wasm-bindgen, quindi `just install-tools` non serve. La
+   nightly non c'è: serve solo alla strada B.
+
+4. Prova veloce, dal worktree `.worktrees/pr`:
 
    ```bash
    cargo test -p tembra-orb-macro -p cargo-tembra
@@ -76,6 +89,9 @@ come dice «Inizia qui», poi riprendi da
    I `run.sh` usano `cargo-tembra` dal `PATH` se c'è,
    altrimenti lo compilano dal workspace. L'output atteso è
    nel README di ogni esempio.
+
+   Sul server, a `d1c4e12`: passano i 20 test della macro, e
+   l'output di `rust-orb-state` coincide con il README.
 
 5. Per lavorare con Giacomo:
    - rispondere in italiano, un argomento alla volta, con
@@ -93,20 +109,21 @@ come dice «Inizia qui», poi riprendi da
 
 - PR #1 è `feat/rust-first-orbs` a `d1c4e12`: 52 commit sopra
   `b08f386`, con base `feat/wasm-orb-runtime`. La CI è rossa.
-- Oggi il base è cambiato tre volte: prima è arrivata la
-  migrazione dei sorgenti a componenti (ABI `tembra:orb`), poi
-  Javier l'ha revertita. Ora il base è `43bf592`, con lo stesso
-  albero di `7cec028`.
-- Javier sta facendo altri cambiamenti: aspettiamo prima di
-  scegliere.
-- Sono pronte due strade, entrambe su origin:
-  - **A.** La PR originale si ribasa su `43bf592` senza
-    conflitti. Basta correggere un test del base.
-  - **B.** Il branch convertito su `tembra:orb`
-    (`feat/rust-first-orbs-lifecycle`) serve solo se la
-    migrazione torna.
-- Il force-push del convertito su PR #1, chiesto oggi, è
-  sospeso: sul base attuale non compila.
+- `tembra:orb` non è tornato: siamo sulla **strada A**, la PR
+  originale. Il convertito (`feat/rust-first-orbs-lifecycle`)
+  resta solo per la strada B.
+- Il base è a `865e4c6`. Dopo il revert Javier ha aggiunto:
+  - `92010d0`: componenti compilati nel browser, chiamate per
+    id di funzione;
+  - `f3a0e8f`: reference view con chiave per i compilati, e
+    `ComponentRoles` nei metadati dell'artifact;
+  - `865e4c6`: tempi di un test.
+- Il merge della PR non è più pulito: su `92010d0` 3 blocchi,
+  sulla punta 31 blocchi in 8 file, più due conflitti che il
+  merge testuale non mostra.
+- Il piano è in «Piano del ribase»: sei scelte da approvare,
+  un merge di prova verificato, poi il ribase commit per
+  commit.
 
 ## Dove sta il lavoro
 
@@ -122,6 +139,9 @@ Su origin, quindi visibili da qualunque clone:
 - `backup/wasm-components-20261111` a `0dba202`: la copia di
   Javier della migrazione revertita.
 - `notes/rust-first-orbs`: questo file.
+
+Sul server i worktree `notes`, `pr` (la PR) e `lifecycle`
+stanno in `/home/claude/github/tembra/.worktrees/`.
 
 Solo sul Mac di Giacomo, e non servono altrove:
 
@@ -141,7 +161,8 @@ Commit del branch convertito, dal più vecchio:
 
 ## Il base oggi
 
-`feat/wasm-orb-runtime`, orari dell'11/11:
+`feat/wasm-orb-runtime`, orari UTC dei commit dell'11/11
+(CET = UTC + 1):
 
 | Ora   | Commit    | Cosa                              |
 | ----- | --------- | --------------------------------- |
@@ -150,6 +171,9 @@ Commit del branch convertito, dal più vecchio:
 | 07:38 | `6e13ad7` | sorgenti come componenti          |
 | 13:45 | `0dba202` | perf: interprete condiviso        |
 | 14:44 | `43bf592` | revert di `6e13ad7` e `0dba202`   |
+| 16:05 | `92010d0` | browser, chiamate per id          |
+| 17:30 | `f3a0e8f` | reference view con chiave         |
+| 17:51 | `865e4c6` | fix dei tempi di un test          |
 
 - `6e13ad7` introduceva l'ABI privato `tembra:orb@0.1.0`:
   - export `lifecycle`: describe, create, release, validate,
@@ -158,9 +182,97 @@ Commit del branch convertito, dal più vecchio:
     contesto, select.
 - Il messaggio di `43bf592` dice che la migrazione è
   conservata su `backup/wasm-components-20261111`.
-- `origin/main` è `d5ada2d` (v0.2.2, 6/11). Il `main` locale è
-  indietro di 5 commit. Il base ha 28 commit che `main` non ha.
-- Alle 16:40 Javier non aveva pushato altro dopo `43bf592`.
+- `origin/main` è `d5ada2d` (v0.2.2, 6/11). Il base ha 31
+  commit che `main` non ha.
+- Alle 19:30 CET la punta era ancora `865e4c6`.
+
+## Il base nuovo: cosa cambia per noi
+
+### `92010d0`: browser e chiamate per id
+
+Per gli Orb compilati:
+
+- Ora girano anche nel browser, ma solo con un adapter
+  preparato dal build dell'app: `build({ .., browser: true })`
+  dell'SDK TS genera i binding con JCO e strumenta i moduli.
+  L'app lo importa e lo registra; il runtime lo accetta solo
+  se lo SHA-256 dell'artifact coincide. Serve JSPI.
+- Il profilo browser esclude risorse, stream e future tra
+  Orb, e le definizioni di hook compilate.
+- L'host chiama le funzioni esportate per id (lo slot che
+  `bind` restituisce), non più per `(servizio, metodo)`. Il
+  worker controlla che l'ambiente sia del servizio della
+  funzione; una contribution gira solo nell'ambiente root.
+- Nuovo `PreparedComponent` in contracts: legge i metadati di
+  un compilato senza verificatore WIT, fidandosi del digest.
+
+Per le nostre modifiche al kernel:
+
+- Conflitti in `worker.rs` (`Environments`,
+  `Packet::Create`) e `component.rs` (ruolo dell'import).
+- Due rotture che il merge testuale non mostra:
+  - `component.rs`: il `match` dei ruoli chiama
+    `contributions.contains_key(..)`, ma ora `contributions`
+    è un `BTreeSet<u32>` di slot;
+  - `worker.rs`: le callback del kernel (`state-init`,
+    `resource-init`) stanno nella mappa `exports` con chiave
+    `(interfaccia, funzione)`; ora la chiave è lo slot `u32`.
+- `PreparedComponent` ignorerebbe in silenzio gli hook
+  dichiarati e le policy dei servizi.
+- `cargo-tembra` non produce l'adapter browser, e il browser
+  non serve gli import `tembra:guest`: `#[state]`,
+  `#[resource]`, contesto e hook dichiarati non girano lì.
+
+### `f3a0e8f`: reference view con chiave
+
+Per gli Orb compilati:
+
+- Un import «reference view» sceglie oggetti del kernel per
+  chiave: una risorsa che rispecchia i metodi del provider,
+  più `get: async func(key: list<string>)`
+  `-> result<R, string>`.
+- Il ruolo sta nei metadati dell'artifact:
+  `ComponentRoles { contributions, references }` prende il
+  posto della mappa delle contribution.
+  `Contract::component_artifact` prende `&ComponentRoles`,
+  l'encoder è `encode_orb_roles`, e il payload cambia formato
+  di proposito.
+- Un'acquisizione rifiutata torna come errore WIT, senza trap
+  e senza quarantena.
+- Esempio Rust: `crates/executor-wasm/rust-keyed-router`
+  (wit-bindgen, nightly), compilato in CI.
+
+Per le nostre modifiche al kernel:
+
+- `ComponentRoles` è lo stesso concetto del nostro
+  `Manifest`, esteso in un altro modo: 12 blocchi in
+  `artifact.rs`, 5 in `authoring.rs`, 4 nei test, più
+  `compiled_hooks.rs` e node-binding.
+- `lower.rs`: accanto ai nostri `Binding::Kernel` e
+  `Binding::Hook` arriva il rifiuto «una view vuole un
+  provider Orb».
+- `worker.rs`: Javier aggiunge `Import.reference: bool` dove
+  noi abbiamo `role: Role`, ed estrae `import_authority`,
+  lo stesso helper della nostra `issuing_authority`.
+- Il test del problema 1 ora chiama `encode_orb_roles`: con i
+  nomi di Javier compila così com'è.
+- Per la macro è un'occasione: `#[orb]` potrebbe generare la
+  view e il ruolo per un import con chiave. Nel guest serve
+  wit-bindgen con `async`.
+
+### `865e4c6`
+
+Tocca solo `crates/executor-wasm/tests/resources.rs`. Niente
+per noi.
+
+### I problemi aperti, sul base nuovo
+
+- **3:** `scope.ts:162` rifiuta ancora `console` su Node e
+  mobile.
+- **9:** `selection.rs`, `hooks.rs` e `standard.rs` non sono
+  cambiati nel base: il problema resta com'era.
+- **10:** per le view Javier restituisce errori WIT invece di
+  trap: è la stessa strada del nostro fix.
 
 ## CI della PR #1
 
@@ -185,10 +297,14 @@ Commit del branch convertito, dal più vecchio:
     dipendenza path senza versione;
   - con la PR si romperebbe anche `tembra-orb-macro`, per
     l'`include_str!` di `guest.wit` fuori dal crate.
-- **Merge di `d1c4e12` su `43bf592`:** pulito (verificato con
-  `git merge-tree`); resta solo l'E0425. Dopo il fix va rifatto
-  `just check`: la CI si fermava alla compilazione, quindi i
-  test del merge non sono mai girati.
+- **Merge di `d1c4e12`:**
+  - su `43bf592`: pulito, resta solo l'E0425;
+  - su `92010d0`: 3 blocchi in `component.rs` e `worker.rs`;
+  - su `865e4c6`: 31 blocchi in 8 file, vedi «Piano del
+    ribase».
+
+  La CI si fermava alla compilazione, quindi i test del merge
+  non sono mai girati.
 
 ## Review: 15 problemi
 
@@ -199,16 +315,17 @@ Legenda:
 
 - **A** = aperto
 - **R** = risolto
+- **D1** = si chiude con la scelta D1 del piano
 - **—** = non si applica
 
 Colonne:
 
-- **PR** = la PR originale ribasata su `43bf592`
+- **PR** = la PR originale, ribasata
 - **Conv.** = il branch convertito
 
 | #  | Problema                          | PR | Conv. |
 | -- | --------------------------------- | -- | ----- |
-| 1  | Il merge non compila (E0425)      | A  | —     |
+| 1  | Il merge non compila (E0425)      | D1 | —     |
 | 2  | `tembra:guest` rifiutato          | —  | R     |
 | 3  | `context::log` va in trap         | A  | R     |
 | 4  | Reload non validato               | A  | R     |
@@ -230,11 +347,10 @@ Colonne:
    - La PR rinomina `encode_orb_contributions` in
      `encode_orb(identity, contract, &Manifest)` e
      `Artifact.contributions` in `manifest`.
-   - Fix sul ribase, nel test del base:
-     `&BTreeMap::new()` diventa `&Manifest::default()`
-     (`Manifest` deriva `Default`).
-   - Poi controllare che l'import di `BTreeMap` non resti
-     inutilizzato (clippy `-D warnings`).
+   - Superato da `f3a0e8f`: il test del base ora chiama
+     `encode_orb_roles(.., &ComponentRoles::default())`. Con la
+     scelta D1 del piano la PR tiene quei nomi, e il test
+     compila senza ritocchi.
 2. **`crates/contracts/src/standard.rs:24`.**
    - Con `6e13ad7`, `Contract::source_world` rifiuta ogni
      Resolve che contenga un package `tembra`.
@@ -251,6 +367,7 @@ Colonne:
      trap, e lo Store va in quarantena.
    - Su `43bf592` `Request::Console` esiste di nuovo: sull'host
      nativo funziona, su Node e mobile no.
+   - Al `865e4c6` il rifiuto è a `scope.ts:162`.
 4. **`crates/orb-macro/src/lib.rs:2780`.**
    - Uno `#[state]` senza `#[validate]` dichiara
      `validated: false`.
@@ -429,11 +546,138 @@ Verso il backup `0dba202`:
 - la firma di `source_component_artifact` non cambia;
 - non è stato compilato.
 
+## Piano del ribase (strada A)
+
+Proposto l'11/11 alle 19:45 CET. **Aspetta l'ok di Giacomo.**
+
+Bersaglio: la punta `865e4c6`, non `92010d0`. La CI della PR
+fa il merge con la punta.
+
+### Conflitti sulla punta
+
+| File                     | Blocchi | Tema                  |
+| ------------------------ | ------- | --------------------- |
+| contracts `artifact.rs`  | 12      | Manifest / Roles      |
+| contracts `authoring.rs` | 5       | Manifest / Roles      |
+| `artifact_tests.rs`      | 4       | Manifest / Roles      |
+| contracts `lower.rs`     | 2       | Kernel, Hook e view   |
+| executor `component.rs`  | 1       | ruolo dell'import     |
+| `component/worker.rs`    | 5       | campi, helper, create |
+| `compiled_hooks.rs`      | 1       | Manifest / Roles      |
+| node-binding `lib.rs`    | 1       | Manifest / Roles      |
+
+In più i due conflitti semantici di `92010d0` (vedi sopra), e
+`port.rs`, che passa `&artifact.manifest`.
+
+Le fermate del ribase sono i 10 commit della PR che toccano
+quei file: 11, 12, 16, 17, 23, 24, 30, 32, 33 e 36, cioè
+`337576a`, `18d017a`, `2399ae3`, `d754d9f`, `1a0050e`,
+`779e238`, `68ca53c`, `53d1b5c`, `4bff698` e `27728f7`.
+I pezzi in conflitto nascono qui:
+
+- `18d017a` (12): `Role`, `issuing_authority` e la mappa
+  delle callback del kernel;
+- `1a0050e` (23): gli hook nel payload `tembra:orb`;
+- `68ca53c` (30): `Manifest`.
+
+### Scelte da approvare
+
+- **D1. Un solo tipo per i metadati del compilato:**
+  `ComponentRoles` di Javier, con in più `hooks` e
+  `services` della PR.
+  - `Manifest` sparisce; `Artifact.manifest` diventa
+    `Artifact.roles`.
+  - Il payload scrive contributions, references, hooks e
+    services, in quest'ordine.
+  - `check_manifest` diventa `check_roles`. Le view restano
+    su `reference_bindings` e `with_references`.
+  - Restano i nomi di Javier (`encode_orb_roles`, `encode_orb`
+    a due argomenti): i suoi test compilano senza ritocchi, e
+    il problema 1 sparisce.
+  - Quasi tutti i suoi letterali usano già
+    `..Default::default()`; nessuno deserializza
+    `ComponentRoles` da JSON.
+- **D2. Nel worker, `Role` della PR più la variante
+  `Reference`**, al posto di `reference: bool`.
+  - `declare` salta ciò che non è `Dependency`: le view non
+    ricevono `main`.
+  - `link_imports` tratta `Reference` come `Dependency`, e il
+    ramo `acquire` di Javier serve `get`.
+- **D3. Un solo helper per l'autorità:**
+  `issuing_authority(state, missing)` della PR. I due
+  chiamanti di Javier gli passano il suo messaggio.
+- **D4. Le callback del kernel in una mappa a parte**,
+  `Exports.kernel`, con chiave `(interfaccia, funzione)`.
+  `Exports.functions` resta di Javier (slot → `Target`).
+- **D5. `lower.rs`:** tenere i due lati, e allargare il
+  rifiuto «una view vuole un provider Orb» a ogni binding
+  non-Orb (Host, Kernel, Hook).
+- **D6. `PreparedComponent::decode`** (browser) rifiuta un
+  artifact con hook dichiarati o policy dei servizi, invece
+  di ignorarli.
+
+Il resto è meccanico:
+
+- `Environments`: unione dei campi. In `Packet::Create` va la
+  `declare` della PR, poi `services.insert` se riesce. In
+  `Release` si toglie l'ambiente da tutte le mappe.
+- `component.rs`: il ruolo `Contribution` si legge da
+  `hooks.contributions`; `view` va calcolata prima del ruolo.
+- `port.rs`, `cargo-tembra` e i test della PR: da `Manifest`
+  a `ComponentRoles`; node-binding con `..Default::default()`.
+
+### Passi
+
+0. `git fetch` e controllo che la punta sia ancora
+   `865e4c6`. Se si è mossa, rifare l'analisi.
+1. **Merge di prova** in un worktree staccato e usa e getta
+   (`.worktrees/probe`, mai pushato): applicare D1–D6, poi
+   `cargo check`, poi `just check`. Così ogni risoluzione è
+   fissata e verificata prima di toccare la storia. L'albero
+   risolto si salva in un ref locale.
+2. **Ribase** nel worktree `pr`, su un branch nuovo:
+
+   ```bash
+   CHECK='cargo check --locked --workspace'
+   CHECK="$CHECK --all-features --all-targets"
+   git switch -c feat/rust-first-orbs-rebased
+   git -c rerere.enabled=true rebase -x "$CHECK" \
+     origin/feat/wasm-orb-runtime
+   ```
+
+   Le opzioni sono quelle di `just lint` e `just test`.
+
+   - Alle 10 fermate si risolve come nel merge di prova.
+   - `-x` fa compilare ogni commit, anche quelli che si
+     applicano senza conflitti ma usano ancora `Manifest`
+     (31 e 39).
+   - Il messaggio di `68ca53c` va riscritto: `Manifest` non
+     c'è più.
+3. **Stesso albero:** `git diff <prova> HEAD` deve essere
+   vuoto, o con differenze spiegate.
+4. **Verifiche:**
+   - `just check`;
+   - acceptance (i test lenti del base falliscono anche
+     senza la PR);
+   - i 9 esempi con la CLI ricompilata, confrontati coi
+     README;
+   - clippy `-D warnings` su macro e CLI.
+5. Aggiornare questo file. Il force-push lo lancia Giacomo
+   (vedi «Comandi e trappole»).
+
+### Aperti dal base nuovo, dopo il ribase
+
+- **Browser:** `cargo-tembra` non produce l'adapter, e gli
+  import `tembra:guest` non sono serviti nel browser.
+- **Chiavi:** `#[orb]` non sa ancora generare una reference
+  view; oggi un import lega solo `main`.
+
 ## Da fare
 
 ### Adesso
 
-- Aspettare Javier.
+- Aspettare l'ok di Giacomo su «Piano del ribase»: il
+  bersaglio `865e4c6` e le scelte D1–D6.
 - Non toccare la PR #1 e non pushare codice nuovo.
 
 ### Alla ripresa, sempre
@@ -463,17 +707,11 @@ Verso il backup `0dba202`:
 
 ### Strada A: il base resta senza `tembra:orb`
 
-1. Creare un branch nuovo da `feat/rust-first-orbs` (per
-   esempio `feat/rust-first-orbs-rebased`). Usare un worktree
-   con il suo `target/`.
-2. Lanciare `git rebase origin/feat/wasm-orb-runtime`. Su
-   `43bf592` il merge era pulito.
-3. Correggere il test del base (problema 1).
-4. Lanciare `just check`, poi l'acceptance. I test lenti del
-   base falliscono anche senza la PR.
-5. Far girare i 9 esempi con la CLI ricompilata dal branch.
-6. Correggere i problemi aperti, in ordine di priorità.
-7. Il force-push lo lancia Giacomo: prima il backup, poi
+È la strada scelta l'11/11.
+
+1. Seguire «Piano del ribase», dopo l'ok di Giacomo.
+2. Correggere i problemi aperti, in ordine di priorità.
+3. Il force-push lo lancia Giacomo: prima il backup, poi
    `--force-with-lease` (vedi sotto).
 
 ### Strada B: torna la migrazione a componenti
@@ -512,11 +750,26 @@ branch.
 6. **11 e 12** — nomi, e tipi non usati.
 7. **5 e 6** — perdite silenziose di forma o di precisione.
 8. **7** — contratti consumabili.
+9. Gli aperti dal base nuovo: browser e chiavi.
 
 ## Comandi e trappole
 
 - Mai lo stesso `--target-dir` per due worktree di questo
   repo: cargo servirebbe le rlib dell'altro worktree.
+- Sul server git è 2.34: niente `merge-tree --write-tree`.
+  Per un merge di prova serve un worktree staccato:
+
+  ```bash
+  git worktree add --detach .worktrees/probe \
+    origin/feat/wasm-orb-runtime
+  cd .worktrees/probe
+  git -c merge.conflictStyle=diff3 merge \
+    --no-commit --no-ff origin/feat/rust-first-orbs
+  git diff --name-only --diff-filter=U
+  git merge --abort
+  ```
+
+  `diff3` mostra anche la versione di `b08f386`.
 - Claude non può lanciare `git push --force*`: il comando va
   dato a Giacomo.
 - Force-push, prima il backup della PR attuale:
@@ -577,3 +830,6 @@ branch.
 - Prima il ribase, poi i fix.
 - Tutto esplicito tramite attributi.
 - I nomi dicono cosa fanno.
+- 11/11 sera: `tembra:orb` non è tornato, quindi strada A.
+  La PR #1 resta la linea principale; il lifecycle serve solo
+  per la strada B.
