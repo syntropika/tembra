@@ -1,5 +1,5 @@
 //! The WIT text derived from the module items, and the consumed packages it refers to.
-use crate::{Service, Shape};
+use crate::{Function, Service, Shape, WitResource};
 use heck::{ToKebabCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use std::{
@@ -16,6 +16,13 @@ pub(crate) fn kebab(ident: &Ident) -> String {
     ident.to_string().to_kebab_case()
 }
 
+/// The items of the module that enter the WIT: its exported types, its services and its resources.
+pub(crate) struct Items<'a> {
+    pub shapes: &'a [Shape],
+    pub services: &'a [Service],
+    pub resources: &'a [WitResource],
+}
+
 /// Which kernel interfaces the world uses.
 pub(crate) struct Kernel {
     pub state: bool,
@@ -23,24 +30,38 @@ pub(crate) struct Kernel {
     pub context: bool,
 }
 
-/// Write the package: one interface per service, the types in the first interface and borrowed by
-/// the others with `use`, then a world using the kernel's interfaces for its states and
-/// resources, importing and exporting every contributed hook, and exporting every interface.
+/// Write the package: one interface per derived service, the types in the first of them and
+/// borrowed by the others with `use`, each WIT resource in the interface of the service that
+/// owns it, then a world using the kernel's interfaces for its states, resources and context,
+/// importing every consumed interface, importing and exporting every hook, and exporting every
+/// interface, derived or implemented.
 pub(crate) fn render<'a>(
     package: &str,
     world: &str,
-    shapes: &[Shape],
-    services: &[Service],
+    items: Items<'_>,
     hooks: impl Iterator<Item = &'a String>,
+    imports: &[String],
     kernel: Kernel,
 ) -> String {
+    let Items {
+        shapes,
+        services,
+        resources,
+    } = items;
     let mut wit = format!("package {package};\n");
-    for (index, service) in services.iter().enumerate() {
+    let derived: Vec<&Service> = services
+        .iter()
+        .filter(|service| service.implements.is_none())
+        .collect();
+    let owner_of =
+        |resource: &WitResource| kebab(resource.service.as_ref().expect("resolved owner"));
+    for (index, service) in derived.iter().enumerate() {
         wit.push('\n');
         for doc in &service.docs {
             wit.push_str(&format!("///{doc}\n"));
         }
-        wit.push_str(&format!("interface {} {{\n", kebab(&service.ident)));
+        let name = kebab(&service.ident);
+        wit.push_str(&format!("interface {name} {{\n"));
         if index == 0 {
             for shape in shapes {
                 wit.push_str(&shape.wit);
@@ -53,28 +74,39 @@ pub(crate) fn render<'a>(
                 .join(", ");
             wit.push_str(&format!(
                 "  use {}.{{{names}}};\n",
-                kebab(&services[0].ident)
+                kebab(&derived[0].ident)
             ));
         }
+        // A resource of another service that this one hands out is borrowed with `use`.
+        let mut mentioned = Vec::new();
         for function in &service.functions {
-            for doc in &function.docs {
-                wit.push_str(&format!("  ///{doc}\n"));
+            for (_, ty, _) in &function.params {
+                references(ty, &mut mentioned);
             }
-            let params = function
-                .params
-                .iter()
-                .map(|(ident, _, wit)| format!("{}: {wit}", kebab(ident)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let result = function
-                .result
-                .as_ref()
-                .map(|(_, wit)| format!(" -> {wit}"))
-                .unwrap_or_default();
-            wit.push_str(&format!(
-                "  {}: func({params}){result};\n",
-                kebab(&function.ident)
-            ));
+            if let Some((ty, _)) = &function.result {
+                references(ty, &mut mentioned);
+            }
+        }
+        let mut borrowed: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for resource in resources {
+            if owner_of(resource) != name && mentioned.contains(&resource.ident) {
+                borrowed
+                    .entry(owner_of(resource))
+                    .or_default()
+                    .push(kebab(&resource.ident));
+            }
+        }
+        for (owner, names) in borrowed {
+            wit.push_str(&format!("  use {owner}.{{{}}};\n", names.join(", ")));
+        }
+        for resource in resources
+            .iter()
+            .filter(|resource| owner_of(resource) == name)
+        {
+            wit.push_str(&resource_text(resource));
+        }
+        for function in &service.functions {
+            wit.push_str(&function_text(function, "  ", ""));
         }
         wit.push_str("}\n");
     }
@@ -92,14 +124,69 @@ pub(crate) fn render<'a>(
     if kernel.context {
         wit.push_str(&format!("  import {GUEST_CONTEXT};\n"));
     }
+    for import in imports {
+        wit.push_str(&format!("  import {import};\n"));
+    }
     for hook in hooks {
         wit.push_str(&format!("  import {hook};\n  export {hook};\n"));
     }
     for service in services {
-        wit.push_str(&format!("  export {};\n", kebab(&service.ident)));
+        match &service.implements {
+            Some(identity) => wit.push_str(&format!("  export {identity};\n")),
+            None => wit.push_str(&format!("  export {};\n", kebab(&service.ident))),
+        }
     }
     wit.push_str("}\n");
     wit
+}
+
+/// One function of an interface or a resource, with its `///` lines, at the given indentation.
+fn function_text(function: &Function, indent: &str, keyword: &str) -> String {
+    let mut text = String::new();
+    for doc in &function.docs {
+        text.push_str(&format!("{indent}///{doc}\n"));
+    }
+    let params = function
+        .params
+        .iter()
+        .map(|(ident, _, wit)| format!("{}: {wit}", kebab(ident)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let result = function
+        .result
+        .as_ref()
+        .map(|(_, wit)| format!(" -> {wit}"))
+        .unwrap_or_default();
+    text.push_str(&format!(
+        "{indent}{}: {keyword}func({params}){result};\n",
+        kebab(&function.ident)
+    ));
+    text
+}
+
+/// A WIT `resource` block: the constructor, then the methods, then the static functions.
+fn resource_text(resource: &WitResource) -> String {
+    let mut text = String::new();
+    for doc in &resource.docs {
+        text.push_str(&format!("  ///{doc}\n"));
+    }
+    text.push_str(&format!("  resource {} {{\n", kebab(&resource.ident)));
+    if let Some(params) = &resource.constructor {
+        let params = params
+            .iter()
+            .map(|(ident, _, wit)| format!("{}: {wit}", kebab(ident)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        text.push_str(&format!("    constructor({params});\n"));
+    }
+    for method in &resource.methods {
+        text.push_str(&function_text(method, "    ", ""));
+    }
+    for function in &resource.statics {
+        text.push_str(&function_text(function, "    ", "static "));
+    }
+    text.push_str("  }\n");
+    text
 }
 
 /// The kernel's interfaces, as the world names them.
@@ -145,13 +232,36 @@ pub(crate) struct Callback {
 pub(crate) struct Spelled {
     pub import: String,
     pub export: String,
+    /// The UpperCamelCase name of the resource this type is an owned handle of, if it is one: an
+    /// exporter wraps the author's value into the bindings' handle type.
+    pub resource: Option<String>,
 }
 
-/// The callback of every hook: the single function of its interface in the consumed packages.
-pub(crate) fn callbacks<'a>(
-    dir: &Path,
-    hooks: impl Iterator<Item = &'a String>,
-) -> syn::Result<BTreeMap<String, Callback>> {
+/// An interface of a consumed package, as the bindings spell it: its freestanding functions and
+/// its resources.
+pub(crate) struct Consumed {
+    pub functions: Vec<ConsumedFunction>,
+    pub resources: Vec<ConsumedResource>,
+}
+
+/// One function of a consumed interface or resource, parameters and result spelled for the
+/// bindings; a method's implicit `self` is left out.
+pub(crate) struct ConsumedFunction {
+    pub name: String,
+    pub params: Vec<(String, Spelled)>,
+    pub result: Option<Spelled>,
+}
+
+/// One resource of a consumed interface.
+pub(crate) struct ConsumedResource {
+    pub name: String,
+    pub constructor: Option<Vec<(String, Spelled)>>,
+    pub methods: Vec<ConsumedFunction>,
+    pub statics: Vec<ConsumedFunction>,
+}
+
+/// Read the WIT packages of a directory.
+fn resolve(dir: &Path) -> syn::Result<Resolve> {
     let mut resolve = Resolve::default();
     resolve.push_dir(dir).map_err(|cause| {
         error(format!(
@@ -159,18 +269,146 @@ pub(crate) fn callbacks<'a>(
             dir.display()
         ))
     })?;
+    Ok(resolve)
+}
+
+/// The interface of the consumed packages with the given identity.
+fn interface<'a>(
+    resolve: &'a Resolve,
+    dir: &Path,
+    identity: &str,
+) -> syn::Result<&'a wit_parser::Interface> {
+    resolve
+        .interfaces
+        .iter()
+        .find(|(id, _)| resolve.id_of(*id).as_deref() == Some(identity))
+        .map(|(_, interface)| interface)
+        .ok_or_else(|| {
+            error(format!(
+                "{identity} is not an interface of the WIT packages in {}",
+                dir.display()
+            ))
+        })
+}
+
+/// The consumed interfaces an Orb implements or imports, spelled for the bindings.
+pub(crate) fn consumed<'a>(
+    dir: &Path,
+    identities: impl Iterator<Item = &'a String>,
+) -> syn::Result<BTreeMap<String, Consumed>> {
+    use wit_parser::FunctionKind;
+    let resolve = resolve(dir)?;
+    identities
+        .map(|identity| {
+            let interface = interface(&resolve, dir, identity)?;
+            let [namespace, package, name] = crate::hook_path(identity);
+            let import = format!("self::{namespace}::{package}::{name}");
+            let export = format!("exports::{namespace}::{package}::{name}");
+            let spell = |ty: wit_parser::Type| -> syn::Result<Spelled> {
+                Ok(Spelled {
+                    import: rust_type(&resolve, ty, &import)?,
+                    export: rust_type(&resolve, ty, &export)?,
+                    resource: owned_resource(&resolve, ty),
+                })
+            };
+            let function = |function: &wit_parser::Function| -> syn::Result<ConsumedFunction> {
+                Ok(ConsumedFunction {
+                    name: function.item_name().to_owned(),
+                    params: function
+                        .params
+                        .iter()
+                        .filter(|param| param.name != "self")
+                        .map(|param| Ok((param.name.clone(), spell(param.ty)?)))
+                        .collect::<syn::Result<_>>()?,
+                    result: function.result.map(spell).transpose()?,
+                })
+            };
+            let mut consumed = Consumed {
+                functions: Vec::new(),
+                resources: interface
+                    .types
+                    .iter()
+                    .filter(|(_, id)| matches!(resolve.types[**id].kind, TypeDefKind::Resource))
+                    .map(|(name, _)| ConsumedResource {
+                        name: name.clone(),
+                        constructor: None,
+                        methods: Vec::new(),
+                        statics: Vec::new(),
+                    })
+                    .collect(),
+            };
+            for definition in interface.functions.values() {
+                let owner =
+                    |consumed: &mut Consumed, id: wit_parser::TypeId| -> syn::Result<usize> {
+                        let name = resolve.types[id].name.clone().unwrap_or_default();
+                        consumed
+                        .resources
+                        .iter()
+                        .position(|resource| resource.name == name)
+                        .ok_or_else(|| {
+                            error(format!(
+                                "{identity}: the resource {name} is defined in another interface"
+                            ))
+                        })
+                    };
+                match definition.kind {
+                    FunctionKind::Freestanding => consumed.functions.push(function(definition)?),
+                    FunctionKind::Constructor(id) => {
+                        let params = function(definition)?.params;
+                        let index = owner(&mut consumed, id)?;
+                        consumed.resources[index].constructor = Some(params);
+                    }
+                    FunctionKind::Method(id) => {
+                        let method = function(definition)?;
+                        let index = owner(&mut consumed, id)?;
+                        consumed.resources[index].methods.push(method);
+                    }
+                    FunctionKind::Static(id) => {
+                        let function = function(definition)?;
+                        let index = owner(&mut consumed, id)?;
+                        consumed.resources[index].statics.push(function);
+                    }
+                    _ => {
+                        return Err(error(format!(
+                            "{identity}: the macro does not express async functions ({})",
+                            definition.name
+                        )));
+                    }
+                }
+            }
+            Ok((identity.clone(), consumed))
+        })
+        .collect()
+}
+
+/// The resource a WIT type is an owned handle of, through aliases, as the bindings name it.
+fn owned_resource(resolve: &Resolve, mut ty: wit_parser::Type) -> Option<String> {
+    loop {
+        let wit_parser::Type::Id(id) = ty else {
+            return None;
+        };
+        match &resolve.types[id].kind {
+            TypeDefKind::Handle(wit_parser::Handle::Own(resource)) => {
+                return resolve.types[*resource]
+                    .name
+                    .as_deref()
+                    .map(ToUpperCamelCase::to_upper_camel_case);
+            }
+            TypeDefKind::Type(inner) => ty = *inner,
+            _ => return None,
+        }
+    }
+}
+
+/// The callback of every hook: the single function of its interface in the consumed packages.
+pub(crate) fn callbacks<'a>(
+    dir: &Path,
+    hooks: impl Iterator<Item = &'a String>,
+) -> syn::Result<BTreeMap<String, Callback>> {
+    let resolve = resolve(dir)?;
     hooks
         .map(|hook| {
-            let (_, interface) = resolve
-                .interfaces
-                .iter()
-                .find(|(id, _)| resolve.id_of(*id).as_deref() == Some(hook.as_str()))
-                .ok_or_else(|| {
-                    error(format!(
-                        "hook {hook} is not an interface of the WIT packages in {}",
-                        dir.display()
-                    ))
-                })?;
+            let interface = interface(&resolve, dir, hook)?;
             let mut functions = interface.functions.values();
             let (Some(function), None) = (functions.next(), functions.next()) else {
                 return Err(error(format!(
@@ -189,6 +427,7 @@ pub(crate) fn callbacks<'a>(
                 Ok(Spelled {
                     import: rust_type(&resolve, ty, &import)?,
                     export: rust_type(&resolve, ty, &export)?,
+                    resource: owned_resource(&resolve, ty),
                 })
             };
             Ok((
@@ -248,6 +487,19 @@ fn rust_type(resolve: &Resolve, ty: wit_parser::Type, module: &str) -> syn::Resu
                 return Ok(format!("{module}::{}", name.to_upper_camel_case()));
             }
             match &definition.kind {
+                TypeDefKind::Handle(wit_parser::Handle::Own(resource)) => format!(
+                    "{module}::{}",
+                    resolve.types[*resource]
+                        .name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_upper_camel_case()
+                ),
+                TypeDefKind::Handle(wit_parser::Handle::Borrow(_)) => {
+                    return Err(error(
+                        "a borrowed resource in a signature is not expressed by the macro; a resource is handed out owned and borrowed only as a method's self",
+                    ));
+                }
                 TypeDefKind::Option(inner) => {
                     format!("Option<{}>", rust_type(resolve, *inner, module)?)
                 }
@@ -273,7 +525,7 @@ fn rust_type(resolve: &Resolve, ty: wit_parser::Type, module: &str) -> syn::Resu
                 TypeDefKind::Type(inner) => rust_type(resolve, *inner, module)?,
                 _ => {
                     return Err(error(
-                        "this type of the hook callback has no spelling the macro knows; use records, enums, variants, scalars, strings, lists, options, results and tuples",
+                        "this type has no spelling the macro knows; use records, enums, variants, resources, scalars, strings, lists, options, results and tuples",
                     ));
                 }
             }

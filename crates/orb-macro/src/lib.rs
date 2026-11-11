@@ -27,7 +27,7 @@
 //! packages the artifact.
 mod wit;
 
-use heck::{ToShoutySnakeCase, ToSnakeCase};
+use heck::{ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -46,11 +46,15 @@ pub fn orb(attribute: TokenStream, item: TokenStream) -> TokenStream {
             options.package = Some(meta.value()?.parse::<LitStr>()?.value());
         } else if meta.path.is_ident("wit") {
             options.wit = Some(meta.value()?.parse::<LitStr>()?.value());
+        } else if meta.path.is_ident("import") {
+            options
+                .imports
+                .push(meta.value()?.parse::<LitStr>()?.value());
         } else if meta.path.is_ident("context") {
             options.context = true;
         } else {
             return Err(meta.error(
-                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", context)]",
+                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", context)]",
             ));
         }
         Ok(())
@@ -72,6 +76,9 @@ struct Options {
     wit: Option<String>,
     /// The module imports the kernel's `tembra:guest/context` interface.
     context: bool,
+    /// Interfaces of other Orbs the module imports, from the consumed WIT packages; the installer
+    /// binds each to a provider.
+    imports: Vec<String>,
 }
 
 /// A type declared in the module, with its WIT definition and the module types it refers to.
@@ -82,12 +89,38 @@ struct Shape {
 }
 
 /// An exported interface: a unit struct marked `#[service]` with an `impl` block of `pub fn`, and
-/// the ownership policy of its objects when the attribute names one.
+/// the ownership policy of its objects when the attribute names one. A plain `#[service]`
+/// derives the interface from the `impl`; `#[service("ns:name/interface@version")]` implements an
+/// interface of a consumed WIT package.
 struct Service {
     ident: Ident,
     docs: Vec<String>,
     functions: Vec<Function>,
     policy: Option<Policy>,
+    implements: Option<String>,
+}
+
+impl Service {
+    /// The versioned identity of the service's interface.
+    fn identity(&self, package: &str) -> String {
+        self.implements
+            .clone()
+            .unwrap_or_else(|| identity(package, &wit::kebab(&self.ident)))
+    }
+}
+
+/// A WIT resource: a struct marked `#[wit_resource]` whose instances callers own through handles.
+/// Its `pub fn new` is the constructor, its `pub fn` taking `&self` are the methods and the other
+/// `pub fn` its static functions. It belongs to the interface of one service: derived with it, or
+/// defined by the WIT the service implements.
+struct WitResource {
+    ident: Ident,
+    docs: Vec<String>,
+    /// The owning service, as named by `service = ...` or resolved to the module's only one.
+    service: Option<Ident>,
+    constructor: Option<Vec<(Ident, Type, String)>>,
+    methods: Vec<Function>,
+    statics: Vec<Function>,
 }
 
 /// The ownership policy of a service's objects, from `#[service(lifetime = host)]` or
@@ -155,6 +188,8 @@ struct State {
     /// before the kernel stores the value, and a reload runs it on the value the new instance
     /// inherits.
     validate: bool,
+    /// The identity of the owning service's interface, once the owner is resolved.
+    identity: String,
 }
 
 /// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a
@@ -190,6 +225,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let mut declared: Vec<Declared> = Vec::new();
     let mut states = Vec::new();
     let mut resources: Vec<Resource> = Vec::new();
+    let mut wit_resources: Vec<WitResource> = Vec::new();
     let mut passthrough = Vec::new();
     let mut impls = Vec::new();
     for item in items {
@@ -197,6 +233,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             Item::Struct(mut s) => {
                 if let Some(attribute) = take(&mut s.attrs, "hook") {
                     declared.push(declaration(&s, &attribute)?);
+                    passthrough.push(Item::Struct(s));
+                } else if let Some(attribute) = take(&mut s.attrs, "wit_resource") {
+                    wit_resources.push(wit_resource(&s, &attribute)?);
                     passthrough.push(Item::Struct(s));
                 } else if let Some(attribute) = take(&mut s.attrs, "resource") {
                     resources.push(resource(&s, &attribute)?);
@@ -218,11 +257,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                             "a service is a unit struct: its methods are the pub fn of its impl blocks",
                         ));
                     }
+                    let (implements, policy) = service_attribute(&attribute)?;
                     services.push(Service {
                         ident: s.ident.clone(),
                         docs: wit::docs(&s.attrs),
                         functions: Vec::new(),
-                        policy: policy(&attribute)?,
+                        policy,
+                        implements,
                     });
                     passthrough.push(Item::Struct(s));
                 } else if matches!(s.fields, Fields::Named(_)) {
@@ -280,20 +321,17 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     }
+    for resource in &mut wit_resources {
+        for function in public_functions(&impls, &resource.ident) {
+            match resource_function(function)? {
+                ResourceFunction::Constructor(params) => resource.constructor = Some(params),
+                ResourceFunction::Method(method) => resource.methods.push(method),
+                ResourceFunction::Static(function) => resource.statics.push(function),
+            }
+        }
+    }
     for resource in &mut resources {
-        let functions = impls
-            .iter()
-            .filter(|item| {
-                matches!(&*item.self_ty, Type::Path(path) if path.path.is_ident(&resource.ident))
-            })
-            .flat_map(|item| &item.items)
-            .filter_map(|item| match item {
-                syn::ImplItem::Fn(function) if matches!(function.vis, Visibility::Public(_)) => {
-                    Some(function)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let functions = public_functions(&impls, &resource.ident);
         let opens = functions.iter().any(|function| {
             function.sig.ident == "open"
                 && function.sig.inputs.is_empty()
@@ -351,7 +389,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             "nothing to export: mark a unit struct with #[service] and give it an impl block of pub fn, or mark a hook with #[hook]",
         ));
     }
-    if let Some(service) = services.iter().find(|service| service.functions.is_empty()) {
+    if let Some(service) = services
+        .iter()
+        .find(|service| service.implements.is_none() && service.functions.is_empty())
+    {
         return Err(syn::Error::new(
             service.ident.span(),
             "a service needs at least one pub fn in an impl block",
@@ -360,7 +401,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // The module names the world; WIT refuses a world and an interface with one name.
     if let Some(service) = services
         .iter()
-        .find(|service| wit::kebab(&service.ident) == world)
+        .find(|service| service.implements.is_none() && wit::kebab(&service.ident) == world)
     {
         return Err(syn::Error::new(
             service.ident.span(),
@@ -432,16 +473,176 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 ),
             ));
         }
+        state.identity = owner.identity(&package);
         state.service = Some(owner.ident.clone());
     }
+    // Each WIT resource belongs to the interface of one service.
+    for resource in &mut wit_resources {
+        let owner = match &resource.service {
+            Some(ident) => services
+                .iter()
+                .find(|service| &service.ident == ident)
+                .ok_or_else(|| {
+                    syn::Error::new(
+                        ident.span(),
+                        format!("`{ident}` is not a #[service] of this module"),
+                    )
+                })?,
+            None if services.len() == 1 => &services[0],
+            None => {
+                return Err(syn::Error::new(
+                    resource.ident.span(),
+                    "name the service whose interface defines this resource: #[wit_resource(service = Name)]",
+                ));
+            }
+        };
+        resource.service = Some(owner.ident.clone());
+    }
+    // A resource is handed out, never taken: no parameter of a derived service or of a
+    // resource names one.
+    let resource_names: BTreeSet<String> = wit_resources
+        .iter()
+        .map(|resource| resource.ident.to_string())
+        .collect();
+    let derived_functions = services
+        .iter()
+        .filter(|service| service.implements.is_none())
+        .flat_map(|service| &service.functions)
+        .chain(wit_resources.iter().flat_map(|resource| &resource.methods))
+        .chain(wit_resources.iter().flat_map(|resource| &resource.statics));
+    let constructor_params = wit_resources
+        .iter()
+        .filter_map(|resource| resource.constructor.as_ref())
+        .flatten();
+    for (ident, ty, _) in derived_functions
+        .flat_map(|function| &function.params)
+        .chain(constructor_params)
+    {
+        let mut mentioned = Vec::new();
+        wit::references(ty, &mut mentioned);
+        if let Some(resource) = mentioned
+            .iter()
+            .find(|mention| resource_names.contains(&mention.to_string()))
+        {
+            return Err(syn::Error::new(
+                ty.span(),
+                format!(
+                    "`{ident}` takes the resource `{resource}`: a resource is handed out, never taken"
+                ),
+            ));
+        }
+    }
 
-    // Only the types a service method or a state uses, directly or through another type, enter
-    // the WIT.
-    let shapes = reachable(candidates, &services, &states, &mut passthrough)?;
+    // Only the types a service method or a resource uses, directly or through another type,
+    // enter the WIT; a state no method mentions stays an ordinary struct, with serde derives.
+    let shapes = reachable(candidates, &services, &wit_resources, &mut passthrough)?;
+    for item in &mut passthrough {
+        if let Item::Struct(item) = item
+            && states.iter().any(|state| state.ident == item.ident)
+        {
+            item.attrs
+                .push(syn::parse_quote!(#[derive(::serde::Serialize, ::serde::Deserialize)]));
+        }
+    }
 
-    // Consumed packages: the callback of every hook, contributed or declared, is read from its
-    // WIT package.
+    // Consumed packages: the callback of every hook, contributed or declared, and every interface
+    // implemented or imported are read from their WIT packages.
     let wit_dir = options.wit.as_deref().map(wit::absolute).transpose()?;
+    let implemented: Vec<String> = services
+        .iter()
+        .filter_map(|service| service.implements.clone())
+        .collect();
+    let consumed = match (
+        &wit_dir,
+        implemented.is_empty() && options.imports.is_empty(),
+    ) {
+        (_, true) => BTreeMap::new(),
+        (Some(dir), false) => wit::consumed(dir, implemented.iter().chain(options.imports.iter()))?,
+        (None, false) => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "implementing or importing an interface needs wit = \"<dir>\", the directory with its WIT package",
+            ));
+        }
+    };
+    // An implemented interface is fixed by its WIT: the impl has exactly its functions, and each
+    // of its resources is a #[wit_resource] struct of the same name with the resource's functions.
+    for service in services
+        .iter()
+        .filter(|service| service.implements.is_some())
+    {
+        let identity = service.implements.as_deref().unwrap_or_default();
+        let interface = &consumed[identity];
+        for function in &interface.functions {
+            if !service
+                .functions
+                .iter()
+                .any(|own| wit::kebab(&own.ident) == function.name)
+            {
+                return Err(syn::Error::new(
+                    service.ident.span(),
+                    format!(
+                        "`{}` implements {identity} but has no `pub fn {}`",
+                        service.ident,
+                        function.name.to_snake_case()
+                    ),
+                ));
+            }
+        }
+        for own in &service.functions {
+            if !interface
+                .functions
+                .iter()
+                .any(|function| function.name == wit::kebab(&own.ident))
+            {
+                return Err(syn::Error::new(
+                    own.ident.span(),
+                    format!(
+                        "`{}::{}` is not a function of {identity}; the interface is fixed by its WIT",
+                        service.ident, own.ident
+                    ),
+                ));
+            }
+        }
+        for resource in &interface.resources {
+            let ident = resource.name.to_upper_camel_case();
+            let Some(implementation) = wit_resources.iter().find(|candidate| {
+                candidate.ident == ident && candidate.service.as_ref() == Some(&service.ident)
+            }) else {
+                return Err(syn::Error::new(
+                    service.ident.span(),
+                    format!(
+                        "{identity} defines the resource `{}`: mark a struct `{ident}` with #[wit_resource(service = {})] and give it the resource's functions",
+                        resource.name, service.ident
+                    ),
+                ));
+            };
+            let expected = resource.constructor.iter().map(|_| "new".to_owned()).chain(
+                resource
+                    .methods
+                    .iter()
+                    .chain(&resource.statics)
+                    .map(|function| function.name.to_snake_case()),
+            );
+            for name in expected {
+                let defined = (name == "new" && implementation.constructor.is_some())
+                    || implementation
+                        .methods
+                        .iter()
+                        .chain(&implementation.statics)
+                        .any(|function| function.ident == name);
+                if !defined {
+                    return Err(syn::Error::new(
+                        implementation.ident.span(),
+                        format!(
+                            "`{ident}` implements the resource `{}` of {identity} but has no `pub fn {name}`",
+                            resource.name
+                        ),
+                    ));
+                }
+            }
+        }
+    }
     let callbacks = match (&wit_dir, hooks.is_empty() && declarations.is_empty()) {
         (_, true) => Default::default(),
         (Some(dir), false) => wit::callbacks(dir, hooks.keys().chain(declarations.keys()))?,
@@ -476,9 +677,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let wit = wit::render(
         &package,
         &world,
-        &shapes,
-        &services,
+        wit::Items {
+            shapes: &shapes,
+            services: &services,
+            resources: &wit_resources,
+        },
         hooks.keys().chain(declarations.keys()),
+        &options.imports,
         wit::Kernel {
             state: !states.is_empty(),
             resources: !resources.is_empty(),
@@ -495,40 +700,83 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let name_ident = format_ident!("{}", name.to_snake_case());
     let shape_idents = shapes.iter().map(|shape| &shape.ident).collect::<Vec<_>>();
     // The generated types carry the author's names and public fields, so the author's functions
-    // and the generated traits speak about one type. A shape is reached from a service, so a
-    // module with shapes has a first service.
-    let reexports = match services.first() {
+    // and the generated traits speak about one type. A shape is reached from a derived service,
+    // so a module with shapes has a first derived service.
+    let reexports = match services.iter().find(|service| service.implements.is_none()) {
         Some(first) if !shapes.is_empty() => {
             let first_interface = format_ident!("{}", first.ident.to_string().to_snake_case());
             quote! { pub use exports::#ns_ident::#name_ident::#first_interface::{#(#shape_idents),*}; }
         }
         _ => quote! {},
     };
-    let bridges = services.iter().map(|service| {
-        let interface = format_ident!("{}", service.ident.to_string().to_snake_case());
-        let target = &service.ident;
-        let functions = service.functions.iter().map(|function| {
-            let ident = &function.ident;
-            let params = function
-                .params
+    // A derived service's bridge forwards each function to the author's; a result that is a
+    // resource is wrapped into the bindings' handle type, and the resources of the service's
+    // interface are the author's structs.
+    let bridges = services
+        .iter()
+        .filter(|service| service.implements.is_none())
+        .map(|service| {
+            let interface = format_ident!("{}", service.ident.to_string().to_snake_case());
+            let module = quote! { exports::#ns_ident::#name_ident::#interface };
+            let target = &service.ident;
+            let functions = service.functions.iter().map(|function| {
+                let ident = &function.ident;
+                let params = function
+                    .params
+                    .iter()
+                    .map(|(ident, ty, _)| quote! { #ident: #ty });
+                let names = function.params.iter().map(|(ident, _, _)| ident);
+                let call = quote! { #target::#ident(#(#names),*) };
+                let (result, body) =
+                    derived_result(&function.result, &module, &resource_names, call);
+                quote! { fn #ident(#(#params),*) #result { #body } }
+            });
+            let owned = wit_resources
                 .iter()
-                .map(|(ident, ty, _)| quote! { #ident: #ty });
-            let names = function.params.iter().map(|(ident, _, _)| ident);
-            let result = function
-                .result
-                .as_ref()
-                .map(|(ty, _)| quote! { -> #ty })
-                .unwrap_or_default();
+                .filter(|resource| resource.service.as_ref() == Some(&service.ident))
+                .map(|resource| {
+                    let ident = &resource.ident;
+                    quote! { type #ident = #ident; }
+                });
+            let resource_impls = wit_resources
+                .iter()
+                .filter(|resource| resource.service.as_ref() == Some(&service.ident))
+                .map(|resource| derived_resource(resource, &module, &resource_names));
             quote! {
-                fn #ident(#(#params),*) #result { #target::#ident(#(#names),*) }
+                impl #module::Guest for __TembraExports {
+                    #(#owned)*
+                    #(#functions)*
+                }
+                #(#resource_impls)*
             }
         });
-        quote! {
-            impl exports::#ns_ident::#name_ident::#interface::Guest for __TembraExports {
-                #(#functions)*
-            }
-        }
-    });
+    // An implemented interface's bridge takes its signatures from the WIT: the functions forward
+    // to the author's of the same names, and each resource of the interface is the author's
+    // struct of the same name.
+    let implemented_bridges = services
+        .iter()
+        .filter_map(|service| {
+            let identity = service.implements.as_deref()?;
+            Some(implemented_service(
+                service,
+                identity,
+                &consumed[identity],
+                &wit_resources,
+            ))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    // Implemented and imported interfaces are re-exported under their own names, like hooks.
+    let consumed_modules = services
+        .iter()
+        .filter_map(|service| service.implements.as_deref())
+        .map(|identity| {
+            let [ns, package, interface] = hook_path(identity);
+            quote! { pub use exports::#ns::#package::#interface; }
+        })
+        .chain(options.imports.iter().map(|identity| {
+            let [ns, package, interface] = hook_path(identity);
+            quote! { pub use self::#ns::#package::#interface; }
+        }));
     // The kernel's context interface is re-exported as `context`, so the author writes
     // `context::principal()`.
     let context_module = options
@@ -573,12 +821,16 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             let lifetime = if policy.host { "host" } else { "referenced" };
             Some(format!(
                 "\"{}\":{{\"lifetime\":\"{lifetime}\",\"linger_ms\":{}}}",
-                identity(&package, &wit::kebab(&service.ident)),
+                service.identity(&package),
                 policy.linger_ms
             ))
         })
         .collect::<Vec<_>>();
-    let manifest_section = if hooks.is_empty() && declarations.is_empty() && policies.is_empty() {
+    let manifest_section = if hooks.is_empty()
+        && declarations.is_empty()
+        && policies.is_empty()
+        && options.wit.is_none()
+    {
         quote! {}
     } else {
         let contributes = hooks
@@ -592,8 +844,15 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             .collect::<Vec<_>>()
             .join(",");
         let services = policies.join(",");
+        // The directory of the consumed packages, as written on the attribute: `cargo tembra
+        // build` nests the whole packages from there, where the component's own types would
+        // keep only the functions it calls.
+        let wit_dir = match &options.wit {
+            Some(dir) => format!(",\"wit\":{}", json_string(dir)),
+            None => String::new(),
+        };
         let json = format!(
-            "{{\"contributes\":{{{contributes}}},\"declares\":{{{declares}}},\"services\":{{{services}}}}}"
+            "{{\"contributes\":{{{contributes}}},\"declares\":{{{declares}}},\"services\":{{{services}}}{wit_dir}}}"
         );
         let bytes = LitByteStr::new(json.as_bytes(), Span::call_site());
         let len = proc_macro2::Literal::usize_unsuffixed(json.len());
@@ -604,7 +863,11 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             static __TEMBRA_MANIFEST: [u8; #len] = *#bytes;
         }
     };
-    let state_code = state_code(&states, &package);
+    // Signatures spelled from a consumed WIT name strings and lists from `alloc`, which the
+    // module may not name.
+    let alloc_alias = (!declared.is_empty() || !implemented.is_empty())
+        .then(|| quote! { extern crate alloc as __tembra_alloc; });
+    let state_code = state_code(&states);
     let resource_code = resource_code(&resources);
     let declaration_code = declaration_code(&declared, &callbacks)?;
     let wit_literal = LitStr::new(&wit, Span::call_site());
@@ -626,14 +889,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
         quote! { path: #dir, }
     });
-    // A state's record is in the WIT whether or not a method mentions it; the bindings must
-    // generate it all the same, since the state type is the generated one.
-    let derives = (!states.is_empty()).then(|| {
-        quote! {
-            additional_derives: [::serde::Serialize, ::serde::Deserialize],
-            generate_unused_types: true,
-        }
-    });
+    // A state's record that a method mentions is a generated type, which the kernel's JSON needs
+    // to serialize; the derives reach every generated type.
+    let derives = (!states.is_empty())
+        .then(|| quote! { additional_derives: [::serde::Serialize, ::serde::Deserialize], });
     let generate = quote! {
         ::wit_bindgen::generate!({
             #path
@@ -675,12 +934,15 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
 
             #reexports
             #context_module
+            #(#consumed_modules)*
             #(#hook_modules)*
 
             #(#passthrough)*
 
+            #alloc_alias
             struct __TembraExports;
             #(#bridges)*
+            #(#implemented_bridges)*
             #(#contribution_bridges)*
             #declaration_code
             #state_code
@@ -696,6 +958,23 @@ fn take(attrs: &mut Vec<Attribute>, name: &str) -> Option<Attribute> {
     Some(attrs.remove(index))
 }
 
+/// A JSON string literal of a path or name: quotes, backslashes and control characters escaped.
+fn json_string(text: &str) -> String {
+    let mut json = String::from('"');
+    for character in text.chars() {
+        match character {
+            '"' => json.push_str("\\\""),
+            '\\' => json.push_str("\\\\"),
+            character if character.is_control() => {
+                json.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => json.push(character),
+        }
+    }
+    json.push('"');
+    json
+}
+
 /// The versioned identity of an interface of this package: `ns:name/interface@version`.
 fn identity(package: &str, interface: &str) -> String {
     match package.split_once('@') {
@@ -704,53 +983,406 @@ fn identity(package: &str, interface: &str) -> String {
     }
 }
 
-/// Read the ownership policy a `#[service]` attribute names, if any: `lifetime = host` pins the
-/// objects until the host closes, `linger_ms = n` keeps an unreferenced object for `n`
+/// Read a `#[service]` attribute: the identity of an interface the service implements, if it
+/// names one first, then the ownership policy of its objects, if any: `lifetime = host` pins
+/// the objects until the host closes, `linger_ms = n` keeps an unreferenced object for `n`
 /// milliseconds; a host-lifetime object cannot linger, as the kernel rules.
-fn policy(attribute: &Attribute) -> syn::Result<Option<Policy>> {
+fn service_attribute(attribute: &Attribute) -> syn::Result<(Option<String>, Option<Policy>)> {
     if matches!(attribute.meta, syn::Meta::Path(_)) {
-        return Ok(None);
+        return Ok((None, None));
     }
-    let (mut host, mut linger_ms) = (false, 0);
-    attribute.parse_nested_meta(|meta| {
-        if meta.path.is_ident("lifetime") {
-            let value: Ident = meta.value()?.parse()?;
-            host = match value.to_string().as_str() {
-                "host" => true,
-                "referenced" => false,
-                _ => {
-                    return Err(syn::Error::new(
-                        value.span(),
-                        "the lifetime is referenced (the default) or host",
-                    ));
-                }
-            };
-        } else if meta.path.is_ident("linger_ms") {
-            let literal: LitInt = meta.value()?.parse()?;
-            linger_ms = literal.base10_parse::<u32>()?;
-        } else {
-            return Err(meta.error(
-                "unknown option; use #[service(lifetime = host)] or #[service(linger_ms = n)]",
+    let span = attribute.span();
+    attribute.parse_args_with(|input: syn::parse::ParseStream| {
+        let mut implements = None;
+        if input.peek(LitStr) {
+            let identity: LitStr = input.parse()?;
+            let value = identity.value();
+            if !value.contains(':') || !value.contains('/') || value.contains(['"', '\\']) {
+                return Err(syn::Error::new(
+                    identity.span(),
+                    "an implemented interface is named ns:name/interface@version",
+                ));
+            }
+            implements = Some(value);
+            if !input.is_empty() {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        let (mut host, mut linger_ms, mut chosen) = (false, 0, false);
+        while !input.is_empty() {
+            let key: Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+            if key == "lifetime" {
+                let value: Ident = input.parse()?;
+                host = match value.to_string().as_str() {
+                    "host" => true,
+                    "referenced" => false,
+                    _ => {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "the lifetime is referenced (the default) or host",
+                        ));
+                    }
+                };
+                chosen = true;
+            } else if key == "linger_ms" {
+                let literal: LitInt = input.parse()?;
+                linger_ms = literal.base10_parse::<u32>()?;
+                chosen = true;
+            } else {
+                return Err(syn::Error::new(
+                    key.span(),
+                    "unknown option; use #[service(\"ns:name/interface@version\", lifetime = host, linger_ms = n)]",
+                ));
+            }
+            if !input.is_empty() {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        if host && linger_ms != 0 {
+            return Err(syn::Error::new(
+                span,
+                "host-lifetime objects cannot linger: they live until the host closes",
             ));
         }
-        Ok(())
-    })?;
-    if host && linger_ms != 0 {
-        return Err(syn::Error::new(
-            attribute.span(),
-            "host-lifetime objects cannot linger: they live until the host closes",
-        ));
-    }
-    Ok(Some(Policy { host, linger_ms }))
+        Ok((implements, chosen.then_some(Policy { host, linger_ms })))
+    })
 }
 
-/// Keep, in module order, the candidate types that a service method or a state reaches; the
-/// others go back to the module as ordinary Rust. A reference to a type the module does not
-/// declare is an error.
+/// Read a WIT resource: a struct, with the service whose interface defines it.
+fn wit_resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<WitResource> {
+    let mut service = None;
+    if !matches!(attribute.meta, syn::Meta::Path(_)) {
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("service") {
+                service = Some(meta.value()?.parse::<Ident>()?);
+            } else {
+                return Err(meta.error("unknown option; use #[wit_resource(service = Name)]"));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(WitResource {
+        ident: item.ident.clone(),
+        docs: wit::docs(&item.attrs),
+        service,
+        constructor: None,
+        methods: Vec::new(),
+        statics: Vec::new(),
+    })
+}
+
+/// The `pub fn` of a type's `impl` blocks.
+fn public_functions<'a>(impls: &'a [syn::ItemImpl], ident: &Ident) -> Vec<&'a syn::ImplItemFn> {
+    impls
+        .iter()
+        .filter(|item| matches!(&*item.self_ty, Type::Path(path) if path.path.is_ident(ident)))
+        .flat_map(|item| &item.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(function) if matches!(function.vis, Visibility::Public(_)) => {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// One `pub fn` of a WIT resource, by its role.
+enum ResourceFunction {
+    Constructor(Vec<(Ident, Type, String)>),
+    Method(Function),
+    Static(Function),
+}
+
+/// Read one `pub fn` of a WIT resource: `new` without `self` is the constructor, a function
+/// taking `&self` a method, any other a static function; `&mut self` and `self` are refused.
+fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction> {
+    let receiver = function.sig.inputs.first().and_then(|input| match input {
+        FnArg::Receiver(receiver) => Some(receiver),
+        FnArg::Typed(_) => None,
+    });
+    match receiver {
+        Some(receiver) if receiver.reference.is_none() || receiver.mutability.is_some() => {
+            return Err(syn::Error::new(
+                receiver.span(),
+                "a WIT method borrows `&self`; change a resource through Cell or RefCell",
+            ));
+        }
+        _ => {}
+    }
+    let mut params = Vec::new();
+    for input in function
+        .sig
+        .inputs
+        .iter()
+        .skip(usize::from(receiver.is_some()))
+    {
+        let FnArg::Typed(typed) = input else {
+            return Err(syn::Error::new(input.span(), "self comes first"));
+        };
+        let Pat::Ident(pat) = &*typed.pat else {
+            return Err(syn::Error::new(
+                typed.span(),
+                "parameters need a plain name",
+            ));
+        };
+        params.push((
+            pat.ident.clone(),
+            (*typed.ty).clone(),
+            wit::wit_type(&typed.ty)?,
+        ));
+    }
+    let read = |params: Vec<(Ident, Type, String)>| -> syn::Result<Function> {
+        Ok(Function {
+            ident: function.sig.ident.clone(),
+            docs: wit::docs(&function.attrs),
+            params,
+            result: match result(&function.sig.output) {
+                Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
+                None => None,
+            },
+        })
+    };
+    if receiver.is_some() {
+        return Ok(ResourceFunction::Method(read(params)?));
+    }
+    if function.sig.ident == "new" {
+        let returns_self = match result(&function.sig.output) {
+            Some(Type::Path(path)) => path.path.is_ident("Self") || path.path.segments.len() == 1,
+            _ => false,
+        };
+        if !returns_self {
+            return Err(syn::Error::new(
+                function.sig.span(),
+                "a WIT resource's constructor is `pub fn new(..) -> Self`",
+            ));
+        }
+        return Ok(ResourceFunction::Constructor(params));
+    }
+    Ok(ResourceFunction::Static(read(params)?))
+}
+
+/// The result of a derived function's bridge: a resource is wrapped into the bindings' handle
+/// type of the interface's module, any other value is returned as it is.
+fn derived_result(
+    result: &Option<(Type, String)>,
+    module: &proc_macro2::TokenStream,
+    resources: &BTreeSet<String>,
+    call: proc_macro2::TokenStream,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let Some((ty, _)) = result else {
+        return (quote! {}, call);
+    };
+    let resource = match ty {
+        Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .filter(|segment| resources.contains(&segment.ident.to_string()))
+            .map(|segment| segment.ident.clone()),
+        _ => None,
+    };
+    match resource {
+        Some(resource) => (
+            quote! { -> #module::#resource },
+            quote! { #module::#resource::new(#call) },
+        ),
+        None => (quote! { -> #ty }, call),
+    }
+}
+
+/// The bindings' trait of a derived resource, implemented by the author's struct: the constructor,
+/// the methods and the static functions forward to the author's `pub fn`.
+fn derived_resource(
+    resource: &WitResource,
+    module: &proc_macro2::TokenStream,
+    resources: &BTreeSet<String>,
+) -> proc_macro2::TokenStream {
+    let ident = &resource.ident;
+    let guest = format_ident!("Guest{}", ident);
+    let constructor = resource.constructor.as_ref().map(|params| {
+        let names = params.iter().map(|(ident, _, _)| ident);
+        let params = params.iter().map(|(ident, ty, _)| quote! { #ident: #ty });
+        quote! { fn new(#(#params),*) -> Self { #ident::new(#(#names),*) } }
+    });
+    let methods = resource.methods.iter().map(|function| {
+        let name = &function.ident;
+        let params = function
+            .params
+            .iter()
+            .map(|(ident, ty, _)| quote! { #ident: #ty });
+        let names = function.params.iter().map(|(ident, _, _)| ident);
+        let call = quote! { #ident::#name(self, #(#names),*) };
+        let (result, body) = derived_result(&function.result, module, resources, call);
+        quote! { fn #name(&self, #(#params),*) #result { #body } }
+    });
+    let statics = resource.statics.iter().map(|function| {
+        let name = &function.ident;
+        let params = function
+            .params
+            .iter()
+            .map(|(ident, ty, _)| quote! { #ident: #ty });
+        let names = function.params.iter().map(|(ident, _, _)| ident);
+        let call = quote! { #ident::#name(#(#names),*) };
+        let (result, body) = derived_result(&function.result, module, resources, call);
+        quote! { fn #name(#(#params),*) #result { #body } }
+    });
+    quote! {
+        impl #module::#guest for #ident {
+            #constructor
+            #(#methods)*
+            #(#statics)*
+        }
+    }
+}
+
+/// One function of an implemented interface as its bridge spells it: parameter names and
+/// declarations, the result, and the resource a returned value is wrapped into, if any.
+struct Signature {
+    names: Vec<Ident>,
+    params: Vec<proc_macro2::TokenStream>,
+    result: proc_macro2::TokenStream,
+    wrap: Option<Ident>,
+}
+
+/// The bridge of an implemented interface, with signatures spelled from its WIT: the functions
+/// forward to the author's of the same names, and each resource of the interface is the author's
+/// struct of the same name, whose constructor, methods and static functions forward likewise.
+fn implemented_service(
+    service: &Service,
+    identity: &str,
+    interface: &wit::Consumed,
+    resources: &[WitResource],
+) -> syn::Result<proc_macro2::TokenStream> {
+    let [ns, package, name] = hook_path(identity);
+    let module = quote! { exports::#ns::#package::#name };
+    let target = &service.ident;
+    let spelled = |spelling: &str| -> syn::Result<Type> { syn::parse_str(spelling) };
+    let signature = |function: &wit::ConsumedFunction| -> syn::Result<Signature> {
+        let mut names = Vec::new();
+        let mut params = Vec::new();
+        for (param, spelling) in &function.params {
+            let ident = format_ident!("{}", param.to_snake_case());
+            let ty = spelled(&spelling.export)?;
+            params.push(quote! { #ident: #ty });
+            names.push(ident);
+        }
+        let result = match &function.result {
+            Some(spelling) => {
+                let ty = spelled(&spelling.export)?;
+                quote! { -> #ty }
+            }
+            None => quote! {},
+        };
+        let wrap = function
+            .result
+            .as_ref()
+            .and_then(|spelling| spelling.resource.as_deref())
+            .map(|resource| format_ident!("{resource}"));
+        Ok(Signature {
+            names,
+            params,
+            result,
+            wrap,
+        })
+    };
+    let wrapped = |wrap: &Option<Ident>, call: proc_macro2::TokenStream| match wrap {
+        Some(resource) => quote! { #module::#resource::new(#call) },
+        None => call,
+    };
+    let mut functions = Vec::new();
+    for function in &interface.functions {
+        let ident = format_ident!("{}", function.name.to_snake_case());
+        let Signature {
+            names,
+            params,
+            result,
+            wrap,
+        } = signature(function)?;
+        let body = wrapped(&wrap, quote! { #target::#ident(#(#names),*) });
+        functions.push(quote! { fn #ident(#(#params),*) #result { #body } });
+    }
+    let mut owned = Vec::new();
+    let mut implementations = Vec::new();
+    for resource in &interface.resources {
+        let ident = format_ident!("{}", resource.name.to_upper_camel_case());
+        let Some(implementation) = resources.iter().find(|candidate| {
+            candidate.ident == ident && candidate.service.as_ref() == Some(&service.ident)
+        }) else {
+            continue;
+        };
+        let struct_ident = &implementation.ident;
+        owned.push(quote! { type #ident = #struct_ident; });
+        let guest = format_ident!("Guest{}", ident);
+        let constructor = match &resource.constructor {
+            Some(params) => {
+                let Signature { names, params, .. } = signature(&wit::ConsumedFunction {
+                    name: "new".into(),
+                    params: params
+                        .iter()
+                        .map(|(name, spelling)| {
+                            (
+                                name.clone(),
+                                wit::Spelled {
+                                    import: spelling.import.clone(),
+                                    export: spelling.export.clone(),
+                                    resource: spelling.resource.clone(),
+                                },
+                            )
+                        })
+                        .collect(),
+                    result: None,
+                })?;
+                quote! { fn new(#(#params),*) -> Self { #struct_ident::new(#(#names),*) } }
+            }
+            None => quote! {},
+        };
+        let mut members = Vec::new();
+        for method in &resource.methods {
+            let name = format_ident!("{}", method.name.to_snake_case());
+            let Signature {
+                names,
+                params,
+                result,
+                wrap,
+            } = signature(method)?;
+            let body = wrapped(&wrap, quote! { #struct_ident::#name(self, #(#names),*) });
+            members.push(quote! { fn #name(&self, #(#params),*) #result { #body } });
+        }
+        for function in &resource.statics {
+            let name = format_ident!("{}", function.name.to_snake_case());
+            let Signature {
+                names,
+                params,
+                result,
+                wrap,
+            } = signature(function)?;
+            let body = wrapped(&wrap, quote! { #struct_ident::#name(#(#names),*) });
+            members.push(quote! { fn #name(#(#params),*) #result { #body } });
+        }
+        implementations.push(quote! {
+            impl #module::#guest for #struct_ident {
+                #constructor
+                #(#members)*
+            }
+        });
+    }
+    Ok(quote! {
+        impl #module::Guest for __TembraExports {
+            #(#owned)*
+            #(#functions)*
+        }
+        #(#implementations)*
+    })
+}
+
+/// Keep, in module order, the candidate types that a derived service's method or a resource's
+/// function reaches; the others go back to the module as ordinary Rust. A reference to a type the
+/// module does not declare is an error; a resource is a type of its own.
 fn reachable(
     candidates: Vec<(Item, Shape)>,
     services: &[Service],
-    states: &[State],
+    resources: &[WitResource],
     passthrough: &mut Vec<Item>,
 ) -> syn::Result<Vec<Shape>> {
     let declared: BTreeMap<String, usize> = candidates
@@ -758,19 +1390,36 @@ fn reachable(
         .enumerate()
         .map(|(index, (_, shape))| (shape.ident.to_string(), index))
         .collect();
-    let mut pending: Vec<Ident> = states.iter().map(|state| state.ident.clone()).collect();
-    for service in services {
+    let mut pending: Vec<Ident> = Vec::new();
+    let mention = |function: &Function, pending: &mut Vec<Ident>| {
+        for (_, ty, _) in &function.params {
+            wit::references(ty, pending);
+        }
+        if let Some((ty, _)) = &function.result {
+            wit::references(ty, pending);
+        }
+    };
+    for service in services
+        .iter()
+        .filter(|service| service.implements.is_none())
+    {
         for function in &service.functions {
-            for (_, ty, _) in &function.params {
-                wit::references(ty, &mut pending);
-            }
-            if let Some((ty, _)) = &function.result {
-                wit::references(ty, &mut pending);
-            }
+            mention(function, &mut pending);
+        }
+    }
+    for resource in resources {
+        for (_, ty, _) in resource.constructor.iter().flatten() {
+            wit::references(ty, &mut pending);
+        }
+        for function in resource.methods.iter().chain(&resource.statics) {
+            mention(function, &mut pending);
         }
     }
     let mut kept = BTreeSet::new();
     while let Some(ident) = pending.pop() {
+        if resources.iter().any(|resource| resource.ident == ident) {
+            continue;
+        }
         let Some(&index) = declared.get(&ident.to_string()) else {
             return Err(syn::Error::new(
                 ident.span(),
@@ -990,11 +1639,7 @@ fn declaration_code(
             })
         })
         .collect::<syn::Result<Vec<_>>>()?;
-    // The bindings spell strings and lists from `alloc`; the module may not name that crate.
-    Ok(quote! {
-        extern crate alloc as __tembra_alloc;
-        #(#items)*
-    })
+    Ok(quote! { #(#items)* })
 }
 
 /// Whether a type is `Result<(), String>`, the answer of a state's validator.
@@ -1054,18 +1699,18 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
         service,
         version,
         validate: false,
+        identity: String::new(),
     })
 }
 
 /// The Rust side of the states: the kernel's `state-init` callback answering one declaration per
 /// owning service, the accessors on each state type, and the JSON helpers they share.
-fn state_code(states: &[State], package: &str) -> proc_macro2::TokenStream {
+fn state_code(states: &[State]) -> proc_macro2::TokenStream {
     if states.is_empty() {
         return quote! {};
     }
     let declarations = states.iter().map(|state| {
-        let service = state.service.as_ref().expect("resolved owner");
-        let identity = LitStr::new(&identity(package, &wit::kebab(service)), Span::call_site());
+        let identity = LitStr::new(&state.identity, Span::call_site());
         let ident = &state.ident;
         let version = state.version;
         let validated = state.validate;
@@ -1080,8 +1725,7 @@ fn state_code(states: &[State], package: &str) -> proc_macro2::TokenStream {
     // On reload the kernel hands the new instance the value it inherits; a validated state
     // answers with its validator, any other state accepts.
     let validators = states.iter().filter(|state| state.validate).map(|state| {
-        let service = state.service.as_ref().expect("resolved owner");
-        let identity = LitStr::new(&identity(package, &wit::kebab(service)), Span::call_site());
+        let identity = LitStr::new(&state.identity, Span::call_site());
         let ident = &state.ident;
         let name = LitStr::new(&state.ident.to_string(), Span::call_site());
         quote! {
