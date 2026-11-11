@@ -242,6 +242,12 @@ impl Orb {
         }
     }
 
+    /// Inspect this Orb's declared services, signatures and requirements without installing it
+    /// or running factories. Executable callbacks remain private.
+    pub fn declaration(&self) -> &core::Orb {
+        &self.metadata
+    }
+
     /// Add an explicit versioned orb dependency.
     pub fn requires(mut self, requirement: core::Requirement) -> Self {
         self.metadata.requires.push(requirement);

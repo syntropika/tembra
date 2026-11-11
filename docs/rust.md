@@ -25,6 +25,13 @@ Local invocation still passes native values without serializing them.
 `local_method()` accepts types without those portable traits and refuses every portable call
 before entering the callback; use it for host-owned values such as streaming HTTP bodies.
 
+`orb.declaration()` borrows its `core::Orb` metadata before installation. The `services`
+list exposes each service's `name`, `methods` and optional canonical `signature`, so consumers
+can check a required service and compare its declared signature with the expected contract.
+Inspection does not install the Orb, execute factories or call methods; callbacks remain private.
+Read descriptor values through an ordinary method call after installation. `api_version` is
+the API contract version and remains separate from the consumer's distribution version.
+
 ## Execute and close
 
 The application supplies a `LocalSpawn` executor, such as `LocalPool::spawner()`.

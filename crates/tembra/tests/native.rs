@@ -3,6 +3,61 @@ use std::{cell::Cell, rc::Rc};
 use tembra::{Error, Host, Orb, Service};
 
 #[test]
+fn inspecting_an_orb_exposes_service_signatures_without_installing_or_executing_it() {
+    const SERVICE: &str = "example:metadata/descriptor@1.0.0";
+    const SIGNATURE: &str = "expected-descriptor-signature";
+    let mut executor = LocalPool::new();
+    let host = Host::new(executor.spawner());
+    let orb_factories = Rc::new(Cell::new(0));
+    let service_factories = Rc::new(Cell::new(0));
+    let callbacks = Rc::new(Cell::new(0));
+    let orb = Orb::new("native-metadata", 7)
+        .create({
+            let factories = orb_factories.clone();
+            move |_| {
+                factories.set(factories.get() + 1);
+                Ok(())
+            }
+        })
+        .service(
+            Service::new(SERVICE, {
+                let factories = service_factories.clone();
+                move |_| {
+                    factories.set(factories.get() + 1);
+                    Ok(())
+                }
+            })
+            .signature(Some(SIGNATURE.into()))
+            .method("describe", {
+                let callbacks = callbacks.clone();
+                move |_, _, (): ()| {
+                    callbacks.set(callbacks.get() + 1);
+                    async { Ok("descriptor values require a call") }
+                }
+            }),
+        );
+
+    let declaration: &tembra::core::Orb = orb.declaration();
+    assert!(std::ptr::eq(declaration, orb.declaration()));
+    assert_eq!(declaration.name, "native-metadata");
+    assert_eq!(declaration.api_version, 7);
+    let descriptor = declaration
+        .services
+        .iter()
+        .find(|service| service.name == SERVICE)
+        .expect("the required descriptor service is declared");
+    assert_eq!(descriptor.signature.as_deref(), Some(SIGNATURE));
+    assert!(descriptor.methods.contains("describe"));
+    executor.run_until_stalled();
+    assert!(host.kernel().installed_orbs().is_empty());
+    assert_eq!(orb_factories.get(), 0);
+    assert_eq!(service_factories.get(), 0);
+    assert_eq!(callbacks.get(), 0);
+    drop(orb);
+    executor.run_until(host.close()).unwrap();
+}
+
+#[test]
 fn native_typed_values_validation_and_cleanup() {
     let mut executor = LocalPool::new();
     let host = Host::new(executor.spawner());
