@@ -278,7 +278,7 @@ await host.load(artifacts[0]!.path, {
 });
 ```
 
-Rust packaging uses `tembra_executor_wasm::ComponentRoles` as the last argument to
+Rust packaging uses `tembra::wasm::ComponentRoles` as the last argument to
 `Contract::component_artifact`, with the same `references` mapping and optional `contributions`.
 
 The official WIT bindings expose acquisition and methods directly inside the compiled guest:
@@ -320,7 +320,7 @@ await host.load("dist/tembra/calculator/orb.<sha256>.wasm", {
 });
 ```
 
-Rust hosts use `tembra_executor_wasm::Engine::load`. See the
+Rust hosts use `tembra::wasm::Engine::load`. See the
 [Wasm orb example](../examples/wasm-orb/README.md) and
 [Wasm orb execution](../crates/executor-wasm/README.md).
 

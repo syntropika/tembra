@@ -1,9 +1,10 @@
 # Wasm Orb execution
 
-`tembra-executor-wasm` turns a built Orb artifact into an ordinary `tembra::Orb`.
+Applications enable `tembra`'s `wasm` feature and use `tembra::wasm` to turn a built
+Orb artifact into an ordinary `tembra::Orb`. This backend crate implements that facade.
 The existing Tembra host and kernel own admission, principals, versions, state,
 resources, replacement and physical settlement. This crate only executes
-callbacks, in Wasmtime. It is not published.
+callbacks, in Wasmtime. Native-only applications do not depend on this backend.
 
 An artifact is one immutable `.wasm` file with a prepared WIT contract and an Orb identity.
 It contains either:
@@ -30,7 +31,7 @@ flowchart LR
 
 ```rust,ignore
 use tembra::Host;
-use tembra_executor_wasm::{Engine, Install, Limits};
+use tembra::wasm::{Engine, Install, Limits};
 
 let engine = Engine::new(Limits::default())?
     // Needed only for source Orbs. Compiled components run without it.
@@ -58,7 +59,7 @@ host, not by the guest.
 A complete example is [examples/rust/wasm.rs](../../examples/rust/wasm.rs):
 
 ```sh
-cargo run --locked -p tembra-executor-wasm --example wasm -- \
+cargo run --locked -p tembra --features wasm --example wasm -- \
   <interpreter.wasm> <calculator.wasm> <arithmetic.wasm>
 ```
 
@@ -249,7 +250,7 @@ completes their unit WASI result and drops the upstream timer; the cancelled sco
 revoked, and the instance can serve a later call.
 
 Compiled Orbs exporting exactly `wasi:http/handler@0.3.0` serve incoming HTTP through the
-native Rust facade `tembra_executor_wasm::ingress::serve`. The application owns the
+native Rust facade `tembra::wasm::ingress::serve`. The application owns the
 listener, authentication and routing; `serve` runs each request under its own root until
 the call has physically ended and returns the head while the body still streams. A
 handler-only Orb needs no grant; `wasi:http/client` still requires an HTTP grant. The

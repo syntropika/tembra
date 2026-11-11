@@ -28,7 +28,7 @@ bindgen = ["uniffi/cli"]
 tembra-bridge.workspace = true
 tembra-executor-wasm = { path = "../executor-wasm" }
 tembra-contracts.workspace = true
-tembra = { path = "../tembra" }
+tembra = { package = "tembra-runtime", path = "../runtime", version = "=0.2.2" }
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true

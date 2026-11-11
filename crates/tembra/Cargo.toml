@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Managed Rust orbs and native execution for Tembra"
+description = "Typed Rust orbs and optional isolated WebAssembly execution for Tembra"
 
 [[example]]
 name = "counter"
@@ -37,20 +37,32 @@ name = "rpc"
 path = "../../examples/rust/rpc.rs"
 required-features = ["rpc", "views"]
 
+[[example]]
+name = "wasm"
+path = "../../examples/rust/wasm.rs"
+required-features = ["wasm"]
+
 [features]
 default = []
-rpc = []
-hooks = ["tembra-core/hooks"]
-subscriptions = ["tembra-core/subscriptions"]
-views = ["tembra-core/views"]
-telemetry = ["tembra-core/telemetry"]
+# Native Wasmtime execution is optional and never compiled into the browser target.
+wasm = ["dep:tembra-executor-wasm"]
+rpc = ["tembra-runtime/rpc"]
+hooks = ["tembra-runtime/hooks"]
+subscriptions = ["tembra-runtime/subscriptions"]
+views = ["tembra-runtime/views"]
+telemetry = ["tembra-runtime/telemetry"]
 
 [dependencies]
-tembra-core.workspace = true
+tembra-runtime.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2", optional = true }
+
+[dev-dependencies]
+futures-timer = "3"
 futures.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
-futures-timer = "3"
 
 [lints]
 workspace = true

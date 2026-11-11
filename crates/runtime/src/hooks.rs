@@ -50,7 +50,7 @@ pub(crate) struct Contribution {
 /// Rust values remain local unless a participant belongs to another language.
 ///
 /// ```
-/// use tembra::{Hook, Orb};
+/// use tembra_runtime::{Hook, Orb};
 /// let transform = Hook::<String, String>::waterfall("transform");
 /// let provider = Orb::new("text", 1).hook(transform);
 /// # let _ = provider;
@@ -143,7 +143,7 @@ impl<A: Serialize + DeserializeOwned + 'static> Hook<A, A> {
     ///
     /// ```
     /// use futures::{FutureExt, executor::LocalPool};
-    /// use tembra::{Hook, Host, Orb, Service, core::Requirement};
+    /// use tembra_runtime::{Hook, Host, Orb, Service, core::Requirement};
     ///
     /// let mut pool = LocalPool::new();
     /// let host = Host::new(pool.spawner());

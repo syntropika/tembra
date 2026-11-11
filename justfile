@@ -124,7 +124,7 @@ test-wasm-acceptance *args:
 
 # Verify native hook lifecycle contracts across the core, facade and Wasm executor.
 test-hook-lifecycle: build-node build-wasm build-sdk
-    cargo test --locked -p tembra-core -p tembra -p tembra-executor-wasm --all-features
+    cargo test --locked -p tembra-core -p tembra-runtime -p tembra -p tembra-executor-wasm --all-features
 
 # Exchange actual SDK RPC frames with a native Rust provider over application-owned bytes.
 test-native-rpc:

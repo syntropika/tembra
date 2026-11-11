@@ -111,7 +111,7 @@ pub struct Connection(Rc<Inner>);
 ///
 /// ```
 /// use futures::executor::LocalPool;
-/// use tembra::{Host, rpc::{serve, Options}};
+/// use tembra_runtime::{Host, rpc::{serve, Options}};
 /// let mut executor = LocalPool::new();
 /// let host = Host::new(executor.spawner());
 /// let channel = serve(host.clone(), Options::new("reader".into(), |_, _| false), |_| Ok(()));

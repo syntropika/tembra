@@ -42,5 +42,5 @@ Rust `State<T>` uses checked updates and returns `Rc<T>` snapshots.
 The validator belongs to the Rust service.
 The Rust wrapper does not expose the SDK's selector and observer helpers.
 
-See [native state](../crates/tembra/src/state.rs), [SDK state](../packages/ts/sdk/src/state/binding.ts)
+See [native state](../crates/runtime/src/state.rs), [SDK state](../packages/ts/sdk/src/state/binding.ts)
 and [state migration](updates.md).

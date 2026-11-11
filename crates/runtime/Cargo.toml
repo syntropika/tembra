@@ -1,0 +1,26 @@
+[package]
+name = "tembra-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared Rust host implementation for Tembra"
+
+[features]
+default = []
+rpc = []
+hooks = ["tembra-core/hooks"]
+subscriptions = ["tembra-core/subscriptions"]
+views = ["tembra-core/views"]
+telemetry = ["tembra-core/telemetry"]
+
+[dependencies]
+tembra-core.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+futures-timer = "3"
+
+[lints]
+workspace = true

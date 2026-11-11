@@ -7,20 +7,7 @@ use wit_parser::{Resolve, UnresolvedPackage};
 pub(crate) fn resolve() -> Result<(Resolve, Vec<UnresolvedPackage>), Error> {
     let mut resolve = Resolve::default();
     let mut known = Vec::new();
-    for (name, source) in [
-        ("wasi-clocks.wit", include_str!("../wit/wasi03/clocks.wit")),
-        ("wasi-random.wit", include_str!("../wit/wasi03/random.wit")),
-        (
-            "wasi-filesystem.wit",
-            include_str!("../wit/wasi03/filesystem.wit"),
-        ),
-        (
-            "wasi-sockets.wit",
-            include_str!("../wit/wasi03/sockets.wit"),
-        ),
-        ("wasi-cli.wit", include_str!("../wit/wasi03/cli.wit")),
-        ("wasi-http.wit", include_str!("../wit/wasi03/http.wit")),
-    ] {
+    for &(name, source) in crate::WASI_SOURCES {
         let group = crate::authoring::parse_source(name, source)?;
         known.push(group.main.clone());
         known.extend(group.nested.iter().cloned());

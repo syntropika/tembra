@@ -6,14 +6,10 @@ use wit_parser::Resolve;
 mod codegen;
 
 fn main() {
-    let wit = PathBuf::from("../contracts/wit/wasi03");
     let mut resolve = Resolve::default();
-    for name in ["clocks", "random", "filesystem", "sockets", "cli", "http"] {
-        let path = wit.join(format!("{name}.wit"));
-        println!("cargo:rerun-if-changed={}", path.display());
-        let source = std::fs::read_to_string(&path).expect("bundled WASI WIT");
+    for &(name, source) in tembra_contracts::WASI_SOURCES {
         resolve
-            .push_str(&path, &source)
+            .push_str(name, source)
             .expect("bundled WASI WIT resolves");
     }
     println!("cargo:rerun-if-changed=build.rs");

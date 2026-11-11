@@ -3,7 +3,9 @@ use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
 use tembra::Host;
-use tembra_executor_wasm::{Engine, Install, Limits};
+use tembra::wasm::{Engine, Install, Limits};
+
+mod orb;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args_os().skip(1);
@@ -24,13 +26,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arithmetic = engine.load(&std::fs::read(provider_file)?, Install::default())?;
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
-    host.install(vec![arithmetic, calculator])?;
+    host.install(vec![orb::counter(), arithmetic, calculator])?;
     let reference = Rc::new(host.get(
         "calculator::example:integrated/calculation@1.0.0",
         vec!["main".into()],
         "example",
     )?);
     pool.run_until(reference.ready())?;
+    let native = Rc::new(host.get(orb::COUNTER, vec!["main".into()], "example")?);
+    pool.run_until(native.ready())?;
+    let counter = native.clone();
+    pool.run_until(host.root("example", move |context| {
+        async move {
+            counter.call::<_, u32>(&context, orb::SET, 12_u32).await?;
+            let count: u32 = counter.call(&context, orb::READ, ()).await?;
+            assert_eq!(count, 12);
+            Ok(())
+        }
+        .boxed_local()
+    }))?;
     let called = reference.clone();
     let result: Value = pool.run_until(host.root("example", move |context| {
         async move {
@@ -42,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }))?;
     println!("{result}");
     reference.release()?;
+    native.release()?;
     pool.run_until(host.close())?;
     assert_eq!(engine.instances(), 0);
     Ok(())

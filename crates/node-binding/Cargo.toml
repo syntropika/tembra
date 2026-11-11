@@ -27,7 +27,7 @@ napi-derive = "=3.6.12"
 tembra-bridge.workspace = true
 tembra-contracts.workspace = true
 tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2" }
-tembra = { path = "../tembra", version = "=0.2.2" }
+tembra = { package = "tembra-runtime", path = "../runtime", version = "=0.2.2" }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 # Browser component preparation (build time only): exact component import names and

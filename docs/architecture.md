@@ -9,7 +9,8 @@ The engine decides when those callbacks can run.
 | Crate                                                        | Responsibility                                                                                                      |
 | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | [tembra-core](../crates/core/src/lib.rs)                     | Own identities, references, call versions, state revisions and lifecycle order. It has no third-party dependencies. |
-| [tembra](../crates/tembra/src/lib.rs)                        | Declare native Rust services. Keep typed values and run callbacks on an application executor.                       |
+| [tembra](../crates/tembra/src/lib.rs)                        | Present the Rust consumer facade; reexport the native host and optional Wasm execution.                             |
+| [tembra-runtime](../crates/runtime/src/lib.rs)               | Implement typed Rust values, host lifecycle and callbacks on the application executor.                              |
 | [tembra-bridge](../crates/bridge/src/lib.rs)                 | Define typed kernel commands and results; generate platform bindings from the Rust command table.                   |
 | [tembra-node-binding](../crates/node-binding/src/lib.rs)     | Expose the bridge through Node-API as `NodeKernel`.                                                                 |
 | [tembra-browser-wasm](../crates/browser-wasm/src/lib.rs)     | Expose the bridge through WASM as `WasmKernel`.                                                                     |

@@ -24,6 +24,7 @@ mod selection;
 mod signatures;
 #[cfg(feature = "authoring")]
 mod standard;
+mod standard_sources;
 mod validate;
 
 pub use artifact::{
@@ -45,6 +46,8 @@ pub use port::envelope;
 pub use references::ReferenceBinding;
 pub use resource_profile::ResourceSignature;
 pub use selection::OrbProvider;
+#[doc(hidden)]
+pub use standard_sources::WASI_SOURCES;
 pub use validate::javascript_name;
 
 /// A diagnostic produced before an Orb enters the kernel.

@@ -91,5 +91,5 @@ Run `just test-native-rpc` for actual Rust/SDK byte conformance.
 `coordinate()` prepares direct participants and decides commit or abort in memory.
 It does not persist that decision or provide a durable distributed transaction.
 
-See [Rust codec](../crates/tembra/src/codec.rs), [SDK codecs](../packages/ts/sdk/src/codecs/json.ts)
+See [Rust codec](../crates/runtime/src/codec.rs), [SDK codecs](../packages/ts/sdk/src/codecs/json.ts)
 and [RPC transport](../packages/ts/sdk/src/infrastructure/rpc/channel.ts).

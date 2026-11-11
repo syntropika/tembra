@@ -1,7 +1,17 @@
 # Rust
 
-Use the `tembra` crate to declare and run native orbs.
-It shares the ownership engine from `tembra-core`.
+Use one `tembra` dependency to declare and run native Rust Orbs and load isolated Wasm Orbs.
+The default build contains the native host only; it does not compile Wasmtime, TLS or WIT tooling.
+
+```toml
+[dependencies]
+tembra = "0.2.2"
+```
+
+Enable `features = ["wasm"]` to expose `tembra::wasm` on native targets. Other optional features
+(`hooks`, `subscriptions`, `views`, `telemetry` and `rpc`) configure the same shared host.
+The browser target keeps the native host lean even when workspace features are enabled;
+browser applications execute isolated Orbs through the TypeScript SDK.
 
 ## Declare an orb
 
@@ -63,15 +73,20 @@ Run these from the repository root:
 
 `just examples` runs these and the hook/composition examples below.
 
-See [native declarations](../crates/tembra/src/orb.rs).
+See [native declarations](../crates/runtime/src/orb.rs).
 
 ## Isolated orbs
 
 Native Rust orbs are trusted application code. To run TypeScript or a compiled component in
-WebAssembly, build it into a `.wasm` artifact and load it with `tembra-executor-wasm`:
+WebAssembly, enable the optional backend and load a built `.wasm` artifact:
+
+```toml
+[dependencies]
+tembra = { version = "0.2.2", features = ["wasm"] }
+```
 
 ```rust,ignore
-use tembra_executor_wasm::{Engine, Install, Limits};
+use tembra::wasm::{Engine, Install, Limits};
 
 let engine = Engine::new(Limits::default())?
     .interpreter(&interpreter_bytes)? // only for TypeScript source orbs
@@ -84,7 +99,9 @@ host.install(vec![orb])?;
 `Engine::load` returns an ordinary `Orb`. It installs, reloads and closes like a native orb and can
 call or provide services through the same kernel. Each loaded orb runs in its own Wasm Store.
 See [Wasm orb execution](../crates/executor-wasm/README.md) and
-[the Wasm consumer example](../examples/rust/wasm.rs).
+[the mixed native/Wasm consumer example](../examples/rust/wasm.rs). It installs a native counter,
+a source Orb and a compiled component in one host. Backend values are reexports of the same
+implementation types; the facade adds no serialization, wrapper runtime or dispatch step.
 
 ## Serve incoming HTTP
 
@@ -93,7 +110,7 @@ owns its listener, authentication and routing, then passes each request to the i
 
 ```rust,ignore
 use std::rc::Rc;
-use tembra_executor_wasm::ingress::{handler_service, serve};
+use tembra::wasm::ingress::{handler_service, serve};
 
 let reference = Rc::new(host.get(&handler_service("web"), vec!["main".into()], "authenticated-user")?);
 reference.ready().await?;
@@ -460,7 +477,7 @@ shared orb data and reference-bound selected state.
 | Foreign service calls preserving an entered context                 | Explicit `call_portable`; local `call` keeps its original trait requirements                                                                  |
 | Synchronous Rust views of Wasm-owned state                          | Not exposed; foreign data can be returned through portable methods                                                                            |
 | Arbitrary hook policies, including parallel and middleware          | Available to trusted TypeScript orbs; the native authoring surface supplies the four typed compositions above                                 |
-| TypeScript and compiled Wasm orbs                                   | Loaded through `tembra-executor-wasm` as ordinary `Orb` values                                                                                |
+| TypeScript and compiled Wasm orbs                                   | Loaded through `tembra::wasm` as ordinary `Orb` values                                                                                        |
 | Native replacement                                                  | `Host::reload` accepts new native or loaded Wasm declarations; state migration and exclusive replacement resources remain outside this facade |
 | RPC, multi-host routing, bundling and loading                       | Separate infrastructure; unchanged by native authoring support                                                                                |
 

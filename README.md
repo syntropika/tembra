@@ -26,7 +26,7 @@ the same lifecycle.
 | Directory                                              | Contents                                                          |
 | ------------------------------------------------------ | ----------------------------------------------------------------- |
 | [crates/core/](crates/core/)                           | Shared Rust engine for ownership, state revisions and orb updates |
-| [crates/tembra/](crates/tembra/)                       | Rust interface for declaring and running orbs                     |
+| [crates/tembra/](crates/tembra/)                       | Single Rust facade for native and isolated Wasm orbs              |
 | [crates/bridge/](crates/bridge/)                       | Communication between the engine and its platform integrations    |
 | [crates/contracts/](crates/contracts/)                 | WIT contracts, orb artifacts and installation grants              |
 | [crates/executor-wasm/](crates/executor-wasm/)         | Runs orb artifacts in Wasmtime for Rust hosts                     |

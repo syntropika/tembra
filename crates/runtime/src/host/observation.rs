@@ -42,7 +42,7 @@ impl<A: 'static> crate::HookHandle<A, ()> {
     ///
     /// ```
     /// use futures::{FutureExt, executor::LocalPool};
-    /// use tembra::{Code, Hook, Host, Orb, Service};
+    /// use tembra_runtime::{Code, Hook, Host, Orb, Service};
     ///
     /// let mut pool = LocalPool::new();
     /// let host = Host::new(pool.spawner());
@@ -72,7 +72,7 @@ impl<A: 'static> crate::HookHandle<A, ()> {
     /// pool.run_until(host.close())?;
     /// assert_eq!(host.kernel().diagnostics().roots, 0);
     /// assert_eq!(host.kernel().diagnostics().calls, 0);
-    /// # Ok::<(), tembra::Error>(())
+    /// # Ok::<(), tembra_runtime::Error>(())
     /// ```
     pub async fn observe(&self, source: &Context, input: A) -> Result<()> {
         if !self.host.same(&source.host) {

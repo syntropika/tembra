@@ -1,29 +1,11 @@
-//! Managed Rust orbs over the language-neutral Tembra kernel.
-mod clock;
-pub mod codec;
-#[cfg(feature = "hooks")]
-mod hooks;
-mod host;
-mod orb;
-pub mod portable;
-mod state;
-pub use clock::Clock;
-#[cfg(feature = "subscriptions")]
-mod events;
-mod readable;
-#[cfg(feature = "rpc")]
-pub mod rpc;
-#[cfg(feature = "subscriptions")]
-pub use events::{Detach, EventHandler, EventOptions, EventSource};
-pub use readable::{Observation, Readable};
+//! Declare, install and call Rust and isolated WebAssembly Orbs through one crate.
+//!
+//! Native Orbs need no optional features. Enable `wasm` on native targets for
+//! `wasm::Engine`, which loads isolated Orbs as the same [`Orb`] type.
+//! Browser applications use the TypeScript SDK and its WebAssembly host adapter.
 
-#[cfg(feature = "hooks")]
-pub use hooks::{Hook, HookHandle};
-pub use host::{
-    AcquisitionOptions, Cancellation, Context, Declaration, ForeignNotification, Host, IssuedCall,
-    Reference, Resource, ResourceKey, ResourceSignal, TaskScope,
-};
-pub use orb::{Orb, Service};
-pub use state::State;
-pub use tembra_core as core;
-pub use tembra_core::{Code, Error, Result};
+pub use tembra_runtime::*;
+
+/// Isolated WebAssembly execution, providers and prepared WIT contracts.
+#[cfg(all(feature = "wasm", not(target_arch = "wasm32")))]
+pub use tembra_executor_wasm as wasm;

@@ -16,10 +16,13 @@ The workflow publishes these npm packages in dependency order:
 - `@syntropika/tembra-react-native`: Swift sources and an XCFramework for iOS, simulators and macOS;
   an Android Maven package containing arm64-v8a, armeabi-v7a, x86 and x86_64 libraries.
 
-The publishable Rust workspace crates are `tembra-core`, `tembra-bridge`, `tembra`,
-`tembra-browser-wasm`, `tembra-contracts` and `tembra-mobile`. `tembra-node-binding` is private implementation
-code distributed through npm. `tembra-executor-wasm` and `tembra-contracts-wasm` are not published. All local Rust dependencies
-have exact registry versions as well as local paths.
+The publishable Rust workspace crates are `tembra-core`, `tembra-bridge`, `tembra-runtime`, `tembra`,
+`tembra-browser-wasm`, `tembra-contracts` and `tembra-executor-wasm`. `tembra-node-binding` and
+`tembra-mobile` are private platform implementations distributed through the Node, Swift and
+Kotlin packages. `tembra-contracts-wasm` is not published. The public `tembra` facade reexports the shared host
+from `tembra-runtime` and optionally the Wasm backend, so those dependencies must be released
+before the facade can resolve from the registry. All local dependencies of publishable Rust
+crates have exact registry versions as well as local paths.
 
 Every platform builds its Node addon and loads it with Node. The workflow also runs
 the repository quality checks, isolated orb acceptance, Swift tests and Android unit

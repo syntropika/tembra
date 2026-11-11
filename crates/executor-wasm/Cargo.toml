@@ -6,14 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Isolated WebAssembly execution over the Tembra host"
-publish = false
-
-[[example]]
-name = "wasm"
-path = "../../examples/rust/wasm.rs"
 
 [dependencies]
-tembra = { path = "../tembra", version = "=0.2.2", features = ["hooks"] }
+tembra = { package = "tembra-runtime", path = "../runtime", version = "=0.2.2", features = [
+  "hooks",
+] }
 tembra-contracts.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -69,6 +66,7 @@ webpki-roots = "1"
 url = "2.5"
 
 [build-dependencies]
+tembra-contracts = { workspace = true, default-features = false }
 sha2 = "0.10"
 wit-parser = "=0.261.0"
 
