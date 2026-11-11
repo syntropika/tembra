@@ -74,6 +74,20 @@ export interface ServiceBinding {
   signature?: string;
 }
 
+/** One checked reference-view role of a compiled artifact, keyed by its import binding. */
+export interface ReferenceBinding {
+  /** Versioned identity of the provider interface the view addresses. */
+  readonly interface: string;
+  /** Nominal identity of the view resource the importer declares. */
+  readonly resource: { readonly interface: string; readonly name: string };
+  /** Original WIT name of the acquisition function. */
+  readonly acquire: string;
+  /** Original WIT method names (`[method]R.name`) mapped to provider function names. */
+  readonly methods: Readonly<Record<string, string>>;
+  /** Interface digest of the derived provider service: the requirement signature. */
+  readonly signature: string;
+}
+
 export interface ContractPort {
   bind(binding: string, method: string, exports: boolean): number;
   /** Check exact captured JSON text through a bound slot; answers the `{ ok }`/`{ error }` envelope. */
@@ -87,6 +101,12 @@ export interface ExecutionScope {
   cancel(): void;
   sync(request: import("./host-protocol.ts").HostRequest): unknown;
   async(request: import("./host-protocol.ts").AsyncHostRequest): Promise<unknown>;
+  /** Publish a reply, rolling back an acquired reference if its observer abandoned it. */
+  deliver(
+    request: import("./host-protocol.ts").AsyncHostRequest,
+    value: unknown,
+    publish: (value: unknown) => boolean,
+  ): void;
 }
 /**
  * One exported WIT interface in the interpreter Load's function table. Each function is listed

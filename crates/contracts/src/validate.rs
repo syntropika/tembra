@@ -7,7 +7,7 @@
 //! 2^53. Every other position, including WIT strings that hold digits, is identical in both.
 use crate::{
     Error,
-    model::{Function, FunctionKind, Item, Kind, MAX_DEPTH, PreparedContract, Slot, Ty},
+    model::{Field, Function, FunctionKind, Item, Kind, MAX_DEPTH, PreparedContract, Slot, Ty},
 };
 use serde_json::Value;
 
@@ -101,25 +101,42 @@ impl PreparedContract {
         self.convert(Form::Wire, slot, arguments, value)
     }
 
-    /// Check a value in `form` and return its function.
+    /// Check a value in `form` and return its function and the parameters its arguments hold.
     fn check_slot(
         &self,
         form: Form,
         slot: u32,
         arguments: bool,
         value: &Value,
-    ) -> Result<&Function, Error> {
+    ) -> Result<(&Function, &[Field]), Error> {
         let slot = *self
             .slots()
             .get(slot as usize)
             .ok_or_else(|| Error("unknown WIT method slot".into()))?;
         let function = self.function(slot);
+        let parameters = self.data_parameters(slot, function);
         if arguments {
-            self.check_arguments(form, function, value)?;
+            self.check_arguments(form, &function.name, parameters, value)?;
         } else {
             self.check_result(form, function, value)?;
         }
-        Ok(function)
+        Ok((function, parameters))
+    }
+
+    /// The parameters a data value carries. A checked reference-view method's implicit `self`
+    /// names a host-local reference and never travels as data; every other slot keeps all of
+    /// its parameters.
+    fn data_parameters<'a>(&self, slot: Slot, function: &'a Function) -> &'a [Field] {
+        let view_method = !slot.exports
+            && matches!(
+                function.kind,
+                FunctionKind::Method(_) | FunctionKind::AsyncMethod(_)
+            )
+            && !self.references().is_empty()
+            && self
+                .references()
+                .contains_key(&self.side(false)[slot.entry as usize].key);
+        &function.params[usize::from(view_method)..]
     }
 
     /// Check a value in `from`, then respell only its 64-bit leaves in the other form. A
@@ -131,10 +148,10 @@ impl PreparedContract {
         arguments: bool,
         mut value: Value,
     ) -> Result<Value, Error> {
-        let function = self.check_slot(from, slot, arguments, &value)?;
+        let (function, parameters) = self.check_slot(from, slot, arguments, &value)?;
         if arguments {
             let values = value.as_array_mut().ok_or_else(checked)?;
-            for (parameter, value) in function.params.iter().zip(values) {
+            for (parameter, value) in parameters.iter().zip(values) {
                 self.respell(parameter.ty, value)?;
             }
         } else if let Some(ty) = function.result {
@@ -264,6 +281,11 @@ impl PreparedContract {
     }
 
     fn check_import(&self, binding: &str, streams: bool) -> Result<(), Error> {
+        if self.references().contains_key(binding) {
+            // The role check already applied the data profile to every view method, excluding
+            // `self`; the acquisition result is a host-local reference, never data.
+            return Ok(());
+        }
         let entry = self
             .model()
             .imports
@@ -360,20 +382,20 @@ impl PreparedContract {
     fn check_arguments(
         &self,
         form: Form,
-        function: &Function,
+        method: &str,
+        parameters: &[Field],
         arguments: &Value,
     ) -> Result<(), Error> {
-        let method = &function.name;
         let values = arguments
             .as_array()
             .ok_or_else(|| Error("WIT arguments must be an array".into()))?;
-        if values.len() != function.params.len() {
+        if values.len() != parameters.len() {
             return Err(Error(format!(
                 "{method}: expected {} arguments",
-                function.params.len()
+                parameters.len()
             )));
         }
-        for (parameter, value) in function.params.iter().zip(values) {
+        for (parameter, value) in parameters.iter().zip(values) {
             self.validate(form, parameter.ty, value, 0)
                 .map_err(|error| Error(format!("{method} argument {}: {error}", parameter.name)))?;
         }

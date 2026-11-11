@@ -300,7 +300,9 @@ API version and methods, uses the admitted caller's principal, and waits for rea
 References acquired this way belong to that root and are released when it ends; retaining a
 JavaScript variable does not extend their authority. Calls from another root and acquisitions
 from cleanup callbacks are refused. A declared dependency has its factory scope's lifetime
-instead. Plain compiled WIT imports still select the default `main` instance.
+instead. Plain compiled WIT imports select the default `main` instance. A compiled Orb can select
+keys through a [typed WIT reference view](tooling.md#keyed-dependency-references), with the same
+root ownership and admission rules.
 
 ## Incoming HTTP
 

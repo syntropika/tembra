@@ -43,7 +43,15 @@ fn artifact(calls_anchor: bool) -> Vec<u8> {
         .unwrap();
     Contract::from_source("hooks.wit", WIT, Some("extension"))
         .unwrap()
-        .component_artifact(&component, "guard", 1, &[(GUARD.into(), -7)].into())
+        .component_artifact(
+            &component,
+            "guard",
+            1,
+            &tembra_contracts::ComponentRoles {
+                contributions: [(GUARD.into(), -7)].into(),
+                ..Default::default()
+            },
+        )
         .unwrap()
 }
 

@@ -1328,7 +1328,8 @@ fn idle_destruction_releases_the_destructors_imports(interpreted: bool) {
 /// it has physically ended, so the importer's call completes only after the provider's call
 /// ended. The cancellation usually reaches the provider's call before it executes (observed on
 /// both engines: it never runs); if it ran first, its late owned result has no receiver and is
-/// destroyed exactly once. Either way no slot, claim, call or instance remains. The window after
+/// destroyed exactly once. If its nested ordinary import is refused after cancellation, the
+/// provider is quarantined. All three outcomes must leave no slot, claim, call or instance. The window after
 /// the host committed a slot is covered by the `ImportReply` unit tests; a provider that has
 /// definitely started is covered by
 /// `an_abandoned_started_import_is_joined_and_closes_its_late_result`.
@@ -1393,7 +1394,21 @@ fn an_abandoned_async_import_closes_its_late_result(interpreted: bool) {
     // was destroyed (none stays live), at most once.
     let ran = pace.waits.get();
     assert!(ran <= 1);
-    assert!(closed(&mut pool, &host, &store) <= u64::from(ran));
+    let checked = store.clone();
+    let count = root(&mut pool, &host, async move |context| {
+        checked
+            .call_portable::<_, u64>(&context, "closed", json!([]))
+            .await
+    });
+    match count {
+        Ok(closed) => assert!(closed <= u64::from(ran)),
+        Err(error) => {
+            // Cancellation may race the provider's nested ordinary import. That import has
+            // no WIT error lane, so the documented outcome is quarantine, not a reusable Store.
+            assert_eq!(error.reason, "wasm_executor_quarantined", "{error}");
+            assert!(error.message.contains("cancelled/call"), "{error}");
+        }
+    }
     assert_eq!(engine.resources(), 0);
     assert_eq!(host.kernel().diagnostics().references, claims);
     relay.release().unwrap();

@@ -86,6 +86,7 @@ just build-interpreter <wasi-sdk> <cache-directory> [<dquickts-checkout>]
 just build-provider <provider-target-directory>
 just build-probe <provider-target-directory>
 just build-consumer <provider-target-directory>
+just build-keyed-router <provider-target-directory>
 just build-resources <provider-target-directory>
 just build-streams <provider-target-directory>
 just build-contributor <provider-target-directory>
@@ -105,6 +106,7 @@ just test-wasm-acceptance --out <directory> \
   --provider <provider-target-directory>/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm \
   --probe <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm \
   --consumer <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm \
+  --keyed-router <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_keyed_router.wasm \
   --contributor <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm \
   --http-client <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm \
   --sockets <provider-target-directory>/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm \

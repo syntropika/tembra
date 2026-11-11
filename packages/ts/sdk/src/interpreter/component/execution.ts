@@ -19,7 +19,7 @@ import {
   type SystemProviders,
 } from "../standard-system.ts";
 import { query, type ContractPort, type InstallationPlan } from "../types.ts";
-import { dependencyImport, type ImportedFunction } from "./host.ts";
+import { dependencyImport, referenceImport, referenceView, type ImportedFunction } from "./host.ts";
 import { instantiate, requireJspi, type CoreLimits } from "./instance.ts";
 import { ComponentPort } from "./port.ts";
 import type { PreparedRecord } from "./prepared.ts";
@@ -183,7 +183,10 @@ export async function openComponent(
       }
       // `checkAdapter` admitted only Orb-bound dependency imports here.
       if (!selected) throw new Error(`Browser component execution cannot provide import ${name}`);
-      imports[name] = dependencyImport(port, name, functions(selected));
+      const view = graph.references[name];
+      imports[name] = view
+        ? referenceImport(port, name, referenceView(graph, name, view, convert))
+        : dependencyImport(port, name, functions(selected));
     }
     // One budget per instance: pages are shared by all its core modules; instantiation runs on
     // its own finite fuel, and each admitted callback is refilled to `fuel`.

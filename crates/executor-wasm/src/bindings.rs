@@ -18,7 +18,7 @@ use tembra::{
 mod operations;
 mod resources;
 mod streams;
-pub(crate) use resources::{Delivery, Roles};
+pub(crate) use resources::{Delivery, Roles, nominal};
 pub(crate) use streams::pump;
 
 #[derive(Clone)]
@@ -34,6 +34,8 @@ pub(crate) struct Import {
     pub methods: BTreeMap<String, BoundMethod>,
     /// The installed requirement's API version and methods, applied to runtime acquisition.
     pub requirement: Option<AcquisitionOptions>,
+    /// A local WIT reference view; its receiver selects a root-owned kernel claim.
+    pub reference: Option<tembra::portable::Nominal>,
 }
 pub(crate) struct BoundMethod {
     pub name: String,
@@ -60,6 +62,11 @@ enum Claim {
         reference: Weak<Reference>,
         root: tembra::core::Id,
     },
+    /// A compiled WIT view, filed in the Store's shared Orb table but usable only by its root.
+    View {
+        reference: Weak<Reference>,
+        root: tembra::core::Id,
+    },
     /// An imported WIT resource returned to this table: the slot owns the handle until the guest
     /// drops it or the environment is released. Calls clone the `Rc` before awaiting, so a drop
     /// during a call takes effect when that call has physically finished.
@@ -69,20 +76,33 @@ enum Claim {
 impl Claim {
     /// A root claim whose root has ended no longer names a reference.
     fn expired(&self) -> bool {
-        matches!(self, Self::Root { reference, .. } if reference.strong_count() == 0)
+        matches!(self, Self::Root { reference, .. } | Self::View { reference, .. } if reference.strong_count() == 0)
     }
 }
 
 struct Handles {
     session: Session,
     environment: u64,
-    /// The Orb root table of a service environment: it holds this revision's owned imports.
+    /// The Orb table of a service environment: it holds Store-local imported handles and views.
     root: Option<Weak<Handles>>,
     next: Cell<u32>,
     states: RefCell<BTreeMap<u32, State<Value>>>,
     references: RefCell<BTreeMap<u32, ReferenceHandle>>,
     resources: RefCell<BTreeMap<u32, Resource<u32>>>,
     hooks: RefCell<BTreeMap<u32, BoundHook>>,
+}
+
+impl Handles {
+    /// Allocate a handle that is meaningful only inside this environment's host table.
+    fn allocate(&self) -> Result<u32> {
+        let id = self
+            .next
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| failure("scope handle space exhausted"))?;
+        self.next.set(id);
+        Ok(id)
+    }
 }
 
 impl Drop for Handles {
@@ -289,18 +309,6 @@ impl Environment {
             Scope::Open(signal) => signal.check(),
             Scope::Declaration(_) | Scope::Validation => Ok(()),
         }
-    }
-
-    /// Allocate a handle that is meaningful only inside this environment's host table.
-    fn allocate(&self) -> Result<u32> {
-        let id = self
-            .handles
-            .next
-            .get()
-            .checked_add(1)
-            .ok_or_else(|| failure("scope handle space exhausted"))?;
-        self.handles.next.set(id);
-        Ok(id)
     }
 
     /// Require the host's live invocation rather than a guest-provided root identifier.

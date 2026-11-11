@@ -64,7 +64,7 @@ impl Environment {
                         Ok(())
                     })?;
                 }
-                let id = self.allocate()?;
+                let id = self.handles.allocate()?;
                 self.handles.states.borrow_mut().insert(id, state);
                 encode(&id)
             }
@@ -124,7 +124,7 @@ impl Environment {
                         binding.slot,
                     ),
                 };
-                let id = self.allocate()?;
+                let id = self.handles.allocate()?;
                 self.handles.hooks.borrow_mut().insert(id, handle);
                 encode(&id)
             }
@@ -134,7 +134,7 @@ impl Environment {
                     .get(&service)
                     .ok_or_else(|| failure("reference is not a selected WIT Orb import"))?;
                 let reference = Self::declaration(scope)?.get(&binding.service, key)?;
-                let id = self.allocate()?;
+                let id = self.handles.allocate()?;
                 self.handles.references.borrow_mut().insert(
                     id,
                     ReferenceHandle {
@@ -145,10 +145,9 @@ impl Environment {
                 encode(&id)
             }
             Request::ReferenceRelease { scope: owner, id } => {
-                // A compiled guest's dropped import is an owned slot of the Orb root table. That
-                // table's ids are never reused, so an owned slot and a declared reference never
-                // share a number; only a source guest releases declared references this way.
-                if !self.release_owned(owner, id)? {
+                // A compiled guest drops imported handles and views in the Orb table. Its
+                // never-reused ids cannot accidentally name a factory-declared reference.
+                if !self.release_import(owner, id)? {
                     self.reference(scope, owner, id)?.0.release()?;
                 }
                 Ok(Value::Null)
@@ -269,7 +268,7 @@ impl Environment {
                 .boxed_local()
             },
         )?;
-        let id = self.allocate()?;
+        let id = self.handles.allocate()?;
         self.handles.resources.borrow_mut().insert(id, resource);
         encode(&id)
     }
@@ -300,6 +299,9 @@ impl Environment {
         }
         if stream {
             return Err(failure("a stream carrier carries only an import call"));
+        }
+        if let AsyncRequest::ReferenceAcquire { service, key } = request {
+            return self.acquire(scope, &service, key).await;
         }
         let value = match request {
             AsyncRequest::HookRun {
@@ -340,9 +342,7 @@ impl Environment {
                     futures::future::Either::Right(_) => Err(failure("operation cancelled")),
                 }
             }
-            AsyncRequest::ReferenceAcquire { service, key } => {
-                self.acquire(scope, &service, key).await
-            }
+            AsyncRequest::ReferenceAcquire { .. } => Err(failure("acquisition was not forwarded")),
             // Forwarded above, where its reply can carry installed resources.
             AsyncRequest::ReferenceCall { .. } => Err(failure("import call was not forwarded")),
             AsyncRequest::Wait { milliseconds } => {
@@ -395,7 +395,12 @@ impl Environment {
     /// files the claim under the root, which releases it when the root ends. Readiness is awaited
     /// under this callback's cancellation, and a claim whose wait or authority fails is released
     /// before the error returns, so no handle is ever published for it.
-    async fn acquire(&self, scope: &Scope, service: &str, key: Vec<String>) -> Result<Value> {
+    async fn acquire(
+        &self,
+        scope: &Scope,
+        service: &str,
+        key: Vec<String>,
+    ) -> Result<crate::worker::Reply> {
         let context = Self::context(scope)?;
         // Only an admitted method call selects instances. A cleanup context (a resource `close`)
         // has no invocation; acquiring there would choose instances by the cleanup principal.
@@ -414,6 +419,9 @@ impl Environment {
         let signal = context.signal();
         signal.check()?;
         let reference = context.get(&import.service, key, requirement)?;
+        // Dropping an async import also drops this future while readiness is pending. The
+        // root still owns the native claim, so dropping an Rc alone would leave it live.
+        let mut pending = PendingAcquisition(Some(reference.clone()));
         let ready = {
             let ready = std::pin::pin!(reference.ready());
             let cancelled = std::pin::pin!(signal.cancelled());
@@ -424,25 +432,46 @@ impl Environment {
         };
         // The invocation or root may have ended while readiness was pending.
         if let Err(error) = ready.and_then(|()| context.check()) {
-            return Err(abandon(&reference, error));
+            return Err(pending.fail(error));
         }
-        let id = self
-            .allocate()
-            .map_err(|error| abandon(&reference, error))?;
-        let mut references = self.handles.references.borrow_mut();
+        // A compiled Store shares one heap across environments. Its local view handles use
+        // the Orb table's never-reused sequence; source contexts keep their own table.
+        let table = if import.reference.is_some() {
+            self.parent.as_ref().unwrap_or(&self.handles)
+        } else {
+            &self.handles
+        };
+        let id = table.allocate().map_err(|error| pending.fail(error))?;
+        let value = encode(&id).map_err(|error| pending.fail(error))?;
+        let view = import.reference.is_some();
+        let mut references = table.references.borrow_mut();
         // Root claims are owned elsewhere; forget the names of those whose roots have ended.
         references.retain(|_, handle| !handle.claim.expired());
         references.insert(
             id,
             ReferenceHandle {
-                claim: Claim::Root {
-                    reference: Rc::downgrade(&reference),
-                    root: context.root,
+                claim: if view {
+                    Claim::View {
+                        reference: Rc::downgrade(&reference),
+                        root: context.root,
+                    }
+                } else {
+                    Claim::Root {
+                        reference: Rc::downgrade(&reference),
+                        root: context.root,
+                    }
                 },
                 import,
             },
         );
-        encode(&id)
+        drop(references);
+        let reply = crate::worker::Reply {
+            value,
+            delivery: view.then(|| Delivery::new(table, id)),
+            stream: None,
+        };
+        pending.commit();
+        Ok(reply)
     }
 
     /// Resolve a reference handle and its WIT binding for the current callback.
@@ -463,40 +492,68 @@ impl Environment {
             .get(&id)
             .cloned()
             .ok_or_else(|| failure("unknown reference handle"))?;
-        let reference = match handle.claim {
-            Claim::Declared(reference) => reference,
-            Claim::Root { reference, root } => {
-                let current = match scope {
-                    Scope::Call(context) => Some(context.root),
-                    _ => None,
-                };
-                if !Rc::ptr_eq(handles, &self.handles) || current != Some(root) {
-                    return Err(failure("reference belongs to another root"));
+        let (reference, root, table) = match handle.claim {
+            Claim::Declared(reference) => {
+                if handle.import.reference.is_some() {
+                    return Err(failure("a reference view requires a root-owned claim"));
                 }
-                reference
-                    .upgrade()
-                    .ok_or_else(|| failure("reference expired with its root"))?
+                return Ok((reference, handle.import));
             }
+            Claim::Root { reference, root } => (reference, root, &self.handles),
+            Claim::View { reference, root } => (
+                reference,
+                root,
+                self.parent.as_ref().unwrap_or(&self.handles),
+            ),
             Claim::Owned(_) => {
                 return Err(failure(
                     "an owned resource handle is not a service reference",
                 ));
             }
         };
+        let current = match scope {
+            Scope::Call(context) => Some(context.root),
+            _ => None,
+        };
+        if !Rc::ptr_eq(handles, table) || current != Some(root) {
+            return Err(failure("reference belongs to another root"));
+        }
+        let reference = reference
+            .upgrade()
+            .ok_or_else(|| failure("reference expired with its root"))?;
         Ok((reference, handle.import))
     }
 }
 
-/// Release a claim that will never be published and return the failure that stopped it. A
-/// secondary release failure is appended to the message, keeping the original code and reason.
-fn abandon(reference: &Reference, mut error: tembra::Error) -> tembra::Error {
-    if let Err(release) = reference.release() {
-        error.message = format!(
-            "{}; releasing the claim also failed: {release}",
-            error.message
-        );
+/// Release an acquisition abandoned before a reply can take responsibility for its claim.
+struct PendingAcquisition(Option<Rc<Reference>>);
+
+impl Drop for PendingAcquisition {
+    fn drop(&mut self) {
+        if let Some(reference) = self.0.take() {
+            let _ = reference.release();
+        }
     }
-    error
+}
+
+impl PendingAcquisition {
+    /// Transfer responsibility to the root and, for a compiled view, the reply's delivery guard.
+    fn commit(mut self) {
+        self.0.take();
+    }
+
+    /// Release once and preserve the original failure, including any cleanup failure.
+    fn fail(&mut self, mut error: tembra::Error) -> tembra::Error {
+        if let Some(reference) = self.0.take()
+            && let Err(release) = reference.release()
+        {
+            error.message = format!(
+                "{}; releasing the claim also failed: {release}",
+                error.message
+            );
+        }
+        error
+    }
 }
 
 /// Encode a typed host reply for the guest transport.

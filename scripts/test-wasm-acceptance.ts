@@ -17,13 +17,14 @@ import { stagePackage } from "./release/npm.ts";
 const suites = ["native", "sdk", "node", "browser", "example", "package"];
 const usage =
   "Usage: bun scripts/test-wasm-acceptance.ts --out <directory> --provider <component.wasm> " +
-  `--probe <component.wasm> --consumer <component.wasm> --contributor <component.wasm> --http-client <component.wasm> --sockets <component.wasm> --http-handler <component.wasm> --http-proxy <component.wasm> --resource-provider <component.wasm> --resource-consumer <component.wasm> --stream-producer <component.wasm> --stream-consumer <component.wasm> [--fixtures <directory>] [--suite <${suites.join("|")}>]...`;
+  `--probe <component.wasm> --consumer <component.wasm> --keyed-router <component.wasm> --contributor <component.wasm> --http-client <component.wasm> --sockets <component.wasm> --http-handler <component.wasm> --http-proxy <component.wasm> --resource-provider <component.wasm> --resource-consumer <component.wasm> --stream-producer <component.wasm> --stream-consumer <component.wasm> [--fixtures <directory>] [--suite <${suites.join("|")}>]...`;
 const { values } = parseArgs({
   options: {
     out: { type: "string" },
     provider: { type: "string" },
     probe: { type: "string" },
     consumer: { type: "string" },
+    "keyed-router": { type: "string" },
     contributor: { type: "string" },
     "http-client": { type: "string" },
     sockets: { type: "string" },
@@ -42,6 +43,7 @@ if (
   !values.provider ||
   !values.probe ||
   !values.consumer ||
+  !values["keyed-router"] ||
   !values.contributor ||
   !values["http-client"] ||
   !values.sockets ||
@@ -65,6 +67,7 @@ if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)
 const provider = path.resolve(values.provider);
 const probe = path.resolve(values.probe);
 const consumer = path.resolve(values.consumer);
+const keyedRouter = path.resolve(values["keyed-router"]);
 const contributor = path.resolve(values.contributor);
 const httpClient = path.resolve(values["http-client"]);
 const sockets = path.resolve(values.sockets);
@@ -82,6 +85,7 @@ for (const file of [
   provider,
   probe,
   consumer,
+  keyedRouter,
   contributor,
   httpClient,
   sockets,
@@ -147,6 +151,8 @@ if (!values.fixtures)
     contributor,
     "--consumer",
     consumer,
+    "--keyed-router",
+    keyedRouter,
     "--probe",
     probe,
     "--http-client",
@@ -165,6 +171,7 @@ const environment = {
   TEMBRA_WASM_PROVIDER: provider,
   TEMBRA_WASM_PROBE: probe,
   TEMBRA_WASM_CONSUMER: consumer,
+  TEMBRA_WASM_KEYED_ROUTER: keyedRouter,
   TEMBRA_WASM_CONTRIBUTOR: contributor,
   TEMBRA_WASM_HTTP_CLIENT: httpClient,
   TEMBRA_WASM_SOCKETS: sockets,

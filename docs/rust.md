@@ -195,6 +195,9 @@ the resource's state. The caller chooses it on each open; a resource method can 
 Equal keys still create independent instances. These keys do not select or deduplicate kernel
 objects: plain compiled WIT imports still bind the provider's `main` object. Each method keeps
 the originating claim's admission restrictions and uses the current call's root authority.
+To select kernel objects by key, use a [typed reference view](tooling.md#keyed-dependency-references).
+Its resource is a local handle to a root-owned service claim, with different ownership from
+these provider-created resources.
 
 One compiled revision owns one Store and serves one callback at a time, across all its
 sessions. A suspended method on one session therefore queues a call on another session of that

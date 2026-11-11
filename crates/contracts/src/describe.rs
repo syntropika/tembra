@@ -68,6 +68,7 @@ impl PreparedContract {
                 json!({"id": id, "definition": definition})
             }).collect::<Vec<_>>(),
             "javascriptNames": names,
+            "references": self.references(),
         })
     }
 }

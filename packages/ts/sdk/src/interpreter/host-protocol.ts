@@ -65,7 +65,8 @@ export type AsyncHostRequest =
   | ({ readonly operation: "reference.ready" } & Handle)
   /**
    * `Context.get`: the guest names only a selected import binding and key; the host supplies the
-   * invocation, principal and requirement and issues the handle into the caller's own table.
+   * invocation, principal and requirement. Source handles use their environment's table;
+   * checked compiled reference views use their Orb table, shared by the Store's environments.
    */
   | {
       readonly operation: "reference.acquire";

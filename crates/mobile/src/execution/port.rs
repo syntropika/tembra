@@ -421,8 +421,7 @@ impl NativePort {
                 }
                 Err(e) => Err(tembra::Error::invalid("platform_reply", e.to_string())),
             };
-            reply.complete(result);
-            Ok(true)
+            Ok(reply.complete(result))
         } else {
             Ok(false)
         }

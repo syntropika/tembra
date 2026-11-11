@@ -115,7 +115,11 @@ impl NodeContract {
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
-    /// Package a checked component with its WIT-derived contribution roles.
+    /// Package a checked component with its WIT-derived roles.
+    ///
+    /// `contributes` maps exported hook callbacks to priorities. `references` maps an imported
+    /// reference-view binding to the provider interface identity it addresses; the contract
+    /// checks each view's shape before packaging.
     #[napi]
     pub fn component_artifact(
         &self,
@@ -123,6 +127,7 @@ impl NodeContract {
         name: String,
         api_version: u32,
         contributes: Option<std::collections::HashMap<String, f64>>,
+        references: Option<std::collections::HashMap<String, String>>,
     ) -> napi::Result<napi::bindgen_prelude::Buffer> {
         let contributions = contributes
             .unwrap_or_default()
@@ -140,8 +145,12 @@ impl NodeContract {
                 Ok((binding, priority as i32))
             })
             .collect::<napi::Result<_>>()?;
+        let roles = tembra_contracts::ComponentRoles {
+            contributions,
+            references: references.unwrap_or_default().into_iter().collect(),
+        };
         self.contract
-            .component_artifact(&component, &name, api_version, &contributions)
+            .component_artifact(&component, &name, api_version, &roles)
             .map(Into::into)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }

@@ -46,6 +46,9 @@ function scope(exports: Partial<ExecutionScope> = {}): ExecutionScope {
   return {
     check() {},
     cancel() {},
+    deliver(_request, value, publish) {
+      publish(value);
+    },
     sync() {
       throw new Error("No synchronous operation expected");
     },

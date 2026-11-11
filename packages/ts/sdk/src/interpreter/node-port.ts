@@ -77,13 +77,19 @@ export class NodePort implements InterpreterPort {
                 respond(() => scope.sync(decodeHostRequest(event.packet))),
               );
             else {
+              let request!: ReturnType<typeof decodeAsyncHostRequest>;
               const operation = Promise.resolve()
-                .then(() => scope.async(decodeAsyncHostRequest(event.packet)))
+                .then(() => {
+                  request = decodeAsyncHostRequest(event.packet);
+                  return scope.async(request);
+                })
                 .then(
                   (value) =>
-                    this.transport.reply(
-                      event.id,
-                      respond(() => value),
+                    scope.deliver(request, value, (value) =>
+                      this.transport.reply(
+                        event.id,
+                        respond(() => value),
+                      ),
                     ),
                   (error) =>
                     this.transport.reply(
@@ -131,7 +137,7 @@ export class NodePort implements InterpreterPort {
         pull: () => transport.pullResponse(),
         disconnect: () => transport.disconnect(),
         cancel: () => transport.cancel(),
-        reply: (id, packet) => void transport.reply(id, packet),
+        reply: (id, packet) => transport.reply(id, packet),
         finish: () => transport.finish(),
       },
       exchange,

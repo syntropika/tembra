@@ -9,6 +9,7 @@ import { readFile, mkdtemp, writeFile, rm, readdir } from "node:fs/promises";
 import { createHost, directoryFilesystem } from "../dist/node.js";
 import { verifyPrecisionScenario } from "./precision-scenario.ts";
 import { verifyContextAcquireScenario } from "./context-acquire-scenario.ts";
+import { verifyKeyedCompiledScenario } from "./keyed-compiled-scenario.ts";
 import {
   COUNTERS as INGRESS_COUNTERS,
   INGRESS_ORB,
@@ -35,6 +36,25 @@ test("Node: source Orbs select keyed instances per request", { skip: !fixtures }
   assert.equal(host.diagnostics().references, 0);
   assert.equal(host.diagnostics().pendingJobs, 0);
 });
+
+test(
+  "Node: compiled Orbs select keyed objects through reference views",
+  { skip: !fixtures },
+  async () => {
+    const host = createHost({ isolated: { limits: { packetBytes: 8192 } } });
+    try {
+      await verifyKeyedCompiledScenario(
+        host,
+        async (name) => new Uint8Array(await readFile(path.join(fixtures, `${name}.wasm`))),
+        true,
+      );
+    } finally {
+      await host.close();
+    }
+    assert.equal(host.diagnostics().references, 0);
+    assert.equal(host.diagnostics().pendingJobs, 0);
+  },
+);
 
 test("Node: exact 64-bit values cross source Orbs without loss", { skip: !fixtures }, async () => {
   const host = createHost();

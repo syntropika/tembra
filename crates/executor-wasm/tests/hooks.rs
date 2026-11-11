@@ -76,7 +76,15 @@ fn compiled_contributor(engine: &Engine, component: &[u8]) -> Orb {
     engine
         .load(
             &contract("extension")
-                .component_artifact(component, "compiled", 1, &roles)
+                .component_artifact(
+                    component,
+                    "compiled",
+                    1,
+                    &tembra_contracts::ComponentRoles {
+                        contributions: roles,
+                        ..Default::default()
+                    },
+                )
                 .unwrap(),
             requires(),
         )

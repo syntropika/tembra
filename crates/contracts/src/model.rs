@@ -62,7 +62,7 @@ pub struct Case {
 ///
 /// Anonymous interfaces have no package identity. Their types can still be inspected and
 /// compared within one component, but cannot name a resource contract between Orbs.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct ResourceIdentity {
     pub interface: Option<String>,
     pub name: Option<String>,
@@ -271,7 +271,7 @@ pub(crate) struct Slot {
 #[derive(Clone, Debug)]
 pub struct PreparedContract(Arc<Prepared>);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Prepared {
     pub model: Model,
     pub slots: Vec<Slot>,
@@ -283,12 +283,16 @@ pub(crate) struct Prepared {
     ///
     /// Derived once from `model`, so wire conversion skips every value without 64-bit integers.
     pub wide: Vec<bool>,
+    /// Checked keyed-reference views, keyed by import binding. Empty unless an artifact's
+    /// metadata declared reference roles; derived and checked once when the artifact is decoded.
+    pub references: BTreeMap<String, crate::ReferenceBinding>,
 }
 
 impl PartialEq for PreparedContract {
-    /// Compare the declared contract, independent of how it was produced.
+    /// Compare the declared contract and its checked reference roles, independent of how it was
+    /// produced.
     fn eq(&self, other: &Self) -> bool {
-        self.0.model == other.0.model
+        self.0.model == other.0.model && self.0.references == other.0.references
     }
 }
 
@@ -336,6 +340,7 @@ impl PreparedContract {
             slots,
             spellings,
             wide,
+            references: BTreeMap::new(),
         })))
     }
 
@@ -369,6 +374,19 @@ impl PreparedContract {
 
     pub(crate) fn slots(&self) -> &[Slot] {
         &self.0.slots
+    }
+
+    /// Replace the checked reference roles. Only reference-role checking derives this map.
+    pub(crate) fn set_references(&mut self, references: BTreeMap<String, crate::ReferenceBinding>) {
+        if self.0.references != references {
+            Arc::make_mut(&mut self.0).references = references;
+        }
+    }
+
+    /// Checked keyed-reference views by import binding. Empty for source artifacts, for
+    /// contracts that were not decoded from an artifact, and for components without roles.
+    pub fn references(&self) -> &BTreeMap<String, crate::ReferenceBinding> {
+        &self.0.references
     }
 
     /// Resolve a type reference that `Model::check` has already bounded.
@@ -690,7 +708,7 @@ fn name(value: &str, function: bool) -> Result<(), Error> {
 }
 
 /// Package, interface and world-key identities such as `ns:pkg/name@1.2.3`.
-fn identity(value: &str) -> Result<(), Error> {
+pub(crate) fn identity(value: &str) -> Result<(), Error> {
     let valid = !value.is_empty()
         && value.len() <= MAX_NAME
         && value.bytes().all(|byte| {

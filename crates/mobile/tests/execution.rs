@@ -5,6 +5,111 @@ use std::sync::Arc;
 use tembra_contracts::{Artifact, Contract};
 use tembra_mobile::{NativeArtifact, NativeInterpreter, NativePort};
 
+/// A real Pulley component abandons one host acquisition while awaiting another. Delivery
+/// acknowledgement must describe the receiver, not merely an entry in the response map.
+#[test]
+#[ignore = "requires TEMBRA_WASM_KEYED_ROUTER"]
+fn portable_keyed_views_report_an_abandoned_reply_before_callback_completion() {
+    const VIEW: &str = "example:keyed/counter-ref@1.0.0";
+    let contract = Contract::from_source(
+        "keyed.wit",
+        include_str!("../../executor-wasm/tests/wit/keyed/keyed.wit"),
+        Some("router"),
+    )
+    .unwrap();
+    let raw = std::fs::read(std::env::var_os("TEMBRA_WASM_KEYED_ROUTER").unwrap()).unwrap();
+    let bytes = contract
+        .component_artifact(
+            &raw,
+            "router",
+            1,
+            &tembra_contracts::ComponentRoles {
+                references: [(VIEW.into(), "example:keyed/counter@1.0.0".into())].into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let backend = NativeInterpreter::new("{}".into(), vec![]).unwrap();
+    let port = backend
+        .open(
+            NativeArtifact::new(bytes).unwrap(),
+            json!({VIEW:{"kind":"orb","name":"keyed","api_version":1}}).to_string(),
+            "{}".into(),
+            None,
+        )
+        .unwrap();
+    for (environment, service) in [(1, Value::Null), (2, json!("compiledRouter"))] {
+        port.begin(
+            json!({"kind":"create","environment":environment,"service":service}).to_string(),
+            true,
+        )
+        .unwrap();
+        loop {
+            let event: Value = serde_json::from_str(&block_on(port.receive()).unwrap()).unwrap();
+            if event["event"] == "complete" {
+                assert!(event["result"].get("error").is_none(), "{event}");
+                port.finish().unwrap();
+                break;
+            }
+            let request: Value = serde_json::from_str(event["packet"].as_str().unwrap()).unwrap();
+            assert_eq!(request["operation"], "orb", "views must not declare main");
+            assert!(
+                port.reply(
+                    event["id"].as_u64().unwrap() as u32,
+                    json!({"ok":1}).to_string()
+                )
+                .unwrap()
+            );
+        }
+    }
+    let function = contract
+        .bind("example:keyed/compiled-router@1.0.0", "probe", true)
+        .unwrap();
+    port.begin(
+        json!({"kind":"invoke","environment":2,"function":function,"args":["abandon-wait"]})
+            .to_string(),
+        false,
+    )
+    .unwrap();
+    let mut abandoned = None;
+    let mut rejected = false;
+    loop {
+        let event: Value = serde_json::from_str(&block_on(port.receive()).unwrap()).unwrap();
+        if event["event"] == "complete" {
+            assert_eq!(event["result"]["ok"], "\"barrier@alice\"");
+            assert!(rejected, "the abandoned receiver was never reported");
+            port.finish().unwrap();
+            break;
+        }
+        let request: Value = serde_json::from_str(event["packet"].as_str().unwrap()).unwrap();
+        let id = event["id"].as_u64().unwrap() as u32;
+        let value = match request["operation"].as_str().unwrap() {
+            "reference.acquire" if request["key"] == json!(["settles"]) => {
+                abandoned = Some(id);
+                continue;
+            }
+            "reference.acquire" => {
+                assert_eq!(request["key"], json!(["barrier"]));
+                rejected = !port
+                    .reply(abandoned.take().unwrap(), json!({"ok":77}).to_string())
+                    .unwrap();
+                json!(1)
+            }
+            "reference.call" => {
+                assert_eq!(request["id"], 1);
+                json!("barrier@alice")
+            }
+            "reference.release" => Value::Null,
+            _ => panic!("unexpected request {request}"),
+        };
+        assert!(port.reply(id, json!({"ok":value}).to_string()).unwrap());
+    }
+    port.release(2).unwrap();
+    port.release(1).unwrap();
+    port.shutdown().unwrap();
+    assert_eq!(backend.instances(), 0);
+}
+
 /// Drive one exchange like the SDK mobile driver: host requests are answered as they arrive and
 /// the ticket finishes after the guest completed.
 fn exchange(port: &Arc<NativePort>, command: Value, declaration: bool) -> Value {

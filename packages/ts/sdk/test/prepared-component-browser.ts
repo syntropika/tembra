@@ -16,6 +16,7 @@ import {
 } from "../src/browser.ts";
 import type { BrowserHostOptions } from "../src/browser.ts";
 import type { HttpHandlerResponse } from "../src/interpreter/http-ingress.ts";
+import { verifyKeyedCompiledScenario } from "./keyed-compiled-scenario.ts";
 
 type Host = Awaited<ReturnType<typeof createHost>>;
 // Service references are dynamically typed WIT proxies.
@@ -123,6 +124,7 @@ interface Adapters {
   hooks: PreparedComponent;
   client: PreparedComponent;
   handler: PreparedComponent;
+  keyed: PreparedComponent;
 }
 
 /** Qualify every prepared-adapter scenario; returns the passed scenario names. */
@@ -139,6 +141,7 @@ export async function verifyPreparedComponents(engine?: URL): Promise<string[]> 
     hooks: await adapter("hook-compiled"),
     client: await adapter("http-client"),
     handler: await adapter("http-handler"),
+    keyed: await adapter("compiled-keyed-router"),
   };
   const base = engine ? { engine } : {};
   const scenarios: [string, () => Promise<void>][] = [
@@ -149,6 +152,7 @@ export async function verifyPreparedComponents(engine?: URL): Promise<string[]> 
     ["source calls compiled provider (host.load)", () => sourceToCompiled(adapters, base)],
     ["compiled calls source through JSPI trampolines", () => compiledToSource(adapters, base)],
     ["compiled hook contributions", () => contributions(adapters, base)],
+    ["compiled reference views select keyed objects", () => keyedViews(adapters, base)],
     ["independent installs and reload", () => independence(adapters, base)],
     ["initial page budget", () => pages(adapters, base)],
     ["fuel exhaustion and trap quarantine", () => quarantine(adapters, base)],
@@ -344,6 +348,13 @@ async function compiledToSource(adapters: Adapters, base: object): Promise<void>
     } finally {
       pipeline.release();
     }
+  });
+}
+
+/** The compiled router selects keyed source counters through its checked reference view. */
+async function keyedViews(adapters: Adapters, base: object): Promise<void> {
+  await using({ isolated: { ...base, components: [adapters.keyed] } }, async (host) => {
+    await verifyKeyedCompiledScenario(host, artifact);
   });
 }
 

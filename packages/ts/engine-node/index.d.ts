@@ -27,6 +27,7 @@ export class NodeContract {
     name: string,
     apiVersion: number,
     contributes?: Readonly<Record<string, number>>,
+    references?: Readonly<Record<string, string>>,
   ): Uint8Array;
 }
 

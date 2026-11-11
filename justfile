@@ -68,6 +68,10 @@ build-probe target-dir toolchain=nightly:
 build-consumer target-dir toolchain=nightly:
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-consumer/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
 
+# Compile an Orb selecting root-owned instances through typed WIT reference views.
+build-keyed-router target-dir toolchain=nightly:
+    cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-keyed-router/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
+
 # Compile the resource provider and its independent importer against the same WIT contract.
 build-resources target-dir toolchain=nightly:
     cargo +"$2" rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/executor-wasm/rust-resource-provider/Cargo.toml --target-dir "$1" -- -Clinker=wasm-component-ld
@@ -167,5 +171,5 @@ test-kotlin: build-kotlin
     gradle -p packages/kotlin :jvm:test
 
 # Exercise the portable mobile transport with real source and compiled guests.
-test-mobile-wasm engine provider probe handler:
-    TEMBRA_WASM_ENGINE="{{absolute_path(engine)}}" TEMBRA_WASM_PROVIDER="{{absolute_path(provider)}}" TEMBRA_WASM_PROBE="{{absolute_path(probe)}}" TEMBRA_WASM_HTTP_HANDLER="{{absolute_path(handler)}}" cargo test --locked -p tembra-mobile --test execution --test compiled_filesystem -- --ignored
+test-mobile-wasm engine provider probe handler keyed-router:
+    TEMBRA_WASM_ENGINE="{{absolute_path(engine)}}" TEMBRA_WASM_PROVIDER="{{absolute_path(provider)}}" TEMBRA_WASM_PROBE="{{absolute_path(probe)}}" TEMBRA_WASM_HTTP_HANDLER="{{absolute_path(handler)}}" TEMBRA_WASM_KEYED_ROUTER="{{absolute_path(keyed-router)}}" cargo test --locked -p tembra-mobile --test execution --test compiled_filesystem -- --ignored

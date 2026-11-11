@@ -100,7 +100,14 @@ impl PreparedContract {
     }
 
     /// Check one selected Orb import; host WASI resources use their own standard transport.
+    ///
+    /// A checked reference view is a host-local reference capability, not a provider-owned
+    /// resource: it needs no capability transport, and the role check already admitted its
+    /// method data, so it passes as for the data profiles.
     pub fn check_import_resource_profile(&self, binding: &str) -> Result<(), Error> {
+        if self.references().contains_key(binding) {
+            return Ok(());
+        }
         let entry = self
             .model()
             .imports

@@ -264,8 +264,8 @@ pub enum AsyncRequest {
     },
     /// `Context.get`: acquire a root-scoped reference to a selected WIT Orb import. The host
     /// supplies the active invocation, its root principal, the provider service and the installed
-    /// requirement; the guest names only the import binding and the instance key. The handle is
-    /// issued into the calling environment's own table, so the request carries no scope.
+    /// requirement; the guest names only the import binding and the instance key. The host
+    /// selects the issuing table: the source environment, or the Orb table for a compiled view.
     #[serde(rename = "reference.acquire")]
     ReferenceAcquire { service: String, key: Vec<String> },
     #[serde(rename = "reference.call")]

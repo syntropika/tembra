@@ -28,6 +28,9 @@ function fixture(events: unknown[]) {
     cancel: () => {
       cancelled = true;
     },
+    deliver(_request, value, publish) {
+      publish(value);
+    },
     sync: () => 42,
     async: async () => null,
   };
@@ -96,6 +99,29 @@ test("mobile factories refuse asynchronous I/O without admitting it", async () =
   expect(f.replies).toEqual([
     [2, { error: "Factories cannot perform asynchronous host operations" }],
   ]);
+});
+
+test("mobile malformed async requests receive a refusal instead of stranding the guest", async () => {
+  const f = fixture([
+    {
+      event: "host",
+      id: 3,
+      asynchronous: true,
+      packet: '{"operation":"reference.acquire","service":"counter","key":[1]}',
+    },
+    { event: "complete", result: { ok: "null" } },
+  ]);
+  let admitted = false;
+  f.scope.async = async () => {
+    admitted = true;
+  };
+  expect(await f.driver.execute("{}", f.scope)).toBe("null");
+  expect(admitted).toBe(false);
+  expect(f.replies[0]).toEqual([
+    3,
+    { error: "Malformed asynchronous host request: invalid field key" },
+  ]);
+  expect(f.finished()).toBe(true);
 });
 
 test("mobile call results retain original numeric bytes for prepared validation", async () => {

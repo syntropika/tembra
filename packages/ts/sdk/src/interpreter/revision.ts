@@ -1,4 +1,4 @@
-import type { Description } from "./types.ts";
+import type { Description, ReferenceBinding } from "./types.ts";
 import type { Declaration } from "../authoring/declaration.ts";
 import type {
   OrbDefinition,
@@ -42,6 +42,7 @@ import { lift, shapes, type Signature, type WitFunction, type WitTypes } from ".
 
 /** The contract's `describe` answer, as far as this adapter reads it. */
 type Described = WitTypes & {
+  references: Readonly<Record<string, ReferenceBinding>>;
   imports: { binding: string; functions?: Record<string, WitFunction> }[];
   exports: { binding: string; contract?: string; functions?: Record<string, WitFunction> }[];
 };
@@ -88,6 +89,8 @@ export function exportedFunctions(
 export class Revision {
   readonly gate = new Gate();
   readonly imports = new Map<string, string>();
+  /** Checked reference views use the Orb table, shared by the compiled Store. */
+  readonly views = new Map<string, ReferenceBinding>();
   readonly importSignatures = new Map<string, string>();
   readonly importMethods = new Map<string, Map<string, { name: string; slot: number }>>();
   readonly hooks = new Map<string, HookBinding>();
@@ -242,13 +245,16 @@ export class Revision {
       if (signature) this.importSignatures.set(binding, signature);
       const selected = description.imports.find((item) => item.binding === binding);
       if (!selected?.functions) throw new Error("Missing prepared import signatures");
+      const view = description.references[binding];
+      if (view) this.views.set(binding, view);
       const methods = new Map<string, { name: string; slot: number }>();
       for (const [name, fn] of Object.entries(selected.functions)) {
+        if (view?.acquire === name) continue;
         const spelling = description.javascriptNames[name];
         if (!spelling || methods.has(spelling)) throw new Error("Ambiguous prepared import method");
         const slot = this.contract.bind(binding, name, false);
-        this.signatures.set(slot, compile(fn));
-        methods.set(spelling, { name, slot });
+        this.signatures.set(slot, compile(view ? { ...fn, params: fn.params.slice(1) } : fn));
+        methods.set(spelling, { name: view?.methods[name] ?? name, slot });
       }
       this.importMethods.set(binding, methods);
     }

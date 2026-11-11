@@ -18,6 +18,7 @@ mod port;
 mod prepare;
 #[cfg(feature = "authoring")]
 mod provenance;
+mod references;
 mod resource_profile;
 mod selection;
 mod signatures;
@@ -26,7 +27,7 @@ mod standard;
 mod validate;
 
 pub use artifact::{
-    Artifact, Identity, Implementation as ArtifactImplementation, PreparedComponent,
+    Artifact, ComponentRoles, Identity, Implementation as ArtifactImplementation, PreparedComponent,
 };
 #[cfg(feature = "authoring")]
 pub use authoring::Contract;
@@ -41,6 +42,7 @@ pub use model::{
 };
 pub use permissions::{FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability};
 pub use port::envelope;
+pub use references::ReferenceBinding;
 pub use resource_profile::ResourceSignature;
 pub use selection::OrbProvider;
 pub use validate::javascript_name;
@@ -82,6 +84,8 @@ mod permission_tests;
 mod prepared_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod provenance_tests;
+#[cfg(all(test, feature = "authoring"))]
+mod reference_tests;
 #[cfg(all(test, feature = "authoring"))]
 mod resource_identity_tests;
 #[cfg(all(test, feature = "authoring"))]

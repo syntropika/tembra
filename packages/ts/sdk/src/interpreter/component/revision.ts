@@ -33,10 +33,12 @@ import {
   type ContractPort,
   type Description,
   type InstallationPlan,
+  type ReferenceBinding,
 } from "../types.ts";
 import { lift, shapes, type Signature, type WitFunction, type WitTypes } from "../wit-shape.ts";
+import { viewMethod } from "./host.ts";
 import type { ComponentPort } from "./port.ts";
-import { ComponentScope, type CallbackScope, type ScopeOwner } from "./scope.ts";
+import { ComponentScope, type BoundMethod, type CallbackScope, type ScopeOwner } from "./scope.ts";
 import { converters, type FunctionValues, type GraphFunction, type TypeGraph } from "./values.ts";
 import type { IngressBridge } from "./wasi-http.ts";
 
@@ -54,6 +56,8 @@ export type Described = WitTypes &
       contract?: string;
       functions?: Record<string, WitFunction>;
     }[];
+    /** Checked reference views; artifact metadata alone declares them. */
+    references: Readonly<Record<string, ReferenceBinding>>;
   };
 
 /** A compiled component's description: one service per callable export interface. */
@@ -101,7 +105,8 @@ export class ComponentRevision implements ScopeOwner {
   readonly gate = new Gate();
   readonly imports = new Map<string, string>();
   readonly importSignatures = new Map<string, string>();
-  readonly importMethods = new Map<string, Map<string, { name: string; slot: number }>>();
+  readonly importMethods = new Map<string, Map<string, BoundMethod>>();
+  readonly views = new Map<string, Map<string, BoundMethod>>();
   readonly signatures = new Map<number, Signature>();
   readonly scopes = new Map<number, ComponentScope>();
   /** The instance's incoming-HTTP bridge from the HTTP adapter (`wasi.ts`). */
@@ -267,7 +272,21 @@ export class ComponentRevision implements ScopeOwner {
       if (signature_) this.importSignatures.set(binding, signature_);
       const selected = graph.imports.find((item) => item.binding === binding);
       if (!selected?.functions) throw new Error("Missing prepared import signatures");
-      const methods = new Map<string, { name: string; slot: number }>();
+      const view = graph.references[binding];
+      if (view) {
+        // Only checked methods are callable; the acquisition result is never data.
+        const methods = new Map<string, BoundMethod>();
+        for (const [name, provider] of Object.entries(view.methods)) {
+          const fn = selected.functions[name];
+          if (!fn) throw new Error(`Missing prepared signature for ${binding}#${name}`);
+          const slot = this.contract.bind(binding, name, false);
+          this.signatures.set(slot, compile(viewMethod(fn)));
+          methods.set(name, { name: provider, slot });
+        }
+        this.views.set(binding, methods);
+        continue;
+      }
+      const methods = new Map<string, BoundMethod>();
       for (const [name, fn] of Object.entries(selected.functions)) {
         const spelling = names[name];
         if (!spelling || methods.has(spelling)) throw new Error("Ambiguous prepared import method");

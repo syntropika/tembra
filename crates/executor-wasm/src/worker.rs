@@ -383,8 +383,8 @@ impl Session {
     ///
     /// It needs no admission and no caller. When the revision is idle and holds imported
     /// resources (`release` is given), it runs now on this thread, and every imported slot its
-    /// destructors drop is passed to `release`. That only removes host table entries, and grants
-    /// the destructors nothing. Otherwise the command is queued behind the running callback; the
+    /// destructors drop is passed to `release`. It releases imported handles and local view
+    /// claims, granting the destructors no call authority. Otherwise the command is queued; the
     /// slots its destructors drop then wait for this revision's next call or its root's release.
     /// A failure is reported, never passed off as a clean release.
     fn cleanup(&self, packet: GuestCommand<'_>, release: Option<&mut dyn FnMut(u32)>) {

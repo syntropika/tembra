@@ -263,6 +263,9 @@ impl PreparedContract {
     }
 
     /// Map each Orb-provided import binding to the qualified service its proxies call.
+    ///
+    /// A checked reference view maps to the provider interface its role addresses, not to the
+    /// view interface itself.
     pub fn import_services(
         &self,
         bindings: &BTreeMap<String, Binding>,
@@ -275,9 +278,12 @@ impl PreparedContract {
             let Some(Binding::Orb { name, .. }) = bindings.get(&entry.key) else {
                 continue;
             };
-            let contract = interface.contract.as_deref().ok_or_else(|| {
-                Error("anonymous import needs an explicit provider mapping".into())
-            })?;
+            let contract = match self.references().get(&entry.key) {
+                Some(reference) => reference.interface.as_str(),
+                None => interface.contract.as_deref().ok_or_else(|| {
+                    Error("anonymous import needs an explicit provider mapping".into())
+                })?,
+            };
             result.insert(entry.key.clone(), service_name(name, contract));
         }
         Ok(result)

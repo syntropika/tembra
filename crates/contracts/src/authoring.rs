@@ -4,7 +4,7 @@
 //! by the prepared contract it produces, so tooling and runtimes share one implementation.
 use crate::{
     Artifact, Error, PreparedContract,
-    artifact::{Container, Identity, append_section, encode_orb_contributions},
+    artifact::{ComponentRoles, Container, Identity, append_section, encode_orb_roles},
 };
 use std::{collections::BTreeSet, path::Path};
 use wit_parser::{
@@ -241,16 +241,22 @@ impl Contract {
         Artifact::package_source(name, api_version, &self.prepared, source)
     }
 
-    /// Package a component with typed contribution roles; WIT owns every callback signature.
+    /// Package a component with typed roles; WIT owns every callback and view signature.
+    ///
+    /// Contribution roles name exported hook callbacks. Reference roles map an imported
+    /// reference-view binding to the provider interface it addresses; each is checked here and
+    /// again whenever the artifact is decoded.
     pub fn component_artifact(
         &self,
         component: &[u8],
         name: &str,
         api_version: u32,
-        contributions: &std::collections::BTreeMap<String, i32>,
+        roles: &ComponentRoles,
     ) -> Result<Vec<u8>, Error> {
         self.prepared.check_resource_profile()?;
-        self.prepared.check_contribution_roles(contributions)?;
+        self.prepared
+            .check_contribution_roles(&roles.contributions)?;
+        self.prepared.reference_bindings(&roles.references)?;
         let identity = Identity {
             name: name.into(),
             api_version,
@@ -267,7 +273,7 @@ impl Contract {
         append_section(
             &mut bytes,
             "tembra:orb",
-            &encode_orb_contributions(&identity, &self.prepared, contributions),
+            &encode_orb_roles(&identity, &self.prepared, roles),
         );
         Ok(bytes)
     }

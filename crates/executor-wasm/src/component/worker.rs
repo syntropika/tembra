@@ -113,6 +113,8 @@ pub(crate) struct Import {
     pub functions: Vec<ImportFunction>,
     /// This import anchors a contribution's type and grants no callable service reference.
     pub contribution: bool,
+    /// This interface acquires root-owned references explicitly, without a default main.
+    pub reference: bool,
 }
 
 pub(crate) struct ImportFunction {
@@ -127,6 +129,8 @@ pub(crate) struct ImportFunction {
     pub own_result: Option<u32>,
     /// The whole result is a `stream<u8>`, read from a pipe the host fills.
     pub stream: bool,
+    /// Dynamic host resource type returned inside the acquisition result.
+    pub acquire: Option<u32>,
 }
 
 /// Immutable authority of one admitted call, shared by every thread of its task group.
@@ -665,6 +669,35 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                 continue;
             }
             let target = Arc::new((import.binding.clone(), function.spelling.clone()));
+            if let Some(payload) = function.acquire {
+                instance.func_new_concurrent(
+                    &function.name,
+                    move |accessor: &Accessor<State>, _, params, results| {
+                        // Capture this task group's authority before the import can suspend.
+                        let request = accessor.with(|mut access| {
+                            acquire_request(access.get(), &target.0, params).map(|receive| {
+                                ImportReply::new(receive, Some(access.get().dropped.clone()))
+                            })
+                        });
+                        Box::pin(async move {
+                            let mut reply = request?;
+                            // A refused key is request data: return the WIT error rather than
+                            // trapping and quarantining every object in this revision.
+                            let result = match reply.answer().await? {
+                                Ok(value) => Ok(accessor.with(|mut access| {
+                                    owned(&mut access, &value, payload)
+                                        .map(|value| value.map(Box::new))
+                                })?),
+                                Err(message) => Err(Some(Box::new(Val::String(message)))),
+                            };
+                            store_result(results, Some(Val::Result(result)))?;
+                            reply.delivered();
+                            Ok(())
+                        })
+                    },
+                )?;
+                continue;
+            }
             let (receiver, own_result) = (function.receiver, function.own_result);
             if function.stream {
                 instance.func_new_concurrent(
@@ -820,17 +853,8 @@ fn store_result(results: &mut [Val], value: Option<Val>) -> wasmtime::Result<()>
     Ok(())
 }
 
-/// Capture the issuing task group's authority and publish one bounded `reference.call` request.
-///
-/// `selected` is the importer table slot a resource method's `self` named; every other function
-/// calls through the import's declared reference.
-fn request(
-    state: &State,
-    (binding, method): &(String, String),
-    selected: Option<u32>,
-    params: &[Val],
-    stream: Option<Arc<Mutex<Pipe>>>,
-) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+/// Capture the authority of the guest thread issuing an import, before any suspension.
+fn import_authority(state: &State) -> wasmtime::Result<Authority> {
     let authority = {
         let groups = state
             .groups
@@ -842,6 +866,54 @@ fn request(
             .map(|bound| bound.authority.clone())
             .ok_or_else(|| wasmtime::Error::msg("dependency import has no admitted invocation"))?
     };
+    Ok(authority)
+}
+
+/// Acquire a kernel object using only the checked import binding and guest-chosen key.
+fn acquire_request(
+    state: &State,
+    binding: &str,
+    params: &[Val],
+) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+    let authority = import_authority(state)?;
+    let [key] = params else {
+        return Err(wasmtime::Error::msg(
+            "reference acquisition requires one key",
+        ));
+    };
+    let key = values::lift(key.clone()).map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+    let packet =
+        json!({"operation": "reference.acquire", "service": binding, "key": key}).to_string();
+    let (reply, receive) = oneshot::channel();
+    if packet.len() > state.packet_bytes {
+        let _ = reply.send(Err("host packet limit exceeded".into()));
+        return Ok(receive);
+    }
+    if let Err(error) = authority.events.try_send(Event::Host {
+        packet,
+        asynchronous: true,
+        reply,
+    }) {
+        let Event::Host { reply, .. } = error.into_inner() else {
+            unreachable!("acquisition sends a host request")
+        };
+        let _ = reply.send(Err("host operation queue is full or closed".into()));
+    }
+    Ok(receive)
+}
+
+/// Capture the issuing task group's authority and publish one bounded `reference.call` request.
+///
+/// `selected` is the importer table slot a resource method's `self` named; every other function
+/// calls through the import's declared reference.
+fn request(
+    state: &State,
+    (binding, method): &(String, String),
+    selected: Option<u32>,
+    params: &[Val],
+    stream: Option<Arc<Mutex<Pipe>>>,
+) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+    let authority = import_authority(state)?;
     let id = match selected {
         Some(slot) => slot,
         None => *authority
@@ -940,17 +1012,26 @@ impl ImportReply {
 
     /// Await the checked result; a refusal traps the importer, which quarantines its Store.
     async fn settle(&mut self) -> wasmtime::Result<Value> {
-        let text = (&mut self.receive)
+        self.answer()
+            .await?
+            .map_err(|message| wasmtime::Error::msg(format!("dependency call failed: {message}")))
+    }
+
+    /// Acquisition refusals are recoverable WIT errors; successful local slots keep the same
+    /// abandoned-delivery guard as ordinary imported resources.
+    async fn answer(&mut self) -> wasmtime::Result<std::result::Result<Value, String>> {
+        let result = (&mut self.receive)
             .await
-            .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
-            .map_err(|message| {
-                wasmtime::Error::msg(format!("dependency call failed: {message}"))
-            })?;
+            .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?;
+        let text = match result {
+            Ok(text) => text,
+            Err(message) => return Ok(Err(message)),
+        };
         let value: Value = serde_json::from_str(&text)?;
         if self.owned.is_some() {
             self.pending = slot(&value);
         }
-        Ok(value)
+        Ok(Ok(value))
     }
 
     /// The guest now holds the result.
@@ -965,6 +1046,9 @@ impl Drop for ImportReply {
         let Some(dropped) = self.owned.as_ref().filter(|_| !self.delivered) else {
             return;
         };
+        // Close before inspecting the buffer: a racing sender must either already have
+        // published a slot we can drain, or receive a refusal and roll back its delivery.
+        self.receive.close();
         // Received but never held, or accepted by the channel but never read.
         let slot = self
             .pending
@@ -1226,7 +1310,7 @@ async fn declare(
     }
     let mut handles = BTreeMap::new();
     for import in &layout.imports {
-        if import.contribution {
+        if import.contribution || import.reference {
             continue;
         }
         let id = declaration(
@@ -1807,5 +1891,33 @@ mod import_reply_tests {
         let (_reply, receive) = oneshot::channel();
         drop(ImportReply::new(receive, Some(dropped.clone())));
         assert!(queued(&dropped).is_empty());
+    }
+
+    #[test]
+    fn a_racing_delivery_is_either_refused_or_queued_for_release() {
+        use std::sync::{Arc, Barrier, mpsc};
+        let barrier = Arc::new(Barrier::new(2));
+        let (publish, requests) = mpsc::channel::<oneshot::Sender<Result<String, String>>>();
+        let (sent, accepted) = mpsc::channel();
+        std::thread::scope(|threads| {
+            let ready = barrier.clone();
+            threads.spawn(move || {
+                for sender in requests {
+                    ready.wait();
+                    sent.send(sender.send(Ok("7".into())).is_ok()).unwrap();
+                }
+            });
+            for _ in 0..256 {
+                let dropped = Dropped::default();
+                let (sender, receive) = oneshot::channel();
+                let reply = ImportReply::new(receive, Some(dropped.clone()));
+                publish.send(sender).unwrap();
+                barrier.wait();
+                drop(reply);
+                let delivered = accepted.recv().unwrap();
+                assert_eq!(queued(&dropped), if delivered { vec![7] } else { vec![] });
+            }
+            drop(publish);
+        });
     }
 }

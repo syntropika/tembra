@@ -52,17 +52,28 @@ pub(crate) fn orb(
             let tembra_contracts::Item::Interface(interface) = &entry.item else {
                 return Err(failure("Orb import must be an interface"));
             };
+            let view = contract.references().get(&binding);
             let mut methods = BTreeMap::new();
             for function in &interface.functions {
+                if view.is_some_and(|view| function.name == view.acquire) {
+                    continue;
+                }
                 let name = function.name.clone();
                 let slot = contract.bind(&binding, &name, false).map_err(failure)?;
                 if methods
                     .insert(
                         tembra_contracts::javascript_name(&name),
                         BoundMethod {
-                            name,
+                            name: view
+                                .and_then(|view| view.methods.get(&name))
+                                .cloned()
+                                .unwrap_or(name),
                             slot,
-                            roles: roles(slot)?,
+                            roles: if view.is_some() {
+                                Roles::of(&contract, slot)?
+                            } else {
+                                roles(slot)?
+                            },
                         },
                     )
                     .is_some()
@@ -72,11 +83,14 @@ pub(crate) fn orb(
             }
             let requirement = requirement(&metadata.requires, &service);
             Ok((
-                binding,
+                binding.clone(),
                 Rc::new(Import {
                     service,
                     methods,
                     requirement,
+                    reference: view
+                        .map(|view| crate::bindings::nominal(&view.resource))
+                        .transpose()?,
                 }),
             ))
         })

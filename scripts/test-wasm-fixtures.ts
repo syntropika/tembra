@@ -8,6 +8,7 @@ const compiledInputs = {
   provider: "the compiled arithmetic provider",
   contributor: "the compiled hook contributor",
   consumer: "the compiled pipeline consumer",
+  "keyed-router": "the compiled keyed-reference router",
   probe: "the compiled probe provider",
   "http-client": "the compiled wasi:http client",
   "http-handler": "the compiled wasi:http handler",
@@ -20,6 +21,7 @@ const { values } = parseArgs({
     provider: { type: "string" },
     contributor: { type: "string" },
     consumer: { type: "string" },
+    "keyed-router": { type: "string" },
     probe: { type: "string" },
     "http-client": { type: "string" },
     "http-handler": { type: "string" },
@@ -287,6 +289,20 @@ for (const [name, file, world] of [
     minify: false,
   };
 }
+// The compiled router uses the same keyed provider through host-local WIT references.
+await mkdir(path.join(sources, "compiled-keyed-router"), { recursive: true });
+await writeFile(
+  path.join(sources, "compiled-keyed-router/keyed.wit"),
+  await readFile(path.join(root, "crates/executor-wasm/tests/wit/keyed/keyed.wit")),
+);
+builds["compiled-keyed-router"] = {
+  entry: component("keyed-router"),
+  wit: "compiled-keyed-router/keyed.wit",
+  world: "router",
+  apiVersion: 1,
+  references: { "example:keyed/counter-ref@1.0.0": "example:keyed/counter@1.0.0" },
+  browser: true,
+};
 // Standard WASI source Orbs: the example scenario and the acceptance-only boundary probes. Two
 // boundary revisions let acceptance pass one revision's handle number to the other.
 const standardFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-standard");

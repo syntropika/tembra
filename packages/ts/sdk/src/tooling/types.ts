@@ -7,6 +7,11 @@ export interface BuildTarget {
   /** Compiled callback interfaces contributing to their selected Orb's hook, with execution priority. */
   contributes?: Readonly<Record<string, number>>;
   /**
+   * Compiled reference-view imports, by import binding, mapped to the provider interface identity
+   * each view addresses. The contract checks every view's shape before packaging.
+   */
+  references?: Readonly<Record<string, string>>;
+  /**
    * Compiled Orbs only: also emit `browser/index.js`, an application-owned module that lets
    * browser hosts run exactly this artifact (register it with `createHost({ isolated: {
    * components } })`). Source Orbs run in browsers without preparation.

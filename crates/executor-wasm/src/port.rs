@@ -402,9 +402,9 @@ pub struct PortReply {
     limit: usize,
 }
 impl PortReply {
-    /// Resolve one host request without exposing native kernel handles or executable callbacks.
-    pub fn complete(self, result: Result<String>) {
-        let _ = self.reply.send(worker::encode(result, self.limit));
+    /// Publish to the original observer. A rejected delivery leaves ownership with the host.
+    pub fn complete(self, result: Result<String>) -> bool {
+        self.reply.send(worker::encode(result, self.limit)).is_ok()
     }
 }
 

@@ -1,0 +1,26 @@
+package example:keyed@1.0.0;
+
+/// A kernel service: each address has independent state.
+interface counter {
+    add: func(amount: u32) -> u32;
+    who: func() -> string;
+}
+
+/// Typed references to counter objects, acquired under the admitted root.
+interface counter-ref {
+    resource counter {
+        add: func(amount: u32) -> u32;
+        who: func() -> string;
+    }
+    get: async func(key: list<string>) -> result<counter, string>;
+}
+
+interface compiled-router {
+    route: async func(key: string, other: string, amount: u32) -> string;
+    probe: async func(name: string) -> string;
+}
+
+world router {
+    import counter-ref;
+    export compiled-router;
+}

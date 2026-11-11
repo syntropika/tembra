@@ -47,6 +47,7 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
         name,
         target.apiVersion,
         target.contributes,
+        target.references,
       );
     } else {
       if (target.browser !== undefined)
@@ -55,6 +56,8 @@ export async function build(config: BuildConfig): Promise<readonly Artifact[]> {
         throw new Error(`Build ${name} declares apiVersion in its source Orb`);
       if (target.contributes !== undefined)
         throw new Error(`Build ${name} declares contributions in its source Orb`);
+      if (target.references !== undefined)
+        throw new Error(`Build ${name} declares reference views in its source Orb`);
       const program = typecheck(entry, root, types!.files, ["tembra-wasm"], types!.paths);
       const description = query<{ imports: { contract?: string; type_only?: boolean }[] }>(
         contract,

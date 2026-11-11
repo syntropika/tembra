@@ -23,6 +23,7 @@ import {
 } from "../interpreter/component/prepared.ts";
 import type { Described } from "../interpreter/component/revision.ts";
 import { converters, type GraphFunction } from "../interpreter/component/values.ts";
+import { referenceView } from "../interpreter/component/host.ts";
 import { BROWSER_WASI } from "../interpreter/component/wasi.ts";
 import { JCO_VERSION, prepareGlue } from "./component-glue.ts";
 
@@ -73,6 +74,18 @@ function plan(graph: Described, imports: readonly string[]) {
     const selected = graph.imports.find((item) => item.binding === name);
     if (!selected) throw new Error(`The component imports ${name}, which its contract lacks`);
     if (selected.type_only) continue;
+    const view = graph.references[name];
+    if (view) {
+      // A checked reference view: only its acquisition and method receivers are handles, both
+      // host-local; every other position is data. No resource crosses between Orbs.
+      try {
+        referenceView(graph, name, view, convert);
+      } catch (error) {
+        throw new Error(`Browser preparation cannot execute ${name}: ${(error as Error).message}`);
+      }
+      for (const fn of Object.keys(selected.functions ?? {})) suspending.push(`${name}#${fn}`);
+      continue;
+    }
     // Orb dependency calls are asynchronous host work behind a synchronous WIT import.
     for (const [fn, signature] of Object.entries(selected.functions ?? {})) {
       check(`${name}#${fn}`, signature);

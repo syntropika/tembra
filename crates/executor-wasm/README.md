@@ -174,9 +174,10 @@ body streams, without requiring a WASI import or grant. Public JSON ports still
 use the data profile and refuse these stream contracts at installation. A compiled
 component can import selected Orbs:
 
-- Its Orb root acquires one reference per Orb import binding, for the default key
-  `main`. A plain WIT import names no object key, so other keyed objects are not
-  addressable yet.
+- A plain import declares one reference for the default key `main`. A
+  [checked reference view](../../docs/tooling.md#keyed-dependency-references) instead exposes
+  typed acquisition by key and methods on the returned resource. It declares no default;
+  its host-local handles name kernel objects under the admitted root's principal.
 - Each import call travels through the same scoped host request as a source Orb's
   dependency call, under the caller's admitted invocation. Kernel execution frames
   refuse causal reentry into the suspended importer; import arguments and results
@@ -189,9 +190,10 @@ component can import selected Orbs:
   result and all of its task group's work have finished, so work after `task.return`
   still runs under the call that started it. An import without such authority, for
   example during instantiation, is refused.
-- A refused or failed import traps the importer and quarantines its Store; Tembra does
-  not fabricate WIT error values. This includes an import issued after the caller was
-  cancelled. Provider calls already in flight remain physically owned until they settle.
+- A refused or failed dependency method traps the importer and quarantines its Store.
+  A reference view's acquisition has an explicit WIT error result: an unapproved key or
+  failed readiness returns that error without quarantining the revision. Provider calls
+  already in flight remain physically owned until they settle.
 
 Source methods can select a key per request using `await context.get(binding, key)`, where
 `binding` names a selected WIT Orb import and `key` is a string or string tuple. Acquisition

@@ -76,7 +76,7 @@ export interface CarrierTransport {
   disconnect(): void;
   /** The caller cancelled the call. */
   cancel(): void;
-  reply(id: number, packet: string): void;
+  reply(id: number, packet: string): boolean;
   /** Release the native ticket after `complete`. */
   finish(): void;
 }
@@ -320,16 +320,22 @@ export class NativeIngress {
       );
       return;
     }
+    let request!: ReturnType<typeof decodeAsyncHostRequest>;
     const operation = Promise.resolve()
-      .then(() => this.scope.async(decodeAsyncHostRequest(packet)))
+      .then(() => {
+        request = decodeAsyncHostRequest(packet);
+        return this.scope.async(request);
+      })
       .then(
         (value) =>
-          this.transport.reply(
-            id,
-            respond(() => value),
+          this.scope.deliver(request, value, (value) =>
+            this.transport.reply(
+              id,
+              respond(() => value),
+            ),
           ),
         (error) =>
-          this.transport.reply(
+          void this.transport.reply(
             id,
             respond(() => {
               throw error;

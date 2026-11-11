@@ -85,6 +85,7 @@ const sources = new Map([
 const adapters = [
   "arithmetic",
   "pipeline",
+  "compiled-keyed-router",
   "probe",
   "hook-compiled",
   "http-client",

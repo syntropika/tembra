@@ -146,6 +146,7 @@ fn layout(
             })
             .transpose()
         };
+        let view = contract.references().get(&entry.key);
         let functions = interface
             .functions
             .iter()
@@ -168,6 +169,18 @@ fn layout(
                 let slot = contract
                     .bind(&entry.key, &function.name, false)
                     .map_err(failure)?;
+                let acquire = view.filter(|view| view.acquire == function.name);
+                if let Some(view) = acquire {
+                    return Ok(worker::ImportFunction {
+                        name: function.name.clone(),
+                        spelling: javascript_name(&function.name),
+                        asynchronous: true,
+                        receiver: None,
+                        own_result: None,
+                        stream: false,
+                        acquire: payload(Some(&view.resource))?,
+                    });
+                }
                 let signature = contract.resource_signature(slot).map_err(failure)?;
                 if signature.stream_result && !asynchronous {
                     return Err(failure(format!(
@@ -182,6 +195,7 @@ fn layout(
                     receiver: payload(signature.receiver)?,
                     own_result: payload(signature.own_result)?,
                     stream: signature.stream_result,
+                    acquire: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -189,6 +203,7 @@ fn layout(
             binding: entry.key.clone(),
             resources,
             functions,
+            reference: view.is_some(),
             contribution: hooks
                 .contributions
                 .iter()

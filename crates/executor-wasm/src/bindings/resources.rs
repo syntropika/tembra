@@ -9,6 +9,9 @@
 //! **Importer.** An owned result is installed in the issuing table as [`Claim::Owned`], and its
 //! slot is the guest's dynamic handle representation. Installation is committed only after the
 //! worker has received the reply; otherwise it is rolled back, which closes the handle.
+//! A reference view instead names a root-owned kernel claim in that same table. Its data-only
+//! methods select that claim; a drop or abandoned delivery releases it without transferring any
+//! provider resource between Orbs.
 //!
 //! Every call still goes through the kernel: constructors and factories through the import's
 //! reference, and methods through the owned handle's own admission claim.
@@ -44,7 +47,7 @@ impl Roles {
 }
 
 /// Only a resource defined by a named interface has a portable identity.
-fn nominal(identity: &tembra_contracts::ResourceIdentity) -> Result<Nominal> {
+pub(crate) fn nominal(identity: &tembra_contracts::ResourceIdentity) -> Result<Nominal> {
     match (&identity.interface, &identity.name) {
         (Some(interface), Some(name)) => Ok(Nominal {
             interface: interface.clone(),
@@ -93,18 +96,18 @@ impl Drop for GuestInstance {
     }
 }
 
-/// The Orb root table, if it holds owned imported resources a destructor could drop.
+/// The Orb table, if it holds imported resources or views a destructor could drop.
 pub(super) fn holding(root: Option<&Weak<Handles>>) -> Option<Rc<Handles>> {
     root.and_then(Weak::upgrade).filter(|root| {
         root.references
             .borrow()
             .values()
-            .any(|handle| matches!(handle.claim, Claim::Owned(_)))
+            .any(|handle| matches!(handle.claim, Claim::Owned(_) | Claim::View { .. }))
     })
 }
 
-/// Remove one owned slot from a table; any other entry is left alone. The removed handle is
-/// dropped outside the table borrow, because closing it reaches the kernel and its issuer.
+/// Remove a local owned slot or reference view, leaving factory declarations alone. Release
+/// outside the table borrow, because closing a handle reaches the kernel and its issuer.
 pub(super) fn release_slot(table: &Handles, slot: u32) -> bool {
     let removed = {
         let mut references = table.references.borrow_mut();
@@ -113,10 +116,23 @@ pub(super) fn release_slot(table: &Handles, slot: u32) -> bool {
                 claim: Claim::Owned(_),
                 ..
             }) => references.remove(&slot),
+            Some(ReferenceHandle {
+                claim: Claim::View { .. },
+                ..
+            }) => references.remove(&slot),
             _ => None,
         }
     };
-    removed.is_some()
+    let released = removed.is_some();
+    if let Some(ReferenceHandle {
+        claim: Claim::View { reference, .. },
+        ..
+    }) = removed
+        && let Some(reference) = reference.upgrade()
+    {
+        let _ = reference.release();
+    }
+    released
 }
 
 /// Refusal of a call whose resource positions do not match its function.
@@ -278,14 +294,18 @@ impl Environment {
             mut streams,
         } = match (callee, &roles.receiver) {
             // The admitted call is handed to the request first, then awaited.
-            (Callee::Reference(reference), None) => {
+            (Callee::Reference(reference), receiver)
+                if receiver.is_none() || receiver.as_ref() == binding.reference.as_ref() =>
+            {
                 let (call, result) = reference
                     .issue_portable::<_, Delivered>(context, &method.name, payload)
                     .await?;
                 issued.set(Some(call));
                 result.await?
             }
-            (Callee::Owned(handle), Some(expected)) if handle.nominal() == expected => {
+            (Callee::Owned(handle), Some(expected))
+                if binding.reference.is_none() && handle.nominal() == expected =>
+            {
                 let (call, result) = handle
                     .issue_portable::<_, Delivered>(context, &method.name, payload)
                     .await?;
@@ -296,7 +316,7 @@ impl Environment {
             (Callee::Owned(_), None) => {
                 return Err(misuse("a resource handle calls only its own methods"));
             }
-            (Callee::Reference(_), Some(_)) => {
+            (Callee::Reference(_), _) => {
                 return Err(misuse("a resource method requires its owned handle"));
             }
         };
@@ -385,12 +405,7 @@ impl Environment {
     /// unless it is committed.
     fn install(&self, handle: Owned, import: Rc<Import>) -> Result<(u32, Delivery)> {
         let table = self.parent.as_ref().unwrap_or(&self.handles);
-        let slot = table
-            .next
-            .get()
-            .checked_add(1)
-            .ok_or_else(|| failure("scope handle space exhausted"))?;
-        table.next.set(slot);
+        let slot = table.allocate()?;
         table.references.borrow_mut().insert(
             slot,
             ReferenceHandle {
@@ -398,21 +413,15 @@ impl Environment {
                 import,
             },
         );
-        Ok((
-            slot,
-            Delivery {
-                table: Rc::downgrade(table),
-                slots: vec![slot],
-            },
-        ))
+        Ok((slot, Delivery::new(table, slot)))
     }
 
-    /// Remove an owned slot dropped by the guest. Returns `false` for any other handle.
+    /// Remove an imported handle or view dropped by the guest, leaving declarations alone.
     ///
     /// A dropped imported handle's representation is always an owned slot of the Orb root
     /// table, and that table's ids are never reused, so a release never reaches a declared
     /// reference by accident.
-    pub(super) fn release_owned(&self, owner: Option<ScopeId>, id: u32) -> Result<bool> {
+    pub(super) fn release_import(&self, owner: Option<ScopeId>, id: u32) -> Result<bool> {
         Ok(release_slot(self.selected_handles(owner)?, id))
     }
 }
@@ -430,6 +439,14 @@ pub(crate) struct Delivery {
 }
 
 impl Delivery {
+    /// Roll back an unpublished local capability, including its kernel claim.
+    pub(super) fn new(table: &Rc<Handles>, slot: u32) -> Self {
+        Self {
+            table: Rc::downgrade(table),
+            slots: vec![slot],
+        }
+    }
+
     /// The guest received the reply and now owns the installed handles.
     pub(crate) fn commit(mut self) {
         self.slots.clear();
@@ -443,14 +460,9 @@ impl Drop for Delivery {
             return;
         }
         if let Some(table) = self.table.upgrade() {
-            let removed: Vec<_> = {
-                let mut references = table.references.borrow_mut();
-                self.slots
-                    .drain(..)
-                    .filter_map(|slot| references.remove(&slot))
-                    .collect()
-            };
-            drop(removed);
+            for slot in self.slots.drain(..) {
+                release_slot(&table, slot);
+            }
         }
     }
 }

@@ -21,6 +21,20 @@ pub struct Identity {
     pub world: String,
 }
 
+/// Checked roles a compiled component's artifact metadata assigns to real WIT items.
+///
+/// `contributions` maps exported hook callbacks to their priority. `references` maps an imported
+/// reference-view binding to the provider interface identity it addresses. Source artifacts carry
+/// neither: their contributions live in the bundle and they cannot import reference views.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComponentRoles {
+    #[serde(default)]
+    pub contributions: BTreeMap<String, i32>,
+    #[serde(default)]
+    pub references: BTreeMap<String, String>,
+}
+
 /// A closed source bundle or compiled component, never executable host JavaScript.
 pub enum Implementation {
     Source(String),
@@ -33,6 +47,7 @@ pub struct Artifact {
     pub contract: PreparedContract,
     pub implementation: Implementation,
     /// Compiled callback roles; source bundles declare their contributions in executable code.
+    /// Checked reference roles are attached to `contract` ([`PreparedContract::references`]).
     pub contributions: BTreeMap<String, i32>,
 }
 
@@ -83,11 +98,20 @@ impl Artifact {
         if !container.tembra.is_empty() {
             return Err(Error("unsupported artifact metadata section".into()));
         }
-        let (identity, contract, contributions) = decode_orb(orb)?;
-        let implementation = if let Some(source) = source {
+        let (identity, contract, roles) = decode_orb(orb)?;
+        let ComponentRoles {
+            contributions,
+            references,
+        } = roles;
+        let (contract, implementation) = if let Some(source) = source {
             if !contributions.is_empty() {
                 return Err(Error(
                     "source artifacts declare contributions in their bundle".into(),
+                ));
+            }
+            if !references.is_empty() {
+                return Err(Error(
+                    "source artifacts cannot carry reference view roles".into(),
                 ));
             }
             if bytes[..8] != COMPONENT_HEADER || container.other {
@@ -96,13 +120,14 @@ impl Artifact {
                 ));
             }
             contract.check_source_profile()?;
-            Implementation::Source(
-                String::from_utf8(source.to_vec()).map_err(|error| Error(error.to_string()))?,
-            )
+            let source =
+                String::from_utf8(source.to_vec()).map_err(|error| Error(error.to_string()))?;
+            (contract, Implementation::Source(source))
         } else {
             verify_component(&contract, bytes)?;
             contract.check_contribution_roles(&contributions)?;
-            Implementation::Component(bytes.to_vec())
+            let contract = contract.with_references(&references)?;
+            (contract, Implementation::Component(bytes.to_vec()))
         };
         Ok(Self {
             identity,
@@ -180,8 +205,13 @@ impl PreparedComponent {
         if !container.tembra.is_empty() {
             return Err(Error("unsupported artifact metadata section".into()));
         }
-        let (identity, contract, contributions) = decode_orb(orb)?;
+        let (identity, contract, roles) = decode_orb(orb)?;
+        let ComponentRoles {
+            contributions,
+            references,
+        } = roles;
         contract.check_contribution_roles(&contributions)?;
+        let contract = contract.with_references(&references)?;
         Ok(Self {
             identity,
             contract,
@@ -219,41 +249,56 @@ fn verify_component(_: &PreparedContract, _: &[u8]) -> Result<(), Error> {
     ))
 }
 
-/// Encode identity and contract into one compact `tembra:orb` payload.
+/// Encode identity and contract into one compact `tembra:orb` payload without roles.
 pub(crate) fn encode_orb(identity: &Identity, contract: &PreparedContract) -> Vec<u8> {
-    encode_orb_contributions(identity, contract, &BTreeMap::new())
+    encode_orb_roles(identity, contract, &ComponentRoles::default())
 }
 
-pub(crate) fn encode_orb_contributions(
+/// Encode identity, contract and roles. Every payload spells both role maps, even when empty;
+/// the format is deliberately not compatible with payloads written before reference roles.
+pub(crate) fn encode_orb_roles(
     identity: &Identity,
     contract: &PreparedContract,
-    contributions: &BTreeMap<String, i32>,
+    roles: &ComponentRoles,
 ) -> Vec<u8> {
     let mut writer = crate::codec::Writer::default();
     writer.str(&identity.name);
     writer.u32(identity.api_version);
     writer.bytes(&contract.encode());
-    writer.len(contributions.len());
-    for (binding, priority) in contributions {
+    writer.len(roles.contributions.len());
+    for (binding, priority) in &roles.contributions {
         writer.str(binding);
         writer.u32(u32::from_le_bytes(priority.to_le_bytes()));
+    }
+    writer.len(roles.references.len());
+    for (binding, target) in &roles.references {
+        writer.str(binding);
+        writer.str(target);
     }
     writer.finish()
 }
 
-/// Decode and validate identity and contract from untrusted bytes.
-fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract, BTreeMap<String, i32>), Error> {
+/// Decode and validate identity and contract from untrusted bytes. Roles are only decoded here;
+/// callers check them against the contract and the artifact kind.
+fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract, ComponentRoles), Error> {
     let mut reader = Reader::new(bytes);
     let name = reader.str()?;
     let api_version = reader.u32()?;
     let length = reader.u32()? as usize;
     let contract = PreparedContract::decode(reader.take(length)?)?;
-    let mut contributions = BTreeMap::new();
+    let mut roles = ComponentRoles::default();
     for _ in 0..reader.count(crate::model::MAX_ITEMS)? {
         let binding = reader.str()?;
         let priority = i32::from_le_bytes(reader.u32()?.to_le_bytes());
-        if contributions.insert(binding, priority).is_some() {
+        if roles.contributions.insert(binding, priority).is_some() {
             return Err(Error("duplicate compiled contribution role".into()));
+        }
+    }
+    for _ in 0..reader.count(crate::model::MAX_ITEMS)? {
+        let binding = reader.str()?;
+        let target = reader.str()?;
+        if roles.references.insert(binding, target).is_some() {
+            return Err(Error("duplicate reference view role".into()));
         }
     }
     reader.finish()?;
@@ -263,7 +308,7 @@ fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract, BTreeMap<Stri
         world: contract.world().to_owned(),
     };
     identity.validate()?;
-    Ok((identity, contract, contributions))
+    Ok((identity, contract, roles))
 }
 
 /// Append a custom section to a WebAssembly binary.

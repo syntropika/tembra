@@ -1,6 +1,18 @@
 import { orb, type Context, type Declaration } from "@syntropika/tembra-sdk";
 
 function create(self: Declaration) {
+  // An unapproved key fails activation: a compiled view receives it as its WIT `err`.
+  if (self.key[0] === "denied") throw new Error("unapproved key");
+  // One acquisition is abandoned while a second keeps the callback open.
+  if (self.key[0] === "settles" || self.key[0] === "barrier") {
+    const delay = self.key[0] === "settles" ? 50 : 150;
+    self.resource("readiness", {
+      async open() {
+        await tembra.wait(delay);
+        return 1;
+      },
+    });
+  }
   // The `slow` instance stays unready long enough for its consumer to be cancelled.
   if (self.key[0] === "slow")
     self.resource("connection", {

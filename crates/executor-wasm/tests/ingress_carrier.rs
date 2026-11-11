@@ -162,7 +162,9 @@ impl Exchange {
 fn answer(packet: &str, reply: PortReply) {
     let packet: serde_json::Value = serde_json::from_str(packet).unwrap();
     match packet["operation"].as_str() {
-        Some("wait") => reply.complete(Ok("null".into())),
+        Some("wait") => {
+            reply.complete(Ok("null".into()));
+        }
         operation => panic!("unexpected host request {operation:?}"),
     }
 }

@@ -32,7 +32,7 @@ pub use providers::{
     NetworkGrant, Rng, SystemCapability,
 };
 #[doc(hidden)]
-pub use tembra_contracts::{Binding, Contract};
+pub use tembra_contracts::{Binding, ComponentRoles, Contract};
 
 use tembra::{Error, core::Code};
 

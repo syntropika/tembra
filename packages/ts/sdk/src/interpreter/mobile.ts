@@ -168,7 +168,7 @@ export class MobileDriver implements InterpreterPort {
         pull: () => carrier.pullResponse(),
         disconnect: () => carrier.disconnect(),
         cancel: () => port.cancel(),
-        reply: (id, packet) => void port.reply(id, packet),
+        reply: (id, packet) => port.reply(id, packet),
         finish: () => port.finish(),
       },
       exchange,
@@ -244,7 +244,7 @@ export class MobileDriver implements InterpreterPort {
           return value;
         }
         if (event.event !== "host") throw new Error("Unknown interpreter event");
-        const respond = (operation: () => unknown): void => {
+        const respond = (operation: () => unknown): boolean => {
           let response: string;
           try {
             response = `{"ok":${reply(operation())}}`;
@@ -253,7 +253,7 @@ export class MobileDriver implements InterpreterPort {
               error: error instanceof Error ? error.message : String(error),
             });
           }
-          this.port.reply(event.id, response);
+          return this.port.reply(event.id, response);
         };
         if (!event.asynchronous) respond(() => scope.sync(decodeHostRequest(event.packet)));
         else if (declaration)
@@ -261,12 +261,16 @@ export class MobileDriver implements InterpreterPort {
             throw new Error("Factories cannot perform asynchronous host operations");
           });
         else {
+          let request!: ReturnType<typeof decodeAsyncHostRequest>;
           const operation = Promise.resolve()
-            .then(() => scope.async(decodeAsyncHostRequest(event.packet)))
+            .then(() => {
+              request = decodeAsyncHostRequest(event.packet);
+              return scope.async(request);
+            })
             .then(
-              (value) => respond(() => value),
+              (value) => scope.deliver(request, value, (value) => respond(() => value)),
               (error) =>
-                respond(() => {
+                void respond(() => {
                   throw error;
                 }),
             )

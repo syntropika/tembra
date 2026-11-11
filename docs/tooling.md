@@ -108,6 +108,82 @@ support. Raw compiled artifacts without a registered adapter are refused.
 Source JS/TS targets do not use this step. Their closed scripts run through the shared dquickts
 interpreter and remain dynamically loadable without generating per-Orb browser bindings.
 
+### Keyed dependency references
+
+A plain compiled WIT import calls the provider's `main` object. To select an object by key,
+import a reference view: a resource whose methods mirror the provider's functions, plus an
+asynchronous acquisition function. For example, a provider exporting `counter.add` and
+`counter.who` can be addressed through:
+
+```wit
+interface counter-ref {
+    resource counter {
+        add: func(amount: u32) -> u32;
+        who: func() -> string;
+    }
+    get: async func(key: list<string>) -> result<counter, string>;
+}
+```
+
+Declare the view's target interface when packaging the compiled component:
+
+```ts
+const artifacts = await build({
+  builds: {
+    router: {
+      entry: "router.wasm",
+      wit: "keyed.wit",
+      world: "router",
+      apiVersion: 1,
+      references: {
+        "example:keyed/counter-ref@1.0.0": "example:keyed/counter@1.0.0",
+      },
+      browser: true,
+    },
+  },
+});
+```
+
+At installation, select the provider for the **view import binding** as usual:
+
+```ts
+await host.load(artifacts[0]!.path, {
+  requires: { "example:keyed/counter-ref@1.0.0": { orb: "keyed", apiVersion: 1 } },
+});
+```
+
+Rust packaging uses `tembra_executor_wasm::ComponentRoles` as the last argument to
+`Contract::component_artifact`, with the same `references` mapping and optional `contributions`.
+
+The official WIT bindings expose acquisition and methods directly inside the compiled guest:
+
+```rust
+async fn update(session_id: String) -> Result<u32, String> {
+    let personal = counter_ref::get(vec!["personal".into(), session_id.clone()]).await?;
+    let work = counter_ref::get(vec!["work".into(), session_id]).await?;
+    work.add(1);
+    Ok(personal.add(1))
+}
+```
+
+Tembra checks the role against the real WIT, derives the provider requirement and verifies its
+signature at installation. Method names, parameter names, types, results and async declarations
+must match the provider. Methods carry data; streams and transferred resources are outside this
+view profile. Without the explicit role, the same resource declaration has ordinary WIT resource
+semantics and cannot select kernel objects.
+
+Acquisition applies the installed requirement and the admitted root's principal. Equal addresses
+share an object according to its lifecycle policy; different keys or principals identify different
+objects. Dropping a view releases its claim when the callback settles. Ending the root expires
+all its claims, including handles retained in guest globals. A refused acquisition returns the
+declared WIT error; a stale handle cannot act for a later root.
+Node and mobile may finish an abandoned readiness wait before its callback ends; if the guest
+no longer observes the reply, Tembra releases the claim instead of publishing it into that root.
+
+Keys are opaque to Tembra. The application defines their meaning and authorizes configurations;
+a key grants no permission and creates no separate Wasm heap. Native and prepared browser hosts
+use this same model. See the [compiled fixture](../crates/executor-wasm/rust-keyed-router/src/lib.rs).
+
 ## Install an artifact
 
 Applications load artifacts by location. Default SDK loaders accept only `.wasm` files.

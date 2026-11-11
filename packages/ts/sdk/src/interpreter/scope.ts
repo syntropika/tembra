@@ -14,6 +14,7 @@ import {
 import type { Revision } from "./revision.ts";
 import { check, encode, VALUE_LIMIT } from "./codec.ts";
 import { lift } from "./wit-shape.ts";
+import { acquireReference } from "./acquire.ts";
 
 const scopeEnded = Object.freeze(new Error("Interpreter callback scope ended"));
 
@@ -84,6 +85,29 @@ export class Scope {
         if (cancelled) return Promise.reject(scopeEnded);
         ended ??= new AbortController();
         return this.async(request, authority, ended.signal);
+      },
+      deliver: (request, value, publish) => {
+        let accepted = false;
+        try {
+          accepted = publish(value);
+        } finally {
+          // The worker may cancel an import while this host is awaiting readiness. Never
+          // leave a ready but undelivered view owned by an otherwise long-lived root.
+          if (
+            !accepted &&
+            request.operation === "reference.acquire" &&
+            this.revision.views.has(request.service) &&
+            typeof value === "number"
+          ) {
+            const table = this.parent ?? this;
+            const slot = table.references.get(value);
+            const root = "context" in authority ? authority.context.root : undefined;
+            if (slot?.binding === request.service && slot.root === root) {
+              table.references.delete(value);
+              slot.reference.release();
+            }
+          }
+        }
       },
     };
   }
@@ -194,9 +218,13 @@ export class Scope {
         this.references.set(id, { reference, binding: request.service });
         return id;
       }
-      case "reference.release":
-        this.reference(request, authority).reference.release();
+      case "reference.release": {
+        const slot = this.reference(request, authority);
+        slot.reference.release();
+        if (this.revision.views.has(slot.binding))
+          this.selected(request.scope).references.delete(request.id);
         return null;
+      }
       case "reference.status":
         return this.reference(request, authority).reference.status;
       case "reference.state": {
@@ -258,18 +286,17 @@ export class Scope {
     const slot = this.handle(selected.references, request.id, "reference");
     if (slot.root === undefined) return slot;
     const current = "context" in authority ? authority.context.root : undefined;
-    if (selected !== this || current !== slot.root)
-      throw new Error("Reference belongs to another root");
+    const issued =
+      selected === this || (this.revision.views.has(slot.binding) && selected === this.parent);
+    if (!issued || current !== slot.root) throw new Error("Reference belongs to another root");
     if (!this.declaration.session.rootReferences.has(slot.root))
       throw new Error("Reference expired with its root");
     return slot;
   }
 
   /**
-   * `Context.get`: acquire a selected WIT Orb import for the active invocation. The host resolves
-   * the provider and the installed requirement's API version and methods; the guest names only the
-   * binding and key, and the root's principal applies. Readiness is awaited under the callback's
-   * cancellation, and a claim whose wait or authority fails is released before any handle exists.
+   * `Context.get`: acquire a selected WIT Orb import for the active invocation (see
+   * `acquire.ts`). Only a ready claim receives a handle, filed with the root owning it.
    */
   private async acquire(
     request: { service: string; key: readonly string[] },
@@ -277,52 +304,24 @@ export class Scope {
     ended: AbortSignal,
   ): Promise<number> {
     const context = this.context(authority);
-    // Only an admitted method call selects instances. A cleanup context (a resource `close`) has
-    // no invocation; acquiring there would choose instances by the cleanup principal.
-    if (!context.invocation)
-      throw new Error("Reference acquisition requires an admitted invocation");
     const binding = this.revision.imports.get(request.service);
     if (!binding) throw new Error("Reference is not a selected WIT Orb import");
     const session = this.declaration.session;
-    const requirement = session.scopes.requirement(this.declaration.environment, binding);
-    const reference = session.handles.hold(
-      requirement.service,
+    const table = this.revision.views.has(request.service) ? (this.parent ?? this) : this;
+    const { id, reference } = await acquireReference(
+      this.declaration,
+      binding,
       request.key,
-      {
-        ...(requirement.apiVersion ? { apiVersion: requirement.apiVersion } : {}),
-        ...(requirement.methods ? { methods: requirement.methods } : {}),
-      },
       context,
+      ended,
+      (reference) => ({ id: table.allocate(), reference }),
     );
-    let id: number;
-    try {
-      await session.calls.observe(reference.ready, combinedSignal(context.signal, ended));
-      // The invocation, root or callback may have ended while readiness was pending.
-      context.check();
-      checkSignal(ended);
-      id = this.allocate();
-    } catch (error) {
-      this.abandon(reference, error);
-    }
     // Root claims are released by the runtime; forget the names of those whose roots have ended.
-    for (const [handle, slot] of this.references)
+    for (const [handle, slot] of table.references)
       if (slot.root !== undefined && !session.rootReferences.has(slot.root))
-        this.references.delete(handle);
-    this.references.set(id, { reference, binding: request.service, root: context.root });
+        table.references.delete(handle);
+    table.references.set(id, { reference, binding: request.service, root: context.root });
     return id;
-  }
-
-  /**
-   * Release a claim that will never be published and rethrow the failure that stopped it; a
-   * secondary release failure is reported to the session instead of replacing it.
-   */
-  private abandon(reference: DynamicReference, error: unknown): never {
-    try {
-      reference.release();
-    } catch (release) {
-      this.declaration.session.report(release);
-    }
-    throw error;
   }
 
   /** Await only issued references and bounded cooperative timers. */

@@ -42,15 +42,21 @@ fn append(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
 fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
     let contract = Contract::from_source("hooks.wit", "package test:hooks@1.0.0; interface guard { apply: func(value: u32) -> u32; } world extension { import guard; export guard; }", Some("extension")).unwrap();
     let component = component(&contract);
-    let contributions = [("test:hooks/guard@1.0.0".into(), -7)].into();
+    let contributions = ComponentRoles {
+        contributions: [("test:hooks/guard@1.0.0".into(), -7)].into(),
+        ..Default::default()
+    };
     let bytes = contract
         .component_artifact(&component, "extension", 1, &contributions)
         .unwrap();
     assert_eq!(
         Artifact::decode(&bytes).unwrap().contributions,
-        contributions
+        contributions.contributions
     );
-    let invalid = [("test:hooks/missing@1.0.0".into(), 1)].into();
+    let invalid = ComponentRoles {
+        contributions: [("test:hooks/missing@1.0.0".into(), 1)].into(),
+        ..Default::default()
+    };
     assert!(
         contract
             .component_artifact(&component, "extension", 1, &invalid)
@@ -65,14 +71,14 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
     crate::artifact::append_section(
         &mut forged,
         "tembra:orb",
-        &crate::artifact::encode_orb_contributions(&identity, contract.prepared(), &invalid),
+        &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &invalid),
     );
     assert!(Artifact::decode(&forged).is_err());
     let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
     crate::artifact::append_section(
         &mut source,
         "tembra:orb",
-        &crate::artifact::encode_orb_contributions(&identity, contract.prepared(), &contributions),
+        &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &contributions),
     );
     crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
     assert!(Artifact::decode(&source).is_err());
@@ -529,10 +535,10 @@ fn source_artifacts_admit_only_whole_async_byte_stream_results() {
         crate::artifact::append_section(
             &mut forged,
             "tembra:orb",
-            &crate::artifact::encode_orb_contributions(
+            &crate::artifact::encode_orb_roles(
                 &identity,
                 contract.prepared(),
-                &BTreeMap::new(),
+                &ComponentRoles::default(),
             ),
         );
         crate::artifact::append_section(&mut forged, "tembra:source", b"globalThis.__tembraOrb={}");

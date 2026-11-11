@@ -53,6 +53,7 @@ jobs:
       - run: just build-provider "$RUNNER_TEMP/provider"
       - run: just build-probe "$RUNNER_TEMP/provider"
       - run: just build-consumer "$RUNNER_TEMP/provider"
+      - run: just build-keyed-router "$RUNNER_TEMP/provider"
       - run: just build-resources "$RUNNER_TEMP/provider"
       - run: just build-streams "$RUNNER_TEMP/provider"
       - run: just build-contributor "$RUNNER_TEMP/provider"
@@ -67,6 +68,7 @@ jobs:
           --provider "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm"
           --probe "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm"
           --consumer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_pipeline.wasm"
+          --keyed-router "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_keyed_router.wasm"
           --contributor "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm"
           --http-client "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_http_client.wasm"
           --sockets "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_sockets.wasm"
@@ -77,4 +79,4 @@ jobs:
           --stream-producer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_stream_producer.wasm"
           --stream-consumer "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_stream_consumer.wasm"
       - name: Test portable mobile execution and foreign continuation delivery
-        run: just test-mobile-wasm packages/ts/engine-node/dist/interpreter.wasm "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm" "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm"
+        run: just test-mobile-wasm packages/ts/engine-node/dist/interpreter.wasm "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_probe.wasm" "$RUNNER_TEMP/http-handler/handler/wasm32-unknown-unknown/release/tembra_wasm_http_handler.wasm" "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_keyed_router.wasm"

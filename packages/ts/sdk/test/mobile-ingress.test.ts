@@ -85,6 +85,9 @@ function fixture(options: { ingress?: boolean } = {}) {
     cancel() {
       journal.push(["scope.cancel"]);
     },
+    deliver(_request, value, publish) {
+      publish(value);
+    },
     sync: (request) => ({ sync: request.operation }),
     async: async (request) => {
       journal.push(["async", request.operation]);

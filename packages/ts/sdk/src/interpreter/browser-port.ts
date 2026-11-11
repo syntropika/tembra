@@ -277,6 +277,9 @@ export class BrowserPort implements InterpreterPort {
     await this.execute(JSON.stringify({ kind: "release", environment }), {
       check() {},
       cancel() {},
+      deliver(_request, value, publish) {
+        publish(value);
+      },
       sync() {
         throw new Error("Release has no host scope");
       },

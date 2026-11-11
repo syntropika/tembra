@@ -238,7 +238,13 @@ impl PreparedContract {
                 .get(binding)
                 .ok_or_else(|| Error(format!("missing provider for {binding}")))?;
             used.insert(binding.to_owned());
+            let reference = self.references().get(binding);
             match selected {
+                Binding::Host { .. } if reference.is_some() => {
+                    return Err(Error(format!(
+                        "{binding}: a reference view requires an Orb provider"
+                    )));
+                }
                 Binding::Host { provider } => {
                     if provider.trim().is_empty() {
                         return Err(Error(format!("empty host provider for {binding}")));
@@ -262,6 +268,24 @@ impl PreparedContract {
                     if name.trim().is_empty() || *api_version == 0 {
                         return Err(Error(format!("invalid Orb provider for {binding}")));
                     }
+                    // A reference view requires the provider service it addresses, with methods
+                    // and digest derived from its resource methods once `self` is removed.
+                    let (contract, signature, methods) = match reference {
+                        Some(reference) => (
+                            reference.interface.clone(),
+                            reference.signature.clone(),
+                            reference.methods.values().cloned().collect(),
+                        ),
+                        None => (
+                            contract,
+                            self.digest(interface)?,
+                            interface
+                                .functions
+                                .iter()
+                                .map(|function| function.name.clone())
+                                .collect(),
+                        ),
+                    };
                     let service = service_name(name, &contract);
                     let requirement =
                         requirements
@@ -279,17 +303,19 @@ impl PreparedContract {
                             "inconsistent API version for provider {name}"
                         )));
                     }
-                    requirement
+                    // A plain import and a reference view may require the same service only
+                    // with an identical derived signature.
+                    if requirement
                         .signatures
-                        .insert(service.clone(), self.digest(interface)?);
-                    requirement.methods.insert(
-                        service,
-                        interface
-                            .functions
-                            .iter()
-                            .map(|function| function.name.clone())
-                            .collect(),
-                    );
+                        .get(&service)
+                        .is_some_and(|previous| *previous != signature)
+                    {
+                        return Err(Error(format!(
+                            "{binding}: another import requires {service} with a different signature"
+                        )));
+                    }
+                    requirement.signatures.insert(service.clone(), signature);
+                    requirement.methods.insert(service, methods);
                 }
             }
         }

@@ -103,6 +103,9 @@ function scope(): CallbackScope & { cancelled: boolean } {
       this.cancelled = true;
     },
     call: async () => null,
+    acquire: () => Promise.reject(new Error("no reference views")),
+    invoke: () => Promise.reject(new Error("no reference views")),
+    release() {},
   };
 }
 

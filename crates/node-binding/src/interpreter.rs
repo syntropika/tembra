@@ -339,8 +339,7 @@ impl NodeInterpreterPort {
     pub fn reply(&self, id: u32, packet: String) -> napi::Result<bool> {
         let reply = self.replies.lock().map_err(js_error)?.remove(&id);
         if let Some(reply) = reply {
-            reply.complete(decode_raw(&packet));
-            Ok(true)
+            Ok(reply.complete(decode_raw(&packet)))
         } else {
             Ok(false)
         }
