@@ -6,9 +6,9 @@ use std::rc::Rc;
 use tembra::{Host, Reference};
 use tembra_executor_wasm::{Engine, Install, Limits};
 
-/// The hook identity: the `guard` interface of the shared WIT package, declared by `gate` and
-/// named by the contributor's `#[hook]` attribute.
-const GUARD: &str = "example:admission/guard@1.0.0";
+/// The hook identity: the `guard` interface the gate derives from its own code, named by the
+/// contributor's `#[hook]` attribute and bound here.
+const GUARD: &str = "example:gate/guard@1.0.0";
 /// The gate's service, derived from its WIT like any compiled Orb's.
 const ADMISSIONS: &str = "gate::example:gate/admissions@1.0.0";
 

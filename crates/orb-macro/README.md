@@ -44,28 +44,29 @@ mod greeter {
 
 ## What the macro reads
 
-| In the module                                                               | In the WIT                                                                                                                |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| the module name                                                             | the `world`                                                                                                               |
-| `package = "..."` on the attribute                                          | `package ns:name@version;`                                                                                                |
-| `wit = "dir"` on the attribute                                              | the directory with the WIT packages the Orb consumes, relative to the crate                                               |
-| `context` on the attribute                                                  | `import tembra:guest/context` in the world: the call's principal and cancellation, the object's address, the log          |
-| a unit struct with `#[service]` and an `impl` block of `pub fn`             | an exported `interface`, in kebab-case                                                                                    |
-| `#[service("ns:name/interface@version")]` on a unit struct                  | `export` of that interface of a consumed package, implemented by the `impl` block                                         |
-| `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`                | nothing in the WIT: the ownership policy of the service's objects, in the manifest                                        |
-| `import = "ns:name/interface@version"` on the attribute                     | `import` of that interface of a consumed package, bound to a provider at installation                                     |
-| a struct with `#[wit_resource]` and an `impl` block of `pub fn`             | a `resource` of its service's interface: the `#[constructor]` function its constructor, the `&self` functions its methods |
-| each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                               |
-| a struct with named fields, when a service method or a state uses it        | a `record`                                                                                                                |
-| an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`                                                              |
-| `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                              |
-| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`        | `import` and `export` of that hook interface in the world: a contribution                                                 |
-| a unit struct with `#[hook("ns:name/hook@version", composition = c)]`       | `import` and `export` of that hook interface in the world: a declaration                                                  |
-| a struct with named fields and `#[state(service = Name, version = n)]`      | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it       |
-| a struct with `#[resource(version = n)]` and a function marked `#[open]`    | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                                     |
-| `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct | nothing in the WIT: the state's rule, run on every update and on reload; `validated` in the declaration to the kernel     |
-| `#[close]` on a `fn(self)` of a `#[resource]` struct                        | nothing in the WIT: run by the kernel at teardown                                                                         |
-| `///` comments                                                              | `///` comments in the WIT                                                                                                 |
+| In the module                                                               | In the WIT                                                                                                                                                         |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| the module name                                                             | the `world`                                                                                                                                                        |
+| `package = "..."` on the attribute                                          | `package ns:name@version;`                                                                                                                                         |
+| `wit = "dir"` on the attribute                                              | the directory with the WIT packages the Orb consumes, relative to the crate                                                                                        |
+| `context` on the attribute                                                  | `import tembra:guest/context` in the world: the call's principal and cancellation, the object's address, the log                                                   |
+| a unit struct with `#[service]` and an `impl` block of `pub fn`             | an exported `interface`, in kebab-case                                                                                                                             |
+| `#[service("ns:name/interface@version")]` on a unit struct                  | `export` of that interface of a consumed package, implemented by the `impl` block                                                                                  |
+| `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`                | nothing in the WIT: the ownership policy of the service's objects, in the manifest                                                                                 |
+| `import = "ns:name/interface@version"` on the attribute                     | `import` of that interface of a consumed package, bound to a provider at installation                                                                              |
+| a struct with `#[wit_resource]` and an `impl` block of `pub fn`             | a `resource` of its service's interface: the `#[constructor]` function its constructor, the `&self` functions its methods                                          |
+| each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                                                                        |
+| a struct with named fields, when a service method or a state uses it        | a `record`                                                                                                                                                         |
+| an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`                                                                                                       |
+| `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                                                                       |
+| a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`        | `import` and `export` of that hook interface in the world: a contribution                                                                                          |
+| a unit struct with `#[hook("ns:name/hook@version", composition = c)]`       | `import` and `export` of that hook interface in the world: a declaration                                                                                           |
+| a unit struct with `#[hook(composition = c, input = Type)]`                 | a hook `interface` of the package under the struct's name, its callback `apply` and the types the input reaches, imported and exported by the world: a declaration |
+| a struct with named fields and `#[state(service = Name, version = n)]`      | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it                                                |
+| a struct with `#[resource(version = n)]` and a function marked `#[open]`    | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                                                                              |
+| `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct | nothing in the WIT: the state's rule, run on every update and on reload; `validated` in the declaration to the kernel                                              |
+| `#[close]` on a `fn(self)` of a `#[resource]` struct                        | nothing in the WIT: run by the kernel at teardown                                                                                                                  |
+| `///` comments                                                              | `///` comments in the WIT                                                                                                                                          |
 
 Nothing is exported by accident. A service is a unit struct marked `#[service]`; the `pub fn` of
 its `impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT
@@ -111,42 +112,52 @@ artifact.
 
 ## Declaring a hook
 
-An Orb that owns a hook marks a unit struct with the hook's identity and its composition, one of
-`series`, `waterfall` and `bail`, and names the directory holding the hook's WIT package, as a
-contributor does:
+An Orb that owns a hook marks a unit struct with the composition, one of `series`, `waterfall` and
+`bail`, and the type of the callback's input; the macro derives the hook's interface from them,
+under the struct's name in the Orb's package, as it derives a service's:
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:gate@1.0.0", wit = "../wit")]
+#[tembra_orb_macro::orb(package = "example:gate@1.0.0")]
 mod gate {
     /// Each contributor may change the admission or block it, in plan order.
-    #[hook("example:admission/guard@1.0.0", composition = waterfall)]
+    #[hook(composition = waterfall, input = Admission)]
     pub struct Guard;
 
-    pub struct Decision { pub value: i32, pub blocked: bool }
+    pub struct Admission { pub value: i32, pub blocked: bool }
 
     #[service]
     pub struct Admissions;
 
     impl Admissions {
         /// Run the hook over a fresh admission and report what the contributors decided.
-        pub fn admit(value: i32) -> Decision {
-            let decided = Guard::run(guard::Admission { value, blocked: false });
-            Decision { value: decided.value, blocked: decided.blocked }
+        pub fn admit(value: i32) -> Admission {
+            Guard::run(Admission { value, blocked: false })
         }
     }
 }
 ```
 
-The macro gives the struct `Guard::run(input)`, which hands the input to the kernel: the kernel
-calls the contributions of other Orbs in plan order and returns the composed result, nothing for a
-series hook, the input type for a waterfall, an option for a bail. The callback's shape must fit the
-composition, and the macro checks it against the WIT. In the world the hook interface is imported
-and exported, as for a contribution: the export is what the portable hook contract requires of a
-provider, and the macro answers it with a callback that traps, because the contributions answer the
-hook; the import is the typed entry to the plan. Which role an interface plays travels in the
-`tembra:manifest` section next to the contribution priorities, and `cargo tembra build` packages
-it; an Orb declares a hook or contributes to it, never both. Service signatures use the module's
-own types, so a method that reports the hook's record converts it, as `admit` does.
+The interface `guard` holds the callback `apply`, whose result follows the composition, nothing
+for a series hook, the input type for a waterfall, an option for a bail, and the types the input
+reaches; the services borrow them with `use`, so `Admission` is one type for the whole module. The
+macro gives the struct `Guard::run(input)`, which hands the input to the kernel: the kernel calls
+the contributions of other Orbs in plan order and returns the composed result. In the world the
+hook interface is imported and exported, as for a contribution: the export is what the portable
+hook contract requires of a provider, and the macro answers it with a callback that traps, because
+the contributions answer the hook; the import is the typed entry to the plan. The bindings spell the
+hook's types once per side, so the macro generates the conversions `run` applies. Contributors read
+the hook from the provider's contract, `wit = "../gate/contract"` and
+`#[hook("example:gate/guard@1.0.0", priority = n)]`; see
+[rust-orb-hook-declaration](../../examples/rust-orb-hook-declaration/README.md).
+
+A hook that is a contract of its own, written by hand because no single Orb owns it or because its
+provider is native, is declared by its identity instead, with the directory holding its package:
+`#[hook("example:admission/guard@1.0.0", composition = waterfall)]` under `wit = "../wit"`. The
+hook's types then belong to the consumed package, re-exported under the interface's name,
+`guard::Admission`, and `run` takes and returns them; the macro checks that the callback's shape
+fits the composition. Which role an interface plays travels in the `tembra:manifest` section next
+to the contribution priorities, and `cargo tembra build` packages it; an Orb declares a hook or
+contributes to it, never both.
 
 ## The lifetime of a service's objects
 
@@ -436,15 +447,13 @@ The macro rewrites the module with:
 5. `pub use exports::...::{Stats}`: the author's record and enum definitions are replaced by the
    generated types with the same names and public fields, so the author's functions and the
    generated traits share one type; `pub use exports::...::guard;` for each contributed hook and each
-   implemented interface, `pub use ...::guard;`, the import module, for each declared hook and
-   each imported interface; `pub use ...::context;` with the `context` option;
+   implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::context;` with the `context` option;
 6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
    by forwarding to the author's functions, hook callbacks and the kernel's `state-init` and
    `resources-init` callbacks included, with a trapping callback for each declared hook, and
    `export!`; the resource trait of each `#[wit_resource]` struct on the struct itself, its
-   constructor and methods forwarded and the handles wrapped at the boundary; with a declared
-   hook, `run` on its struct, calling the hook's import;
+   constructor and methods forwarded and the handles wrapped at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
 8. with a state, `Default` and the `read`/`update` functions on each state type, over a hidden
    module that maps the kernel's JSON to the type with `serde_json`, and the kernel's `validate`
    callback, which runs the state's `#[validate]` function on the value a reload would adopt;
@@ -460,8 +469,7 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
 - WASI interfaces are not expressed. An Orb consumes another Orb's WIT by importing an
   interface, implementing one or contributing to a hook; selecting another object by key, as a
   TypeScript Orb does with `context.get`, is not expressed.
-- A declared hook's types enter no service signature: a method that reports the hook's record
-  returns a record of the module, converted from it.
+- A hook declared from a consumed package keeps that package's types: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list.
 - A service's functions are associated functions without `self`; only the methods of a
   `#[wit_resource]` struct take `&self`, never `&mut self`. Besides a service's state, a
   resource's fields and the root's resources, data lives in `static`s, as in the compiled

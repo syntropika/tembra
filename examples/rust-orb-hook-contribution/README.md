@@ -22,7 +22,9 @@ shows it. This example keeps the provider native on purpose: a sandboxed contrib
 a hook of trusted application code is the case of an application extended by plugins. The provider
 is declared with the `tembra` facade, as in [examples/rust/hooks.rs](../rust/hooks.rs), and attaches
 the WIT callback signature to its hook with `Hook::signature`, so the compiled contributor is
-checked against the same contract at installation.
+checked against the same contract at installation. A native provider has no derived WIT, so the
+hook's contract is written by hand in `wit/admission.wit`; a compiled provider derives it from its
+code, and its contributors read the provider's contract, as the hook declaration example shows.
 
 ## Build
 
