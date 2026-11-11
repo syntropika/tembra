@@ -1,0 +1,16 @@
+[package]
+name = "tembra-example-book-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+# The wiring that installs the compiled keeper next to a native one and consults both through the
+# shared interface; it defines the native keeper, which is trusted application code, not an Orb of
+# the example.
+[dependencies]
+tembra = { path = "../../../crates/tembra" }
+tembra-executor-wasm = { path = "../../../crates/executor-wasm" }
+futures = "0.3"
+serde_json = "1"
