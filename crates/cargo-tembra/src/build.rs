@@ -1,5 +1,5 @@
 //! `cargo tembra build`: compile, derive the WIT, verify, package, summarize.
-use crate::component::{contract_text, decode, embedded_hooks, roles, summary};
+use crate::component::{contract_text, decode, embedded_manifest, summary};
 use anyhow::{Context, Result, bail};
 use heck::{ToKebabCase, ToSnakeCase};
 use sha2::{Digest, Sha256};
@@ -97,8 +97,9 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     // 3. Verify and package: the same component_artifact the SDK build uses for a provider.
     //    Hook interfaces are the ones the contract both imports and exports; which are declared,
     //    with what composition, and which are contributions, with what priority, travels in the
-    //    component, written by the macro from the #[hook] attributes.
-    let roles = roles(&contract, &embedded_hooks(&component)?)?;
+    //    component with the lifetime each service chose: the macro writes them from the #[hook]
+    //    and #[service] attributes.
+    let roles = crate::component::roles(&contract, &embedded_manifest(&component)?)?;
     let artifact = contract
         .component_artifact(&component, &orb_name, api_version, &roles)
         .map_err(|error| anyhow::anyhow!("{error}"))

@@ -50,6 +50,7 @@ mod greeter {
 | `package = "..."` on the attribute                                     | `package ns:name@version;`                                                            |
 | `wit = "dir"` on the attribute                                         | the directory with the WIT packages the Orb consumes, relative to the crate           |
 | a unit struct with `#[service]` and an `impl` block of `pub fn`        | an exported `interface`, in kebab-case                                                |
+| `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`           | nothing in the WIT: the ownership policy of the service's objects, in the manifest    |
 | each `pub fn` without `self`                                           | a `func`; name and parameters in kebab-case                                           |
 | a struct with named fields, when a service method or a state uses it   | a `record`                                                                            |
 | an enum, when a service method uses it                                 | an `enum` when every variant is empty, otherwise a `variant`                          |
@@ -93,7 +94,7 @@ The macro reads the callback's name from that WIT, imports and exports the inter
 as the portable hook contract requires, re-exports the generated module under the interface name so
 the author writes `guard::Admission`, and forwards the callback to the function. The function's Rust
 name is free; its single parameter and its result are the callback's. The priority travels in the
-component, in a `tembra:hooks` custom section, and `cargo tembra build` packages it with the
+component, in a `tembra:manifest` custom section, and `cargo tembra build` packages it with the
 artifact.
 
 ## Declaring a hook
@@ -131,9 +132,34 @@ composition, and the macro checks it against the WIT. In the world the hook inte
 and exported, as for a contribution: the export is what the portable hook contract requires of a
 provider, and the macro answers it with a callback that traps, because the contributions answer the
 hook; the import is the typed entry to the plan. Which role an interface plays travels in the
-`tembra:hooks` section next to the contribution priorities, and `cargo tembra build` packages it;
-an Orb declares a hook or contributes to it, never both. Service signatures use the module's own
-types, so a method that reports the hook's record converts it, as `admit` does.
+`tembra:manifest` section next to the contribution priorities, and `cargo tembra build` packages
+it; an Orb declares a hook or contributes to it, never both. Service signatures use the module's
+own types, so a method that reports the hook's record converts it, as `admit` does.
+
+## The lifetime of a service's objects
+
+The kernel creates one object per key and principal that a reference names, and by default keeps
+it while something references it. The attribute can choose otherwise, as a TypeScript service does
+in its declaration:
+
+```rust
+/// One ledger, created when the host installs the Orb and kept until the host closes.
+#[service(lifetime = host)]
+pub struct Ledger;
+
+/// A cache whose objects stay two and a half seconds after their last reference is released.
+#[service(linger_ms = 2500)]
+pub struct Cache;
+```
+
+`lifetime = host` pins the objects: the host creates the `main` object under its own principal
+when it installs the Orb, and nothing releases it before the host closes; such an object is
+acquired only as `main` by the principal `host`. `linger_ms = n` keeps an unreferenced object, and
+the kernel state it owns, for `n` milliseconds before the kernel releases it, so a reference taken
+again soon finds the same object. A host-lifetime object cannot linger. The policy is not WIT: it
+travels in the component's `tembra:manifest` section, keyed by the interface identity, and
+`cargo tembra build` packages it in the artifact, where the executor reads it as a source
+bundle's own declaration.
 
 ## Kernel-managed state
 
@@ -221,11 +247,12 @@ WIT has no spelling for, such as a client of some granted I/O.
 The macro rewrites the module with:
 
 1. `pub const WIT: &str`, the derived WIT text;
-2. the same text as a `tembra:wit` custom section of the Wasm module, and the hook roles, the
-   declared hooks with their composition and the contributions with their priorities, as a
-   `tembra:hooks` section. `cargo tembra build` reads them and packages the contract exactly as
-   written here, with the `///` comments the binary type section loses and the hook imports the
-   linker drops because nothing calls them;
+2. the same text as a `tembra:wit` custom section of the Wasm module, and the manifest, the
+   declared hooks with their composition, the contributions with their priorities and the
+   services that chose a lifetime or a linger, as a `tembra:manifest` section. `cargo tembra
+build` reads them and packages the contract exactly as written here, with the `///` comments
+   the binary type section loses and the hook imports the linker drops because nothing calls
+   them;
 3. the `no_std` prelude for the Wasm target, `#[global_allocator]` on `dlmalloc` and a
    `#[panic_handler]` that traps, under `#[cfg(target_arch = "wasm32")]`; on the host the crate
    builds with std, so `cargo check` and rust-analyzer work without a Wasm target;

@@ -56,7 +56,7 @@ The export is what the portable hook contract requires of a provider, and the ma
 a callback that traps: contributions answer the hook, the provider never does. The import is the
 typed entry to the plan; `Guard::run` calls it, and the executor turns the call into the kernel's
 `hook.run`, the same request a TypeScript provider makes. What tells the two roles apart is the
-`tembra:hooks` section the macro writes into the component, `declares` for the gate and
+`tembra:manifest` section the macro writes into the component, `declares` for the gate and
 `contributes` for the blocker; `cargo tembra build` reads it and packages the role in the artifact,
 and the kernel binds the gate's import to the plan instead of asking the installer for a provider.
 
