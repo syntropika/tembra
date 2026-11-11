@@ -14,7 +14,8 @@ use std::{
 };
 use tembra::Result;
 use tembra_contracts::{
-    FunctionKind, Item, Plan, PreparedContract, ServiceBinding, guest, javascript_name,
+    FunctionKind, HookComposition, Item, Plan, PreparedContract, ServiceBinding, guest,
+    javascript_name,
 };
 pub(crate) use worker::State as ComponentState;
 
@@ -22,14 +23,17 @@ pub(crate) use worker::State as ComponentState;
 ///
 /// Compiled services have no guest-selected lifetime, linger or access policy. Hook callbacks and
 /// the kernel's own callbacks (`tembra:guest`) are answered to their callers, never offered as
-/// services.
+/// services; the hooks the artifact declares are described under their export's alias, as a
+/// source bundle declares its own.
 pub(crate) fn describe(
     contract: &PreparedContract,
     name: &str,
     api_version: u32,
     contributions: &BTreeMap<String, i32>,
+    hooks: &BTreeMap<String, HookComposition>,
 ) -> Value {
     let mut services = Map::new();
+    let mut declared = Map::new();
     for entry in &contract.model().exports {
         let Item::Interface(interface) = &entry.item else {
             continue;
@@ -37,6 +41,15 @@ pub(crate) fn describe(
         // The incoming HTTP handler is declared like a service so `check_ingress` consumes it;
         // it never becomes a portable service binding.
         if interface.contract.is_none() || interface.functions.is_empty() {
+            continue;
+        }
+        let alias = javascript_name(interface.name.as_deref().unwrap_or_default());
+        if let Some(composition) = interface
+            .contract
+            .as_ref()
+            .and_then(|identity| hooks.get(identity))
+        {
+            declared.insert(alias, json!(composition));
             continue;
         }
         if interface.contract.as_ref().is_some_and(|identity| {
@@ -49,12 +62,9 @@ pub(crate) fn describe(
             .iter()
             .map(|function| javascript_name(&function.name))
             .collect::<Vec<_>>();
-        services.insert(
-            javascript_name(interface.name.as_deref().unwrap_or_default()),
-            json!({ "methods": methods }),
-        );
+        services.insert(alias, json!({ "methods": methods }));
     }
-    json!({ "name": name, "apiVersion": api_version, "services": services, "contributes": contributions })
+    json!({ "name": name, "apiVersion": api_version, "services": services, "hooks": declared, "contributes": contributions })
 }
 
 /// Resolve checked exports and selected Orb imports into Send-only Store dispatch tables.
@@ -131,11 +141,7 @@ fn layout(
             Some(Binding::Orb { .. }) if contribution => worker::Role::Contribution,
             Some(Binding::Orb { .. }) => worker::Role::Dependency,
             Some(Binding::Kernel) => worker::Role::Kernel,
-            Some(Binding::Hook) => {
-                return Err(failure(
-                    "this executor cannot run a compiled Orb's hook declarations yet",
-                ));
-            }
+            Some(Binding::Hook) => worker::Role::Hook,
             Some(Binding::Host { .. }) | None => continue,
         };
         let Item::Interface(interface) = &entry.item else {
@@ -219,6 +225,25 @@ fn layout(
             reference: view.is_some(),
         });
     }
+    // Each declared hook's import binding, to the alias `hook.declare` names.
+    let declared = hooks
+        .hooks
+        .iter()
+        .filter_map(|hook| {
+            contract
+                .model()
+                .imports
+                .iter()
+                .find_map(|entry| match &entry.item {
+                    Item::Interface(interface)
+                        if interface.contract.as_deref() == Some(&hook.name) =>
+                    {
+                        Some((entry.key.clone(), hook.alias.clone()))
+                    }
+                    _ => None,
+                })
+        })
+        .collect();
     Ok(worker::Layout {
         exports,
         imports,
@@ -226,6 +251,7 @@ fn layout(
         ingress: contract.ingress().map(str::to_owned),
         state_init: guest::exports(contract.model(), guest::STATE_INIT),
         resource_init: guest::exports(contract.model(), guest::RESOURCE_INIT),
+        hooks: declared,
     })
 }
 
@@ -372,7 +398,7 @@ mod state_tests {
         let bindings = contract
             .providers(&Default::default(), &Grants::default())
             .unwrap();
-        let description = describe(&contract, "counter", 1, &BTreeMap::new());
+        let description = describe(&contract, "counter", 1, &BTreeMap::new(), &BTreeMap::new());
         assert_eq!(
             description["services"]
                 .as_object()
@@ -410,6 +436,61 @@ mod state_tests {
         );
         assert_eq!(layout.imports[1].binding, guest::RESOURCE);
         assert_eq!(layout.imports[1].role, worker::Role::Kernel);
+    }
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+    use tembra_contracts::{Contract, Implementation};
+
+    const WIT: &str = "package example:gate@1.0.0;
+        interface guard { record admission { value: s32, blocked: bool } apply: func(input: admission) -> admission; }
+        interface admissions { use guard.{admission}; admit: func(value: s32) -> admission; }
+        world gate { import guard; export guard; export admissions; }";
+
+    /// A declared hook is described under its export's alias, never as a service; its import
+    /// binds to the plan and the layout remembers the alias the worker declares it by.
+    #[test]
+    fn a_declared_hook_is_described_and_its_import_runs_the_plan() {
+        let contract = Contract::from_source("gate.wit", WIT, None).unwrap();
+        let identity = "example:gate/guard@1.0.0";
+        let bindings = contract
+            .providers(&Default::default(), &Grants::default())
+            .unwrap();
+        assert_eq!(bindings[identity], Binding::Hook);
+        let declared = BTreeMap::from([(identity.to_owned(), HookComposition::Waterfall)]);
+        let description = describe(&contract, "gate", 1, &BTreeMap::new(), &declared);
+        assert_eq!(
+            description["services"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["admissions"]
+        );
+        assert_eq!(description["hooks"], json!({ "guard": "waterfall" }));
+        let implementation: Implementation = serde_json::from_value(description).unwrap();
+        let services = contract
+            .check_implementation("gate", 1, implementation.clone())
+            .unwrap();
+        let hooks = contract.check_hooks(&implementation, &bindings).unwrap();
+        let layout = layout(&contract, &services, &bindings, &hooks).unwrap();
+        assert_eq!(
+            layout
+                .exports
+                .iter()
+                .map(|export| export.service.as_str())
+                .collect::<Vec<_>>(),
+            ["admissions"]
+        );
+        assert_eq!(layout.imports.len(), 1);
+        assert_eq!(layout.imports[0].binding, identity);
+        assert_eq!(layout.imports[0].role, worker::Role::Hook);
+        assert_eq!(
+            layout.hooks,
+            BTreeMap::from([(identity.to_owned(), "guard".to_owned())])
+        );
     }
 }
 
