@@ -1,6 +1,6 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 20:55 CET
+- **Aggiornato:** 2026-11-11, 20:35 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   ora con base `main`
 - **Stato:** strada A. Ribase fatto, verificato e su origin
@@ -794,7 +794,7 @@ Il resto è meccanico:
 
 ### Adesso
 
-Fatto da Claude alle 20:50 CET, su richiesta di Giacomo
+Fatto da Claude verso le 20:30 CET, su richiesta di Giacomo
 («Non puoi farlo te?»):
 
 - PR #1 spostata su `main` (`gh pr edit 1 --base main`; alla
@@ -827,11 +827,12 @@ Poi:
    e `Manifest` (sezioni «Artifact» e «The manifest, the
    kernel's context and state validation»).
 
-Nota: Javier ha pushato `aa88fef` (commit delle 19:46 CET,
-visto alle 20:45) su `feat/wasm-orb-runtime` («feat(browser): support compiled
-orb resources and byte streams»), non ancora in `main`. Con la
-PR ribasata ha in comune solo `crates/executor-wasm/README.md`,
-e il merge di prova è pulito.
+Nota: Javier ha pushato `aa88fef` su `feat/wasm-orb-runtime`
+(commit delle 19:46 CET, visto verso le 20:30), non ancora in
+`main`: «feat(browser): support compiled orb resources and
+byte streams». Con la PR ribasata ha in comune solo
+`crates/executor-wasm/README.md`, e il merge di prova è
+pulito.
 
 Dopo il push: guardare la CI (`quality` e `acceptance`;
 alcuni test lenti del base erano già rossi), poi i fix in
