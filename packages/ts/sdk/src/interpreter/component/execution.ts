@@ -23,7 +23,13 @@ import { dependencyImport, referenceImport, referenceView, type ImportedFunction
 import { instantiate, requireJspi, type CoreLimits } from "./instance.ts";
 import { ComponentPort } from "./port.ts";
 import type { PreparedRecord } from "./prepared.ts";
-import { compiledDescription, ComponentRevision, type Described } from "./revision.ts";
+import type { LogObserver } from "./kernel.ts";
+import {
+  compiledDescription,
+  ComponentRevision,
+  type CompiledRoles,
+  type Described,
+} from "./revision.ts";
 import { converters, type GraphFunction } from "./values.ts";
 import { checkPublicWasi, publicWasi } from "./wasi.ts";
 
@@ -39,12 +45,18 @@ export interface ComponentOptions {
     timeoutMs?: number;
     fuel?: number;
   };
+  /** Receives the Orb's `tembra:guest/context` log records, as a source Orb's console. */
+  onLog?: LogObserver;
 }
 
 /** The verifier's digest-bound metadata of one compiled artifact. */
 export interface PreparedContract extends ContractPort {
   description(): string;
   contributions(): string;
+  /** Declared hooks and their composition, by interface identity, as a JSON object. */
+  hooks(): string;
+  /** Service lifetimes and lingers, by interface identity, as a JSON object. */
+  services(): string;
   digest(): string;
 }
 
@@ -68,7 +80,13 @@ function checkAdapter(record: PreparedRecord, graph: Described, plan: Installati
     const selected = graph.imports.find((item) => item.binding === name);
     if (!selected) throw new Error(`The prepared adapter names unknown import ${name}`);
     if (selected.type_only) continue;
-    if (plan.bindings[name]?.kind !== "orb" || !Object.hasOwn(plan.importServices, name))
+    // The kernel serves its own interfaces and the plans of the hooks this Orb declares.
+    const kind = plan.bindings[name]?.kind;
+    if (
+      kind !== "kernel" &&
+      kind !== "hook" &&
+      (kind !== "orb" || !Object.hasOwn(plan.importServices, name))
+    )
       throw new Error(`Browser component execution cannot provide import ${name}`);
     for (const fn of Object.keys(selected.functions ?? {}))
       if (!record.suspending.has(`${name}#${fn}`))
@@ -153,7 +171,10 @@ export async function openComponent(
       return binding?.kind === "host" ? binding.provider : undefined;
     };
     const convert = converters(graph);
-    const revision = new ComponentRevision(port, contract, graph, timeout);
+    const revision = new ComponentRevision(port, contract, graph, timeout, {
+      orb: identity.name,
+      ...(options.onLog ? { observer: options.onLog } : {}),
+    });
     const network = capabilities.network;
     const imports: Record<string, unknown> = publicWasi(record.imports, {
       clocks,
@@ -181,8 +202,13 @@ export async function openComponent(
         imports[name] = {};
         continue;
       }
-      // `checkAdapter` admitted only Orb-bound dependency imports here.
       if (!selected) throw new Error(`Browser component execution cannot provide import ${name}`);
+      const kind = prepared.bindings[name]?.kind;
+      if (kind === "kernel" || kind === "hook") {
+        imports[name] = revision.kernel.imports(name);
+        continue;
+      }
+      // `checkAdapter` admitted only Orb-bound dependency imports here.
       const view = graph.references[name];
       imports[name] = view
         ? referenceImport(port, name, referenceView(graph, name, view, convert))
@@ -199,11 +225,11 @@ export async function openComponent(
     // Fail closed when the glue never reported its task accessor: it is not instrumented.
     if (!port.attached) throw new Error("The prepared component glue is not instrumented");
     port.exports = instance as never;
-    const description = compiledDescription(
-      graph,
-      identity,
-      JSON.parse(contract.contributions()) as Record<string, number>,
-    );
+    const description = compiledDescription(graph, identity, {
+      contributions: JSON.parse(contract.contributions()) as CompiledRoles["contributions"],
+      hooks: JSON.parse(contract.hooks()) as NonNullable<CompiledRoles["hooks"]>,
+      services: JSON.parse(contract.services()) as NonNullable<CompiledRoles["services"]>,
+    });
     return revision.definition(identity, prepared, description);
   } catch (error) {
     try {

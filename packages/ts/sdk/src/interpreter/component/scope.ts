@@ -1,8 +1,11 @@
 /**
  * Host authority of one compiled component environment.
  *
- * A compiled component has no Tembra control imports: it cannot declare state, hooks, resources
- * or references. Its only host authority beyond granted WASI is calling its typed Orb dependency
+ * A compiled component reaches the kernel only through the `tembra:guest` interfaces its world
+ * imports (kernel state, root resources, declared hooks, the call's context), served under the
+ * callback's own authority by the same `Scope` as a source Orb (`kernel.ts`); it declares no
+ * named host resources or references. Its only host authority beyond granted WASI and those
+ * kernel interfaces is calling its typed Orb dependency
  * imports. A plain import targets the default `main` reference the root factory declared for its
  * binding. A checked reference view (an artifact role) declares no default: the guest acquires
  * root claims by key through the view's acquisition function and calls the provider through the
@@ -16,7 +19,9 @@ import type { Context } from "../../runtime/context.ts";
 import { checkSignal, combinedSignal } from "../../runtime/signals.ts";
 import { acquireReference } from "../acquire.ts";
 import { check, encode, VALUE_LIMIT } from "../codec.ts";
-import type { ContractPort } from "../types.ts";
+import type { Authority } from "../scope.ts";
+import type { ContractPort, ExecutionScope } from "../types.ts";
+import type { KernelAccess, KernelTable } from "./kernel.ts";
 import { lift, type Signature } from "../wit-shape.ts";
 
 const scopeEnded = Object.freeze(new Error("Component callback scope ended"));
@@ -73,6 +78,11 @@ export interface CallbackScope {
    * releases it when it ends; a drop never acts for another root.
    */
   release(claim: ReferenceClaim): void;
+  /**
+   * This callback's kernel requests (`tembra:guest`), served under its own authority by its
+   * environment's table; absent for an Orb that uses no kernel interface.
+   */
+  readonly kernel?: KernelAccess;
 }
 
 /** The revision tables a component scope resolves import calls against. */
@@ -94,6 +104,8 @@ export class ComponentScope {
   readonly parent: ComponentScope | undefined;
   /** Default `main` reference per plain Orb import binding (root scope only). */
   readonly defaults = new Map<string, DynamicReference>();
+  /** The kernel handles this environment declared; absent for an Orb that uses none. */
+  kernel: KernelTable | undefined;
 
   constructor(
     readonly owner: ScopeOwner,
@@ -111,8 +123,12 @@ export class ComponentScope {
         if (!owner.views.has(binding)) this.defaults.set(binding, declaration.get(name, ["main"]));
   }
 
-  /** Adapt one admitted invocation to the component port without exposing it to the guest. */
-  exchange(context: Context): CallbackScope {
+  /**
+   * Adapt one admitted invocation to the component port without exposing it to the guest.
+   * `execution` is the kernel's scope of a callback the kernel issued (a resource closer).
+   */
+  exchange(context: Context, execution?: ExecutionScope): CallbackScope {
+    const kernel = this.access({ context }, execution);
     const ended = new AbortController();
     // Match native guest drops: a long callback can drop and reacquire the same address
     // without prematurely retiring its provider. Root cancellation remains immediate.
@@ -127,8 +143,10 @@ export class ComponentScope {
     return {
       signal: context.signal,
       check: () => context.check(),
+      ...(kernel ? { kernel } : {}),
       cancel: () => {
         if (!ended.signal.aborted) ended.abort(scopeEnded);
+        kernel?.execution.cancel();
         for (const token of dropped) {
           try {
             release(token);
@@ -170,6 +188,39 @@ export class ComponentScope {
         else dropped.add(token);
       },
     };
+  }
+
+  /**
+   * A callback the kernel itself runs on this environment: its declaration, a validation of the
+   * state a reload hands over, a resource opener. It serves only the kernel's interfaces, under
+   * `authority`; an Orb dependency call needs an admitted invocation and is refused, as it is for
+   * a source Orb. `execution` is the kernel's scope when the kernel issued the callback.
+   */
+  callback(
+    authority: Exclude<Authority, { context: Context }>,
+    execution?: ExecutionScope,
+  ): CallbackScope {
+    const kernel = this.access(authority, execution);
+    if (!kernel) throw new Error("This Orb uses no kernel interface");
+    const refused = () => Promise.reject(new Error("Operation requires an admitted invocation"));
+    return {
+      ...("signal" in authority ? { signal: authority.signal } : {}),
+      check: () => kernel.execution.check(),
+      kernel,
+      cancel: () => kernel.execution.cancel(),
+      call: refused,
+      acquire: refused,
+      invoke: refused,
+      // No claim is issued here; a claim of a root stays with that root.
+      release: () => {},
+    };
+  }
+
+  /** The kernel access of a callback under `authority`, when this environment has a table. */
+  private access(authority: Authority, execution?: ExecutionScope): KernelAccess | undefined {
+    const table = this.kernel;
+    if (!table) return undefined;
+    return { table, execution: execution ?? table.scope.exchange(authority) };
   }
 
   /** Resolve a token this revision issued for exactly `binding`. */

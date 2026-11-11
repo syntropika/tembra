@@ -18,11 +18,36 @@ import { acquireReference } from "./acquire.ts";
 
 const scopeEnded = Object.freeze(new Error("Interpreter callback scope ended"));
 
-type Authority =
+/** The host-issued authority one callback's requests are served under. */
+export type Authority =
   | { declaration: Declaration }
   | { context: Context }
   | { signal: AbortSignal }
   | { validation: true };
+
+/**
+ * The revision tables and callback executor a scope serves requests with. A source revision is
+ * one; a prepared browser component lends its own for the kernel interfaces its Orb imports
+ * (`component/kernel.ts`), so both answer the same requests with this same code.
+ */
+export type ScopeRevision = Pick<
+  Revision,
+  | "contract"
+  | "scopes"
+  | "views"
+  | "imports"
+  | "importMethods"
+  | "importSignatures"
+  | "hooks"
+  | "signatures"
+> & {
+  /**
+   * Run a resource callback the guest numbered with the scope its `authority` issued. A source
+   * revision needs only the scope; a prepared component also admits its dependency calls with
+   * the authority itself, which stays on the host.
+   */
+  execute(command: string, scope: ExecutionScope, authority: Authority): Promise<unknown>;
+};
 
 /** Read cancellation from the host-issued authority without transferring it to the guest. */
 function authoritySignal(authority: Authority): AbortSignal | undefined {
@@ -54,7 +79,7 @@ export class Scope {
 
   /** Retain only issued declarations; service scopes inherit their own revision's Orb resources. */
   constructor(
-    readonly revision: Revision,
+    readonly revision: ScopeRevision,
     readonly declaration: Declaration,
     readonly service: string | null,
   ) {
@@ -242,19 +267,17 @@ export class Scope {
           ),
         );
         const { open, close } = request;
+        const run = (callback: number, value: number | null, authority: Authority) =>
+          this.revision.execute(
+            JSON.stringify({ kind: "callback", callback, value }),
+            this.exchange(authority),
+            authority,
+          );
         const options = {
           version: request.version,
           deps: dependencies,
-          open: (signal: AbortSignal) =>
-            this.revision.execute(
-              JSON.stringify({ kind: "callback", callback: open, value: null }),
-              this.exchange({ signal }),
-            ) as Promise<number>,
-          close: (value: number, context: Context) =>
-            this.revision.execute(
-              JSON.stringify({ kind: "callback", callback: close, value }),
-              this.exchange({ context }),
-            ),
+          open: (signal: AbortSignal) => run(open, null, { signal }) as Promise<number>,
+          close: (value: number, context: Context) => run(close, value, { context }),
         };
         const resource = declaration.resource<number>(request.name, options);
         const id = this.allocate();
