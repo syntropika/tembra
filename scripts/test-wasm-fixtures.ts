@@ -220,6 +220,22 @@ for (const [name, file, world] of [
     minify: false,
   };
 }
+// Source byte-stream production uses real WIT types and the SDK's writeChunks helper.
+const streamFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-stream-source");
+await mkdir(path.join(sources, "stream-source"), { recursive: true });
+for (const file of ["contract.wit", "orb.ts"]) {
+  const source = await readFile(path.join(streamFixture, file), "utf8");
+  await writeFile(
+    path.join(sources, "stream-source", file),
+    source.replaceAll('"@syntropika/tembra-sdk"', guest),
+  );
+}
+builds["stream-source"] = {
+  entry: "stream-source/orb.ts",
+  wit: "stream-source/contract.wit",
+  world: "producer",
+};
+
 // Context.get: keyed counters and the router selecting them at runtime under the caller's root.
 const keyedFixture = path.join(root, "packages/ts/sdk/test/fixtures/wasm-keyed");
 for (const [name, file, world] of [

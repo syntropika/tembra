@@ -35,6 +35,8 @@ import {
   STREAM_NEW,
   STREAM_READ,
   STREAM_WRITE,
+  WRITE_ACCEPTED,
+  WRITE_CLOSED,
   Writer,
   decode,
   encode,
@@ -690,8 +692,14 @@ export class StandardHost implements StandardServices {
           );
         const entry = this.#entries.get(handle);
         if (entry?.kind !== "input") throw new Error("handle is not a live input stream");
-        await entry.value.write(length, () => reader.raw(length), signal);
-        return { bytes: new Uint8Array(), issued: [] };
+        try {
+          await entry.value.write(length, () => reader.raw(length), signal);
+        } catch (error) {
+          // A stopped consumer is an ordinary end of production; anything else fails it.
+          if (entry.value.cancelled) return { bytes: Uint8Array.of(WRITE_CLOSED), issued: [] };
+          throw error;
+        }
+        return { bytes: Uint8Array.of(WRITE_ACCEPTED), issued: [] };
       }
       case INGRESS_HEAD: {
         const call = this.#ingress;

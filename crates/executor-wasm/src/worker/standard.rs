@@ -46,6 +46,13 @@ const FUTURE_WRITE: u8 = 7;
 /// Asynchronous, incoming HTTP callbacks only: publish the handler's result once; completes
 /// when the response delivery ended.
 const INGRESS_HEAD: u8 = 8;
+/// Asynchronous, callbacks returning a whole `stream<u8>` only: publish the guest writer as the
+/// result once; completes when its bytes were delivered or the caller closed the stream.
+const STREAM_RESULT: u8 = 9;
+/// `STREAM_WRITE` status: the chunk was accepted.
+const WRITE_ACCEPTED: u8 = 0;
+/// `STREAM_WRITE` status: the reader closed the stream; production ends normally.
+const WRITE_CLOSED: u8 = 1;
 /// Bytes buffered per stream before the upstream producer is paused.
 const PIPE_BYTES: usize = 64 << 10;
 /// Live handles per revision.
@@ -287,6 +294,43 @@ fn publish_ingress(
         }
         Ok(())
     })
+}
+
+/// Publish a callback's whole byte-stream result once (`STREAM_RESULT`).
+///
+/// The guest's untransferred writer `id` becomes the readable end of the host-created pipe, and
+/// the caller receives the stream's head now; nothing is consumed before the writer validated.
+/// The returned task, owned by the callback, relays the written bytes into the pipe and completes
+/// once the writer closed and its bytes reached the pipe, or once the caller closed its end;
+/// until then the callback and its authority last. Aborting it fails the pipe.
+fn publish_stream(
+    mut store: StoreContextMut<'_, State>,
+    id: u64,
+    reply: Reply,
+) -> wasmtime::Result<JoinHandle> {
+    if store.data().stream.is_none() {
+        return Err(invalid("no byte-stream result is pending"));
+    }
+    let mut seen = Vec::new();
+    let claim = store.data().standard.handles.claim(id, &mut seen)?;
+    let call = store.data_mut().stream.take().expect("checked above");
+    let relay = claim.relay(Arc::clone(&call.pipe))?;
+    let task = store.spawn(async move |_: &wasmtime::component::Accessor<State>| {
+        relay.await;
+        if let Some(reply) = reply {
+            let _ = reply.send(Ok(Delivery {
+                bytes: Vec::new(),
+                issued: Vec::new(),
+                read: None,
+            }));
+        }
+        Ok(())
+    })?;
+    if call.head.send(()).is_err() {
+        // The caller is gone: nobody reads, so the guest's next write sees the stream closed.
+        call.pipe.lock().expect("pipe").close();
+    }
+    Ok(task)
 }
 
 impl crate::ingress::IngressEvent {
@@ -583,6 +627,9 @@ pub(super) fn spawn(
         if !store.data().callback_scope.active() {
             return Err(invalid("callback scope ended"));
         }
+        if packet.len() > store.data().packet_bytes {
+            return Err(invalid("standard packet exceeds the packet limit"));
+        }
         let mut reader = Reader(packet.get(1..).unwrap_or_default());
         let (send, receive) = oneshot::channel();
         let reply = Some(send);
@@ -692,6 +739,11 @@ pub(super) fn spawn(
                 )?
             }
             INGRESS_HEAD => publish_ingress(store.as_context_mut(), &mut reader, reply)?,
+            STREAM_RESULT => {
+                let id = reader.u64()?;
+                reader.end()?;
+                publish_stream(store.as_context_mut(), id, reply)?
+            }
             _ => return Err(invalid("unknown standard operation")),
         };
         Ok((handle, leases, receive))
@@ -877,6 +929,92 @@ mod system_qualification;
 mod tests {
     use super::*;
     use wasmtime::component::Resource;
+
+    /// Publication of a whole byte-stream result: only a live, untransferred writer of this
+    /// Store, only while the callback's result is pending, and only once. A refusal consumes
+    /// nothing; the published head and the relay's end follow the writer.
+    #[test]
+    fn a_stream_result_publishes_one_untransferred_writer_once() {
+        let engine = crate::Engine::new(crate::Limits::default()).unwrap();
+        let state = super::super::runtime::test_state(wasmtime_wasi::WasiCtx::builder().build());
+        let mut store = wasmtime::Store::new(&engine.engine, state);
+        let packet = |operation: u8, id: Option<u64>| {
+            let mut packet = vec![PACKET_TAG, operation];
+            if let Some(id) = id {
+                packet.extend_from_slice(&id.to_le_bytes());
+            }
+            packet
+        };
+        let mut create = packet(STREAM_NEW, None);
+        create.extend_from_slice(&BYTE_STREAM.to_le_bytes());
+        let writer = |store: &mut wasmtime::Store<State>| {
+            let reply = synchronous_now(store.as_context_mut(), &create)
+                .unwrap()
+                .unwrap();
+            u64::from_le_bytes(reply.try_into().unwrap())
+        };
+        let first = writer(&mut store);
+        let publish = |store: &mut wasmtime::Store<State>, id: u64| {
+            futures::executor::block_on(store.run_concurrent(async |access| {
+                access
+                    .with(|mut store| {
+                        spawn(store.as_context_mut(), &packet(STREAM_RESULT, Some(id)))
+                    })
+                    .map(|admitted| admitted.map(|(_, _, receive)| receive))
+            }))
+            .unwrap()
+            .unwrap()
+        };
+        // Outside a stream-returning callback, nothing is published.
+        assert_eq!(
+            publish(&mut store, first).err().unwrap(),
+            "no byte-stream result is pending"
+        );
+        let pipe = Arc::<Mutex<Pipe>>::default();
+        let (head, mut published) = futures::channel::oneshot::channel();
+        store.data_mut().stream = Some(crate::worker::StreamCall {
+            pipe: Arc::clone(&pipe),
+            head,
+        });
+        // Neither an unknown handle nor a readable stream is a writer; the head stays pending.
+        let (readable, _) = store.data_mut().standard.handles.items().unwrap();
+        for id in [first + 1000, readable] {
+            assert!(publish(&mut store, id).is_err(), "{id}");
+            assert!(store.data().stream.is_some());
+            assert_eq!(published.try_recv(), Ok(None));
+        }
+        let mut delivered = publish(&mut store, first).unwrap();
+        assert_eq!(published.try_recv(), Ok(Some(())));
+        assert!(store.data().stream.is_none());
+        // Once: the slot is consumed, and a transferred writer cannot be published again.
+        let (head, _second) = futures::channel::oneshot::channel();
+        store.data_mut().stream = Some(crate::worker::StreamCall {
+            pipe: Arc::default(),
+            head,
+        });
+        assert_eq!(
+            publish(&mut store, first).err().unwrap(),
+            "stream was already transferred"
+        );
+        store.data_mut().stream = None;
+        // Closing the writer ends the relay: the pipe ends and the publication completes.
+        assert!(
+            synchronous_now(store.as_context_mut(), &packet(DROP, Some(first)))
+                .unwrap()
+                .is_ok()
+        );
+        futures::executor::block_on(store.run_concurrent(async |_| {
+            assert!((&mut delivered).await.unwrap().is_ok());
+        }))
+        .unwrap();
+        let mut pipe = pipe.lock().unwrap();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert_eq!(
+            pipe.poll_bytes(&mut context, usize::MAX),
+            std::task::Poll::Ready(None)
+        );
+        assert_eq!(pipe.failure(), None);
+    }
 
     #[test]
     fn resource_identities_never_alias_another_store_or_a_retired_entry() {

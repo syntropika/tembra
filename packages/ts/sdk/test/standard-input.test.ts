@@ -23,6 +23,7 @@ import {
   Writer,
   decode,
   encode,
+  WRITE_CLOSED,
 } from "../src/interpreter/standard-codec.ts";
 import { StandardHost } from "../src/interpreter/standard-host.ts";
 import { INPUT_BUDGET } from "../src/interpreter/standard-streams.ts";
@@ -259,8 +260,8 @@ test("a provider stream failure stops the input, reports its code and frees the 
     tag: "err",
     val: { tag: "insufficient-space" },
   });
-  await expect(standard.async(write(writer, Uint8Array.of(3)))).rejects.toThrow(
-    "stream reader was dropped",
+  expect((await standard.async(write(writer, Uint8Array.of(3)))).bytes).toEqual(
+    Uint8Array.of(WRITE_CLOSED),
   );
   expect(standard.inputBytes).toBe(0);
   // Accepted bytes before the failure stay written.

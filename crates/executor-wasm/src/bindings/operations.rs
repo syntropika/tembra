@@ -275,10 +275,13 @@ impl Environment {
     }
 
     /// Await portable references and cooperative timers under the active invocation's authority.
+    /// `issued` receives the dependency call an import call issues, so the request's answer can
+    /// cancel it and wait for its physical end if the callback stops waiting.
     pub(super) async fn asynchronous(
         &self,
         scope: &Scope,
         packet: &str,
+        issued: &crate::worker::Issued,
     ) -> Result<crate::worker::Reply> {
         let request = AsyncRequest::decode(packet).map_err(failure)?;
         // An import call may deliver owned resources, committed only once the worker has them.
@@ -289,7 +292,9 @@ impl Environment {
             args,
         } = request
         {
-            return self.call_import(scope, owner, id, &method, args).await;
+            return self
+                .call_import(scope, owner, id, &method, args, issued)
+                .await;
         }
         let value = match request {
             AsyncRequest::HookRun {

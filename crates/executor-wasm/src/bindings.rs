@@ -273,9 +273,9 @@ impl Environment {
                 cancellation.as_ref(),
                 packet,
                 carrier,
-                async |packet, asynchronous| {
+                async |packet, asynchronous, issued| {
                     if asynchronous {
-                        self.asynchronous(&scope, packet).await
+                        self.asynchronous(&scope, packet, issued).await
                     } else {
                         self.sync(&scope, packet).map(Into::into)
                     }

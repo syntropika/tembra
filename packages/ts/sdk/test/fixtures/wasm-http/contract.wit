@@ -11,6 +11,7 @@ interface requests {
     exchange: async func(url: string) -> reply;
     duplex: async func(url: string) -> string;
     upload: async func(url: string, chunks: u32, fail: bool) -> string;
+    interrupt: async func(url: string, observed: string) -> string;
     open: async func(url: string) -> u16;
     read: async func() -> string;
     close: async func();

@@ -8,7 +8,8 @@ pub struct Cancellation(pub(super) Rc<CancellationState>);
 
 pub(super) struct CancellationState {
     cancelled: Cell<bool>,
-    reason: &'static str,
+    /// Why it was cancelled; an invocation's signal names its root or its own call.
+    reason: Cell<&'static str>,
     send: RefCell<Option<oneshot::Sender<()>>>,
     wait: Shared<LocalBoxFuture<'static, ()>>,
 }
@@ -21,7 +22,7 @@ impl Cancellation {
         let (send, receive) = oneshot::channel();
         Self(Rc::new(CancellationState {
             cancelled: Cell::new(false),
-            reason,
+            reason: Cell::new(reason),
             send: RefCell::new(Some(send)),
             wait: async move {
                 let _ = receive.await;
@@ -38,6 +39,17 @@ impl Cancellation {
         }
     }
 
+    /// Cancel for `reason`, unless already cancelled for another one.
+    pub(super) fn cancel_because(&self, reason: &'static str) {
+        if !self.0.cancelled.get() {
+            self.0.reason.set(reason);
+        }
+        self.0.cancelled.set(true);
+        if let Some(send) = self.0.send.borrow_mut().take() {
+            let _ = send.send(());
+        }
+    }
+
     /// Check whether cancellation has been requested.
     pub fn is_cancelled(&self) -> bool {
         self.0.cancelled.get()
@@ -48,7 +60,7 @@ impl Cancellation {
         if self.is_cancelled() {
             Err(Error::new(
                 core::Code::Cancelled,
-                self.0.reason,
+                self.0.reason.get(),
                 "operation was cancelled",
             ))
         } else {

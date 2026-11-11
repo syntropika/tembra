@@ -17,8 +17,27 @@ test(
   async () => {
     const sockets = new Set();
     const uploads = [];
+    let acknowledged = false;
+    let observed;
+    const interruptedStarted = new Promise((resolve) => {
+      observed = resolve;
+    });
     const server = createServer((request, response) => {
-      if (request.url === "/upload") {
+      if (request.url === "/upload-started") {
+        const timer = setTimeout(() => response.writeHead(504).end(), 2000);
+        response.once("close", () => clearTimeout(timer));
+        void interruptedStarted.then(() => {
+          clearTimeout(timer);
+          if (!response.destroyed) {
+            response.once("finish", () => {
+              acknowledged = true;
+            });
+            response.end("started");
+          }
+        });
+        return;
+      }
+      if (request.url === "/upload" || request.url === "/interrupted-upload") {
         const closed = new Promise((resolve) => request.once("close", resolve));
         const state = { bytes: 0, invalid: false, completed: false, closed };
         uploads.push(state);
@@ -27,6 +46,7 @@ test(
             if (bytes[index] !== Math.floor((state.bytes + index) / 65536) % 251)
               state.invalid = true;
           state.bytes += bytes.length;
+          if (request.url === "/interrupted-upload" && state.bytes > 0) observed();
         });
         request.on("end", () => {
           state.completed = true;
@@ -81,7 +101,11 @@ test(
       assert.equal(uploads[0].invalid, false);
       assert.equal(uploads[0].completed, true);
       stage = "throwing upload";
-      await assert.rejects(requests.upload(`${origin}/upload`, 4, true));
+      await assert.rejects(
+        requests.interrupt(`${origin}/interrupted-upload`, `${origin}/upload-started`),
+      );
+      assert.equal(acknowledged, true, "the peer must acknowledge before the producer fails");
+      assert.ok(uploads[1].bytes > 0, "the peer must observe bytes before the producer fails");
       assert.equal(
         uploads[1].completed,
         false,

@@ -131,11 +131,11 @@ impl Context {
             .transpose()
     }
 
-    /// Reject an expired root or completed invocation.
+    /// Reject an expired root, or a completed invocation or one its caller cancelled.
     pub fn check(&self) -> Result<()> {
         self.host.kernel().check_root(self.root)?;
         if let Some(call) = &self.call {
-            self.host.kernel().invocation(call.id)?;
+            self.host.kernel().check_call(call.id)?;
         }
         Ok(())
     }
@@ -153,6 +153,11 @@ impl Context {
         self.host.kernel().root_principal(self.root)
     }
 
+    /// The entered invocation that issues calls made from this context, if any.
+    pub(crate) fn issuer(&self) -> Option<core::Id> {
+        self.call.as_ref().map(|call| call.id)
+    }
+
     /// Require an admitted call context for owner operations.
     pub fn invocation(&self) -> Result<core::Invocation> {
         self.call
@@ -162,13 +167,49 @@ impl Context {
 }
 
 impl Context {
-    /// Observe cancellation of this operation's root, including host shutdown.
+    /// Observe cancellation of this operation's root, including host shutdown. An entered
+    /// invocation's signal also fires when its caller cancels that invocation (or one it
+    /// descends from); that never cancels the root or sibling calls.
     pub fn signal(&self) -> Cancellation {
-        self.host.context_signal(self.root)
+        match &self.call {
+            Some(call) => self.host.call_signal(self.root, call.id),
+            None => self.host.context_signal(self.root),
+        }
     }
 }
 
 impl Host {
+    /// One shared signal per entered invocation, created when first observed: cancelled at once
+    /// if its root or the invocation itself already was.
+    fn call_signal(&self, root: core::Id, call: core::Id) -> Cancellation {
+        let mut signals = self.0.call_signals.borrow_mut();
+        signals.retain(|_, (_, signal)| signal.strong_count() != 0);
+        if let Some(signal) = signals.get(&call).and_then(|(_, signal)| signal.upgrade()) {
+            return Cancellation(signal);
+        }
+        let signal = Cancellation::new("root");
+        if self.kernel().check_root(root).is_err() {
+            signal.cancel();
+        } else if self.kernel().call_cancelled(call) {
+            signal.cancel_because("call");
+        }
+        signals.insert(call, (root, Rc::downgrade(&signal.0)));
+        signal
+    }
+
+    /// Mirror a kernel call cancellation into that invocation's signal, if it is observed.
+    pub fn cancel_call_signal(&self, call: core::Id) {
+        let signal = self
+            .0
+            .call_signals
+            .borrow()
+            .get(&call)
+            .and_then(|(_, signal)| signal.upgrade());
+        if let Some(signal) = signal {
+            Cancellation(signal).cancel_because("call");
+        }
+    }
+
     fn context_signal(&self, root: core::Id) -> Cancellation {
         let mut signals = self.0.context_signals.borrow_mut();
         signals.retain(|_, signal| signal.strong_count() != 0);
@@ -194,6 +235,18 @@ impl Host {
             .and_then(std::rc::Weak::upgrade)
         {
             Cancellation(signal).cancel();
+        }
+        // Signals of the root's entered invocations observe the root too.
+        let calls: Vec<_> = self
+            .0
+            .call_signals
+            .borrow()
+            .values()
+            .filter(|(owner, _)| *owner == root)
+            .filter_map(|(_, signal)| signal.upgrade())
+            .collect();
+        for signal in calls {
+            Cancellation(signal).cancel_because("root");
         }
         for stream in self.root_streams(root, false) {
             stream.cancel_root();

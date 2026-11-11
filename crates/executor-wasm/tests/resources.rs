@@ -41,6 +41,7 @@ const COUNTER: &str = "[constructor]counter";
 const HITS: &str = "[method]counter.hits";
 const OPEN_KEYED: &str = "open-keyed";
 const KEY: &str = "[method]session.key";
+const OPEN_LATER: &str = "open-later";
 
 /// Typed session keys crossing the real WIT boundary: astral and combining characters, quotes,
 /// a backslash and a slash must arrive unchanged.
@@ -213,6 +214,7 @@ both_engines!(
     a_guest_global_handle_crosses_keyed_objects,
     idle_destruction_releases_the_destructors_imports,
     an_abandoned_async_import_closes_its_late_result,
+    an_abandoned_started_import_is_joined_and_closes_its_late_result,
     equal_keys_open_independent_native_sessions,
     a_compiled_importer_opens_independent_keyed_sessions,
     one_revision_serves_its_sessions_one_call_at_a_time,
@@ -878,7 +880,7 @@ fn async_methods_keep_their_receiver_through_suspension(interpreted: bool) {
 /// A test capability whose closes are counted; issued by a controlled native provider.
 struct Late {
     nominal: tembra::portable::Nominal,
-    closed: Rc<Cell<u32>>,
+    store: Rc<LateStore>,
 }
 
 impl tembra::portable::Capability for Late {
@@ -889,16 +891,68 @@ impl tembra::portable::Capability for Late {
 
 impl Drop for Late {
     fn drop(&mut self) {
-        self.closed.set(self.closed.get() + 1);
+        self.store.closed.set(self.store.closed.get() + 1);
     }
 }
 
-/// A controlled native `store` for the importer's failure path only: its session constructor
-/// answers with a counted capability once its gate opens. It is not a native resource provider.
-fn late_store(
-    gate: Rc<RefCell<Option<futures::channel::oneshot::Receiver<()>>>>,
-    closed: Rc<Cell<u32>>,
-) -> Orb {
+/// The observable state of the controlled native `store` built by [`late_store`].
+#[derive(Default)]
+struct LateStore {
+    /// Held by the next constructor or `open-later` call, which answers once it opens.
+    gate: RefCell<Option<futures::channel::oneshot::Receiver<()>>>,
+    /// Counted capabilities closed.
+    closed: Cell<u32>,
+    /// Fired when the next `open-later` call starts running.
+    started: RefCell<Option<futures::channel::oneshot::Sender<()>>>,
+    /// Awaited by the next `closed` call: it answers only once `open-later` started.
+    checkpoint: RefCell<Option<futures::channel::oneshot::Receiver<()>>>,
+    /// The latest `open-later` call's own signal.
+    signal: RefCell<Option<tembra::Cancellation>>,
+    /// `closed` calls answered.
+    answered: Cell<u32>,
+    /// Ordered events of both sides.
+    log: RefCell<Vec<&'static str>>,
+}
+
+impl LateStore {
+    /// Hold the next `open-later` call, and make the next `closed` call its checkpoint.
+    /// Returns the sender that opens the gate.
+    fn hold_open_later(&self) -> futures::channel::oneshot::Sender<()> {
+        let (open, gate) = futures::channel::oneshot::channel();
+        let (started, checkpoint) = futures::channel::oneshot::channel();
+        *self.gate.borrow_mut() = Some(gate);
+        *self.started.borrow_mut() = Some(started);
+        *self.checkpoint.borrow_mut() = Some(checkpoint);
+        open
+    }
+
+    fn note(&self, event: &'static str) {
+        self.log.borrow_mut().push(event);
+    }
+
+    fn position(&self, event: &str) -> Option<usize> {
+        self.log.borrow().iter().position(|logged| *logged == event)
+    }
+
+    /// One counted session capability as the call's result.
+    fn issue(self: &Rc<Self>) -> tembra::Result<Payload> {
+        let mut result = Payload::data(Value::Null);
+        let index = result.attach(tembra::portable::Issued::new(Late {
+            nominal: tembra::portable::Nominal {
+                interface: SESSIONS.into(),
+                name: "session".into(),
+            },
+            store: self.clone(),
+        }));
+        result.map_value(|_| Ok(json!(index)))
+    }
+}
+
+/// A controlled native `store` for the importer's late-result paths only. It is not a native
+/// resource provider: the session constructor and `open-later` answer with a counted capability
+/// once their gate opens, even when their call was cancelled; `closed` answers the count of
+/// closed capabilities, after its checkpoint if one is set. Other methods are unsupported.
+fn late_store(store: Rc<LateStore>) -> Orb {
     let pace = std::collections::BTreeMap::from([(
         PACE.to_owned(),
         tembra_executor_wasm::Binding::Orb {
@@ -912,36 +966,57 @@ fn late_store(
         let methods: Vec<String> = service.methods.iter().cloned().collect();
         let mut native = Service::new(service.name, |_| Ok(())).signature(service.signature);
         for method in methods {
-            if method == CONSTRUCT {
-                let (gate, closed) = (gate.clone(), closed.clone());
-                native = native.payload_method(method, move |_, _, payload: Payload| {
-                    let gate = gate.borrow_mut().take();
-                    let closed = closed.clone();
+            let store = store.clone();
+            native = match method.as_str() {
+                CONSTRUCT => native.payload_method(method, move |_, _, payload: Payload| {
+                    let gate = store.gate.borrow_mut().take();
+                    let store = store.clone();
                     async move {
                         payload.into_data()?;
                         if let Some(gate) = gate {
                             let _ = gate.await;
                         }
-                        let mut result = Payload::data(Value::Null);
-                        let index = result.attach(tembra::portable::Issued::new(Late {
-                            nominal: tembra::portable::Nominal {
-                                interface: SESSIONS.into(),
-                                name: "session".into(),
-                            },
-                            closed,
-                        }));
-                        result.map_value(|_| Ok(json!(index)))
+                        store.issue()
                     }
-                });
-            } else {
-                native = native.payload_method(method, |_, _, _: Payload| async move {
+                }),
+                OPEN_LATER => native.payload_method(method, move |_, context: Context, payload| {
+                    let store = store.clone();
+                    async move {
+                        payload.into_data()?;
+                        store.note("provider:start");
+                        *store.signal.borrow_mut() = Some(context.signal());
+                        if let Some(started) = store.started.borrow_mut().take() {
+                            let _ = started.send(());
+                        }
+                        let gate = store.gate.borrow_mut().take();
+                        if let Some(gate) = gate {
+                            let _ = gate.await;
+                        }
+                        // Answer even when cancelled: the owned result arrives late.
+                        store.note("provider:end");
+                        store.issue()
+                    }
+                }),
+                "closed" => native.payload_method(method, move |_, _, payload: Payload| {
+                    let store = store.clone();
+                    async move {
+                        payload.into_data()?;
+                        let checkpoint = store.checkpoint.borrow_mut().take();
+                        if let Some(checkpoint) = checkpoint {
+                            let _ = checkpoint.await;
+                        }
+                        store.answered.set(store.answered.get() + 1);
+                        Ok(Payload::data(json!(store.closed.get())))
+                    }
+                }),
+                _ => native.payload_method(method, |_, _, _: Payload| async move {
                     Err::<Payload, _>(tembra::Error::new(
                         tembra::Code::Unsupported,
                         "test",
                         "not served by this provider",
                     ))
-                });
-            }
+                }),
+            };
         }
         orb = orb.service(native);
     }
@@ -964,31 +1039,30 @@ fn a_failed_importer_reply_closes_the_late_capability(interpreted: bool) {
         Engine::new(limits)
     }
     .unwrap();
-    let gate = Rc::new(RefCell::new(None));
-    let closed = Rc::new(Cell::new(0));
+    let store = Rc::new(LateStore::default());
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     host.install(vec![
-        late_store(gate.clone(), closed.clone()),
+        late_store(store.clone()),
         consumer(&engine, &consuming, "relay", "store"),
     ])
     .unwrap();
     let relay = reference(&mut pool, &host, &format!("relay::{RELAY}"), "alice");
     let claims = host.kernel().diagnostics().references;
     let (open, late) = futures::channel::oneshot::channel();
-    *gate.borrow_mut() = Some(late);
+    *store.gate.borrow_mut() = Some(late);
     let called = relay.clone();
     let timed_out = root(&mut pool, &host, async move |context| {
         called.call::<_, Value>(&context, "keep", json!([1])).await
     })
     .unwrap_err();
     assert!(timed_out.message.contains("timed out"), "{timed_out}");
-    assert_eq!(closed.get(), 0);
+    assert_eq!(store.closed.get(), 0);
     // The provider answers after the importer is gone.
     open.send(()).unwrap();
     pool.run_until(host.settled());
     assert_eq!(
-        closed.get(),
+        store.closed.get(),
         1,
         "the late capability is closed exactly once"
     );
@@ -1002,7 +1076,7 @@ fn a_failed_importer_reply_closes_the_late_capability(interpreted: bool) {
     assert!(quarantined.message.contains("timed out"), "{quarantined}");
     relay.release().unwrap();
     pool.run_until(host.close()).unwrap();
-    assert_eq!(closed.get(), 1);
+    assert_eq!(store.closed.get(), 1);
     assert_eq!(engine.instances(), 0);
 }
 
@@ -1247,14 +1321,17 @@ fn idle_destruction_releases_the_destructors_imports(interpreted: bool) {
     assert!(host.errors().is_empty(), "{:?}", host.errors());
 }
 
-/// [experiment] The guest cancels a pending async import whose result is an owned resource.
+/// The guest cancels a pending async import whose result is an owned resource.
 ///
-/// Observed on this Wasmtime and wit-bindgen: the cancellation reaches the host at once, so
-/// the importer's call completes while the provider's call keeps running physically. Its late
-/// owned result then has no receiver and is destroyed exactly once, leaving no slot or claim.
-/// The caller's root stays open meanwhile: once it ends, the provider's own pending import is
-/// refused and quarantines the provider (a general cross-Orb rule, reported separately). The
-/// window after the host committed a slot is covered by the `ImportReply` unit tests.
+/// The cancellation reaches the host at once: the abandoned import's dependency call is
+/// cancelled (that call only, never the root) and stays owned by the importer's callback until
+/// it has physically ended, so the importer's call completes only after the provider's call
+/// ended. The cancellation usually reaches the provider's call before it executes (observed on
+/// both engines: it never runs); if it ran first, its late owned result has no receiver and is
+/// destroyed exactly once. Either way no slot, claim, call or instance remains. The window after
+/// the host committed a slot is covered by the `ImportReply` unit tests; a provider that has
+/// definitely started is covered by
+/// `an_abandoned_started_import_is_joined_and_closes_its_late_result`.
 fn an_abandoned_async_import_closes_its_late_result(interpreted: bool) {
     let (Some(provided), Some(consuming)) = (
         fixture("TEMBRA_WASM_RESOURCE_PROVIDER"),
@@ -1299,26 +1376,143 @@ fn an_abandoned_async_import_closes_its_late_result(interpreted: bool) {
                 .await
         })
         .unwrap();
+    // The provider is never held: whether it ran or was cancelled first, the importer's call
+    // completes only once the provider's call has physically ended.
+    open.send(()).unwrap();
     until(&mut pool, || answer.borrow().is_some());
     assert_eq!(
         answer.borrow_mut().take(),
         Some(json!(false)),
         "the import was still pending when dropped"
     );
-    // The provider's call outlives the abandoned import and is parked on the host.
-    until(&mut pool, || pace.waits.get() == 1);
-    assert_eq!(engine.resources(), 0);
-    open.send(()).unwrap();
     pool.run_until(host.settled());
     release.send(()).unwrap();
     pool.run_until(finished).unwrap();
-    // The late session was created, never delivered, and destroyed exactly once.
-    assert_eq!(closed(&mut pool, &host, &store), 1);
+    assert_eq!(host.kernel().diagnostics().calls, 0);
+    // A session exists only if the provider ran before its cancellation; any session created
+    // was destroyed (none stays live), at most once.
+    let ran = pace.waits.get();
+    assert!(ran <= 1);
+    assert!(closed(&mut pool, &host, &store) <= u64::from(ran));
     assert_eq!(engine.resources(), 0);
     assert_eq!(host.kernel().diagnostics().references, claims);
     relay.release().unwrap();
     store.release().unwrap();
     pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// The guest abandons an async import whose provider call has demonstrably started.
+///
+/// The compiled importer starts `open-later`, then waits on `closed`, which the controlled
+/// provider answers only once its `open-later` call is running. Only then does the guest drop
+/// the pending import and continue. The provider's call alone is cancelled (its signal fires,
+/// the root's does not), but it stays physically owned: while its gate is held the importer's
+/// call does not settle and both calls stay counted. Once the provider answers, its owned result
+/// has no receiver and is closed exactly once; then the importer's call settles with no call,
+/// resource or claim left. A second round proves the importer and provider stay healthy.
+fn an_abandoned_started_import_is_joined_and_closes_its_late_result(interpreted: bool) {
+    let Some(consuming) = fixture("TEMBRA_WASM_RESOURCE_CONSUMER") else {
+        return;
+    };
+    let engine = engine(interpreted);
+    let store = Rc::new(LateStore::default());
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        late_store(store.clone()),
+        consumer(&engine, &consuming, "relay", "store"),
+    ])
+    .unwrap();
+    let relay = reference(&mut pool, &host, &format!("relay::{RELAY}"), "alice");
+    let claims = host.kernel().diagnostics().references;
+    for round in 1..=2_u32 {
+        store.log.borrow_mut().clear();
+        let open = store.hold_open_later();
+        let answer = Rc::new(RefCell::new(None));
+        let (called, answered, owner, observed) =
+            (relay.clone(), answer.clone(), host.clone(), store.clone());
+        let finished = pool
+            .spawner()
+            .spawn_local_with_handle(async move {
+                owner
+                    .root("alice", move |context| {
+                        async move {
+                            let result = called
+                                .call::<_, Value>(&context, "abandon-started", json!([3]))
+                                .await?;
+                            observed.note("importer:answer");
+                            *answered.borrow_mut() =
+                                Some((result, context.signal().is_cancelled()));
+                            Ok(())
+                        }
+                        .boxed_local()
+                    })
+                    .await
+            })
+            .unwrap();
+        // The checkpoint answered only after the provider started, and the guest went on past
+        // the drop to its second `closed` call.
+        until(&mut pool, || store.answered.get() == 2 * round);
+        assert_eq!(store.position("provider:start"), Some(0), "{:?}", store.log);
+        // Logical cancellation of the provider's call.
+        until(&mut pool, || {
+            store
+                .signal
+                .borrow()
+                .as_ref()
+                .is_some_and(tembra::Cancellation::is_cancelled)
+        });
+        // Physical ownership: give the importer every chance to settle while the gate is held.
+        for _ in 0..50 {
+            pool.run_until_stalled();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            answer.borrow().is_none(),
+            "settled before the provider ended"
+        );
+        assert_eq!(store.position("provider:end"), None);
+        assert_eq!(store.closed.get(), round - 1);
+        assert_eq!(
+            host.kernel().diagnostics().calls,
+            2,
+            "the importer's and the provider's calls stay counted"
+        );
+        open.send(()).unwrap();
+        pool.run_until(finished).unwrap();
+        assert_eq!(
+            answer.borrow_mut().take(),
+            Some((json!(false), false)),
+            "the import was pending when dropped, and the root was never cancelled"
+        );
+        assert!(
+            store.position("provider:end") < store.position("importer:answer"),
+            "{:?}",
+            store.log
+        );
+        pool.run_until(host.settled());
+        assert_eq!(
+            store.closed.get(),
+            round,
+            "the late owned result is closed exactly once"
+        );
+        assert_eq!(host.kernel().diagnostics().calls, 0);
+        assert_eq!(host.kernel().diagnostics().references, claims);
+        assert_eq!(engine.resources(), 0);
+    }
+    // The importer still serves calls through the same provider; nothing was closed twice.
+    let called = relay.clone();
+    let closed = root(&mut pool, &host, async move |context| {
+        called.call::<_, Value>(&context, "closed", json!([])).await
+    })
+    .unwrap();
+    assert_eq!(closed, json!(2));
+    relay.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(store.closed.get(), 2);
+    assert_eq!(engine.resources(), 0);
     assert_eq!(engine.instances(), 0);
     assert!(host.errors().is_empty(), "{:?}", host.errors());
 }

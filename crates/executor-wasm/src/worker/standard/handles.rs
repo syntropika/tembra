@@ -1,7 +1,7 @@
 //! Issue non-reusing revision-owned handles before exposing native resources.
 use super::{
     HANDLE_LIMIT, Shared, invalid,
-    streams::{Feed, Inbox, InputBudget, Pending, Pipe, PipeConsumer, Promised},
+    streams::{Feed, Inbox, InputBudget, Pending, Pipe, PipeConsumer, Promised, Relay},
 };
 use crate::abi::IDENTITY_LIMIT;
 use std::{
@@ -564,6 +564,20 @@ impl Claim {
         inbox.transferred = true;
         drop(inbox);
         Ok(Feed(self.0, file))
+    }
+}
+
+impl Claim {
+    /// Hand the readable end to the relay into a whole byte-stream result's `pipe`; called only
+    /// after the whole packet validated. From now on the guest's writes reach the caller.
+    pub(super) fn relay(self, pipe: Shared<Pipe>) -> wasmtime::Result<Relay> {
+        let mut inbox = self.0.lock().expect("inbox");
+        if inbox.transferred {
+            return Err(invalid("stream was already transferred"));
+        }
+        inbox.transferred = true;
+        drop(inbox);
+        Ok(Relay::new(self.0, pipe))
     }
 }
 

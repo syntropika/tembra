@@ -65,19 +65,23 @@ impl Host {
     /// Admits one physical call against its root's retained implementation version.
     /// Refuses roots older than the object's minimum version before retaining a call.
     pub fn begin_call(&self, reference: Id, root: Id, method: &str) -> Result<Invocation> {
-        self.begin_call_with_context(reference, root, method, 0)
+        self.begin_call_with_context(reference, root, method, 0, None)
     }
 
-    /// Admit one call with its own immutable frame.
+    /// Admit one call with its own immutable frame. `parent` is the live invocation issuing it,
+    /// if any: a cancelled parent admits nothing, and cancelling the parent later reaches this
+    /// call too.
     pub fn begin_call_with_context(
         &self,
         reference: Id,
         root: Id,
         method: &str,
         frame: Id,
+        parent: Option<Id>,
     ) -> Result<Invocation> {
         let mut inner = self.inner.borrow_mut();
         inner.check_frame(root, frame)?;
+        inner.check_parent(root, parent)?;
         let context = inner.check_root(root)?;
         if inner.closing && !context.cleanup {
             return Err(Error::new(Code::Closed, Reason::Host, "host is closing"));
@@ -150,7 +154,48 @@ impl Host {
             code_version: version,
             method: method.into(),
         };
-        inner.retain_call(call, orb_owner)
+        let call = inner.retain_call(call, orb_owner)?;
+        inner.link_call(call.id, parent);
+        Ok(call)
+    }
+
+    /// Cancel one invocation for its caller, and every live call it issued, directly or through
+    /// its descendants. Its root, its caller and sibling calls are unaffected. Cancellation is
+    /// logical: each call keeps running, counted, until [`Host::finish_call`]; a cancelled call
+    /// admits no further calls, operations or execution frames. Returns the calls cancelled now,
+    /// in order, each also announced once by [`Action::CancelCall`]; repeating it returns none.
+    pub fn cancel_call(&self, call: Id) -> Result<Vec<Id>> {
+        let mut inner = self.inner.borrow_mut();
+        if !inner.calls.contains_key(&call) {
+            return Err(gone(Reason::Call));
+        }
+        let mut cancelled = Vec::new();
+        let mut next = vec![call];
+        while let Some(call) = next.pop() {
+            // An already cancelled call's descendants were cancelled with it, and it admits none.
+            if !inner.cancelled_calls.insert(call) {
+                continue;
+            }
+            inner.actions.push_back(Action::CancelCall(call));
+            cancelled.push(call);
+            next.extend(inner.call_children.members(&call));
+        }
+        Ok(cancelled)
+    }
+
+    /// Require a live invocation that its caller has not cancelled.
+    pub fn check_call(&self, call: Id) -> Result<()> {
+        let inner = self.inner.borrow();
+        if !inner.calls.contains_key(&call) {
+            return Err(gone(Reason::Call));
+        }
+        inner.check_uncancelled(call)
+    }
+
+    /// Whether a caller cancelled this invocation (or one of its ancestors). An ended call reads
+    /// as not cancelled.
+    pub fn call_cancelled(&self, call: Id) -> bool {
+        self.inner.borrow().cancelled_calls.contains(&call)
     }
 
     /// Marks actual callback settlement, independently from logical cancellation or caller release.
@@ -160,6 +205,7 @@ impl Host {
             .calls
             .remove(&call)
             .ok_or_else(|| gone(Reason::Call))?;
+        inner.unlink_call(call.id);
         #[cfg(feature = "hooks")]
         inner.release_observation_call(call.id);
         let mut leases = Vec::new();
@@ -212,10 +258,11 @@ impl Host {
         operation: Id,
         object: Option<Id>,
     ) -> Result<Invocation> {
-        self.begin_operation_with_context(orb, root, operation, object, 0)
+        self.begin_operation_with_context(orb, root, operation, object, 0, None)
     }
 
-    /// Admit an orb operation with its caller's frame.
+    /// Admit an orb operation with its caller's frame; `parent` as for
+    /// [`Host::begin_call_with_context`].
     pub fn begin_operation_with_context(
         &self,
         orb: Id,
@@ -223,9 +270,11 @@ impl Host {
         operation: Id,
         object: Option<Id>,
         frame: Id,
+        parent: Option<Id>,
     ) -> Result<Invocation> {
         let mut inner = self.inner.borrow_mut();
         inner.check_frame(root, frame)?;
+        inner.check_parent(root, parent)?;
         let context = inner.check_root(root)?;
         let version = context.version;
         let snapshot = inner
@@ -272,11 +321,70 @@ impl Host {
             code_version: version,
             method: operation.to_string(),
         };
-        inner.retain_call(invocation, orb_owner)
+        let invocation = inner.retain_call(invocation, orb_owner)?;
+        inner.link_call(invocation.id, parent);
+        Ok(invocation)
     }
 }
 
 impl Inner {
+    /// Refuse a call issued by an invocation that ended, belongs to another root or was
+    /// cancelled by its caller.
+    fn check_parent(&self, root: Id, parent: Option<Id>) -> Result<()> {
+        let Some(parent) = parent else {
+            return Ok(());
+        };
+        match self.calls.get(&parent) {
+            None => Err(gone(Reason::Call)),
+            Some(call) if call.root != root => Err(Error::invalid(
+                Reason::Context,
+                "the issuing invocation belongs to another root",
+            )),
+            Some(_) => self.check_uncancelled(parent),
+        }
+    }
+
+    /// Refuse new authority derived from a cancelled invocation.
+    pub(crate) fn check_uncancelled(&self, call: Id) -> Result<()> {
+        if self.cancelled_calls.contains(&call) {
+            return Err(Error::new(
+                Code::Cancelled,
+                Reason::Call,
+                "invocation was cancelled",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Record which invocation issued a call.
+    fn link_call(&mut self, call: Id, parent: Option<Id>) {
+        if let Some(parent) = parent {
+            self.call_parents.insert(call, parent);
+            self.call_children.insert(parent, call);
+        }
+    }
+
+    /// Forget an ended call's lineage. Calls it issued that still run are handed to its own
+    /// parent, so cancelling an ancestor still reaches them.
+    fn unlink_call(&mut self, call: Id) {
+        self.cancelled_calls.remove(&call);
+        let parent = self.call_parents.remove(&call);
+        if let Some(parent) = parent {
+            self.call_children.remove(&parent, call);
+        }
+        for child in self.call_children.take(&call) {
+            match parent {
+                Some(parent) => {
+                    self.call_parents.insert(child, parent);
+                    self.call_children.insert(parent, child);
+                }
+                None => {
+                    self.call_parents.remove(&child);
+                }
+            }
+        }
+    }
+
     /// Retain physical call ownership and its reverse indexes together.
     fn retain_call(&mut self, call: Invocation, orb_owner: Id) -> Result<Invocation> {
         #[cfg(feature = "hooks")]

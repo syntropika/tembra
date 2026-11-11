@@ -34,6 +34,10 @@ pub(super) struct State {
     pub(super) resolve: bool,
     /// The incoming HTTP request of the active ingress callback, if any.
     pub(super) ingress: Option<Ingress>,
+    /// The host-created end of the active callback's whole byte-stream result, until
+    /// `STREAM_RESULT` publishes it. Dropped unpublished at the callback's end, so its caller
+    /// learns that no stream was returned.
+    pub(super) stream: Option<super::StreamCall>,
 }
 
 /// The upstream request body's processing result.
@@ -401,6 +405,7 @@ pub(super) async fn instantiate(
             callback_scope: scope,
             resolve,
             ingress: None,
+            stream: None,
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -443,6 +448,7 @@ pub(super) async fn run(
                     }
                 }
             }
+            store.data_mut().stream = command.stream.take();
             store.data_mut().events = Some(command.events.clone());
             store.data_mut().deadline = Some(
                 std::time::Instant::now()
@@ -462,6 +468,7 @@ pub(super) async fn run(
             .and_then(|result| result)
             .map_err(|error| super::standard::attribute_trap(error, engine.interpreter.as_deref()));
             store.data_mut().events = None;
+            store.data_mut().stream = None;
             let mut trapped = result.as_ref().map_or(true, |outcome| outcome.interrupted);
             let mut result = result;
             // Ending an ingress callback cannot fail unless the Store's tables are inconsistent;
@@ -564,5 +571,6 @@ pub(super) fn test_state(ctx: wasmtime_wasi::WasiCtx) -> State {
         callback_scope: scope,
         resolve: false,
         ingress: None,
+        stream: None,
     }
 }

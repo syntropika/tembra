@@ -378,7 +378,7 @@ commands! {
         context: Option<Handle>,
     } -> Invocation => |k, i| {
         k.host
-            .begin_call_with_context(i.reference.0, i.root.0, &i.method, frame(i.context))
+            .begin_call_with_context(i.reference.0, i.root.0, &i.method, frame(i.context), None)
             .map(Invocation::from)
     };
     /// Recheck the caller's context, then admit a service call, in one bounded exchange.
@@ -390,8 +390,15 @@ commands! {
         context: Option<Handle>,
     } -> Invocation => |k, i| {
         context::check(k, i.root, i.parent)?;
+        // The issuing invocation's cancellation reaches this call, and refuses it once cancelled.
         k.host
-            .begin_call_with_context(i.reference.0, i.root.0, &i.method, frame(i.context))
+            .begin_call_with_context(
+                i.reference.0,
+                i.root.0,
+                &i.method,
+                frame(i.context),
+                i.parent.map(|parent| parent.0),
+            )
             .map(Invocation::from)
     };
     /// Admit an owner-bound callback operation.
@@ -409,6 +416,7 @@ commands! {
                 i.operation.0,
                 i.object.map(|object| object.0),
                 frame(i.context),
+                None,
             )
             .map(Invocation::from)
     };

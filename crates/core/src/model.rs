@@ -188,6 +188,9 @@ pub enum Action {
     CloseResource(Id),
     DropValue(Id),
     CancelRoot(Id),
+    /// One invocation was cancelled by its caller: only that call and the calls it issued, never
+    /// its root or sibling calls. Physical calls keep running until they finish.
+    CancelCall(Id),
     CancelTask(Id),
     RetireOrb(Id),
     StateChanged {

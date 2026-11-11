@@ -20,6 +20,7 @@ import {
   Writer,
   decode,
   encode,
+  WRITE_ACCEPTED,
 } from "../src/interpreter/standard-codec.ts";
 import { StandardHost } from "../src/interpreter/standard-host.ts";
 
@@ -143,10 +144,12 @@ export class Guest {
     expect(this.host.sync(this.futureWritePacket(handle, value)).length).toBe(0);
   }
 
-  async streamWrite(handle: number, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
-    for (let at = 0; at < bytes.length; at += 65536) {
+  /** Write in 64 KiB chunks; the status of the last write, stopping at `WRITE_CLOSED`. */
+  async streamWrite(handle: number, bytes: Uint8Array, signal?: AbortSignal): Promise<number> {
+    let status = WRITE_ACCEPTED;
+    for (let at = 0; at < bytes.length && status === WRITE_ACCEPTED; at += 65536) {
       const chunk = bytes.subarray(at, at + 65536);
-      await this.host.async(
+      const delivery = await this.host.async(
         this.#packet(STREAM_WRITE, (writer) => {
           writer.handle(handle);
           writer.u32(chunk.length);
@@ -154,7 +157,10 @@ export class Guest {
         }),
         signal,
       );
+      expect(delivery.bytes.length).toBe(1);
+      status = delivery.bytes[0]!;
     }
+    return status;
   }
 
   /** One read; `undefined` is end of stream. */

@@ -7,7 +7,7 @@
 //! 2^53. Every other position, including WIT strings that hold digits, is identical in both.
 use crate::{
     Error,
-    model::{Function, Item, Kind, MAX_DEPTH, PreparedContract, Slot, Ty},
+    model::{Function, FunctionKind, Item, Kind, MAX_DEPTH, PreparedContract, Slot, Ty},
 };
 use serde_json::Value;
 
@@ -212,6 +212,20 @@ impl PreparedContract {
     /// The incoming HTTP handler is not a portable export: its owned resources are served only
     /// by the host-local ingress adapter, so it is outside this profile rather than admitted to it.
     pub fn check_value_profile(&self) -> Result<(), Error> {
+        self.check_exports(false)
+    }
+
+    /// Require the exports of a source Orb: the data profile, plus a `stream<u8>` returned as the
+    /// whole result of an asynchronous freestanding function.
+    ///
+    /// The stream end never travels as data: only the native facade's capability transport
+    /// carries it, so data-only endpoints keep [`Self::check_value_profile`]. Stream arguments,
+    /// nested streams, other element types, futures and resources stay refused.
+    pub fn check_source_profile(&self) -> Result<(), Error> {
+        self.check_exports(true)
+    }
+
+    fn check_exports(&self, streams: bool) -> Result<(), Error> {
         for entry in &self.model().exports {
             if crate::lower::is_ingress(entry) {
                 continue;
@@ -228,7 +242,7 @@ impl PreparedContract {
                     ));
                 }
                 for function in &interface.functions {
-                    self.supported_function(function)?;
+                    self.supported_function(function, streams)?;
                 }
             }
         }
@@ -257,16 +271,28 @@ impl PreparedContract {
             ));
         }
         for function in &interface.functions {
-            self.supported_function(function)?;
+            self.supported_function(function, false)?;
         }
         Ok(())
     }
 
-    fn supported_function(&self, function: &Function) -> Result<(), Error> {
+    /// `streams` admits a `stream<u8>` returned as the whole result of an asynchronous
+    /// freestanding function; every other position keeps the data profile.
+    fn supported_function(&self, function: &Function, streams: bool) -> Result<(), Error> {
         for parameter in &function.params {
             self.supported(parameter.ty, 0)?;
         }
         if let Some(result) = function.result {
+            if streams && self.byte_stream(result) {
+                if !matches!(function.kind, FunctionKind::AsyncFreestanding) {
+                    return Err(Error(
+                        "a byte stream is carried only as the whole result of an asynchronous \
+                         freestanding function"
+                            .into(),
+                    ));
+                }
+                return Ok(());
+            }
             self.supported(result, 0)?;
         }
         Ok(())

@@ -20,8 +20,8 @@ pub use readable::{Observation, Readable};
 #[cfg(feature = "hooks")]
 pub use hooks::{Hook, HookHandle};
 pub use host::{
-    AcquisitionOptions, Cancellation, Context, Declaration, ForeignNotification, Host, Reference,
-    Resource, ResourceKey, ResourceSignal, TaskScope,
+    AcquisitionOptions, Cancellation, Context, Declaration, ForeignNotification, Host, IssuedCall,
+    Reference, Resource, ResourceKey, ResourceSignal, TaskScope,
 };
 pub use orb::{Orb, Service};
 pub use state::State;

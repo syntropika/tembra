@@ -123,6 +123,19 @@ impl Reference {
             .await
     }
 
+    /// Like [`Reference::call_portable`], but its caller keeps control of the admitted
+    /// invocation: once admitted, it receives the [`IssuedCall`], which cancels exactly this call
+    /// and waits for its physical end, and the call's result, which it may stop awaiting.
+    pub async fn issue_portable<A: IntoPayload + 'static, R: FromPayload + 'static>(
+        &self,
+        context: &Context,
+        method: &str,
+        arguments: A,
+    ) -> Result<(IssuedCall, LocalBoxFuture<'static, Result<R>>)> {
+        let boundary: Boundary<A, R> = (Box::new(A::into_payload), Box::new(R::from_payload));
+        self.issue(context, method, arguments, Some(boundary)).await
+    }
+
     /// Only `Owned` can originate implicit self. Public payload arguments cannot forward a
     /// provider's retained receiver into another call.
     pub(crate) async fn call_borrowed<R: FromPayload + 'static>(
@@ -131,9 +144,19 @@ impl Reference {
         method: &str,
         arguments: Payload,
     ) -> Result<R> {
+        let (_, result) = self.issue_borrowed(context, method, arguments).await?;
+        result.await
+    }
+
+    /// [`Reference::call_borrowed`] with control of the admitted invocation.
+    pub(crate) async fn issue_borrowed<R: FromPayload + 'static>(
+        &self,
+        context: &Context,
+        method: &str,
+        arguments: Payload,
+    ) -> Result<(IssuedCall, LocalBoxFuture<'static, Result<R>>)> {
         let boundary: Boundary<Payload, R> = (Box::new(Ok), Box::new(R::from_payload));
-        self.invoke(context, method, arguments, Some(boundary))
-            .await
+        self.issue(context, method, arguments, Some(boundary)).await
     }
 
     async fn invoke<A: 'static, R: 'static>(
@@ -143,6 +166,19 @@ impl Reference {
         arguments: A,
         boundary: Option<Boundary<A, R>>,
     ) -> Result<R> {
+        let (_, result) = self.issue(context, method, arguments, boundary).await?;
+        result.await
+    }
+
+    /// Admit one call issued from `context` and start it as managed work. The call's guard, not
+    /// its caller, owns the invocation until it physically ends.
+    async fn issue<A: 'static, R: 'static>(
+        &self,
+        context: &Context,
+        method: &str,
+        arguments: A,
+        boundary: Option<Boundary<A, R>>,
+    ) -> Result<(IssuedCall, LocalBoxFuture<'static, Result<R>>)> {
         if !self.host.same(&context.host) {
             return Err(Error::invalid(Reason::Context, "foreign host context"));
         }
@@ -154,7 +190,12 @@ impl Reference {
             context.root,
             method,
             context.frame(),
+            context.issuer(),
         )?;
+        let issued = IssuedCall {
+            host: self.host.clone(),
+            call: call.id,
+        };
         let route = self.route(&call, method, boundary.is_some());
         let foreign = matches!(route, Route::Foreign);
         let origin = Origin::new(self.host.clone(), self.id, self.object, foreign, call.root);
@@ -230,13 +271,17 @@ impl Reference {
             };
             (result, None)
         })?;
-        let result = receive.await.map_err(|_| {
-            Error::invalid(Reason::Executor, "executor stopped before callback settled")
-        })??;
-        result
-            .downcast::<R>()
-            .map(|value| *value)
-            .map_err(|_| type_error())
+        let result = async move {
+            let result = receive.await.map_err(|_| {
+                Error::invalid(Reason::Executor, "executor stopped before callback settled")
+            })??;
+            result
+                .downcast::<R>()
+                .map(|value| *value)
+                .map_err(|_| type_error())
+        }
+        .boxed_local();
+        Ok((issued, result))
     }
 
     /// Select the admitted call's entrypoint. Portable calls always use the provider's portable
@@ -268,6 +313,47 @@ impl Reference {
                 .map_or(Route::Missing, |handle| {
                     Route::Local(environment, handle.clone())
                 })
+        }
+    }
+}
+
+/// A dependency call as its caller issued it: the caller may cancel exactly this invocation,
+/// and wait until it has physically ended.
+///
+/// Cancellation is logical. The call, and the calls it issued, observe it through their
+/// context's signal, and admit no further work; their root, their caller and sibling calls are
+/// unaffected. The call keeps running, counted by the kernel and owned by its managed task,
+/// until it physically ends, however long a callee that ignores the signal takes.
+#[derive(Clone)]
+pub struct IssuedCall {
+    host: Host,
+    call: core::Id,
+}
+
+impl IssuedCall {
+    /// The admitted invocation's kernel identity.
+    pub fn id(&self) -> core::Id {
+        self.call
+    }
+
+    /// Cancel this invocation and the calls it issued. Doing so again, or after the call
+    /// ended, does nothing.
+    pub fn cancel(&self) {
+        let Ok(cancelled) = self.host.kernel().cancel_call(self.call) else {
+            return;
+        };
+        for call in cancelled {
+            self.host.cancel_call_signal(call);
+        }
+        self.host.flush();
+    }
+
+    /// Resolve once the invocation has physically ended: its managed task finished the call.
+    pub async fn settled(&self) {
+        while self.host.kernel().invocation(self.call).is_ok() {
+            let (send, receive) = oneshot::channel();
+            self.host.0.settled.borrow_mut().push(send);
+            let _ = receive.await;
         }
     }
 }

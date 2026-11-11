@@ -118,6 +118,7 @@ export const ActionType = Object.freeze({
   CloseResource: "close-resource",
   DropValue: "drop-value",
   CancelRoot: "cancel-root",
+  CancelCall: "cancel-call",
   CancelTask: "cancel-task",
   RetireOrb: "retire-orb",
   State: "state",
@@ -407,6 +408,11 @@ export interface ActionCancelRoot {
   id: number;
 }
 
+export interface ActionCancelCall {
+  type: "cancel-call";
+  id: number;
+}
+
 export interface ActionCancelTask {
   type: "cancel-task";
   id: number;
@@ -449,6 +455,7 @@ export type Action =
   | ActionCloseResource
   | ActionDropValue
   | ActionCancelRoot
+  | ActionCancelCall
   | ActionCancelTask
   | ActionRetireOrb
   | ActionState

@@ -508,3 +508,71 @@ fn compiled_resource_exports_are_verified_but_need_a_capability_transport() {
             .is_err()
     );
 }
+
+/// Source Orbs admit a `stream<u8>` only as the whole result of an asynchronous freestanding
+/// function; the data profile still refuses it, and a forged artifact is refused on decode.
+#[test]
+fn source_artifacts_admit_only_whole_async_byte_stream_results() {
+    let world = |body: &str| {
+        format!(
+            "package test:streams@1.0.0; interface frames {{ {body} }} world orb {{ export frames; }}"
+        )
+    };
+    // Bypass `package_source`, so only `decode` checks the profile.
+    let forge = |contract: &Contract| {
+        let identity = Identity {
+            name: "orb".into(),
+            api_version: 1,
+            world: contract.prepared().world().to_owned(),
+        };
+        let mut forged = crate::artifact::COMPONENT_HEADER.to_vec();
+        crate::artifact::append_section(
+            &mut forged,
+            "tembra:orb",
+            &crate::artifact::encode_orb_contributions(
+                &identity,
+                contract.prepared(),
+                &BTreeMap::new(),
+            ),
+        );
+        crate::artifact::append_section(&mut forged, "tembra:source", b"globalThis.__tembraOrb={}");
+        forged
+    };
+    for accepted in [
+        "frames: async func(count: u32, label: string) -> stream<u8>; ping: func() -> u32;",
+        "type bytes = stream<u8>; frames: async func() -> bytes;",
+    ] {
+        let contract = contract(&world(accepted));
+        let bytes = contract
+            .source_artifact("globalThis.__tembraOrb={}", "orb", 1)
+            .unwrap();
+        assert!(Artifact::decode(&bytes).is_ok(), "{accepted}");
+        assert!(Artifact::decode(&forge(&contract)).is_ok(), "{accepted}");
+        assert!(
+            contract.prepared().check_value_profile().is_err(),
+            "{accepted}"
+        );
+    }
+    let refused = [
+        "frames: func() -> stream<u8>;",
+        "frames: async func(input: stream<u8>) -> u32;",
+        "frames: async func() -> list<stream<u8>>;",
+        "frames: async func() -> option<stream<u8>>;",
+        "frames: async func() -> result<stream<u8>, string>;",
+        "frames: async func() -> tuple<stream<u8>, u32>;",
+        "frames: async func() -> stream<u32>;",
+        "frames: async func() -> stream;",
+        "frames: async func() -> future<u8>;",
+        "resource session { frames: async func() -> stream<u8>; }",
+    ];
+    for shape in refused {
+        let contract = contract(&world(shape));
+        assert!(
+            contract
+                .source_artifact("globalThis.__tembraOrb={}", "orb", 1)
+                .is_err(),
+            "{shape}"
+        );
+        assert!(Artifact::decode(&forge(&contract)).is_err(), "{shape}");
+    }
+}

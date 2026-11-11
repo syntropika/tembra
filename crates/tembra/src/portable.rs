@@ -374,6 +374,20 @@ impl Owned {
             .with_receiver(Loan(Rc::downgrade(&self.capability)))?;
         self.anchor.call_borrowed(context, method, payload).await
     }
+
+    /// Like [`Owned::call_portable`], with control of the admitted invocation: see
+    /// [`crate::Reference::issue_portable`].
+    pub async fn issue_portable<A: IntoPayload + 'static, R: FromPayload + 'static>(
+        &self,
+        context: &Context,
+        method: &str,
+        arguments: A,
+    ) -> Result<(crate::IssuedCall, LocalBoxFuture<'static, Result<R>>)> {
+        let payload = arguments
+            .into_payload()?
+            .with_receiver(Loan(Rc::downgrade(&self.capability)))?;
+        self.anchor.issue_borrowed(context, method, payload).await
+    }
 }
 
 /// What a portable provider returns: its logical result and, when the call keeps working after

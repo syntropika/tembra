@@ -242,6 +242,7 @@ impl Environment {
         id: u32,
         method: &str,
         args: Value,
+        issued: &crate::worker::Issued,
     ) -> Result<Reply> {
         let context = Self::context(scope)?;
         let (callee, binding) = self.callee(scope, owner, id)?;
@@ -263,15 +264,20 @@ impl Environment {
             owned,
             mut streams,
         } = match (callee, &roles.receiver) {
+            // The admitted call is handed to the request first, then awaited.
             (Callee::Reference(reference), None) => {
-                reference
-                    .call_portable::<_, Delivered>(context, &method.name, payload)
-                    .await?
+                let (call, result) = reference
+                    .issue_portable::<_, Delivered>(context, &method.name, payload)
+                    .await?;
+                issued.set(Some(call));
+                result.await?
             }
             (Callee::Owned(handle), Some(expected)) if handle.nominal() == expected => {
-                handle
-                    .call_portable::<_, Delivered>(context, &method.name, payload)
-                    .await?
+                let (call, result) = handle
+                    .issue_portable::<_, Delivered>(context, &method.name, payload)
+                    .await?;
+                issued.set(Some(call));
+                result.await?
             }
             (Callee::Owned(_), Some(_)) => return Err(mistyped()),
             (Callee::Owned(_), None) => {

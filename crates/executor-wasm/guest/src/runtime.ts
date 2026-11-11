@@ -15,6 +15,8 @@ import "./builtins.ts";
   const stateValues = globalThis.__tembraState;
   const sweepStandard = globalThis.__tembraSweepStandard!;
   delete globalThis.__tembraSweepStandard;
+  const streamResult = globalThis.__tembraStreamResult!;
+  delete globalThis.__tembraStreamResult;
   const writeLog = globalThis.__writeLog!;
   delete globalThis.__writeLog;
   Object.defineProperty(globalThis, "console", {
@@ -392,6 +394,17 @@ import "./builtins.ts";
       let result;
       switch (request.kind) {
         case "invoke":
+          if (wire.streamResult(request.service, request.method)) {
+            // The result leaves as a stream; this callback lasts until it was produced.
+            await streamResult(
+              await orb.services[request.service]!.methods[request.method]!(
+                environments.get(request.environment),
+                context(request.environment),
+                ...wire.arguments(request.service, request.method, request.args),
+              ),
+            );
+            break;
+          }
           result = await wire.invoke(request.service, request.method, () =>
             orb.services[request.service]!.methods[request.method]!(
               environments.get(request.environment),

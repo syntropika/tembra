@@ -192,10 +192,12 @@ fn stream_into(store: &mut Store, call: Packet, data: &[u8]) -> Result<(), u32> 
             .unwrap(),
     );
     for chunk in data.chunks(40_000) {
-        // Upstream stops reading after an error; the future then reports that error.
-        if let Err(error) = write(store, input, chunk) {
-            assert!(error.contains("stream reader was dropped"), "{error}");
-            break;
+        // Upstream stops reading after an error: the write reports the closed reader, an
+        // ordinary status, and the future then reports that error.
+        match write(store, input, chunk).unwrap().as_slice() {
+            [WRITE_ACCEPTED] => {}
+            [WRITE_CLOSED] => break,
+            other => panic!("unexpected write status {other:?}"),
         }
     }
     release(store, input).unwrap();

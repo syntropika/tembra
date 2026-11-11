@@ -18,8 +18,15 @@ export const FUTURE_READ = 2;
 export const DROP = 3;
 /** Create a guest-writable input stream of a `TYPES` index; replies with its u64 identity. */
 export const STREAM_NEW = 4;
-/** Write one chunk into a guest-writable input stream; completes once the host accepted it. */
+/**
+ * Write one chunk into a guest-writable input stream; completes once the host accepted it. The
+ * reply is one status byte, `WRITE_ACCEPTED` or `WRITE_CLOSED`; every rejection is a failure.
+ */
 export const STREAM_WRITE = 5;
+/** `STREAM_WRITE` status: the chunk was accepted. */
+export const WRITE_ACCEPTED = 0;
+/** `STREAM_WRITE` status: the reader closed the stream, an ordinary end of production. */
+export const WRITE_CLOSED = 1;
 /** Create a guest-writable future of a generated writable `TYPES` index. */
 export const FUTURE_NEW = 6;
 /** Resolve a guest-writable future with one typed payload. */
@@ -31,6 +38,13 @@ export const FUTURE_WRITE = 7;
  * the response streams. The reply is empty.
  */
 export const INGRESS_HEAD = 8;
+/**
+ * Asynchronous, only in a callback whose export returns a whole `stream<u8>`: publish the guest
+ * writer `handle` as that result once. The caller receives the stream at once; the operation
+ * completes when the written bytes were delivered or the caller closed the stream, so the
+ * callback stays alive while it streams. The reply is empty.
+ */
+export const STREAM_RESULT = 9;
 /** Largest byte chunk either side moves through one stream read or write. */
 export const STREAM_CHUNK = 64 << 10;
 

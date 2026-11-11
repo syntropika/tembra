@@ -42,7 +42,7 @@ fn private_ancestry_rejects_reentry_without_registering_application_keys() {
         )
         .unwrap();
     let second = host
-        .begin_call_with_context(reference.reference, root, "step", inherited)
+        .begin_call_with_context(reference.reference, root, "step", inherited, None)
         .unwrap();
     let before = host.context_stats();
     assert!(
@@ -125,11 +125,11 @@ fn trusted_intermediaries_preserve_the_private_heap_identity() {
     let first = host.begin_call(a.reference, root, "step").unwrap();
     let frame = host.enter_execution(first.id, 0).unwrap();
     let middle = host
-        .begin_call_with_context(b.reference, root, "step", frame)
+        .begin_call_with_context(b.reference, root, "step", frame, None)
         .unwrap();
     assert!(host.enter_execution(middle.id, frame).is_err());
     let bounce = host
-        .begin_call_with_context(a.reference, root, "step", middle.context)
+        .begin_call_with_context(a.reference, root, "step", middle.context, None)
         .unwrap();
     assert!(host.enter_execution(bounce.id, bounce.context).is_err());
     for call in [bounce.id, middle.id, first.id] {

@@ -61,7 +61,8 @@ impl Vm {
     /// Load TypeScript and npm's closed bundle without evaluating it in the outer host.
     ///
     /// The standard WASI bootstrap is evaluated only when the checked contract imports a WASI
-    /// interface (including type-only dependencies such as clocks under filesystem). Otherwise
+    /// interface (including type-only dependencies such as clocks under filesystem) or defines a
+    /// stream, whose bytes the bootstrap's standard writer produces. Otherwise
     /// [`WITHOUT_STANDARD`] leaves exactly the globals that bootstrap leaves for an Orb without
     /// standard imports. The decision depends only on the contract, so a captured heap is always
     /// paired with the same choice.
@@ -98,7 +99,8 @@ impl Vm {
                     env!("TEMBRA_GUEST_BOOTSTRAP_DIR"),
                     "/values.js"
                 )))?;
-                if imports_wasi(&configuration.contract) {
+                if imports_wasi(&configuration.contract) || defines_stream(&configuration.contract)
+                {
                     // Match the owned configuration JSON to share its parser instantiation in Wasm.
                     ctx.globals().set(
                         "__tembraStandardSchema",
@@ -335,6 +337,19 @@ impl Vm {
 const WITHOUT_STANDARD: &str = "delete globalThis.__hostSyncBytes; \
      globalThis.__tembraStandard = Object.freeze({}); \
      globalThis.__tembraSweepStandard = () => {};";
+
+/// Whether a checked contract description defines a stream type. An admitted source Orb has one
+/// only as the whole `stream<u8>` result of an export, produced through the standard writer.
+fn defines_stream(contract: &serde_json::Value) -> bool {
+    contract
+        .get("types")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|types| {
+            types
+                .iter()
+                .any(|item| item.pointer("/definition/kind/stream").is_some())
+        })
+}
 
 /// Whether a checked contract description (`Contract::describe`) imports any WASI interface.
 /// Interface imports carry `contract` (`null` for inline interfaces); function and type imports

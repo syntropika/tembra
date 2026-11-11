@@ -26,8 +26,9 @@ pub struct InterpreterPort {
     pub(crate) hooks: tembra_contracts::HookPlan,
     /// The checked host-local incoming HTTP handler, if this revision serves one.
     pub(crate) ingress: Option<tembra_contracts::IngressBinding>,
-    /// Whether this revision exchanges WIT resource capabilities (see [`Transport`]).
-    pub(crate) resources: bool,
+    /// Whether this revision exchanges capabilities through the native facade (see
+    /// [`Transport`]): WIT resources of a compiled component, and whole byte-stream results.
+    pub(crate) capabilities: bool,
     packet_bytes: usize,
 }
 
@@ -36,8 +37,9 @@ pub struct InterpreterPort {
 pub(crate) enum Transport {
     /// JSON-compatible data only: platform ports and their foreign carriers.
     Data,
-    /// Data plus host-issued WIT resources, for the native Rust facade. Only compiled
-    /// components serve resources; any other artifact still exchanges data only.
+    /// Data plus host-issued capabilities, for the native Rust facade. Only compiled
+    /// components serve WIT resources; a source Orb adds only `stream<u8>` returned as the whole
+    /// result of an asynchronous freestanding export.
     Capabilities,
 }
 
@@ -74,16 +76,16 @@ impl Engine {
         let mut plan = contract
             .plan(name, api_version, bindings)
             .map_err(failure)?;
-        let resources = transport == Transport::Capabilities
-            && matches!(
-                artifact.implementation,
-                tembra_contracts::ArtifactImplementation::Component(_)
-            );
+        let capabilities = transport == Transport::Capabilities;
+        let source = matches!(
+            artifact.implementation,
+            tembra_contracts::ArtifactImplementation::Source(_)
+        );
         let imports = bindings
             .iter()
             .filter(|(_, binding)| matches!(binding, Binding::Orb { .. }))
             .map(|(name, _)| name);
-        if resources {
+        if capabilities && !source {
             contract.check_resource_profile().map_err(failure)?;
             for name in imports {
                 contract
@@ -91,25 +93,42 @@ impl Engine {
                     .map_err(failure)?;
             }
         } else {
-            let data = contract.check_value_profile().and_then(|()| {
+            // Source imports stay data-only; a source export may return a whole byte stream
+            // only through the native facade.
+            let exports = if capabilities {
+                contract.check_source_profile()
+            } else {
+                contract.check_value_profile()
+            };
+            let data = exports.and_then(|()| {
                 imports
                     .clone()
                     .try_for_each(|name| contract.check_import_value_profile(name))
             });
             if let Err(error) = data {
-                // Say so when only the resource transport is missing, not the shape itself.
+                // Say so when only the capability transport is missing, not the shape itself.
+                let imports_data = imports
+                    .clone()
+                    .all(|name| contract.check_import_value_profile(name).is_ok());
                 let resource_shapes = contract.check_resource_profile().is_ok()
                     && imports
                         .clone()
                         .all(|name| contract.check_import_resource_profile(name).is_ok());
-                return Err(failure(if resource_shapes {
-                    format!(
-                        "{error}: WIT resources are served only by compiled components installed \
+                return Err(failure(
+                    if !capabilities && imports_data && contract.check_source_profile().is_ok() {
+                        format!(
+                            "{error}: byte-stream results are served only through the native Rust \
+                         facade; this endpoint exchanges data only"
+                        )
+                    } else if !source && resource_shapes {
+                        format!(
+                            "{error}: WIT resources are served only by compiled components installed \
                          through the native Rust facade; this endpoint exchanges data only"
-                    )
-                } else {
-                    error.to_string()
-                }));
+                        )
+                    } else {
+                        error.to_string()
+                    },
+                ));
             }
         }
         let checked = |description: &Value| {
@@ -162,7 +181,7 @@ impl Engine {
             metadata: plan.orb,
             hooks,
             ingress,
-            resources,
+            capabilities,
             packet_bytes: self.limits.packet_bytes,
         })
     }

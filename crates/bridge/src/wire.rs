@@ -995,6 +995,7 @@ union! {
         CloseResource = "close-resource" { id: Ident },
         DropValue = "drop-value" { id: Ident },
         CancelRoot = "cancel-root" { id: Ident },
+        CancelCall = "cancel-call" { id: Ident },
         CancelTask = "cancel-task" { id: Ident },
         RetireOrb = "retire-orb" { id: Ident },
         State = "state" { id: Ident, revision: Decimal },
@@ -1031,6 +1032,7 @@ impl From<core::Action> for Action {
             A::CloseResource(id) => Self::CloseResource { id: Ident(id) },
             A::DropValue(id) => Self::DropValue { id: Ident(id) },
             A::CancelRoot(id) => Self::CancelRoot { id: Ident(id) },
+            A::CancelCall(id) => Self::CancelCall { id: Ident(id) },
             A::CancelTask(id) => Self::CancelTask { id: Ident(id) },
             A::RetireOrb(id) => Self::RetireOrb { id: Ident(id) },
             A::StateChanged { object, revision } => Self::State {

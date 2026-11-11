@@ -29,6 +29,7 @@ impl Host {
                 self.0.observers.borrow_mut().remove(object);
             }
             core::Action::CancelRoot(root) => self.cancel_context(*root),
+            core::Action::CancelCall(call) => self.cancel_call_signal(*call),
             core::Action::CancelTask(task) => self.cancel_task(*task),
             core::Action::ProgramComplete { program, error } => {
                 if let Some(send) = self.0.programs.borrow_mut().remove(program) {

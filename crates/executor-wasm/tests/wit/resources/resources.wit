@@ -85,6 +85,11 @@ interface relay {
   /// Start `open-later`, poll it once, then drop it: the guest cancels a pending owned import.
   /// Answers whether the import had already completed.
   abandon: async func(seed: u64) -> bool;
+  /// Start `open-later` and poll it once, then call `closed` as a host-observable checkpoint
+  /// before dropping the still pending import, and call `closed` again after the drop.
+  /// A provider that answers the first `closed` only once `open-later` has started makes the
+  /// drop cancel a running call. Answers whether the import had already completed.
+  abandon-started: async func(seed: u64) -> bool;
   /// Open `first` twice and `second` once with one seed, add 1, 2 and 3 to them in that order,
   /// then drop all three before reading the provider's destructor count.
   keyed: func(first: tuple<string, string>, second: tuple<string, string>, seed: u64) -> keyed-report;

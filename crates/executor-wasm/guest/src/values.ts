@@ -188,6 +188,13 @@ import {
       if (args.length !== type.params.length) throw new Error("WIT hook argument count differs");
       return type.params.map((param, index) => convert(param.type, args[index], false));
     },
+    streamResult(service, method) {
+      let type = signature(exports, service, method).result;
+      if (type === undefined) return false;
+      type = primitive(type);
+      const kind = typeof type === "number" ? types.get(type) : undefined;
+      return kind?.stream !== undefined && kind.stream !== null && primitive(kind.stream) === "u8";
+    },
     exportResult(service, method, value) {
       const type = signature(exports, service, method).result;
       return type === undefined ? undefined : convert(type, value, true);

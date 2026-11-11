@@ -54,6 +54,7 @@ impl Reference {
             context.root,
             method,
             context.frame(),
+            context.issuer(),
         )?;
         let host = self.host.clone();
         self.host

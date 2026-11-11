@@ -128,6 +128,9 @@ impl Host {
         if call.is_some_and(|id| inner.calls.get(&id).is_none_or(|value| value.root != root)) {
             return Err(invalid("originating invocation has ended"));
         }
+        if let Some(call) = call {
+            inner.check_uncancelled(call)?;
+        }
         if key.name.is_empty()
             || key.name.len() > 256
             || key.version == 0
@@ -169,6 +172,7 @@ impl Host {
             .ok_or_else(|| invalid("originating invocation has ended"))?;
         let root = invocation.root;
         let realm = invocation.orb;
+        inner.check_uncancelled(call)?;
         inner.check_root(root)?;
         inner.check_frame(root, parent)?;
         if !inner

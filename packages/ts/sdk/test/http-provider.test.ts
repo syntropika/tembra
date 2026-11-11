@@ -2,6 +2,7 @@
 // exact guest upload as a pull stream and returns raw fields, a body stream and trailers. These
 // tests drive it with raw guest packets and local deterministic providers only.
 import { expect, test } from "bun:test";
+import { WRITE_CLOSED } from "../src/interpreter/standard-codec.ts";
 import {
   type HttpField,
   type HttpProvider,
@@ -262,9 +263,7 @@ test("the provider stopping the upload, invalid responses and typed codes are st
   const sending = guest.send(stopped.request, signal);
   await tick();
   await requests[0]!.body!.cancel();
-  await expect(guest.streamWrite(contents, encoder.encode("late"), signal)).rejects.toThrow(
-    "stream reader was dropped",
-  );
+  expect(await guest.streamWrite(contents, encoder.encode("late"), signal)).toBe(WRITE_CLOSED);
   answers[0]!({ status: 413, fields: [], body: null });
   expect((await sending).tag).toBe("ok");
   expect(await guest.futureRead(stopped.result, RESULT)).toEqual({

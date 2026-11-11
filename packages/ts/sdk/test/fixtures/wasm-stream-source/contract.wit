@@ -1,0 +1,3 @@
+package tembra-test:typed-stream;
+interface frames { frames: async func(count: u32, size: u32) -> stream<u8>; }
+world producer { export frames; }

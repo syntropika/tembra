@@ -225,7 +225,7 @@ impl PreparedContract {
     }
 
     /// Whether `ty` is exactly `stream<u8>`.
-    fn byte_stream(&self, ty: Ty) -> bool {
+    pub(crate) fn byte_stream(&self, ty: Ty) -> bool {
         matches!(self.resolved(ty), Ty::Ref(id) if matches!(
             self.kind(id),
             Kind::Stream(Some(element)) if self.resolved(*element) == Ty::U8

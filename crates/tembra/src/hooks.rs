@@ -342,6 +342,7 @@ impl<A: 'static, R: 'static> HookHandle<A, R> {
             self.operation,
             self.object,
             context.frame(),
+            context.issuer(),
         )?;
         let entered = self.host.context(call.root, Some(call.clone()))?;
         let (host, compose) = (self.host.clone(), self.hook.compose.clone());

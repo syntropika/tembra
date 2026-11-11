@@ -51,6 +51,59 @@ pub(crate) enum Event {
     },
 }
 
+/// The dependency call one host request issued, if any. When the callback stops waiting for
+/// that request, its answer cancels exactly this call and keeps owning it until it has
+/// physically ended.
+pub(crate) type Issued = Cell<Option<tembra::IssuedCall>>;
+
+/// Cancels the dependency call of a request whose answer is dropped before it settled (its
+/// callback's driver went away): never silently detached, at least signalled.
+struct Abandon<'a>(&'a Issued);
+
+impl Drop for Abandon<'_> {
+    fn drop(&mut self) {
+        if let Some(call) = self.0.take() {
+            call.cancel();
+        }
+    }
+}
+
+/// Whether a callback still joins the dependency calls its abandoned requests issued. It stops
+/// when the caller's cancellation revoked the callback or its Store stopped: those calls are then
+/// only signalled and stay counted by the kernel, as for a root cancellation. A frame value:
+/// waiters allocate only when a request was abandoned.
+#[derive(Default)]
+struct Release {
+    released: Cell<bool>,
+    waiters: std::cell::RefCell<Vec<std::task::Waker>>,
+}
+
+impl Release {
+    fn release(&self) {
+        self.released.set(true);
+        for waiter in self.waiters.take() {
+            waiter.wake();
+        }
+    }
+
+    async fn released(&self) {
+        std::future::poll_fn(|context| {
+            if self.released.get() {
+                return std::task::Poll::Ready(());
+            }
+            let mut waiters = self.waiters.borrow_mut();
+            if !waiters
+                .iter()
+                .any(|waiter| waiter.will_wake(context.waker()))
+            {
+                waiters.push(context.waker().clone());
+            }
+            std::task::Poll::Pending
+        })
+        .await
+    }
+}
+
 /// Stream imports one callback may have outstanding (requested, or delivered and being read).
 const STREAM_IMPORTS: usize = 16;
 
@@ -526,7 +579,7 @@ impl Session {
         cancellation: Option<&tembra::Cancellation>,
         packet: impl serde::Serialize,
         carrier: Carrier,
-        host: impl AsyncFn(&str, bool) -> Result<Reply>,
+        host: impl AsyncFn(&str, bool, &Issued) -> Result<Reply>,
     ) -> Result<Value> {
         let events = self.begin_with(
             Operation::Start,
@@ -539,8 +592,10 @@ impl Session {
             completed: false,
         };
         // Outstanding stream imports of this callback; a plain counter on this frame, so data
-        // requests pay nothing for it. Declared first: the pending answers borrow it.
+        // requests pay nothing for it. Declared first: the pending answers borrow it, and
+        // whether they still join the dependency calls of abandoned requests.
         let streams = Cell::new(0_usize);
+        let release = Release::default();
         let mut pending = FuturesUnordered::new();
         let mut revoked = false;
         loop {
@@ -565,6 +620,7 @@ impl Session {
                     futures::future::Either::Right(_) => {
                         self.0.io.scope().end_callback();
                         revoked = true;
+                        release.release();
                         continue;
                     }
                 }
@@ -588,8 +644,11 @@ impl Session {
                 Event::Ingress(_) => {}
                 Event::Done(result) => {
                     // End this callback's epoch before waiting, so abandoned requests settle now;
-                    // their completion is still awaited.
+                    // their completion is still awaited. A stopped Store only signals them.
                     self.0.io.scope().end_callback();
+                    if self.0.poison.lock().expect("poison state").is_some() {
+                        release.release();
+                    }
                     while pending.next().await.is_some() {}
                     guard.completed = true;
                     return decode(result);
@@ -598,7 +657,7 @@ impl Session {
                     packet,
                     asynchronous,
                     reply,
-                } => pending.push(self.answer(&host, packet, asynchronous, reply, None)),
+                } => pending.push(self.answer(&host, packet, asynchronous, reply, None, &release)),
                 Event::Stream {
                     packet,
                     reply,
@@ -611,7 +670,14 @@ impl Session {
                         continue;
                     }
                     let slot = StreamSlot::take(&streams);
-                    pending.push(self.answer(&host, packet, true, reply, Some((pipe, slot))));
+                    pending.push(self.answer(
+                        &host,
+                        packet,
+                        true,
+                        reply,
+                        Some((pipe, slot)),
+                        &release,
+                    ));
                 }
             }
         }
@@ -624,24 +690,46 @@ impl Session {
     /// delivered end is then pumped into its pipe, within this callback: the pump ends at the
     /// stream's end, at a failure, when the guest closes its reader, or when the callback's
     /// epoch ends.
+    ///
+    /// If the callback stops waiting for the answer while a dependency call it issued is still
+    /// running, that call is cancelled at once: it and the calls it issued only, never its root
+    /// or another call. While the callback settles normally the call also stays owned by this
+    /// answer until it has physically ended, so the callback, and a stream it published,
+    /// settles only after it; a callee that ignores the cancellation keeps it unsettled, and
+    /// counted, as long as it runs. If the caller's cancellation revoked the callback or its
+    /// Store stopped, the call is only signalled, and stays counted by the kernel, as for a root
+    /// cancellation.
     fn answer<'a>(
         &'a self,
-        host: &'a impl AsyncFn(&str, bool) -> Result<Reply>,
+        host: &'a impl AsyncFn(&str, bool, &Issued) -> Result<Reply>,
         packet: String,
         asynchronous: bool,
         mut reply: oneshot::Sender<std::result::Result<String, String>>,
         stream: Option<(Arc<Mutex<Pipe>>, StreamSlot<'a>)>,
+        release: &'a Release,
     ) -> futures::future::LocalBoxFuture<'a, ()> {
         async move {
+            let issued = Issued::default();
+            let _abandon = Abandon(&issued);
             let result = {
-                let operation = std::pin::pin!(host(&packet, asynchronous));
+                let operation = std::pin::pin!(host(&packet, asynchronous, &issued));
                 let closed = std::pin::pin!(reply.closed());
                 match futures::future::select(operation, closed).await {
                     futures::future::Either::Left((result, _)) => Some(result),
                     futures::future::Either::Right(_) => None,
                 }
             };
-            let Some(result) = result else { return };
+            let Some(result) = result else {
+                if let Some(call) = issued.take() {
+                    call.cancel();
+                    let settled = std::pin::pin!(call.settled());
+                    let released = std::pin::pin!(release.released());
+                    futures::future::select(settled, released).await;
+                }
+                return;
+            };
+            // Answered: the dependency call completed for this request; nothing to cancel.
+            issued.take();
             let (text, delivery, end) = match result {
                 Ok(answer) => (Ok(answer.value.to_string()), answer.delivery, answer.stream),
                 Err(error) => (Err(error), None, None),
@@ -772,6 +860,41 @@ mod tests {
     use super::*;
     use crate::{Contract, Limits};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn callback_release_wakes_each_waiter_once_after_repeated_polls() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct Wakes(AtomicUsize);
+        impl futures::task::ArcWake for Wakes {
+            fn wake_by_ref(this: &Arc<Self>) {
+                this.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let release = Release::default();
+        let first = Arc::new(Wakes::default());
+        let second = Arc::new(Wakes::default());
+        let first_waker = futures::task::waker(Arc::clone(&first));
+        let second_waker = futures::task::waker(Arc::clone(&second));
+        let mut first_context = std::task::Context::from_waker(&first_waker);
+        let mut second_context = std::task::Context::from_waker(&second_waker);
+        let mut first_wait = std::pin::pin!(release.released());
+        let mut second_wait = std::pin::pin!(release.released());
+        for _ in 0..1024 {
+            assert!(first_wait.as_mut().poll(&mut first_context).is_pending());
+            assert!(second_wait.as_mut().poll(&mut second_context).is_pending());
+        }
+        release.release();
+        assert_eq!(first.0.load(Ordering::Relaxed), 1);
+        assert_eq!(second.0.load(Ordering::Relaxed), 1);
+        assert!(first_wait.as_mut().poll(&mut first_context).is_ready());
+        assert!(second_wait.as_mut().poll(&mut second_context).is_ready());
+        release.release();
+        assert_eq!(first.0.load(Ordering::Relaxed), 1);
+        assert_eq!(second.0.load(Ordering::Relaxed), 1);
+    }
 
     /// A detached WASI blocking operation must finish before quarantine is published.
     #[test]

@@ -8,6 +8,8 @@ import {
   STREAM_CHUNK,
   STREAM_NEW,
   STREAM_WRITE,
+  WRITE_ACCEPTED,
+  WRITE_CLOSED,
   Writer,
 } from "../../../../packages/ts/sdk/src/interpreter/standard-codec.ts";
 
@@ -26,6 +28,17 @@ interface Input {
   readonly handle: number;
   close(): void;
 }
+
+/**
+ * A pump's source failure, allocated only on failure: a source may throw any value, including
+ * `undefined`, so the thrown value itself can never mark success.
+ */
+export class SourceFailure {
+  constructor(readonly error: unknown) {}
+}
+
+/** How one pump ended: `undefined` after its source's end (or a reader's close), else its failure. */
+export type PumpOutcome = SourceFailure | undefined;
 
 /** One revision's callback-owned writers; the runtime closes them at callback end. */
 export class InputBindings {
@@ -96,7 +109,7 @@ class InputCall {
         typeof source?.[Symbol.asyncIterator] !== "function" &&
         typeof source?.[Symbol.iterator] !== "function"
       )
-        throw new TypeError("stream<u8> arguments require an AsyncIterable<number>");
+        throw new TypeError("a stream<u8> value requires an AsyncIterable<number> source");
       const type = TYPES.findIndex(([kind, item]) => kind === "stream" && item === detail);
       if (type < 0) throw new TypeError("unsupported input stream type");
       const handle = this.bindings.create(STREAM_NEW, type);
@@ -123,7 +136,7 @@ class InputCall {
     return input.handle;
   }
 
-  start(): Promise<unknown>[] {
+  start(): Promise<PumpOutcome>[] {
     const running = this.#pumps.map((pump) => pump.run());
     // A successful trailer must follow successful production. Sending it before a throwing
     // body producer finished would allow the host to commit a truncated HTTP upload.
@@ -162,15 +175,15 @@ class FutureInput implements Input {
     bindings.active.add(this);
   }
 
-  start(pumps: Promise<unknown>[]): void {
-    void Promise.all([this.#value, Promise.all(pumps)]).then(([value, failures]) => {
+  start(pumps: Promise<PumpOutcome>[]): void {
+    void Promise.all([this.#value, Promise.all(pumps)]).then(([value, outcomes]) => {
       if (this.#closed) return;
-      const failure = failures.find((failure) => failure !== undefined);
+      const failure = outcomes.find((outcome) => outcome !== undefined);
       try {
         this.bindings.writeFuture(
           this.handle,
           this.payload,
-          failure === undefined ? value : failed(failure),
+          failure === undefined ? value : failed(failure.error),
         );
       } catch {
         // Invalid values leave the writer untouched. DROP resolves it as a standard error.
@@ -193,7 +206,10 @@ class FutureInput implements Input {
   }
 }
 
-/** A failed STREAM_WRITE: the consumer is gone and its future reports why. */
+/**
+ * Production ended normally: the reader closed the stream, or this pump was closed. Any other
+ * failed write is the stream's failure, never its end.
+ */
 class WriteFailure extends Error {}
 
 /** Pump one guest iterable into a host input stream, one bounded chunk at a time. */
@@ -237,8 +253,8 @@ class Pump {
   }
 
   /** Run to end of input; resolve with the source's own failure, if any. */
-  async run(): Promise<unknown> {
-    let failure: unknown;
+  async run(): Promise<PumpOutcome> {
+    let failure: PumpOutcome;
     try {
       const batch = new Uint8Array(this.#chunked ? 0 : STREAM_CHUNK);
       let length = 0;
@@ -274,7 +290,8 @@ class Pump {
       this.#iterator = undefined;
       if (length) await this.#write(batch.subarray(0, length));
     } catch (error) {
-      if (!(error instanceof WriteFailure)) failure = error;
+      // A write its owner interrupted by closing the pump is part of that close, not a failure.
+      if (!(error instanceof WriteFailure) && !this.#closed) failure = new SourceFailure(error);
     } finally {
       this.close();
     }
@@ -287,11 +304,12 @@ class Pump {
     const writer = packet(STREAM_WRITE);
     writer.handle(this.handle);
     writer.bytes(chunk);
-    try {
-      await this.bindings.async(writer.finish());
-    } catch (error) {
-      throw new WriteFailure(String(error));
-    }
+    // A rejected write (a refused packet, an ended callback) propagates as a failure.
+    const reader = new Reader(await this.bindings.async(writer.finish()));
+    const status = reader.u8();
+    reader.end();
+    if (status === WRITE_CLOSED) throw new WriteFailure("stream reader was closed");
+    if (status !== WRITE_ACCEPTED) throw new Error("invalid stream write status");
   }
 
   /** Return an unfinished iterator and drop the writer: the input reaches end of stream. */

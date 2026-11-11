@@ -43,7 +43,7 @@ fn twenty_thousand_serial_invocations_reclaim_frames_while_outer_call_stays_live
             )
             .unwrap();
         let consumer = host
-            .begin_call_with_context(reference.reference, root, "step", frame)
+            .begin_call_with_context(reference.reference, root, "step", frame, None)
             .unwrap();
         assert_eq!(
             host.context_value(root, frame, &TRACE.contract()).unwrap(),
@@ -53,7 +53,7 @@ fn twenty_thousand_serial_invocations_reclaim_frames_while_outer_call_stays_live
         host.finish_call(producer.id).unwrap();
         assert_eq!(host.context_stats().0, 0);
         assert!(
-            host.begin_call_with_context(reference.reference, root, "step", frame)
+            host.begin_call_with_context(reference.reference, root, "step", frame, None)
                 .is_err()
         );
     }
@@ -77,7 +77,7 @@ fn descendant_outlives_both_creators_and_preserves_inherited_keys() {
         )
         .unwrap();
     let second = host
-        .begin_call_with_context(reference.reference, root, "step", parent)
+        .begin_call_with_context(reference.reference, root, "step", parent, None)
         .unwrap();
     let number: ContextKey<i64> = ContextKey::new("test/number", 1);
     let child = host
@@ -90,7 +90,7 @@ fn descendant_outlives_both_creators_and_preserves_inherited_keys() {
         )
         .unwrap();
     let third = host
-        .begin_call_with_context(reference.reference, root, "step", child)
+        .begin_call_with_context(reference.reference, root, "step", child, None)
         .unwrap();
     host.finish_call(first.id).unwrap();
     host.finish_call(second.id).unwrap();
@@ -132,7 +132,7 @@ fn rejected_admission_does_not_pin_and_siblings_do_not_release_each_other() {
         )
         .unwrap();
     assert!(
-        host.begin_call_with_context(reference.reference, root, "absent", a)
+        host.begin_call_with_context(reference.reference, root, "absent", a, None)
             .is_err()
     );
     host.finish_call(left.id).unwrap();
@@ -159,7 +159,7 @@ fn root_bindings_keep_their_lifetime_and_live_frame_quota_remains_enforced() {
         )
         .unwrap();
     let producer = host
-        .begin_call_with_context(reference.reference, root, "step", root_frame)
+        .begin_call_with_context(reference.reference, root, "step", root_frame, None)
         .unwrap();
     for _ in 0..4095 {
         host.derive_context(
@@ -219,7 +219,7 @@ fn cancellation_and_root_close_preserve_frames_until_physical_descendant_settlem
         )
         .unwrap();
     let child = host
-        .begin_call_with_context(reference.reference, root, "step", frame)
+        .begin_call_with_context(reference.reference, root, "step", frame, None)
         .unwrap();
     host.cancel_root(root).unwrap();
     host.end_root(root).unwrap();
@@ -243,7 +243,7 @@ fn owned_operations_retain_inherited_frames_after_service_creator_settles() {
         )
         .unwrap();
     let operation = host
-        .begin_operation_with_context(first.orb, root, 99, Some(first.object), frame)
+        .begin_operation_with_context(first.orb, root, 99, Some(first.object), frame, None)
         .unwrap();
     host.finish_call(first.id).unwrap();
     assert_eq!(host.context_stats().0, 1);

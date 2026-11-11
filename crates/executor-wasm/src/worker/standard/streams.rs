@@ -6,7 +6,7 @@
 //! STREAM_READ reply that delivers them. Input byte streams buffer guest chunks in an [`Inbox`]
 //! drained by a [`Feed`] producer that upstream consumes.
 use super::{
-    PIPE_BYTES, Shared, State, Writer,
+    PIPE_BYTES, Shared, State, WRITE_ACCEPTED, WRITE_CLOSED, Writer,
     handles::{Close, FilePermit, Handles},
     invalid,
 };
@@ -826,6 +826,9 @@ impl Writing {
 
     /// Accept the whole chunk (at most `PIPE_BYTES`, checked at admission) once both the
     /// stream's buffer and the revision's input budget have room; it is never split.
+    ///
+    /// The reply is one status byte: [`WRITE_ACCEPTED`], or [`WRITE_CLOSED`] when the reader
+    /// closed the stream, an ordinary end of production. Every error is a failure.
     pub(super) async fn write(self, chunk: Vec<u8>) -> Result<Vec<u8>, String> {
         let mut chunk = Some(chunk);
         std::future::poll_fn(|context| {
@@ -834,7 +837,7 @@ impl Writing {
                 return Poll::Ready(Err("stream was dropped".into()));
             }
             if inbox.reader_gone {
-                return Poll::Ready(Err("stream reader was dropped".into()));
+                return Poll::Ready(Ok(vec![WRITE_CLOSED]));
             }
             let length = chunk.as_ref().map_or(0, Vec::len);
             let budget = Arc::clone(&inbox.budget);
@@ -846,7 +849,7 @@ impl Writing {
                 if let Some(producer) = inbox.producer.take() {
                     producer.wake();
                 }
-                return Poll::Ready(Ok(Vec::new()));
+                return Poll::Ready(Ok(vec![WRITE_ACCEPTED]));
             }
             budget.wait(context.waker());
             drop(budget);
@@ -854,6 +857,92 @@ impl Writing {
             Poll::Pending
         })
         .await
+    }
+}
+
+/// Moves what the guest writes to its callback's whole byte-stream result into the pipe the
+/// native caller reads, within the pipe's bound. It is a Store task of the producing callback, so
+/// it never outlives that callback.
+///
+/// It ends when the guest closed its writer and every accepted byte reached the pipe (the pipe
+/// ends; its reader reports a clean end only after the callback physically succeeded), or when
+/// the reader closed the pipe (the writer's next write reports [`WRITE_CLOSED`]). The reader's
+/// close is observed even while the writer is idle: both wakers are this task's. Dropped before
+/// either, it fails the pipe, so an abandoned or cancelled producer never reads as complete.
+///
+/// Lock order: pipe, then inbox, then the revision budget. Nothing else holds an inbox while it
+/// locks a pipe.
+pub(super) struct Relay {
+    inbox: Shared<Inbox>,
+    pipe: Shared<Pipe>,
+    done: bool,
+}
+
+impl Relay {
+    pub(super) fn new(inbox: Shared<Inbox>, pipe: Shared<Pipe>) -> Self {
+        Self {
+            inbox,
+            pipe,
+            done: false,
+        }
+    }
+
+    /// The reader is gone: refuse further writes, return buffered bytes to the budget and wake
+    /// a pending write so it reports the close.
+    fn reader_gone(&self) {
+        let mut inbox = self.inbox.lock().expect("inbox");
+        inbox.reader_gone = true;
+        inbox.discard();
+        if let Some(writer) = inbox.writer.take() {
+            writer.wake();
+        }
+    }
+}
+
+impl std::future::Future for Relay {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+        let this = &mut *self;
+        let mut pipe = this.pipe.lock().expect("pipe");
+        if pipe.closed {
+            drop(pipe);
+            this.reader_gone();
+            this.done = true;
+            return Poll::Ready(());
+        }
+        let mut inbox = this.inbox.lock().expect("inbox");
+        let count = PIPE_BYTES
+            .saturating_sub(pipe.buffer.len())
+            .min(inbox.buffer.len());
+        if count > 0 {
+            pipe.buffer.extend(inbox.buffer.drain(..count));
+            inbox.budget.lock().expect("input budget").release(count);
+            if let Some(writer) = inbox.writer.take() {
+                writer.wake();
+            }
+            pipe.wake_head();
+        }
+        if inbox.closed && inbox.buffer.is_empty() {
+            pipe.finish();
+            this.done = true;
+            return Poll::Ready(());
+        }
+        // Wait for room, more bytes, the writer's close or the reader's close.
+        pipe.producer = Some(context.waker().clone());
+        inbox.producer = Some(context.waker().clone());
+        Poll::Pending
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        if !self.done {
+            self.pipe.lock().expect("pipe").fail(
+                "the stream's producer callback ended before its stream was delivered".into(),
+            );
+            self.reader_gone();
+        }
     }
 }
 
@@ -1044,5 +1133,182 @@ impl crate::http::CallOwned for std::sync::Mutex<Pipe> {
         if pipe.pump.is_some() {
             pipe.closing_pump.push(held);
         }
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+    use std::{
+        future::Future,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::Wake,
+    };
+
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Wakes {
+        fn count(&self) -> usize {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    struct Fixture {
+        inbox: Shared<Inbox>,
+        pipe: Shared<Pipe>,
+        budget: Shared<InputBudget>,
+        relay: Pin<Box<Relay>>,
+    }
+
+    /// A transferred writer relayed into a fresh pipe.
+    fn fixture() -> Fixture {
+        let budget = Shared::<InputBudget>::default();
+        let mut inbox = Inbox::new(Arc::clone(&budget));
+        inbox.transferred = true;
+        let inbox = Arc::new(Mutex::new(inbox));
+        let pipe = Shared::<Pipe>::default();
+        let relay = Box::pin(Relay::new(Arc::clone(&inbox), Arc::clone(&pipe)));
+        Fixture {
+            inbox,
+            pipe,
+            budget,
+            relay,
+        }
+    }
+
+    /// One guest write, polled once: `Ok(status)` once it completed, `Err(write)` while pending.
+    type Started = Result<Vec<u8>, Pin<Box<dyn Future<Output = Result<Vec<u8>, String>>>>>;
+
+    fn write(inbox: &Shared<Inbox>, bytes: usize, context: &mut Context<'_>) -> Started {
+        let mut write: Pin<Box<dyn Future<Output = _>>> = Box::pin(
+            Writing::begin(Arc::clone(inbox))
+                .unwrap()
+                .write(vec![7; bytes]),
+        );
+        match write.as_mut().poll(context) {
+            Poll::Ready(status) => Ok(status.unwrap()),
+            Poll::Pending => Err(write),
+        }
+    }
+
+    #[test]
+    fn a_relay_moves_bytes_within_the_pipe_bound_and_ends_after_the_writer_closed() {
+        let mut fixture = fixture();
+        let wakes = Arc::<Wakes>::default();
+        let waker = Waker::from(wakes.clone());
+        let mut context = Context::from_waker(&waker);
+        let noop = Waker::noop();
+        let mut writer = Context::from_waker(noop);
+        assert_eq!(
+            write(&fixture.inbox, PIPE_BYTES, &mut writer).ok().unwrap(),
+            [WRITE_ACCEPTED]
+        );
+        assert!(fixture.relay.as_mut().poll(&mut context).is_pending());
+        // The whole chunk moved; its budget returned with it.
+        assert_eq!(fixture.pipe.lock().unwrap().buffered(), PIPE_BYTES);
+        assert_eq!(fixture.budget.lock().unwrap().used(), 0);
+        assert_eq!(
+            write(&fixture.inbox, PIPE_BYTES, &mut writer).ok().unwrap(),
+            [WRITE_ACCEPTED]
+        );
+        let woken = wakes.count();
+        assert!(woken >= 1);
+        // The pipe is full: nothing moves beyond its bound.
+        assert!(fixture.relay.as_mut().poll(&mut context).is_pending());
+        assert_eq!(fixture.pipe.lock().unwrap().buffered(), PIPE_BYTES);
+        assert_eq!(fixture.budget.lock().unwrap().used(), PIPE_BYTES);
+        // A read makes room and wakes the relay.
+        let chunk = fixture
+            .pipe
+            .lock()
+            .unwrap()
+            .poll_bytes(&mut writer, usize::MAX);
+        assert!(matches!(chunk, Poll::Ready(Some(chunk)) if chunk.len() == PIPE_BYTES));
+        assert!(wakes.count() > woken);
+        fixture.inbox.lock().unwrap().close();
+        // Drained, and the writer closed: the pipe ends after its data.
+        assert!(fixture.relay.as_mut().poll(&mut context).is_ready());
+        assert_eq!(fixture.budget.lock().unwrap().used(), 0);
+        let mut pipe = fixture.pipe.lock().unwrap();
+        assert!(matches!(
+            pipe.poll_bytes(&mut writer, usize::MAX),
+            Poll::Ready(Some(chunk)) if chunk.len() == PIPE_BYTES
+        ));
+        assert_eq!(pipe.poll_bytes(&mut writer, usize::MAX), Poll::Ready(None));
+        assert_eq!(pipe.failure(), None);
+        drop(pipe);
+        drop(fixture.relay);
+        assert_eq!(fixture.pipe.lock().unwrap().failure(), None);
+    }
+
+    #[test]
+    fn a_closed_reader_stops_an_idle_relay_once_and_reports_the_close_to_the_writer() {
+        let mut fixture = fixture();
+        let wakes = Arc::<Wakes>::default();
+        let waker = Waker::from(wakes.clone());
+        let mut context = Context::from_waker(&waker);
+        // Idle: nothing written, the writer still open.
+        assert!(fixture.relay.as_mut().poll(&mut context).is_pending());
+        assert_eq!(wakes.count(), 0);
+        fixture.pipe.lock().unwrap().close();
+        assert_eq!(wakes.count(), 1, "the reader's close wakes the idle relay");
+        assert!(fixture.relay.as_mut().poll(&mut context).is_ready());
+        // A later close of the closed pipe wakes nothing.
+        fixture.pipe.lock().unwrap().close();
+        assert_eq!(wakes.count(), 1);
+        let noop = Waker::noop();
+        let mut writer = Context::from_waker(noop);
+        assert_eq!(
+            write(&fixture.inbox, 10, &mut writer).ok().unwrap(),
+            [WRITE_CLOSED],
+            "the next write reports the reader's close, not a failure"
+        );
+        assert_eq!(fixture.budget.lock().unwrap().used(), 0);
+        drop(fixture.relay);
+        assert_eq!(fixture.pipe.lock().unwrap().failure(), None);
+    }
+
+    #[test]
+    fn a_dropped_relay_fails_its_pipe_wakes_its_writer_and_returns_the_budget() {
+        let fixture = fixture();
+        let noop = Waker::noop();
+        let mut writer = Context::from_waker(noop);
+        assert_eq!(
+            write(&fixture.inbox, PIPE_BYTES, &mut writer).ok().unwrap(),
+            [WRITE_ACCEPTED]
+        );
+        // The inbox is full and never relayed: the next write waits.
+        let wakes = Arc::<Wakes>::default();
+        let waker = Waker::from(wakes.clone());
+        let mut waiting = Context::from_waker(&waker);
+        let mut pending = write(&fixture.inbox, 1, &mut waiting).err().unwrap();
+        assert_eq!(fixture.budget.lock().unwrap().used(), PIPE_BYTES);
+        drop(fixture.relay);
+        assert!(wakes.count() >= 1);
+        assert_eq!(
+            pending.as_mut().poll(&mut waiting),
+            Poll::Ready(Ok(vec![WRITE_CLOSED]))
+        );
+        assert_eq!(fixture.budget.lock().unwrap().used(), 0);
+        let mut pipe = fixture.pipe.lock().unwrap();
+        assert_eq!(
+            pipe.failure(),
+            Some("the stream's producer callback ended before its stream was delivered")
+        );
+        assert_eq!(pipe.poll_bytes(&mut writer, usize::MAX), Poll::Ready(None));
     }
 }

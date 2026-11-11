@@ -331,7 +331,7 @@ impl Engine {
             &bindings,
             port.hooks,
             port.ingress,
-            port.resources,
+            port.capabilities,
         )
     }
 }

@@ -208,8 +208,9 @@ attachment described below.
 
 ## Portable byte streams
 
-A compiled async freestanding export whose complete WIT result is `stream<u8>` can return
-bytes to a native Rust caller without buffering the full body:
+A compiled or source Orb installed with `Engine::load` can return bytes to a native Rust
+caller without buffering the full body, when its async freestanding export's complete WIT
+result is `stream<u8>`:
 
 ```rust,ignore
 use futures::{FutureExt, StreamExt};
@@ -233,12 +234,25 @@ its receiving root owns the right to read it. Ending or cancelling that root clo
 and refuses further reads. Keep the root alive while consuming it; use `Host::spawn_root` for
 a consumer that must outlive its initial caller.
 
-Dropping the end asks the producer to stop once. `close().await` additionally waits for physical
-settlement. Neither action kills an idle producer: its next stream operation observes the
-close, and the callback timeout bounds a producer that never performs another operation.
-The compiled executor reports clean EOF only after the producing call succeeds; a trap after
+Dropping the end asks the producer to stop once. `close().await` additionally waits for the
+producer callback and its admitted Orb-import calls to settle physically. A trusted native
+callee that ignores cancellation can keep this close pending until it returns; the guest's
+callback deadline does not bound that native work. Hooks and other asynchronous host requests
+retain their ordinary abandonment behavior.
+The executor reports clean EOF only after the producing call succeeds; a trap after
 the last byte is still an error. `Host::close` waits for physical settlement even if the
 consumer abandons its result.
+
+Source methods return `writeChunks(chunks)` from `@syntropika/tembra-sdk`, an
+`AsyncIterable<number>`, or a `Uint8Array`. They use the existing bounded stream writer;
+bytes cross as binary chunks. This source export support is available through the native
+Rust facade. Source Orb imports and the Node, browser and mobile SDK ports still refuse
+domain stream contracts until their capability carriers are implemented.
+
+The whole source stream runs within one callback and shares its fuel and wall-time limits.
+Expiry quarantines the producing revision. Prefer `writeChunks` over per-byte generation for
+large bodies. The revision serves no other callback until production ends. After the reader
+closes, the producer's asynchronous iterator cleanup cannot rely on starting new host operations.
 
 Compiled Orbs can import that same async `stream<u8>` signature from a compiled or native
 provider. The host pumps bytes into the importing Store with bounded backpressure and at most
@@ -251,6 +265,19 @@ that received it; returning from that callback closes it, even if guest state re
 Each compiled revision serves one callback at a time, so consume a stream before opening
 another against that same producer revision.
 
+When a source or compiled callback abandons a pending Orb import, the executor cancels that
+issued call and normally joins it before the callback settles. Cancellation also reaches its
+descendants, without cancelling sibling calls or their root. An import abandoned before its
+provider starts need not create a resource at all. If the caller itself is cancelled or the
+Store is retired, its callback stops joining; outstanding calls remain signalled and counted
+until they finish. `Host::close` still waits for them.
+
+Native Rust callers can control one invocation explicitly with `Reference::issue_portable`
+or `Owned::issue_portable`. These return an `IssuedCall` and a future for the logical result.
+`IssuedCall::cancel()` signals that invocation and its descendants;
+`IssuedCall::settled().await` waits for its physical completion. Inside an entered invocation,
+`Context::signal()` observes that call's cancellation as well as its root's cancellation.
+
 A plain WIT `stream<u8>` has no error payload. A compiled consumer sees end/drop on producer
 failure; the host retains the cause and quarantines a trapped producer. The number of bytes
 delivered before failure can vary with scheduling. EOF alone therefore does not prove success
@@ -258,7 +285,8 @@ for an imported stream. Model any required completion result explicitly in the a
 contract; this profile does not yet admit general WIT futures.
 
 Stream arguments, nested streams, non-byte elements, resource-method streams and futures are
-not admitted. Source Orbs and the Node/mobile data ports refuse these inter-Orb contracts.
+not admitted. Source Orb imports and the Node, browser and mobile data ports refuse domain
+stream contracts.
 WASI HTTP body streams use their standard resources and host transport instead.
 
 ## Typed hooks (`hooks`)

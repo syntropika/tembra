@@ -10,7 +10,7 @@ import {
   IngressExchange,
 } from "../src/interpreter/http-ingress.ts";
 import { METHODS } from "../src/interpreter/standard.ts";
-import { encode, INGRESS_HEAD, Writer } from "../src/interpreter/standard-codec.ts";
+import { encode, INGRESS_HEAD, WRITE_CLOSED, Writer } from "../src/interpreter/standard-codec.ts";
 import type { StandardHost } from "../src/interpreter/standard-host.ts";
 import {
   BODY,
@@ -229,8 +229,9 @@ test("a disconnect while the handler writes: it sees connection-terminated and i
     tag: "err",
     val: { tag: "connection-terminated" },
   });
-  // The next write fails; the request body ends, its trailers carrying the same code.
-  await expect(guest.streamWrite(contents, encoder.encode("data: 2\n\n"))).rejects.toThrow();
+  // The next write reports the closed reader; the request body ends, its trailers carrying the
+  // same code.
+  expect(await guest.streamWrite(contents, encoder.encode("data: 2\n\n"))).toBe(WRITE_CLOSED);
   expect(await guest.streamRead(requestStream)).toBeUndefined();
   await host.settled();
   expect(body.state.returned).toBe(1);
@@ -303,7 +304,7 @@ test("cancellation ends the delivery: reads reject with the reason and the reque
   expect(await read).toBe("Operation cancelled");
   await expect(reply.trailers).rejects.toThrow("Operation cancelled");
   await expect(iterator.next()).rejects.toThrow();
-  await expect(guest.streamWrite(contents, encoder.encode("late"))).rejects.toThrow();
+  expect(await guest.streamWrite(contents, encoder.encode("late"))).toBe(WRITE_CLOSED);
   guest.drop(contents);
   guest.drop(handle);
   await finish(host, exchange, new Error("cancelled"));

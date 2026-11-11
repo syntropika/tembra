@@ -10,8 +10,9 @@ use tembra::{Orb, Result, Service, core};
 
 /// Install callbacks from the binding plan that `open_port` already checked against WIT.
 ///
-/// `resources` is set only for a compiled revision admitted to the native capability
-/// transport; every other revision keeps data-only callbacks.
+/// `capabilities` is set only for a revision admitted to the native capability transport: its
+/// functions with resource or byte-stream positions travel as capabilities. Every other
+/// revision, and every data-only function, keeps data-only callbacks.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn orb(
     metadata: core::Orb,
@@ -21,10 +22,10 @@ pub(crate) fn orb(
     bindings: &BTreeMap<String, tembra_contracts::Binding>,
     hooks: tembra_contracts::HookPlan,
     ingress: Option<tembra_contracts::IngressBinding>,
-    resources: bool,
+    capabilities: bool,
 ) -> Result<Orb> {
     let roles = |slot| {
-        if resources {
+        if capabilities {
             Roles::of(&contract, slot)
         } else {
             Ok(Roles::default())

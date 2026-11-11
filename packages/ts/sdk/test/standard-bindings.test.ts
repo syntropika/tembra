@@ -96,6 +96,8 @@ function gated(base: MountedFilesystem) {
 function guest(
   filesystem: MountedFilesystem = memoryFilesystem().open("/data", true),
   extraImports: { contract: string; type_only: boolean }[] = [],
+  /** Refuse the `n`th STREAM_WRITE packet (1-based) as a port refuses an oversized packet. */
+  refuseWrite?: (n: number) => boolean,
 ) {
   const imports = [
     { contract: FS, type_only: false },
@@ -122,7 +124,11 @@ function guest(
       }
     },
     __hostAsync(packet: Uint8Array) {
-      if (packet[1] === STREAM_WRITE) writes.push(packet.length - 14);
+      if (packet[1] === STREAM_WRITE) {
+        writes.push(packet.length - 14);
+        if (refuseWrite?.(writes.length))
+          return Promise.reject(new Error("Interpreter packet exceeds its configured bound"));
+      }
       return standard.async(packet).then((delivery) => delivery.bytes);
     },
   };
@@ -263,6 +269,43 @@ test("a source failure rejects the future after accepted bytes are written", asy
     "source broke",
   );
   expect((await file.stat()).size).toBe(5n);
+  await standard.dispose();
+});
+
+test("a refused write fails its stream instead of ending it; the source is returned", async () => {
+  const { root, standard } = guest(undefined, [], (n) => n === 2);
+  const file = await root.openAt({}, "cut.bin", { create: true }, { read: true, write: true });
+  let returned = false;
+  function* chunks() {
+    try {
+      for (let index = 0; index < 4; index++) yield new Uint8Array(64 << 10).fill(index + 1);
+    } finally {
+      returned = true;
+    }
+  }
+  const future = file.writeViaStream(writeChunks(chunks()), 0n);
+  // The refused second write is the stream's failure: never a truncated, successful write.
+  await expect(Promise.resolve(future)).rejects.toThrow(
+    "Interpreter packet exceeds its configured bound",
+  );
+  expect(returned).toBe(true);
+  await standard.settled();
+  expect((await file.stat()).size).toBe(BigInt(64 << 10));
+  await standard.dispose();
+});
+
+test("a source throwing undefined rejects the future; it is never a clean end", async () => {
+  const { root, standard } = guest();
+  const file = await root.openAt({}, "thrown.bin", { create: true }, { read: true, write: true });
+  async function* broken() {
+    yield new Uint8Array(5).fill(1);
+    throw undefined;
+  }
+  const settled = await Promise.resolve(file.writeViaStream(writeChunks(broken()), 0n)).then(
+    (value) => ({ resolved: value }),
+    (error: unknown) => ({ rejected: error }),
+  );
+  expect(settled).toEqual({ rejected: undefined });
   await standard.dispose();
 });
 

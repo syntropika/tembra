@@ -21,6 +21,12 @@ pub(crate) struct Inner {
     pub context_peak: usize,
     pub call_contexts: BTreeMap<Id, Vec<Id>>,
     pub calls: BTreeMap<Id, Invocation>,
+    /// The invocation that issued each live call admitted from inside another call.
+    pub call_parents: BTreeMap<Id, Id>,
+    /// Live calls issued by each invocation (the reverse of `call_parents`).
+    pub call_children: Index<Id>,
+    /// Live invocations their caller cancelled, together with every call they issued.
+    pub cancelled_calls: BTreeSet<Id>,
     pub resources: BTreeMap<Id, Resource>,
     pub tasks: BTreeMap<Id, Task>,
     pub actions: VecDeque<Action>,

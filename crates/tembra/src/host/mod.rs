@@ -43,7 +43,7 @@ mod values;
 pub use acquisition::AcquisitionOptions;
 pub use context::Context;
 pub use declaration::Declaration;
-pub use reference::Reference;
+pub use reference::{IssuedCall, Reference};
 pub use resources::{Cancellation, Resource, ResourceKey, ResourceSignal};
 pub use signals::ForeignNotification;
 pub use tasks::TaskScope;
@@ -110,6 +110,9 @@ struct Inner {
     openers: RefCell<BTreeMap<core::Id, Opener>>,
     cancellations: RefCell<BTreeMap<core::Id, ResourceSignal>>,
     context_signals: RefCell<BTreeMap<core::Id, std::rc::Weak<resources::CancellationState>>>,
+    /// Signals of entered invocations, by call, with their root; created when first observed.
+    call_signals:
+        RefCell<BTreeMap<core::Id, (core::Id, std::rc::Weak<resources::CancellationState>)>>,
     errors: RefCell<Vec<Error>>,
     external_actions: Cell<bool>,
     driver_wake: RefCell<Option<Rc<dyn Fn()>>>,
@@ -176,6 +179,7 @@ impl Host {
             openers: RefCell::new(BTreeMap::new()),
             cancellations: RefCell::new(BTreeMap::new()),
             context_signals: RefCell::new(BTreeMap::new()),
+            call_signals: RefCell::new(BTreeMap::new()),
             errors: RefCell::new(Vec::new()),
             external_actions: Cell::new(false),
             driver_wake: RefCell::new(None),

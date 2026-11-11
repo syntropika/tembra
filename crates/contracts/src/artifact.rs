@@ -66,7 +66,7 @@ impl Artifact {
             world: contract.world().to_owned(),
         };
         identity.validate()?;
-        contract.check_value_profile()?;
+        contract.check_source_profile()?;
         let mut bytes = COMPONENT_HEADER.to_vec();
         append_section(&mut bytes, ORB, &encode_orb(&identity, contract));
         append_section(&mut bytes, SOURCE, source.as_bytes());
@@ -95,7 +95,7 @@ impl Artifact {
                     "source artifacts may only contain Orb metadata and source".into(),
                 ));
             }
-            contract.check_value_profile()?;
+            contract.check_source_profile()?;
             Implementation::Source(
                 String::from_utf8(source.to_vec()).map_err(|error| Error(error.to_string()))?,
             )

@@ -2,6 +2,7 @@
 // browser host owns around a raw `HttpProvider`, whatever the provider does. Local providers only.
 import { expect, test } from "bun:test";
 import { BrowserNetwork } from "../src/interpreter/browser-network.ts";
+import { WRITE_CLOSED } from "../src/interpreter/standard-codec.ts";
 import type {
   HttpField,
   HttpProvider,
@@ -89,9 +90,7 @@ test("H1: a provider that ignores request bodies cannot exhaust the revision inp
         val: "the response was released before its request body completed",
       },
     });
-    await expect(guest.streamWrite(contents, new Uint8Array(1), signal)).rejects.toThrow(
-      "stream reader was dropped",
-    );
+    expect(await guest.streamWrite(contents, new Uint8Array(1), signal)).toBe(WRITE_CLOSED);
     guest.drop(contents);
     guest.futureWrite(trailers, { tag: "ok" });
   }

@@ -12,13 +12,14 @@ import {
   STANDARD_PACKET,
   STREAM_CHUNK,
   STREAM_READ,
+  STREAM_RESULT,
   Writer,
   decode,
   encode,
   resourceClassName,
 } from "../../../../packages/ts/sdk/src/interpreter/standard-codec.ts";
 
-import { InputBindings } from "./standard-inputs.ts";
+import { InputBindings, type PumpOutcome } from "./standard-inputs.ts";
 
 (() => {
   const syncBytes = globalThis.__hostSyncBytes!;
@@ -201,9 +202,9 @@ import { InputBindings } from "./standard-inputs.ts";
   class StandardFuture {
     #value: Promise<unknown> | undefined;
     /** Input pumps of the call that issued this future; a source failure rejects it. */
-    #pumps: Promise<unknown>[] = [];
+    #pumps: Promise<PumpOutcome>[] = [];
     constructor(readonly payload: number) {}
-    link(pumps: Promise<unknown>[]): void {
+    link(pumps: Promise<PumpOutcome>[]): void {
       this.#pumps = pumps;
     }
     then(resolve?: (value: any) => unknown, reject?: (error: any) => unknown) {
@@ -226,7 +227,7 @@ import { InputBindings } from "./standard-inputs.ts";
             const value = this.payload < 0 ? undefined : decode(reader, this.payload, handles);
             reader.end();
             for (const failure of await Promise.all(this.#pumps))
-              if (failure !== undefined) throw failure;
+              if (failure !== undefined) throw failure.error;
             return value;
           },
           (error) => {
@@ -283,7 +284,7 @@ import { InputBindings } from "./standard-inputs.ts";
   };
 
   /** Decode a reply and unwrap a top-level result as jco does. */
-  function reply(index: number, bytes: Uint8Array, running: Promise<unknown>[]): unknown {
+  function reply(index: number, bytes: Uint8Array, running: Promise<PumpOutcome>[]): unknown {
     const method = METHODS[index]!;
     if (method.result === undefined) return undefined;
     const reader = new Reader(bytes);
@@ -298,7 +299,7 @@ import { InputBindings } from "./standard-inputs.ts";
   }
 
   /** Attach producer failures to futures, including futures nested in a result tuple. */
-  function link(type: number, value: any, running: Promise<unknown>[]): void {
+  function link(type: number, value: any, running: Promise<PumpOutcome>[]): void {
     if (type < 0 || value === undefined || value === null) return;
     const [kind, a, b] = TYPES[type]!;
     if (kind === "future") (value as StandardFuture).link(running);
@@ -539,6 +540,46 @@ import { InputBindings } from "./standard-inputs.ts";
       await quiescent();
     },
   });
+  /**
+   * Produce an export's whole `stream<u8>` result. `source` is any `stream<u8>` argument source
+   * (`writeChunks`, an `AsyncIterable<number>`, a `Uint8Array`): it is pumped into a writer whose
+   * readable end is published once as the result, so the caller holds it at once. This resolves
+   * when the source ended and its bytes were delivered, and rejects with the source's own failure,
+   * which the caller reads as a failed stream, never as its end. If the caller closes the stream
+   * first, production stops: the source is returned and the callback ends.
+   */
+  globalThis.__tembraStreamResult = async (source: unknown): Promise<void> => {
+    const writers = inputs.call();
+    const handle = writers.handle("stream", "u8", source);
+    let delivered: Promise<Uint8Array>;
+    try {
+      const writer = packet(STREAM_RESULT);
+      writer.handle(handle);
+      delivered = __hostAsync(writer.finish());
+    } catch (error) {
+      writers.close();
+      throw error;
+    }
+    const [running] = writers.start();
+    let ended = false;
+    let failure: PumpOutcome;
+    void running!.then((outcome) => {
+      ended = true;
+      failure = outcome;
+    });
+    try {
+      await delivered;
+    } catch (error) {
+      writers.close();
+      throw error;
+    }
+    // Delivery ends after the source ended, or once the caller closed the stream.
+    if (!ended) {
+      writers.close();
+      return;
+    }
+    if (failure !== undefined) throw failure.error;
+  };
   globalThis.__tembraStandard = Object.freeze(
     Object.fromEntries(
       Object.entries(modules).map(([name, value]) => [name, Object.freeze(value)]),

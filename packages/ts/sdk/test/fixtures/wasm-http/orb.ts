@@ -82,6 +82,23 @@ export default orb({
           const response = await fetch(url, { method: "POST", body: chunks() });
           return response.text();
         },
+        async interrupt(
+          _environment: Environment,
+          _context: Context,
+          url: string,
+          observed: string,
+        ) {
+          async function* chunks() {
+            yield new Uint8Array(64 << 10);
+            // Fail only after the peer has received bytes, so this exercises transport abort.
+            const acknowledgement = await fetch(observed);
+            if (acknowledgement.status !== 200) throw new Error("Peer did not observe the upload");
+            await acknowledgement.text();
+            throw new Error("upload producer failed");
+          }
+          const response = await fetch(url, { method: "POST", body: chunks() });
+          return response.text();
+        },
         async open(environment: Environment, _context: Context, url: string) {
           await environment.value.response?.close();
           environment.value.response = await fetch(url);

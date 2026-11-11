@@ -16,6 +16,8 @@ interface WitKind {
   type?: WitType;
   list?: WitType;
   option?: WitType;
+  /** The element type of a `stream`, or `null` for a stream without elements. */
+  stream?: WitType | null;
   record?: { fields: { name: string; type: WitType }[] };
   tuple?: { types: WitType[] };
   variant?: { cases: { name: string; type?: WitType }[] };
@@ -34,6 +36,8 @@ interface GuestValues {
   arguments(service: string, method: string, arguments_: unknown[]): unknown[];
   exportArguments(service: string, method: string, arguments_: unknown[]): unknown[];
   exportResult(service: string, method: string, value: unknown): unknown;
+  /** Whether the export's whole result is a `stream<u8>`. */
+  streamResult(service: string, method: string): boolean;
   invoke(service: string, method: string, callback: () => unknown): Promise<unknown>;
   importArguments(service: string, method: string, arguments_: unknown[]): unknown[];
   importResult(service: string, method: string, value: unknown): unknown;
@@ -142,6 +146,8 @@ declare var __tembraDispatch: (packet: string) => Promise<string>;
 declare var __tembraEffects:
   | { readonly pending: number; readonly sequence: number; idle(): Promise<void> }
   | undefined;
+/** Publish an export's whole `stream<u8>` result and produce it until delivered or closed. */
+declare var __tembraStreamResult: ((source: unknown) => Promise<void>) | undefined;
 /** Incoming HTTP: decode the host-issued request, run the handler, publish and settle. */
 declare var __tembraIngress:
   | { serve(request: number, handler: (request: unknown) => unknown): Promise<void> }

@@ -42,10 +42,10 @@ fn frames_are_per_call_immutable_typed_and_retained_until_physical_settlement() 
         )
         .unwrap();
     let first = host
-        .begin_call_with_context(object.reference, root, "echo", left)
+        .begin_call_with_context(object.reference, root, "echo", left, None)
         .unwrap();
     let second = host
-        .begin_call_with_context(object.reference, root, "echo", right)
+        .begin_call_with_context(object.reference, root, "echo", right, None)
         .unwrap();
     assert_eq!(
         host.context_value(root, 0, &TRACE.contract()).unwrap(),
@@ -74,7 +74,7 @@ fn frames_are_per_call_immutable_typed_and_retained_until_physical_settlement() 
     assert_eq!(host.context_stats(), before);
     let foreign = host.begin_root("alice").unwrap();
     assert!(
-        host.begin_call_with_context(object.reference, foreign, "echo", left)
+        host.begin_call_with_context(object.reference, foreign, "echo", left, None)
             .is_err()
     );
     host.end_root(foreign).unwrap();

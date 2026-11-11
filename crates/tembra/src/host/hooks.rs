@@ -129,7 +129,7 @@ impl Host {
         self.ready_orb(orb).await?;
         let call = self
             .kernel()
-            .begin_operation_with_context(orb, root, operation, None, frame)?;
+            .begin_operation_with_context(orb, root, operation, None, frame, None)?;
         let entered = self.context(call.root, Some(call.clone()))?;
         let receive = self.spawn_managed(call.id, async move {
             (contribution.portable)(entered, input).await
@@ -161,6 +161,7 @@ impl Host {
                 operation,
                 None,
                 context.frame(),
+                context.issuer(),
             )?;
             let _guard = InvocationGuard {
                 host: self.clone(),

@@ -23,6 +23,8 @@ import {
   encode,
   utf8Decode,
   utf8Encode,
+  WRITE_ACCEPTED,
+  WRITE_CLOSED,
 } from "../src/interpreter/standard-codec.ts";
 import { StandardHost } from "../src/interpreter/standard-host.ts";
 
@@ -249,10 +251,10 @@ async function write(
         : call("writeViaStream", file, writer, offset),
     ),
   );
-  // A consumer that stopped (for example a refused descriptor) fails later writes.
+  // A consumer that stopped (for example a refused descriptor) reports later writes closed.
   for (const chunk of chunks)
-    await asynchronous(standard, streamWrite(writer, chunk)).catch((error) =>
-      expect(String(error)).toContain("stream reader was dropped"),
+    expect([WRITE_ACCEPTED, WRITE_CLOSED]).toContain(
+      (await asynchronous(standard, streamWrite(writer, chunk)))[0]!,
     );
   standard.sync(operation(DROP, writer));
   const reader = new Reader(await asynchronous(standard, operation(FUTURE_READ, future)));
@@ -651,8 +653,8 @@ test("a failed consumer drops its reader; later writes fail and the future repor
   await asynchronous(standard, streamWrite(writer, Uint8Array.of(1, 2, 3)));
   const reader = new Reader(await asynchronous(standard, operation(FUTURE_READ, future)));
   expect([reader.u8(), reader.u32()]).toEqual([1, 22]);
-  await expect(asynchronous(standard, streamWrite(writer, Uint8Array.of(4)))).rejects.toThrow(
-    "stream reader was dropped",
+  expect(await asynchronous(standard, streamWrite(writer, Uint8Array.of(4)))).toEqual(
+    Uint8Array.of(WRITE_CLOSED),
   );
   standard.sync(operation(DROP, writer));
   await standard.dispose();

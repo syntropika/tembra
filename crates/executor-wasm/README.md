@@ -140,11 +140,12 @@ Factory admission waits at most half the callback timeout.
 
 ## Value profile
 
-Source Orbs exchange domain values as WIT-validated, bounded JSON. Supported
+The data transport exchanges domain values as WIT-validated, bounded JSON. Supported
 values: finite numbers, integers through 64 bits, strings, characters, lists,
 records, tuples, simple options, flags, enums, variants and results. Negative
-zero, nested options, resource handles, streams and futures are rejected by
-Tembra's inter-Orb transport; these are not restrictions of WIT or WebAssembly.
+zero, nested options, resource handles, streams and futures are rejected by this
+data profile; these are not restrictions of WIT or WebAssembly. Native capability
+transport additionally carries the resource and byte-stream shapes described below.
 
 WIT `u64` and `s64` use `bigint` in JavaScript and ordinary `u64` and `i64` in Rust,
 including inside records, lists and tagged payloads. JavaScript numbers, numeric
@@ -166,8 +167,11 @@ through the Canonical ABI. The native Rust facade additionally supports whole ow
 resource results, implicit borrowed method receivers and whole `stream<u8>` results of async
 freestanding exports and imports; see
 [owned WIT resources](../../docs/rust.md#owned-wit-resources) and
-[portable byte streams](../../docs/rust.md#portable-byte-streams). Source Orbs and public
-JSON ports still use the data profile. A compiled component can import selected Orbs:
+[portable byte streams](../../docs/rust.md#portable-byte-streams). Source Orbs installed
+through the native Rust facade can also return a whole `stream<u8>` from an async
+freestanding export. Their Orb imports remain data-only. Public JSON ports still
+use the data profile and refuse these stream contracts at installation. A compiled
+component can import selected Orbs:
 
 - Its Orb root acquires one reference per Orb import binding, for the default key
   `main`. A plain WIT import names no object key, so other keyed objects are not
@@ -316,7 +320,7 @@ directory must not contain the checkout. `--suite native` selects the
 Rust tests against supplied artifacts.
 
 The interpreter is a `wasm32-wasip1` reactor core module behind a private
-fixed-buffer ABI, `tembra-interpreter-v10`. Its import namespace also carries the
+fixed-buffer ABI, `tembra-interpreter-v11`. Its import namespace also carries the
 digest of the generated WASI method and type table, so mismatched host/interpreter
 bindings are refused before execution. [`src/abi.rs`](src/abi.rs) is its only
 definition: the guest includes it, the native host compiles it, and the browser host
@@ -398,8 +402,8 @@ body read and closes it on EOF or early return. Call `response.close()` when it 
 needed. The facade accepts absolute HTTP(S) URLs and does not implement complete WHATWG Fetch
 semantics; pass an already percent-encoded URL. `HttpError.code` preserves the standard HTTP,
 header or request-options failure (or is `undefined` for a payload-free refusal). Uploads and
-their trailers must finish in their originating callback. WIT resources and streams remain
-outside the portable inter-Orb value profile.
+their trailers must finish in their originating callback. Standard HTTP resource handles
+belong to their owning Store and cannot be sent through the inter-Orb data profile.
 
 Compiled components import real `wasi:http/client@0.3.0` resources from
 `wasmtime-wasi-http`. Their bodies, streams and trailers use the upstream
@@ -424,8 +428,8 @@ interface and no ambient browser implementation.
 SSE stays within its admitted callback and the configured callback/read deadlines.
 Long-running operations need an appropriate host `timeoutMs`; cancellation closes
 the connection promptly. Exceeding the callback deadline quarantines the Orb,
-as with any other callback. WIT stream values remain outside the current inter-Orb
-value profile.
+as with any other callback. WASI HTTP bodies use the standard bindings; domain
+byte-stream results use the separate native capability transport described above.
 
 Compiled components run on the same session owner as source Orbs: one Store per Orb
 revision on a dedicated Wasmtime worker, admitted one callback at a time, without

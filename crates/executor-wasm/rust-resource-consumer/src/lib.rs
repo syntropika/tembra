@@ -102,6 +102,21 @@ impl exports::tembra_test::resources::relay::Guest for Relay {
         first.is_ready()
     }
 
+    async fn abandon_started(seed: u64) -> bool {
+        let done = {
+            let mut later = core::pin::pin!(sessions::open_later(seed));
+            let first =
+                core::future::poll_fn(|context| Poll::Ready(later.as_mut().poll(context))).await;
+            // The checkpoint: a cooperating provider answers only once `open-later` started.
+            sessions::closed();
+            first.is_ready()
+            // Leaving this block drops the pending import, which cancels its subtask.
+        };
+        // Show that this call continued past the drop.
+        sessions::closed();
+        done
+    }
+
     fn keyed(first: (String, String), second: (String, String), seed: u64) -> KeyedReport {
         // Equal keys still open distinct instances; each keeps its own key and total.
         let first = (first.0.as_str(), first.1.as_str());
