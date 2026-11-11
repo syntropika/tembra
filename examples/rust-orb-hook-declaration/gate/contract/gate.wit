@@ -1,30 +1,25 @@
 package example:gate@1.0.0;
 
-/// The gate's service.
-interface admissions {
-  /// What the gate decided for one value.
-  record decision {
+/// The hook this Orb declares: a waterfall, each contributor may change the admission or
+/// block it, in plan order. Its interface is derived from this struct and from `Admission`.
+interface guard {
+  /// One admission: the value, and whether a contributor blocked it.
+  record admission {
     value: s32,
     blocked: bool,
   }
+  apply: func(input: admission) -> admission;
+}
+
+/// The gate's service.
+interface admissions {
+  use guard.{admission};
   /// Run the guard hook over a fresh admission and report what the contributors decided.
-  admit: func(value: s32) -> decision;
+  admit: func(value: s32) -> admission;
 }
 
 world gate {
-  import example:admission/guard@1.0.0;
-  export example:admission/guard@1.0.0;
+  import guard;
+  export guard;
   export admissions;
-}
-
-package example:admission@1.0.0 {
-  /// Waterfall hook: each participant may change the value or block the admission.
-  interface guard {
-    record admission {
-      value: s32,
-      blocked: bool,
-    }
-
-    apply: func(input: admission) -> admission;
-  }
 }
