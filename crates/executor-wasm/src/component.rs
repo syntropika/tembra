@@ -131,6 +131,11 @@ fn layout(
             Some(Binding::Orb { .. }) if contribution => worker::Role::Contribution,
             Some(Binding::Orb { .. }) => worker::Role::Dependency,
             Some(Binding::Kernel) => worker::Role::Kernel,
+            Some(Binding::Hook) => {
+                return Err(failure(
+                    "this executor cannot run a compiled Orb's hook declarations yet",
+                ));
+            }
             Some(Binding::Host { .. }) | None => continue,
         };
         let Item::Interface(interface) = &entry.item else {

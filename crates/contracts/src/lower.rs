@@ -21,6 +21,9 @@ pub enum Binding {
     },
     /// The kernel serves this import itself (`tembra:guest`): no provider and no grant.
     Kernel,
+    /// The import of a hook this Orb declares and also exports: calling it runs the hook's plan
+    /// through the kernel. No provider, no grant, no requirement.
+    Hook,
 }
 
 /// A host capability to resolve against separately configured providers and grants.
@@ -261,7 +264,7 @@ impl PreparedContract {
                 )));
             }
             match selected {
-                Binding::Host { .. } | Binding::Kernel if reference.is_some() => {
+                Binding::Host { .. } | Binding::Kernel | Binding::Hook if reference.is_some() => {
                     return Err(Error(format!(
                         "{binding}: a reference view requires an Orb provider"
                     )));
@@ -272,6 +275,17 @@ impl PreparedContract {
                             "{binding}: the kernel serves only {} and {}",
                             guest::STATE,
                             guest::RESOURCE
+                        )));
+                    }
+                }
+                Binding::Hook => {
+                    let declared = self.model().exports.iter().any(|entry| {
+                        matches!(&entry.item, Item::Interface(exported)
+                            if exported.contract.as_deref() == Some(contract.as_str()))
+                    });
+                    if !declared {
+                        return Err(Error(format!(
+                            "{binding}: a hook import runs a hook this world declares, so the world must export the same interface"
                         )));
                     }
                 }

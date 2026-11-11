@@ -84,6 +84,55 @@ impl HookPlan {
 }
 
 impl PreparedContract {
+    /// Validate the contribution and hook roles of a compiled component against this contract,
+    /// without relying on deployment provider names. An interface takes one hook role. Reference
+    /// views are checked where they are attached to the contract.
+    pub(crate) fn check_roles(&self, roles: &crate::ComponentRoles) -> Result<(), Error> {
+        if let Some(both) = roles
+            .hooks
+            .keys()
+            .find(|identity| roles.contributions.contains_key(*identity))
+        {
+            return Err(Error(format!(
+                "{both}: an Orb declares a hook or contributes to it, not both"
+            )));
+        }
+        self.check_contribution_roles(&roles.contributions)?;
+        self.check_hook_roles(&roles.hooks)
+    }
+
+    /// Validate the hooks a compiled component declares: each names an exported interface with
+    /// one callback whose shape fits the composition.
+    pub(crate) fn check_hook_roles(
+        &self,
+        hooks: &BTreeMap<String, HookComposition>,
+    ) -> Result<(), Error> {
+        for (identity, composition) in hooks {
+            let alias = self
+                .model()
+                .exports
+                .iter()
+                .find_map(|entry| match &entry.item {
+                    Item::Interface(interface)
+                        if interface.contract.as_deref() == Some(identity) =>
+                    {
+                        Some(javascript_name(
+                            interface.name.as_deref().unwrap_or_default(),
+                        ))
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    Error(format!(
+                        "{identity}: a declared hook must export its WIT callback interface"
+                    ))
+                })?;
+            let (name, function) = self.hook_interface(&alias)?;
+            self.check_composition(name, function, *composition)?;
+        }
+        Ok(())
+    }
+
     /// Validate persisted contribution roles without relying on deployment provider names.
     pub(crate) fn check_contribution_roles(
         &self,
@@ -205,6 +254,49 @@ impl PreparedContract {
         }
     }
 
+    /// Whether the callback's shape fits the composition: series callbacks return nothing, bail
+    /// callbacks return an option, waterfall callbacks return their input type.
+    fn check_composition(
+        &self,
+        name: &str,
+        function: &crate::Function,
+        composition: HookComposition,
+    ) -> Result<(), Error> {
+        match composition {
+            HookComposition::Series if function.result.is_some() => {
+                return Err(Error(format!(
+                    "{name}: series callbacks must return no value"
+                )));
+            }
+            HookComposition::Bail if !function.result.is_some_and(|ty| self.optional(ty)) => {
+                return Err(Error(format!(
+                    "{name}: bail callbacks must return an option"
+                )));
+            }
+            _ => {}
+        }
+        if composition == HookComposition::Waterfall {
+            // Compare normalized complete type shapes, not resolver-local type IDs.
+            let mut echo = self.model().clone();
+            for entry in &mut echo.exports {
+                if let Item::Interface(interface) = &mut entry.item
+                    && interface.contract.as_deref() == Some(name)
+                {
+                    interface.functions[0].result = Some(interface.functions[0].params[0].ty);
+                }
+            }
+            let echo = PreparedContract::new(echo)?;
+            if echo.function_signature(name, &function.name, true)?
+                != self.function_signature(name, &function.name, true)?
+            {
+                return Err(Error(format!(
+                    "{name}: waterfall input and result must have the same WIT type"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Check role metadata against both WIT sides and the explicitly selected target provider.
     pub fn check_hooks(
         &self,
@@ -216,37 +308,25 @@ impl PreparedContract {
         let mut plan = HookPlan::default();
         for (alias, composition) in &implementation.hooks {
             let (name, function) = self.hook_interface(alias)?;
-            match composition {
-                HookComposition::Series if function.result.is_some() => {
-                    return Err(Error(format!(
-                        "{name}: series callbacks must return no value"
-                    )));
-                }
-                HookComposition::Bail if !function.result.is_some_and(|ty| self.optional(ty)) => {
-                    return Err(Error(format!(
-                        "{name}: bail callbacks must return an option"
-                    )));
-                }
-                _ => {}
-            }
-            if *composition == HookComposition::Waterfall {
-                // Compare normalized complete type shapes, not resolver-local type IDs.
-                let mut echo = self.model().clone();
-                for entry in &mut echo.exports {
-                    if let Item::Interface(interface) = &mut entry.item
-                        && interface.contract.as_deref() == Some(name)
-                    {
-                        interface.functions[0].result = Some(interface.functions[0].params[0].ty);
+            self.check_composition(name, function, *composition)?;
+            // A compiled provider imports its own hook to run it; that import is the kernel's
+            // plan, never a provider's service, so a requirement for it is a mistake.
+            let imported = self
+                .model()
+                .imports
+                .iter()
+                .find_map(|entry| match &entry.item {
+                    Item::Interface(interface) if interface.contract.as_deref() == Some(name) => {
+                        Some(entry.key.as_str())
                     }
-                }
-                let echo = PreparedContract::new(echo)?;
-                if echo.function_signature(name, &function.name, true)?
-                    != self.function_signature(name, &function.name, true)?
-                {
-                    return Err(Error(format!(
-                        "{name}: waterfall input and result must have the same WIT type"
-                    )));
-                }
+                    _ => None,
+                });
+            if let Some(binding) = imported
+                && !matches!(bindings.get(binding), Some(Binding::Hook))
+            {
+                return Err(Error(format!(
+                    "{name}: the import of a declared hook runs its plan; it binds to no provider"
+                )));
             }
             plan.hooks.push(HookBinding {
                 name: name.into(),
@@ -355,6 +435,46 @@ mod tests {
         assert_eq!(
             checked.contributions[0].signature,
             provider.function_signature(binding, "apply", true).unwrap()
+        );
+    }
+
+    /// A compiled provider imports the hook it exports, to run its plan: without a requirement
+    /// the import binds to the plan, the lowering admits it, and a provider binding on it is
+    /// refused because it would route the run to another Orb's service.
+    #[test]
+    fn a_provider_imports_its_own_hook_as_the_kernel_plan() {
+        let contract = Contract::from_source("hooks.wit", "package example:hooks@1.0.0; interface guard { record admission { value: s32, blocked: bool } apply: func(input: admission) -> admission; } interface gate { use guard.{admission}; admit: func(value: s32) -> admission; } world provider { import guard; export guard; export gate; }", Some("provider")).unwrap();
+        let binding = "example:hooks/guard@1.0.0";
+        let bindings = contract
+            .providers(&BTreeMap::new(), &crate::Grants::default())
+            .unwrap();
+        assert_eq!(bindings, [(binding.into(), Binding::Hook)].into());
+        let mut plan = contract.plan("gate", 1, &bindings).unwrap();
+        assert!(plan.orb.requires.is_empty() && plan.host_imports.is_empty());
+        let implementation = Implementation {
+            hooks: [("guard".into(), HookComposition::Waterfall)].into(),
+            ..Default::default()
+        };
+        let checked = contract.check_hooks(&implementation, &bindings).unwrap();
+        assert_eq!(checked.hooks[0].name, binding);
+        checked.apply(&mut plan);
+        assert_eq!(plan.orb.hooks, [binding.into()].into());
+        assert_eq!(plan.orb.services.len(), 1, "gate stays, guard is the hook");
+        let provider = [(
+            binding.into(),
+            Binding::Orb {
+                name: "other".into(),
+                api_version: 1,
+            },
+        )]
+        .into();
+        assert!(contract.check_hooks(&implementation, &provider).is_err());
+        // Without the export the import is an ordinary dependency and needs a requirement.
+        let consumer = Contract::from_source("hooks.wit", "package example:hooks@1.0.0; interface guard { record admission { value: s32, blocked: bool } apply: func(input: admission) -> admission; } world consumer { import guard; }", Some("consumer")).unwrap();
+        assert!(
+            consumer
+                .providers(&BTreeMap::new(), &crate::Grants::default())
+                .is_err()
         );
     }
 

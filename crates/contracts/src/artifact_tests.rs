@@ -49,10 +49,9 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
     let bytes = contract
         .component_artifact(&component, "extension", 1, &contributions)
         .unwrap();
-    assert_eq!(
-        Artifact::decode(&bytes).unwrap().contributions,
-        contributions.contributions
-    );
+    let decoded = Artifact::decode(&bytes).unwrap();
+    assert_eq!(decoded.contributions, contributions.contributions);
+    assert!(decoded.hooks.is_empty());
     let invalid = ComponentRoles {
         contributions: [("test:hooks/missing@1.0.0".into(), 1)].into(),
         ..Default::default()
@@ -79,6 +78,60 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
         &mut source,
         "tembra:orb",
         &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &contributions),
+    );
+    crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
+    assert!(Artifact::decode(&source).is_err());
+}
+
+/// A compiled provider exports the hook it declares and imports it to run its plan. The artifact
+/// carries the composition; a shape the composition refuses, a role the world does not export,
+/// an interface in both roles and a source bundle claiming the role are all refused.
+#[test]
+fn compiled_hook_declarations_travel_in_the_artifact_and_are_checked() {
+    let contract = Contract::from_source("hooks.wit", "package test:hooks@1.0.0; interface guard { record admission { value: s32, blocked: bool } apply: func(input: admission) -> admission; } interface gate { admit: func(value: s32) -> admission; use guard.{admission}; } world provider { import guard; export guard; export gate; }", Some("provider")).unwrap();
+    let component = component(&contract);
+    let identity = "test:hooks/guard@1.0.0";
+    let roles = ComponentRoles {
+        hooks: [(identity.into(), HookComposition::Waterfall)].into(),
+        ..Default::default()
+    };
+    let bytes = contract
+        .component_artifact(&component, "gate", 1, &roles)
+        .unwrap();
+    let decoded = Artifact::decode(&bytes).unwrap();
+    assert_eq!(decoded.hooks, roles.hooks);
+    assert!(decoded.contributions.is_empty());
+    for refused in [
+        ComponentRoles {
+            hooks: [(identity.into(), HookComposition::Series)].into(),
+            ..Default::default()
+        },
+        ComponentRoles {
+            hooks: [("test:hooks/gate@1.0.0".into(), HookComposition::Waterfall)].into(),
+            ..Default::default()
+        },
+        ComponentRoles {
+            hooks: [(identity.into(), HookComposition::Waterfall)].into(),
+            contributions: [(identity.into(), 0)].into(),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            contract
+                .component_artifact(&component, "gate", 1, &refused)
+                .is_err()
+        );
+    }
+    let packaged = Identity {
+        name: "gate".into(),
+        api_version: 1,
+        world: "provider".into(),
+    };
+    let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
+    crate::artifact::append_section(
+        &mut source,
+        "tembra:orb",
+        &crate::artifact::encode_orb_roles(&packaged, contract.prepared(), &roles),
     );
     crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
     assert!(Artifact::decode(&source).is_err());

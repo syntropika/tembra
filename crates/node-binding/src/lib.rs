@@ -148,6 +148,7 @@ impl NodeContract {
         let roles = tembra_contracts::ComponentRoles {
             contributions,
             references: references.unwrap_or_default().into_iter().collect(),
+            ..Default::default()
         };
         self.contract
             .component_artifact(&component, &name, api_version, &roles)
