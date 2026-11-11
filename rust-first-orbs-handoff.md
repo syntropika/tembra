@@ -1,6 +1,6 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 17:00 CET
+- **Aggiornato:** 2026-11-11, 18:20 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft)
 - **Stato:** in attesa di Javier. Non toccare la PR finché
   il base non è chiaro.
@@ -8,20 +8,86 @@
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
 alla sessione che riprende il lavoro, anche da un'altra
-macchina. Si legge da qualunque clone:
+macchina: si parte da «Inizia qui». Per aggiornarlo si fa
+commit e push sullo stesso branch, dal worktree
+`.worktrees/notes`.
 
-```bash
-git fetch origin notes/rust-first-orbs
-git show FETCH_HEAD:rust-first-orbs-handoff.md
+## Inizia qui: sessione sul server
+
+Primo messaggio da incollare nella sessione:
+
+```text
+Leggi rust-first-orbs-handoff.md sul branch
+notes/rust-first-orbs di origin. Prepara il clone
+come dice «Inizia qui», poi riprendi da
+«Alla ripresa, sempre».
 ```
 
-Per aggiornarlo si usa un worktree del branch, poi commit e
-push sullo stesso branch. Sul Mac di Giacomo il worktree è già
-in `.worktrees/notes`; altrove:
+1. Leggere questo file da un clone qualunque:
 
-```bash
-git worktree add .worktrees/notes notes/rust-first-orbs
-```
+   ```bash
+   git fetch origin
+   git show \
+     origin/notes/rust-first-orbs:rust-first-orbs-handoff.md
+   ```
+
+2. Preparare i worktree, ognuno con il suo `target/`:
+
+   ```bash
+   git worktree add .worktrees/notes \
+     notes/rust-first-orbs
+   git worktree add .worktrees/lifecycle \
+     feat/rust-first-orbs-lifecycle
+   ```
+
+   La PR originale (`feat/rust-first-orbs`) serve solo per la
+   strada A, che ha i suoi passi.
+
+3. Installare gli strumenti come dice `DEVELOP.md`, sezione
+   «Tools»:
+   - mise installa bun, node e just;
+   - rustup legge `rust-toolchain.toml`: Rust 1.99.0 con
+     `wasm32-unknown-unknown`, linker `wasm-component-ld`
+     compreso;
+   - `just install-tools` aggiunge cargo-machete e
+     wasm-bindgen.
+
+   ```bash
+   mise trust && mise install
+   mise exec -- just install-tools
+   mise exec -- just install
+   ```
+
+   L'esempio scritto a mano (`rust-orb-lifecycle`) usa anche
+   la nightly fissata nel justfile:
+
+   ```bash
+   rustup toolchain install nightly-2026-10-15 \
+     --profile minimal --target wasm32-unknown-unknown
+   ```
+
+4. Prova veloce, dal worktree `.worktrees/lifecycle`:
+
+   ```bash
+   cargo test -p tembra-orb-macro -p cargo-tembra
+   ./examples/rust-orb-state/run.sh
+   ```
+
+   I `run.sh` usano `cargo-tembra` dal `PATH` se c'è,
+   altrimenti lo compilano dal workspace. L'output atteso è
+   nel README di ogni esempio.
+
+5. Per lavorare con Giacomo:
+   - rispondere in italiano, un argomento alla volta, con
+     esempi eseguibili;
+   - blocchi di codice con righe sotto i ~60 caratteri,
+     tabelle strette, niente ASCII art larga;
+   - nomi che dicono cosa fanno, e tutto esplicito tramite
+     attributi;
+   - commit locali in stile conventional commits, push solo
+     quando lo chiede, e i force-push li lancia lui;
+   - la memoria di Claude del suo Mac non è sul server: le
+     decisioni che contano sono in questo file.
 
 ## In breve
 
@@ -33,7 +99,7 @@ git worktree add .worktrees/notes notes/rust-first-orbs
   albero di `7cec028`.
 - Javier sta facendo altri cambiamenti: aspettiamo prima di
   scegliere.
-- In locale sono pronte due strade:
+- Sono pronte due strade, entrambe su origin:
   - **A.** La PR originale si ribasa su `43bf592` senza
     conflitti. Basta correggere un test del base.
   - **B.** Il branch convertito su `tembra:orb`
@@ -48,20 +114,19 @@ Su origin, quindi visibili da qualunque clone:
 
 - `feat/rust-first-orbs` a `d1c4e12`: è la PR #1. Sul Mac di
   Giacomo è il checkout principale.
+- `feat/rust-first-orbs-lifecycle` a `03a24b6`
+  - è il branch convertito: 4 commit sopra `6e13ad7`;
+  - serve per la strada B;
+  - sul Mac di Giacomo sta nel worktree
+    `.worktrees/rust-counter-tembra-orb`.
 - `backup/wasm-components-20261111` a `0dba202`: la copia di
   Javier della migrazione revertita.
 - `notes/rust-first-orbs`: questo file.
 
-Solo sul Mac di Giacomo, quindi assenti sul server finché
-qualcuno non li pusha:
+Solo sul Mac di Giacomo, e non servono altrove:
 
-- `feat/rust-first-orbs-lifecycle` a `03a24b6`
-  - è il branch convertito: 4 commit sopra `6e13ad7`;
-  - sta nel worktree `.worktrees/rust-counter-tembra-orb`,
-    con il suo `target/`;
-  - serve per la strada B.
-- `spike/rust-counter-tembra-orb` a `3a00876`: il primo
-  commit del branch convertito.
+- `spike/rust-counter-tembra-orb` a `3a00876`: è già il
+  primo commit del branch convertito.
 - `archive/study-wasm-orbs` a `e51c7c4`: vecchia storia di
   studio, da non toccare.
 
@@ -369,7 +434,7 @@ Verso il backup `0dba202`:
 ### Adesso
 
 - Aspettare Javier.
-- Non pushare nulla.
+- Non toccare la PR #1 e non pushare codice nuovo.
 
 ### Alla ripresa, sempre
 
@@ -414,8 +479,7 @@ Verso il backup `0dba202`:
 ### Strada B: torna la migrazione a componenti
 
 1. Ribasare `feat/rust-first-orbs-lifecycle` sul nuovo base.
-   Su `0dba202` il merge era pulito. Fuori dal Mac di Giacomo
-   il branch va prima pushato da lì.
+   Su `0dba202` il merge era pulito.
 2. Se `orb.wit` è cambiato:
    - ricopiarlo in `crates/orb-macro/src/tembra-orb.wit` (il
      test lo segnala);
@@ -470,10 +534,9 @@ branch.
     NUOVO:feat/rust-first-orbs
   ```
 
-- Verifica del convertito, nel suo worktree sul Mac:
+- Verifica del convertito, dal suo worktree:
 
   ```bash
-  cd .worktrees/rust-counter-tembra-orb
   cargo build -p cargo-tembra
   export PATH="$PWD/target/debug:$PATH"
   ./examples/rust-orb-state/run.sh
