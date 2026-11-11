@@ -15,14 +15,16 @@ const WIT_SECTION: &str = "tembra:wit";
 const MANIFEST_SECTION: &str = "tembra:manifest";
 
 /// The manifest the macro stored in the component: the hooks it contributes to, with their
-/// priorities, the hooks it declares, with their composition, and the services whose
-/// `#[service]` attribute names a lifetime or a linger, by interface identity.
+/// priorities, the hooks it declares, with their composition, the services whose `#[service]`
+/// attribute names a lifetime or a linger, by interface identity, and the directory of the WIT
+/// packages the module consumes, relative to the crate manifest, as written on the attribute.
 #[derive(Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EmbeddedManifest {
     pub contributes: BTreeMap<String, i32>,
     pub declares: BTreeMap<String, HookComposition>,
     pub services: BTreeMap<String, ServicePolicy>,
+    pub wit: Option<String>,
 }
 
 /// `cargo tembra wit`: print the reconstructed WIT, or write the contract with --emit.
@@ -48,7 +50,7 @@ pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) 
         }
         Some(directory) => {
             let name = world_name.context("--emit needs --world <name>")?;
-            let (text, name) = contract_text(&bytes, &resolve, world, &name)?;
+            let (text, name) = contract_text(&bytes, &resolve, world, &name, None)?;
             std::fs::create_dir_all(&directory)?;
             let file = directory.join(format!("{name}.wit"));
             std::fs::write(&file, &text)?;
@@ -62,13 +64,15 @@ pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) 
 /// The contract of a component as WIT text, and the name of its world.
 ///
 /// A component built with the macro carries the module's own WIT in a custom section; the
-/// packages it consumes are nested after it, taken from the component's types. Any other
-/// component gets the WIT derived from its types, with the given world name.
+/// packages it consumes are nested after it, whole, from the directory the macro named when it
+/// is given, else from the component's types, which keep only the functions the component calls.
+/// Any other component gets the WIT derived from its types, with the given world name.
 pub fn contract_text(
     bytes: &[u8],
     resolve: &Resolve,
     world: WorldId,
     name: &str,
+    consumed: Option<&Path>,
 ) -> Result<(String, String)> {
     let root = resolve.worlds[world]
         .package
@@ -86,11 +90,31 @@ pub fn contract_text(
                 .find_map(|line| line.trim_start().strip_prefix("world "))
                 .map(|rest| rest.trim_end_matches('{').trim().to_owned())
                 .context("the tembra:wit section declares no world")?;
+            // The whole consumed packages, when the macro said where they are: a provider's
+            // interface keeps the functions this component never calls, so the contract names
+            // the same interface the provider exports.
+            let whole = match consumed {
+                Some(dir) => {
+                    let mut whole = Resolve::default();
+                    whole.push_dir(dir).with_context(|| {
+                        format!("reading the consumed WIT in {}", dir.display())
+                    })?;
+                    Some(whole)
+                }
+                None => None,
+            };
             let mut text = text;
             for id in nested(resolve, root, |name| *name != package) {
+                let (source, id) = match &whole {
+                    Some(whole) => match whole.package_names.get(&resolve.packages[id].name) {
+                        Some(id) => (whole, *id),
+                        None => (resolve, id),
+                    },
+                    None => (resolve, id),
+                };
                 let mut printer = WitPrinter::default();
                 printer
-                    .print_package(resolve, id, false)
+                    .print_package(source, id, false)
                     .map_err(|error| anyhow::anyhow!("{error}"))?;
                 text.push('\n');
                 text.push_str(&String::from(printer.output));

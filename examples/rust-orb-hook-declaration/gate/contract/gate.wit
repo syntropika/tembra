@@ -18,6 +18,7 @@ world gate {
 }
 
 package example:admission@1.0.0 {
+  /// Waterfall hook: each participant may change the value or block the admission.
   interface guard {
     record admission {
       value: s32,
