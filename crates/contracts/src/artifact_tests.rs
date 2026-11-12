@@ -344,6 +344,7 @@ fn roles_embedded_in_the_core_module_are_read_and_packaged() {
             )]
             .into(),
             services: [("test:embedded/ledger@1.0.0".into(), host)].into(),
+            references: BTreeMap::new(),
             wit: Some("../wit".into()),
         }
     );
@@ -421,6 +422,123 @@ fn embedded_roles_the_contract_does_not_offer_are_refused() {
                 .0
                 .starts_with("the tembra:manifest section is not a JSON object"),
             "{error}"
+        );
+    }
+}
+
+/// The provider interface a keyed import reaches, with a record and an asynchronous function.
+const COUNTER: &str = "interface counter {
+    record tally { key: list<string>, count: u32 }
+    add: func(amount: u32) -> u32;
+    read: async func() -> tally;
+  }";
+
+/// A world importing a keyed view as `#[orb]` derives it for
+/// `import("example:counters/counter@1.0.0", keyed)`: a resource of the provider interface's name
+/// whose methods are its functions, the provider's record `use`d from it, and `get`.
+fn keyed() -> String {
+    format!(
+        "package example:router@1.0.0;
+interface routing {{ route: async func(key: string) -> result<u32, string>; }}
+interface counter-ref {{
+  use example:counters/counter@1.0.0.{{tally}};
+  resource counter {{ add: func(amount: u32) -> u32; read: async func() -> tally; }}
+  get: async func(key: list<string>) -> result<counter, string>;
+}}
+world router {{ import counter-ref; export routing; }}
+package example:counters@1.0.0 {{ {COUNTER} }}
+"
+    )
+}
+
+/// The reference views a component built with `#[orb]` carries are read from its manifest and
+/// packaged as they are: the artifact's view reaches the provider interface with the signature
+/// the provider's own contract gives it. A manifest written before keyed imports has no
+/// `references` and carries none.
+#[test]
+fn reference_views_embedded_in_the_core_module_are_read_and_packaged() {
+    let contract = Contract::from_source("router.wit", &keyed(), Some("router")).unwrap();
+    let references: BTreeMap<String, String> = [(
+        "example:router/counter-ref@1.0.0".to_owned(),
+        "example:counters/counter@1.0.0".to_owned(),
+    )]
+    .into();
+    let component = component_carrying(
+        &contract,
+        &[(
+            "tembra:manifest",
+            br#"{"contributes":{},"declares":{},"services":{},"references":{"example:router/counter-ref@1.0.0":"example:counters/counter@1.0.0"},"wit":"../counters"}"#,
+        )],
+    );
+    assert_eq!(
+        EmbeddedManifest::read(&component).unwrap().references,
+        references
+    );
+    let roles = contract.embedded_roles(&component).unwrap();
+    assert_eq!(
+        roles,
+        ComponentRoles {
+            references: references.clone(),
+            ..Default::default()
+        }
+    );
+    let decoded = Artifact::decode(
+        &contract
+            .component_artifact(&component, "router", 1, &roles)
+            .unwrap(),
+    )
+    .unwrap();
+    let view = &decoded.contract.references()["example:router/counter-ref@1.0.0"];
+    assert_eq!(view.interface, "example:counters/counter@1.0.0");
+    let provider = Contract::from_source(
+        "counters.wit",
+        &format!("package example:counters@1.0.0; {COUNTER} world provider {{ export counter; }}"),
+        Some("provider"),
+    )
+    .unwrap()
+    .plan("counters", 1, &BTreeMap::new())
+    .unwrap();
+    assert_eq!(
+        Some(&view.signature),
+        provider.orb.services[0].signature.as_ref()
+    );
+    let older = component_carrying(
+        &contract,
+        &[(
+            "tembra:manifest",
+            br#"{"contributes":{},"declares":{},"services":{},"wit":"../counters"}"#,
+        )],
+    );
+    assert!(
+        EmbeddedManifest::read(&older)
+            .unwrap()
+            .references
+            .is_empty()
+    );
+    assert!(
+        contract
+            .embedded_roles(&older)
+            .unwrap()
+            .references
+            .is_empty()
+    );
+}
+
+/// A view the manifest names must be an interface the world imports and does not export.
+#[test]
+fn reference_views_the_contract_does_not_import_are_refused() {
+    let contract = Contract::from_source("embedded.wit", EMBEDDED, Some("book")).unwrap();
+    for view in [
+        "test:embedded/missing@1.0.0",
+        "test:embedded/ledger@1.0.0",
+        "test:embedded/guard@1.0.0",
+    ] {
+        let json = format!(r#"{{"references":{{"{view}":"test:other/counter@1.0.0"}}}}"#);
+        assert_eq!(
+            contract.embedded_roles(&manifest(&json)).unwrap_err().0,
+            format!(
+                "#[orb] imports test:other/counter@1.0.0 by key through the view {view}, but the contract does not import the view"
+            )
         );
     }
 }
