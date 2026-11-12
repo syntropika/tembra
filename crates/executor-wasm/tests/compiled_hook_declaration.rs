@@ -14,6 +14,8 @@ use tembra_executor_wasm::{Contract, Engine, Install, Limits};
 
 #[path = "support/components.rs"]
 mod components;
+#[path = "support/dummy.rs"]
+mod dummy;
 
 const GUARD: &str = "example:gated/guard@1.0.0";
 const GATE: &str = "gate::example:gated/admissions@1.0.0";
@@ -136,4 +138,34 @@ fn a_declared_hook_without_contributions_returns_its_input() {
     gate.release().unwrap();
     pool.run_until(host.close()).unwrap();
     assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// A declared hook whose callback is an `async func` is linked as a concurrent import, as an
+/// asynchronous dependency is, so its provider instantiates. Every function of the component
+/// traps; loading runs none of them.
+#[test]
+fn a_provider_of_an_async_hook_instantiates() {
+    let artifact = dummy::artifact(
+        "package example:gate@1.0.0;
+        interface guard {
+            record admission { value: s32, blocked: bool }
+            apply: async func(input: admission) -> admission;
+        }
+        interface runner { admit: func(value: s32) -> s32; }
+        world gate { import guard; export guard; export runner; }",
+        "gate",
+        "gate",
+        &ComponentRoles {
+            hooks: [(
+                "example:gate/guard@1.0.0".to_owned(),
+                HookComposition::Waterfall,
+            )]
+            .into(),
+            ..Default::default()
+        },
+    );
+    Engine::new(Limits::default())
+        .unwrap()
+        .load(&artifact, Install::default())
+        .unwrap();
 }

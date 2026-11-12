@@ -878,16 +878,36 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
                 }
                 Role::Hook => {
                     let binding = import.binding.clone();
-                    instance.func_new_async(
-                        &function.name,
-                        move |store, ty, params, results| {
-                            let request = hook_request(store.data(), &binding, params);
-                            Box::new(async move {
-                                let value = hook_settle(request?).await?;
-                                store_result(results, lower_result(&ty, &value)?)
-                            })
-                        },
-                    )?;
+                    // An `async func` callback is linked as a concurrent host function, as a
+                    // dependency's is; Wasmtime refuses a synchronous one for it.
+                    if function.asynchronous {
+                        instance.func_new_concurrent(
+                            &function.name,
+                            move |accessor: &Accessor<State>, ty, params, results| {
+                                // The first poll runs inside the issuing guest call, so the
+                                // entered group is still the caller's when its authority is
+                                // captured.
+                                let request = accessor.with(|mut access| {
+                                    hook_request(access.get(), &binding, params)
+                                });
+                                Box::pin(async move {
+                                    let value = hook_settle(request?).await?;
+                                    store_result(results, lower_result(&ty, &value)?)
+                                })
+                            },
+                        )?;
+                    } else {
+                        instance.func_new_async(
+                            &function.name,
+                            move |store, ty, params, results| {
+                                let request = hook_request(store.data(), &binding, params);
+                                Box::new(async move {
+                                    let value = hook_settle(request?).await?;
+                                    store_result(results, lower_result(&ty, &value)?)
+                                })
+                            },
+                        )?;
+                    }
                     continue;
                 }
                 Role::Dependency => {}
