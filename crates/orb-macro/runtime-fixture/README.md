@@ -10,10 +10,17 @@ types replacing them take: a record, an enum and a variant derive `Default`, `Pa
 `Hash` or `Ord`, and the kernel-managed state `Position` starts from its derived `Default`. The
 default build counts distinct moves in a `HashSet`, the `no-std` one in a `BTreeSet`.
 
+Its `chance` service imports `wasi:random/random` and `wasi:clocks/monotonic-clock` with the macro's
+`import` option: it draws bytes from the host's secure random source and awaits a wait on its
+monotonic clock, so both builds enable `wit-bindgen`'s `async` feature. Every installation of the
+fixture grants the `random` and `clocks` system capabilities; the kernel refuses one that does not.
+
 Run `just test-orb-macro` from the repository root to build both real components and execute
 `executor-wasm/tests/orb_macro_runtime.rs` on Cranelift and Pulley. The test decodes both component
 contracts, compares their WIT and typed metadata, calls each guest, observes the walker's state,
-and verifies physical Store and kernel cleanup. Explicit execution requires both fixture paths and
+and verifies physical Store and kernel cleanup. It installs each guest without the grants of
+chance's WASI imports, which the kernel refuses, then with them, and draws and waits through them.
+Explicit execution requires both fixture paths and
 fails if either is absent. The macro-only facade dependency disables host features in both guest
 builds.
 

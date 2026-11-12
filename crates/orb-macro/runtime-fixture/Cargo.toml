@@ -14,7 +14,12 @@ no-std = ["dep:dlmalloc"]
 
 [dependencies]
 tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
-wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
+# `async` for `chance`, which awaits a WASI clock.
+wit-bindgen = { version = "=0.63.0", default-features = false, features = [
+  "macros",
+  "realloc",
+  "async",
+] }
 dlmalloc = { version = "0.2.12", features = ["global"], optional = true }
 # The code the macro generates for the walker's state names these.
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

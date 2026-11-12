@@ -4,11 +4,20 @@ extern crate alloc;
 
 #[cfg_attr(
     feature = "no-std",
-    tembra::orb(package = "example:runtime@1.0.0", no_std)
+    tembra::orb(
+        package = "example:runtime@1.0.0",
+        import = "wasi:random/random@0.3.0",
+        import = "wasi:clocks/monotonic-clock@0.3.0",
+        no_std
+    )
 )]
 #[cfg_attr(
     not(feature = "no-std"),
-    tembra::orb(package = "example:runtime@1.0.0")
+    tembra::orb(
+        package = "example:runtime@1.0.0",
+        import = "wasi:random/random@0.3.0",
+        import = "wasi:clocks/monotonic-clock@0.3.0"
+    )
 )]
 mod guest {
     use alloc::{format, string::String, vec::Vec};
@@ -116,6 +125,27 @@ mod guest {
         /// Where the walker stands, as `Debug` prints it.
         pub fn describe() -> String {
             format!("{:?}", Position::read())
+        }
+    }
+
+    /// Draws from the host's secure random source and waits on its monotonic clock, through the
+    /// WASI interfaces the attribute imports: an installation grants `random` and `clocks`, or the
+    /// kernel refuses it.
+    #[service]
+    pub struct Chance;
+
+    impl Chance {
+        /// `length` bytes from the host's secure random source.
+        pub fn draw(length: u64) -> Vec<u8> {
+            random::get_random_bytes(length)
+        }
+
+        /// Wait `nanoseconds` on the host's monotonic clock and return how long the wait took by
+        /// that clock.
+        pub async fn pause(nanoseconds: u64) -> u64 {
+            let start = monotonic_clock::now();
+            monotonic_clock::wait_for(nanoseconds).await;
+            monotonic_clock::now() - start
         }
     }
 }
