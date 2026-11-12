@@ -12,7 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tembra::{Host, Reference};
-use tembra_executor_wasm::{Contract, Engine, Install, Limits, LogRecord};
+use tembra_executor_wasm::{Contract, Engine, Install, Limits, LogRecord, PortEvent};
 
 /// The kernel's package, bundled with the contracts; the fixture's world imports its context.
 const GUEST: &str = include_str!("../../contracts/wit/tembra/guest.wit");
@@ -165,4 +165,74 @@ fn a_compiled_orb_reads_its_call_and_its_object_and_logs_through_the_kernel() {
     probe.release().unwrap();
     pool.run_until(host.close()).unwrap();
     assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// On a platform port (Node, mobile) a compiled Orb's log never reaches the port as a host
+/// request: the session's diagnostics take it, as they take a source Orb's console records. A
+/// platform scope refuses `console`, and the refusal would trap the call and retire the Store.
+#[test]
+fn a_platform_port_never_sees_a_compiled_log_as_a_host_request() {
+    let records: Arc<Mutex<Vec<LogRecord>>> = Arc::default();
+    let sink = records.clone();
+    let engine = Engine::new(Limits::default())
+        .unwrap()
+        .on_log(move |record| sink.lock().unwrap().push(record.clone()));
+    let artifact = tembra_contracts::Artifact::decode(&artifact()).unwrap();
+    let bindings = artifact
+        .contract
+        .providers(&Default::default(), &Default::default())
+        .unwrap();
+    let port = engine
+        .open_port(
+            &artifact,
+            &bindings,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+    // The platform kernel declares the Orb root, then one object of the probe service; each
+    // tells its address, and the object names its root.
+    let declarations = |packet: &str, _| {
+        let request: Value = serde_json::from_str(packet).unwrap();
+        match request["operation"].as_str() {
+            Some("address") => Ok(json!({"key": [], "principal": "host"})),
+            Some("orb") => Ok(json!(1)),
+            other => panic!("unexpected declaration request {other:?}"),
+        }
+    };
+    port.declare(
+        json!({"kind": "create", "environment": 1, "service": null}),
+        declarations,
+    )
+    .unwrap();
+    port.declare(
+        json!({"kind": "create", "environment": 2, "service": "probe"}),
+        declarations,
+    )
+    .unwrap();
+    let note = Contract::from_source("aware.wit", WIT, Some("aware"))
+        .unwrap()
+        .bind("example:aware/probe@1.0.0", "note", true)
+        .unwrap();
+    let (_ticket, events) = port
+        .begin(
+            json!({"kind": "invoke", "environment": 2, "function": note, "args": ["hello"]})
+                .to_string(),
+        )
+        .unwrap();
+    match events.receive().unwrap() {
+        PortEvent::Complete(result) => assert_eq!(result.unwrap(), "null"),
+        PortEvent::Host { packet, .. } => panic!("the log reached the port as {packet}"),
+        PortEvent::Ingress(_) => unreachable!("no incoming HTTP exchange was started"),
+    }
+    let records = records.lock().unwrap();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(
+        (
+            records[0].orb.as_str(),
+            records[0].level.as_str(),
+            records[0].message.as_str()
+        ),
+        ("aware", "info", "hello")
+    );
 }

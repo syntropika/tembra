@@ -371,7 +371,7 @@ impl Engine {
             self,
             artifact.identity.name.clone(),
             io,
-            move |commands, poison, _diagnostics| {
+            move |commands, poison, diagnostics| {
                 worker::run(
                     engine,
                     component,
@@ -379,7 +379,7 @@ impl Engine {
                     grants,
                     layout,
                     ready,
-                    (commands, scope, poison),
+                    (commands, scope, poison, diagnostics),
                 )
             },
         )?;

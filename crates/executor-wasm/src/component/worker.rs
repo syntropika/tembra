@@ -300,6 +300,9 @@ pub(crate) struct State {
     dropped: Dropped,
     /// Only these host-dynamic types were linked from checked Orb imports.
     payloads: BTreeSet<u32>,
+    /// The session's diagnostics: the context interface's log reaches the host's log observers
+    /// through them, as a source Orb's console records do, never as a host request.
+    diagnostics: crate::worker::diagnostics::Diagnostics,
 }
 
 impl crate::worker::stream_adapter::AdapterStore for State {
@@ -544,19 +547,21 @@ pub(crate) async fn run(
     grants: Arc<crate::Grants>,
     layout: Layout,
     ready: mpsc::Sender<std::result::Result<(), String>>,
-    // The session's callback epochs and quarantine cause travel with its command queue.
-    calls: (
+    // The session's callback epochs, quarantine cause and diagnostics travel with its command
+    // queue.
+    (commands, scope, poison, diagnostics): (
         mpsc::Receiver<Command>,
         crate::io::CallbackScope,
         Arc<Mutex<Option<String>>>,
+        crate::worker::diagnostics::Diagnostics,
     ),
 ) -> Terminal {
     let transport = crate::http::Transport::default();
     let terminal = live(
         (engine, component, wasi, grants, layout),
         ready,
-        calls,
-        &transport,
+        (commands, scope, poison),
+        (&transport, diagnostics),
     )
     .await;
     // The Store is gone: aborted connection drivers drop on the next runtime turn and close
@@ -582,14 +587,23 @@ async fn live(
         crate::io::CallbackScope,
         Arc<Mutex<Option<String>>>,
     ),
-    transport: &crate::http::Transport,
+    (transport, diagnostics): (
+        &crate::http::Transport,
+        crate::worker::diagnostics::Diagnostics,
+    ),
 ) -> Terminal {
     let groups = Arc::new(Mutex::new(Groups {
         scope,
         ..Groups::default()
     }));
     let instance = instantiate(
-        &engine, &component, wasi, grants, &layout, &groups, transport,
+        &engine,
+        &component,
+        wasi,
+        grants,
+        &layout,
+        &groups,
+        (transport, diagnostics),
     )
     .await;
     let (mut store, exports) = match instance {
@@ -643,7 +657,10 @@ async fn instantiate(
     grants: Arc<crate::Grants>,
     layout: &Layout,
     groups: &Arc<Mutex<Groups>>,
-    transport: &crate::http::Transport,
+    (transport, diagnostics): (
+        &crate::http::Transport,
+        crate::worker::diagnostics::Diagnostics,
+    ),
 ) -> wasmtime::Result<(Store<State>, Exports)> {
     let mut linker = Linker::<State>::new(&engine.engine);
     link_wasi(&mut linker)?;
@@ -679,6 +696,7 @@ async fn instantiate(
                 .iter()
                 .flat_map(|import| import.resources.iter().map(|(_, payload)| *payload))
                 .collect(),
+            diagnostics,
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -1501,15 +1519,16 @@ async fn hook_settle(
 
 /// How a kernel context function is answered.
 enum ContextAnswer {
-    /// From the issuing call's authority, without the host: the object's declared address.
+    /// Without the host: the object's declared address, or the log's empty answer.
     Local(Arc<Value>),
     /// By the host, on the issuing call's channel; the reply is lowered with the import's type.
     Host(oneshot::Receiver<std::result::Result<String, String>>),
 }
 
 /// Capture the issuing call's authority and answer one function of the kernel's context
-/// interface: the object's address from the authority, the call's principal and cancellation
-/// and the log through the existing synchronous requests of the call's channel.
+/// interface: the object's address from the authority, the log through the session's
+/// diagnostics, the call's principal and cancellation through the existing synchronous requests
+/// of the call's channel.
 fn context_request(
     state: &State,
     function: &str,
@@ -1526,11 +1545,17 @@ fn context_request(
         ("principal", []) => json!({"operation": "context.principal"}),
         ("cancelled", []) => json!({"operation": "signal.cancelled"}),
         ("cancel", []) => json!({"operation": "context.cancel"}),
-        ("log", [level, message]) => {
-            let lift = |value: &Val| {
-                values::lift(value.clone()).map_err(|error| wasmtime::Error::msg(error.to_string()))
-            };
-            json!({"operation": "console", "level": lift(level)?, "message": lift(message)?})
+        ("log", [Val::Enum(level), Val::String(message)]) => {
+            // A diagnostic record is the host's, attributed to this revision, and never needs
+            // the call's authority: the session's diagnostics take it, as they take a source
+            // Orb's console records. Platform ports refuse `console` requests by design.
+            let level = serde_json::from_value::<crate::protocol::LogLevel>(json!(level))
+                .map_err(|_| wasmtime::Error::msg(format!("unknown log level {level}")))?;
+            let answer = state
+                .diagnostics
+                .emit(level, message.clone())
+                .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+            return Ok(ContextAnswer::Local(Arc::new(answer)));
         }
         _ => return Err(wasmtime::Error::msg("unknown kernel context function")),
     }
