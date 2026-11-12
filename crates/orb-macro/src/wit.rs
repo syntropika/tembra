@@ -191,9 +191,8 @@ fn service_mentions(service: &Service, resources: &[WitResource]) -> Vec<Ident> 
 /// Any other shape is defined in the interface of the earliest derived service, in declaration
 /// order, that mentions it: in its functions, in its own resources' functions, or through the
 /// fields of other shapes. So a later service that names a shape no earlier one does defines it
-/// itself, and an earlier service that hands out a later service's resource does not make the
-/// later one `use` it back. Every shape that enters the WIT is reached from a derived hook, a
-/// derived service or one of its resources, so each has a place.
+/// itself. Every shape that enters the WIT is reached from a derived hook, a derived service or
+/// one of its resources, so each has a place.
 pub(crate) fn placement(
     shapes: &[Shape],
     services: &[Service],

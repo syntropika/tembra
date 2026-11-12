@@ -1513,6 +1513,15 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     }
+    // A derived function returns only its own interface's resources, through the records and
+    // variants it reaches too, and takes none of another interface's through them.
+    resource_params::check_reached(
+        &services,
+        &wit_resources,
+        &declared,
+        &shapes,
+        &imported_modules,
+    )?;
 
     // Consumed packages: the callback of every hook, contributed or declared, and every interface
     // implemented or imported are read from their WIT packages.

@@ -680,8 +680,10 @@ under the caller's own admission; when the last owner drops the handle, the kern
 value, which runs `Drop`. WIT methods borrow `self`, so a method changes a value through `Cell` or
 `RefCell`; a `&mut self` method is a compile error. A function of the interface takes the resource
 back as a parameter, [below](#taking-a-resource). The resource belongs to one interface, that of
-`#[wit_resource(service = Name)]` or of the module's only service; another service of the module
-may return it, and its interface `use`s the type. A record or an enum is defined in the interface
+`#[wit_resource(service = Name)]` or of the module's only service, and only that interface returns
+it: the runtime returns a resource only from the interface that defines it, so a function of
+another service or of another service's resource returning it, alone, nested or in a record or a
+variant, is a compile error on its result type. A record or an enum is defined in the interface
 of the earliest service, in declaration order, that mentions it, in its functions or its
 resources' functions, and the others `use` it from there; interfaces that would `use` each other,
 which WIT refuses, are a compile error naming them. See
@@ -730,10 +732,10 @@ The runtime moves an owned resource only into the interface that defines it, or 
 imports that interface. It refuses at installation today an Orb whose function takes a borrowed
 resource, `borrow<t>` ("borrow requires a dedicated interpreter value adapter"), so the macro
 derives none: `&T` is refused as every reference in a signature is. A function taking a resource of
-another service's interface or of an implemented interface, a WASI handle, which the runtime moves
-between no Orbs, and a hook's input holding a resource are compile errors too; so is a derived
-function returning an imported interface's handle, which the runtime returns only from the interface
-that defines it.
+another service's interface or of an implemented interface, itself or in a record or a variant of
+the module, a WASI handle, which the runtime moves between no Orbs, and a hook's input holding a
+resource are compile errors too; so is a derived function returning an imported interface's handle,
+or another service's resource, which the runtime returns only from the interface that defines it.
 
 ## Flags
 
@@ -920,7 +922,7 @@ key) among its dependencies,
   `bool` fields; its functions `empty`, `bits` and `from_bits_retain` and its `BitOr` are the
   macro's, for its bindings, and a derived hook's input holds none. A `resource` is a `#[wit_resource]` struct or the
   handle of an imported interface. A derived function takes either as an owned parameter, a
-  struct only in the interface that defines it, and returns only a struct; an implemented
+  struct only in the interface that defines it, and returns only a struct of its own interface; an implemented
   interface takes the owned handles its WIT says. A borrowed parameter, `borrow<t>`, is not
   derived: the runtime refuses it at installation today ("borrow requires a dedicated interpreter
   value adapter"). No `stream` or `future`. `()` is nothing only as a function's result or a

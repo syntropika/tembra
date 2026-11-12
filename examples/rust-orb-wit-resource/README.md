@@ -143,5 +143,6 @@ A function takes a resource back only owned, in the interface that defines it, a
 [the macro's README](../../crates/orb-macro/README.md#taking-a-resource) shows; a borrowed
 parameter is not expressed by the macro. Methods borrow `self`; a `&mut self` method is a compile
 error. A resource belongs to one service's interface, the one named by `#[wit_resource(service =
-Name)]` or the module's only service; another service of the module may return it, and its
-interface `use`s the type.
+Name)]` or the module's only service, and only that interface returns it: the runtime returns a
+resource only from the interface that defines it, so another service returning it is a compile
+error.

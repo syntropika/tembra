@@ -2,14 +2,15 @@
 //! owned, `own<t>` in the WIT, and the handle of an imported interface, `texts::Builder`, which the
 //! derived interface `use`s from the imported one. Either may sit in an option, a result, a list or
 //! a tuple. The runtime moves an owned resource into the interface that defines it, or into an Orb
-//! that imports that interface; it refuses at installation an Orb whose function takes a borrowed
-//! one, `borrow<t>`, so a `&T` parameter stays refused, as every reference in a signature is.
+//! that imports that interface, and returns one only from the interface that defines it; it
+//! refuses at installation an Orb whose function takes a borrowed one, `borrow<t>`, so a `&T`
+//! parameter stays refused, as every reference in a signature is.
 use crate::{
     Constructor, Declared, Function, Handles, Service, Shape, WitResource, handles_of, rebuild,
     type_ident, wit, with_handles,
 };
 use quote::quote;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use syn::{Ident, Type, spanned::Spanned};
 
 /// The modules the bindings generate for the imported interfaces, by the name the Orb module
@@ -188,30 +189,8 @@ pub(crate) fn check(
             let mut mentioned = Vec::new();
             references(ty, modules, &mut mentioned);
             for resource in mentioned.iter().filter_map(resource_named) {
-                let owner = resource.service.as_ref().expect("resolved owner");
-                let implemented = services
-                    .iter()
-                    .find(|service| service.ident == *owner)
-                    .and_then(|service| service.implements.as_deref());
-                if let Some(identity) = implemented {
-                    return Err(syn::Error::new(
-                        ty.span(),
-                        format!(
-                            "`{}` takes `{}`, a resource of the implemented interface {identity}: a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports",
-                            function.name, resource.ident
-                        ),
-                    ));
-                }
-                if owner != function.interface {
-                    return Err(syn::Error::new(
-                        ty.span(),
-                        format!(
-                            "`{}` takes `{}`, a resource of the interface `{}`: the runtime moves an owned resource only into the interface that defines it, so take it in a function of `{owner}` or of one of its resources",
-                            function.name,
-                            resource.ident,
-                            wit::kebab(owner)
-                        ),
-                    ));
+                if let Some(owner) = foreign_owner(services, resource, function.interface) {
+                    return Err(taking_error(&function, ty, resource, None, owner));
                 }
             }
         }
@@ -246,6 +225,160 @@ pub(crate) fn check(
         }
     }
     Ok(())
+}
+
+/// Refuse, once the types that enter the WIT are known, a resource the runtime would not carry
+/// through a derived function: its result holds, anywhere, only resources of its own interface,
+/// itself or in the records and variants of the module it reaches, because the runtime returns a
+/// resource only from the interface that defines it; the records and variants a parameter takes
+/// hold none of another interface either, which the runtime would not move in; and those of a
+/// derived hook's input hold no resource. What a parameter or a hook's input names itself `check`
+/// has refused already.
+pub(crate) fn check_reached(
+    services: &[Service],
+    resources: &[WitResource],
+    declared: &[Declared],
+    shapes: &[Shape],
+    modules: &BTreeMap<String, String>,
+) -> syn::Result<()> {
+    for function in derived(services, resources) {
+        for (_, ty, _) in function.params {
+            for (resource, via) in held(ty, shapes, resources, modules) {
+                if let Some(owner) = foreign_owner(services, resource, function.interface) {
+                    return Err(taking_error(&function, ty, resource, via, owner));
+                }
+            }
+        }
+        let Some(ty) = function.result else {
+            continue;
+        };
+        for (resource, via) in held(ty, shapes, resources, modules) {
+            let Some(owner) = foreign_owner(services, resource, function.interface) else {
+                continue;
+            };
+            let returned = holding(resource, via);
+            let message = match owner {
+                Owner::Implemented(identity) => format!(
+                    "`{}` returns {returned} a resource of the implemented interface {identity}: the runtime returns a resource only from the interface that defines it",
+                    function.name
+                ),
+                Owner::Interface(owner) => format!(
+                    "`{}` returns {returned} a resource of the interface `{}`: the runtime returns a resource only from the interface that defines it, so return it from a function of `{owner}` or of one of its resources",
+                    function.name,
+                    wit::kebab(owner)
+                ),
+            };
+            return Err(syn::Error::new(ty.span(), message));
+        }
+    }
+    for declaration in declared {
+        let Some((ty, _)) = &declaration.input else {
+            continue;
+        };
+        if let Some((resource, Some(via))) = held(ty, shapes, resources, modules).first() {
+            return Err(syn::Error::new(
+                ty.span(),
+                format!(
+                    "the input of the hook `{}` holds `{via}`, which holds the resource `{}`: a hook's input holds no resource",
+                    declaration.ident, resource.ident
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Where a resource a derived function of `interface` names is defined, when it is not that
+/// interface, the only one the runtime moves it into or returns it from.
+enum Owner<'a> {
+    /// An implemented interface, by its identity.
+    Implemented(&'a str),
+    /// Another derived interface, by the service whose interface it is.
+    Interface(&'a Ident),
+}
+
+/// The interface defining `resource`, when it is another than `interface`.
+fn foreign_owner<'a>(
+    services: &'a [Service],
+    resource: &'a WitResource,
+    interface: &Ident,
+) -> Option<Owner<'a>> {
+    let owner = resource.service.as_ref().expect("resolved owner");
+    let implemented = services
+        .iter()
+        .find(|service| service.ident == *owner)
+        .and_then(|service| service.implements.as_deref());
+    match implemented {
+        Some(identity) => Some(Owner::Implemented(identity)),
+        None if owner != interface => Some(Owner::Interface(owner)),
+        None => None,
+    }
+}
+
+/// The resource a type holds, for the errors: itself, or the record or variant that holds it.
+fn holding(resource: &WitResource, via: Option<&Ident>) -> String {
+    match via {
+        Some(via) => format!("`{via}`, which holds `{}`,", resource.ident),
+        None => format!("`{}`,", resource.ident),
+    }
+}
+
+/// The error of a derived function taking a resource of another interface, on the parameter's type.
+fn taking_error(
+    function: &Derived<'_>,
+    ty: &Type,
+    resource: &WitResource,
+    via: Option<&Ident>,
+    owner: Owner<'_>,
+) -> syn::Error {
+    let taken = holding(resource, via);
+    let message = match owner {
+        Owner::Implemented(identity) => format!(
+            "`{}` takes {taken} a resource of the implemented interface {identity}: a derived function takes the resources of the interfaces this module derives and the handles of the interfaces it imports",
+            function.name
+        ),
+        Owner::Interface(owner) => format!(
+            "`{}` takes {taken} a resource of the interface `{}`: the runtime moves an owned resource only into the interface that defines it, so take it in a function of `{owner}` or of one of its resources",
+            function.name,
+            wit::kebab(owner)
+        ),
+    };
+    syn::Error::new(ty.span(), message)
+}
+
+/// Each resource of the module a type holds, with the record or variant of the module that holds
+/// it, if one does: the resource itself or inside options, results, lists and tuples, or in the
+/// fields and cases of the records and variants the type reaches, followed by name as the WIT
+/// names them.
+fn held<'a>(
+    ty: &Type,
+    shapes: &'a [Shape],
+    resources: &'a [WitResource],
+    modules: &BTreeMap<String, String>,
+) -> Vec<(&'a WitResource, Option<&'a Ident>)> {
+    let mut mentioned = Vec::new();
+    references(ty, modules, &mut mentioned);
+    let mut pending: Vec<(Ident, Option<&'a Ident>)> =
+        mentioned.into_iter().map(|ident| (ident, None)).collect();
+    let mut seen = BTreeSet::new();
+    let mut held = Vec::new();
+    while let Some((ident, via)) = pending.pop() {
+        if !seen.insert(ident.to_string()) {
+            continue;
+        }
+        if let Some(resource) = resources.iter().find(|resource| resource.ident == ident) {
+            held.push((resource, via));
+        } else if let Some(shape) = shapes.iter().find(|shape| shape.ident == ident) {
+            let via = via.or(Some(&shape.ident));
+            pending.extend(
+                shape
+                    .references
+                    .iter()
+                    .map(|reference| (reference.clone(), via)),
+            );
+        }
+    }
+    held
 }
 
 /// What a derived interface `use`s from an imported one: its identity, and each resource whose

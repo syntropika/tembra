@@ -1160,8 +1160,8 @@ fn resolved(module: &ItemMod) -> String {
 }
 
 /// An interface `use`s what the constructors, methods and static functions of its own resources
-/// name, as it does for its own functions: a module record, another service's resource, a type a
-/// derived hook defines.
+/// name, as it does for its own functions: a module record, a type a derived hook defines. Another
+/// service's resource they cannot name, which the runtime would refuse.
 #[test]
 fn an_interface_uses_what_its_resources_mention() {
     let record = resolved(&expanded(
@@ -1182,27 +1182,6 @@ fn an_interface_uses_what_its_resources_mention() {
     assert!(
         record.contains("resource session {\n    info: func() -> info;\n  }"),
         "{record}"
-    );
-    let resource = resolved(&expanded(
-        "example:wa@1.0.0",
-        "mod wa {
-            #[wit_resource(service = Main)]
-            pub struct Token;
-            impl Token { pub fn id(&self) -> u32 { 7 } }
-            #[service]
-            pub struct Main;
-            impl Main { pub fn issue() -> Token { Token } }
-            #[wit_resource(service = Sessions)]
-            pub struct Session;
-            impl Session { pub fn grant(&self) -> Token { Token } }
-            #[service]
-            pub struct Sessions;
-            impl Sessions { pub fn open() -> Session { Session } }
-        }",
-    ));
-    assert!(
-        resource.contains("interface sessions {\n  use main.{token};\n"),
-        "{resource}"
     );
     let hook = resolved(&expanded(
         "example:wahook@1.0.0",
@@ -1243,18 +1222,24 @@ const FRONT: &str = "mod wb {
 }";
 
 /// A type is defined in the interface of the earliest service that mentions it, through its
-/// functions, its resources' functions or other types, and re-exported from there; so a first
-/// service handing out a later service's resource does not make the later one `use` it back.
-/// Interfaces that would still `use` each other are an error naming them.
+/// functions, its resources' functions or other types, and re-exported from there; a later service
+/// mentioning it `use`s it. A resource stays with its own service: another one handing it out is
+/// refused, as `a_resource_is_returned_only_from_its_own_interface` shows.
 #[test]
 fn a_type_is_defined_by_the_earliest_service_that_mentions_it() {
-    let module = expanded("example:wb@1.0.0", FRONT);
+    let module = expanded(
+        "example:wb@1.0.0",
+        &FRONT.replace(
+            "impl Front { pub fn start() -> Builder { Builder } }",
+            "impl Front { pub fn summary() -> Stats { Stats { words: 0 } } }",
+        ),
+    );
     assert_eq!(
         resolved(&module),
-        "package example:wb@1.0.0;\n\ninterface front {\n  use texts.{builder};\n  start: func() -> builder;\n}\n\ninterface texts {\n  /// Counts over the texts.\n  record stats {\n    words: u32,\n  }\n  resource builder {\n    text: func() -> u32;\n  }\n  counts: func() -> stats;\n}\n\nworld wb {\n  export front;\n  export texts;\n}\n"
+        "package example:wb@1.0.0;\n\ninterface front {\n  /// Counts over the texts.\n  record stats {\n    words: u32,\n  }\n  summary: func() -> stats;\n}\n\ninterface texts {\n  use front.{stats};\n  resource builder {\n    text: func() -> u32;\n  }\n  counts: func() -> stats;\n}\n\nworld wb {\n  export front;\n  export texts;\n}\n"
     );
     assert!(
-        tokens(&module).contains("pub use exports :: example :: wb :: texts :: { Stats } ;"),
+        tokens(&module).contains("pub use exports :: example :: wb :: front :: { Stats } ;"),
         "{}",
         tokens(&module)
     );
@@ -1283,19 +1268,135 @@ fn a_type_is_defined_by_the_earliest_service_that_mentions_it() {
         record.contains("interface sessions {\n  record info {\n    n: u32,\n    detail: detail,\n  }\n  record detail {\n"),
         "{record}"
     );
-    // Both services mention the record and the first hands out the second's resource: each
-    // interface would `use` the other.
-    let error = refused(
-        "example:wb@1.0.0",
-        &FRONT.replace(
+}
+
+/// The runtime returns a resource only from the interface that defines it, and moves one only into
+/// it: a derived function, a resource's method or a static function returning another interface's
+/// resource, alone, nested or in a record of the module, is refused on its result type, and so is
+/// a parameter whose record holds one, or a hook's input whose record holds a resource. The
+/// interface that defines the resource returns it, in a record too.
+#[test]
+fn a_resource_is_returned_only_from_its_own_interface() {
+    for (front, message) in [
+        (
             "impl Front { pub fn start() -> Builder { Builder } }",
-            "impl Front { pub fn start() -> Builder { Builder } pub fn summary() -> Stats { Stats { words: 0 } } }",
+            "`Front::start` returns `Builder`, a resource of the interface `texts`: the runtime returns a resource only from the interface that defines it, so return it from a function of `Texts` or of one of its resources",
         ),
+        (
+            "impl Front { pub fn find() -> Result<Option<Builder>, String> { Ok(None) } }",
+            "`Front::find` returns `Builder`, a resource of the interface `texts`",
+        ),
+        (
+            "pub struct Lease { pub builder: Builder }
+            impl Front { pub fn lend() -> Vec<Lease> { Vec::new() } }",
+            "`Front::lend` returns `Lease`, which holds `Builder`, a resource of the interface `texts`",
+        ),
+        (
+            "pub struct Lease { pub builder: Builder }
+            impl Front { pub fn keep(lease: Lease) {} }",
+            "`Front::keep` takes `Lease`, which holds `Builder`, a resource of the interface `texts`: the runtime moves an owned resource only into the interface that defines it, so take it in a function of `Texts` or of one of its resources",
+        ),
+        (
+            "impl Front { pub fn ping() -> u32 { 0 } }
+            #[wit_resource(service = Front)]
+            pub struct Draft;
+            impl Draft {
+                pub fn text(&self) -> u32 { 0 }
+                pub fn fork() -> (u32, Builder) { (0, Builder) }
+            }",
+            "`Draft::fork` returns `Builder`, a resource of the interface `texts`",
+        ),
+    ] {
+        let error = refused(
+            "example:wb@1.0.0",
+            &FRONT.replace(
+                "impl Front { pub fn start() -> Builder { Builder } }",
+                front,
+            ),
+        );
+        assert!(error.contains(message), "{front}: {error}");
+    }
+    let error = refused(
+        "example:wa@1.0.0",
+        "mod wa {
+            #[wit_resource(service = Main)]
+            pub struct Token;
+            impl Token { pub fn id(&self) -> u32 { 7 } }
+            #[service]
+            pub struct Main;
+            impl Main { pub fn issue() -> Token { Token } }
+            #[wit_resource(service = Sessions)]
+            pub struct Session;
+            impl Session { pub fn grant(&self) -> Token { Token } }
+            #[service]
+            pub struct Sessions;
+            impl Sessions { pub fn open() -> Session { Session } }
+        }",
     );
     assert!(
-        error.contains("`front` uses `{builder}` of `texts`, `texts` uses `{stats}` of `front`: WIT refuses interfaces that depend on themselves through `use`"),
+        error.contains("`Session::grant` returns `Token`, a resource of the interface `main`"),
         "{error}"
     );
+    let dir = consumed("returned-cursor", CURSOR_WIT);
+    let error = refused_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        "mod keeper {
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper { pub fn open() -> Cursor { Cursor::start() } }
+            #[wit_resource(service = Keeper)]
+            pub struct Cursor { at: u32 }
+            impl Cursor {
+                #[constructor]
+                pub fn start() -> Self { Cursor { at: 0 } }
+                pub fn current(&self) -> book::Entry { todo!() }
+                pub fn all(&self) -> Vec<book::Entry> { todo!() }
+                pub fn merge(&self, other: book::Cursor) -> u32 { self.at }
+            }
+            #[service]
+            pub struct Tools;
+            impl Tools { pub fn fresh() -> Option<Cursor> { None } }
+        }",
+    );
+    assert!(
+        error.contains("`Tools::fresh` returns `Cursor`, a resource of the implemented interface example:ledger/book@1.0.0: the runtime returns a resource only from the interface that defines it"),
+        "{error}"
+    );
+    let error = refused(
+        "example:wahook@1.0.0",
+        "mod wahook {
+            #[hook(composition = series, input = Admission)]
+            pub struct Guard;
+            pub struct Admission { pub ticket: Ticket }
+            #[wit_resource]
+            pub struct Ticket;
+            impl Ticket { pub fn id(&self) -> u32 { 0 } }
+            #[service]
+            pub struct Admissions;
+            impl Admissions { pub fn issue() -> Ticket { Ticket } }
+        }",
+    );
+    assert!(
+        error.contains("the input of the hook `Guard` holds `Admission`, which holds the resource `Ticket`: a hook's input holds no resource"),
+        "{error}"
+    );
+    let own = resolved(&expanded(
+        "example:wb@1.0.0",
+        &FRONT
+            .replace(
+                "impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }",
+                "pub struct Lease { pub builder: Builder }
+            impl Texts {
+                pub fn counts() -> Stats { Stats { words: 0 } }
+                pub fn lend() -> Option<Lease> { None }
+            }",
+            )
+            .replace(
+                "impl Front { pub fn start() -> Builder { Builder } }",
+                "impl Front { pub fn ping() -> u32 { 0 } }",
+            ),
+    ));
+    assert!(own.contains("  lend: func() -> option<lease>;\n"), "{own}");
 }
 
 const DESK: &str = "mod desk {
