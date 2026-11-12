@@ -573,7 +573,9 @@ The macro rewrites the module with:
    component happens to call;
 3. only with the `no_std` option, the freestanding Wasm prelude: `#[global_allocator]` on
    `dlmalloc` and a `#[panic_handler]` that traps, under `#[cfg(target_arch = "wasm32")]`; std
-   guests keep their standard runtime, and host checks require no Wasm target;
+   guests keep their standard runtime, and host checks require no Wasm target. When the macro
+   refuses the module of a `no_std` guest, the prelude comes with its error, which is then the
+   only one the compiler reports;
 4. `wit_bindgen::generate!({ inline: WIT, world, generate_all })`, the official macro with the WIT
    as a string, plus `path` when the Orb consumes other packages and, with a state, the kernel's
    `tembra:guest` package nested in the inline text and `serde` derives on the generated types,

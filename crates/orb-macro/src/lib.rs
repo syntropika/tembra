@@ -37,12 +37,42 @@ use quote::{format_ident, quote};
 use std::collections::{BTreeMap, BTreeSet};
 use syn::{
     Attribute, Fields, FnArg, Ident, Item, ItemFn, ItemMod, LitByteStr, LitInt, LitStr, Pat,
-    ReturnType, Token, Type, Visibility, parse_macro_input, spanned::Spanned,
+    ReturnType, Token, Type, Visibility, spanned::Spanned,
 };
 
 /// Declare a compiled Orb from a module; the crate documentation lists the rules.
 #[proc_macro_attribute]
 pub fn orb(attribute: TokenStream, item: TokenStream) -> TokenStream {
+    expansion(attribute.into(), item.into()).into()
+}
+
+/// The module's expansion, or the macro's error next to the runtime prelude the module would have
+/// brought: without its allocator and panic handler, a `no_std` crate would report their absence
+/// after the error that matters. A std crate has its own runtime and gets none.
+fn expansion(
+    attribute: proc_macro2::TokenStream,
+    item: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    // Read from the tokens, so that an attribute the macro refuses still says it.
+    let freestanding = attribute
+        .clone()
+        .into_iter()
+        .any(|token| matches!(&token, proc_macro2::TokenTree::Ident(ident) if ident == "no_std"));
+    let expanded = options(attribute)
+        .and_then(|options| Ok((options, syn::parse2::<ItemMod>(item)?)))
+        .and_then(|(options, module)| expand(options, module));
+    match expanded {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            let error = error.to_compile_error();
+            let prelude = freestanding.then(prelude);
+            quote! { #error #prelude }
+        }
+    }
+}
+
+/// Read the attribute's options.
+fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
     let mut options = Options::default();
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("package") {
@@ -62,11 +92,24 @@ pub fn orb(attribute: TokenStream, item: TokenStream) -> TokenStream {
         }
         Ok(())
     });
-    parse_macro_input!(attribute with parser);
-    let module = parse_macro_input!(item as ItemMod);
-    match expand(options, module) {
-        Ok(tokens) => tokens.into(),
-        Err(error) => error.to_compile_error().into(),
+    syn::parse::Parser::parse2(parser, attribute)?;
+    Ok(options)
+}
+
+/// The runtime prelude of a `no_std` component: the allocator and a panic handler that traps, for
+/// the Wasm target. On the host the crate builds with std, so `cargo check` and rust-analyzer
+/// need no Wasm target.
+fn prelude() -> proc_macro2::TokenStream {
+    quote! {
+        #[cfg(target_arch = "wasm32")]
+        #[global_allocator]
+        static __TEMBRA_ALLOCATOR: ::dlmalloc::GlobalDlmalloc = ::dlmalloc::GlobalDlmalloc;
+
+        #[cfg(target_arch = "wasm32")]
+        #[panic_handler]
+        fn __tembra_panic(_: &::core::panic::PanicInfo<'_>) -> ! {
+            ::core::arch::wasm32::unreachable()
+        }
     }
 }
 
@@ -1891,21 +1934,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             #derives
         });
     };
-    let runtime_prelude = options.no_std.then(|| {
-        quote! {
-            // Freestanding guests supply their own allocator and panic handler; std guests
-            // use the standard library's runtime. Host checks always use std.
-            #[cfg(target_arch = "wasm32")]
-            #[global_allocator]
-            static __TEMBRA_ALLOCATOR: ::dlmalloc::GlobalDlmalloc = ::dlmalloc::GlobalDlmalloc;
-
-            #[cfg(target_arch = "wasm32")]
-            #[panic_handler]
-            fn __tembra_panic(_: &::core::panic::PanicInfo<'_>) -> ! {
-                ::core::arch::wasm32::unreachable()
-            }
-        }
-    });
+    let runtime_prelude = options.no_std.then(prelude);
     Ok(quote! {
         #(#outer_attrs)*
         #vis mod #module_ident {

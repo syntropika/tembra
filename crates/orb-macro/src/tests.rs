@@ -1,6 +1,6 @@
 //! The macro's reading of a module, checked on its output: the WIT it derives, the manifest it
 //! embeds and the errors it reports. The generated bindings themselves compile in the examples.
-use super::{Options, expand};
+use super::{Options, expand, expansion};
 use syn::{Expr, Item, ItemMod, Lit, UnOp};
 
 /// Expand a module under `#[orb(package = ...)]` and parse the generated module back.
@@ -2480,6 +2480,56 @@ fn the_state_derives_leave_out_the_types_that_cannot_carry_them() {
         "{}",
         tokens(&stateless)
     );
+}
+
+/// A freestanding (`no_std`) guest gets the runtime prelude once, inside its module, and a refused
+/// module still brings it next to the error, so the crate reports the macro's error alone, not the
+/// allocator and the panic handler it lacks without the module. A std guest never gets it.
+#[test]
+fn a_refused_module_brings_the_runtime_prelude_of_a_freestanding_guest() {
+    let count = |tokens: &str, needle: &str| tokens.matches(needle).count();
+    for (freestanding, tail) in [(true, quote::quote!(, no_std)), (false, quote::quote!())] {
+        let prelude = usize::from(freestanding);
+        let accepted = expansion(
+            quote::quote!(package = "example:book@1.0.0" #tail),
+            syn::parse_str(&ledger("#[service]")).unwrap(),
+        )
+        .to_string();
+        assert_eq!(count(&accepted, "compile_error"), 0, "{accepted}");
+        assert_eq!(
+            count(&accepted, "# [global_allocator]"),
+            prelude,
+            "{accepted}"
+        );
+        assert_eq!(count(&accepted, "# [panic_handler]"), prelude, "{accepted}");
+        for (attribute, module, message) in [
+            (
+                quote::quote!(package = "example:book@1.0.0" #tail),
+                ledger("#[service]").replace("pub fn count", "pub fn then"),
+                "a member every reference to a service object has",
+            ),
+            (
+                quote::quote!(package = "example:book@1.0.0", colour #tail),
+                ledger("#[service]"),
+                "unknown option",
+            ),
+            (
+                quote::quote!(package = "example:book@1.0.0" #tail),
+                "pub struct NotAModule;".to_owned(),
+                "expected `mod`",
+            ),
+        ] {
+            let refused = expansion(attribute, syn::parse_str(&module).unwrap()).to_string();
+            assert_eq!(count(&refused, "compile_error"), 1, "{refused}");
+            assert!(refused.contains(message), "{message}\n{refused}");
+            assert_eq!(
+                count(&refused, "# [global_allocator]"),
+                prelude,
+                "{refused}"
+            );
+            assert_eq!(count(&refused, "# [panic_handler]"), prelude, "{refused}");
+        }
+    }
 }
 
 /// The prelude names the generated code could mean; it spells each by its path instead.
