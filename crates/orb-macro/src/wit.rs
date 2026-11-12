@@ -143,12 +143,28 @@ pub(crate) fn render<'a>(
         }
         let name = kebab(&service.ident);
         wit.push_str(&format!("interface {name} {{\n"));
+        // The interface mentions what its functions name, and what the constructors, methods
+        // and static functions of its own resources name.
         let mut mentioned = Vec::new();
-        for function in &service.functions {
+        let owned = || {
+            resources
+                .iter()
+                .filter(|resource| owner_of(resource) == name)
+        };
+        let functions = service
+            .functions
+            .iter()
+            .chain(owned().flat_map(|resource| resource.methods.iter().chain(&resource.statics)));
+        for function in functions {
             for (_, ty, _) in &function.params {
                 references(ty, &mut mentioned);
             }
             if let Some((ty, _)) = &function.result {
+                references(ty, &mut mentioned);
+            }
+        }
+        for constructor in owned().filter_map(|resource| resource.constructor.as_ref()) {
+            for (_, ty, _) in &constructor.params {
                 references(ty, &mut mentioned);
             }
         }

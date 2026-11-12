@@ -704,6 +704,85 @@ fn an_import_enters_the_world_and_is_reexported() {
     assert!(tokens(&module).contains("pub use self :: example :: ledger :: book ;"));
 }
 
+/// The derived WIT, checked to resolve as a package.
+fn resolved(module: &ItemMod) -> String {
+    let text = wit(module);
+    let mut resolve = wit_parser::Resolve::default();
+    resolve
+        .push_str("orb.wit", &text)
+        .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
+    text
+}
+
+/// An interface `use`s what the constructors, methods and static functions of its own resources
+/// name, as it does for its own functions: a module record, another service's resource, a type a
+/// derived hook defines.
+#[test]
+fn an_interface_uses_what_its_resources_mention() {
+    let record = resolved(&expanded(
+        "example:wa@1.0.0",
+        "mod wa {
+            pub struct Info { pub n: u32 }
+            #[service]
+            pub struct Main;
+            impl Main { pub fn ping() -> u32 { 1 } }
+            #[wit_resource(service = Sessions)]
+            pub struct Session;
+            impl Session { pub fn info(&self) -> Info { Info { n: 1 } } }
+            #[service]
+            pub struct Sessions;
+            impl Sessions { pub fn open() -> Session { Session } }
+        }",
+    ));
+    assert!(
+        record.contains("resource session {\n    info: func() -> info;\n  }"),
+        "{record}"
+    );
+    let resource = resolved(&expanded(
+        "example:wa@1.0.0",
+        "mod wa {
+            #[wit_resource(service = Main)]
+            pub struct Token;
+            impl Token { pub fn id(&self) -> u32 { 7 } }
+            #[service]
+            pub struct Main;
+            impl Main { pub fn issue() -> Token { Token } }
+            #[wit_resource(service = Sessions)]
+            pub struct Session;
+            impl Session { pub fn grant(&self) -> Token { Token } }
+            #[service]
+            pub struct Sessions;
+            impl Sessions { pub fn open() -> Session { Session } }
+        }",
+    ));
+    assert!(
+        resource.contains("interface sessions {\n  use main.{token};\n"),
+        "{resource}"
+    );
+    let hook = resolved(&expanded(
+        "example:wahook@1.0.0",
+        "mod wahook {
+            #[hook(composition = waterfall, input = Admission)]
+            pub struct Guard;
+            pub struct Admission { pub value: i32, pub blocked: bool }
+            #[wit_resource]
+            pub struct Ticket;
+            impl Ticket {
+                #[constructor]
+                pub fn new(admission: Admission) -> Self { Ticket }
+                pub fn admission(&self) -> Admission { todo!() }
+            }
+            #[service]
+            pub struct Admissions;
+            impl Admissions { pub fn issue() -> Ticket { Ticket } }
+        }",
+    ));
+    assert!(
+        hook.contains("interface admissions {\n  use guard.{admission};\n"),
+        "{hook}"
+    );
+}
+
 const DESK: &str = "mod desk {
     /// One session.
     #[wit_resource]
