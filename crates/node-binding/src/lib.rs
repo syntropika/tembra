@@ -118,12 +118,14 @@ impl NodeContract {
     /// Package a checked component with its WIT-derived roles.
     ///
     /// A component built with `#[orb]` carries roles in its core module: the hooks it declares,
-    /// with their composition, the hooks it contributes to, with their priorities, and the
-    /// lifetimes of its services. They are packaged as the component carries them.
-    /// `contributes` maps exported hook callbacks to priorities, next to the contributions the
-    /// component carries; a hook both name must have the same priority in both. `references` maps
-    /// an imported reference-view binding to the provider interface identity it addresses; the
-    /// contract checks each view's shape before packaging.
+    /// with their composition, the hooks it contributes to, with their priorities, the lifetimes
+    /// of its services and the reference views of the interfaces it imports by key. They are
+    /// packaged as the component carries them. `contributes` maps exported hook callbacks to
+    /// priorities, next to the contributions the component carries; a hook both name must have
+    /// the same priority in both. `references` maps an imported reference-view binding to the
+    /// provider interface identity it addresses, next to the views the component carries; a view
+    /// both name must address the same interface in both. The contract checks each view's shape
+    /// before packaging.
     #[napi]
     pub fn component_artifact(
         &self,
@@ -185,8 +187,9 @@ impl NodeContract {
 
 /// The roles to package a component with: the ones it carries, as
 /// `Contract::embedded_roles` reads them, with the given contributions and reference views. A
-/// hook the component and the caller both contribute to keeps the priority they agree on; two
-/// different priorities are refused, naming both.
+/// hook the component and the caller both contribute to keeps the priority they agree on, and a
+/// view both name the interface they agree on; two different priorities or interfaces are
+/// refused, naming both.
 fn component_roles(
     contract: &tembra_contracts::Contract,
     component: &[u8],
@@ -204,7 +207,16 @@ fn component_roles(
         }
         roles.contributions.insert(hook, priority);
     }
-    roles.references = references;
+    for (view, target) in references {
+        if let Some(embedded) = roles.references.get(&view)
+            && *embedded != target
+        {
+            return Err(tembra_contracts::Error(format!(
+                "{view}: the component imports {embedded} by key through it, `references` maps it to {target}"
+            )));
+        }
+        roles.references.insert(view, target);
+    }
     Ok(roles)
 }
 

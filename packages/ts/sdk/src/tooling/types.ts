@@ -12,7 +12,9 @@ export interface BuildTarget {
   contributes?: Readonly<Record<string, number>>;
   /**
    * Compiled reference-view imports, by import binding, mapped to the provider interface identity
-   * each view addresses. The contract checks every view's shape before packaging.
+   * each view addresses, next to those a component built with `#[orb]` carries; a view named by
+   * both must address the same interface. The contract checks every view's shape before
+   * packaging.
    */
   references?: Readonly<Record<string, string>>;
   /**
