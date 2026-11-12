@@ -1,14 +1,13 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-12, 02:59 CET
+- **Aggiornato:** 2026-11-12, 14:15 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   base `main`
-- **Stato:** strada A. La PR #1 è a `8dfb26e`: 55 commit
-  sopra `main` (`7966893`), ribasati il 12/11 (vedi «Secondo
-  ribase»). CI verde, `quality` e `acceptance`; GitHub la dà
-  `MERGEABLE`/`CLEAN` (è ancora draft). In attesa dell'ok di
-  Giacomo: due commit locali sugli esempi e il corpo della PR
-  aggiornato. Poi i fix (vedi «Da fare»).
+- **Stato:** strada A. La PR #1 è a `7119fcc`, sopra `main`
+  (`7966893`): la seconda review del 12/11 e i suoi fix,
+  più due commit di Javier. Corpo della PR aggiornato. CI su
+  `7119fcc` in corso (run `43224859881` push e `43224872989`
+  pull_request). Vedi «Seconda review (12/11)».
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -16,6 +15,81 @@ alla sessione che riprende il lavoro, anche da un'altra
 macchina: si parte da «Inizia qui». Per aggiornarlo si fa
 commit e push sullo stesso branch, dal worktree
 `.worktrees/notes`.
+
+## Seconda review (12/11)
+
+Da leggere per primo: riassume il 12/11 pomeriggio.
+
+- Review `/code-review high` della PR a `8dfb26e`, dopo i due
+  ribase e la PR #2: dei 15 problemi della prima review i 13
+  aperti erano tutti presenti, più una trentina di difetti
+  nuovi, quasi tutti riprodotti con fixture o test.
+- Fix pushati in fast-forward, ognuno con un test che fallisce
+  senza il fix:
+  - `8dfb26e..be89e31`: 32 commit (runtime, `cargo tembra`,
+    17 della macro, esempi, CI `just test-orb-examples`);
+  - Javier ha poi pushato sopra `ca5ac69` (authoring: async,
+    std di default, facade `tembra`) e `5ffd831` (root
+    completata ≠ cancellata);
+  - `5ffd831..7119fcc`: 13 commit ribasati sui suoi, conflitti
+    della macro risolti tenendo entrambe le parti (bridge
+    async + handle annidati + nomi; prelude solo con
+    `no_std`, anche sugli errori; `guest::SOURCE`).
+- Verificato su `7119fcc`: `just check` (689 test Rust in 123
+  binari, TS 551), clippy, machete, `just test-orb-examples`,
+  `just test-orb-macro`; ogni commit passa fmt e check.
+- Il report dei 15 findings più gravi è nella sessione
+  Claude; esiti: tutti risolti tranne il #6, in parte.
+
+Decisioni prese da Claude su delega di Giacomo («decidi
+te», 12/11):
+
+- **#10, cancellazione:** dove esiste una risposta vera, il
+  guest la riceve invece di un trap. Il principal è letto
+  all'ammissione della chiamata; un secondo `cancel()` non fa
+  niente; `update` restituisce il valore che il kernel ha
+  tenuto. `hook.run` e le chiamate alle dipendenze restano
+  trap, come su `main`. Stesso comportamento nel browser.
+- **#6, stato:** resta JSON (lo stato tipato è una domanda
+  aperta per Javier nella PR). La macro rifiuta NaN e ±inf
+  prima di salvare; la perdita di precisione oltre 2^53 sugli
+  host JS è documentata, non risolta.
+- **#9, `node-binding`:** il manifest della macro si legge in
+  `tembra-contracts` (`EmbeddedManifest`), così anche
+  `build()` dell'SDK TS tiene hook e service policy.
+- **#7:** `cargo tembra build` scrive in `contract/deps/` i
+  package standard da cui il contratto dipende; un altro Orb
+  lo consuma con `wit = "../x/contract"`.
+- **Sorgenti con `tembra:guest`:** rifiutati
+  all'installazione (nativo e browser), non nell'artifact: i
+  test TS usano artifact sorgente per leggere il contratto.
+- Confermate le scelte dei fix della macro: un tipo condiviso
+  va nel primo servizio che lo cita; un `impl Default` scritto
+  a mano fa da valore iniziale; `-0.0` diventa `0`; il
+  `contract/` vecchio di un world rinominato si cancella;
+  `system_capability` è pubblica.
+
+Da sapere:
+
+- Nel worktree `.worktrees/pr` il branch locale
+  `feat/rust-first-orbs` ha due commit mai pushati
+  (`87fb7d4` lockfile, `727b577` `run.sh` eseguibile): sono gli
+  stessi fix già nella PR (`03b7092`, `9cd40da`). Prima di
+  lavorarci: `git fetch` e riallinearlo a
+  `origin/feat/rust-first-orbs`, senza ripushare quei due.
+- `acceptance` può fallire su test di stream intermittenti
+  del base (per esempio
+  `an_idle_producer_ends_both_calls_at_their_terminal_timeout`):
+  rilanciare il job con `gh run rerun <id> --failed`.
+
+Resta da fare:
+
+- #6: interi oltre 2^53 sugli host JS (decisione con Javier:
+  JSON con interi a 64 bit come stringhe, o stato tipato).
+- `cargo tembra wit --emit` scrive un solo `.wit`, senza
+  `deps/`.
+- I README degli esempi elencano solo `contract/<world>.wit`.
+- Le chiavi: `#[orb]` non genera ancora reference view.
 
 ## Inizia qui: sessione sul server
 
@@ -520,7 +594,11 @@ Legenda:
 
 - **A** = aperto
 - **R** = risolto
+- **P** = risolto in parte
 - **—** = non si applica
+
+Colonna **PR** aggiornata al 12/11 pomeriggio (`7119fcc`),
+dopo la seconda review.
 
 Colonne:
 
@@ -531,19 +609,19 @@ Colonne:
 | -- | --------------------------------- | -- | ----- |
 | 1  | Il merge non compila (E0425)      | R  | —     |
 | 2  | `tembra:guest` rifiutato          | —  | R     |
-| 3  | `context::log` va in trap         | A  | R     |
-| 4  | Reload non validato               | A  | R     |
-| 5  | Discriminanti e serde persi       | A  | A     |
-| 6  | JSON di stato: NaN e u64          | A  | A     |
-| 7  | `contract/` non consumabili       | A  | A     |
-| 8  | Input di hook stringa/lista       | A  | A     |
-| 9  | `Binding::Hook` senza hook        | A  | R     |
-| 10 | `cancel()` ritira lo Store        | A  | R     |
-| 11 | Nomi Rust → WIT invalido          | A  | A     |
-| 12 | Tipi non usati rifiutati          | A  | A     |
-| 13 | `#[wit_resource]` WIT-first       | A  | A     |
-| 14 | `Option<Risorsa>` come risultato  | A  | A     |
-| 15 | Nessuna CI compila un guest       | A  | A     |
+| 3  | `context::log` va in trap         | R  | R     |
+| 4  | Reload non validato               | R  | R     |
+| 5  | Discriminanti e serde persi       | R  | A     |
+| 6  | JSON di stato: NaN e u64          | P  | A     |
+| 7  | `contract/` non consumabili       | R  | A     |
+| 8  | Input di hook stringa/lista       | R  | A     |
+| 9  | `Binding::Hook` senza hook        | R  | R     |
+| 10 | `cancel()` ritira lo Store        | R  | R     |
+| 11 | Nomi Rust → WIT invalido          | R  | A     |
+| 12 | Tipi non usati rifiutati          | R  | A     |
+| 13 | `#[wit_resource]` WIT-first       | R  | A     |
+| 14 | `Option<Risorsa>` come risultato  | R  | A     |
+| 15 | Nessuna CI compila un guest       | R  | A     |
 
 ### Dettagli
 
@@ -1130,6 +1208,9 @@ branch.
 
 ### Priorità dei fix, dopo il ribase
 
+Superata il 12/11 pomeriggio: tutti fatti tranne #6 in parte
+(vedi «Seconda review (12/11)»).
+
 1. **4** — al reload si perde lo stato, e la revisione va in
    quarantena.
 2. **15** — un job CI che compila i guest. Costa poco e
@@ -1231,3 +1312,7 @@ branch.
   le scelte del ribase (le sue tenute dove si poteva, cosa è
   cambiato nel suo codice). Aspettare la sua risposta prima
   di cambiare di nuovo quelle parti.
+- 12/11 pomeriggio: Giacomo ha delegato a Claude le scelte
+  aperte della seconda review («decidi te»). Le scelte prese
+  sono in «Seconda review (12/11)»; il #6 resta da decidere
+  con Javier.
