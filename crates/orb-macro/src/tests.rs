@@ -1067,6 +1067,126 @@ fn a_wit_resource_is_derived_from_the_struct_and_its_methods() {
     assert!(error.contains("handed out, never taken"), "{error}");
 }
 
+/// A resource inside an option, a result, a list or a tuple is wrapped where it is: the bridge
+/// spells the bindings' type with the handle in the resource's place and rebuilds the containers
+/// around it; a value holding no resource crosses as it is.
+#[test]
+fn a_nested_resource_is_wrapped_where_it_is() {
+    let module = expanded(
+        "example:desk@1.0.0",
+        &DESK.replace(
+            "pub fn open(n: u32) -> Session { Session::new(n) }",
+            "pub fn open(n: u32) -> Session { Session::new(n) }
+            pub fn find(n: u32) -> Option<Session> { None }
+            pub fn checked(n: u32) -> Result<Session, String> { todo!() }
+            pub fn refused(n: u32) -> Result<u32, Session> { todo!() }
+            pub fn many(n: u32) -> Vec<Session> { todo!() }
+            pub fn counted(n: u32) -> (Session, u32) { todo!() }
+            pub fn plain(n: u32) -> Option<u32> { None }",
+        ),
+    );
+    let module_path = "exports :: example :: desk :: sessions";
+    let generated = tokens(&module);
+    for expected in [
+        format!(
+            "fn find (n : u32) -> Option < {module_path} :: Session > {{ Sessions :: find (n) . map (| item | {module_path} :: Session :: new (item)) }}"
+        ),
+        format!(
+            "fn checked (n : u32) -> Result < {module_path} :: Session , String > {{ match Sessions :: checked (n) {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok ({module_path} :: Session :: new (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err (item) , }} }}"
+        ),
+        format!(
+            "fn refused (n : u32) -> Result < u32 , {module_path} :: Session > {{ match Sessions :: refused (n) {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok (item) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err ({module_path} :: Session :: new (item)) , }} }}"
+        ),
+        format!(
+            "fn many (n : u32) -> Vec < {module_path} :: Session > {{ Sessions :: many (n) . into_iter () . map (| item | {module_path} :: Session :: new (item)) . collect () }}"
+        ),
+        format!(
+            "fn counted (n : u32) -> ({module_path} :: Session , u32 ,) {{ {{ let (item0 , item1 ,) = Sessions :: counted (n) ; ({module_path} :: Session :: new (item0) , item1 ,) }} }}"
+        ),
+        "fn plain (n : u32) -> Option < u32 > { Sessions :: plain (n) }".into(),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+    // A resource's own method wraps the same way.
+    let twin = expanded(
+        "example:desk@1.0.0",
+        &DESK.replace(
+            "pub fn twin(&self) -> Session { Session { n: self.n } }",
+            "pub fn twin(&self) -> Option<Session> { None }",
+        ),
+    );
+    assert!(
+        tokens(&twin).contains(&format!(
+            "fn twin (& self ,) -> Option < {module_path} :: Session > {{ Session :: twin (self ,) . map (| item | {module_path} :: Session :: new (item)) }}"
+        )),
+        "{}",
+        tokens(&twin)
+    );
+}
+
+const NESTED_WIT: &str = "package example:ledger@1.0.0;
+interface book {
+  resource entry {
+    constructor(label: string);
+    next: func() -> option<entry>;
+    split: static func() -> tuple<entry, entry>;
+  }
+  type maybe = option<entry>;
+  find: func(label: string) -> option<entry>;
+  aliased: func(label: string) -> maybe;
+  many: func() -> list<result<entry, string>>;
+}
+";
+
+/// An implemented interface wraps its resources inside options, lists, results and tuples too,
+/// through an alias of one: the WIT says where they are.
+#[test]
+fn an_implemented_interface_wraps_its_nested_resources() {
+    let dir = consumed("nested", NESTED_WIT);
+    let module = orb_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        "mod keeper {
+            #[wit_resource(service = Keeper)]
+            pub struct Entry { label: String }
+            impl Entry {
+                #[constructor]
+                pub fn new(label: String) -> Self { Entry { label } }
+                pub fn next(&self) -> Option<Entry> { None }
+                pub fn split() -> (Entry, Entry) { todo!() }
+            }
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper {
+                pub fn find(label: String) -> Option<Entry> { None }
+                pub fn aliased(label: String) -> Option<Entry> { None }
+                pub fn many() -> Vec<Result<Entry, String>> { Vec::new() }
+            }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let book = "exports :: example :: ledger :: book";
+    let generated = tokens(&module);
+    for expected in [
+        format!(
+            "fn find (label : __tembra_alloc :: string :: String) -> :: core :: option :: Option < {book} :: Entry > {{ Keeper :: find (label) . map (| item | {book} :: Entry :: new (item)) }}"
+        ),
+        format!(
+            "fn aliased (label : __tembra_alloc :: string :: String) -> {book} :: Maybe {{ Keeper :: aliased (label) . map (| item | {book} :: Entry :: new (item)) }}"
+        ),
+        format!(
+            "Keeper :: many () . into_iter () . map (| item | match item {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok ({book} :: Entry :: new (item)) ,"
+        ),
+        format!(
+            "fn next (& self ,) -> :: core :: option :: Option < {book} :: Entry > {{ Entry :: next (self ,) . map (| item | {book} :: Entry :: new (item)) }}"
+        ),
+        format!(
+            "fn split () -> ({book} :: Entry , {book} :: Entry ,) {{ {{ let (item0 , item1 ,) = Entry :: split () ; ({book} :: Entry :: new (item0) , {book} :: Entry :: new (item1) ,) }} }}"
+        ),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+}
+
 /// The constructor is the function marked `#[constructor]`, of any name; a `pub fn new` without
 /// the marker is a static function of the resource, and the marked function has one shape.
 #[test]

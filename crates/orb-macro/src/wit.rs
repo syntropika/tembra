@@ -1,5 +1,5 @@
 //! The WIT text derived from the module items, and the consumed packages it refers to.
-use crate::{Composition, Declared, Function, Service, Shape, ShapeKind, WitResource};
+use crate::{Composition, Declared, Function, Handles, Service, Shape, ShapeKind, WitResource};
 use heck::{ToKebabCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use std::{
@@ -525,9 +525,9 @@ pub(crate) struct Callback {
 pub(crate) struct Spelled {
     pub import: String,
     pub export: String,
-    /// The UpperCamelCase name of the resource this type is an owned handle of, if it is one: an
-    /// exporter wraps the author's value into the bindings' handle type.
-    pub resource: Option<String>,
+    /// Where a value of the type holds owned resource handles, if anywhere: an exporter wraps
+    /// each of the author's values there into the bindings' handle type.
+    pub handles: Option<Handles>,
 }
 
 /// An interface of a consumed package, as the bindings spell it: its freestanding functions and
@@ -602,7 +602,7 @@ pub(crate) fn consumed<'a>(
                 Ok(Spelled {
                     import: rust_type(&resolve, ty, &import)?,
                     export: rust_type(&resolve, ty, &export)?,
-                    resource: owned_resource(&resolve, ty),
+                    handles: handles(&resolve, ty),
                 })
             };
             let function = |function: &wit_parser::Function| -> syn::Result<ConsumedFunction> {
@@ -678,22 +678,29 @@ pub(crate) fn consumed<'a>(
         .collect()
 }
 
-/// The resource a WIT type is an owned handle of, through aliases, as the bindings name it.
-fn owned_resource(resolve: &Resolve, mut ty: wit_parser::Type) -> Option<String> {
-    loop {
-        let wit_parser::Type::Id(id) = ty else {
-            return None;
-        };
-        match &resolve.types[id].kind {
-            TypeDefKind::Handle(wit_parser::Handle::Own(resource)) => {
-                return resolve.types[*resource]
-                    .name
-                    .as_deref()
-                    .map(ToUpperCamelCase::to_upper_camel_case);
-            }
-            TypeDefKind::Type(inner) => ty = *inner,
-            _ => return None,
+/// Where a WIT type holds owned resource handles, as the bindings name the resources: a handle
+/// itself, or an option, a list, a result or a tuple around one, named or not, through aliases. A
+/// record or a variant is the bindings' own type, which the author builds with the handles in it.
+fn handles(resolve: &Resolve, ty: wit_parser::Type) -> Option<Handles> {
+    let wit_parser::Type::Id(id) = dealias(resolve, ty) else {
+        return None;
+    };
+    let part = |ty: Option<wit_parser::Type>| ty.and_then(|ty| handles(resolve, ty));
+    match &resolve.types[id].kind {
+        TypeDefKind::Handle(wit_parser::Handle::Own(resource)) => {
+            let name = resolve.types[*resource].name.as_deref()?;
+            Some(Handles::Resource(Ident::new(
+                &name.to_upper_camel_case(),
+                Span::call_site(),
+            )))
         }
+        TypeDefKind::Option(inner) => Handles::option(handles(resolve, *inner)),
+        TypeDefKind::List(inner) => Handles::list(handles(resolve, *inner)),
+        TypeDefKind::Result(result) => Handles::result(part(result.ok), part(result.err)),
+        TypeDefKind::Tuple(tuple) => {
+            Handles::tuple(tuple.types.iter().map(|ty| handles(resolve, *ty)).collect())
+        }
+        _ => None,
     }
 }
 
@@ -795,7 +802,7 @@ pub(crate) fn callbacks<'a>(
                 Ok(Spelled {
                     import: rust_type(&resolve, ty, &import)?,
                     export: rust_type(&resolve, ty, &export)?,
-                    resource: owned_resource(&resolve, ty),
+                    handles: handles(&resolve, ty),
                 })
             };
             Ok((

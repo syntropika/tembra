@@ -2173,8 +2173,9 @@ fn check_async(function: &Function, expected: &wit::ConsumedFunction) -> syn::Re
     ))
 }
 
-/// The result of a derived function's bridge: a resource is wrapped into the bindings' handle
-/// type of the interface's module, any other value is returned as it is.
+/// The result of a derived function's bridge: each resource the value holds, itself or inside
+/// options, results, lists and tuples, is wrapped into the bindings' handle type of the
+/// interface's module; a value holding none is returned as it is.
 fn derived_result(
     result: &Option<(Type, String)>,
     module: &proc_macro2::TokenStream,
@@ -2184,21 +2185,180 @@ fn derived_result(
     let Some((ty, _)) = result else {
         return (quote! {}, call);
     };
-    let resource = match ty {
-        Type::Path(path) => path
-            .path
-            .segments
-            .last()
-            .filter(|segment| resources.contains(&segment.ident.to_string()))
-            .map(|segment| segment.ident.clone()),
-        _ => None,
-    };
-    match resource {
-        Some(resource) => (
-            quote! { -> #module::#resource },
-            quote! { #module::#resource::new(#call) },
-        ),
+    match handles_of(ty, resources) {
+        Some(handles) => {
+            let spelled = with_handles(ty, resources, module);
+            (quote! { -> #spelled }, wrap(&handles, call, module))
+        }
         None => (quote! { -> #ty }, call),
+    }
+}
+
+/// Where a value holds owned resources, which a bridge wraps into the bindings' handle types: a
+/// resource itself, by the name of its handle type, or a container rebuilt around what it holds.
+/// `None` stands for a part that holds no resource and crosses as it is.
+pub(crate) enum Handles {
+    Resource(Ident),
+    Option(Box<Handles>),
+    List(Box<Handles>),
+    Result(Option<Box<Handles>>, Option<Box<Handles>>),
+    Tuple(Vec<Option<Handles>>),
+}
+
+/// The containers, each holding what its parts hold, or `None` when no part holds a resource.
+impl Handles {
+    /// An option around `inner`.
+    pub(crate) fn option(inner: Option<Handles>) -> Option<Handles> {
+        Some(Handles::Option(Box::new(inner?)))
+    }
+
+    /// A list of `inner`.
+    pub(crate) fn list(inner: Option<Handles>) -> Option<Handles> {
+        Some(Handles::List(Box::new(inner?)))
+    }
+
+    /// A result with `ok` and `err` on its sides.
+    pub(crate) fn result(ok: Option<Handles>, err: Option<Handles>) -> Option<Handles> {
+        (ok.is_some() || err.is_some())
+            .then(|| Handles::Result(ok.map(Box::new), err.map(Box::new)))
+    }
+
+    /// A tuple of `items`.
+    pub(crate) fn tuple(items: Vec<Option<Handles>>) -> Option<Handles> {
+        items
+            .iter()
+            .any(Option::is_some)
+            .then_some(Handles::Tuple(items))
+    }
+}
+
+/// Where an author's type holds a resource of the module, read by the names `wit_type` reads:
+/// `Option`, `Vec`, `Result` and tuples around a type whose last segment is a resource's name.
+fn handles_of(ty: &Type, resources: &BTreeSet<String>) -> Option<Handles> {
+    match ty {
+        Type::Path(path) => {
+            let segment = path.path.segments.last()?;
+            let arguments: Vec<&Type> = match &segment.arguments {
+                syn::PathArguments::AngleBracketed(arguments) => arguments
+                    .args
+                    .iter()
+                    .filter_map(|argument| match argument {
+                        syn::GenericArgument::Type(ty) => Some(ty),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            match (segment.ident.to_string().as_str(), arguments.as_slice()) {
+                (name, []) if resources.contains(name) => {
+                    Some(Handles::Resource(segment.ident.clone()))
+                }
+                ("Option", [inner]) => Handles::option(handles_of(inner, resources)),
+                ("Vec", [inner]) => Handles::list(handles_of(inner, resources)),
+                ("Result", [ok, err]) => {
+                    Handles::result(handles_of(ok, resources), handles_of(err, resources))
+                }
+                _ => None,
+            }
+        }
+        Type::Tuple(tuple) => Handles::tuple(
+            tuple
+                .elems
+                .iter()
+                .map(|ty| handles_of(ty, resources))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// The author's type as the bindings spell it in `module`: each resource of the module is the
+/// handle type there, everything else keeps the author's spelling.
+fn with_handles(
+    ty: &Type,
+    resources: &BTreeSet<String>,
+    module: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    match ty {
+        Type::Path(path) => {
+            let Some(last) = path.path.segments.last() else {
+                return quote! { #ty };
+            };
+            let ident = &last.ident;
+            match &last.arguments {
+                syn::PathArguments::None if resources.contains(&ident.to_string()) => {
+                    quote! { #module::#ident }
+                }
+                syn::PathArguments::AngleBracketed(arguments) => {
+                    let leading = &path.path.leading_colon;
+                    let prefix = path
+                        .path
+                        .segments
+                        .iter()
+                        .take(path.path.segments.len() - 1)
+                        .map(|segment| quote! { #segment:: });
+                    let arguments = arguments.args.iter().map(|argument| match argument {
+                        syn::GenericArgument::Type(ty) => with_handles(ty, resources, module),
+                        other => quote! { #other },
+                    });
+                    quote! { #leading #(#prefix)* #ident<#(#arguments),*> }
+                }
+                _ => quote! { #ty },
+            }
+        }
+        Type::Tuple(tuple) => {
+            let elements = tuple
+                .elems
+                .iter()
+                .map(|ty| with_handles(ty, resources, module));
+            quote! { (#(#elements,)*) }
+        }
+        _ => quote! { #ty },
+    }
+}
+
+/// An expression turning `value` into the bindings' type: each resource `handles` places in it
+/// is wrapped into its handle type of `module`, the interface's generated module, and the
+/// options, lists, results and tuples around one are rebuilt.
+fn wrap(
+    handles: &Handles,
+    value: proc_macro2::TokenStream,
+    module: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let part = |handles: Option<&Handles>, value: proc_macro2::TokenStream| match handles {
+        Some(handles) => wrap(handles, value, module),
+        None => value,
+    };
+    match handles {
+        Handles::Resource(resource) => quote! { #module::#resource::new(#value) },
+        Handles::Option(inner) => {
+            let inner = wrap(inner, quote! { item }, module);
+            quote! { #value.map(|item| #inner) }
+        }
+        Handles::List(inner) => {
+            let inner = wrap(inner, quote! { item }, module);
+            quote! { #value.into_iter().map(|item| #inner).collect() }
+        }
+        Handles::Result(ok, err) => {
+            let ok = part(ok.as_deref(), quote! { item });
+            let err = part(err.as_deref(), quote! { item });
+            quote! {
+                match #value {
+                    ::core::result::Result::Ok(item) => ::core::result::Result::Ok(#ok),
+                    ::core::result::Result::Err(item) => ::core::result::Result::Err(#err),
+                }
+            }
+        }
+        Handles::Tuple(items) => {
+            let names: Vec<Ident> = (0..items.len())
+                .map(|index| format_ident!("item{index}"))
+                .collect();
+            let parts = items
+                .iter()
+                .zip(&names)
+                .map(|(handles, name)| part(handles.as_ref(), quote! { #name }));
+            quote! { { let (#(#names,)*) = #value; (#(#parts,)*) } }
+        }
     }
 }
 
@@ -2254,55 +2414,55 @@ fn derived_resource(
 }
 
 /// One function of an implemented interface as its bridge spells it: parameter names and
-/// declarations, the result, and the resource a returned value is wrapped into, if any.
-struct Signature {
+/// declarations, the result, and where a returned value holds resources to wrap, if anywhere.
+struct Signature<'a> {
     names: Vec<Ident>,
     params: Vec<proc_macro2::TokenStream>,
     result: proc_macro2::TokenStream,
-    wrap: Option<Ident>,
+    handles: Option<&'a Handles>,
 }
 
-/// A function of a consumed interface spelled for a bridge `depth` modules below the Orb module.
-fn signature(function: &wit::ConsumedFunction, depth: usize) -> syn::Result<Signature> {
+/// The parameters and the result of a function of a consumed interface, spelled for a bridge
+/// `depth` modules below the Orb module.
+fn signature<'a>(
+    params: &[(String, wit::Spelled)],
+    result: Option<&'a wit::Spelled>,
+    depth: usize,
+) -> syn::Result<Signature<'a>> {
     let spelled =
         |spelling: &str| -> syn::Result<Type> { syn::parse_str(&rooted(spelling, depth)) };
     let mut names = Vec::new();
-    let mut params = Vec::new();
-    for (param, spelling) in &function.params {
+    let mut declarations = Vec::new();
+    for (param, spelling) in params {
         let ident = format_ident!("{}", param.to_snake_case());
         let ty = spelled(&spelling.export)?;
-        params.push(quote! { #ident: #ty });
+        declarations.push(quote! { #ident: #ty });
         names.push(ident);
     }
-    let result = match &function.result {
+    let spelled_result = match result {
         Some(spelling) => {
             let ty = spelled(&spelling.export)?;
             quote! { -> #ty }
         }
         None => quote! {},
     };
-    let wrap = function
-        .result
-        .as_ref()
-        .and_then(|spelling| spelling.resource.as_deref())
-        .map(|resource| format_ident!("{resource}"));
     Ok(Signature {
         names,
-        params,
-        result,
-        wrap,
+        params: declarations,
+        result: spelled_result,
+        handles: result.and_then(|spelling| spelling.handles.as_ref()),
     })
 }
 
-/// A call whose result, when it is a resource, is wrapped into the bindings' handle type of
-/// `module`, the interface's generated module.
+/// A call whose result is turned into the bindings' type of `module`, the interface's generated
+/// module: each resource it holds is wrapped into its handle type.
 fn wrapped(
-    wrap: &Option<Ident>,
+    handles: Option<&Handles>,
     module: &proc_macro2::TokenStream,
     call: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    match wrap {
-        Some(resource) => quote! { #module::#resource::new(#call) },
+    match handles {
+        Some(handles) => wrap(handles, call, module),
         None => call,
     }
 }
@@ -2334,11 +2494,11 @@ fn implemented_service(
             names,
             params,
             result,
-            wrap,
-        } = signature(function, depth)?;
+            handles,
+        } = signature(&function.params, function.result.as_ref(), depth)?;
         let (asynchronous, await_) = async_bridge(function.asynchronous);
         let body = wrapped(
-            &wrap,
+            handles,
             &module,
             quote! { #target::#ident(#(#names),*) #await_ },
         );
@@ -2366,25 +2526,7 @@ fn implemented_service(
                     ident: constructor, ..
                 }),
             ) => {
-                let new = wit::ConsumedFunction {
-                    name: "new".into(),
-                    asynchronous: false,
-                    params: params
-                        .iter()
-                        .map(|(name, spelling)| {
-                            (
-                                name.clone(),
-                                wit::Spelled {
-                                    import: spelling.import.clone(),
-                                    export: spelling.export.clone(),
-                                    resource: spelling.resource.clone(),
-                                },
-                            )
-                        })
-                        .collect(),
-                    result: None,
-                };
-                let Signature { names, params, .. } = signature(&new, local)?;
+                let Signature { names, params, .. } = signature(params, None, local)?;
                 quote! { fn new(#(#params),*) -> Self { #ident::#constructor(#(#names),*) } }
             }
             _ => quote! {},
@@ -2396,11 +2538,11 @@ fn implemented_service(
                 names,
                 params,
                 result,
-                wrap,
-            } = signature(method, local)?;
+                handles,
+            } = signature(&method.params, method.result.as_ref(), local)?;
             let (asynchronous, await_) = async_bridge(method.asynchronous);
             let call = quote! { #ident::#name(self, #(#names),*) #await_ };
-            let body = wrapped(&wrap, &local_module, call);
+            let body = wrapped(handles, &local_module, call);
             members.push(quote! { #asynchronous fn #name(&self, #(#params),*) #result { #body } });
         }
         for function in &resource.statics {
@@ -2409,11 +2551,11 @@ fn implemented_service(
                 names,
                 params,
                 result,
-                wrap,
-            } = signature(function, local)?;
+                handles,
+            } = signature(&function.params, function.result.as_ref(), local)?;
             let (asynchronous, await_) = async_bridge(function.asynchronous);
             let call = quote! { #ident::#name(#(#names),*) #await_ };
-            let body = wrapped(&wrap, &local_module, call);
+            let body = wrapped(handles, &local_module, call);
             members.push(quote! { #asynchronous fn #name(#(#params),*) #result { #body } });
         }
         implementations.push((

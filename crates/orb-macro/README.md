@@ -410,11 +410,12 @@ from each WIT function to the `pub fn` of the same name. The interface is fixed 
 extra `pub fn` is a compile error and a wrong type fails to compile at the bridge. A resource of the
 interface is implemented by a `#[wit_resource(service = Keeper)]` struct of the resource's name,
 with its constructor and methods; they too take and return what the WIT says, in the package's
-types, `book::Entry` or an owned `book::Cursor` handle, so no type of the module enters the WIT
-through them. The derived contract has no interface of its own, only the world,
-and `cargo tembra build` nests the shared package whole after it: the kernel holds every keeper of
-`example:ledger/book@1.0.0`, native or compiled, to one contract, and an installer binds a consumer
-of the interface to either. See
+types, `book::Entry` or an owned `book::Cursor` handle as a parameter, so no type of the module
+enters the WIT through them. A function returning the resource, alone or in an `Option`, a
+`Result`, a `Vec` or a tuple, returns the struct there, and the bridge wraps it into its handle. The
+derived contract has no interface of its own, only the world, and `cargo tembra build` nests the
+shared package whole after it: the kernel holds every keeper of `example:ledger/book@1.0.0`, native
+or compiled, to one contract, and an installer binds a consumer of the interface to either. See
 [rust-orb-shared-interface](../../examples/rust-orb-shared-interface/README.md).
 
 ## Importing another Orb's interface
@@ -491,16 +492,17 @@ interface texts {
 ```
 
 The struct keeps its fields and its `Drop`. The value lives in the component; a method returning
-the struct returns an owned handle, which crosses to the caller, native or compiled, and every
-method call travels back under the caller's own admission; when the last owner drops the handle,
-the kernel destroys the value, which runs `Drop`. WIT methods borrow `self`, so a method changes a
-value through `Cell` or `RefCell`; a `&mut self` method is a compile error, and so is a function
-taking a resource as a parameter: a resource is handed out, never taken. The resource belongs to
-one interface, that of `#[wit_resource(service = Name)]` or of the module's only service; another
-service of the module may return it, and its interface `use`s the type. A record or an enum is
-defined in the interface of the earliest service, in declaration order, that mentions it, in its
-functions or its resources' functions, and the others `use` it from there; interfaces that would
-`use` each other, which WIT refuses, are a compile error naming them. See
+the struct, or an `Option`, a `Result`, a `Vec` or a tuple holding it, returns an owned handle in
+its place, which crosses to the caller, native or compiled, and every method call travels back
+under the caller's own admission; when the last owner drops the handle, the kernel destroys the
+value, which runs `Drop`. WIT methods borrow `self`, so a method changes a value through `Cell` or
+`RefCell`; a `&mut self` method is a compile error, and so is a function taking a resource as a
+parameter: a resource is handed out, never taken. The resource belongs to one interface, that of
+`#[wit_resource(service = Name)]` or of the module's only service; another service of the module
+may return it, and its interface `use`s the type. A record or an enum is defined in the interface
+of the earliest service, in declaration order, that mentions it, in its functions or its
+resources' functions, and the others `use` it from there; interfaces that would `use` each other,
+which WIT refuses, are a compile error naming them. See
 [rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md).
 
 ## Organizing the module in sub-modules
