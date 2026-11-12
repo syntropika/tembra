@@ -621,7 +621,9 @@ pub(crate) fn callbacks<'a>(
                 Callback {
                     name: function.name.clone(),
                     series: function.result.is_none(),
-                    waterfall: function.result == Some(param.ty),
+                    waterfall: function
+                        .result
+                        .is_some_and(|result| same_type(&resolve, result, param.ty)),
                     bail: function.result.is_some_and(|ty| optional(&resolve, ty)),
                     input: spell(param.ty)?,
                     result: function.result.map(spell).transpose()?,
@@ -629,6 +631,62 @@ pub(crate) fn callbacks<'a>(
             ))
         })
         .collect()
+}
+
+/// A WIT type with its aliases followed: `type out = admission` is `admission`.
+fn dealias(resolve: &Resolve, mut ty: wit_parser::Type) -> wit_parser::Type {
+    while let wit_parser::Type::Id(id) = ty
+        && let TypeDefKind::Type(inner) = resolve.types[id].kind
+    {
+        ty = inner;
+    }
+    ty
+}
+
+/// Whether two WIT types are one, through aliases: a record, a variant, an enum, a flags type or
+/// a resource is itself, and a list, an option, a result, a tuple or a handle, named or not, is
+/// the same shape over the same types. The kernel holds a waterfall callback's input and result
+/// to the same rule.
+fn same_type(resolve: &Resolve, left: wit_parser::Type, right: wit_parser::Type) -> bool {
+    let (left, right) = (dealias(resolve, left), dealias(resolve, right));
+    let (wit_parser::Type::Id(left), wit_parser::Type::Id(right)) = (left, right) else {
+        return left == right;
+    };
+    if left == right {
+        return true;
+    }
+    let (left, right) = (&resolve.types[left], &resolve.types[right]);
+    let same = |left: wit_parser::Type, right: wit_parser::Type| same_type(resolve, left, right);
+    let same_side =
+        |left: Option<wit_parser::Type>, right: Option<wit_parser::Type>| match (left, right) {
+            (Some(left), Some(right)) => same(left, right),
+            (None, None) => true,
+            _ => false,
+        };
+    match (&left.kind, &right.kind) {
+        (TypeDefKind::List(left), TypeDefKind::List(right))
+        | (TypeDefKind::Option(left), TypeDefKind::Option(right)) => same(*left, *right),
+        (TypeDefKind::Result(left), TypeDefKind::Result(right)) => {
+            same_side(left.ok, right.ok) && same_side(left.err, right.err)
+        }
+        (TypeDefKind::Tuple(left), TypeDefKind::Tuple(right)) => {
+            left.types.len() == right.types.len()
+                && left
+                    .types
+                    .iter()
+                    .zip(&right.types)
+                    .all(|(left, right)| same(*left, *right))
+        }
+        (
+            TypeDefKind::Handle(wit_parser::Handle::Own(left)),
+            TypeDefKind::Handle(wit_parser::Handle::Own(right)),
+        )
+        | (
+            TypeDefKind::Handle(wit_parser::Handle::Borrow(left)),
+            TypeDefKind::Handle(wit_parser::Handle::Borrow(right)),
+        ) => same(wit_parser::Type::Id(*left), wit_parser::Type::Id(*right)),
+        _ => false,
+    }
 }
 
 /// Whether a WIT type is an option, through aliases.

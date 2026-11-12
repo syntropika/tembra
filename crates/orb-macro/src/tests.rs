@@ -1237,6 +1237,66 @@ fn a_declared_hook_may_name_a_consumed_interface() {
     assert!(error.contains("hooks need wit ="), "{error}");
 }
 
+/// A waterfall callback returns its input type, through aliases and anonymous types alike, as
+/// the kernel compares them: `type out = admission` returns an admission, `list<u32>` is one
+/// type wherever it is written; another record is not the input type.
+#[test]
+fn a_waterfall_result_is_its_input_type_through_aliases() {
+    let waterfall = |name: &str, callback: &str| {
+        let dir = consumed(
+            name,
+            &ADMISSION_WIT.replace("  apply: func(input: admission) -> admission;", callback),
+        );
+        orb_with(options("example:gate@1.0.0", Some(&dir)), SHARED_GATE)
+    };
+    let module = waterfall(
+        "aliased",
+        "  type out = admission;\n  apply: func(input: admission) -> out;",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        tokens(&module).contains("pub fn run (input : self :: example :: admission :: guard :: Admission) -> self :: example :: admission :: guard :: Out"),
+        "{}",
+        tokens(&module)
+    );
+    for (name, callback) in [
+        (
+            "doubled",
+            "  type entry = admission;\n  type out = entry;\n  apply: func(input: entry) -> out;",
+        ),
+        (
+            "listed",
+            "  type batch = list<admission>;\n  apply: func(input: list<admission>) -> batch;",
+        ),
+        (
+            "optional",
+            "  apply: func(input: option<tuple<admission, u32>>) -> option<tuple<admission, u32>>;",
+        ),
+    ] {
+        let accepted = waterfall(name, callback);
+        // The module's own `run` speaks the old input, so a compile error about it is expected;
+        // the composition itself is accepted.
+        if let Err(error) = accepted {
+            assert!(
+                !error.to_string().contains("does not fit a waterfall hook"),
+                "{name}: {error}"
+            );
+        }
+    }
+    let error = waterfall(
+        "unlike",
+        "  record other { value: s32, blocked: bool }\n  apply: func(input: admission) -> other;",
+    )
+    .map(|_| ())
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error
+            .contains("does not fit a waterfall hook: a waterfall callback returns its input type"),
+        "{error}"
+    );
+}
+
 const LEDGER: &str = "mod ledger {
     pub mod pinned {
         /// The balance of a pinned ledger object.
