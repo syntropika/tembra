@@ -13,6 +13,8 @@ use tembra_executor_wasm::{Engine, Install, Limits};
 
 #[path = "support/components.rs"]
 mod components;
+#[path = "support/dummy.rs"]
+mod dummy;
 
 const WIT: &str = r#"
 package example:tally@1.0.0;
@@ -198,4 +200,42 @@ fn pinned_objects_keep_their_state_between_references() {
         pool.run_until(host.close()).unwrap();
         assert!(host.errors().is_empty(), "{:?}", host.errors());
     }
+}
+
+/// A compiled Orb that keeps kernel state and serves incoming HTTP creates its handler object:
+/// the handler is a service of no interface the component exports, so it declares no state.
+/// Every function of the component traps; creating the handler object runs none of them.
+#[test]
+fn a_stateful_orb_creates_its_incoming_http_handler() {
+    let artifact = dummy::artifact(
+        "package example:web@1.0.0;
+        interface counter { add: func(by: s64) -> s64; }
+        world web {
+            import tembra:guest/state@1.0.0;
+            export tembra:guest/state-init@1.0.0;
+            export counter;
+            export wasi:http/handler@0.3.0;
+        }",
+        "web",
+        "web",
+        &ComponentRoles::default(),
+    );
+    let web = Engine::new(Limits::default())
+        .unwrap()
+        .load(&artifact, Install::default())
+        .unwrap();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![web]).unwrap();
+    let handler = host
+        .get(
+            &tembra_executor_wasm::ingress::handler_service("web"),
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap();
+    pool.run_until(handler.ready()).unwrap();
+    handler.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
 }

@@ -2138,12 +2138,17 @@ async fn declare(
     if !layout.state_init {
         return Ok(());
     }
-    let interface = layout
+    // Only the objects of a service the component exports own kernel state. The incoming HTTP
+    // handler is created as a service of its own but answers no interface of the component, so
+    // its objects declare none, as in the browser's component kernel.
+    let Some(interface) = layout
         .exports
         .iter()
         .find(|export| export.service == alias)
         .map(|export| export.interface.clone())
-        .ok_or("unknown compiled service")?;
+    else {
+        return Ok(());
+    };
     let function = exports
         .kernel
         .get(&(guest::STATE_INIT.to_owned(), guest::DECLARE.to_owned()))
