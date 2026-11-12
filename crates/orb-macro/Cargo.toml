@@ -6,12 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Derives the WIT contract and the component bindings of a compiled Orb from a Rust module"
-publish = false
 
 [lib]
 proc-macro = true
 
 [dependencies]
+tembra-contracts = { workspace = true, default-features = false }
 heck = "0.5"
 proc-macro2 = "1"
 quote = "1"

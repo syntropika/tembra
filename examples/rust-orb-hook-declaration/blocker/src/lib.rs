@@ -3,7 +3,7 @@
 //! build wrote, as any interface of another Orb. An Orb needs no service to contribute.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
-#[tembra_orb_macro::orb(package = "example:blocker@1.0.0", wit = "../gate/contract")]
+#[tembra_orb_macro::orb(no_std, package = "example:blocker@1.0.0", wit = "../gate/contract")]
 mod blocker {
     /// Block negative values; let the others continue down the hook unchanged.
     #[hook("example:gate/guard@1.0.0", priority = -7)]

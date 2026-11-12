@@ -10,8 +10,40 @@ tembra = "0.2.2"
 
 Enable `features = ["wasm"]` to expose `tembra::wasm` on native targets. Other optional features
 (`hooks`, `subscriptions`, `views`, `telemetry` and `rpc`) configure the same shared host.
+Enable `contracts` to use the prepared model through `tembra::contracts`, or `authoring` to
+add WIT parsing, component verification and artifact packaging through that same module.
 The browser target keeps the native host lean even when workspace features are enabled;
 browser applications execute isolated Orbs through the TypeScript SDK.
+
+## Author a compiled Orb
+
+Guest crates use the same facade with host execution disabled:
+
+```toml
+[dependencies]
+tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
+wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
+```
+
+```rust,ignore
+#[tembra::orb(package = "example:greeting@1.0.0")]
+mod greeting {
+    #[service]
+    pub struct Api;
+
+    impl Api {
+        pub fn hello(name: String) -> String {
+            format!("Hello, {name}!")
+        }
+    }
+}
+```
+
+The macro uses `std` by default. A freestanding guest uses `#![no_std]`, the `no_std` macro
+option and `dlmalloc`; see the [macro guide](../crates/orb-macro/README.md). `wit-bindgen`
+remains the explicit dependency used by the generated bindings. The `macros` feature builds
+the procedural macro for the compiler; it adds no host runtime, Wasmtime or WIT parser to the
+guest binary.
 
 ## Declare an orb
 
@@ -48,6 +80,15 @@ The application supplies a `LocalSpawn` executor, such as `LocalPool::spawner()`
 `Host::new()` does not start a runtime or worker thread.
 Use `host.install()` to register orbs and `host.get()` to acquire an object reference.
 Native `get()` returns before activation finishes; `ready().await` waits for it.
+`get()` and `get_with_options()` are nonblocking: if the previous instance at the exact
+service, key and principal is closing, they return `unavailable/disposing`.
+Use `host.get_wait(service, key, principal, options).await` to wait for that instance's
+physical close before acquiring again. `context.get_wait(service, key, options).await`
+uses the caller's principal and releases the claim when its root ends. Cancellation or
+root expiry stops the wait without interrupting cleanup. Other admission failures return
+immediately, and admission requirements are checked again after the close. These methods
+wait for address availability; call `ready().await` separately to await activation.
+Compiled WIT instance selection uses this same waiting acquisition path.
 
 Use `host.root()` to obtain a context.
 `reference.call(&ctx, method, arguments)` waits for activation and invokes the method.

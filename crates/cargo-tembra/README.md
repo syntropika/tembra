@@ -19,7 +19,8 @@ cargo tembra --help
 | `cargo tembra inspect <component.wasm> [--wit <dir> --world <name>]` | core import sections, services and methods, required grants and, against a WIT, hook contributions and the verifier's verdict                                                                                                                                                                              |
 
 `new` finds the tembra checkout by walking up from the current directory, because the created
-crate depends on the macro by path; outside the checkout, pass `--tembra <root>`.
+crate depends on the public `tembra` facade by path with only its `macros` feature; outside the
+checkout, pass `--tembra <root>`.
 
 ## Where the contract comes from
 
@@ -115,9 +116,8 @@ serves the kernel interfaces and the declared hooks itself, as the native execut
 
 ## Not yet
 
-- A `tembra-guest` crate re-exporting `wit-bindgen`, `dlmalloc` and the macro, so that `new` does
-  not depend on a path inside this checkout, and publication on crates.io next to
-  `tembra-contracts`.
+- Registry-based scaffolding instead of a checkout path. The facade already exports the macro;
+  generated bindings still use the explicit `wit-bindgen` and `dlmalloc` dependencies.
 - `run --call`, behind an optional feature, to install and call the Orb with the executor.
 - `wasm-opt`, once Binaryen handles components; today it works on core modules only.
 - Reproducible builds in a container, like the optimizer, when a marketplace must trust a hash.

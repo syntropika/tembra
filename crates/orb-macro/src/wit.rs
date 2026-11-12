@@ -437,8 +437,9 @@ fn function_text(function: &Function, indent: &str, keyword: &str) -> String {
         .as_ref()
         .map(|(_, wit)| format!(" -> {wit}"))
         .unwrap_or_default();
+    let asynchronous = if function.asynchronous { "async " } else { "" };
     text.push_str(&format!(
-        "{indent}{}: {keyword}func({params}){result};\n",
+        "{indent}{}: {keyword}{asynchronous}func({params}){result};\n",
         kebab(&function.ident)
     ));
     text
@@ -480,7 +481,7 @@ const GUEST_CONTEXT: &str = "tembra:guest/context@1.0.0";
 /// The kernel's `tembra:guest` package in nested form, appended to the inline WIT so the bindings
 /// of a state resolve it; `cargo tembra` reads the same package from `tembra-contracts`.
 pub(crate) fn guest_package() -> syn::Result<String> {
-    const GUEST: &str = include_str!("../../contracts/wit/tembra/guest.wit");
+    const GUEST: &str = tembra_contracts::guest::SOURCE;
     nested(GUEST)
         .ok_or_else(|| error("the bundled tembra:guest package has no `package ..;` declaration"))
 }
@@ -556,6 +557,7 @@ pub(crate) struct Consumed {
 /// bindings; a method's implicit `self` is left out.
 pub(crate) struct ConsumedFunction {
     pub name: String,
+    pub asynchronous: bool,
     pub params: Vec<(String, Spelled)>,
     pub result: Option<Spelled>,
 }
@@ -622,6 +624,7 @@ pub(crate) fn consumed<'a>(
             let function = |function: &wit_parser::Function| -> syn::Result<ConsumedFunction> {
                 Ok(ConsumedFunction {
                     name: function.item_name().to_owned(),
+                    asynchronous: function.kind.is_async(),
                     params: function
                         .params
                         .iter()
@@ -660,25 +663,27 @@ pub(crate) fn consumed<'a>(
                         })
                     };
                 match definition.kind {
-                    FunctionKind::Freestanding => consumed.functions.push(function(definition)?),
+                    FunctionKind::Freestanding | FunctionKind::AsyncFreestanding => {
+                        consumed.functions.push(function(definition)?);
+                    }
                     FunctionKind::Constructor(id) => {
                         let params = function(definition)?.params;
                         let index = owner(&mut consumed, id)?;
                         consumed.resources[index].constructor = Some(params);
                     }
-                    FunctionKind::Method(id) => {
+                    FunctionKind::Method(id) | FunctionKind::AsyncMethod(id) => {
                         let method = function(definition)?;
                         let index = owner(&mut consumed, id)?;
                         consumed.resources[index].methods.push(method);
                     }
-                    FunctionKind::Static(id) => {
+                    FunctionKind::Static(id) | FunctionKind::AsyncStatic(id) => {
                         let function = function(definition)?;
                         let index = owner(&mut consumed, id)?;
                         consumed.resources[index].statics.push(function);
                     }
                     _ => {
                         return Err(error(format!(
-                            "{identity}: the macro does not express async functions ({})",
+                            "{identity}: the macro does not express property functions ({})",
                             definition.name
                         )));
                     }

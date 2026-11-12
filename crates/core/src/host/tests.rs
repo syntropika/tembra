@@ -375,3 +375,68 @@ fn duplicate_refuses_released_unknown_and_closing() {
     host.close();
     assert!(host.duplicate(copy).is_err());
 }
+
+#[test]
+fn disposal_waiters_follow_exact_physical_instance_and_unregister_on_drop() {
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Wake, Waker},
+    };
+    struct Count(AtomicUsize);
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let host = Host::new();
+    let claim = lingering_object(&host, 0);
+    let address = host.object_address(claim.object).unwrap();
+    assert!(host.wait_for_disposal(&address).is_none());
+    host.release(claim.reference).unwrap();
+    let mut first = host.wait_for_disposal(&address).unwrap();
+    let mut second = host.wait_for_disposal(&address).unwrap();
+    let abandoned = host.wait_for_disposal(&address).unwrap();
+    assert_eq!(host.inner.borrow().disposal_waiters[&claim.object].len(), 3);
+    drop(abandoned);
+    assert_eq!(host.inner.borrow().disposal_waiters[&claim.object].len(), 2);
+    let count = Arc::new(Count(AtomicUsize::new(0)));
+    let waker = Waker::from(count.clone());
+    let mut context = Context::from_waker(&waker);
+    assert!(Pin::new(&mut first).poll(&mut context).is_pending());
+    assert!(Pin::new(&mut second).poll(&mut context).is_pending());
+    assert_eq!(count.0.load(Ordering::SeqCst), 0);
+    assert_eq!(host.drain(), [Action::DisposeObject(claim.object)]);
+    assert_eq!(count.0.load(Ordering::SeqCst), 0);
+    host.disposed(claim.object).unwrap();
+    assert_eq!(count.0.load(Ordering::SeqCst), 2);
+    assert!(host.inner.borrow().disposal_waiters.is_empty());
+    assert!(Pin::new(&mut first).poll(&mut context).is_ready());
+    assert!(Pin::new(&mut second).poll(&mut context).is_ready());
+    assert!(host.wait_for_disposal(&address).is_none());
+    drop((first, second));
+    host.close();
+    host.finish_close().unwrap();
+}
+
+#[test]
+fn shutdown_wakes_disposal_waiters_before_physical_close_finishes() {
+    use std::{future::Future, pin::Pin, task::Context};
+    let host = Host::new();
+    let claim = lingering_object(&host, 0);
+    let address = host.object_address(claim.object).unwrap();
+    host.release(claim.reference).unwrap();
+    let mut waiting = host.wait_for_disposal(&address).unwrap();
+    let mut context = Context::from_waker(std::task::Waker::noop());
+    assert!(Pin::new(&mut waiting).poll(&mut context).is_pending());
+    host.close();
+    assert!(host.inner.borrow().disposal_waiters.is_empty());
+    assert!(Pin::new(&mut waiting).poll(&mut context).is_ready());
+    assert_eq!(host.diagnostics().objects, 1);
+    host.disposed(claim.object).unwrap();
+    host.finish_close().unwrap();
+}

@@ -6,6 +6,7 @@
 extern crate alloc;
 
 #[tembra_orb_macro::orb(
+    no_std,
     package = "example:welcomer@1.0.0",
     wit = "../greeter/contract",
     import = "example:greeter/greeting@1.0.0"

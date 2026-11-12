@@ -1,23 +1,28 @@
-//! The crate `new` writes: a manifest that reads back the macro's path, whatever the path holds.
+//! The generated guest uses the facade's macros without linking the host implementation.
 use super::{manifest, without_verbatim_prefix};
 use std::path::PathBuf;
 
 #[test]
-fn the_macro_path_is_written_as_a_toml_string() {
+fn the_facade_path_is_written_as_a_toml_string_without_host_features() {
     // An ordinary path reads as it did; quotes and backslashes are escaped and read back.
-    let path = "/home/ada/tembra/crates/orb-macro";
-    assert!(
-        manifest("greeter", path).contains(&format!("tembra-orb-macro = {{ path = \"{path}\" }}"))
-    );
+    let path = "/home/ada/tembra/crates/tembra";
     for path in [
         path,
-        r#"/home/ada/a "quoted" \ dir\tembra/crates/orb-macro"#,
-        r"C:\Users\ada\tembra\crates\orb-macro",
+        r#"/home/ada/a "quoted" \ dir\tembra/crates/tembra"#,
+        r"C:\Users\ada\tembra\crates\tembra",
     ] {
         let manifest: toml::Value = toml::from_str(&manifest("greeter", path)).unwrap();
         assert_eq!(
-            manifest["dependencies"]["tembra-orb-macro"]["path"].as_str(),
+            manifest["dependencies"]["tembra"]["path"].as_str(),
             Some(path)
+        );
+        assert_eq!(
+            manifest["dependencies"]["tembra"]["default-features"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            manifest["dependencies"]["tembra"]["features"][0].as_str(),
+            Some("macros")
         );
     }
 }

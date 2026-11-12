@@ -1,12 +1,8 @@
 //! A compiled Orb written from its code: the module is the contract, and `cargo tembra build`
 //! derives the WIT from the component.
-#![cfg_attr(target_arch = "wasm32", no_std)]
-extern crate alloc;
 
 #[tembra_orb_macro::orb(package = "example:greeter@1.0.0")]
 mod greeter {
-    use alloc::{format, string::String};
-
     /// Counts over a text.
     pub struct Stats {
         pub words: u32,

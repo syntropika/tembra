@@ -6,6 +6,9 @@
 //! cannot redefine it.
 use crate::{Item, Model};
 
+/// Canonical WIT for the kernel interfaces used by compiled Orb authoring tools.
+pub const SOURCE: &str = include_str!("../wit/tembra/guest.wit");
+
 /// Read and update the kernel-managed state of the service object running the call.
 pub const STATE: &str = "tembra:guest/state@1.0.0";
 

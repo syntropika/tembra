@@ -1,6 +1,6 @@
 # Rust Orb exporting a service
 
-This example writes a compiled Orb in Rust without a WIT file or a build script, builds it with
+This example writes a compiled Orb using Rust's standard library without a WIT file or a build script, builds it with
 `cargo tembra` and installs the artifact through the ordinary Rust host.
 
 | File                           | Role                                                                                  |
@@ -14,7 +14,10 @@ This example writes a compiled Orb in Rust without a WIT file or a build script,
 `greeting` greets by name and measures a text. The author writes a `pub struct Stats`, a unit
 struct `Greeting` and three `pub fn`; [the macro](../../crates/orb-macro/README.md) turns them into a
 `record`, an exported `interface` and three `func`s, and generates the `wit-bindgen` bindings and
-the `export!`.
+the `export!`. The macro leaves allocation and panic handling to `std`; this guest does not
+depend on `dlmalloc`. The other Rust Orb examples use the explicit `no_std` option for their
+freestanding runtime. `std` on `wasm32-unknown-unknown` does not provide operating-system I/O or
+network access.
 
 ## Build
 

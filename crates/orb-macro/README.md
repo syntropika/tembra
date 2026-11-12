@@ -11,13 +11,8 @@ contribution to another Orb's hook and keeps its counts in a resource of the Orb
 [state example](../../examples/rust-orb-state/README.md) gives a service kernel-managed state.
 
 ```rust
-#![cfg_attr(target_arch = "wasm32", no_std)]
-extern crate alloc;
-
-#[tembra_orb_macro::orb(package = "example:greeter@1.0.0")]
+#[tembra::orb(package = "example:greeter@1.0.0")]
 mod greeter {
-    use alloc::{format, string::String};
-
     /// Counts over a text.
     pub struct Stats {
         pub words: u32,
@@ -41,6 +36,47 @@ mod greeter {
     }
 }
 ```
+
+The public Rust facade re-exports this macro. A guest enables only the authoring entry point,
+without linking the application's host runtime:
+
+```toml
+[dependencies]
+tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
+wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
+```
+
+## Standard library and freestanding guests
+
+A guest uses Rust's standard library by default. The macro leaves its allocator and panic handler
+to `std`, so the ordinary `String`, `Vec` and `format!` prelude works without `dlmalloc`. This also
+allows dependencies that need `std`; a `wasm32-unknown-unknown` build still has that target's usual
+limits on operating-system I/O, networking and threads. Linking `std` does not grant host access.
+
+For a freestanding guest, opt in explicitly on both the crate and the Orb:
+
+```rust
+#![cfg_attr(target_arch = "wasm32", no_std)]
+extern crate alloc;
+
+#[tembra::orb(package = "example:greeter@1.0.0", no_std)]
+mod greeter {
+    use alloc::string::String;
+
+    #[service]
+    pub struct Greeting;
+
+    impl Greeting {
+        pub fn hello(name: String) -> String { name }
+    }
+}
+```
+
+That guest additionally lists `dlmalloc` with its `global` feature. The macro emits its allocator and trapping
+panic handler only for the Wasm target; a host `cargo check` continues to use `std`. The `no_std`
+option selects runtime ownership and does not change the WIT contract. A procedural attribute
+cannot inspect the crate's `#![no_std]`, so the two declarations must agree. `cargo tembra new`
+starts with this explicit freestanding mode.
 
 ## What the macro reads
 
@@ -97,7 +133,7 @@ mark a free `pub fn` with the hook's identity and, when it matters, a priority (
 runs first):
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:filter@1.0.0", wit = "../wit")]
+#[tembra::orb(package = "example:filter@1.0.0", wit = "../wit")]
 mod filter {
     /// Block negative values; let the others continue down the hook unchanged.
     #[hook("example:admission/guard@1.0.0", priority = -7)]
@@ -125,7 +161,7 @@ An Orb that owns a hook marks a unit struct with the composition, one of `series
 under the struct's name in the Orb's package, as it derives a service's:
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:gate@1.0.0")]
+#[tembra::orb(package = "example:gate@1.0.0")]
 mod gate {
     /// Each contributor may change the admission or block it, in plan order.
     #[hook(composition = waterfall, input = Admission)]
@@ -200,7 +236,7 @@ marked `#[state]` is that state for the objects of one service; it names the ser
 module has more than one, and a version (default 1) the kernel compares on reload:
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:counter@1.0.0")]
+#[tembra::orb(package = "example:counter@1.0.0")]
 mod tally {
     /// The state of one counter object.
     #[state(service = Counter, version = 1)]
@@ -308,7 +344,7 @@ principal. With `context` on the attribute the module imports the kernel's `temb
 interface, re-exported as `context`, and reads that view:
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:audit@1.0.0", context)]
+#[tembra::orb(package = "example:audit@1.0.0", context)]
 mod audit {
     use alloc::{format, string::String};
 
@@ -342,7 +378,7 @@ A plain `#[service]` derives a new interface from the `impl` block, in the Orb's
 the directory `wit = "dir"` points to, and the `impl` block implements it:
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:keeper@1.0.0", wit = "../wit")]
+#[tembra::orb(package = "example:keeper@1.0.0", wit = "../wit")]
 mod keeper {
     use alloc::vec::Vec;
 
@@ -376,7 +412,7 @@ of the interface to either. See
 interface to the world and re-exports its generated module under the interface's name:
 
 ```rust
-#[tembra_orb_macro::orb(
+#[tembra::orb(
     package = "example:welcomer@1.0.0",
     wit = "../greeter/contract",
     import = "example:greeter/greeting@1.0.0"
@@ -462,7 +498,7 @@ The Orb module may hold sub-modules, written inline; the macro reads them as par
 leaves them in place, so a service can live with what belongs to it:
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:ledger@1.0.0")]
+#[tembra::orb(package = "example:ledger@1.0.0")]
 mod ledger {
     pub mod pinned {
         /// The balance of one pinned ledger object, kept by the kernel.
@@ -508,9 +544,9 @@ The macro rewrites the module with:
    with the `///` comments the binary type section loses, the hook imports the linker drops
    because nothing calls them, and every consumed package nested whole, not the part the
    component happens to call;
-3. the `no_std` prelude for the Wasm target, `#[global_allocator]` on `dlmalloc` and a
-   `#[panic_handler]` that traps, under `#[cfg(target_arch = "wasm32")]`; on the host the crate
-   builds with std, so `cargo check` and rust-analyzer work without a Wasm target;
+3. only with the `no_std` option, the freestanding Wasm prelude: `#[global_allocator]` on
+   `dlmalloc` and a `#[panic_handler]` that traps, under `#[cfg(target_arch = "wasm32")]`; std
+   guests keep their standard runtime, and host checks require no Wasm target;
 4. `wit_bindgen::generate!({ inline: WIT, world, generate_all })`, the official macro with the WIT
    as a string, plus `path` when the Orb consumes other packages and, with a state, the kernel's
    `tembra:guest` package nested in the inline text and `serde` derives on the generated types,
@@ -533,8 +569,8 @@ The macro rewrites the module with:
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
    function and emptied by the `#[close]` one, and the `with` function on each resource type.
 
-The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmalloc` (feature
-`global`) among its dependencies, and `serde` (features `derive`, `alloc`) and `serde_json`
+The crate must list `wit-bindgen` (features `macros` and `realloc`) among its dependencies,
+`dlmalloc` (feature `global`) only with `no_std`, and `serde` (features `derive`, `alloc`) and `serde_json`
 (feature `alloc`) when it has a state: the generated code names them.
 
 ## Limits
@@ -569,3 +605,54 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
   JSON, are compile errors on a type that enters the WIT.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.
+
+## Async implementations of existing WIT
+
+An implemented interface keeps the calling convention written in its WIT. Implement an
+`async func` with `pub async fn`, including resource methods and static factories. The macro
+forwards the future with `.await` through the official `wit-bindgen` async bindings; it does
+not run an executor or block the guest thread. Enable `wit-bindgen`'s `async` feature in the
+guest crate.
+
+For example, given an existing interface:
+
+```wit
+interface feed {
+  resource updates {
+    next: async func() -> option<u64>;
+  }
+  subscribe: async func() -> updates;
+}
+```
+
+```rust,ignore
+#[tembra::orb(package = "example:consumer@1.0.0", wit = "wit")]
+mod events {
+    #[service("example:events/feed@1.0.0")]
+    pub struct Feed;
+
+    impl Feed {
+        pub async fn subscribe() -> Updates {
+            Updates
+        }
+    }
+
+    #[wit_resource(service = Feed)]
+    pub struct Updates;
+
+    impl Updates {
+        pub async fn next(&self) -> Option<u64> {
+            Some(1)
+        }
+    }
+}
+```
+
+Async functions can await asynchronous imports, and a resource's `&self` borrow remains valid
+while its method is suspended. A function's async or sync declaration must match the existing
+WIT; a mismatch is a macro error. Constructors remain synchronous; use an async static factory
+when construction needs to await work. Rust-first declarations also retain `async` in the WIT
+they derive.
+
+`just test-orb-macro` builds real guests and exercises host-controlled suspension and resumption
+of an interface factory, a resource method and a static factory on both execution engines.

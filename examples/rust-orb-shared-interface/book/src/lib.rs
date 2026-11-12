@@ -5,7 +5,7 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 
-#[tembra_orb_macro::orb(package = "example:keeper@1.0.0", wit = "../wit")]
+#[tembra_orb_macro::orb(no_std, package = "example:keeper@1.0.0", wit = "../wit")]
 mod keeper {
     use alloc::vec::Vec;
 

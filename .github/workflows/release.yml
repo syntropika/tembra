@@ -245,7 +245,9 @@ jobs:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: bun scripts/release.ts pack "$RELEASE_TAG" "$RUNNER_TEMP/release"
       - name: Verify standalone crate archives
-        run: cargo package --locked --workspace --exclude tembra-node-binding --all-features
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: bun scripts/release.ts package-crates "$RELEASE_TAG"
       - name: Build the browser qualification fixture
         run: bun scripts/test-wasm-fixtures.ts --out "$RUNNER_TEMP/release-fixtures" --provider "$RUNNER_TEMP/provider/wasm32-wasip3/release/tembra_wasm_arithmetic.wasm" --contributor "$RUNNER_TEMP/provider/wasm32-unknown-unknown/release/tembra_wasm_contributor.wasm"
       - name: Install packed packages, typecheck a NodeNext consumer and execute isolated Orbs

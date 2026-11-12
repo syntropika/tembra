@@ -4,7 +4,7 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 
-#[tembra_orb_macro::orb(package = "example:audit@1.0.0", context)]
+#[tembra_orb_macro::orb(no_std, package = "example:audit@1.0.0", context)]
 mod audit {
     use alloc::string::String;
 

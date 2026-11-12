@@ -1,0 +1,27 @@
+[package]
+name = "tembra-orb-runtime-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+no-std = ["dep:dlmalloc"]
+
+[dependencies]
+tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
+wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
+dlmalloc = { version = "0.2.12", features = ["global"], optional = true }
+
+[package.metadata.cargo-machete]
+ignored = ["wit-bindgen", "dlmalloc"]
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+strip = "symbols"

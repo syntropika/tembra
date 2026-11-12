@@ -152,6 +152,23 @@ test-orb-examples:
     done
     git diff --exit-code -- examples
 
+# Compile the macro's async and std/no_std guests, then execute their real component boundaries.
+test-orb-macro:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fixture_target="${CARGO_TARGET_DIR:-target}/orb-macro"
+    mkdir -p "$fixture_target"
+    fixture_target="$(cd "$fixture_target" && pwd)"
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/async-fixture/Cargo.toml --target-dir "$fixture_target" -- -Clinker=wasm-component-ld
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --target-dir "$fixture_target" -- -Clinker=wasm-component-ld
+    cp "$fixture_target/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$fixture_target/std.wasm"
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --target-dir "$fixture_target" --features no-std -- -Clinker=wasm-component-ld
+    cp "$fixture_target/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$fixture_target/no-std.wasm"
+    TEMBRA_WASM_ORB_MACRO_ASYNC="$fixture_target/wasm32-unknown-unknown/release/tembra_orb_macro_async_fixture.wasm" \
+    TEMBRA_WASM_ORB_MACRO_STD="$fixture_target/std.wasm" \
+    TEMBRA_WASM_ORB_MACRO_NO_STD="$fixture_target/no-std.wasm" \
+        cargo test --locked -p tembra-executor-wasm --test orb_macro_async --test orb_macro_runtime -- --ignored
+
 check: fmt-check build-node build-wasm build-sdk
     bun run typecheck
     just lint
@@ -163,6 +180,7 @@ check: fmt-check build-node build-wasm build-sdk
 install-tools:
     cargo install --locked cargo-machete --version 0.9.2
     cargo install --locked wasm-bindgen-cli --version 0.2.129
+    cargo install --locked wasm-component-ld --version 0.5.31
 
 install-ts: install
 check-all: check

@@ -4,7 +4,7 @@
 //! The gate's own service, `Admissions`, asks the hook what to do with each value.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
-#[tembra_orb_macro::orb(package = "example:gate@1.0.0")]
+#[tembra_orb_macro::orb(no_std, package = "example:gate@1.0.0")]
 mod gate {
     /// The hook this Orb declares: a waterfall, each contributor may change the admission or
     /// block it, in plan order. Its interface is derived from this struct and from `Admission`.

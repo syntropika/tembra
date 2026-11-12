@@ -18,6 +18,7 @@ fn options(package: &str, wit: Option<&std::path::Path>) -> Options {
         package: Some(literal(package)),
         wit: wit.map(|dir| dir.display().to_string()),
         context: false,
+        no_std: false,
         imports: Vec::new(),
     }
 }
@@ -377,7 +378,7 @@ fn a_host_lifetime_cannot_linger_and_unknown_options_are_refused() {
 /// declaration opens the block, the rest of the file goes inside, and a world resolves it.
 #[test]
 fn the_kernel_package_nests_from_either_line_break() {
-    const GUEST: &str = include_str!("../../contracts/wit/tembra/guest.wit");
+    const GUEST: &str = tembra_contracts::guest::SOURCE;
     let lf = GUEST.replace("\r\n", "\n");
     let crlf = lf.replace('\n', "\r\n");
     let nested = super::wit::nested(&lf).expect("a declaration");

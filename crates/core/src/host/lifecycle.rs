@@ -75,6 +75,9 @@ impl Host {
         for id in targets {
             inner.maybe_dispose(id);
         }
+        let waiters = inner.disposal_waiters.remove(&object).unwrap_or_default();
+        drop(inner);
+        super::disposal::wake(waiters);
         Ok(())
     }
 
@@ -129,6 +132,7 @@ impl Host {
             return;
         }
         inner.closing = true;
+        let waiters = std::mem::take(&mut inner.disposal_waiters);
         let programs = inner
             .programs
             .iter_mut()
@@ -146,6 +150,7 @@ impl Host {
             })
             .map(|pending| pending.reload.id);
         drop(inner);
+        super::disposal::wake(waiters.into_values().flatten());
         if let Some(ticket) = unowned {
             self.abort(ticket)
                 .expect("pending reload without a program");

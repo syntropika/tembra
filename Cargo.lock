@@ -1799,7 +1799,9 @@ dependencies = [
  "futures-timer",
  "serde",
  "serde_json",
+ "tembra-contracts",
  "tembra-executor-wasm",
+ "tembra-orb-macro",
  "tembra-runtime",
 ]
 
@@ -1931,6 +1933,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+ "tembra-contracts",
  "wit-parser 0.261.0",
 ]
 

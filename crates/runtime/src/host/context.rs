@@ -310,6 +310,43 @@ impl Context {
 }
 
 impl Context {
+    /// Acquire under this root after the exact previous instance physically closes.
+    /// Cancellation or root expiry ends only this wait; it never interrupts the old cleanup.
+    /// The principal, context and admission requirements are checked again on every attempt.
+    /// Use [`Reference::ready`] separately to await the new instance's activation.
+    pub async fn get_wait(
+        &self,
+        service: &str,
+        key: Vec<String>,
+        options: crate::AcquisitionOptions,
+    ) -> Result<Rc<Reference>> {
+        let signal = self.signal();
+        let root_signal = self.host.context_signal(self.root);
+        loop {
+            match self.get(service, key.clone(), options.clone()) {
+                Ok(reference) => return Ok(reference),
+                Err(error) => {
+                    let wait = self
+                        .host
+                        .closing(service, &key, &self.principal()?, error)?;
+                    let cancelled = std::pin::pin!(async {
+                        let call = std::pin::pin!(signal.cancelled());
+                        let root = std::pin::pin!(root_signal.cancelled());
+                        futures::future::select(call, root).await;
+                    });
+                    let wait = std::pin::pin!(wait);
+                    if let futures::future::Either::Left(_) =
+                        futures::future::select(cancelled, wait).await
+                    {
+                        self.check()?;
+                        signal.check()?;
+                        root_signal.check()?;
+                    }
+                }
+            }
+        }
+    }
+
     /// Access the native environment shared by the currently entered orb.
     pub fn orb<T: 'static>(&self) -> Result<Rc<T>> {
         self.check()?;
@@ -338,6 +375,15 @@ impl Host {
     /// Stream ends delivered to the root are closed first, so their producers stop before the
     /// root's claims are revoked; a retained end then refuses every read.
     pub fn end_context(&self, root: core::Id) {
+        if let Some(signal) = self
+            .0
+            .context_signals
+            .borrow()
+            .get(&root)
+            .and_then(std::rc::Weak::upgrade)
+        {
+            Cancellation(signal).cancel_because("root");
+        }
         for stream in self.root_streams(root, true) {
             stream.end_root();
         }

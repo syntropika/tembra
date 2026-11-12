@@ -1,5 +1,7 @@
 use crate::Reason;
 mod contexts;
+mod disposal;
+pub use disposal::Disposal;
 mod lifecycle;
 mod orbs;
 mod references;

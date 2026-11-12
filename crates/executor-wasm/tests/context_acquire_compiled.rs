@@ -39,7 +39,17 @@ struct Counter {
     value: Cell<u32>,
 }
 
+#[derive(Clone)]
+struct CloseGate {
+    release: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
+    witnessed: Rc<RefCell<Option<oneshot::Sender<()>>>>,
+}
+
 fn provider(activated: Rc<RefCell<Vec<String>>>) -> Orb {
+    provider_with_close(activated, None)
+}
+
+fn provider_with_close(activated: Rc<RefCell<Vec<String>>>, close: Option<CloseGate>) -> Orb {
     let wit = format!("{WIT}\nworld provider {{ export counter; }}");
     let declaration = Contract::from_source("keyed.wit", &wit, Some("provider"))
         .unwrap()
@@ -58,6 +68,31 @@ fn provider(activated: Rc<RefCell<Vec<String>>>) -> Orb {
                     "key",
                     "unapproved key",
                 ));
+            }
+            if key == "closing"
+                && let Some(close) = close.clone()
+            {
+                declaration.resource(
+                    "physical-close",
+                    1,
+                    || Ok(()),
+                    move |_, _| {
+                        let wait = close.release.borrow_mut().take();
+                        async move {
+                            if let Some(wait) = wait {
+                                let _ = wait.await;
+                            }
+                            Ok(())
+                        }
+                        .boxed_local()
+                    },
+                )?;
+            }
+            if key == "witness"
+                && let Some(gate) = &close
+                && let Some(witnessed) = gate.witnessed.borrow_mut().take()
+            {
+                let _ = witnessed.send(());
             }
             if matches!(key.as_str(), "slow" | "settles" | "barrier") {
                 let delay = match key.as_str() {
@@ -469,4 +504,95 @@ fn compiled_reference_cannot_cross_simultaneously_live_roots() {
 #[ignore = "requires TEMBRA_WASM_KEYED_ROUTER"]
 fn interpreted_compiled_reference_cannot_cross_simultaneously_live_roots() {
     retained(true, true);
+}
+
+fn acquisition_during_close(interpreted: bool) {
+    let limits = Limits {
+        timeout_ms: 10_000,
+        ..Limits::default()
+    };
+    let engine = if interpreted {
+        Engine::interpreted(limits)
+    } else {
+        Engine::new(limits)
+    }
+    .unwrap();
+    let router = engine
+        .load(&artifact(), Install::default().requires(VIEW, "keyed", 1))
+        .unwrap();
+    let (release, wait) = oneshot::channel();
+    let (witness, witnessed) = oneshot::channel();
+    let activated = Rc::new(RefCell::new(Vec::new()));
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        provider_with_close(
+            activated.clone(),
+            Some(CloseGate {
+                release: Rc::new(RefCell::new(Some(wait))),
+                witnessed: Rc::new(RefCell::new(Some(witness))),
+            }),
+        ),
+        router,
+    ])
+    .unwrap();
+    let previous = host
+        .get(
+            &format!("keyed::{COUNTER}"),
+            vec!["closing".into()],
+            "alice",
+        )
+        .unwrap();
+    pool.run_until(previous.ready()).unwrap();
+    let reference = host.get(ROUTER, vec!["main".into()], "host").unwrap();
+    pool.run_until(reference.ready()).unwrap();
+    previous.release().unwrap();
+    pool.run_until_stalled();
+    assert_eq!(activated.borrow().as_slice(), ["closing@alice"]);
+    let mut next = Box::pin(host.root("alice", move |context| {
+        async move {
+            reference
+                .call_portable::<_, String>(&context, "route", json!(["closing", "witness", 2]))
+                .await
+        }
+        .boxed_local()
+    }));
+    // The guest dispatches the closing-key acquisition before its independent witness key.
+    // Wait for that real host factory, so worker scheduling cannot defer both gets until after
+    // this test has released the old close.
+    match pool.run_until(futures::future::select(next.as_mut(), witnessed)) {
+        futures::future::Either::Right((result, _)) => result.unwrap(),
+        futures::future::Either::Left((result, _)) => {
+            panic!("call ended before witness: {result:?}")
+        }
+    }
+    assert_eq!(
+        activated.borrow().as_slice(),
+        ["closing@alice", "witness@alice"]
+    );
+    release.send(()).unwrap();
+    assert_eq!(
+        pool.run_until(next).unwrap(),
+        "2,4,2 closing@alice witness@alice"
+    );
+    assert_eq!(
+        activated.borrow().as_slice(),
+        ["closing@alice", "witness@alice", "closing@alice"]
+    );
+    pool.run_until(host.close()).unwrap();
+    assert!(host.errors().is_empty());
+    assert_eq!(host.kernel().diagnostics().objects, 0);
+    assert_eq!(engine.instances(), 0);
+}
+
+#[test]
+#[ignore = "requires TEMBRA_WASM_KEYED_ROUTER"]
+fn compiled_acquisition_waits_for_the_previous_instances_physical_close() {
+    acquisition_during_close(false);
+}
+
+#[test]
+#[ignore = "requires TEMBRA_WASM_KEYED_ROUTER"]
+fn interpreted_compiled_acquisition_waits_for_the_previous_instances_physical_close() {
+    acquisition_during_close(true);
 }

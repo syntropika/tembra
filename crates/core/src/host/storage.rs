@@ -13,6 +13,7 @@ pub(crate) struct Inner {
     pub services: BTreeMap<Version, BTreeMap<String, (Id, Service)>>,
     pub objects: BTreeMap<Id, Object>,
     pub addresses: BTreeMap<Address, Id>,
+    pub disposal_waiters: super::disposal::DisposalWaiters,
     pub references: BTreeMap<Id, Reference>,
     pub object_references: Index<Id>,
     pub roots: BTreeMap<Id, Root>,

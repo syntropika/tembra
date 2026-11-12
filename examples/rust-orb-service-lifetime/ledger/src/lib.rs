@@ -6,7 +6,7 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 
-#[tembra_orb_macro::orb(package = "example:ledger@1.0.0")]
+#[tembra_orb_macro::orb(no_std, package = "example:ledger@1.0.0")]
 mod ledger {
     pub mod pinned {
         /// The balance of one pinned ledger object, kept by the kernel.

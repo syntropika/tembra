@@ -14,16 +14,17 @@
 //!
 //! The macro derives the WIT contract from those items and generates what a WIT-first crate
 //! writes by hand: the `wit_bindgen::generate!` invocation with the WIT inline, the `Guest`
-//! implementations forwarding to the author's functions, `export!`, and the `no_std` runtime
-//! prelude for the Wasm target. The hook interfaces come from the provider's WIT, found in the
+//! implementations forwarding to the author's functions and `export!`. The module uses the
+//! standard library by default; `no_std` on the attribute adds the freestanding Wasm prelude.
+//! The hook interfaces come from the provider's WIT, found in the
 //! directory named by `wit = "dir"` on the attribute, relative to the crate manifest; their
 //! generated modules are re-exported under their own names, so the author writes
 //! `guard::Admission`. The kernel's `tembra:guest` package is bundled with the macro; with
 //! `context` on the attribute the module imports its `context` interface and reads the call's
 //! principal and cancellation, the object's address and the host's log as `context::...`.
 //!
-//! The crate using the macro must depend on `wit-bindgen` (features `macros` and `realloc`) and
-//! `dlmalloc` (feature `global`), because the generated code names them; a crate with a state
+//! The crate using the macro must depend on `wit-bindgen` (features `macros` and `realloc`),
+//! and on `dlmalloc` (feature `global`) only in `no_std` mode; a crate with a state
 //! also depends on `serde` (`derive`, `alloc`) and `serde_json` (`alloc`). `cargo tembra build`
 //! compiles the crate, reads the same WIT and the hook priorities from the component and
 //! packages the artifact.
@@ -52,9 +53,11 @@ pub fn orb(attribute: TokenStream, item: TokenStream) -> TokenStream {
             options.imports.push(meta.value()?.parse::<LitStr>()?);
         } else if meta.path.is_ident("context") {
             options.context = true;
+        } else if meta.path.is_ident("no_std") {
+            options.no_std = true;
         } else {
             return Err(meta.error(
-                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", context)]",
+                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", context, no_std)]",
             ));
         }
         Ok(())
@@ -76,6 +79,8 @@ struct Options {
     wit: Option<String>,
     /// The module imports the kernel's `tembra:guest/context` interface.
     context: bool,
+    /// Supply the allocator and panic handler for a freestanding Wasm guest.
+    no_std: bool,
     /// Interfaces of other Orbs the module imports, from the consumed WIT packages, as written on
     /// the attribute; the installer binds each to a provider.
     imports: Vec<LitStr>,
@@ -158,6 +163,7 @@ struct Policy {
 /// One exported function, with the WIT spelling of its parameter and result types.
 struct Function {
     ident: Ident,
+    asynchronous: bool,
     docs: Vec<String>,
     params: Vec<(Ident, Type, String)>,
     result: Option<(Type, String)>,
@@ -883,6 +889,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         )?;
         if let Some(marked) = constructor {
             let function = &marked.function;
+            if let Some(asynchronous) = function.sig.asyncness {
+                return Err(syn::Error::new(
+                    asynchronous.span(),
+                    "WIT constructors are synchronous; use an async static factory instead",
+                ));
+            }
             let returns_self = match result(&function.sig.output) {
                 Some(Type::Path(path)) => {
                     path.path.is_ident("Self") || path.path.is_ident(&resource.ident)
@@ -1291,6 +1303,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 ));
             }
         }
+        for function in &interface.functions {
+            let own = service
+                .functions
+                .iter()
+                .find(|own| wit::kebab(&own.ident) == function.name)
+                .expect("implemented function checked above");
+            check_async(own, function)?;
+        }
         for own in &service.functions {
             if !interface
                 .functions
@@ -1344,6 +1364,19 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                     ));
                 }
                 _ => {}
+            }
+            for (expected, authored) in [
+                (&resource.methods, &implementation.methods),
+                (&resource.statics, &implementation.statics),
+            ] {
+                for function in expected {
+                    if let Some(own) = authored
+                        .iter()
+                        .find(|own| wit::kebab(&own.ident) == function.name)
+                    {
+                        check_async(own, function)?;
+                    }
+                }
             }
             let expected = resource
                 .methods
@@ -1436,7 +1469,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
 
     // Generate the Rust side: the bindings from the inline WIT, the author's types replaced by
     // the generated ones, the bridges to the author's functions, each in the module of the item
-    // it serves, and the no_std prelude.
+    // it serves, and the optional freestanding runtime prelude.
     let module_ident = module.ident;
     let vis = module.vis;
     let (outer_attrs, inner_attrs) = placed(&module.attrs);
@@ -1481,9 +1514,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 .iter()
                 .map(|(ident, ty, _)| quote! { #ident: #ty });
             let names = function.params.iter().map(|(ident, _, _)| ident);
-            let call = quote! { #target::#ident(#(#names),*) };
+            let (asynchronous, await_) = async_bridge(function.asynchronous);
+            let call = quote! { #target::#ident(#(#names),*) #await_ };
             let (result, body) = derived_result(&function.result, &module, &resource_names, call);
-            quote! { fn #ident(#(#params),*) #result { #body } }
+            quote! { #asynchronous fn #ident(#(#params),*) #result { #body } }
         });
         let owned = wit_resources
             .iter()
@@ -1749,16 +1783,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             #derives
         });
     };
-    Ok(quote! {
-        #(#outer_attrs)*
-        #vis mod #module_ident {
-            #(#inner_attrs)*
-
-            /// The WIT derived from this module.
-            pub const WIT: &str = #wit_literal;
-
-            // The runtime prelude of a `no_std` component. On the host the module builds with std,
-            // so `cargo check` and rust-analyzer need no Wasm target.
+    let runtime_prelude = options.no_std.then(|| {
+        quote! {
+            // Freestanding guests supply their own allocator and panic handler; std guests
+            // use the standard library's runtime. Host checks always use std.
             #[cfg(target_arch = "wasm32")]
             #[global_allocator]
             static __TEMBRA_ALLOCATOR: ::dlmalloc::GlobalDlmalloc = ::dlmalloc::GlobalDlmalloc;
@@ -1768,6 +1796,17 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             fn __tembra_panic(_: &::core::panic::PanicInfo<'_>) -> ! {
                 ::core::arch::wasm32::unreachable()
             }
+        }
+    });
+    Ok(quote! {
+        #(#outer_attrs)*
+        #vis mod #module_ident {
+            #(#inner_attrs)*
+
+            /// The WIT derived from this module.
+            pub const WIT: &str = #wit_literal;
+
+            #runtime_prelude
 
             // The exact WIT of this module travels inside the component as a custom section, so
             // `cargo tembra build` packages the contract as written here: hook imports the
@@ -2052,6 +2091,7 @@ fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction
     }
     let read = Function {
         ident: function.sig.ident.clone(),
+        asynchronous: function.sig.asyncness.is_some(),
         docs: wit::docs(&function.attrs)?,
         params: typed_params(function)?,
         result: match result(&function.sig.output) {
@@ -2085,6 +2125,34 @@ fn typed_params(function: &syn::ImplItemFn) -> syn::Result<Vec<(Ident, Type, Str
         ));
     }
     Ok(params)
+}
+
+/// Preserve async execution in the bindings: poll the author's future instead of blocking it.
+fn async_bridge(asynchronous: bool) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    if asynchronous {
+        (quote! { async }, quote! { .await })
+    } else {
+        (quote! {}, quote! {})
+    }
+}
+
+/// Existing WIT fixes both the result type and the synchronous or asynchronous calling convention.
+fn check_async(function: &Function, expected: &wit::ConsumedFunction) -> syn::Result<()> {
+    if function.asynchronous == expected.asynchronous {
+        return Ok(());
+    }
+    let required = if expected.asynchronous {
+        "async fn"
+    } else {
+        "fn"
+    };
+    Err(syn::Error::new(
+        function.ident.span(),
+        format!(
+            "`{}` must be `{required}` to match its WIT declaration",
+            function.ident
+        ),
+    ))
 }
 
 /// The result of a derived function's bridge: a resource is wrapped into the bindings' handle
@@ -2141,9 +2209,10 @@ fn derived_resource(
             .iter()
             .map(|(ident, ty, _)| quote! { #ident: #ty });
         let names = function.params.iter().map(|(ident, _, _)| ident);
-        let call = quote! { #ident::#name(self, #(#names),*) };
+        let (asynchronous, await_) = async_bridge(function.asynchronous);
+        let call = quote! { #ident::#name(self, #(#names),*) #await_ };
         let (result, body) = derived_result(&function.result, module, resources, call);
-        quote! { fn #name(&self, #(#params),*) #result { #body } }
+        quote! { #asynchronous fn #name(&self, #(#params),*) #result { #body } }
     });
     let statics = resource.statics.iter().map(|function| {
         let name = &function.ident;
@@ -2152,9 +2221,10 @@ fn derived_resource(
             .iter()
             .map(|(ident, ty, _)| quote! { #ident: #ty });
         let names = function.params.iter().map(|(ident, _, _)| ident);
-        let call = quote! { #ident::#name(#(#names),*) };
+        let (asynchronous, await_) = async_bridge(function.asynchronous);
+        let call = quote! { #ident::#name(#(#names),*) #await_ };
         let (result, body) = derived_result(&function.result, module, resources, call);
-        quote! { fn #name(#(#params),*) #result { #body } }
+        quote! { #asynchronous fn #name(#(#params),*) #result { #body } }
     });
     quote! {
         impl #module::#guest for #ident {
@@ -2248,8 +2318,13 @@ fn implemented_service(
             result,
             wrap,
         } = signature(function, depth)?;
-        let body = wrapped(&wrap, &module, quote! { #target::#ident(#(#names),*) });
-        functions.push(quote! { fn #ident(#(#params),*) #result { #body } });
+        let (asynchronous, await_) = async_bridge(function.asynchronous);
+        let body = wrapped(
+            &wrap,
+            &module,
+            quote! { #target::#ident(#(#names),*) #await_ },
+        );
+        functions.push(quote! { #asynchronous fn #ident(#(#params),*) #result { #body } });
     }
     let mut owned = Vec::new();
     let mut implementations = Vec::new();
@@ -2275,6 +2350,7 @@ fn implemented_service(
             ) => {
                 let new = wit::ConsumedFunction {
                     name: "new".into(),
+                    asynchronous: false,
                     params: params
                         .iter()
                         .map(|(name, spelling)| {
@@ -2304,9 +2380,10 @@ fn implemented_service(
                 result,
                 wrap,
             } = signature(method, local)?;
-            let call = quote! { #ident::#name(self, #(#names),*) };
+            let (asynchronous, await_) = async_bridge(method.asynchronous);
+            let call = quote! { #ident::#name(self, #(#names),*) #await_ };
             let body = wrapped(&wrap, &local_module, call);
-            members.push(quote! { fn #name(&self, #(#params),*) #result { #body } });
+            members.push(quote! { #asynchronous fn #name(&self, #(#params),*) #result { #body } });
         }
         for function in &resource.statics {
             let name = format_ident!("{}", function.name.to_snake_case());
@@ -2316,9 +2393,10 @@ fn implemented_service(
                 result,
                 wrap,
             } = signature(function, local)?;
-            let call = quote! { #ident::#name(#(#names),*) };
+            let (asynchronous, await_) = async_bridge(function.asynchronous);
+            let call = quote! { #ident::#name(#(#names),*) #await_ };
             let body = wrapped(&wrap, &local_module, call);
-            members.push(quote! { fn #name(#(#params),*) #result { #body } });
+            members.push(quote! { #asynchronous fn #name(#(#params),*) #result { #body } });
         }
         implementations.push((
             implementation.scope,
@@ -2585,6 +2663,7 @@ fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
     }
     Ok(Function {
         ident: function.sig.ident.clone(),
+        asynchronous: function.sig.asyncness.is_some(),
         docs: wit::docs(&function.attrs)?,
         params,
         result: match result(&function.sig.output) {
@@ -3680,3 +3759,9 @@ fn semantic_version(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod async_tests;
+
+#[cfg(test)]
+mod std_tests;

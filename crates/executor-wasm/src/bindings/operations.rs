@@ -429,7 +429,7 @@ impl Environment {
             .ok_or_else(|| failure("import has no installed Orb requirement"))?;
         let signal = context.signal();
         signal.check()?;
-        let reference = context.get(&import.service, key, requirement)?;
+        let reference = context.get_wait(&import.service, key, requirement).await?;
         // Dropping an async import also drops this future while readiness is pending. The
         // root still owns the native claim, so dropping an Rc alone would leave it live.
         let mut pending = PendingAcquisition(Some(reference.clone()));

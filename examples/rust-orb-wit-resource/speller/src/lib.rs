@@ -6,6 +6,7 @@
 extern crate alloc;
 
 #[tembra_orb_macro::orb(
+    no_std,
     package = "example:speller@1.0.0",
     wit = "../text/contract",
     import = "example:text/texts@1.0.0"
