@@ -1685,6 +1685,219 @@ fn a_derived_function_takes_an_imported_handle() {
     );
 }
 
+const PERMITS: &str = "mod office {
+    /// What a holder may do.
+    #[flags]
+    #[derive(Default, PartialEq, Clone)]
+    pub struct Access { pub read: bool, pub write: bool, pub r#type: bool }
+    pub struct Grant { pub who: String, pub access: Access }
+    #[service]
+    pub struct Permits;
+    impl Permits {
+        pub fn invert(access: Access) -> Access { todo!() }
+        pub fn merged(grants: Vec<Grant>, extra: Option<Access>) -> Grant { todo!() }
+    }
+}";
+
+/// A struct of `bool` fields marked `#[flags]` is a WIT `flags`, a flag per field in order, and
+/// stays the author's: the bindings take it through `with`, so nothing re-exports a generated type
+/// in its place, and the macro gives it what the bindings call on it, the derives a generated
+/// record holding it needs, and none the author wrote twice.
+#[test]
+fn a_flags_struct_is_a_wit_flags_the_author_keeps() {
+    let module = expanded("example:office@1.0.0", PERMITS);
+    let text = resolved(&module);
+    for expected in [
+        "  /// What a holder may do.\n  flags access {\n    read,\n    write,\n    %type,\n  }\n",
+        "  record grant {\n    who: string,\n    access: access,\n  }\n",
+        "  invert: func(access: access) -> access;\n",
+        "  merged: func(grants: list<grant>, extra: option<access>) -> grant;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let generated = tokens(&module);
+    for expected in [
+        "with : { \"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: Access } ,",
+        "pub use exports :: example :: office :: permits :: { Grant } ;",
+        "# [derive (Default , PartialEq , Clone)] # [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access",
+        "pub const fn empty () -> Self { Self { read : false , write : false , r#type : false } }",
+        "pub const fn bits (& self) -> u32 { (self . read as u32) | ((self . write as u32) << 1) | ((self . r#type as u32) << 2) }",
+        "pub const fn from_bits_retain (bits : u32) -> Self { Self { read : (bits & 1) != 0 , write : (bits & 2) != 0 , r#type : (bits & 4) != 0 } }",
+        "impl :: core :: ops :: BitOr for Access",
+        "Self { read : self . read | other . read , write : self . write | other . write , r#type : self . r#type | other . r#type }",
+        "fn invert (access : Access) -> Access { Permits :: invert (access) }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    // A trait the author implements by hand is not derived again.
+    let module = expanded(
+        "example:office@1.0.0",
+        &PERMITS.replace(
+            "pub struct Grant",
+            "impl core::fmt::Debug for Access {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { Ok(()) }
+            }
+            pub struct Grant",
+        ),
+    );
+    assert!(
+        tokens(&module).contains("# [derive (:: core :: marker :: Copy)] pub struct Access"),
+        "{}",
+        tokens(&module)
+    );
+}
+
+/// In an Orb with a state the flags derive serde's traits, and a record holding the module's own
+/// flags is no longer left out of the derives the state makes the bindings add: the flags are
+/// the author's struct, serde's now.
+#[test]
+fn a_flags_struct_is_serde_in_an_orb_with_a_state() {
+    let module = expanded(
+        "example:office@1.0.0",
+        &PERMITS.replace(
+            "pub struct Grant",
+            "#[state(service = Permits)]
+            pub struct Granted { pub last: Access, pub grants: u32 }
+            pub struct Grant",
+        ),
+    );
+    let generated = tokens(&module);
+    assert!(
+        generated.contains("# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug , :: serde :: Serialize , :: serde :: Deserialize)] pub struct Access"),
+        "{generated}"
+    );
+    assert!(
+        generated
+            .contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize] ,"),
+        "{generated}"
+    );
+    assert!(
+        !generated.contains("additional_derives_ignore"),
+        "{generated}"
+    );
+}
+
+/// A flags struct of a sub-module is named from its module, and must be visible to the Orb module;
+/// one no function uses stays ordinary Rust, without the functions the bindings call.
+#[test]
+fn a_flags_struct_of_a_sub_module_is_named_from_its_module() {
+    let module = expanded(
+        "example:office@1.0.0",
+        "mod office {
+            pub mod rights {
+                #[flags]
+                pub struct Access { pub read: bool }
+                #[flags]
+                pub struct Unused { pub seen: bool }
+                #[service]
+                pub struct Permits;
+                impl Permits { pub fn check(access: Access) -> bool { access.read } }
+            }
+        }",
+    );
+    let generated = tokens(&module);
+    assert!(
+        generated.contains("\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: rights :: Access"),
+        "{generated}"
+    );
+    assert!(
+        generated.contains("pub struct Unused { pub seen : bool }"),
+        "{generated}"
+    );
+    assert!(!generated.contains("for Unused"), "{generated}");
+    let error = refused(
+        "example:office@1.0.0",
+        "mod office {
+            pub mod rights {
+                #[flags]
+                struct Access { pub read: bool }
+                #[service]
+                pub struct Permits;
+                impl Permits { pub fn check() -> bool { true } }
+            }
+        }",
+    );
+    assert!(
+        error.contains("`Access` is a flags of a sub-module: make it visible to the Orb module"),
+        "{error}"
+    );
+}
+
+/// What WIT or the bindings rule out of a flags struct is refused on the item: a field that is no
+/// `bool`, no field or more than the component model's 32, a generic parameter, two fields of one
+/// WIT name, an option on the attribute, a function of a name the bindings call or the author's own
+/// `BitOr`, and a derived hook's input reaching the flags.
+#[test]
+fn what_a_flags_struct_cannot_be_is_refused() {
+    let module = |access: &str, extra: &str| {
+        format!(
+            "mod office {{
+                {access}
+                {extra}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn invert(access: Access) -> Access {{ access }} }}
+            }}"
+        )
+    };
+    let many = (0..33)
+        .map(|index| format!("pub f{index}: bool"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (access, extra, message) in [
+        (
+            "#[flags] pub struct Access { pub read: bool, pub level: u8 }".to_owned(),
+            "",
+            "the field `Access::level` is no `bool`: each field of a flags is a flag, a `bool`",
+        ),
+        (
+            "#[flags] pub struct Access {}".to_owned(),
+            "",
+            "`Access` has no field: a WIT flags holds at least one flag",
+        ),
+        (
+            format!("#[flags] pub struct Access {{ {many} }}"),
+            "",
+            "`Access` has 33 fields: a WIT flags holds at most 32 flags, as the component model rules",
+        ),
+        (
+            "#[flags] pub struct Access<T> { pub read: bool, pub marker: core::marker::PhantomData<T> }".to_owned(),
+            "",
+            "`Access` is a flags: it takes no generic parameter",
+        ),
+        (
+            "#[flags] pub struct Access { pub can_read: bool, pub canRead: bool }".to_owned(),
+            "",
+            "the fields `Access::can_read` and `Access::canRead` are both the flag `can-read`",
+        ),
+        (
+            "#[flags(bits = 8)] pub struct Access { pub read: bool }".to_owned(),
+            "",
+            "#[flags] takes no options",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl Access { pub fn bits(&self) -> u8 { 0 } }",
+            "`Access::bits` takes a name the macro gives a #[flags] struct, whose bindings call `empty`, `bits`, `from_bits_retain` on it",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "#[hook(composition = series, input = Admission)]
+            pub struct Guard;
+            pub struct Admission { pub access: Access }",
+            "`Access` is a flags that a derived hook's input reaches",
+        ),
+    ] {
+        let error = refused("example:office@1.0.0", &module(&access, extra));
+        assert!(error.contains(message), "{access} {extra}: {error}");
+    }
+}
+
 const NESTED_WIT: &str = "package example:ledger@1.0.0;
 interface book {
   resource entry {

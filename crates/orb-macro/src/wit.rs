@@ -1034,10 +1034,10 @@ fn handles(resolve: &Resolve, ty: wit_parser::Type) -> Option<Handles> {
 /// they generate.
 #[derive(Default)]
 pub(crate) struct Bindings {
-    /// The records and variants that cannot derive `serde`'s traits: those holding a flags type, a
-    /// resource handle, a stream or a future, directly or through other types, which the bindings
-    /// give no `serde` implementation. They are named as the `additional_derives_ignore` option of
-    /// `wit-bindgen` compares them, by `ignored_name`.
+    /// The records and variants that cannot derive `serde`'s traits: those holding a consumed
+    /// package's flags type, a resource handle, a stream or a future, directly or through other
+    /// types, which the bindings give no `serde` implementation. They are named as the
+    /// `additional_derives_ignore` option of `wit-bindgen` compares them, by `ignored_name`.
     pub unserializable: Vec<String>,
     /// How the bindings generate each record, variant and enum of an interface, by the type's full
     /// name as the selectors of `additional_type_attributes` write it,
@@ -1065,9 +1065,9 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
     {
         return Bindings::default();
     }
-    if resolve.push_str("orb.wit", inline).is_err() {
+    let Ok(own) = resolve.push_str("orb.wit", inline) else {
         return Bindings::default();
-    }
+    };
     let unserializable: BTreeSet<String> = resolve
         .types
         .iter()
@@ -1078,7 +1078,12 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
             )
         })
         .filter(|(id, _)| {
-            holds_unserializable(&resolve, wit_parser::Type::Id(*id), &mut BTreeSet::new())
+            holds_unserializable(
+                &resolve,
+                wit_parser::Type::Id(*id),
+                &mut BTreeSet::new(),
+                own,
+            )
         })
         .filter_map(|(_, definition)| definition.name.as_deref())
         .map(ignored_name)
@@ -1163,12 +1168,14 @@ pub(crate) fn ignored_name(name: &str) -> String {
 }
 
 /// Whether a WIT type holds, anywhere, a value the bindings give no `serde` implementation: a
-/// flags type, a resource handle, a stream, a future, an error context, or an array longer than
+/// flags type of another package than `own`, the Orb's, whose flags types are the author's
+/// structs, a resource handle, a stream, a future, an error context, or an array longer than
 /// `serde`'s.
 fn holds_unserializable(
     resolve: &Resolve,
     ty: wit_parser::Type,
     seen: &mut BTreeSet<wit_parser::TypeId>,
+    own: wit_parser::PackageId,
 ) -> bool {
     let id = match ty {
         wit_parser::Type::Id(id) => id,
@@ -1179,10 +1186,11 @@ fn holds_unserializable(
     if !seen.insert(id) {
         return false;
     }
-    let mut holds = |ty: wit_parser::Type| holds_unserializable(resolve, ty, seen);
+    let mut holds = |ty: wit_parser::Type| holds_unserializable(resolve, ty, seen, own);
     match &resolve.types[id].kind {
-        TypeDefKind::Flags(_)
-        | TypeDefKind::Handle(_)
+        TypeDefKind::Flags(_) => !matches!(resolve.types[id].owner,
+            wit_parser::TypeOwner::Interface(owner) if resolve.interfaces[owner].package == Some(own)),
+        TypeDefKind::Handle(_)
         | TypeDefKind::Resource
         | TypeDefKind::Future(_)
         | TypeDefKind::Stream(_) => true,

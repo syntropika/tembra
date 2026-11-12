@@ -97,6 +97,7 @@ starts with this explicit freestanding mode.
 | each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                                                                        |
 | a struct with named fields, when a service method uses it                   | a `record`                                                                                                                                                         |
 | an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`                                                                                                       |
+| a struct of `bool` fields with `#[flags]`, when a service method uses it    | a `flags`, a flag per field in kebab-case; the struct stays the author's, which the bindings take as it is                                                         |
 | `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                                                                       |
 | a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`        | `import` and `export` of that hook interface in the world: a contribution                                                                                          |
 | a unit struct with `#[hook("ns:name/hook@version", composition = c)]`       | `import` and `export` of that hook interface in the world: a declaration                                                                                           |
@@ -734,6 +735,68 @@ between no Orbs, and a hook's input holding a resource are compile errors too; s
 function returning an imported interface's handle, which the runtime returns only from the interface
 that defines it.
 
+## Flags
+
+A struct of `bool` fields marked `#[flags]` is a WIT `flags`: each field is a flag, in declaration
+order, named in kebab-case. Unlike a record, the struct is not replaced by the type the bindings
+generate, a bitflags type with constants where the struct has fields: `wit-bindgen`'s `with` option
+maps the WIT type onto the author's struct, so the bindings' functions, records, variants and
+containers take and return the struct itself, with no conversion.
+
+```rust
+/// What a holder may do with a document.
+#[flags]
+#[derive(Default, PartialEq)]
+pub struct Access { pub read: bool, pub write: bool, pub share: bool }
+
+/// The access granted to someone.
+pub struct Grant { pub who: String, pub access: Access }
+
+impl Permits {
+    /// The access with exactly the flags `access` lacks.
+    pub fn invert(access: Access) -> Access { /* ... */ }
+    /// The flags any of the grants sets.
+    pub fn merged(grants: Vec<Grant>) -> Access {
+        grants.iter().fold(Access::default(), |all, grant| all | grant.access)
+    }
+}
+```
+
+```wit
+interface permits {
+  /// What a holder may do with a document.
+  flags access {
+    read,
+    write,
+    share,
+  }
+  record grant {
+    who: string,
+    access: access,
+  }
+  invert: func(access: access) -> access;
+  merged: func(grants: list<grant>) -> access;
+}
+```
+
+The macro gives the struct what the bindings call on it, as `wit-bindgen` 0.63 lowers and lifts a
+flags: the functions `empty()`, `bits()` and `from_bits_retain(bits)`, hidden from the
+documentation, and `BitOr`, the union of two values, which the author's code may use too. These
+names are the bindings', so a function of one of them in the struct's own `impl` blocks, or the
+author's own `BitOr`, is a compile error. The macro also derives `Clone`, `Copy` and `Debug`, which
+a generated record or variant holding the struct needs of it, and, in an Orb with a state, serde's
+`Serialize` and `Deserialize`, so a state can hold the struct, directly or in a record; each unless
+the author derives or implements it. A state's JSON holds every field of the struct,
+`{"read": true, "write": false, "share": false}`, where the portable boundary spells a flags value
+as an object of its set flags in camelCase, `{"read": true}`, a flag left out being unset.
+
+A flags holds one to 32 flags, as the component model rules, and its struct takes no generic
+parameter; a flags struct of a sub-module is `pub` or `pub(super)`, visible to the Orb module, as
+the bindings name it from there. A derived hook's input holds no flags: the bindings name a hook's
+types from its import module and from its export module, at two depths, and the macro maps a flags
+onto the author's struct through one path. A struct marked `#[flags]` that no function uses stays
+ordinary Rust.
+
 ## Organizing the module in sub-modules
 
 The Orb module may hold sub-modules, written inline; the macro reads them as part of the Orb and
@@ -800,17 +863,20 @@ The macro rewrites the module with:
    its file. With a WASI import, the WASI packages it needs are nested the same way, from the
    sources `tembra-contracts` bundles.
    With a state, also `serde` derives on the generated types, except the records and
-   variants holding a flags type or a resource handle, which have no `serde` implementation to
-   derive. With derives on the types that enter the WIT, also `additional_type_attributes` and
+   variants holding a consumed package's flags type or a resource handle, which have no `serde`
+   implementation to derive. With derives on the types that enter the WIT, also `additional_type_attributes` and
    `additional_member_attributes`, which hand them to the generated types with the helper
-   attributes they read;
+   attributes they read. With a `#[flags]` struct, also `with`, which maps each flags type onto
+   the author's struct;
 5. `pub use exports::...::{Stats}`: the author's record and enum definitions are replaced by the
    generated types with the same names, public fields and derives, so the author's functions and
    the generated traits share one type, and each derive of such a type is imported again under no
    name, `use EnumIter as _;`, where the type was written, so the imports it names stay used;
    `pub use exports::...::guard;` for each contributed hook and each
    implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option;
-6. the author's items, unchanged;
+6. the author's items, unchanged, but for each `#[flags]` struct that enters the WIT the derives
+   it lacks, `Clone`, `Copy`, `Debug` and, with a state, serde's, and the functions its bindings
+   call on it, `empty`, `bits`, `from_bits_retain` and `BitOr`;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
    by forwarding to the author's functions, hook callbacks and the kernel's `state-init` and
    `resources-init` callbacks included, with a trapping callback for each declared hook, and
@@ -849,13 +915,15 @@ key) among its dependencies,
   does. JSON holds no NaN or infinite float, so a state holding one cannot be stored, and the
   JavaScript hosts (Node, mobile, browser) parse JSON numbers as doubles, so an integer beyond
   ±2^53 in a state loses precision there.
-- Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
-  64-bit integers cross the boundary exactly. A `resource` is a `#[wit_resource]` struct or the
+- Types: records, enums, variants, flags and the scalar, string, list, option, result and tuple
+  types; 64-bit integers cross the boundary exactly. A flags is a `#[flags]` struct of one to 32
+  `bool` fields; its functions `empty`, `bits` and `from_bits_retain` and its `BitOr` are the
+  macro's, for its bindings, and a derived hook's input holds none. A `resource` is a `#[wit_resource]` struct or the
   handle of an imported interface. A derived function takes either as an owned parameter, a
   struct only in the interface that defines it, and returns only a struct; an implemented
   interface takes the owned handles its WIT says. A borrowed parameter, `borrow<t>`, is not
   derived: the runtime refuses it at installation today ("borrow requires a dedicated interpreter
-  value adapter"). No `flags`, `stream` or `future`. `()` is nothing only as a function's result or a
+  value adapter"). No `stream` or `future`. `()` is nothing only as a function's result or a
   side of a `Result`, which WIT then leaves out: `Result<T, ()>` is `result<t>`, `Result<(), E>` is
   `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has no equivalent, use `bool`.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it, and a record

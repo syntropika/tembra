@@ -10,6 +10,8 @@
 //! `variant`s only when a service method, a WIT resource's function or a hook's input uses them,
 //! directly or through another type; a state alone does not. Such a type is replaced by the type
 //! the bindings generate, which takes the author's derives and the helper attributes they read.
+//! A struct of `bool` fields marked `#[flags]` becomes a `flags` on the same terms, but stays the
+//! author's: the bindings take it as it is.
 //! The rest of the module stays ordinary Rust: a state that stays out of the WIT, and the module
 //! types its fields reach, get serde's derives.
 //!
@@ -31,6 +33,7 @@
 //! also depends on `serde` (`derive`, `alloc`) and `serde_json` (`alloc`). `cargo tembra build`
 //! compiles the crate, reads the same WIT and the hook priorities from the component and
 //! packages the artifact.
+mod flags;
 mod keyed;
 mod resource_params;
 mod wasi;
@@ -181,6 +184,8 @@ struct Candidate {
     references: Vec<Ident>,
     /// The module declaring the type, by scope; 0 is the Orb module.
     scope: usize,
+    /// A struct marked `#[flags]`, a `flags` once it enters the WIT, which stays the author's.
+    flags: bool,
 }
 
 impl Candidate {
@@ -195,6 +200,7 @@ impl Candidate {
             item: Item::Struct(item),
             references,
             scope,
+            flags: false,
         }
     }
 
@@ -210,12 +216,19 @@ impl Candidate {
             item: Item::Enum(item),
             references,
             scope,
+            flags: false,
         }
     }
 
     /// The type's WIT definition, once it enters the WIT, with what the generated type replacing
-    /// it would drop refused first and what it takes of the author's attributes.
+    /// it would drop refused first and what it takes of the author's attributes. A flags struct
+    /// is not replaced and keeps its attributes.
     fn translate(&self) -> syn::Result<Shape> {
+        if let (true, Item::Struct(item)) = (self.flags, &self.item) {
+            let mut shape = flags::shape(item)?;
+            shape.scope = self.scope;
+            return Ok(shape);
+        }
         replaceable(&self.item)?;
         let mut shape = match &self.item {
             Item::Struct(item) => wit::record(item)?,
@@ -234,11 +247,12 @@ impl Candidate {
 }
 
 /// The construction of a shape: the named fields of a record, the cases of an enum, the cases of
-/// a variant with their payload.
+/// a variant with their payload, the author's struct of a flags, which the bindings take as it is.
 enum ShapeKind {
     Record(Vec<(Ident, Type)>),
     Enum(Vec<Ident>),
     Variant(Vec<(Ident, Option<Type>)>),
+    Flags(Box<syn::ItemStruct>),
 }
 
 /// An exported interface: a unit struct marked `#[service]` with an `impl` block of `pub fn`, and
@@ -757,6 +771,9 @@ impl Scan {
                             scope,
                         });
                         passthrough.push(Item::Struct(s));
+                    } else if let Some(attribute) = take(&mut s.attrs, "flags") {
+                        self.candidates
+                            .push(flags::candidate(s, &attribute, scope, nested)?);
                     } else if matches!(s.fields, Fields::Named(_)) {
                         self.candidates.push(Candidate::record(s, scope));
                     } else {
@@ -1450,6 +1467,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         }
         tree.at(&modules[scope]).items.push(item);
     }
+    // A flags struct that enters the WIT stays the author's, with what the bindings call on it.
+    flags::check_hooks(&shapes, &declared)?;
+    flags::emit(&shapes, &mut tree, &modules, &impls, !states.is_empty())?;
     // A name that enters the WIT is one across the Orb module: the types, the services, the
     // derived hooks and the resources of every module share the package's names.
     {
@@ -1718,11 +1738,15 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // The generated types carry the author's names and public fields, so the author's functions
     // and the generated traits speak about one type: each is re-exported in the module that
     // declared it, from the interface `placement` defines it in, under the author's name where
-    // the bindings name it otherwise, `HttpRequest as HTTPRequest`.
+    // the bindings name it otherwise, `HttpRequest as HTTPRequest`. A flags struct is the
+    // author's own, which the bindings take.
     let hook_shapes = wit::hook_shapes(&shapes, &declared);
     let interface_module = |ident: &Ident| rust_ident(&wit::kebab(ident));
     let mut grouped: Vec<((Ident, usize), Vec<proc_macro2::TokenStream>)> = Vec::new();
-    for shape in &shapes {
+    for shape in shapes
+        .iter()
+        .filter(|shape| !matches!(shape.kind, ShapeKind::Flags(_)))
+    {
         let interface = interface_module(&placement[&shape.ident.to_string()]);
         let key = (interface, shape.scope);
         let ident = &shape.ident;
@@ -2040,8 +2064,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     };
     // A state's record that a method mentions is a generated type, which the kernel's JSON needs
     // to serialize; the derives reach every generated type that can carry them. A record or a
-    // variant holding a flags type or a resource handle cannot: the bindings give those no serde
-    // implementation, so the derives leave it alone.
+    // variant holding a resource handle or a consumed package's flags type cannot: the bindings
+    // give those no serde implementation, so the derives leave it alone. The module's own flags
+    // are the author's structs, which a state gives serde's derives.
     let derives = serde.then(|| {
         let ignored = &bindings.unserializable;
         let ignore =
@@ -2060,6 +2085,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         (!types.is_empty()).then(|| quote! { additional_type_attributes: { #(#types),* }, });
     let member_attributes =
         (!members.is_empty()).then(|| quote! { additional_member_attributes: { #(#members),* }, });
+    // The bindings take each flags type as the author's struct.
+    let remapped = flags::remapped(&shapes, &placement, &package, &modules);
+    let with = (!remapped.is_empty()).then(|| quote! { with: { #(#remapped),* }, });
     let generate = quote! {
         ::wit_bindgen::generate!({
             #path
@@ -2069,6 +2097,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             #derives
             #type_attributes
             #member_attributes
+            #with
         });
     };
     let runtime_prelude = options.no_std.then(prelude);
@@ -3360,6 +3389,8 @@ fn implemented(kind: &ShapeKind, generated: wit::Generated) -> Vec<(&'static str
                 ));
             }
         }
+        // A flags struct keeps the author's derives on the author's struct.
+        ShapeKind::Flags(_) => {}
     }
     if generated.error {
         traits.extend(["Display", "Error"].map(|name| {
@@ -3991,7 +4022,7 @@ fn holding_lists(shapes: &[Shape]) -> BTreeSet<String> {
                 ShapeKind::Variant(cases) => {
                     cases.iter().filter_map(|(_, ty)| ty.as_ref()).collect()
                 }
-                ShapeKind::Enum(_) => Vec::new(),
+                ShapeKind::Enum(_) | ShapeKind::Flags(_) => Vec::new(),
             };
             if types.iter().any(|ty| holds_list(ty, &holding)) {
                 holding.insert(shape.ident.to_string());
@@ -4062,6 +4093,7 @@ fn conversions(
                     });
                     quote! { match value { #(#arms,)* } }
                 }
+                ShapeKind::Flags(_) => unreachable!("a derived hook reaches no flags"),
             };
             let to_import = body(export);
             let to_export = body(import);

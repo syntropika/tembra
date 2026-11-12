@@ -647,3 +647,117 @@ fn tally(pool: &mut LocalPool, host: &Host, engine: &Engine, name: &str) {
     assert_eq!(engine.resources(), 0, "{name}");
     tallies.release().unwrap();
 }
+
+/// A flags value, the author's struct of `bool` fields, crosses the boundary both ways on both
+/// guests and both engines: as a parameter and a result, inside a record, a list and an option, and
+/// in a state the kernel keeps as JSON.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD and TEMBRA_WASM_ORB_MACRO_NO_STD"]
+fn flags_cross_the_boundary_both_ways() {
+    let guests = [
+        ("standard", component("TEMBRA_WASM_ORB_MACRO_STD")),
+        ("freestanding", component("TEMBRA_WASM_ORB_MACRO_NO_STD")),
+    ];
+    for interpreted in [false, true] {
+        let engine = if interpreted {
+            Engine::interpreted(Limits::default())
+        } else {
+            Engine::new(Limits::default())
+        }
+        .unwrap();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let orbs = guests
+            .iter()
+            .map(|(name, bytes)| {
+                let (wit, contract) = contract(bytes);
+                let words: String = wit.split_whitespace().collect();
+                assert!(words.contains("flagsaccess{read,write,share,}"), "{wit}");
+                let roles = contract.embedded_roles(bytes).unwrap();
+                let artifact = contract.component_artifact(bytes, name, 1, &roles).unwrap();
+                engine.load(&artifact, keyed(granted())).unwrap()
+            })
+            .chain([counters()])
+            .collect();
+        host.install(orbs).unwrap();
+        for (name, _) in &guests {
+            permit(&mut pool, &host, name);
+        }
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(engine.instances(), 0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+    }
+}
+
+/// Drive the permits of the Orb `name`. A flags value is an object of its set flags on the
+/// portable boundary, a flag left out unset; the state's JSON is serde's, every field of the
+/// struct.
+fn permit(pool: &mut LocalPool, host: &Host, name: &str) {
+    let permits = Rc::new(
+        host.get(
+            &format!("{name}::example:runtime/permits@1.0.0"),
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(permits.ready()).unwrap();
+    let state = permits.state::<Value>().unwrap();
+    let call = |pool: &mut LocalPool, method: &'static str, arguments: Value| {
+        let permits = permits.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move {
+                permits
+                    .call_portable::<_, Value>(&context, method, arguments)
+                    .await
+            }
+            .boxed_local()
+        }))
+        .unwrap()
+    };
+    assert_eq!(
+        *state.value().unwrap(),
+        json!({"last": {"read": false, "write": false, "share": false}, "grants": 0}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "invert", json!([{"read": true, "share": true}])),
+        json!({"write": true}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "invert", json!([{}])),
+        json!({"read": true, "write": true, "share": true}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "give", json!(["ada", {"write": true, "share": true}])),
+        json!({"who": "ada", "access": {"write": true, "share": true}}),
+        "{name}"
+    );
+    assert_eq!(
+        *state.value().unwrap(),
+        json!({"last": {"read": false, "write": true, "share": true}, "grants": 1}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "kept", json!([])),
+        json!({"last": {"write": true, "share": true}, "grants": 1}),
+        "{name}"
+    );
+    let grants = json!([
+        {"who": "ada", "access": {"read": true}},
+        {"who": "bob", "access": {"share": true}},
+    ]);
+    assert_eq!(
+        call(pool, "merged", json!([grants, null])),
+        json!({"read": true, "share": true}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "merged", json!([[], {"write": true}])),
+        json!({"write": true}),
+        "{name}"
+    );
+    permits.release().unwrap();
+}

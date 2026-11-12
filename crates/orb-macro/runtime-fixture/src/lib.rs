@@ -252,4 +252,64 @@ mod guest {
             DROPPED.load(core::sync::atomic::Ordering::Relaxed)
         }
     }
+
+    /// What a holder may do with a document: each field is a flag of the WIT `flags`. The struct
+    /// stays this one; the bindings take it as it is.
+    #[flags]
+    #[derive(Default, PartialEq)]
+    pub struct Access {
+        pub read: bool,
+        pub write: bool,
+        pub share: bool,
+    }
+
+    /// The access granted to someone.
+    pub struct Grant {
+        pub who: String,
+        pub access: Access,
+    }
+
+    /// The last access a permits object granted and how many grants it made, kept by the kernel.
+    #[state(service = Permits)]
+    pub struct Granted {
+        pub last: Access,
+        pub grants: u32,
+    }
+
+    #[service]
+    pub struct Permits;
+
+    impl Permits {
+        /// The access with exactly the flags `access` lacks.
+        pub fn invert(access: Access) -> Access {
+            Access {
+                read: !access.read,
+                write: !access.write,
+                share: !access.share,
+            }
+        }
+
+        /// Grant `access` to `who`; the kernel keeps it as the last access granted.
+        pub fn give(who: String, access: Access) -> Grant {
+            Granted::update(|granted| {
+                granted.last = access;
+                granted.grants += 1;
+            });
+            Grant { who, access }
+        }
+
+        /// The flags any of the grants or `extra` sets.
+        pub fn merged(grants: Vec<Grant>, extra: Option<Access>) -> Access {
+            grants
+                .iter()
+                .map(|grant| grant.access)
+                .chain(extra)
+                .fold(Access::default(), |all, access| all | access)
+        }
+
+        /// What the kernel keeps for this object.
+        pub fn kept() -> Granted {
+            Granted::read()
+        }
+    }
 }
