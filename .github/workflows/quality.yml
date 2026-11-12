@@ -32,6 +32,8 @@ jobs:
       - run: just install-tools
       - run: just install
       - run: just check
+      # Compiled Orbs written with `#[orb]`: the macro's output must compile and run.
+      - run: just test-orb-examples
 
   # Build the pinned interpreter and compiled provider once, then run every isolated Orb suite.
   acceptance:

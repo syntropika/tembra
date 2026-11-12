@@ -142,6 +142,16 @@ examples:
     cargo run --locked -p tembra --features hooks --example hooks
     cargo run --locked -p tembra --example composition
 
+# Build and run every #[orb] example; the contracts and lockfiles committed beside them must not change.
+test-orb-examples:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for script in examples/rust-orb-*/run.sh; do
+        echo "== $script"
+        "$script"
+    done
+    git diff --exit-code -- examples
+
 check: fmt-check build-node build-wasm build-sdk
     bun run typecheck
     just lint
