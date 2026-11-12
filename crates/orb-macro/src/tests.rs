@@ -177,8 +177,9 @@ const COUNTER: &str = "mod tally {
     }
 }";
 
-/// A state with a function marked `#[validate]` declares itself validated and its `update`
-/// answers the refusal; the marker decides, not the name, and the function has one shape.
+/// A state with a function marked `#[validate]` runs it on a reload and its `update` answers the
+/// refusal; the marker decides, not the name, and the function has one shape. Every state declares
+/// itself validated, so a reload checks that the inherited value reads as the state's type.
 #[test]
 fn a_validated_state_declares_so_and_updates_fallibly() {
     let module = expanded("example:counter@1.0.0", COUNTER);
@@ -209,14 +210,21 @@ fn a_validated_state_declares_so_and_updates_fallibly() {
         renamed.contains("Ok (state) => state . non_negative () ,"),
         "{renamed}"
     );
-    // Without the marker, `validate` is an ordinary function and the state is not validated.
+    // Without the marker, `validate` is an ordinary function: a reload still reads the inherited
+    // value as the state's type, and runs no rule.
     let plain = tokens(&expanded(
         "example:counter@1.0.0",
         &COUNTER.replace("#[validate]\n", ""),
     ));
-    assert!(plain.contains("validated : false"), "{plain}");
+    assert!(plain.contains("validated : true"), "{plain}");
+    assert!(!plain.contains("validated : false"), "{plain}");
+    assert!(
+        plain.contains("\"example:counter/counter@1.0.0\" => match :: serde_json :: from_str :: < Count > (& value) { :: core :: result :: Result :: Ok (_) => :: core :: result :: Result :: Ok (()) , :: core :: result :: Result :: Err (error) =>"),
+        "{plain}"
+    );
     assert!(plain.contains("pub fn validate (& self)"), "{plain}");
     assert!(!plain.contains("value . validate ()"), "{plain}");
+    assert!(!plain.contains("state . validate ()"), "{plain}");
     for wrong in [
         "pub fn validate(&mut self) -> Result<(), String>",
         "pub fn validate(&self) -> bool",

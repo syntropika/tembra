@@ -50,8 +50,8 @@ A state may carry its rule: a function of its `impl` block marked `#[validate]`,
 refusal leaves the previous value in place, so `add` returns a `result<count, string>` in the WIT.
 The same function answers the kernel on a reload, when the new instance is asked whether it
 accepts the value it inherits; a refusal fails the reload and the running revision keeps serving.
-Without the marker, a function named `validate` is ordinary Rust and the state is not validated.
-The world gains two lines:
+Without the marker, a function named `validate` is ordinary Rust, and a reload still checks that
+the inherited value reads as a `Count`. The world gains two lines:
 
 ```wit
 world tally {
@@ -63,10 +63,10 @@ world tally {
 
 `tembra:guest` is the kernel's own package, bundled with `tembra-contracts` like WASI. When the
 kernel creates a `counter` object it calls the exported `state-init.declare` with the service's
-interface name, gets the initial JSON, the version and whether the state is validated back, and
-declares the state for that object; `read` and `update` then reach the state of the object running
-the call, and `state-init.validate` is what a reload calls. The executor serves the import itself:
-the installer requires and grants nothing.
+interface name, gets the initial JSON and the version back, and declares the state for that object;
+`read` and `update` then reach the state of the object running the call, and `state-init.validate`
+is what a reload calls: the new instance reads the value it inherits as a `Count` and runs the rule
+on it. The executor serves the import itself: the installer requires and grants nothing.
 
 ## Build
 

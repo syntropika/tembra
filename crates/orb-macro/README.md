@@ -64,7 +64,7 @@ mod greeter {
 | a unit struct with `#[hook(composition = c, input = Type)]`                 | a hook `interface` of the package under the struct's name, its callback `apply` and the types the input reaches, imported and exported by the world: a declaration |
 | a struct with named fields and `#[state(service = Name, version = n)]`      | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it                                                |
 | a struct with `#[resource(version = n)]` and a function marked `#[open]`    | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                                                                              |
-| `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct | nothing in the WIT: the state's rule, run on every update and on reload; `validated` in the declaration to the kernel                                              |
+| `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct | nothing in the WIT: the state's rule, run on every update and on reload                                                                                            |
 | `#[close]` on a `fn(self)` of a `#[resource]` struct                        | nothing in the WIT: run by the kernel at teardown                                                                                                                  |
 | an inline `mod`                                                             | nothing of its own: its items are read as the Orb's, grouped with what belongs to them                                                                             |
 | `///` comments                                                              | `///` comments in the WIT                                                                                                                                          |
@@ -232,7 +232,10 @@ A state may carry its own rule: a function of its `impl` block marked `#[validat
 refusal leaves the previous value in place. The same function answers the kernel on a reload, when
 the new instance is asked whether it accepts the value it inherits: a refusal fails the reload and
 the running revision keeps serving, as the [state example](../../examples/rust-orb-state/README.md)
-shows for an update. A function named `validate` without the marker is ordinary Rust.
+shows for an update. A function named `validate` without the marker is ordinary Rust. Every state
+answers a reload, with a rule or without: the new instance first reads the value it inherits as its
+own state type, so a value of another shape, a field added or renamed under the same `version`,
+fails the reload instead of the first `read`.
 
 Two rules follow from the kernel, not from the macro. A service's state is reached only by the
 methods of that service: a call runs on one object, and the kernel refuses an update from any
@@ -495,7 +498,8 @@ The macro rewrites the module with:
    constructor and methods forwarded and the handles wrapped at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
 8. with a state, `Default` and the `read`/`update` functions on each state type, over a hidden
    module that maps the kernel's JSON to the type with `serde_json`, and the kernel's `validate`
-   callback, which runs the state's `#[validate]` function on the value a reload would adopt;
+   callback, which reads the value a reload would adopt as the state type and runs the state's
+   `#[validate]` function on it;
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
    function and emptied by the `#[close]` one, and the `with` function on each resource type.
 

@@ -220,7 +220,7 @@ struct State {
     version: u32,
     /// The function marked `#[validate]`, `fn(&self) -> Result<(), String>`: every update runs it
     /// before the kernel stores the value, and a reload runs it on the value the new instance
-    /// inherits.
+    /// inherits, once that value reads as the state's type.
     validator: Option<Ident>,
     /// The identity of the owning service's interface, once the owner is resolved.
     identity: String,
@@ -2773,37 +2773,40 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
     if states.is_empty() {
         return quote! {};
     }
+    // Every state is validated: the value a reload hands the new instance must at least read as
+    // the state's type, or the first `read` would trap.
     let declarations = states.iter().map(|state| {
         let identity = LitStr::new(&state.identity, Span::call_site());
         let path = from_root(&modules[state.scope], &state.ident);
         let version = state.version;
-        let validated = state.validator.is_some();
         quote! {
             #identity => Some(exports::tembra::guest::state_init::Declaration {
                 initial: __tembra_state::to_json(&<#path as ::core::default::Default>::default()),
                 version: #version,
-                validated: #validated,
+                validated: true,
             }),
         }
     });
-    // On reload the kernel hands the new instance the value it inherits; a validated state
-    // answers with its validator, any other state accepts.
-    let validators = states
-        .iter()
-        .filter_map(|state| state.validator.as_ref().map(|validator| (state, validator)))
-        .map(|(state, validator)| {
-            let identity = LitStr::new(&state.identity, Span::call_site());
-            let path = from_root(&modules[state.scope], &state.ident);
-            let name = LitStr::new(&state.ident.to_string(), Span::call_site());
-            quote! {
-                #identity => match ::serde_json::from_str::<#path>(&value) {
-                    Ok(state) => state.#validator(),
-                    Err(error) => Err(__tembra_state::format!(
-                        "the retained state is not a `{}`: {error}", #name
-                    )),
-                },
-            }
-        });
+    // On reload the kernel hands the new instance the value it inherits: the new instance reads
+    // it as its state's type, refusing a value of another shape, and runs the state's own rule,
+    // if it has one.
+    let validators = states.iter().map(|state| {
+        let identity = LitStr::new(&state.identity, Span::call_site());
+        let path = from_root(&modules[state.scope], &state.ident);
+        let name = LitStr::new(&state.ident.to_string(), Span::call_site());
+        let accepted = match &state.validator {
+            Some(validator) => quote! { ::core::result::Result::Ok(state) => state.#validator(), },
+            None => quote! { ::core::result::Result::Ok(_) => ::core::result::Result::Ok(()), },
+        };
+        quote! {
+            #identity => match ::serde_json::from_str::<#path>(&value) {
+                #accepted
+                ::core::result::Result::Err(error) => ::core::result::Result::Err(
+                    __tembra_state::format!("the retained state is not a `{}`: {error}", #name),
+                ),
+            },
+        }
+    });
     let accessors = states.iter().map(|state| {
         let path = from_root(&modules[state.scope], &state.ident);
         let fields = &state.fields;
