@@ -1,6 +1,6 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-12, 15:17 CET
+- **Aggiornato:** 2026-11-12, 16:40 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1,
   mergiata in `main` il 12/11 alle 14:59 CET
 - **Stato:** la PR #1 è in `main` con il merge commit
@@ -99,9 +99,16 @@ Da sapere:
 
 Resta da fare:
 
-- Le voci aperte della PR #3, a partire dalle piccole: gli
-  import degli esempi via `tembra::wasm`, i `#[derive]`
-  dell'autore, la dipendenza git di `cargo tembra new`.
+- Le voci aperte della PR #3. Fatte il 12/11 con tre
+  subagent, integrate e pushate fino a `74e324e` (`just
+  check`, esempi e test della macro verdi): esempi via la
+  facade `tembra`, `cargo tembra new` fuori dal repo con
+  dipendenza git, `#[derive]` dell'autore conservati.
+  Prossime, le medie: parametri resource e `flags` nel WIT
+  derivato, import WASI, import con chiave.
+- Il commit vuoto `137925e` della PR #3 ha ancora la riga
+  `Co-Authored-By`: si rifà solo con un force-push che
+  lancia Giacomo. Da ora niente attribuzione nei commit.
 - Le scelte della seconda review sono in discussione con
   Javier (messaggio di Giacomo del 12/11, dopo il merge):
   quelle da cambiare vanno in commit nuovi da `main`.
