@@ -1,5 +1,5 @@
 //! `cargo tembra`: a Cargo subcommand for Rust Orbs, in the spirit of `cargo contract` and the
-//! CosmWasm optimizer. An author writes a module with `#[tembra_orb_macro::orb]` and runs one
+//! CosmWasm optimizer. An author writes a module with `#[tembra::orb]` and runs one
 //! command; the WIT, the component checks, the artifact and the grant summary follow.
 //!
 //! ```text
