@@ -428,6 +428,53 @@ fn a_service_may_implement_a_consumed_interface() {
     assert!(error.contains("needs wit ="), "{error}");
 }
 
+/// Every reference to a service object has the members `then`, `release`, `state`, `ready`,
+/// `status` and `opaque`, so the kernel refuses a method of one of those names: the macro refuses
+/// it first, by the name the kernel compares, for a derived and for an implemented interface.
+#[test]
+fn a_service_method_may_not_take_a_reserved_member_name() {
+    for name in ["then", "release", "state", "ready", "status", "opaque"] {
+        let error = refused(
+            PACKAGE,
+            &ledger("#[service]").replace("pub fn count()", &format!("pub fn {name}()")),
+        );
+        assert!(
+            error.contains(&format!(
+                "`Ledger::{name}` is a method named `{name}`, a member every reference to a service object has"
+            )),
+            "{name}: {error}"
+        );
+    }
+    // The kernel compares the lowerCamelCase spelling, which `then_` shares.
+    let error = refused(
+        PACKAGE,
+        &ledger("#[service]").replace("pub fn count()", "pub fn then_()"),
+    );
+    assert!(error.contains("is a method named `then`"), "{error}");
+    // A name that only contains one is a method like any other.
+    let module = expanded(
+        PACKAGE,
+        &ledger("#[service]").replace("pub fn count()", "pub fn ready_count()"),
+    );
+    assert!(
+        wit(&module).contains("ready-count: func() -> u32;"),
+        "{}",
+        wit(&module)
+    );
+    let dir = consumed(
+        "reserved",
+        &LEDGER_WIT.replace("total: func() -> s64;", "status: func() -> s64;"),
+    );
+    let error = refused_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        &KEEPER.replace("pub fn total()", "pub fn status()"),
+    );
+    assert!(
+        error.contains("example:ledger/book@1.0.0 has a function `status`, a member every reference to a service object has as `status`"),
+        "{error}"
+    );
+}
+
 /// `import = "..."` on the attribute imports the interface in the world and re-exports its module.
 #[test]
 fn an_import_enters_the_world_and_is_reexported() {

@@ -27,7 +27,7 @@
 //! packages the artifact.
 mod wit;
 
-use heck::{ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
+use heck::{ToLowerCamelCase, ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -794,7 +794,22 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 continue;
             };
             if matches!(function.vis, Visibility::Public(_)) {
-                service.functions.push(method(function)?);
+                let read = method(function)?;
+                // An implemented interface's names are fixed by its WIT, checked with it below.
+                if service.implements.is_none()
+                    && let Some(member) = reserved_member(&wit::kebab(&read.ident))
+                {
+                    return Err(syn::Error::new(
+                        read.ident.span(),
+                        format!(
+                            "`{}::{}` is a method named `{member}`, a member every reference to a service object has ({}): the kernel refuses such a method, so rename it",
+                            service.ident,
+                            read.ident,
+                            RESERVED_MEMBERS.join(", ")
+                        ),
+                    ));
+                }
+                service.functions.push(read);
             }
         }
     }
@@ -1178,6 +1193,16 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         let identity = service.implements.as_deref().unwrap_or_default();
         let interface = &consumed[identity];
         for function in &interface.functions {
+            if let Some(member) = reserved_member(&function.name) {
+                return Err(syn::Error::new(
+                    service.ident.span(),
+                    format!(
+                        "{identity} has a function `{}`, a member every reference to a service object has as `{member}` ({}): the kernel refuses such a method, so no Orb can serve this interface",
+                        function.name,
+                        RESERVED_MEMBERS.join(", ")
+                    ),
+                ));
+            }
             if !service
                 .functions
                 .iter()
@@ -1676,6 +1701,19 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             export!(__TembraExports);
         }
     })
+}
+
+/// The members every reference to a service object has, which the kernel refuses as method names
+/// when it installs an Orb; `tembra-core` checks the same list.
+const RESERVED_MEMBERS: [&str; 6] = ["then", "release", "state", "ready", "status", "opaque"];
+
+/// The reserved member a WIT function would take on a reference, if any: the kernel compares the
+/// lowerCamelCase spelling of the official JavaScript bindings.
+fn reserved_member(wit_name: &str) -> Option<String> {
+    let member = wit_name.to_lower_camel_case();
+    RESERVED_MEMBERS
+        .contains(&member.as_str())
+        .then_some(member)
 }
 
 /// Remove and return the marker attribute with the given name, if present.
