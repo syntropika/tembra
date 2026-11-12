@@ -116,10 +116,10 @@ every type of the module its fields reach that stays out too, get `serde`'s deri
 names a type the module does not declare is a compile error, and so is a service with the name of
 the module, because WIT refuses a world and an interface of one name. So is a method named `then`,
 `release`, `state`, `ready`, `status` or `opaque`: every reference to a service object has those
-members, and the kernel refuses such a method when it installs the Orb. The package and
-every identity an attribute names are WIT identities, `ns:name@version` and
-`ns:name/interface@version`: names of kebab-case words of lowercase letters and digits, each word
-starting with a letter, none of them a WIT keyword, and a semantic version.
+members, and the kernel refuses such a method when it installs the Orb. The package and every
+identity an attribute names are WIT identities, `ns:name@version` and `ns:name/interface@version`:
+names of kebab-case words of lowercase letters and digits, each word starting with a letter, none
+of them a WIT keyword, and a semantic version.
 
 A name that enters the WIT is the kebab-case form of the Rust name, a raw identifier without its
 `r#`: `HTTPRequest` is `http-request` and `r#type` is `type`. A WIT keyword, such as `list`,
@@ -627,8 +627,8 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) among its de
   ±2^53 in a state loses precision there.
 - Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
   64-bit integers cross the boundary exactly. A `resource` is a `#[wit_resource]` struct or the
-  handle of an imported interface, handed out as an owned handle and never taken as a
-  parameter. No `flags`, `stream` or `future`. `()` is nothing only as a function's result or a
+  handle of an imported interface, handed out as an owned handle and never taken as a parameter,
+  unless an implemented interface's WIT takes it. No `flags`, `stream` or `future`. `()` is nothing only as a function's result or a
   side of a `Result`, which WIT then leaves out: `Result<T, ()>` is `result<t>`, `Result<(), E>` is
   `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has no equivalent, use `bool`.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it, and a record
