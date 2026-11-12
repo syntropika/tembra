@@ -328,27 +328,39 @@ fn an_idle_producer_ends_only_at_the_terminal_timeout() {
     engines(|bytes, interpreted| {
         let mut fixture = install(bytes, interpreted, 1000);
         let started = Instant::now();
-        let closed = fixture
-            .root(async move |context, reference, _| {
-                let stream = open(&context, &reference, 0, 0, IDLE).await?;
-                // The producer never looks at its stream: the close is acknowledged only when the
-                // call times out, and that is a failure.
-                Ok(stream.close().await)
-            })
-            .unwrap();
+        let outcome = fixture.root(async move |context, reference, _| {
+            let stream = open(&context, &reference, 0, 0, IDLE).await?;
+            // Closing an unread idle stream still awaits its terminal callback deadline.
+            Ok(stream.close().await)
+        });
         assert!(
             started.elapsed() >= Duration::from_millis(900),
             "{interpreted}"
         );
+        let (error, published) = match outcome {
+            Err(error) => (error, false),
+            Ok(Err(error)) => (error, true),
+            Ok(Ok(())) => panic!("{interpreted}: a timed-out producer closed cleanly"),
+        };
         assert!(
-            closed.unwrap_err().message.contains("timed out"),
-            "{interpreted}"
+            error.message.contains("timed out"),
+            "{interpreted}: {error:?}"
         );
         fixture.wait(|fixture| fixture.calls() == 0);
         // The Store is retired, never reused with its parked task.
         let ping = fixture.ping().unwrap_err();
         assert_eq!(ping.reason, "wasm_executor_quarantined", "{interpreted}");
-        assert!(!fixture.host.errors().is_empty());
+        fixture.pool.run_until(fixture.host.settled());
+        assert_eq!(fixture.engine.instances(), 0, "{interpreted}");
+        let errors = fixture.host.errors();
+        if published {
+            assert_eq!(errors, vec![error], "{interpreted}");
+        } else {
+            assert!(
+                errors.is_empty(),
+                "{interpreted}: a direct timeout was duplicated: {errors:?}"
+            );
+        }
         fixture.close();
     });
 }

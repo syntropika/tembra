@@ -15,7 +15,10 @@ use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tembra::{
@@ -96,6 +99,48 @@ const GATED: u32 = 6;
 const THROW_UNDEFINED: u32 = 7;
 /// Native only: call back into the consumer first.
 const REENTER: u32 = 8;
+
+/// One test's producer waits until its actual receiving caller observed the head.
+#[derive(Default)]
+struct HeadGate {
+    observed: AtomicBool,
+    timed_out: AtomicBool,
+    ready: Condvar,
+    lock: Mutex<()>,
+    reader: futures::task::AtomicWaker,
+}
+
+impl HeadGate {
+    fn open(&self) {
+        let _guard = self.lock.lock().unwrap();
+        self.observed.store(true, Ordering::Release);
+        self.ready.notify_all();
+        self.reader.wake();
+    }
+
+    fn wait(&self) {
+        let guard = self.lock.lock().unwrap();
+        let (_guard, _) = self
+            .ready
+            .wait_timeout_while(guard, Duration::from_secs(20), |_| {
+                !self.observed.load(Ordering::Acquire)
+            })
+            .unwrap();
+        self.timed_out
+            .store(!self.observed.load(Ordering::Acquire), Ordering::Release);
+    }
+
+    fn poll(&self, context: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        self.reader.register(context.waker());
+        if self.observed.load(Ordering::Acquire) {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+
+type HeadGates = Arc<Mutex<Option<Arc<HeadGate>>>>;
 
 /// Consumer read styles (`reader.read`); `+ 10` reads the aliased import instead.
 const CHUNKS: u32 = 0;
@@ -220,6 +265,8 @@ globalThis.__tembraOrb = {{ services: {{ reader: {{
       }} catch (error) {{
         return [0n, "import:" + message(error)];
       }}
+      // Only a successfully resolved import can release the producer's test gate.
+      console.log("consumer:failure-head");
       const at = {{ index: 0, offset: 0 }};
       let bytes = 0, bad = 0;
       try {{
@@ -347,6 +394,9 @@ globalThis.__tembraOrb = {{ services: {{ frames: {{
           }})());
         case {FAIL_AFTER}:
           return writeChunks((async function* () {{
+            // Flush STREAM_RESULT in a real host round trip before a diagnostic gate parks us.
+            await tembra.wait(0);
+            console.log("producer:failure-gate");
             for (let index = 0; index < count; index++) {{
               if (index === count >> 1) throw new Error("source producer failed after its head");
               yield chunk(index, size);
@@ -366,6 +416,9 @@ globalThis.__tembraOrb = {{ services: {{ frames: {{
           throw new Error("source producer refused before its head");
         case {THROW_UNDEFINED}:
           return writeChunks((async function* () {{
+            // Flush STREAM_RESULT in a real host round trip before a diagnostic gate parks us.
+            await tembra.wait(0);
+            console.log("producer:failure-gate");
             for (let index = 0; index < count; index++) yield chunk(index, size);
             throw undefined;
           }})());
@@ -430,6 +483,7 @@ fn exact(received: &[u8], size: usize) -> bool {
 /// What the native producer saw and did.
 #[derive(Default)]
 struct Native {
+    head: RefCell<Option<Arc<HeadGate>>>,
     log: RefCell<Vec<String>>,
     /// `(principal, root)` of every `frames` call.
     calls: RefCell<Vec<(String, core::Id)>>,
@@ -493,11 +547,17 @@ struct Lazy {
 impl ByteSource for Lazy {
     fn poll_next(
         &mut self,
-        _: &mut std::task::Context<'_>,
+        context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<tembra::Result<Vec<u8>>>> {
         use std::task::Poll;
         if self.closed {
             return Poll::Ready(None);
+        }
+        if self.fail_at.is_some()
+            && let Some(gate) = self.native.head.borrow().as_ref()
+            && gate.poll(context).is_pending()
+        {
+            return Poll::Pending;
         }
         if self.fail_at == Some(self.next) {
             self.done.take().map(|done| done.send(()));
@@ -641,6 +701,7 @@ struct Fixture {
     producer: Rc<Reference>,
     native: Rc<Native>,
     logs: Arc<Mutex<Vec<String>>>,
+    heads: HeadGates,
     interpreted: bool,
     kind: Kind,
 }
@@ -657,6 +718,7 @@ fn engine(
     interpreter: &[u8],
     interpreted: bool,
     limits: Limits,
+    heads: HeadGates,
 ) -> (Engine, Arc<Mutex<Vec<String>>>) {
     let logs = Arc::<Mutex<Vec<String>>>::default();
     let sink = logs.clone();
@@ -668,7 +730,17 @@ fn engine(
     .unwrap()
     .interpreter(interpreter)
     .unwrap()
-    .on_log(move |record| sink.lock().unwrap().push(record.message.clone()));
+    .on_log(move |record| {
+        sink.lock().unwrap().push(record.message.clone());
+        let gate = heads.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            match record.message.as_str() {
+                "producer:failure-gate" => gate.wait(),
+                "consumer:failure-head" => gate.open(),
+                _ => {}
+            }
+        }
+    });
     (engine, logs)
 }
 
@@ -734,7 +806,8 @@ fn install(
     kind: Kind,
     compiled: Option<&[u8]>,
 ) -> Fixture {
-    let (engine, logs) = engine(interpreter, interpreted, limits);
+    let heads = HeadGates::default();
+    let (engine, logs) = engine(interpreter, interpreted, limits, heads.clone());
     let pool = LocalPool::new();
     let host = Host::new(pool.spawner());
     let native = Rc::<Native>::default();
@@ -754,6 +827,7 @@ fn install(
         producer,
         native,
         logs,
+        heads,
         interpreted,
         kind,
     };
@@ -774,6 +848,26 @@ fn engines(body: impl Fn(&[u8], bool)) {
 }
 
 impl Fixture {
+    fn arm_head(&self) -> Arc<HeadGate> {
+        let gate = Arc::<HeadGate>::default();
+        *self.native.head.borrow_mut() = Some(gate.clone());
+        *self.heads.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    fn check_head(&self) {
+        if let Some(gate) = self.heads.lock().unwrap().as_ref() {
+            assert!(
+                gate.observed.load(Ordering::Acquire),
+                "head was not observed"
+            );
+            assert!(
+                !gate.timed_out.load(Ordering::Acquire),
+                "head gate timed out"
+            );
+        }
+    }
+
     fn mode(&self) -> String {
         format!(
             "{} {:?}",
@@ -1052,6 +1146,7 @@ fn a_source_relay_forwards_a_stream_from_source_or_native_to_native() {
             fixture.pool.run_until(relayed.ready()).unwrap();
             let read = |fixture: &mut Fixture, mode: u32, take: usize| {
                 let relayed = relayed.clone();
+                let gate = (mode == FAIL_AFTER).then(|| fixture.arm_head());
                 fixture
                     .pool
                     .run_until(fixture.host.root("alice", move |context| {
@@ -1063,6 +1158,9 @@ fn a_source_relay_forwards_a_stream_from_source_or_native_to_native() {
                                     (COUNT, SIZE, mode),
                                 )
                                 .await?;
+                            if let Some(gate) = gate {
+                                gate.open();
+                            }
                             let mut received = Vec::new();
                             while received.len() < take {
                                 match futures::StreamExt::next(&mut stream).await {
@@ -1083,6 +1181,7 @@ fn a_source_relay_forwards_a_stream_from_source_or_native_to_native() {
             assert!(exact(&received, SIZE as usize), "{mode}");
             // A failure after the origin's head reaches the native reader as an error.
             let (received, failure) = read(&mut fixture, FAIL_AFTER, usize::MAX).unwrap();
+            fixture.check_head();
             assert!(failure.is_some(), "{mode}: a failed origin ended cleanly");
             assert!(received.len() <= (COUNT / 2 * SIZE) as usize, "{mode}");
             assert!(exact(&received, SIZE as usize), "{mode}");
@@ -1110,6 +1209,7 @@ fn a_source_relay_forwards_a_stream_from_source_or_native_to_native() {
             fixture.wait(|fixture| fixture.calls() == 0);
             relayed.release().unwrap();
             // The failed origin's error is recorded by the host, not swallowed.
+            fixture.pool.run_until(fixture.host.settled());
             let errors = fixture.host.errors();
             assert!(
                 kind == Kind::Native
@@ -1201,9 +1301,15 @@ fn producer_failures_are_errors_before_and_after_the_head() {
             let mut fixture = install(interpreter, interpreted, limits(30_000), kind, None);
             let mode = fixture.mode();
             let mut failure = |producer: u32| {
-                fixture
+                if matches!(producer, FAIL_AFTER | THROW_UNDEFINED) {
+                    fixture.arm_head();
+                }
+                let result = fixture
                     .call::<_, (u64, String)>("failure", (4_u32, 1024_u32, producer))
-                    .unwrap()
+                    .unwrap();
+                fixture.pool.run_until(fixture.host.settled());
+                fixture.check_head();
+                result
             };
             let (bytes, outcome) = failure(FAIL_BEFORE);
             assert_eq!(bytes, 0, "{mode}");
@@ -1224,8 +1330,9 @@ fn producer_failures_are_errors_before_and_after_the_head() {
                 let (bytes, outcome) = failure(THROW_UNDEFINED);
                 assert!(bytes <= 4096, "{mode}: {bytes}");
                 assert!(outcome.starts_with("read:"), "{mode}: {outcome}");
-                // Both failed producer callbacks are recorded by the host.
+                // Each failed producer callback is recorded once after physical settlement.
                 let errors = fixture.host.errors();
+                assert_eq!(errors.len(), 2, "{mode}: {errors:?}");
                 assert!(
                     errors
                         .iter()
@@ -1520,7 +1627,7 @@ fn refused_import_profiles() {
     let Some(interpreter) = interpreter() else {
         return;
     };
-    let (engine, _) = engine(&interpreter, false, limits(30_000));
+    let (engine, _) = engine(&interpreter, false, limits(30_000), HeadGates::default());
     let bindings = |names: &[&str]| -> BTreeMap<String, tembra_contracts::Binding> {
         names
             .iter()

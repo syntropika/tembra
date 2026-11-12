@@ -56,6 +56,7 @@ const DEPENDENCY: u32 = 7;
 const THROW_UNDEFINED: u32 = 8;
 const CLEANUP: u32 = 9;
 const GATED: u32 = 10;
+const PACKET_AFTER_HEAD: u32 = 11;
 
 /// The fixture Orb. `writeChunks` transcribes `writeChunks(chunks)` from
 /// `@syntropika/tembra-sdk` (`packages/ts/sdk/src/guest.ts`): the helper returns exactly this
@@ -154,6 +155,15 @@ globalThis.__tembraOrb = {{ services: {{ frames: {{
               console.log("producer:returned");
             }}
           }})());
+        case {PACKET_AFTER_HEAD}:
+          return writeChunks((async function* () {{
+            try {{
+              await environment.ledger.note("packet", context);
+              yield chunk(0, size);
+            }} finally {{
+              console.log("packet:returned");
+            }}
+          }})());
         case {DEPENDENCY}:
           return writeChunks((async function* () {{
             yield chunk(0, size);
@@ -216,6 +226,7 @@ type Seen = Rc<RefCell<Vec<(String, String, String)>>>;
 /// Gated ledger calls, and the order of what they and the test observed.
 #[derive(Default)]
 struct Gates {
+    packet: RefCell<Option<oneshot::Receiver<()>>>,
     /// Release the callback only after its consumer has ended the logical root.
     cooperative: RefCell<Option<oneshot::Receiver<()>>>,
     log: RefCell<Vec<String>>,
@@ -259,6 +270,14 @@ fn ledger(seen: Seen, gates: Rc<Gates>) -> Orb {
                 let seen = seen.clone();
                 let gates = gates.clone();
                 async move {
+                    if event == "packet" {
+                        let principal = context.principal()?;
+                        let root = format!("{:?}", context.root);
+                        seen.borrow_mut().push((event, principal, root));
+                        let gate = gates.packet.borrow_mut().take().unwrap();
+                        gate.await.unwrap();
+                        return Ok("packet".into());
+                    }
                     if event == "cooperate" {
                         gates.note("cooperate:start");
                         let gate = gates.cooperative.borrow_mut().take().unwrap();
@@ -386,10 +405,9 @@ impl Fixture {
         }));
         if let Err(error) = &result {
             eprintln!(
-                "{}: root failed: {error:?}; logs {:?}; host errors {:?}",
+                "{}: root failed: {error:?}; logs {:?}",
                 self.mode(),
-                self.logs.lock().unwrap(),
-                self.host.errors()
+                self.logs.lock().unwrap()
             );
         }
         result
@@ -865,25 +883,32 @@ fn cancelling_the_root_fails_the_read_and_keeps_the_revision() {
 fn the_terminal_timeout_fails_the_read_and_quarantines_the_revision() {
     engines(|interpreter, interpreted| {
         let mut fixture = install(interpreter, interpreted, limits(1_500));
-        let outcome = fixture
-            .root(async move |context, reference, _| {
-                let mut stream = open(&context, &reference, 2, 1 << 10, IDLE).await?;
-                Ok(drain(&mut stream).await)
-            })
-            .unwrap();
+        let outcome = fixture.root(async move |context, reference, _| {
+            let mut stream = open(&context, &reference, 2, 1 << 10, IDLE).await?;
+            Ok(drain(&mut stream).await)
+        });
         let mode = fixture.mode();
-        let Err((prefix, error)) = outcome else {
-            panic!("{mode}: a timed-out producer ended cleanly");
+        let published = match outcome {
+            Err(error) => {
+                assert!(error.message.contains("wall time"), "{mode}: {error:?}");
+                false
+            }
+            Ok(Err((prefix, error))) => {
+                // The deadline may precede the first write or follow its complete chunk.
+                assert!(matches!(prefix.len(), 0 | 1024), "{mode}");
+                assert!(exact(&prefix, 1 << 10), "{mode}");
+                // Dropping the Store can fail the pipe before publishing its wall-time cause.
+                assert!(
+                    error.message.contains("wall time")
+                        || error
+                            .message
+                            .contains("ended before its stream was delivered"),
+                    "{mode}: {error:?}"
+                );
+                true
+            }
+            Ok(Ok(_)) => panic!("{mode}: a timed-out producer ended cleanly"),
         };
-        assert_eq!(prefix.len(), 1 << 10, "{mode}");
-        // The dropped Store fails the pipe, or the settlement reports the wall time first.
-        assert!(
-            error.message.contains("wall time")
-                || error
-                    .message
-                    .contains("ended before its stream was delivered"),
-            "{mode}: {error:?}"
-        );
         fixture.wait(|fixture| fixture.calls() == 0);
         let refused = fixture.ping().unwrap_err();
         assert_eq!(
@@ -891,7 +916,17 @@ fn the_terminal_timeout_fails_the_read_and_quarantines_the_revision() {
             "{mode}: {refused:?}"
         );
         assert!(refused.message.contains("wall time"), "{mode}: {refused:?}");
-        let _ = fixture.host.errors();
+        fixture.pool.run_until(fixture.host.settled());
+        let errors = fixture.host.errors();
+        if published {
+            assert_eq!(errors.len(), 1, "{mode}: {errors:?}");
+            assert_eq!(errors[0].message, refused.message, "{mode}: {errors:?}");
+        } else {
+            assert!(
+                errors.is_empty(),
+                "{mode}: a direct timeout was duplicated: {errors:?}"
+            );
+        }
         fixture.close();
     });
 }
@@ -966,38 +1001,82 @@ fn a_reload_lets_an_open_stream_finish_on_its_revision() {
 #[ignore = "requires TEMBRA_WASM_ENGINE"]
 fn a_small_packet_limit_never_truncates_a_stream_into_a_clean_end() {
     engines(|interpreter, interpreted| {
-        let mut fixture = install(
-            interpreter,
-            interpreted,
-            Limits {
-                packet_bytes: 16 << 10,
-                ..limits(30_000)
-            },
-        );
-        let outcome = fixture
-            .root(async move |context, reference, _| {
-                let mut stream = open(&context, &reference, 4, 64 << 10, CHUNKS).await?;
+        for producer in [CHUNKS, PACKET_AFTER_HEAD] {
+            let mut fixture = install(
+                interpreter,
+                interpreted,
+                Limits {
+                    packet_bytes: 16 << 10,
+                    ..limits(30_000)
+                },
+            );
+            let (release, gate) = oneshot::channel();
+            *fixture.gates.packet.borrow_mut() = Some(gate);
+            let root = Rc::new(RefCell::new(None));
+            let entered = root.clone();
+            let outcome = fixture.root(async move |context, reference, _| {
+                *entered.borrow_mut() = Some(format!("{:?}", context.root));
+                let mut stream = open(&context, &reference, 4, 64 << 10, producer).await?;
+                // The gated producer cannot issue its first write before this observed head.
+                if producer == PACKET_AFTER_HEAD {
+                    release.send(()).unwrap();
+                }
                 Ok(drain(&mut stream).await)
-            })
-            .unwrap();
-        let mode = fixture.mode();
-        let Err((prefix, error)) = outcome else {
-            panic!("{mode}: an oversized binary packet was accepted");
-        };
-        assert!(
-            prefix.is_empty(),
-            "{mode}: bytes accepted before the limit check"
-        );
-        eprintln!("{mode}: small packet limit failed the stream: {error:?}");
-        fixture.wait(|fixture| fixture.calls() == 0);
-        let errors = fixture.host.errors();
-        assert_eq!(errors.len(), 1, "{mode}: {errors:?}");
-        assert!(
-            errors[0].message.contains("packet limit"),
-            "{mode}: {errors:?}"
-        );
-        assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
-        fixture.close();
+            });
+            let mode = fixture.mode();
+            let (error, published) = match outcome {
+                Err(error) => {
+                    assert_eq!(producer, CHUNKS, "{mode}: the gated head was lost");
+                    (error, false)
+                }
+                Ok(Err((prefix, error))) => {
+                    assert!(
+                        prefix.is_empty(),
+                        "{mode}: bytes accepted before the limit check"
+                    );
+                    (error, true)
+                }
+                Ok(Ok(_)) => panic!("{mode}: an oversized binary packet ended cleanly"),
+            };
+            assert!(
+                error
+                    .message
+                    .contains("standard packet exceeds the packet limit"),
+                "{mode}: {error:?}"
+            );
+            fixture.pool.run_until(fixture.host.settled());
+            assert_eq!(fixture.calls(), 0, "{mode}");
+            let errors = fixture.host.errors();
+            if published {
+                assert_eq!(errors, vec![error], "{mode}");
+            } else {
+                assert!(
+                    errors.is_empty(),
+                    "{mode}: a direct refusal was duplicated: {errors:?}"
+                );
+            }
+            if producer == PACKET_AFTER_HEAD {
+                assert_eq!(
+                    *fixture.seen.borrow(),
+                    vec![(
+                        "packet".into(),
+                        "alice".into(),
+                        root.borrow().clone().unwrap()
+                    )],
+                    "{mode}"
+                );
+                assert!(fixture.logged("packet:returned"), "{mode}");
+            } else {
+                assert!(fixture.logged("producer:returned:0"), "{mode}");
+            }
+            assert_eq!(fixture.ping().unwrap(), 42, "{mode}");
+            assert_eq!(
+                fixture.engine.instances(),
+                1,
+                "{mode}: a packet refusal retired the revision"
+            );
+            fixture.close();
+        }
     });
 }
 

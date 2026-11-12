@@ -378,13 +378,19 @@ fn an_idle_producer_ends_both_calls_at_their_terminal_timeout() {
             &pair.call::<_, u32>("ping", (1_u32,)).unwrap_err()
         ));
         assert!(quarantined(&pair.producer_ping().unwrap_err()));
+        pair.pool.run_until(pair.host.settled());
+        assert_eq!(pair.engine.instances(), 0, "{interpreted}");
         let errors = pair.host.errors();
+        // The scalar consumer result does not expose whether its upstream stream was delivered.
+        // A pre-head failure is returned directly; a published producer reports its late failure
+        // once. The direct-stream tests separately require that exact report after an observed head.
         assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("timed out")),
-            "{interpreted}: {errors:?}"
+            errors.len() <= 1,
+            "{interpreted}: duplicate timeout: {errors:?}"
         );
+        for late in errors {
+            assert_eq!(late, error, "{interpreted}: unexpected late failure");
+        }
         pair.close();
     });
 }
