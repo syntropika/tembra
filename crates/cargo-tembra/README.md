@@ -71,7 +71,8 @@ services chose a lifetime.
 Both directories sit inside the Orb's crate, like `schema/` and `artifacts/` of a CosmWasm contract:
 the first is committed, the second is a build output to ignore. With `--out <dir>` the component,
 the artifact, a copy of the contract and the checksums go to that directory instead, so a
-repository with several Orbs can collect them in one place.
+repository with several Orbs can collect them in one place. A build replaces the lines of its own
+files in `checksums.txt` and keeps the others, sorted by file name.
 
 and a summary, here for the filter of the hooks example:
 

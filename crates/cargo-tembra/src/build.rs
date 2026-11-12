@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use heck::ToKebabCase;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -147,7 +148,8 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .map_err(|error| anyhow::anyhow!("{error}"))
         .context("the component does not satisfy its contract")?;
     //    The outputs stay inside the crate, next to contract/; with --out they are collected
-    //    elsewhere together with a copy of the contract, so one directory can hold every Orb.
+    //    elsewhere together with a copy of the contract, so one directory can hold every Orb:
+    //    checksums.txt keeps the lines of the files this build does not write.
     let collected = out.is_some();
     let artifacts = out.unwrap_or_else(|| manifest_dir.join("artifacts"));
     std::fs::create_dir_all(&artifacts)?;
@@ -162,11 +164,15 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         std::fs::copy(&wit_file, artifacts.join(&name))?;
         files.push((name, std::fs::read(&wit_file)?));
     }
-    let mut checksums = String::new();
-    for (file, bytes) in &files {
-        checksums.push_str(&format!("{:x}  {file}\n", Sha256::digest(bytes)));
-    }
-    std::fs::write(artifacts.join("checksums.txt"), &checksums)?;
+    let checksums = artifacts.join("checksums.txt");
+    let previous = match std::fs::read_to_string(&checksums) {
+        Ok(previous) => previous,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", checksums.display()));
+        }
+    };
+    std::fs::write(&checksums, merged_checksums(&previous, &files))?;
 
     // 4. Summary: what the Orb offers, what it imports, which grants an installer must give.
     println!();
@@ -213,6 +219,24 @@ fn built_component(messages: impl BufRead, package: &Path) -> Result<Option<Path
         }
     }
     Ok(component)
+}
+
+/// The checksums of a directory after a build, `previous` being the file's former content: one
+/// `sha256  file` line per file, sorted by file name. The files this build wrote get new lines;
+/// the lines of the others, another Orb's in a directory given to `--out`, stay as they were.
+fn merged_checksums(previous: &str, written: &[(String, Vec<u8>)]) -> String {
+    let mut lines: BTreeMap<&str, String> = previous
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let file = line.split_once("  ").map_or(line, |(_, file)| file);
+            (file, line.to_owned())
+        })
+        .collect();
+    for (file, bytes) in written {
+        lines.insert(file, format!("{:x}  {file}", Sha256::digest(bytes)));
+    }
+    lines.into_values().map(|line| line + "\n").collect()
 }
 
 #[cfg(test)]
