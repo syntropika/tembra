@@ -97,6 +97,67 @@ struct Shape {
     scope: usize,
 }
 
+/// A struct with named fields or an enum of the module, before reachability decides whether it
+/// enters the WIT: the item, its name, the module types its fields name, followed by reachability
+/// and serde's derives, and its module. Only a candidate that enters the WIT is translated, so a
+/// type no method mentions may hold what WIT has no spelling for.
+struct Candidate {
+    item: Item,
+    ident: Ident,
+    references: Vec<Ident>,
+    /// The module declaring the type, by scope; 0 is the Orb module.
+    scope: usize,
+}
+
+impl Candidate {
+    /// A struct with named fields, a record once it enters the WIT.
+    fn record(item: syn::ItemStruct, scope: usize) -> Self {
+        let mut references = Vec::new();
+        for field in &item.fields {
+            wit::references(&field.ty, &mut references);
+        }
+        Self {
+            ident: item.ident.clone(),
+            item: Item::Struct(item),
+            references,
+            scope,
+        }
+    }
+
+    /// An enum, an `enum` or a `variant` once it enters the WIT; until then its variants may
+    /// carry fields of any shape.
+    fn enumeration(item: syn::ItemEnum, scope: usize) -> Self {
+        let mut references = Vec::new();
+        for field in item.variants.iter().flat_map(|variant| &variant.fields) {
+            wit::references(&field.ty, &mut references);
+        }
+        Self {
+            ident: item.ident.clone(),
+            item: Item::Enum(item),
+            references,
+            scope,
+        }
+    }
+
+    /// The type's WIT definition, once it enters the WIT, with what the generated type replacing
+    /// it would drop refused first.
+    fn translate(&self) -> syn::Result<Shape> {
+        replaceable(&self.item)?;
+        let mut shape = match &self.item {
+            Item::Struct(item) => wit::record(item)?,
+            Item::Enum(item) => wit::enumeration(item)?,
+            other => {
+                return Err(syn::Error::new(
+                    other.span(),
+                    "a type entering the WIT is a struct with named fields or an enum",
+                ));
+            }
+        };
+        shape.scope = self.scope;
+        Ok(shape)
+    }
+}
+
 /// The construction of a shape: the named fields of a record, the cases of an enum, the cases of
 /// a variant with their payload.
 enum ShapeKind {
@@ -405,7 +466,7 @@ struct Scan {
     package: String,
     /// The path of each module from the Orb module, by scope; scope 0 is the Orb module itself.
     modules: Vec<Vec<Ident>>,
-    candidates: Vec<(Item, Shape)>,
+    candidates: Vec<Candidate>,
     services: Vec<Service>,
     contributions: Vec<Contribution>,
     declared: Vec<Declared>,
@@ -489,9 +550,7 @@ impl Scan {
                         self.resources.push(resource);
                         // A resource enters the WIT only when a service method uses it.
                         if matches!(s.fields, Fields::Named(_)) {
-                            let mut shape = wit::record(&s)?;
-                            shape.scope = scope;
-                            self.candidates.push((Item::Struct(s), shape));
+                            self.candidates.push(Candidate::record(s, scope));
                         } else {
                             passthrough.push(Item::Struct(s));
                         }
@@ -516,9 +575,7 @@ impl Scan {
                         let mut state = state(&s, &attribute)?;
                         state.scope = scope;
                         self.states.push(state);
-                        let mut shape = wit::record(&s)?;
-                        shape.scope = scope;
-                        self.candidates.push((Item::Struct(s), shape));
+                        self.candidates.push(Candidate::record(s, scope));
                     } else if let Some(attribute) = take(&mut s.attrs, "service") {
                         if !matches!(s.fields, Fields::Unit) {
                             return Err(syn::Error::new(
@@ -537,18 +594,12 @@ impl Scan {
                         });
                         passthrough.push(Item::Struct(s));
                     } else if matches!(s.fields, Fields::Named(_)) {
-                        let mut shape = wit::record(&s)?;
-                        shape.scope = scope;
-                        self.candidates.push((Item::Struct(s), shape));
+                        self.candidates.push(Candidate::record(s, scope));
                     } else {
                         passthrough.push(Item::Struct(s));
                     }
                 }
-                Item::Enum(e) => {
-                    let mut shape = wit::enumeration(&e)?;
-                    shape.scope = scope;
-                    self.candidates.push((Item::Enum(e), shape));
-                }
+                Item::Enum(e) => self.candidates.push(Candidate::enumeration(e, scope)),
                 Item::Impl(mut i) if i.trait_.is_none() => {
                     if let Some(attribute) = i.attrs.iter().find(|a| a.path().is_ident("service")) {
                         return Err(syn::Error::new(
@@ -1207,7 +1258,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // A state whose `Default` the author implements by hand starts from the author's value.
     let declared_types: Vec<(usize, Ident)> = candidates
         .iter()
-        .map(|(_, shape)| (shape.scope, shape.ident.clone()))
+        .map(|candidate| (candidate.scope, candidate.ident.clone()))
         .collect();
     let authored: Vec<bool> = states
         .iter()
@@ -1227,7 +1278,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // every type of the module its fields reach that stays out too, so each of them gets the
     // serde derives the author did not write. The types that enter the WIT are generated with
     // the derives already.
-    let mut unreached: Vec<(Item, Shape)> = Vec::new();
+    let mut unreached: Vec<Candidate> = Vec::new();
     let shapes = reachable(
         candidates,
         &services,
@@ -1236,11 +1287,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &mut unreached,
     )?;
     let serialized = serialized(&unreached, &shapes, &states);
-    for (index, (mut item, shape)) in unreached.into_iter().enumerate() {
+    for (index, candidate) in unreached.into_iter().enumerate() {
+        let Candidate {
+            mut item, scope, ..
+        } = candidate;
         if let Item::Struct(item) = &item
             && let Some(state) = states
                 .iter_mut()
-                .find(|state| state.ident == item.ident && state.scope == shape.scope)
+                .find(|state| state.ident == item.ident && state.scope == scope)
         {
             // The author's struct stays, with its derives: a derived `Default` is the state's.
             state.authored_default |= state.derives_default;
@@ -1265,7 +1319,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 attrs.push(syn::parse_quote!(#[derive(#(#missing),*)]));
             }
         }
-        tree.at(&modules[shape.scope]).items.push(item);
+        tree.at(&modules[scope]).items.push(item);
     }
     // A name that enters the WIT is one across the Orb module: the types, the services, the
     // derived hooks and the resources of every module share the package's names.
@@ -2676,16 +2730,16 @@ fn implemented_service(
 /// name resolves to the type of the module naming it, else to the one type of that name in the
 /// Orb; a type the module does not declare is an error, and a resource is a type of its own.
 fn reachable(
-    candidates: Vec<(Item, Shape)>,
+    candidates: Vec<Candidate>,
     services: &[Service],
     resources: &[WitResource],
     hook_inputs: &[(&Type, usize)],
-    unreached: &mut Vec<(Item, Shape)>,
+    unreached: &mut Vec<Candidate>,
 ) -> syn::Result<Vec<Shape>> {
     let mut declared: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (index, (_, shape)) in candidates.iter().enumerate() {
+    for (index, candidate) in candidates.iter().enumerate() {
         declared
-            .entry(shape.ident.to_string())
+            .entry(candidate.ident.to_string())
             .or_default()
             .push(index);
     }
@@ -2745,7 +2799,7 @@ fn reachable(
         };
         let index = match indexes
             .iter()
-            .find(|&&index| candidates[index].1.scope == scope)
+            .find(|&&index| candidates[index].scope == scope)
         {
             Some(&index) => index,
             None if indexes.len() == 1 => indexes[0],
@@ -2759,23 +2813,23 @@ fn reachable(
             }
         };
         if kept.insert(index) {
-            let shape = &candidates[index].1;
+            let candidate = &candidates[index];
             pending.extend(
-                shape
+                candidate
                     .references
                     .iter()
                     .cloned()
-                    .map(|reference| (reference, shape.scope)),
+                    .map(|reference| (reference, candidate.scope)),
             );
         }
     }
+    // Only the kept candidates are translated: what they hold must have a WIT spelling.
     let mut shapes = Vec::new();
-    for (index, (item, shape)) in candidates.into_iter().enumerate() {
+    for (index, candidate) in candidates.into_iter().enumerate() {
         if kept.contains(&index) {
-            replaceable(&item)?;
-            shapes.push(shape);
+            shapes.push(candidate.translate()?);
         } else {
-            unreached.push((item, shape));
+            unreached.push(candidate);
         }
     }
     Ok(shapes)
@@ -2882,20 +2936,20 @@ fn replaceable(item: &Item) -> syn::Result<()> {
 /// name resolves as `reachable` resolves it; one that resolves to a type entering the WIT stops
 /// there, because that type is generated with serde's derives, and one the module does not
 /// declare is the author's to serialize.
-fn serialized(unreached: &[(Item, Shape)], entered: &[Shape], states: &[State]) -> BTreeSet<usize> {
+fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> BTreeSet<usize> {
     let mut serialized = BTreeSet::new();
     let mut pending: Vec<(Ident, usize)> = Vec::new();
-    for (index, (item, shape)) in unreached.iter().enumerate() {
-        let state = matches!(item, Item::Struct(_))
+    for (index, candidate) in unreached.iter().enumerate() {
+        let state = matches!(candidate.item, Item::Struct(_))
             && states
                 .iter()
-                .any(|state| state.ident == shape.ident && state.scope == shape.scope);
+                .any(|state| state.ident == candidate.ident && state.scope == candidate.scope);
         if state && serialized.insert(index) {
             pending.extend(
-                shape
+                candidate
                     .references
                     .iter()
-                    .map(|name| (name.clone(), shape.scope)),
+                    .map(|name| (name.clone(), candidate.scope)),
             );
         }
     }
@@ -2909,8 +2963,8 @@ fn serialized(unreached: &[(Item, Shape)], entered: &[Shape], states: &[State]) 
                 unreached
                     .iter()
                     .enumerate()
-                    .filter(|(_, (_, shape))| shape.ident == name)
-                    .map(|(index, (_, shape))| (shape.scope, Some(index))),
+                    .filter(|(_, candidate)| candidate.ident == name)
+                    .map(|(index, candidate)| (candidate.scope, Some(index))),
             )
             .collect();
         let resolved = match named.iter().find(|(module, _)| *module == scope) {
@@ -2921,12 +2975,12 @@ fn serialized(unreached: &[(Item, Shape)], entered: &[Shape], states: &[State]) 
         if let Some((_, Some(index))) = resolved
             && serialized.insert(*index)
         {
-            let shape = &unreached[*index].1;
+            let candidate = &unreached[*index];
             pending.extend(
-                shape
+                candidate
                     .references
                     .iter()
-                    .map(|name| (name.clone(), shape.scope)),
+                    .map(|name| (name.clone(), candidate.scope)),
             );
         }
     }

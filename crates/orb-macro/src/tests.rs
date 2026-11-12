@@ -1594,6 +1594,52 @@ fn the_types_a_state_out_of_the_wit_reaches_get_serde_derives() {
     );
 }
 
+/// A type is translated to WIT only once a method, a resource or a hook reaches it: a type no
+/// method mentions stays ordinary Rust whatever it holds, an array, a reference or a variant with
+/// named fields, and the same type is a compile error once it enters the WIT.
+#[test]
+fn only_a_type_that_enters_the_wit_needs_a_wit_spelling() {
+    let module = |returned: &str| {
+        format!(
+            "mod safe {{
+                pub struct Digest {{ pub bytes: [u8; 32] }}
+                pub enum Shape {{ Circle {{ radius: u32 }}, Square(u32) }}
+                #[state]
+                pub struct Sealed {{ pub digest: [u8; 4], pub shape: Shape }}
+                #[resource]
+                pub struct Banner {{ pub text: &'static str }}
+                impl Banner {{ #[open] pub fn open() -> Self {{ Banner {{ text: \"safe\" }} }} }}
+                #[service]
+                pub struct Vault;
+                impl Vault {{ pub fn get() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    let kept = expanded("example:vault@1.0.0", &module("u32"));
+    assert_eq!(
+        wit(&kept),
+        "package example:vault@1.0.0;\n\ninterface vault {\n  get: func() -> u32;\n}\n\nworld safe {\n  import tembra:guest/state@1.0.0;\n  export tembra:guest/state-init@1.0.0;\n  import tembra:guest/resources@1.0.0;\n  export tembra:guest/resources-init@1.0.0;\n  export vault;\n}\n"
+    );
+    let generated = tokens(&kept);
+    let derived = "# [derive (:: serde :: Serialize , :: serde :: Deserialize)]";
+    for expected in [
+        "pub struct Digest { pub bytes : [u8 ; 32] }".into(),
+        format!("{derived} pub struct Sealed {{ pub digest : [u8 ; 4] , pub shape : Shape }}"),
+        format!("{derived} pub enum Shape {{ Circle {{ radius : u32 }} , Square (u32) }}"),
+        "pub struct Banner { pub text : & 'static str }".into(),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+    for (returned, message) in [
+        ("Digest", "this type has no WIT equivalent"),
+        ("Shape", "a variant carries at most one unnamed payload"),
+        ("Banner", "WIT boundaries pass owned values"),
+    ] {
+        let error = refused("example:vault@1.0.0", &module(returned));
+        assert!(error.contains(message), "{returned}: {error}");
+    }
+}
+
 /// A type that enters the WIT is replaced by the generated one, which has no room for an explicit
 /// discriminant and cannot carry `#[serde(..)]`: both are refused there, on the item, its fields
 /// or its variants, and kept on a type that stays out of the WIT, which the macro leaves as written.

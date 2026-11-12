@@ -109,12 +109,14 @@ Nothing is exported by accident. A service is a unit struct marked `#[service]`;
 `impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT only
 when a service method, a WIT resource's function or a hook's input uses it, directly or through the
 fields of another type that enters; a state alone does not make a type enter. The other types of the
-module, and unit structs without the marker, remain ordinary Rust; a state that stays out of the
-WIT, and every type of the module its fields reach that stays out too, get `serde`'s derives. A
-method that names a type the module does not declare is a compile error, and so is a service with
-the name of the module, because WIT refuses a world and an interface of one name. So is a method
-named `then`, `release`, `state`, `ready`, `status` or `opaque`: every reference to a service object
-has those members, and the kernel refuses such a method when it installs the Orb. The package and
+module, and unit structs without the marker, remain ordinary Rust, whatever they hold: only a type
+that enters the WIT needs a WIT spelling for its fields and cases, so an array field or a variant
+with named fields is a compile error there and nowhere else. A state that stays out of the WIT, and
+every type of the module its fields reach that stays out too, get `serde`'s derives. A method that
+names a type the module does not declare is a compile error, and so is a service with the name of
+the module, because WIT refuses a world and an interface of one name. So is a method named `then`,
+`release`, `state`, `ready`, `status` or `opaque`: every reference to a service object has those
+members, and the kernel refuses such a method when it installs the Orb. The package and
 every identity an attribute names are WIT identities, `ns:name@version` and
 `ns:name/interface@version`: names of kebab-case words of lowercase letters and digits, each word
 starting with a letter, none of them a WIT keyword, and a semantic version.
