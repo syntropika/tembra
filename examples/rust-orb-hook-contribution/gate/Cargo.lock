@@ -1340,11 +1340,7 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 name = "tembra"
 version = "0.2.2"
 dependencies = [
- "futures",
- "futures-timer",
- "serde",
- "serde_json",
- "tembra-core",
+ "tembra-runtime",
 ]
 
 [[package]]
@@ -1392,8 +1388,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tembra",
  "tembra-contracts",
+ "tembra-runtime",
  "tokio",
  "tokio-rustls",
  "url",
@@ -1402,6 +1398,17 @@ dependencies = [
  "wasmtime-wasi-http",
  "webpki-roots",
  "wit-parser 0.261.0",
+]
+
+[[package]]
+name = "tembra-runtime"
+version = "0.2.2"
+dependencies = [
+ "futures",
+ "futures-timer",
+ "serde",
+ "serde_json",
+ "tembra-core",
 ]
 
 [[package]]
