@@ -15,7 +15,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("usage: host <path to audit.orb.wasm>")?;
     // 1. The engine receives every log record a compiled Orb writes, attributed by the host.
     let engine = Engine::new(Limits::default())?.on_log(|record| {
-        println!("log            [{}] {}: {}", record.level, record.orb, record.message);
+        println!(
+            "log            [{}] {}: {}",
+            record.level, record.orb, record.message
+        );
     });
     // The world imports only the kernel's context interface: nothing to require, nothing to grant.
     let audit = engine.load(&std::fs::read(&artifact)?, Install::default())?;
@@ -40,7 +43,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // 3. A log record from inside a method, and a call that cancels itself. Methods are called
     //    by their WIT names: `give_up` in Rust is `give-up` in the contract.
-    call(&mut pool, &host, &desk, "bob", "warn", json!(["the desk is full"]))?;
+    call(
+        &mut pool,
+        &host,
+        &desk,
+        "bob",
+        "warn",
+        json!(["the desk is full"]),
+    )?;
     println!(
         "bob, desk      give-up() -> {}",
         call(&mut pool, &host, &desk, "bob", "give-up", json!([]))?
