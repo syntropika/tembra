@@ -1353,14 +1353,6 @@ fn a_wit_resource_is_derived_from_the_struct_and_its_methods() {
         &DESK.replace("pub fn get(&self) -> u32", "pub fn get(&mut self) -> u32"),
     );
     assert!(error.contains("borrows `&self`"), "{error}");
-    let error = refused(
-        "example:desk@1.0.0",
-        &DESK.replace(
-            "pub fn open(n: u32) -> Session { Session::new(n) }",
-            "pub fn open(n: u32) -> Session { Session::new(n) } pub fn take(session: Session) {}",
-        ),
-    );
-    assert!(error.contains("handed out, never taken"), "{error}");
 }
 
 /// A resource inside an option, a result, a list or a tuple is wrapped where it is: the bridge
@@ -1417,6 +1409,279 @@ fn a_nested_resource_is_wrapped_where_it_is() {
         )),
         "{}",
         tokens(&twin)
+    );
+}
+
+/// A derived function takes a resource of its own interface, owned, alone or inside an option, a
+/// result, a list or a tuple, and so do the resource's constructor, methods and static functions:
+/// the WIT names the resource where the author's type does, and the bridge takes each handle back
+/// into the author's value, which consumes it.
+#[test]
+fn a_derived_function_takes_a_resource_of_its_interface() {
+    let module = expanded(
+        "example:desk@1.0.0",
+        &DESK
+            .replace(
+                "pub fn open(n: u32) -> Session { Session::new(n) }",
+                "pub fn open(n: u32) -> Session { Session::new(n) }
+                pub fn close(session: Session) -> u32 { session.n }
+                pub fn close_all(sessions: Vec<Session>, last: Option<Session>) -> u32 { 0 }
+                pub fn settle(outcome: Result<Session, String>, pair: (Session, u32)) {}
+                pub async fn later(session: Session) -> u32 { session.n }",
+            )
+            .replace(
+                "pub fn new(n: u32) -> Session { Session { n } }",
+                "pub fn new(n: u32, from: Option<Session>) -> Session { Session { n } }
+                pub fn merge(&self, other: Session) -> u32 { self.n + other.n }
+                pub fn adopt(other: Session) -> Session { other }",
+            ),
+    );
+    let text = resolved(&module);
+    for expected in [
+        "    constructor(n: u32, %from: option<session>);\n",
+        "    merge: func(other: session) -> u32;\n",
+        "    adopt: static func(other: session) -> session;\n",
+        "  close: func(session: session) -> u32;\n",
+        "  close-all: func(sessions: list<session>, last: option<session>) -> u32;\n",
+        "  settle: func(outcome: result<session, string>, pair: tuple<session, u32>);\n",
+        "  later: async func(session: session) -> u32;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let handle = "exports :: example :: desk :: sessions :: Session";
+    let generated = tokens(&module);
+    for expected in [
+        format!(
+            "fn close (session : {handle}) -> u32 {{ Sessions :: close (session . into_inner ()) }}"
+        ),
+        format!(
+            "fn close_all (sessions : Vec < {handle} > , last : Option < {handle} >) -> u32 {{ Sessions :: close_all (sessions . into_iter () . map (| item | item . into_inner ()) . collect () , last . map (| item | item . into_inner ())) }}"
+        ),
+        format!(
+            "fn settle (outcome : Result < {handle} , String > , pair : ({handle} , u32 ,)) {{ Sessions :: settle (match outcome {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok (item . into_inner ()) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err (item) , }} , {{ let (item0 , item1 ,) = pair ; (item0 . into_inner () , item1 ,) }}) }}"
+        ),
+        format!(
+            "async fn later (session : {handle}) -> u32 {{ Sessions :: later (session . into_inner ()) . await }}"
+        ),
+        format!(
+            "fn new (n : u32 , from : Option < {handle} >) -> Self {{ Session :: new (n , from . map (| item | item . into_inner ())) }}"
+        ),
+        format!(
+            "fn merge (& self , other : {handle}) -> u32 {{ Session :: merge (self , other . into_inner ()) }}"
+        ),
+        format!(
+            "fn adopt (other : {handle}) -> {handle} {{ {handle} :: new (Session :: adopt (other . into_inner ())) }}"
+        ),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+}
+
+/// The runtime moves an owned resource only into the interface that defines it, and carries no
+/// borrowed argument between Orbs: a derived function taking a resource of another service's
+/// interface, a resource of an implemented interface or a borrowed resource is refused, and so is
+/// a derived hook whose input holds a resource.
+#[test]
+fn a_resource_the_runtime_cannot_carry_into_a_function_is_refused() {
+    let error = refused(
+        "example:wb@1.0.0",
+        &FRONT.replace(
+            "impl Front { pub fn start() -> Builder { Builder } }",
+            "impl Front { pub fn start() -> Builder { Builder } pub fn take(builder: Option<Builder>) {} }",
+        ),
+    );
+    assert!(
+        error.contains("`Front::take` takes `Builder`, a resource of the interface `texts`: the runtime moves an owned resource only into the interface that defines it, so take it in a function of `Texts` or of one of its resources"),
+        "{error}"
+    );
+    let error = refused(
+        "example:wb@1.0.0",
+        &FRONT.replace(
+            "impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }",
+            "impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }
+            #[wit_resource(service = Front)]
+            pub struct Draft;
+            impl Draft { pub fn keep(&self, builder: Builder) {} }",
+        ),
+    );
+    assert!(
+        error.contains("`Draft::keep` takes `Builder`, a resource of the interface `texts`"),
+        "{error}"
+    );
+    let error = refused(
+        "example:desk@1.0.0",
+        &DESK.replace(
+            "pub fn open(n: u32) -> Session { Session::new(n) }",
+            "pub fn open(n: u32) -> Session { Session::new(n) } pub fn peek(session: &Session) -> u32 { 0 }",
+        ),
+    );
+    assert!(
+        error.contains("WIT boundaries pass owned values"),
+        "{error}"
+    );
+    let dir = consumed("taken-cursor", CURSOR_WIT);
+    let error = refused_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        "mod keeper {
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper { pub fn open() -> Cursor { Cursor::start() } }
+            #[wit_resource(service = Keeper)]
+            pub struct Cursor { at: u32 }
+            impl Cursor {
+                #[constructor]
+                pub fn start() -> Self { Cursor { at: 0 } }
+                pub fn current(&self) -> book::Entry { todo!() }
+                pub fn all(&self) -> Vec<book::Entry> { todo!() }
+                pub fn merge(&self, other: book::Cursor) -> u32 { self.at }
+            }
+            #[service]
+            pub struct Tools;
+            impl Tools { pub fn measure(cursor: Cursor) -> u32 { 0 } }
+        }",
+    );
+    assert!(
+        error.contains("`Tools::measure` takes `Cursor`, a resource of the implemented interface example:ledger/book@1.0.0"),
+        "{error}"
+    );
+    let error = refused(
+        "example:wahook@1.0.0",
+        "mod wahook {
+            #[hook(composition = series, input = Ticket)]
+            pub struct Guard;
+            #[wit_resource]
+            pub struct Ticket;
+            impl Ticket { pub fn id(&self) -> u32 { 0 } }
+            #[service]
+            pub struct Admissions;
+            impl Admissions { pub fn issue() -> Ticket { Ticket } }
+        }",
+    );
+    assert!(
+        error.contains("the input of the hook `Guard` holds the resource `Ticket`: a hook's input holds no resource"),
+        "{error}"
+    );
+    let error = refused_with(
+        Options {
+            imports: vec![literal("wasi:filesystem/types@0.3.0")],
+            ..options("example:files@1.0.0", None)
+        },
+        "mod storage {
+            #[service]
+            pub struct Files;
+            impl Files { pub fn size(file: types::Descriptor) -> u64 { 0 } }
+        }",
+    );
+    assert!(
+        error.contains("`Files::size` takes `Descriptor`, a resource of the WASI interface wasi:filesystem/types@0.3.0: the runtime moves no WASI handle between Orbs"),
+        "{error}"
+    );
+}
+
+const TEXT_WIT: &str = "package example:text@1.0.0;
+interface texts {
+  resource builder {
+    constructor();
+    text: func() -> string;
+  }
+  resource a-b;
+  start: func() -> builder;
+}
+";
+
+/// An imported interface's handle, named through the interface's module, is a parameter of a
+/// derived function, alone or in a container: the derived interface `use`s the resource from the
+/// imported one, under the kebab-case name of its handle, and the bridge passes the handle on as
+/// it is, the bindings' own type.
+#[test]
+fn a_derived_function_takes_an_imported_handle() {
+    let dir = consumed("speller", TEXT_WIT);
+    let importing = || Options {
+        imports: vec![literal("example:text/texts@1.0.0")],
+        ..options("example:speller@1.0.0", Some(&dir))
+    };
+    let module = orb_with(
+        importing(),
+        "mod speller {
+            #[wit_resource]
+            pub struct Note { text: String }
+            impl Note {
+                #[constructor]
+                pub fn new(builder: texts::Builder) -> Self { Note { text: builder.text() } }
+                pub fn append(&self, more: Option<texts::Builder>) -> u32 { 0 }
+            }
+            #[service]
+            pub struct Spelling;
+            impl Spelling {
+                pub fn finish(builder: texts::Builder) -> String { builder.text() }
+                pub fn count(builders: Vec<texts::Builder>, odd: texts::AB) -> u32 { 0 }
+                pub fn jot(builder: texts::Builder) -> Note { Note::new(builder) }
+            }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let text = wit(&module);
+    for expected in [
+        "interface spelling {\n  use example:text/texts@1.0.0.{builder, a-b as ab};\n",
+        "    constructor(builder: builder);\n",
+        "    append: func(more: option<builder>) -> u32;\n",
+        "  finish: func(builder: builder) -> string;\n",
+        "  count: func(builders: list<builder>, odd: ab) -> u32;\n",
+        "world speller {\n  import example:text/texts@1.0.0;\n  export spelling;\n}\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let mut resolve = wit_parser::Resolve::default();
+    resolve.push_dir(&dir).unwrap();
+    resolve
+        .push_str("orb.wit", &text)
+        .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
+    let generated = tokens(&module);
+    for expected in [
+        "fn finish (builder : texts :: Builder) -> String { Spelling :: finish (builder) }",
+        "fn count (builders : Vec < texts :: Builder > , odd : texts :: AB) -> u32 { Spelling :: count (builders , odd) }",
+        "fn new (builder : texts :: Builder) -> Self { Note :: new (builder) }",
+        "fn append (& self , more : Option < texts :: Builder >) -> u32 { Note :: append (self , more) }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let refused = |module: &str| refused_with(importing(), module);
+    let error = refused(
+        "mod speller {
+            #[service]
+            pub struct Spelling;
+            impl Spelling { pub fn begin() -> Option<texts::Builder> { None } }
+        }",
+    );
+    assert!(
+        error.contains("`Spelling::begin` returns `Builder`, a resource of the imported interface example:text/texts@1.0.0: the runtime returns a resource only from the interface that defines it"),
+        "{error}"
+    );
+    let error = refused(
+        "mod speller {
+            #[service]
+            pub struct Spelling;
+            impl Spelling { pub fn finish(builder: texts::Bulder) -> u32 { 0 } }
+        }",
+    );
+    assert!(
+        error.contains("`Spelling::finish` takes `Bulder`, which names no resource of the imported interface example:text/texts@1.0.0: its resources are `Builder`, `AB`"),
+        "{error}"
+    );
+    let error = refused(
+        "mod speller {
+            pub struct Builder { pub text: String }
+            #[service]
+            pub struct Spelling;
+            impl Spelling {
+                pub fn finish(builder: texts::Builder) -> u32 { 0 }
+                pub fn draft() -> Builder { todo!() }
+            }
+        }",
+    );
+    assert!(
+        error.contains("`Builder` of this module has the name of `Builder`, the resource `builder` of the imported interface example:text/texts@1.0.0, which `Spelling::finish` takes"),
+        "{error}"
     );
 }
 

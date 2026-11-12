@@ -187,4 +187,69 @@ mod guest {
             )
         }
     }
+
+    /// A running total the caller owns. A function taking it consumes the caller's handle.
+    #[wit_resource(service = Tallies)]
+    pub struct Tally {
+        total: core::cell::Cell<u32>,
+    }
+
+    impl Tally {
+        #[constructor]
+        pub fn new(start: u32) -> Self {
+            Self {
+                total: core::cell::Cell::new(start),
+            }
+        }
+
+        /// Add to the total and return it.
+        pub fn add(&self, by: u32) -> u32 {
+            self.total.set(self.total.get() + by);
+            self.total.get()
+        }
+
+        /// Add another tally's total to this one and return it; the other tally is consumed.
+        pub fn absorb(&self, other: Tally) -> u32 {
+            self.add(other.total.get())
+        }
+    }
+
+    /// How many tallies were destroyed: dropped by their last owner, or consumed by a function
+    /// that took them.
+    static DROPPED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+    impl Drop for Tally {
+        fn drop(&mut self) {
+            DROPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[service]
+    pub struct Tallies;
+
+    impl Tallies {
+        /// Start a tally; the caller owns the returned handle.
+        pub fn start(at: u32) -> Tally {
+            Tally::new(at)
+        }
+
+        /// Take a tally back and return its total.
+        pub fn close(tally: Tally) -> u32 {
+            tally.total.get()
+        }
+
+        /// The totals of the tallies a list and an option hold, in order, each taken back.
+        pub fn close_all(tallies: Vec<Tally>, last: Option<Tally>) -> Vec<u32> {
+            tallies
+                .iter()
+                .chain(&last)
+                .map(|tally| tally.total.get())
+                .collect()
+        }
+
+        /// How many tallies were destroyed.
+        pub fn dropped() -> u32 {
+            DROPPED.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
 }

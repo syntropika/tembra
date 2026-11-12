@@ -1,4 +1,5 @@
 //! The WIT text derived from the module items, and the consumed packages it refers to.
+use crate::resource_params::Foreign;
 use crate::{Composition, Declared, Function, Handles, Service, Shape, ShapeKind, WitResource};
 use heck::{ToKebabCase, ToUpperCamelCase};
 use proc_macro2::Span;
@@ -116,13 +117,14 @@ fn claim_params(function: &str, params: &[(Ident, Type, String)]) -> syn::Result
 
 /// The items of the module that enter the WIT: its exported types, where each is defined, its
 /// services, its resources and its declared hooks, of which the derived ones are interfaces of
-/// the package.
+/// the package, and what each derived interface `use`s from the imported interfaces, by its name.
 pub(crate) struct Items<'a> {
     pub shapes: &'a [Shape],
     pub placement: &'a BTreeMap<String, Ident>,
     pub services: &'a [Service],
     pub resources: &'a [WitResource],
     pub declared: &'a [Declared],
+    pub foreign: &'a BTreeMap<String, Vec<Foreign>>,
 }
 
 /// The names of the shapes a derived hook reaches through its input, directly or through the
@@ -272,6 +274,7 @@ pub(crate) fn render<'a>(
         services,
         resources,
         declared,
+        foreign,
     } = items;
     let derived_hooks: Vec<&Declared> = declared
         .iter()
@@ -362,6 +365,11 @@ pub(crate) fn render<'a>(
                 namespace.claim(item, format!("`{item}`, used from `{from}`,"))?;
             }
         }
+        for used in foreign.get(name).into_iter().flatten() {
+            for (_, handle) in &used.resources {
+                namespace.claim(handle, format!("`{handle}`, used from {},", used.identity))?;
+            }
+        }
         uses.retain(|(_, names)| !names.is_empty());
         for shape in &defined {
             namespace.claim(&shape.ident, format!("the type `{}`", shape.ident))?;
@@ -434,6 +442,9 @@ pub(crate) fn render<'a>(
                 escaped(from),
                 names.join(", ")
             ));
+        }
+        for used in foreign.get(&interface.name).into_iter().flatten() {
+            wit.push_str(&used.text());
         }
         for shape in &interface.defined {
             wit.push_str(&shape.wit);

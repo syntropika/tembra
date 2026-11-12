@@ -93,6 +93,7 @@ starts with this explicit freestanding mode.
 | `import = "wasi:name/interface@0.3.0"` on the attribute                     | `import` of that interface of a WASI package bundled with `tembra-contracts`, granted at installation                                                              |
 | `import("ns:name/interface@version", keyed)` on the attribute               | `import` of a view of that interface, `interface-ref` in the package: a resource with the interface's functions as methods, and `get`, selecting an object by key  |
 | a struct with `#[wit_resource]` and an `impl` block of `pub fn`             | a `resource` of its service's interface: the `#[constructor]` function its constructor, the `&self` functions its methods                                          |
+| a `#[wit_resource]` struct or an imported `iface::Name` as a parameter      | an owned handle, `own<t>`, which the call takes from its caller; an imported interface's resource is `use`d from it                                                |
 | each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                                                                        |
 | a struct with named fields, when a service method uses it                   | a `record`                                                                                                                                                         |
 | an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`                                                                                                       |
@@ -676,14 +677,62 @@ the struct, or an `Option`, a `Result`, a `Vec` or a tuple holding it, returns a
 its place, which crosses to the caller, native or compiled, and every method call travels back
 under the caller's own admission; when the last owner drops the handle, the kernel destroys the
 value, which runs `Drop`. WIT methods borrow `self`, so a method changes a value through `Cell` or
-`RefCell`; a `&mut self` method is a compile error, and so is a function taking a resource as a
-parameter: a resource is handed out, never taken. The resource belongs to one interface, that of
+`RefCell`; a `&mut self` method is a compile error. A function of the interface takes the resource
+back as a parameter, [below](#taking-a-resource). The resource belongs to one interface, that of
 `#[wit_resource(service = Name)]` or of the module's only service; another service of the module
 may return it, and its interface `use`s the type. A record or an enum is defined in the interface
 of the earliest service, in declaration order, that mentions it, in its functions or its
 resources' functions, and the others `use` it from there; interfaces that would `use` each other,
 which WIT refuses, are a compile error naming them. See
 [rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md).
+
+## Taking a resource
+
+A derived function takes a resource as a parameter, owned: a `#[wit_resource]` struct of its own
+interface, `T`, which the WIT names `own<t>`, or the handle of an imported interface,
+`texts::Builder`, named through the interface's module, which the derived interface `use`s from
+the imported one. Either may sit in an `Option`, a `Result`, a `Vec` or a tuple, and a service's
+functions, a resource's constructor, its methods and its static functions take them alike:
+
+```rust
+impl Builder {
+    /// Append another builder's text to this one; the other builder is consumed.
+    pub fn append(&self, other: Builder) -> u32 { /* ... */ }
+}
+
+impl Texts {
+    /// Take a builder back and return its text.
+    pub fn finish(builder: Builder) -> String { builder.text.into_inner() }
+}
+```
+
+```wit
+interface texts {
+  resource builder {
+    /* ... */
+    append: func(other: builder) -> u32;
+  }
+  finish: func(builder: builder) -> string;
+}
+```
+
+The caller's handle moves into the call, and the caller loses it: a native caller attaches its
+`Owned` to the call's payload, a compiled one passes its handle. The bridge takes the handle back
+into the author's value, which the function then owns and drops, running `Drop`, unless it keeps
+it. An imported interface's handle crosses as the bindings' own type, the one the imported
+functions return; the derived interface knows its resource by the kebab-case form of the handle's
+Rust name, so a type or a resource of the module named like the handle is a compile error. A
+record or a variant holding a resource is the bindings' type, with the bindings' handle in the
+resource's place: a function taking one gets the handle, whose `into_inner` gives the value.
+
+The runtime moves an owned resource only into the interface that defines it, or into an Orb that
+imports that interface. It refuses at installation today an Orb whose function takes a borrowed
+resource, `borrow<t>` ("borrow requires a dedicated interpreter value adapter"), so the macro
+derives none: `&T` is refused as every reference in a signature is. A function taking a resource of
+another service's interface or of an implemented interface, a WASI handle, which the runtime moves
+between no Orbs, and a hook's input holding a resource are compile errors too; so is a derived
+function returning an imported interface's handle, which the runtime returns only from the interface
+that defines it.
 
 ## Organizing the module in sub-modules
 
@@ -766,7 +815,7 @@ The macro rewrites the module with:
    by forwarding to the author's functions, hook callbacks and the kernel's `state-init` and
    `resources-init` callbacks included, with a trapping callback for each declared hook, and
    `export!`; the resource trait of each `#[wit_resource]` struct on the struct itself, its
-   constructor and methods forwarded and the handles wrapped at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
+   constructor and methods forwarded and the handles wrapped, or taken back, at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
 8. with a state, `Default`, field by field unless the author provides it, and the `read`/`update`
    functions on each state type, over a hidden module that maps the kernel's JSON to the type with
    `serde_json` and holds back a value whose JSON would not read back as the type, and the
@@ -802,8 +851,11 @@ key) among its dependencies,
   ±2^53 in a state loses precision there.
 - Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
   64-bit integers cross the boundary exactly. A `resource` is a `#[wit_resource]` struct or the
-  handle of an imported interface, handed out as an owned handle and never taken as a parameter,
-  unless an implemented interface's WIT takes it. No `flags`, `stream` or `future`. `()` is nothing only as a function's result or a
+  handle of an imported interface. A derived function takes either as an owned parameter, a
+  struct only in the interface that defines it, and returns only a struct; an implemented
+  interface takes the owned handles its WIT says. A borrowed parameter, `borrow<t>`, is not
+  derived: the runtime refuses it at installation today ("borrow requires a dedicated interpreter
+  value adapter"). No `flags`, `stream` or `future`. `()` is nothing only as a function's result or a
   side of a `Result`, which WIT then leaves out: `Result<T, ()>` is `result<t>`, `Result<(), E>` is
   `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has no equivalent, use `bool`.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it, and a record

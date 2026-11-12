@@ -2,7 +2,11 @@
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::{cell::Cell, collections::BTreeMap, rc::Rc};
-use tembra::{Host, Orb, Reference, Service, core::Code};
+use tembra::{
+    Context, Host, Orb, Reference, Service,
+    core::Code,
+    portable::{Owned, Payload},
+};
 use tembra_executor_wasm::{
     Binding, Contract, Deterministic, Engine, Install, Limits, SystemCapability,
 };
@@ -530,4 +534,116 @@ fn a_keyed_import_reaches_the_object_of_each_key() {
         );
         assert!(host.errors().is_empty());
     }
+}
+
+/// A derived function takes back the resources its interface hands out, on both guests and both
+/// engines: the caller's handle moves into the call and the guest consumes the value.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD and TEMBRA_WASM_ORB_MACRO_NO_STD"]
+fn derived_functions_consume_the_resources_they_take() {
+    let guests = [
+        ("standard", component("TEMBRA_WASM_ORB_MACRO_STD")),
+        ("freestanding", component("TEMBRA_WASM_ORB_MACRO_NO_STD")),
+    ];
+    for interpreted in [false, true] {
+        let engine = if interpreted {
+            Engine::interpreted(Limits::default())
+        } else {
+            Engine::new(Limits::default())
+        }
+        .unwrap();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let orbs = guests
+            .iter()
+            .map(|(name, bytes)| {
+                let (_, contract) = contract(bytes);
+                let roles = contract.embedded_roles(bytes).unwrap();
+                let artifact = contract.component_artifact(bytes, name, 1, &roles).unwrap();
+                engine.load(&artifact, keyed(granted())).unwrap()
+            })
+            .chain([counters()])
+            .collect();
+        host.install(orbs).unwrap();
+        for (name, _) in &guests {
+            tally(&mut pool, &host, &engine, name);
+        }
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(engine.instances(), 0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+    }
+}
+
+/// Drive the tallies of the Orb `name`: each owned tally passed to `close`, to `close-all` in a
+/// list and an option, or to another tally's `absorb` leaves the caller and the provider's handle
+/// table, and the guest drops the value it took back.
+fn tally(pool: &mut LocalPool, host: &Host, engine: &Engine, name: &str) {
+    /// Run one operation under a fresh root of `alice`.
+    fn root<T: 'static>(
+        pool: &mut LocalPool,
+        host: &Host,
+        operation: impl AsyncFnOnce(Context) -> tembra::Result<T> + 'static,
+    ) -> T {
+        pool.run_until(host.root("alice", move |context| operation(context).boxed_local()))
+            .unwrap()
+    }
+    let tallies = Rc::new(
+        host.get(
+            &format!("{name}::example:runtime/tallies@1.0.0"),
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(tallies.ready()).unwrap();
+    let issue = |pool: &mut LocalPool, method: &'static str, at: u32| -> Owned {
+        let tallies = tallies.clone();
+        root(pool, host, async move |context| {
+            tallies.call_portable(&context, method, (at,)).await
+        })
+    };
+    let call = |pool: &mut LocalPool, method: &'static str, payload: Payload| -> Value {
+        let tallies = tallies.clone();
+        root(pool, host, async move |context| {
+            tallies.call_portable(&context, method, payload).await
+        })
+    };
+    let dropped = |pool: &mut LocalPool| call(pool, "dropped", Payload::data(json!([])));
+
+    let first = issue(pool, "start", 5);
+    let (first, total) = root(pool, host, async move |context| {
+        let total: u32 = first
+            .call_portable(&context, "[method]tally.add", (3_u32,))
+            .await?;
+        Ok((first, total))
+    });
+    assert_eq!(total, 8, "{name}");
+    assert_eq!(engine.resources(), 1, "{name}");
+    let mut payload = Payload::data(json!([0]));
+    payload.attach_argument(first).unwrap();
+    assert_eq!(call(pool, "close", payload), json!(8), "{name}");
+    assert_eq!(engine.resources(), 0, "{name}");
+    assert_eq!(dropped(pool), json!(1), "{name}");
+
+    let mut payload = Payload::data(json!([[0, 1], 2]));
+    for at in [1, 2, 4] {
+        payload.attach_argument(issue(pool, "start", at)).unwrap();
+    }
+    assert_eq!(engine.resources(), 3, "{name}");
+    assert_eq!(call(pool, "close-all", payload), json!([1, 2, 4]), "{name}");
+    assert_eq!(engine.resources(), 0, "{name}");
+    assert_eq!(dropped(pool), json!(4), "{name}");
+
+    // A tally's method takes another tally; dropping the receiver's handle destroys it too.
+    let kept = issue(pool, "[constructor]tally", 10);
+    let mut payload = Payload::data(json!([0]));
+    payload.attach_argument(issue(pool, "start", 20)).unwrap();
+    let total: Value = root(pool, host, async move |context| {
+        kept.call_portable(&context, "[method]tally.absorb", payload)
+            .await
+    });
+    assert_eq!(total, json!(30), "{name}");
+    assert_eq!(dropped(pool), json!(6), "{name}");
+    assert_eq!(engine.resources(), 0, "{name}");
+    tallies.release().unwrap();
 }

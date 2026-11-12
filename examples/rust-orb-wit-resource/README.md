@@ -139,7 +139,8 @@ order.
 
 ## Limits
 
-A resource is handed out, never taken: a method taking a resource, owned or borrowed, as a
+A function takes a resource back only owned, in the interface that defines it, as
+[the macro's README](../../crates/orb-macro/README.md#taking-a-resource) shows; a borrowed
 parameter is not expressed by the macro. Methods borrow `self`; a `&mut self` method is a compile
 error. A resource belongs to one service's interface, the one named by `#[wit_resource(service =
 Name)]` or the module's only service; another service of the module may return it, and its
