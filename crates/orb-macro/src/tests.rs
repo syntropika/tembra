@@ -1015,6 +1015,61 @@ fn sub_modules_are_refused_when_ill_formed() {
     );
 }
 
+/// Documentation over several lines, a block comment or a `#[doc]` string, is carried line by
+/// line into the WIT, each line after its own `///`, so no line of it becomes WIT; a character
+/// the WIT lexer refuses is an error on the attribute.
+#[test]
+fn documentation_over_several_lines_stays_comment_text() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+        /** The ledger.
+        interface injected { surprise: func() -> u32; } */
+        #[service]
+        pub struct Ledger;
+        impl Ledger {
+            #[doc = \"How many entries.\\n  type extra = u64;\\r\\nThe end.\"]
+            pub fn count() -> u32 { 0 }
+        }
+    }",
+    );
+    let text = wit(&module);
+    assert!(
+        text.contains("\n/// The ledger.\n///        interface injected { surprise: func() -> u32; } \ninterface ledger {\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  ///How many entries.\n  ///  type extra = u64;\n  ///The end.\n  count: func() -> u32;\n"
+        ),
+        "{text}"
+    );
+    let mut resolve = wit_parser::Resolve::default();
+    resolve.push_str("book.wit", &text).unwrap();
+    let names: Vec<_> = resolve
+        .interfaces
+        .iter()
+        .filter_map(|(_, interface)| interface.name.clone())
+        .collect();
+    assert_eq!(names, ["ledger"]);
+    assert_eq!(resolve.types.len(), 0, "{text}");
+    // A block comment's blank opening and closing lines are left out.
+    let block = expanded(PACKAGE, &ledger("/**\n The ledger.\n */\n#[service]"));
+    assert!(
+        wit(&block).contains("\n/// The ledger.\ninterface ledger {\n"),
+        "{}",
+        wit(&block)
+    );
+    let error = refused(
+        PACKAGE,
+        &ledger("#[doc = \"Turned \u{202e} around.\"]\n#[service]"),
+    );
+    assert!(
+        error.contains("this documentation holds U+202E, a character WIT refuses"),
+        "{error}"
+    );
+}
+
 /// Inner attributes, `//!` and `#![..]`, of the Orb module and of a sub-module stay first inside
 /// their module's braces; outer ones stay before `mod`.
 #[test]

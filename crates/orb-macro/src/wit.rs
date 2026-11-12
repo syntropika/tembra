@@ -711,7 +711,7 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
         return Err(syn::Error::new(item.span(), "a record needs named fields"));
     };
     let mut wit = String::new();
-    for doc in docs(&item.attrs) {
+    for doc in docs(&item.attrs)? {
         wit.push_str(&format!("  ///{doc}\n"));
     }
     wit.push_str(&format!("  record {} {{\n", kebab(&item.ident)));
@@ -747,7 +747,7 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
         .iter()
         .all(|variant| matches!(variant.fields, Fields::Unit));
     let mut wit = String::new();
-    for doc in docs(&item.attrs) {
+    for doc in docs(&item.attrs)? {
         wit.push_str(&format!("  ///{doc}\n"));
     }
     let keyword = if plain { "enum" } else { "variant" };
@@ -886,19 +886,64 @@ pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
     }
 }
 
-/// The `///` lines of an item, carried into the WIT.
-pub(crate) fn docs(attrs: &[Attribute]) -> Vec<String> {
-    attrs
-        .iter()
-        .filter_map(|attr| match &attr.meta {
-            Meta::NameValue(meta) if meta.path.is_ident("doc") => match &meta.value {
-                Expr::Lit(lit) => match &lit.lit {
-                    Lit::Str(s) => Some(s.value()),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
+/// The `///` lines of an item, carried into the WIT: one per line of its documentation, so the
+/// text of a block comment or of a `#[doc]` string over several lines stays a comment in the WIT,
+/// each line after its own `///`. A block comment's opening and closing lines, when blank, are
+/// left out. A character the WIT lexer refuses anywhere, a control character or a bidirectional
+/// override, is an error on the attribute.
+pub(crate) fn docs(attrs: &[Attribute]) -> syn::Result<Vec<String>> {
+    let mut lines = Vec::new();
+    for attr in attrs {
+        let Meta::NameValue(meta) = &attr.meta else {
+            continue;
+        };
+        if !meta.path.is_ident("doc") {
+            continue;
+        }
+        let Expr::Lit(literal) = &meta.value else {
+            continue;
+        };
+        let Lit::Str(text) = &literal.lit else {
+            continue;
+        };
+        let text = text.value();
+        if let Some(refused) = text.chars().find(|character| refused_in_wit(*character)) {
+            return Err(syn::Error::new(
+                attr.span(),
+                format!(
+                    "this documentation holds U+{:04X}, a character WIT refuses; the macro carries the documentation into the WIT",
+                    u32::from(refused)
+                ),
+            ));
+        }
+        let text = text.replace("\r\n", "\n");
+        let mut split: Vec<&str> = text.split(['\n', '\r']).collect();
+        while split.len() > 1 && split.last().is_some_and(|line| line.trim().is_empty()) {
+            split.pop();
+        }
+        while split.len() > 1 && split.first().is_some_and(|line| line.trim().is_empty()) {
+            split.remove(0);
+        }
+        lines.extend(split.into_iter().map(str::to_owned));
+    }
+    Ok(lines)
+}
+
+/// Whether the WIT lexer refuses a character anywhere in a file, comments included: control
+/// characters other than tabs and line breaks, bidirectional overrides and the deprecated
+/// codepoints it lists.
+fn refused_in_wit(character: char) -> bool {
+    matches!(
+        character,
+        '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{149}'
+            | '\u{673}'
+            | '\u{f77}'
+            | '\u{f79}'
+            | '\u{17a3}'
+            | '\u{17a4}'
+            | '\u{17b4}'
+            | '\u{17b5}'
+    ) || (character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
 }

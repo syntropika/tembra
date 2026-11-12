@@ -503,7 +503,7 @@ impl Scan {
                         let (implements, policy) = service_attribute(&attribute)?;
                         self.services.push(Service {
                             ident: s.ident.clone(),
-                            docs: wit::docs(&s.attrs),
+                            docs: wit::docs(&s.attrs)?,
                             functions: Vec::new(),
                             policy,
                             implements,
@@ -1847,7 +1847,7 @@ fn wit_resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Wi
     }
     Ok(WitResource {
         ident: item.ident.clone(),
-        docs: wit::docs(&item.attrs),
+        docs: wit::docs(&item.attrs)?,
         service,
         constructor: None,
         methods: Vec::new(),
@@ -1901,7 +1901,7 @@ fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction
     }
     let read = Function {
         ident: function.sig.ident.clone(),
-        docs: wit::docs(&function.attrs),
+        docs: wit::docs(&function.attrs)?,
         params: typed_params(function)?,
         result: match result(&function.sig.output) {
             Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
@@ -2296,7 +2296,7 @@ fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
     }
     Ok(Function {
         ident: function.sig.ident.clone(),
-        docs: wit::docs(&function.attrs),
+        docs: wit::docs(&function.attrs)?,
         params,
         result: match result(&function.sig.output) {
             Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
@@ -2477,7 +2477,7 @@ fn declaration(
         hook,
         composition,
         ident: item.ident.clone(),
-        docs: wit::docs(&item.attrs),
+        docs: wit::docs(&item.attrs)?,
         input,
         scope: 0,
     })

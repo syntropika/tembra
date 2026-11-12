@@ -67,7 +67,7 @@ mod greeter {
 | `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct | nothing in the WIT: the state's rule, run on every update and on reload                                                                                            |
 | `#[close]` on a `fn(self)` of a `#[resource]` struct                        | nothing in the WIT: run by the kernel at teardown                                                                                                                  |
 | an inline `mod`                                                             | nothing of its own: its items are read as the Orb's, grouped with what belongs to them                                                                             |
-| `///` comments                                                              | `///` comments in the WIT                                                                                                                                          |
+| `///` comments and `/** */` blocks                                          | `///` comments in the WIT, one per line                                                                                                                            |
 
 Nothing is exported by accident. A service is a unit struct marked `#[service]`; the `pub fn` of
 its `impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT
