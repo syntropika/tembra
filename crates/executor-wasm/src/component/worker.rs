@@ -1421,15 +1421,36 @@ fn state_request(
     let packet = match (function, params) {
         ("read", []) => json!({"operation": "state.read", "id": id}),
         ("update", [Val::String(value)]) => {
-            let value: Value = serde_json::from_str(value).map_err(|error| {
+            let mut value: Value = serde_json::from_str(value).map_err(|error| {
                 wasmtime::Error::msg(format!("the state value is not JSON: {error}"))
             })?;
+            unsigned_zeros(&mut value);
             json!({"operation": "state.update", "id": id, "value": value})
         }
         _ => return Err(wasmtime::Error::msg("unknown kernel state function")),
     }
     .to_string();
     synchronous(state, &authority, packet)
+}
+
+/// Write every negative zero of a component's state JSON as zero, as `JSON.stringify` does.
+///
+/// The portable value profile has no negative zero: a platform host would commit the value, then
+/// refuse to encode it in its reply, and the object's state could never be read again.
+fn unsigned_zeros(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            if number
+                .as_f64()
+                .is_some_and(|float| float == 0.0 && float.is_sign_negative())
+            {
+                *value = json!(0);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(unsigned_zeros),
+        Value::Object(fields) => fields.values_mut().for_each(unsigned_zeros),
+        Value::Null | Value::Bool(_) | Value::String(_) => {}
+    }
 }
 
 /// The authority of the task group that issued the current import call.
@@ -2230,8 +2251,9 @@ async fn declare(
     let initial = declared["initial"]
         .as_str()
         .ok_or("the state declaration carries no initial value")?;
-    let initial: Value = serde_json::from_str(initial)
+    let mut initial: Value = serde_json::from_str(initial)
         .map_err(|error| format!("the initial state is not JSON: {error}"))?;
+    unsigned_zeros(&mut initial);
     let version = declared["version"]
         .as_u64()
         .ok_or("the state declaration carries no version")?;
@@ -2885,5 +2907,26 @@ mod import_reply_tests {
             }
             drop(publish);
         });
+    }
+}
+
+#[cfg(test)]
+mod state_value_tests {
+    use super::unsigned_zeros;
+    use serde_json::json;
+
+    /// A state field that rounds to negative zero is stored as zero, wherever it sits, and no
+    /// other value changes: the platform hosts' value profile has no negative zero.
+    #[test]
+    fn negative_zeros_of_a_state_become_zero() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(r#"{"x":-0.0,"y":[-0,0.5,-1.5],"z":{"w":-0.0},"s":"text"}"#)
+                .unwrap();
+        unsigned_zeros(&mut value);
+        assert_eq!(
+            value,
+            json!({"x": 0, "y": [0, 0.5, -1.5], "z": {"w": 0}, "s": "text"})
+        );
+        assert!(!value.to_string().contains("-0"), "{value}");
     }
 }

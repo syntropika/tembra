@@ -191,6 +191,39 @@ describe("kernel state of compiled service objects", () => {
       await tally.close();
     }
   });
+
+  test("a negative zero is stored as zero, so the state can still be validated on reload", async () => {
+    const validated: string[] = [];
+    const signed: Compiled = {
+      name: "signed",
+      contract: await contract(COUNTER, "tally"),
+      component: ({ "tembra:guest/state@1.0.0": state }) => ({
+        "tembra:guest/state-init@1.0.0": {
+          declare: () => ({ initial: '{"x":0.5}', version: 1, validated: true }),
+          validate: (_service: string, value: string) => void validated.push(value),
+        },
+        "test:counter/counter@1.0.0": {
+          // serde_json writes a value that rounds to negative zero as `-0.0`.
+          add: (_by: bigint) => {
+            state!.update('{"x":-0.0}');
+            return 0n;
+          },
+        },
+      }),
+    };
+    const tally = host([signed]);
+    try {
+      await tally.install({ artifact: Uint8Array.of(0) });
+      const main = await tally.get("signed::test:counter/counter@1.0.0", "main");
+      await main.add(0n);
+      expect(Object.is((main.state.value as { x: number }).x, 0)).toBe(true);
+      await tally.reload([{ artifact: Uint8Array.of(0) }]);
+      expect(validated).toEqual(['{"x":0}']);
+      main.release();
+    } finally {
+      await tally.close();
+    }
+  });
 });
 
 const JOURNAL = `package test:journal@1.0.0;

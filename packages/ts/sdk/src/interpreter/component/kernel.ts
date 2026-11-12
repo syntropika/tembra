@@ -96,11 +96,15 @@ export type LogObserver = (record: { orb: string; level: string; message: string
 const isU32 = (value: unknown): value is number =>
   Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff_ffff;
 
-/** Parse JSON text a component wrote, naming what it was in the refusal. */
+/**
+ * Parse JSON text a component wrote, naming what it was in the refusal. A negative zero becomes
+ * zero, as `JSON.stringify` writes it and as the native worker stores it: the portable value
+ * profile has none, so a retained `-0` could never be validated or encoded again.
+ */
 function json(text: unknown, what: string): unknown {
   if (typeof text !== "string") throw new Error(`${what} is not JSON text`);
   try {
-    return JSON.parse(text);
+    return JSON.parse(text, (_key, value: unknown) => (Object.is(value, -0) ? 0 : value));
   } catch (error) {
     throw new Error(`${what} is not JSON: ${(error as Error).message}`);
   }
