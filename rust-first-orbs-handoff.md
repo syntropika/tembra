@@ -1,12 +1,14 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-11, 23:20 CET
+- **Aggiornato:** 2026-11-12, 02:01 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   base `main`
-- **Stato:** strada A. Ribase fatto, verificato e pushato: la
-  PR #1 è a `f8d9cf2`, 52 commit sopra `main` (`865e4c6`), e
-  GitHub la dà `MERGEABLE`/`CLEAN`. CI in corso. Restano il
-  corpo della PR e i fix (vedi «Da fare»).
+- **Stato:** strada A. La PR #1 è a `9e4f696`: i 52 commit
+  del ribase più i 3 della PR #2 (adapter browser), sopra
+  `main` (`865e4c6`). GitHub la dà `MERGEABLE`/`UNSTABLE`:
+  `quality` verde, `acceptance` rossa su test di stream del
+  base che Javier sta correggendo (vedi «CI della PR #1»).
+  Poi i fix (vedi «Da fare»).
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -109,8 +111,13 @@ come dice «Inizia qui», poi riprendi da
 
 ## In breve
 
-- PR #1 è `feat/rust-first-orbs` a `d1c4e12`: 52 commit sopra
-  `b08f386`, con base `feat/wasm-orb-runtime`. La CI è rossa.
+- Dal 12/11: PR #1 è `feat/rust-first-orbs` a `9e4f696`, base
+  `main`. La PR #2 (`feat/rust-first-orbs-browser` a
+  `c18a95a`, l'adapter browser) è mergiata dentro. Il resto
+  di questa sezione descrive l'11/11, prima del ribase.
+- PR #1 era `feat/rust-first-orbs` a `d1c4e12`: 52 commit
+  sopra `b08f386`, con base `feat/wasm-orb-runtime`. La CI era
+  rossa.
 - `tembra:orb` non è tornato: siamo sulla **strada A**, la PR
   originale. Il convertito (`feat/rust-first-orbs-lifecycle`)
   resta solo per la strada B.
@@ -143,9 +150,12 @@ Su origin, dall'11/11 sera:
 
 Solo sul server, nel clone `/home/claude/github/tembra`:
 
-- `refs/probe/rust-first-orbs-merge` a `a47eeb2`, nel
-  worktree `.worktrees/probe`: il merge di prova, stesso
-  albero (`777aa65`). Solo riferimento, mai da pushare.
+- `refs/probe/rust-first-orbs-merge` a `a47eeb2`: il merge di
+  prova, stesso albero (`777aa65`). Solo riferimento, mai da
+  pushare.
+- `refs/probe/ci-stream-fixes` a `1ad2bc1`, nel worktree
+  `.worktrees/probe` (staccato): `9e4f696` più i sette commit
+  di Javier sugli stream, vedi «CI della PR #1».
 
 Su origin, quindi visibili da qualunque clone:
 
@@ -314,6 +324,75 @@ per noi.
   trap: è la stessa strada del nostro fix.
 
 ## CI della PR #1
+
+### Dopo la PR #2 (12/11)
+
+La PR #2 (`feat/rust-first-orbs-browser`, l'adapter browser
+per i compilati) è stata mergiata nella PR #1 il 12/11 alle
+00:22 CET: la PR #1 è a `9e4f696`, 55 commit sopra `main`.
+
+Run su `9e4f696`: `43119361463` (push) e `43119619184`
+(pull_request). `quality` verde. `acceptance` rossa, ogni
+volta su un test diverso di `source_stream_imports.rs`:
+
+- `a_source_consumer_reads_native_and_source_producers_`
+  `exactly`: «interpreter callback exceeded its wall time
+  limit; Store quarantined»;
+- `a_source_consumer_reads_a_compiled_producer_exactly_`
+  `and_sees_its_trap`: la trap del producer arriva come
+  errore dell'import, non come errore di lettura.
+
+Non è la PR. Durata di `source_stream_imports.rs`:
+
+| Ramo   | Commit    | Durata | Esito |
+| ------ | --------- | ------ | ----- |
+| main   | `865e4c6` | 332 s  | ok    |
+| PR     | `f8d9cf2` | 340 s  | ok    |
+| PR     | `9e4f696` | 477 s  | rosso |
+| PR     | `9e4f696` | 700 s  | rosso |
+| Javier | `aa88fef` | 721 s  | rosso |
+| Javier | `27c608c` | 686 s  | rosso |
+| Javier | `dd52ff0` | 94 s   | ok    |
+
+- Rosse sono le run lente, e lì è lento tutto, anche i test
+  che la PR non tocca: dipende dal runner.
+- `main` ha una sola run, su `865e4c6`. Dopo, l'acceptance è
+  rossa su tutti i commit di Javier, anche senza la PR.
+- Javier sta sistemando proprio questi test, su
+  `feat/wasm-orb-runtime`. Sette commit, dalle 20:41 CET
+  dell'11/11 all'01:40 del 12/11:
+  - `27c608c`: meno carico nel test di backpressure;
+  - `c89d1c8`: la trap del producer compilato, e in
+    `standard.ts` l'iterazione per byte senza una promise
+    per byte;
+  - `dcbcece`: cache in CI, Cranelift a `opt-level = 3` nei
+    test (da qui i 94 s);
+  - `0edd61b`, `a4b9592`, `dd52ff0`, `7966893`: tempi e
+    canali di errore degli stream; `a4b9592` corregge anche
+    `bindings/operations.rs`.
+- I sette commit si applicano puliti su `9e4f696`. Risultato
+  in `refs/probe/ci-stream-fixes` (`1ad2bc1`), nel worktree
+  `.worktrees/probe`: passano `cargo fmt --check` e
+  `cargo check --workspace --all-targets`.
+- Il merge di tutto `feat/wasm-orb-runtime` (`7966893`) sulla
+  PR invece ha conflitti in 7 file: `Cargo.lock`,
+  `README.md`, `crates/contracts/src/standard.rs`,
+  `docs/rust.md` e tre file dell'adapter browser toccati
+  dalla PR #2, in `packages/ts/sdk/src/interpreter/
+  component/`: `execution.ts`, `revision.ts`, `scope.ts`.
+- CI di Javier su `7966893` (run `43129112003`, finita alle
+  02:00 CET): verde, `quality` e `acceptance`.
+  `source_stream_imports.rs` in 93 s; tutti i test
+  dell'acceptance in 404 s, contro i 1208 s di `main`.
+- `just check` su `1ad2bc1`: verde, 609 test Rust in 115
+  binari, più TypeScript ed esempi.
+
+Proposta, in attesa dell'ok di Giacomo: portare i sette
+commit nella PR con `cherry-pick -x` (push normale, niente
+force). Quando Javier porta avanti `main`, il ribase li
+scarta perché identici.
+
+### Prima del ribase (`d1c4e12`)
 
 - **`quality` sul push:** verde.
 - **`quality` sulla pull_request:** rossa, perché il merge col
