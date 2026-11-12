@@ -1,6 +1,6 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-12, 17:59 CET
+- **Aggiornato:** 2026-11-12, 19:51 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1,
   mergiata in `main` il 12/11 alle 14:59 CET
 - **Stato:** la PR #1 è in `main` con il merge commit
@@ -111,9 +111,12 @@ Resta da fare:
   `references`), parametri resource owned (i `borrow<t>` li
   rifiuta il runtime), `#[flags]` su struct di `bool`
   mappata con `with`, e il rifiuto delle resource restituite
-  da un'altra interfaccia. Restano le tre difficili (tipi
-  importati nelle firme, dipendenze fra risorse, stato
-  tipato): le ultime due toccano il kernel, con Javier.
+  da un'altra interfaccia. Poi i tipi WIT importati nelle
+  firme, fino a `cb82c47` (resta la conversione solo per gli
+  hook dichiarati da un pacchetto consumato). Restano le due
+  che toccano il kernel (dipendenze fra risorse, stato
+  tipato): in attesa della risposta di Javier. Nessuna
+  review indipendente del lavoro della PR #3, solo CI.
 - Il commit vuoto `137925e` della PR #3 ha ancora la riga
   `Co-Authored-By`: si rifà solo con un force-push che
   lancia Giacomo. Da ora niente attribuzione nei commit.
