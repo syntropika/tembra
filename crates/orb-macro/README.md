@@ -224,8 +224,20 @@ mod tally {
 
 The macro gives the state type two associated functions: `Count::read()` returns the state of the
 object running the current call, `Count::update(|count| ...)` changes it and stores it, returning
-the stored value. The initial value is `Default::default()`, which the macro implements field by
-field. Behind them, the world imports the kernel's `tembra:guest/state` interface and exports
+the stored value. The initial value is the state's `Default`, which the macro implements field by
+field unless the author provides it: an `impl Default for Count` anywhere in the Orb module, or a
+`#[derive(Default)]` on a state that stays out of the WIT, whose struct the macro keeps. That is how
+a state starts from a value of the author's choosing:
+
+```rust
+impl Default for Count {
+    fn default() -> Self {
+        Count { total: 100, steps: 0 }
+    }
+}
+```
+
+Behind them, the world imports the kernel's `tembra:guest/state` interface and exports
 `tembra:guest/state-init`: when the kernel creates a service object it asks the component for the
 declaration of that service's state, as JSON with its version, and binds it to the state it
 retains for the object. The executor serves both interfaces itself; the installer requires and
@@ -503,10 +515,10 @@ The macro rewrites the module with:
    `resources-init` callbacks included, with a trapping callback for each declared hook, and
    `export!`; the resource trait of each `#[wit_resource]` struct on the struct itself, its
    constructor and methods forwarded and the handles wrapped at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
-8. with a state, `Default` and the `read`/`update` functions on each state type, over a hidden
-   module that maps the kernel's JSON to the type with `serde_json`, and the kernel's `validate`
-   callback, which reads the value a reload would adopt as the state type and runs the state's
-   `#[validate]` function on it;
+8. with a state, `Default`, field by field unless the author provides it, and the `read`/`update`
+   functions on each state type, over a hidden module that maps the kernel's JSON to the type with
+   `serde_json`, and the kernel's `validate` callback, which reads the value a reload would adopt
+   as the state type and runs the state's `#[validate]` function on it;
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
    function and emptied by the `#[close]` one, and the `with` function on each resource type.
 
@@ -528,7 +540,9 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
   are opened in the order the kernel chooses; the `#[open]` and `#[close]` functions take no
   arguments besides the value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
-  camelCase spelling the executor gives WIT values on the portable boundary.
+  camelCase spelling the executor gives WIT values on the portable boundary. The macro derives
+  `Serialize` and `Deserialize` on a state that stays out of the WIT, unless the author already
+  does.
 - Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
   64-bit integers cross the boundary exactly. A `resource` is a `#[wit_resource]` struct or the
   handle of an imported interface, handed out as an owned handle and never taken as a
@@ -537,6 +551,8 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
   `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has no equivalent, use `bool`.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it, and a record
   of a consumed package is not a state; a state copies it into a record of the module.
-- Replacing the author's types drops their `#[derive]`s.
+- Replacing the author's types drops their `#[derive]`s: a state that enters the WIT starts from
+  the macro's field-by-field `Default` or from an `impl Default` the author writes, never from a
+  derive.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.

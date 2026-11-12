@@ -224,6 +224,13 @@ struct State {
     identity: String,
     /// The module declaring the state, by scope; 0 is the Orb module.
     scope: usize,
+    /// The struct derives `Default`, which counts while the macro keeps the author's struct: when
+    /// the state stays out of the WIT.
+    derives_default: bool,
+    /// The author gives the state its `Default`, its initial value: by an `impl Default` in the
+    /// Orb module, or by a derive on a struct the macro keeps. Otherwise the macro implements it
+    /// field by field.
+    authored_default: bool,
 }
 
 /// A resource of the Orb's root: a struct marked `#[resource]` whose `impl` block has a function
@@ -387,6 +394,8 @@ struct Scan {
     resources: Vec<Resource>,
     wit_resources: Vec<WitResource>,
     impls: Vec<(usize, syn::ItemImpl)>,
+    /// The type of each `impl Default for ..` of the Orb module, with the module it is written in.
+    default_impls: Vec<(usize, Type)>,
     marked: Vec<Marked>,
 }
 
@@ -588,7 +597,15 @@ impl Scan {
                 }
                 Item::Impl(i) => {
                     // A trait impl is copied through unread; a marker belongs to an inherent
-                    // block.
+                    // block. An `impl Default` may give a state its initial value.
+                    let implements_default = i.trait_.as_ref().is_some_and(|(_, path, _)| {
+                        path.segments
+                            .last()
+                            .is_some_and(|segment| segment.ident == "Default")
+                    });
+                    if implements_default {
+                        self.default_impls.push((scope, (*i.self_ty).clone()));
+                    }
                     for impl_item in &i.items {
                         let syn::ImplItem::Fn(function) = impl_item else {
                             continue;
@@ -764,6 +781,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         resources: Vec::new(),
         wit_resources: Vec::new(),
         impls: Vec::new(),
+        default_impls: Vec::new(),
         marked: Vec::new(),
     };
     let (items, children) = scan.scan(items, 0)?;
@@ -786,6 +804,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         mut resources,
         mut wit_resources,
         impls,
+        default_impls,
         marked,
         ..
     } = scan;
@@ -1109,9 +1128,26 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         }
     }
 
+    // A state whose `Default` the author implements by hand starts from the author's value.
+    let declared_types: Vec<(usize, Ident)> = candidates
+        .iter()
+        .map(|(_, shape)| (shape.scope, shape.ident.clone()))
+        .collect();
+    let authored: Vec<bool> = states
+        .iter()
+        .map(|state| {
+            default_impls.iter().any(|(scope, ty)| {
+                names_state(ty, *scope, state, &states, &modules, &declared_types)
+            })
+        })
+        .collect();
+    for (state, authored) in states.iter_mut().zip(authored) {
+        state.authored_default = authored;
+    }
+
     // Only the types a service method, a resource or a hook uses, directly or through another
     // type, enter the WIT; the others go back to their modules as ordinary Rust, a state with
-    // serde derives.
+    // the serde derives the author did not write.
     let mut unreached: Vec<(usize, Item)> = Vec::new();
     let shapes = reachable(
         candidates,
@@ -1122,12 +1158,23 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     )?;
     for (scope, mut item) in unreached {
         if let Item::Struct(item) = &mut item
-            && states
-                .iter()
-                .any(|state| state.ident == item.ident && state.scope == scope)
+            && let Some(state) = states
+                .iter_mut()
+                .find(|state| state.ident == item.ident && state.scope == scope)
         {
-            item.attrs
-                .push(syn::parse_quote!(#[derive(::serde::Serialize, ::serde::Deserialize)]));
+            // The author's struct stays, with its derives: a derived `Default` is the state's.
+            state.authored_default |= state.derives_default;
+            let missing: Vec<proc_macro2::TokenStream> = [
+                ("Serialize", quote! { ::serde::Serialize }),
+                ("Deserialize", quote! { ::serde::Deserialize }),
+            ]
+            .into_iter()
+            .filter(|(name, _)| !derives(&item.attrs, name))
+            .map(|(_, path)| path)
+            .collect();
+            if !missing.is_empty() {
+                item.attrs.push(syn::parse_quote!(#[derive(#(#missing),*)]));
+            }
         }
         tree.at(&modules[scope]).items.push(item);
     }
@@ -1733,6 +1780,90 @@ fn reserved_member(wit_name: &str) -> Option<String> {
     RESERVED_MEMBERS
         .contains(&member.as_str())
         .then_some(member)
+}
+
+/// Whether an item's `#[derive(..)]` attributes name a trait, by the last segment of its path.
+fn derives(attrs: &[Attribute], name: &str) -> bool {
+    attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("derive"))
+        .any(|attribute| {
+            attribute
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Path, Token![,]>::parse_terminated,
+                )
+                .is_ok_and(|paths| {
+                    paths.iter().any(|path| {
+                        path.segments
+                            .last()
+                            .is_some_and(|segment| segment.ident == name)
+                    })
+                })
+        })
+}
+
+/// Whether the type of an `impl Default for ..`, written in the module `scope`, is `state`: its
+/// path, followed from that module through `self::`, `super::` and sub-modules, ends at the
+/// state; a path ending at another type of the Orb module is not the state, and one leaving the
+/// Orb module neither. A name the macro cannot follow, such as one a `use` brings in, is the
+/// state when no other state has its name.
+fn names_state(
+    ty: &Type,
+    scope: usize,
+    state: &State,
+    states: &[State],
+    modules: &[Vec<Ident>],
+    declared: &[(usize, Ident)],
+) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(last) = path.path.segments.last() else {
+        return false;
+    };
+    if path.qself.is_some() || last.ident != state.ident {
+        return false;
+    }
+    let Some(module) = module_of(&path.path, &modules[scope]) else {
+        return false;
+    };
+    if module == modules[state.scope] {
+        return true;
+    }
+    let elsewhere = declared
+        .iter()
+        .any(|(scope, ident)| modules[*scope] == module && *ident == last.ident);
+    !elsewhere
+        && states
+            .iter()
+            .filter(|other| other.ident == state.ident)
+            .count()
+            == 1
+}
+
+/// The module, as a path from the Orb module, in which a type path written in the module `from`
+/// names its type: `self::` stays, `super::` goes up, any other segment goes down a sub-module.
+/// `None` for a path that leaves the Orb module.
+fn module_of(path: &syn::Path, from: &[Ident]) -> Option<Vec<Ident>> {
+    if path.leading_colon.is_some() {
+        return None;
+    }
+    let mut module = from.to_vec();
+    let segments: Vec<&Ident> = path.segments.iter().map(|segment| &segment.ident).collect();
+    let (_, prefix) = segments.split_last()?;
+    for segment in prefix {
+        if *segment == "self" {
+            continue;
+        }
+        if *segment == "super" {
+            module.pop()?;
+        } else if *segment == "crate" || *segment == "Self" {
+            return None;
+        } else {
+            module.push((*segment).clone());
+        }
+    }
+    Some(module)
 }
 
 /// Remove and return the marker attribute with the given name, if present.
@@ -2804,6 +2935,8 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
         validator: None,
         identity: String::new(),
         scope: 0,
+        derives_default: derives(&item.attrs, "Default"),
+        authored_default: false,
     })
 }
 
@@ -2882,12 +3015,17 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
                 }
             }
         };
-        quote! {
-            impl ::core::default::Default for #path {
-                fn default() -> Self {
-                    Self { #(#fields: ::core::default::Default::default()),* }
+        let default = (!state.authored_default).then(|| {
+            quote! {
+                impl ::core::default::Default for #path {
+                    fn default() -> Self {
+                        Self { #(#fields: ::core::default::Default::default()),* }
+                    }
                 }
             }
+        });
+        quote! {
+            #default
             impl #path {
                 #[doc = #read_doc]
                 pub fn read() -> Self {

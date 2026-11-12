@@ -837,6 +837,93 @@ fn a_state_enters_the_wit_only_when_a_method_mentions_it() {
     assert!(!generated.contains("pub use exports :: example :: ledger :: pinned :: { Balance }"));
 }
 
+/// A state starts from its `Default`: the macro implements it field by field unless the author
+/// gives it, by an `impl Default` anywhere in the Orb module or by a derive on a state the macro
+/// keeps, out of the WIT; the serde derives the author already wrote are not added again.
+#[test]
+fn the_author_may_give_a_state_its_default_and_its_derives() {
+    let generated_default = "impl :: core :: default :: Default for Balance {";
+    let state = |attributes: &str, extra: &str, returned: &str| {
+        format!(
+            "mod ledger {{
+                {attributes}
+                #[state]
+                pub struct Balance {{ pub total: i64 }}
+                {extra}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    // Kept out of the WIT, the author's derives stay and complete what the macro adds.
+    let derived = tokens(&expanded(
+        "example:ledger@1.0.0",
+        &state(
+            "#[derive(Default, serde::Serialize, serde::Deserialize)]",
+            "",
+            "i64",
+        ),
+    ));
+    assert!(!derived.contains(generated_default), "{derived}");
+    assert!(!derived.contains("# [derive (:: serde"), "{derived}");
+    let half = tokens(&expanded(
+        "example:ledger@1.0.0",
+        &state("#[derive(serde::Serialize)]", "", "i64"),
+    ));
+    assert!(
+        half.contains(
+            "# [derive (serde :: Serialize)] # [derive (:: serde :: Deserialize)] pub struct Balance"
+        ),
+        "{half}"
+    );
+    assert!(half.contains(generated_default), "{half}");
+    // A hand-written `impl Default` is the state's, whether the state enters the WIT or not.
+    let by_hand = "impl Default for Balance { fn default() -> Self { Balance { total: 100 } } }";
+    for returned in ["i64", "Balance"] {
+        let module = expanded("example:ledger@1.0.0", &state("", by_hand, returned));
+        assert!(!tokens(&module).contains(generated_default), "{returned}");
+    }
+    // A state that enters the WIT is the generated type: the author's derive goes with the item,
+    // so the macro implements `Default`, as the derive would have.
+    let entered = tokens(&expanded(
+        "example:ledger@1.0.0",
+        &state("#[derive(Default)]", "", "Balance"),
+    ));
+    assert!(entered.contains(generated_default), "{entered}");
+    // Two states of one name are told apart by the path the `impl` names.
+    for (place, skipped, kept) in [
+        (
+            "    pub mod pinned {",
+            "pinned :: Balance",
+            "passing :: Balance",
+        ),
+        (
+            "    pub mod pinned {\n        impl Default for super::passing::Balance { fn default() -> Self { super::passing::Balance { total: 1 } } }",
+            "passing :: Balance",
+            "pinned :: Balance",
+        ),
+    ] {
+        let source = if place.contains("super::passing") {
+            LEDGER.replace("    pub mod pinned {", place)
+        } else {
+            LEDGER.replace(
+                "    pub mod pinned {",
+                "    pub mod pinned {\n        impl Default for Balance { fn default() -> Self { Balance { total: 1 } } }",
+            )
+        };
+        let generated = tokens(&expanded("example:ledger@1.0.0", &source));
+        assert!(
+            !generated.contains(&format!("impl :: core :: default :: Default for {skipped}")),
+            "{generated}"
+        );
+        assert!(
+            generated.contains(&format!("impl :: core :: default :: Default for {kept}")),
+            "{generated}"
+        );
+    }
+}
+
 const GATE: &str = "mod gate {
     /// Each contributor may change the admission or block it.
     #[hook(composition = waterfall, input = Admission)]
