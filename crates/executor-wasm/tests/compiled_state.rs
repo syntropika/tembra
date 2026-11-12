@@ -239,3 +239,22 @@ fn a_stateful_orb_creates_its_incoming_http_handler() {
     pool.run_until(host.close()).unwrap();
     assert!(host.errors().is_empty(), "{:?}", host.errors());
 }
+
+/// Kernel state is served to compiled components only: a source Orb keeps its state through its
+/// bundle, so a source world importing `tembra:guest/state` is refused when it is installed
+/// rather than failing on its first use of the import.
+#[test]
+fn a_source_orb_cannot_import_the_kernel_state() {
+    let artifact = tembra_executor_wasm::Contract::from_source("tally.wit", WIT, Some("tally"))
+        .unwrap()
+        .source_artifact("/* a bundle */", "tally", 1)
+        .unwrap();
+    let error = match Engine::new(Limits::default())
+        .unwrap()
+        .load(&artifact, Install::default())
+    {
+        Ok(_) => panic!("a source Orb importing the kernel state was installed"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("compiled components only"), "{error}");
+}

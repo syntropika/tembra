@@ -184,6 +184,16 @@ export class BrowserExecution {
       network: Object.keys(this.options.providers?.network ?? {}),
       http: Object.keys(this.options.providers?.http ?? {}),
     });
+    // A source bundle reaches its state, resources and context through its own declaration; the
+    // kernel serves `tembra:guest` to compiled components only, so such an import would install
+    // and never be served. The native executor refuses it the same way.
+    const kernel = Object.entries(prepared.bindings).find(
+      ([, binding]) => binding.kind === "kernel",
+    );
+    if (kernel)
+      throw new Error(
+        `${kernel[0]}: the kernel serves tembra:guest to compiled components only; a source Orb reaches its state, resources and context through its bundle`,
+      );
     const options = { ...identity, grants: installation.grants };
     let capabilities: BrowserCapabilities | undefined;
     let stdio: StdioStreams | undefined;

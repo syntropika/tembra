@@ -3,7 +3,7 @@ import { BrowserExecution } from "../src/interpreter/browser.ts";
 import { memoryFilesystem } from "../src/interpreter/filesystem.ts";
 
 /** Give lifecycle tests an owned contract while engine startup deliberately fails. */
-function contracts(kind: "source" | "component" = "source") {
+function contracts(kind: "source" | "component" = "source", bindings: object = {}) {
   let freed = 0;
   return {
     freed: () => freed,
@@ -25,7 +25,7 @@ function contracts(kind: "source" | "component" = "source") {
         request() {
           return JSON.stringify({
             ok: {
-              bindings: {},
+              bindings,
               importServices: {},
               plan: { orb: { name: "test", apiVersion: 1, services: [], requires: [], hooks: [] } },
             },
@@ -57,6 +57,15 @@ for (const kind of ["source", "component"] as const)
     );
     expect(contract.freed()).toBe(1);
   });
+
+test("a source artifact importing a kernel interface is refused and freed", async () => {
+  const contract = contracts("source", { "tembra:guest/state@1.0.0": { kind: "kernel" } });
+  const backend = new BrowserExecution({}, contract.module);
+  await expect(backend.materialize({ artifact: new Uint8Array() })).rejects.toThrow(
+    "tembra:guest/state@1.0.0: the kernel serves tembra:guest to compiled components only",
+  );
+  expect(contract.freed()).toBe(1);
+});
 
 test("failed engine startup closes mounted providers and their contract together", async () => {
   const contract = contracts();

@@ -62,6 +62,28 @@ pub fn exports(model: &Model, contract: &str) -> bool {
     names(&model.exports, contract)
 }
 
+impl crate::PreparedContract {
+    /// Refuse the kernel's interfaces in the world of a source Orb. A source bundle reaches its
+    /// state, resources and context through its declaration and context objects; the kernel
+    /// serves `tembra:guest` to compiled components only, so such an import would install and
+    /// never be served.
+    pub fn check_source_kernel(&self) -> Result<(), crate::Error> {
+        let model = self.model();
+        for entry in model.imports.iter().chain(&model.exports) {
+            if let Item::Interface(interface) = &entry.item
+                && interface.contract.as_deref().is_some_and(reserved)
+            {
+                return Err(crate::Error(format!(
+                    "{}: the kernel serves tembra:guest to compiled components only; a source Orb \
+                     reaches its state, resources and context through its bundle",
+                    entry.key
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn names(side: &[crate::Entry], contract: &str) -> bool {
     side.iter().any(|entry| match &entry.item {
         Item::Interface(interface) => interface.contract.as_deref() == Some(contract),
