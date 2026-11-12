@@ -853,6 +853,301 @@ fn an_import_enters_the_world_and_is_reexported() {
     assert!(tokens(&module).contains("pub use self :: example :: ledger :: book ;"));
 }
 
+/// A Rust name whose WIT name is a keyword of WIT, `list`, `record` or `interface`, is written with
+/// WIT's `%` escape wherever the WIT names it, and the bindings are asked for the world the same
+/// way; a raw identifier is read without its `r#`.
+#[test]
+fn a_name_that_is_a_wit_keyword_is_escaped() {
+    let module = expanded(
+        "example:keywords@1.0.0",
+        "mod list {
+            pub struct Record { pub result: u32, pub from: Kind }
+            pub enum Kind { Record, Variant }
+            #[wit_resource]
+            pub struct Stream { at: u32 }
+            impl Stream {
+                #[constructor]
+                pub fn new(with: u32) -> Self { Stream { at: with } }
+                pub fn own(&self) -> u32 { self.at }
+                pub fn tuple() -> Stream { Stream { at: 0 } }
+            }
+            #[service]
+            pub struct Interface;
+            impl Interface {
+                pub fn list(from: u32, r#use: String) -> Vec<Record> { todo!() }
+                pub fn future(at: u32) -> Stream { Stream::new(at) }
+            }
+        }",
+    );
+    assert_eq!(
+        resolved(&module),
+        "package example:keywords@1.0.0;\n\ninterface %interface {\n  record %record {\n    %result: u32,\n    %from: kind,\n  }\n  enum kind {\n    %record,\n    %variant,\n  }\n  resource %stream {\n    constructor(%with: u32);\n    %own: func() -> u32;\n    %tuple: static func() -> %stream;\n  }\n  %list: func(%from: u32, %use: string) -> list<%record>;\n  %future: func(at: u32) -> %stream;\n}\n\nworld %list {\n  export %interface;\n}\n"
+    );
+    assert!(
+        tokens(&module).contains("world : \"%list\" ,"),
+        "{}",
+        tokens(&module)
+    );
+}
+
+/// A name the bindings spell otherwise than the author is bridged with the bindings' spelling: a
+/// function `GET` is `get` and `r#move` is `move_`, a resource `HTTPSession` is `HttpSession`,
+/// and a record `HTTPRequest` is re-exported from `HttpRequest` under the author's name.
+#[test]
+fn a_name_the_bindings_spell_otherwise_is_bridged() {
+    let module = expanded(
+        "example:web@1.0.0",
+        "mod web {
+            pub struct HTTPRequest { pub path: String }
+            #[wit_resource]
+            pub struct HTTPSession { request: HTTPRequest }
+            impl HTTPSession {
+                #[constructor]
+                pub fn open(path: String) -> Self { todo!() }
+                pub fn URL(&self) -> String { todo!() }
+                pub fn r#type(&self) -> u32 { 0 }
+            }
+            #[service]
+            pub struct HTTPServer;
+            impl HTTPServer {
+                pub fn GET(r#type: u32) -> u32 { r#type }
+                pub fn r#move(path: String) -> HTTPRequest { todo!() }
+                pub fn start(request: HTTPRequest) -> Option<HTTPSession> { None }
+            }
+        }",
+    );
+    let text = resolved(&module);
+    for expected in [
+        "  record http-request {\n",
+        "  resource http-session {\n",
+        "    url: func() -> string;\n    %type: func() -> u32;\n",
+        "  get: func(%type: u32) -> u32;\n  move: func(path: string) -> http-request;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let generated = tokens(&module);
+    let interface = "exports :: example :: web :: http_server";
+    for expected in [
+        format!("pub use {interface} :: {{ HttpRequest as HTTPRequest }} ;"),
+        "type HttpSession = HTTPSession ;".into(),
+        "fn get (r#type : u32) -> u32 { HTTPServer :: GET (r#type) }".into(),
+        "fn move_ (path : String) -> HTTPRequest { HTTPServer :: r#move (path) }".into(),
+        format!(
+            "fn start (request : HTTPRequest) -> Option < {interface} :: HttpSession > {{ HTTPServer :: start (request) . map (| item | {interface} :: HttpSession :: new (item)) }}"
+        ),
+        format!("impl {interface} :: GuestHttpSession for HTTPSession"),
+        "fn url (& self ,) -> String { HTTPSession :: URL (self ,) }".into(),
+        "fn type_ (& self ,) -> u32 { HTTPSession :: r#type (self ,) }".into(),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+}
+
+/// The generated type replaces the author's, but the bindings name its fields and cases from
+/// their WIT names: a field or a case they would name otherwise is refused, with the name to use;
+/// a type that stays out of the WIT keeps its names.
+#[test]
+fn a_field_or_a_case_the_bindings_name_otherwise_is_refused() {
+    let module = |types: &str| {
+        format!(
+            "mod web {{
+                {types}
+                #[service]
+                pub struct Server;
+                impl Server {{ pub fn get() -> Request {{ todo!() }} }}
+            }}"
+        )
+    };
+    for (types, message) in [
+        (
+            "pub struct Request { pub userID: u32 }",
+            "the field `Request::userID` enters the WIT as `user-id`, which the generated type replacing `Request` names `user_id`: name the field `user_id`",
+        ),
+        (
+            "pub struct Request { pub r#type: u32 }",
+            "the field `Request::r#type` enters the WIT as `type`, which the generated type replacing `Request` names `type_`: name the field `type_`",
+        ),
+        (
+            "pub enum Request { HTTP, Https }",
+            "the case `Request::HTTP` enters the WIT as `http`, which the generated type replacing `Request` names `Http`: name the case `Http`",
+        ),
+        (
+            "pub struct Request { pub café: u32 }",
+            "the field `Request::café` has no WIT name: its kebab-case form `café` holds a character other than ASCII letters, digits and `-`",
+        ),
+    ] {
+        let error = refused("example:web@1.0.0", &module(types));
+        assert!(error.contains(message), "{types}: {error}");
+    }
+    let module = expanded(
+        "example:web@1.0.0",
+        &module(
+            "pub struct Request { pub type_: u32, pub kind: Kind }\npub enum Kind { Http, Https }\npub struct Kept { pub userID: u32 }",
+        ),
+    );
+    assert!(
+        resolved(&module).contains("  record request {\n    %type: u32,\n    kind: kind,\n  }\n"),
+        "{}",
+        wit(&module)
+    );
+    assert!(tokens(&module).contains("pub struct Kept { pub userID : u32 }"));
+}
+
+/// Types and functions share an interface's names in WIT, a resource's methods and static
+/// functions share the resource's, and the interfaces share the package's: two items of one WIT
+/// name in one scope are a compile error naming both.
+#[test]
+fn two_items_of_one_wit_name_in_one_scope_are_refused() {
+    let module = |types: &str, functions: &str| {
+        format!(
+            "mod office {{
+                {types}
+                #[service]
+                pub struct Desk;
+                impl Desk {{ {functions} }}
+            }}"
+        )
+    };
+    for (types, functions, message) in [
+        (
+            "pub struct Stats { pub words: u32 }",
+            "pub fn stats() -> Stats { todo!() }",
+            "the type `Stats` and `Desk::stats` are both `stats` in the interface `desk`, where types and functions share one namespace; rename one of them",
+        ),
+        (
+            "pub struct Info { pub n: u32 }\npub struct Report { pub info: Info }",
+            "pub fn summary() -> Report { todo!() } pub fn info() -> u32 { 0 }",
+            "the type `Info` and `Desk::info` are both `info` in the interface `desk`",
+        ),
+        (
+            "",
+            "pub fn r#move(by: u32) -> u32 { by } pub fn move_(by: u32) -> u32 { by }",
+            "`Desk::r#move` and `Desk::move_` are both `move` in the interface `desk`",
+        ),
+        (
+            "#[wit_resource]\npub struct Pen;\nimpl Pen { pub fn ink_level(&self) -> u32 { 0 } }",
+            "pub fn pen() -> u32 { 0 }",
+            "the resource `Pen` and `Desk::pen` are both `pen` in the interface `desk`",
+        ),
+        (
+            "#[wit_resource]\npub struct Pen;\nimpl Pen { pub fn ink_level(&self) -> u32 { 0 } pub fn inkLevel() -> u32 { 0 } }",
+            "pub fn take() -> Pen { Pen }",
+            "`Pen::ink_level` and `Pen::inkLevel` are both `ink-level` in the resource `pen`, where its methods and static functions share one namespace",
+        ),
+        (
+            "",
+            "pub fn add(by_count: u32, byCount: u32) -> u32 { 0 }",
+            "the parameter `by_count` and the parameter `byCount` are both `by-count` in the parameters of `Desk::add`",
+        ),
+        (
+            "",
+            "pub fn café() -> u32 { 0 }",
+            "`Desk::café` has no WIT name: its kebab-case form `café` holds a character other than ASCII letters, digits and `-`",
+        ),
+        (
+            "#[service]\npub struct DESK;\nimpl DESK { pub fn count() -> u32 { 0 } }",
+            "pub fn total() -> u32 { 0 }",
+            "`DESK` and `Desk` are both the interface `desk` in the WIT; rename one of them",
+        ),
+    ] {
+        let error = refused("example:office@1.0.0", &module(types, functions));
+        assert!(error.contains(message), "{types} {functions}: {error}");
+    }
+}
+
+/// An implemented interface or a consumed hook whose WIT names are Rust keywords is bridged as the
+/// bindings name them, `move_`, `type_`, `return_`, and calls the author's functions by their own
+/// names, matched by WIT name.
+#[test]
+fn a_consumed_name_that_is_a_rust_keyword_is_bridged_as_the_bindings_name_it() {
+    let dir = consumed(
+        "keywords",
+        "package example:ledger@1.0.0;
+        interface book {
+          resource cursor {
+            constructor(%type: u32);
+            %match: func(%in: u32) -> bool;
+            %static: static func(%as: u32) -> cursor;
+          }
+          %move: func(%type: u32) -> u32;
+          get-entry: func() -> u32;
+        }
+        interface guard {
+          record admission { value: s32 }
+          %return: func(%in: admission) -> admission;
+        }",
+    );
+    let module = orb_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        "mod keeper {
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper {
+                pub fn r#move(r#type: u32) -> u32 { r#type }
+                pub fn getEntry() -> u32 { 0 }
+            }
+            #[wit_resource(service = Keeper)]
+            pub struct Cursor { at: u32 }
+            impl Cursor {
+                #[constructor]
+                pub fn new(r#type: u32) -> Self { Cursor { at: r#type } }
+                pub fn r#match(&self, r#in: u32) -> bool { self.at == r#in }
+                pub fn static_(r#as: u32) -> Cursor { Cursor { at: r#as } }
+            }
+            #[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
+            pub fn admit(input: guard::Admission) -> guard::Admission { input }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let generated = tokens(&module);
+    for expected in [
+        "fn move_ (type_ : u32) -> u32 { Keeper :: r#move (type_) }",
+        "fn get_entry () -> u32 { Keeper :: getEntry () }",
+        "fn new (type_ : u32) -> Self { Cursor :: new (type_) }",
+        "fn match_ (& self , in_ : u32) -> bool { Cursor :: r#match (self , in_) }",
+        "fn static_ (as_ : u32) -> exports :: example :: ledger :: book :: Cursor { exports :: example :: ledger :: book :: Cursor :: new (Cursor :: static_ (as_)) }",
+        "fn return_ (input : guard :: Admission) -> guard :: Admission { admit (input) }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let declared = orb_with(
+        options("example:gate@1.0.0", Some(&dir)),
+        "mod gate {
+            #[hook(\"example:ledger/guard@1.0.0\", composition = waterfall)]
+            pub struct Guard;
+            #[service]
+            pub struct Admissions;
+            impl Admissions { pub fn admit(value: i32) -> i32 { Guard::run(guard::Admission { value }).value } }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let generated = tokens(&declared);
+    for expected in [
+        "fn return_ (_input : exports :: example :: ledger :: guard :: Admission)",
+        "self :: example :: ledger :: guard :: return_ (input)",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let error = refused_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        "mod keeper {
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper {
+                pub fn r#move(r#type: u32) -> u32 { r#type }
+                pub fn move_(r#type: u32) -> u32 { r#type }
+                pub fn get_entry() -> u32 { 0 }
+            }
+            #[wit_resource(service = Keeper)]
+            pub struct Cursor;
+        }",
+    );
+    assert!(
+        error.contains("`r#move` and `move_` both implement the WIT function `move`"),
+        "{error}"
+    );
+}
+
 /// The derived WIT, checked to resolve as a package.
 fn resolved(module: &ItemMod) -> String {
     let text = wit(module);
@@ -1277,7 +1572,7 @@ fn the_types_a_state_out_of_the_wit_reaches_get_serde_derives() {
             pub struct Pinned;
             impl Pinned {
                 pub fn add(amount: i64) -> i64 { amount }
-                pub fn shown() -> Shown { todo!() }
+                pub fn last_shown() -> Shown { todo!() }
             }
         }",
     );

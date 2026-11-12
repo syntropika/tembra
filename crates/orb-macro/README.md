@@ -119,6 +119,17 @@ every identity an attribute names are WIT identities, `ns:name@version` and
 `ns:name/interface@version`: names of kebab-case words of lowercase letters and digits, each word
 starting with a letter, none of them a WIT keyword, and a semantic version.
 
+A name that enters the WIT is the kebab-case form of the Rust name, a raw identifier without its
+`r#`: `HTTPRequest` is `http-request` and `r#type` is `type`. A WIT keyword, such as `list`,
+`record` or `interface`, is written with WIT's `%` escape. The bindings name each item back from
+its WIT name, `HttpRequest`, `get` for a function `GET`, `move_` for `r#move`, and the bridges speak
+their names: a function or a resource keeps the author's name, and a record or an enum is
+re-exported under it. A field or a case cannot be renamed so, because the generated type replaces
+the author's: one the bindings would name otherwise, `userID` or a case `HTTP`, is a compile error
+giving the name to use, `user_id` or `Http`. Inside an interface, types and functions share one
+namespace in WIT, as do the methods and static functions of a resource: two items of one WIT name
+there, a record `Stats` and a function `stats`, are a compile error naming both.
+
 Nothing is bound by name either. The functions the generated code calls by role, a state's rule,
 a root resource's opening and closing and a WIT resource's constructor, carry a marker,
 `#[validate]`, `#[open]`, `#[close]` or `#[constructor]`, whatever their names and visibility; a
@@ -405,7 +416,8 @@ mod keeper {
 
 The world exports that interface instead of a derived one, its generated module is re-exported
 under the interface's name, so the author writes `book::Entry`, and the macro generates the bridge
-from each WIT function to the `pub fn` of the same name. The interface is fixed by its WIT: the
+from each WIT function to the `pub fn` of the same WIT name, `move_` or `r#move` for a function
+`move`, named in the bridge as the bindings name it. The interface is fixed by its WIT: the
 `impl` provides every function, with its parameter and result types, and nothing else; a missing or
 extra `pub fn` is a compile error and a wrong type fails to compile at the bridge. A resource of the
 interface is implemented by a `#[wit_resource(service = Keeper)]` struct of the resource's name,

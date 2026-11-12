@@ -782,6 +782,15 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let (namespace, rest) = package.split_once(':').unwrap_or_default();
     let name = rest.split_once('@').map_or(rest, |(name, _)| name);
     let world = wit::kebab(&module.ident);
+    if let Some(problem) = wit::name_problem(&world) {
+        return Err(syn::Error::new(
+            module.ident.span(),
+            format!(
+                "the module `{}` has no WIT name for the world: its kebab-case form `{world}` {problem}",
+                module.ident
+            ),
+        ));
+    }
     let Some((_, items)) = module.content else {
         return Err(syn::Error::new(
             module.span(),
@@ -1040,6 +1049,38 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 format!(
                     "`{}` names both a hook and the service `{}`; rename one of them",
                     declaration.ident, service.ident
+                ),
+            ));
+        }
+    }
+    // Each derived service and derived hook names an interface of the package after its struct:
+    // a WIT name, which no other interface takes.
+    let mut interface_names: BTreeMap<String, &Ident> = BTreeMap::new();
+    let interface_idents = services
+        .iter()
+        .filter(|service| service.implements.is_none())
+        .map(|service| &service.ident)
+        .chain(
+            declared
+                .iter()
+                .filter(|declaration| declaration.input.is_some())
+                .map(|declaration| &declaration.ident),
+        );
+    for ident in interface_idents {
+        let name = wit::kebab(ident);
+        if let Some(problem) = wit::name_problem(&name) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{ident}` has no WIT name for its interface: its kebab-case form `{name}` {problem}"
+                ),
+            ));
+        }
+        if let Some(previous) = interface_names.insert(name.clone(), ident) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{previous}` and `{ident}` are both the interface `{name}` in the WIT; rename one of them"
                 ),
             ));
         }
@@ -1306,17 +1347,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                     ),
                 ));
             }
-            if !service
-                .functions
-                .iter()
-                .any(|own| wit::kebab(&own.ident) == function.name)
-            {
+            if implementing(&service.functions, &function.name)?.is_none() {
                 return Err(syn::Error::new(
                     service.ident.span(),
                     format!(
                         "`{}` implements {identity} but has no `pub fn {}`",
                         service.ident,
-                        function.name.to_snake_case()
+                        rust_ident(&function.name)
                     ),
                 ));
             }
@@ -1345,10 +1382,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
         for resource in &interface.resources {
-            let ident = resource.name.to_upper_camel_case();
-            let Some(implementation) = wit_resources.iter().find(|candidate| {
-                candidate.ident == ident && candidate.service.as_ref() == Some(&service.ident)
-            }) else {
+            let ident = camel_ident(&resource.name);
+            let Some(implementation) =
+                implementation_of(&wit_resources, &service.ident, &resource.name)
+            else {
                 return Err(syn::Error::new(
                     service.ident.span(),
                     format!(
@@ -1357,6 +1394,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                     ),
                 ));
             };
+            let ident = &implementation.ident;
             match (&resource.constructor, &implementation.constructor) {
                 (Some(_), None) => {
                     return Err(syn::Error::new(
@@ -1383,36 +1421,20 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 }
                 _ => {}
             }
-            for (expected, authored) in [
-                (&resource.methods, &implementation.methods),
-                (&resource.statics, &implementation.statics),
-            ] {
-                for function in expected {
-                    if let Some(own) = authored
-                        .iter()
-                        .find(|own| wit::kebab(&own.ident) == function.name)
-                    {
-                        check_async(own, function)?;
-                    }
+            let own = implementation.methods.iter().chain(&implementation.statics);
+            for function in resource.methods.iter().chain(&resource.statics) {
+                // The WIT fixes whether each one is asynchronous.
+                let authored = implementing(own.clone(), &function.name)?;
+                if let Some(authored) = authored {
+                    check_async(authored, function)?;
                 }
-            }
-            let expected = resource
-                .methods
-                .iter()
-                .chain(&resource.statics)
-                .map(|function| function.name.to_snake_case());
-            for name in expected {
-                let defined = implementation
-                    .methods
-                    .iter()
-                    .chain(&implementation.statics)
-                    .any(|function| function.ident == name);
-                if !defined {
+                if authored.is_none() {
                     return Err(syn::Error::new(
                         implementation.ident.span(),
                         format!(
-                            "`{ident}` implements the resource `{}` of {identity} but has no `pub fn {name}`",
-                            resource.name
+                            "`{ident}` implements the resource `{}` of {identity} but has no `pub fn {}`",
+                            resource.name,
+                            rust_ident(&function.name)
                         ),
                     ));
                 }
@@ -1491,31 +1513,48 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let module_ident = module.ident;
     let vis = module.vis;
     let (outer_attrs, inner_attrs) = placed(&module.attrs);
-    let ns_ident = rust_module(namespace);
+    let ns_ident = rust_ident(namespace);
     let name_ident = package_module(name);
     // The generated types carry the author's names and public fields, so the author's functions
     // and the generated traits speak about one type: each is re-exported in the module that
-    // declared it, from the interface `placement` defines it in.
+    // declared it, from the interface `placement` defines it in, under the author's name where
+    // the bindings name it otherwise, `HttpRequest as HTTPRequest`.
     let hook_shapes = wit::hook_shapes(&shapes, &declared);
-    let interface_module = |ident: &Ident| rust_module(&wit::kebab(ident));
-    let mut grouped: Vec<((Ident, usize), Vec<&Ident>)> = Vec::new();
+    let interface_module = |ident: &Ident| rust_ident(&wit::kebab(ident));
+    let mut grouped: Vec<((Ident, usize), Vec<proc_macro2::TokenStream>)> = Vec::new();
     for shape in &shapes {
         let interface = interface_module(&placement[&shape.ident.to_string()]);
         let key = (interface, shape.scope);
+        let ident = &shape.ident;
+        let generated = type_ident(&wit::kebab(ident));
+        let imported = if generated == *ident {
+            quote! { #ident }
+        } else {
+            quote! { #generated as #ident }
+        };
         match grouped.iter_mut().find(|(known, _)| *known == key) {
-            Some((_, idents)) => idents.push(&shape.ident),
-            None => grouped.push((key, vec![&shape.ident])),
+            Some((_, imports)) => imports.push(imported),
+            None => grouped.push((key, vec![imported])),
         }
     }
-    for ((interface, scope), idents) in &grouped {
+    for ((interface, scope), imports) in &grouped {
         let root = supers(modules[*scope].len());
         tree.at(&modules[*scope]).generated.push(quote! {
-            pub use #root exports::#ns_ident::#name_ident::#interface::{#(#idents),*};
+            pub use #root exports::#ns_ident::#name_ident::#interface::{#(#imports),*};
         });
     }
-    // A derived service's bridge forwards each function to the author's; a result that is a
-    // resource is wrapped into the bindings' handle type, and the resources of the service's
-    // interface are the author's structs, each bridged in its own module.
+    // The bindings' handle type of each WIT resource, by the author's name of its struct.
+    let handle_types: BTreeMap<String, Ident> = wit_resources
+        .iter()
+        .map(|resource| {
+            let handle = type_ident(&wit::kebab(&resource.ident));
+            (resource.ident.to_string(), handle)
+        })
+        .collect();
+    // A derived service's bridge forwards each function, named as the bindings name it, to the
+    // author's; a resource the result holds is wrapped into the bindings' handle type, and the
+    // resources of the service's interface are the author's structs, each bridged in its own
+    // module.
     for service in services
         .iter()
         .filter(|service| service.implements.is_none())
@@ -1527,6 +1566,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         let target = &service.ident;
         let functions = service.functions.iter().map(|function| {
             let ident = &function.ident;
+            let generated = rust_ident(&wit::kebab(ident));
             let params = function
                 .params
                 .iter()
@@ -1534,16 +1574,16 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             let names = function.params.iter().map(|(ident, _, _)| ident);
             let (asynchronous, await_) = async_bridge(function.asynchronous);
             let call = quote! { #target::#ident(#(#names),*) #await_ };
-            let (result, body) = derived_result(&function.result, &module, &resource_names, call);
-            quote! { #asynchronous fn #ident(#(#params),*) #result { #body } }
+            let (result, body) = derived_result(&function.result, &module, &handle_types, call);
+            quote! { #asynchronous fn #generated(#(#params),*) #result { #body } }
         });
         let owned = wit_resources
             .iter()
             .filter(|resource| resource.service.as_ref() == Some(&service.ident))
             .map(|resource| {
-                let ident = &resource.ident;
-                let path = relative(depth, &modules[resource.scope], ident);
-                quote! { type #ident = #path; }
+                let camel = camel_ident(&wit::kebab(&resource.ident));
+                let path = relative(depth, &modules[resource.scope], &resource.ident);
+                quote! { type #camel = #path; }
             });
         tree.at(&modules[service.scope]).generated.push(quote! {
             impl #module::Guest for #root __TembraExports {
@@ -1560,16 +1600,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 quote! { #resource_root exports::#ns_ident::#name_ident::#interface };
             tree.at(&modules[resource.scope])
                 .generated
-                .push(derived_resource(
-                    resource,
-                    &resource_module,
-                    &resource_names,
-                ));
+                .push(derived_resource(resource, &resource_module, &handle_types));
         }
     }
     // An implemented interface's bridge takes its signatures from the WIT: the functions forward
-    // to the author's of the same names, and each resource of the interface is the author's
-    // struct of the same name.
+    // to the author's of the same WIT names, and each resource of the interface is the author's
+    // struct of its WIT name.
     for service in services
         .iter()
         .filter(|service| service.implements.is_some())
@@ -1627,7 +1663,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         let depth = modules[contribution.scope].len();
         let root = supers(depth);
         let module = export_module(depth, &hook_path(&contribution.hook));
-        let callback = format_ident!("{}", callbacks[&contribution.hook].name.to_snake_case());
+        let callback = rust_ident(&callbacks[&contribution.hook].name);
         let target = &contribution.ident;
         let (param, ty) = &contribution.param;
         let result = contribution
@@ -1763,7 +1799,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let wit_literal = LitStr::new(&wit, Span::call_site());
     let wit_bytes = LitByteStr::new(wit.as_bytes(), Span::call_site());
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
-    let world_literal = LitStr::new(&world, Span::call_site());
+    let world_literal = LitStr::new(&wit::escaped(&world), Span::call_site());
     // The bindings read the author's WIT and, nested in it, the kernel package a state, a
     // resource or the context uses; the hook packages come from the consumed directory. Foreign
     // interfaces need `generate_all`.
@@ -2175,11 +2211,12 @@ fn check_async(function: &Function, expected: &wit::ConsumedFunction) -> syn::Re
 
 /// The result of a derived function's bridge: each resource the value holds, itself or inside
 /// options, results, lists and tuples, is wrapped into the bindings' handle type of the
-/// interface's module; a value holding none is returned as it is.
+/// interface's module, which `resources` names by the author's name of the struct; a value
+/// holding none is returned as it is.
 fn derived_result(
     result: &Option<(Type, String)>,
     module: &proc_macro2::TokenStream,
-    resources: &BTreeSet<String>,
+    resources: &BTreeMap<String, Ident>,
     call: proc_macro2::TokenStream,
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
     let Some((ty, _)) = result else {
@@ -2233,8 +2270,9 @@ impl Handles {
 }
 
 /// Where an author's type holds a resource of the module, read by the names `wit_type` reads:
-/// `Option`, `Vec`, `Result` and tuples around a type whose last segment is a resource's name.
-fn handles_of(ty: &Type, resources: &BTreeSet<String>) -> Option<Handles> {
+/// `Option`, `Vec`, `Result` and tuples around a type whose last segment is the name of a
+/// resource's struct, which `resources` maps to the bindings' handle type.
+fn handles_of(ty: &Type, resources: &BTreeMap<String, Ident>) -> Option<Handles> {
     match ty {
         Type::Path(path) => {
             let segment = path.path.segments.last()?;
@@ -2249,9 +2287,10 @@ fn handles_of(ty: &Type, resources: &BTreeSet<String>) -> Option<Handles> {
                     .collect(),
                 _ => Vec::new(),
             };
-            match (segment.ident.to_string().as_str(), arguments.as_slice()) {
-                (name, []) if resources.contains(name) => {
-                    Some(Handles::Resource(segment.ident.clone()))
+            let name = segment.ident.to_string();
+            match (name.as_str(), arguments.as_slice()) {
+                (name, []) if resources.contains_key(name) => {
+                    Some(Handles::Resource(resources[name].clone()))
                 }
                 ("Option", [inner]) => Handles::option(handles_of(inner, resources)),
                 ("Vec", [inner]) => Handles::list(handles_of(inner, resources)),
@@ -2276,7 +2315,7 @@ fn handles_of(ty: &Type, resources: &BTreeSet<String>) -> Option<Handles> {
 /// handle type there, everything else keeps the author's spelling.
 fn with_handles(
     ty: &Type,
-    resources: &BTreeSet<String>,
+    resources: &BTreeMap<String, Ident>,
     module: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     match ty {
@@ -2286,8 +2325,9 @@ fn with_handles(
             };
             let ident = &last.ident;
             match &last.arguments {
-                syn::PathArguments::None if resources.contains(&ident.to_string()) => {
-                    quote! { #module::#ident }
+                syn::PathArguments::None if resources.contains_key(&ident.to_string()) => {
+                    let handle = &resources[&ident.to_string()];
+                    quote! { #module::#handle }
                 }
                 syn::PathArguments::AngleBracketed(arguments) => {
                     let leading = &path.path.leading_colon;
@@ -2363,14 +2403,15 @@ fn wrap(
 }
 
 /// The bindings' trait of a derived resource, implemented by the author's struct: the constructor,
-/// the methods and the static functions forward to the author's `pub fn`.
+/// the methods and the static functions, named as the bindings name them, forward to the
+/// author's `pub fn`.
 fn derived_resource(
     resource: &WitResource,
     module: &proc_macro2::TokenStream,
-    resources: &BTreeSet<String>,
+    resources: &BTreeMap<String, Ident>,
 ) -> proc_macro2::TokenStream {
     let ident = &resource.ident;
-    let guest = format_ident!("Guest{}", ident);
+    let guest = format_ident!("Guest{}", camel_ident(&wit::kebab(ident)));
     let constructor = resource.constructor.as_ref().map(|constructor| {
         let names = constructor.params.iter().map(|(ident, _, _)| ident);
         let params = constructor
@@ -2382,6 +2423,7 @@ fn derived_resource(
     });
     let methods = resource.methods.iter().map(|function| {
         let name = &function.ident;
+        let generated = rust_ident(&wit::kebab(name));
         let params = function
             .params
             .iter()
@@ -2390,10 +2432,11 @@ fn derived_resource(
         let (asynchronous, await_) = async_bridge(function.asynchronous);
         let call = quote! { #ident::#name(self, #(#names),*) #await_ };
         let (result, body) = derived_result(&function.result, module, resources, call);
-        quote! { #asynchronous fn #name(&self, #(#params),*) #result { #body } }
+        quote! { #asynchronous fn #generated(&self, #(#params),*) #result { #body } }
     });
     let statics = resource.statics.iter().map(|function| {
         let name = &function.ident;
+        let generated = rust_ident(&wit::kebab(name));
         let params = function
             .params
             .iter()
@@ -2402,7 +2445,7 @@ fn derived_resource(
         let (asynchronous, await_) = async_bridge(function.asynchronous);
         let call = quote! { #ident::#name(#(#names),*) #await_ };
         let (result, body) = derived_result(&function.result, module, resources, call);
-        quote! { #asynchronous fn #name(#(#params),*) #result { #body } }
+        quote! { #asynchronous fn #generated(#(#params),*) #result { #body } }
     });
     quote! {
         impl #module::#guest for #ident {
@@ -2434,7 +2477,7 @@ fn signature<'a>(
     let mut names = Vec::new();
     let mut declarations = Vec::new();
     for (param, spelling) in params {
-        let ident = format_ident!("{}", param.to_snake_case());
+        let ident = rust_ident(param);
         let ty = spelled(&spelling.export)?;
         declarations.push(quote! { #ident: #ty });
         names.push(ident);
@@ -2467,12 +2510,48 @@ fn wrapped(
     }
 }
 
-/// The bridge of an implemented interface, with signatures spelled from its WIT: the functions
-/// forward to the author's of the same names, in the service's module, and each resource of the
-/// interface is the author's struct of the same name, whose constructor, methods and static
-/// functions forward likewise from the struct's own module, with the module's scope. There the
-/// author's functions are visible whatever their visibility: a bridge elsewhere that could not
-/// see the author's `new` would call the trait's own `new`, itself, forever.
+/// The author's function implementing the WIT function `name`: the one whose WIT name it is, so
+/// `move_` or `r#move` implements `move` and `getEntry` implements `get-entry`. Two of them would
+/// implement it twice.
+fn implementing<'a>(
+    functions: impl IntoIterator<Item = &'a Function>,
+    name: &str,
+) -> syn::Result<Option<&'a Function>> {
+    let mut found = functions
+        .into_iter()
+        .filter(|function| wit::kebab(&function.ident) == name);
+    let first = found.next();
+    if let (Some(first), Some(second)) = (first, found.next()) {
+        return Err(syn::Error::new(
+            second.ident.span(),
+            format!(
+                "`{}` and `{}` both implement the WIT function `{name}`; rename one of them",
+                first.ident, second.ident
+            ),
+        ));
+    }
+    Ok(first)
+}
+
+/// The `#[wit_resource]` struct implementing the resource `name` of `service`'s implemented
+/// interface: the one of that WIT name the service owns.
+fn implementation_of<'a>(
+    resources: &'a [WitResource],
+    service: &Ident,
+    name: &str,
+) -> Option<&'a WitResource> {
+    resources.iter().find(|candidate| {
+        wit::kebab(&candidate.ident) == name && candidate.service.as_ref() == Some(service)
+    })
+}
+
+/// The bridge of an implemented interface, with signatures spelled from its WIT: the functions,
+/// named as the bindings name them, forward to the author's functions of the same WIT names, in
+/// the service's module, and each resource of the interface is the author's struct of its WIT
+/// name, whose constructor, methods and static functions forward likewise from the struct's own
+/// module, with the module's scope. There the author's functions are visible whatever their
+/// visibility: a bridge elsewhere that could not see the author's `new` would call the trait's own
+/// `new`, itself, forever.
 fn implemented_service(
     service: &Service,
     identity: &str,
@@ -2489,7 +2568,11 @@ fn implemented_service(
     let target = &service.ident;
     let mut functions = Vec::new();
     for function in &interface.functions {
-        let ident = format_ident!("{}", function.name.to_snake_case());
+        let ident = rust_ident(&function.name);
+        let Some(own) = implementing(&service.functions, &function.name)? else {
+            continue;
+        };
+        let own = &own.ident;
         let Signature {
             names,
             params,
@@ -2500,25 +2583,25 @@ fn implemented_service(
         let body = wrapped(
             handles,
             &module,
-            quote! { #target::#ident(#(#names),*) #await_ },
+            quote! { #target::#own(#(#names),*) #await_ },
         );
         functions.push(quote! { #asynchronous fn #ident(#(#params),*) #result { #body } });
     }
     let mut owned = Vec::new();
     let mut implementations = Vec::new();
     for resource in &interface.resources {
-        let ident = format_ident!("{}", resource.name.to_upper_camel_case());
-        let Some(implementation) = resources.iter().find(|candidate| {
-            candidate.ident == ident && candidate.service.as_ref() == Some(&service.ident)
-        }) else {
+        let Some(implementation) = implementation_of(resources, &service.ident, &resource.name)
+        else {
             continue;
         };
-        let struct_path = relative(depth, &modules[implementation.scope], &implementation.ident);
-        owned.push(quote! { type #ident = #struct_path; });
+        let ident = &implementation.ident;
+        let camel = camel_ident(&resource.name);
+        let struct_path = relative(depth, &modules[implementation.scope], ident);
+        owned.push(quote! { type #camel = #struct_path; });
         // The resource's own bridge, in the struct's module.
         let local = modules[implementation.scope].len();
         let local_module = export_module(local, &hook_path(identity));
-        let guest = format_ident!("Guest{}", ident);
+        let guest = format_ident!("Guest{}", camel);
         let constructor = match (&resource.constructor, &implementation.constructor) {
             (
                 Some(params),
@@ -2531,22 +2614,23 @@ fn implemented_service(
             }
             _ => quote! {},
         };
+        let own: Vec<&Function> = implementation
+            .methods
+            .iter()
+            .chain(&implementation.statics)
+            .collect();
         let mut members = Vec::new();
-        for method in &resource.methods {
-            let name = format_ident!("{}", method.name.to_snake_case());
-            let Signature {
-                names,
-                params,
-                result,
-                handles,
-            } = signature(&method.params, method.result.as_ref(), local)?;
-            let (asynchronous, await_) = async_bridge(method.asynchronous);
-            let call = quote! { #ident::#name(self, #(#names),*) #await_ };
-            let body = wrapped(handles, &local_module, call);
-            members.push(quote! { #asynchronous fn #name(&self, #(#params),*) #result { #body } });
-        }
-        for function in &resource.statics {
-            let name = format_ident!("{}", function.name.to_snake_case());
+        for (function, receiver) in resource
+            .methods
+            .iter()
+            .map(|method| (method, true))
+            .chain(resource.statics.iter().map(|function| (function, false)))
+        {
+            let Some(author) = implementing(own.iter().copied(), &function.name)? else {
+                continue;
+            };
+            let author = &author.ident;
+            let name = rust_ident(&function.name);
             let Signature {
                 names,
                 params,
@@ -2554,9 +2638,17 @@ fn implemented_service(
                 handles,
             } = signature(&function.params, function.result.as_ref(), local)?;
             let (asynchronous, await_) = async_bridge(function.asynchronous);
-            let call = quote! { #ident::#name(#(#names),*) #await_ };
+            let (receiver, call) = if receiver {
+                (
+                    quote! { &self, },
+                    quote! { #ident::#author(self, #(#names),*) #await_ },
+                )
+            } else {
+                (quote! {}, quote! { #ident::#author(#(#names),*) #await_ })
+            };
             let body = wrapped(handles, &local_module, call);
-            members.push(quote! { #asynchronous fn #name(#(#params),*) #result { #body } });
+            members
+                .push(quote! { #asynchronous fn #name(#receiver #(#params),*) #result { #body } });
         }
         implementations.push((
             implementation.scope,
@@ -2690,10 +2782,52 @@ fn reachable(
 }
 
 /// Refuse what a type that enters the WIT carries but the generated type replacing it would drop
-/// without a word: an explicit discriminant, which a WIT enum has no room for, and a
-/// `#[serde(..)]` attribute, which the generated type cannot carry, so a state's JSON would
-/// silently change shape.
+/// without a word: an explicit discriminant, which a WIT enum has no room for, a `#[serde(..)]`
+/// attribute, which the generated type cannot carry, so a state's JSON would silently change
+/// shape, and a field or a case the bindings name otherwise, from its WIT name, so the author's
+/// name would be gone.
 fn replaceable(item: &Item) -> syn::Result<()> {
+    let members: Vec<(&Ident, Ident, &str)> = match item {
+        Item::Struct(item) => item
+            .fields
+            .iter()
+            .filter_map(|field| field.ident.as_ref())
+            .map(|field| (field, rust_ident(&wit::kebab(field)), "field"))
+            .collect(),
+        Item::Enum(item) => item
+            .variants
+            .iter()
+            .map(|variant| {
+                let case = camel_ident(&wit::kebab(&variant.ident));
+                (&variant.ident, case, "case")
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let owner = match item {
+        Item::Struct(item) => &item.ident,
+        Item::Enum(item) => &item.ident,
+        _ => return Ok(()),
+    };
+    for (member, generated, kind) in members {
+        let name = wit::kebab(member);
+        if let Some(problem) = wit::name_problem(&name) {
+            return Err(syn::Error::new(
+                member.span(),
+                format!(
+                    "the {kind} `{owner}::{member}` has no WIT name: its kebab-case form `{name}` {problem}"
+                ),
+            ));
+        }
+        if *member != generated {
+            return Err(syn::Error::new(
+                member.span(),
+                format!(
+                    "the {kind} `{owner}::{member}` enters the WIT as `{name}`, which the generated type replacing `{owner}` names `{generated}`: name the {kind} `{generated}`"
+                ),
+            ));
+        }
+    }
     let (ident, attrs, fields): (&Ident, Vec<&Attribute>, Vec<&syn::Field>) = match item {
         Item::Struct(item) => (
             &item.ident,
@@ -3028,7 +3162,7 @@ fn declaration_code(
         ));
     }
     let callback = &callbacks[&declaration.hook];
-    let name = format_ident!("{}", callback.name.to_snake_case());
+    let name = rust_ident(&callback.name);
     // The import takes a string, a list or a type holding one by reference.
     let argument = if callback.borrowed {
         quote! { &input }
@@ -3200,7 +3334,8 @@ fn conversions(
         .iter()
         .filter(|shape| hook_shapes.contains(&shape.ident.to_string()))
         .map(|shape| {
-            let ident = &shape.ident;
+            // The bindings' name of the type, on both sides.
+            let ident = type_ident(&wit::kebab(&shape.ident));
             let body = |from: &proc_macro2::TokenStream| match &shape.kind {
                 ShapeKind::Record(fields) => {
                     let fields = fields.iter().map(|(field, ty)| {
@@ -3313,7 +3448,8 @@ fn respell(
             };
             let ident = &last.ident;
             if prefix.is_empty() && hook_shapes.contains(&ident.to_string()) {
-                return quote! { #module::#ident };
+                let generated = type_ident(&wit::kebab(ident));
+                return quote! { #module::#generated };
             }
             let syn::PathArguments::AngleBracketed(arguments) = &last.arguments else {
                 return quote! { #ty };
@@ -3761,14 +3897,14 @@ pub(crate) fn hook_path(hook: &str) -> [Ident; 3] {
     let (namespace, name) = package.split_once(':').unwrap_or((package, ""));
     let interface = rest.split('@').next().unwrap_or(rest);
     [
-        rust_module(namespace),
+        rust_ident(namespace),
         package_module(name),
-        rust_module(interface),
+        rust_ident(interface),
     ]
 }
 
-/// The Rust keywords `wit-bindgen` escapes with a trailing `_` when it names a module after a WIT
-/// namespace or interface.
+/// The Rust keywords `wit-bindgen` escapes with a trailing `_` when it names a module, a
+/// function, a parameter or a field after a WIT name.
 const RUST_KEYWORDS: &[&str] = &[
     "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
     "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
@@ -3777,14 +3913,30 @@ const RUST_KEYWORDS: &[&str] = &[
     "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
 ];
 
-/// The module `wit-bindgen` generates for a WIT namespace or interface name: its snake_case form,
-/// with `_` after a Rust keyword.
-pub(crate) fn rust_module(name: &str) -> Ident {
+/// The identifier `wit-bindgen` generates for the WIT name of a namespace, an interface, a
+/// function, a parameter or a field: its snake_case form, with `_` after a Rust keyword.
+pub(crate) fn rust_ident(name: &str) -> Ident {
     if RUST_KEYWORDS.contains(&name) {
         format_ident!("{name}_")
     } else {
         format_ident!("{}", name.to_snake_case())
     }
+}
+
+/// The name `wit-bindgen` gives the type of a WIT record, enum, variant or resource handle: its
+/// UpperCamelCase form, but `Guest_` for `guest`, a name the bindings keep for their traits.
+pub(crate) fn type_ident(name: &str) -> Ident {
+    if name == "guest" {
+        format_ident!("Guest_")
+    } else {
+        camel_ident(name)
+    }
+}
+
+/// The name `wit-bindgen` gives the case of a WIT enum or variant, and a resource in the names of
+/// its traits, `Guest<Name>` and the associated type of `Guest`: its UpperCamelCase form.
+pub(crate) fn camel_ident(name: &str) -> Ident {
+    format_ident!("{}", name.to_upper_camel_case())
 }
 
 /// The module `wit-bindgen` generates for a WIT package name: its snake_case form, never escaped,

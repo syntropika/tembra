@@ -7,13 +7,111 @@ use std::{
     path::{Path, PathBuf},
 };
 use syn::{
-    Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, Meta, Type, spanned::Spanned,
+    Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, Meta, Type, ext::IdentExt,
+    spanned::Spanned,
 };
 use wit_parser::{Resolve, TypeDefKind};
 
-/// WIT names are kebab-case; Rust identifiers map to them one by one.
+/// WIT names are kebab-case; Rust identifiers map to them one by one, a raw identifier without
+/// its `r#`.
 pub(crate) fn kebab(ident: &Ident) -> String {
-    ident.to_string().to_kebab_case()
+    ident.unraw().to_string().to_kebab_case()
+}
+
+/// A WIT name as the WIT text writes it: with WIT's `%` escape when it is a keyword of WIT, so
+/// `list` or `record` names an item instead of starting a type.
+pub(crate) fn escaped(name: &str) -> String {
+    if crate::WIT_KEYWORDS.contains(&name) {
+        format!("%{name}")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// What makes the kebab-case form of a Rust name no WIT identifier, if anything: WIT names are
+/// words of ASCII letters and digits joined by `-`, the first starting with a letter.
+pub(crate) fn name_problem(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("is empty");
+    }
+    if !name.starts_with(|first: char| first.is_ascii_alphabetic()) {
+        return Some("does not start with a letter");
+    }
+    if !name.chars().all(|character| {
+        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+    }) {
+        return Some("holds a character other than ASCII letters, digits and `-`");
+    }
+    None
+}
+
+/// The names of one scope of the WIT, an interface, a resource or a parameter list, with the item
+/// that claimed each: WIT refuses one name twice in a scope.
+struct Namespace {
+    /// The scope, for the errors: "the interface `texts`".
+    scope: String,
+    /// Why two items meet there, for the errors.
+    rule: &'static str,
+    claimed: BTreeMap<String, String>,
+}
+
+impl Namespace {
+    fn new(scope: String, rule: &'static str) -> Self {
+        Self {
+            scope,
+            rule,
+            claimed: BTreeMap::new(),
+        }
+    }
+
+    /// Claim the WIT name of `ident` for `item`, described for the errors.
+    fn claim(&mut self, ident: &Ident, item: String) -> syn::Result<()> {
+        let name = kebab(ident);
+        if let Some(problem) = name_problem(&name) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!("{item} has no WIT name: its kebab-case form `{name}` {problem}"),
+            ));
+        }
+        if let Some(previous) = self.claimed.insert(name.clone(), item.clone()) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "{previous} and {item} are both `{name}` in {}{}; rename one of them",
+                    self.scope, self.rule
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Claim the names of a resource's methods and static functions, in the resource's own
+/// namespace, and of the parameters of each of its functions.
+fn claim_resource(resource: &WitResource) -> syn::Result<()> {
+    let mut namespace = Namespace::new(
+        format!("the resource `{}`", kebab(&resource.ident)),
+        ", where its methods and static functions share one namespace",
+    );
+    for function in resource.methods.iter().chain(&resource.statics) {
+        let item = format!("`{}::{}`", resource.ident, function.ident);
+        namespace.claim(&function.ident, item.clone())?;
+        claim_params(&item, &function.params)?;
+    }
+    if let Some(constructor) = &resource.constructor {
+        let item = format!("`{}::{}`", resource.ident, constructor.ident);
+        claim_params(&item, &constructor.params)?;
+    }
+    Ok(())
+}
+
+/// Claim the parameters of one function in a namespace of their own.
+fn claim_params(function: &str, params: &[(Ident, Type, String)]) -> syn::Result<()> {
+    let mut namespace = Namespace::new(format!("the parameters of {function}"), "");
+    for (ident, _, _) in params {
+        namespace.claim(ident, format!("the parameter `{ident}`"))?;
+    }
+    Ok(())
 }
 
 /// The items of the module that enter the WIT: its exported types, where each is defined, its
@@ -228,13 +326,13 @@ pub(crate) fn render<'a>(
             .filter(|(other, _, _)| other != name)
             .map(|(other, _, _)| (other.clone(), Vec::new()))
             .collect();
-        let mut borrow = |from: String, item: String| {
-            if let Some((_, names)) = uses.iter_mut().find(|(other, _)| *other == from)
-                && !names.contains(&item)
-            {
-                names.push(item);
-            }
-        };
+        // Types and functions share the interface's names: what it uses, defines, owns and
+        // declares, in the order the text lists them.
+        let mut namespace = Namespace::new(
+            format!("the interface `{name}`"),
+            ", where types and functions share one namespace",
+        );
+        let mut borrowed: Vec<(String, &Ident)> = Vec::new();
         for shape in shapes
             .iter()
             .filter(|shape| mentioned.contains(&shape.ident))
@@ -242,7 +340,7 @@ pub(crate) fn render<'a>(
             if let Some(owner) = placement.get(&shape.ident.to_string())
                 && owner != *ident
             {
-                borrow(kebab(owner), kebab(&shape.ident));
+                borrowed.push((kebab(owner), &shape.ident));
             }
         }
         for resource in resources
@@ -250,10 +348,49 @@ pub(crate) fn render<'a>(
             .filter(|resource| mentioned.contains(&resource.ident))
         {
             if owner_of(resource) != *name {
-                borrow(owner_of(resource), kebab(&resource.ident));
+                borrowed.push((owner_of(resource), &resource.ident));
+            }
+        }
+        for (from, item) in borrowed {
+            let Some((_, names)) = uses.iter_mut().find(|(other, _)| *other == from) else {
+                continue;
+            };
+            if !names.contains(&kebab(item)) {
+                names.push(kebab(item));
+                namespace.claim(item, format!("`{item}`, used from `{from}`,"))?;
             }
         }
         uses.retain(|(_, names)| !names.is_empty());
+        for shape in &defined {
+            namespace.claim(&shape.ident, format!("the type `{}`", shape.ident))?;
+        }
+        match derived_hooks.iter().find(|hook| &hook.ident == *ident) {
+            Some(hook) => {
+                let apply = Ident::new("apply", hook.ident.span());
+                namespace.claim(&apply, format!("the callback `apply` of `{}`", hook.ident))?;
+            }
+            None => {
+                let service = derived
+                    .iter()
+                    .find(|service| &service.ident == *ident)
+                    .expect("a derived service");
+                for resource in resources
+                    .iter()
+                    .filter(|resource| owner_of(resource) == *name)
+                {
+                    namespace.claim(
+                        &resource.ident,
+                        format!("the resource `{}`", resource.ident),
+                    )?;
+                    claim_resource(resource)?;
+                }
+                for function in &service.functions {
+                    let item = format!("`{}::{}`", service.ident, function.ident);
+                    namespace.claim(&function.ident, item.clone())?;
+                    claim_params(&item, &function.params)?;
+                }
+            }
+        }
         interfaces.push(Interface {
             name: name.clone(),
             ident,
@@ -287,9 +424,14 @@ pub(crate) fn render<'a>(
         for doc in interface.docs {
             wit.push_str(&format!("///{doc}\n"));
         }
-        wit.push_str(&format!("interface {} {{\n", interface.name));
+        wit.push_str(&format!("interface {} {{\n", escaped(&interface.name)));
         for (from, names) in &interface.uses {
-            wit.push_str(&format!("  use {from}.{{{}}};\n", names.join(", ")));
+            let names: Vec<String> = names.iter().map(|name| escaped(name)).collect();
+            wit.push_str(&format!(
+                "  use {}.{{{}}};\n",
+                escaped(from),
+                names.join(", ")
+            ));
         }
         for shape in &interface.defined {
             wit.push_str(&shape.wit);
@@ -321,7 +463,7 @@ pub(crate) fn render<'a>(
         }
         wit.push_str("}\n");
     }
-    wit.push_str(&format!("\nworld {world} {{\n"));
+    wit.push_str(&format!("\nworld {} {{\n", escaped(world)));
     if kernel.state {
         wit.push_str(&format!(
             "  import {GUEST_STATE};\n  export {GUEST_STATE_INIT};\n"
@@ -342,13 +484,13 @@ pub(crate) fn render<'a>(
         wit.push_str(&format!("  import {hook};\n  export {hook};\n"));
     }
     for hook in &derived_hooks {
-        let name = kebab(&hook.ident);
+        let name = escaped(&kebab(&hook.ident));
         wit.push_str(&format!("  import {name};\n  export {name};\n"));
     }
     for service in services {
         match &service.implements {
             Some(identity) => wit.push_str(&format!("  export {identity};\n")),
-            None => wit.push_str(&format!("  export {};\n", kebab(&service.ident))),
+            None => wit.push_str(&format!("  export {};\n", escaped(&kebab(&service.ident)))),
         }
     }
     wit.push_str("}\n");
@@ -413,7 +555,7 @@ fn function_text(function: &Function, indent: &str, keyword: &str) -> String {
     let params = function
         .params
         .iter()
-        .map(|(ident, _, wit)| format!("{}: {wit}", kebab(ident)))
+        .map(|(ident, _, wit)| format!("{}: {wit}", escaped(&kebab(ident))))
         .collect::<Vec<_>>()
         .join(", ");
     let result = function
@@ -424,7 +566,7 @@ fn function_text(function: &Function, indent: &str, keyword: &str) -> String {
     let asynchronous = if function.asynchronous { "async " } else { "" };
     text.push_str(&format!(
         "{indent}{}: {keyword}{asynchronous}func({params}){result};\n",
-        kebab(&function.ident)
+        escaped(&kebab(&function.ident))
     ));
     text
 }
@@ -435,12 +577,15 @@ fn resource_text(resource: &WitResource) -> String {
     for doc in &resource.docs {
         text.push_str(&format!("  ///{doc}\n"));
     }
-    text.push_str(&format!("  resource {} {{\n", kebab(&resource.ident)));
+    text.push_str(&format!(
+        "  resource {} {{\n",
+        escaped(&kebab(&resource.ident))
+    ));
     if let Some(constructor) = &resource.constructor {
         let params = constructor
             .params
             .iter()
-            .map(|(ident, _, wit)| format!("{}: {wit}", kebab(ident)))
+            .map(|(ident, _, wit)| format!("{}: {wit}", escaped(&kebab(ident))))
             .collect::<Vec<_>>()
             .join(", ");
         text.push_str(&format!("    constructor({params});\n"));
@@ -689,10 +834,7 @@ fn handles(resolve: &Resolve, ty: wit_parser::Type) -> Option<Handles> {
     match &resolve.types[id].kind {
         TypeDefKind::Handle(wit_parser::Handle::Own(resource)) => {
             let name = resolve.types[*resource].name.as_deref()?;
-            Some(Handles::Resource(Ident::new(
-                &name.to_upper_camel_case(),
-                Span::call_site(),
-            )))
+            Some(Handles::Resource(crate::type_ident(name)))
         }
         TypeDefKind::Option(inner) => Handles::option(handles(resolve, *inner)),
         TypeDefKind::List(inner) => Handles::list(handles(resolve, *inner)),
@@ -966,16 +1108,12 @@ fn rust_type(resolve: &Resolve, ty: wit_parser::Type, module: &str) -> syn::Resu
         Type::Id(id) => {
             let definition = &resolve.types[id];
             if let Some(name) = &definition.name {
-                return Ok(format!("{module}::{}", name.to_upper_camel_case()));
+                return Ok(format!("{module}::{}", crate::type_ident(name)));
             }
             match &definition.kind {
                 TypeDefKind::Handle(wit_parser::Handle::Own(resource)) => format!(
                     "{module}::{}",
-                    resolve.types[*resource]
-                        .name
-                        .as_deref()
-                        .unwrap_or_default()
-                        .to_upper_camel_case()
+                    crate::type_ident(resolve.types[*resource].name.as_deref().unwrap_or_default())
                 ),
                 TypeDefKind::Handle(wit_parser::Handle::Borrow(_)) => {
                     return Err(error(
@@ -1035,7 +1173,7 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
     for doc in docs(&item.attrs)? {
         wit.push_str(&format!("  ///{doc}\n"));
     }
-    wit.push_str(&format!("  record {} {{\n", kebab(&item.ident)));
+    wit.push_str(&format!("  record {} {{\n", escaped(&kebab(&item.ident))));
     let mut references = Vec::new();
     let mut named = Vec::new();
     for field in &fields.named {
@@ -1044,7 +1182,7 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
         };
         wit.push_str(&format!(
             "    {}: {},\n",
-            kebab(ident),
+            escaped(&kebab(ident)),
             wit_type(&field.ty)?
         ));
         self::references(&field.ty, &mut references);
@@ -1072,11 +1210,14 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
         wit.push_str(&format!("  ///{doc}\n"));
     }
     let keyword = if plain { "enum" } else { "variant" };
-    wit.push_str(&format!("  {keyword} {} {{\n", kebab(&item.ident)));
+    wit.push_str(&format!(
+        "  {keyword} {} {{\n",
+        escaped(&kebab(&item.ident))
+    ));
     let mut references = Vec::new();
     let mut cases = Vec::new();
     for variant in &item.variants {
-        let case = kebab(&variant.ident);
+        let case = escaped(&kebab(&variant.ident));
         match &variant.fields {
             Fields::Unit => {
                 wit.push_str(&format!("    {case},\n"));
@@ -1222,7 +1363,8 @@ pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
                         (false, false) => format!("result<{}, {}>", wit_type(ok)?, wit_type(err)?),
                     }
                 }
-                other => other.to_kebab_case(),
+                // A type of the module, by its WIT name.
+                _ => escaped(&kebab(&segment.ident)),
             })
         }
         Type::Tuple(tuple) if tuple.elems.is_empty() => Err(syn::Error::new(
