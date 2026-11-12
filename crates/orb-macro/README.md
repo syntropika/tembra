@@ -90,6 +90,7 @@ starts with this explicit freestanding mode.
 | `#[service("ns:name/interface@version")]` on a unit struct                  | `export` of that interface of a consumed package, implemented by the `impl` block                                                                                  |
 | `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`                | nothing in the WIT: the ownership policy of the service's objects, in the manifest                                                                                 |
 | `import = "ns:name/interface@version"` on the attribute                     | `import` of that interface of a consumed package, bound to a provider at installation                                                                              |
+| `import = "wasi:name/interface@0.3.0"` on the attribute                     | `import` of that interface of a WASI package bundled with `tembra-contracts`, granted at installation                                                              |
 | a struct with `#[wit_resource]` and an `impl` block of `pub fn`             | a `resource` of its service's interface: the `#[constructor]` function its constructor, the `&self` functions its methods                                          |
 | each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                                                                        |
 | a struct with named fields, when a service method uses it                   | a `record`                                                                                                                                                         |
@@ -479,6 +480,78 @@ kernel checks the provider against the same signature. See
 [rust-orb-import](../../examples/rust-orb-import/README.md) and, for a handed-out resource,
 [rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md).
 
+## Importing WASI interfaces
+
+The host serves WASI 0.3 to a compiled Orb, under the grants of its installation. The same
+`import` option imports one of its interfaces; the `wasi` namespace tells it from another Orb's:
+
+```rust
+#[tembra::orb(
+    package = "example:dice@1.0.0",
+    import = "wasi:random/random@0.3.0",
+    import = "wasi:clocks/monotonic-clock@0.3.0"
+)]
+mod dice {
+    #[service]
+    pub struct Die;
+
+    impl Die {
+        /// A throw of the die, from the host's secure random source.
+        pub fn throw() -> u8 {
+            (random::get_random_u64() % 6) as u8 + 1
+        }
+
+        /// Wait on the host's monotonic clock, then throw.
+        pub async fn throw_after(nanoseconds: u64) -> u8 {
+            monotonic_clock::wait_for(nanoseconds).await;
+            Die::throw()
+        }
+    }
+}
+```
+
+The world imports each interface, `import wasi:random/random@0.3.0;`, and its generated module is
+re-exported under the interface's name, `random` and `monotonic_clock` here, as for another Orb's.
+The bindings' own path names it too, `wasi::random::random`, and every interface an import builds
+on, such as `wasi::filesystem::types`, which `wasi:filesystem/preopens` brings: an Orb importing
+`wasi:filesystem/preopens` and `wasi:sockets/types` reaches the filesystem's types by that path,
+since two imports of one interface name, both `types`, would be re-exported under one name, which
+Rust refuses.
+
+The WASI packages are bundled with `tembra-contracts`, so a WASI import needs no `wit = "dir"`:
+the macro reads the interface from its bundled package and nests that package, with the bundled
+packages it builds on, in the WIT the bindings read. A consumed directory may hold some of them
+already, as a contract `cargo tembra build` wrote holds those it depends on in its `deps/`: the
+bindings read those from there, and each must define what the bundled package defines, whatever
+its comments, or the macro names its file. The `wasi` namespace holds the bundled packages and
+nothing else: an identity naming none of their interfaces, of another version or unstable like
+`wasi:clocks/timezone`, is a compile error listing what there is.
+
+WASI 0.3 is asynchronous where it waits: a clock's waits, files, sockets and HTTP are `async func`,
+whose bindings are `async fn` a method awaits, as `throw_after` does, and standard input and output
+are streams and futures. The bindings of such an interface use `wit-bindgen`'s async support, so
+the guest enables its `async` feature, as
+[async implementations](#async-implementations-of-existing-wit) do, even when its methods call only
+the interface's synchronous functions, such as `monotonic_clock::now()`; `wasi:random` needs none.
+
+Nothing binds a WASI import to another Orb: the installation grants it. `cargo tembra build`
+writes the WASI packages the contract depends on into `contract/deps/`, as it writes the kernel's,
+and its summary names the grant each import needs, here:
+
+```text
+WASI imports, grants the installer must give:
+  system: clocks: wasi:clocks/monotonic-clock@0.3.0
+  system: random: wasi:random/random@0.3.0
+```
+
+At installation the kernel binds each WASI import to the host's provider of that grant, as for
+any compiled component, and refuses an installation that does not grant it: the installer of
+`dice` sets `install.grants.system` to `SystemCapability::Random` and `SystemCapability::Clocks`,
+and the methods then draw from the host's random source and wait on its monotonic clock. A
+filesystem, socket or HTTP import needs the `FilesystemGrant`, `NetworkGrant` or `HttpGrant` of a
+configured provider. An interface the host does not serve as an import, such as `wasi:cli/run`,
+which a command exports, compiles but does not install.
+
 ## Exporting a WIT resource
 
 A struct marked `#[wit_resource]` becomes a `resource` of the interface of the service whose
@@ -594,7 +667,9 @@ The macro rewrites the module with:
    the context, the kernel's `tembra:guest` package nested in the inline text, unless the consumed
    directory holds it already, as a contract `cargo tembra build` wrote does in its `deps/`; that
    copy must define what the bundled package defines, whatever its comments, or the macro names
-   its file. With a state, also `serde` derives on the generated types, except the records and
+   its file. With a WASI import, the WASI packages it needs are nested the same way, from the
+   sources `tembra-contracts` bundles.
+   With a state, also `serde` derives on the generated types, except the records and
    variants holding a flags type or a resource handle, which have no `serde` implementation to
    derive. With derives on the types that enter the WIT, also `additional_type_attributes` and
    `additional_member_attributes`, which hand them to the generated types with the helper
@@ -625,7 +700,8 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) among its de
 
 ## Limits
 
-- WASI interfaces are not expressed. An Orb consumes another Orb's WIT by importing an
+- WASI interfaces are imported, never implemented: serving incoming HTTP, an export of
+  `wasi:http/handler`, is not expressed. An Orb consumes another Orb's WIT by importing an
   interface, implementing one or contributing to a hook; selecting another object by key, as a
   TypeScript Orb does with `context.get`, is not expressed.
 - A hook declared from a consumed package keeps that package's types: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.

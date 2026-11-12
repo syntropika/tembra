@@ -655,7 +655,7 @@ pub(crate) fn guest_package_needed(dir: Option<&Path>) -> syn::Result<bool> {
 /// What a package defines, as text without its documentation: each interface, in name order, with
 /// its types and functions, a type by its structure and a named type by its place. Two copies of
 /// one package that differ only in their comments read the same.
-fn definitions(resolve: &Resolve, package: wit_parser::PackageId) -> String {
+pub(crate) fn definitions(resolve: &Resolve, package: wit_parser::PackageId) -> String {
     let mut text = String::new();
     let mut interfaces: Vec<(&String, &wit_parser::InterfaceId)> =
         resolve.packages[package].interfaces.iter().collect();
@@ -864,7 +864,7 @@ pub(crate) struct ConsumedResource {
 }
 
 /// Read the WIT packages of a directory.
-fn resolve(dir: &Path) -> syn::Result<Resolve> {
+pub(crate) fn resolve(dir: &Path) -> syn::Result<Resolve> {
     let mut resolve = Resolve::default();
     resolve.push_dir(dir).map_err(|cause| {
         error(format!(

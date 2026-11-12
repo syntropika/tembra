@@ -23,12 +23,15 @@
 //! `guard::Admission`. The kernel's `tembra:guest` package is bundled with the macro; with
 //! `context` on the attribute the module imports its `context` interface and reads the call's
 //! principal and cancellation, the object's address and the host's log as `context::...`.
+//! `import = "wasi:..."` imports an interface of the WASI 0.3 packages `tembra-contracts` bundles,
+//! which the host serves under the installation's grants, with no directory to name.
 //!
 //! The crate using the macro must depend on `wit-bindgen` (features `macros` and `realloc`),
 //! and on `dlmalloc` (feature `global`) only in `no_std` mode; a crate with a state
 //! also depends on `serde` (`derive`, `alloc`) and `serde_json` (`alloc`). `cargo tembra build`
 //! compiles the crate, reads the same WIT and the hook priorities from the component and
 //! packages the artifact.
+mod wasi;
 mod wit;
 
 use heck::{ToLowerCamelCase, ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
@@ -1529,9 +1532,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .iter()
         .filter_map(|service| service.implements.clone())
         .collect();
-    let consumed = match (&wit_dir, implemented.is_empty() && imports.is_empty()) {
+    // An imported WASI interface comes from the bundled WASI packages, nested in the inline WIT.
+    let imported: Vec<&String> = imports
+        .iter()
+        .filter(|identity| !wasi::is_wasi(identity))
+        .collect();
+    let consumed = match (&wit_dir, implemented.is_empty() && imported.is_empty()) {
         (_, true) => BTreeMap::new(),
-        (Some(dir), false) => wit::consumed(dir, implemented.iter().chain(imports.iter()))?,
+        (Some(dir), false) => wit::consumed(dir, implemented.iter().chain(imported))?,
         (None, false) => {
             return Err(syn::Error::new(
                 Span::call_site(),
@@ -2024,17 +2032,18 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
     let world_literal = LitStr::new(&wit::escaped(&world), Span::call_site());
     // The bindings read the author's WIT and, nested in it, the kernel package a state, a
-    // resource or the context uses, unless the consumed directory holds it already, as a contract
-    // with its dependencies does; the hook packages come from the consumed directory. Foreign
-    // interfaces need `generate_all`.
+    // resource or the context uses and the WASI packages the imports need, unless the consumed
+    // directory holds them already, as a contract with its dependencies does; the hook packages
+    // come from the consumed directory. Foreign interfaces need `generate_all`.
     let kernel = !states.is_empty() || !resources.is_empty() || options.context;
+    let standard = wasi::packages(&options.imports, wit_dir.as_deref())?;
     let inline = if kernel && wit::guest_package_needed(wit_dir.as_deref())? {
         LitStr::new(
-            &format!("{wit}\n{}", wit::guest_package()?),
+            &format!("{wit}\n{}{standard}", wit::guest_package()?),
             Span::call_site(),
         )
     } else {
-        wit_literal.clone()
+        LitStr::new(&format!("{wit}{standard}"), Span::call_site())
     };
     let path = wit_dir.as_ref().map(|dir| {
         let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
@@ -4825,3 +4834,6 @@ mod async_tests;
 
 #[cfg(test)]
 mod std_tests;
+
+#[cfg(test)]
+mod wasi_tests;

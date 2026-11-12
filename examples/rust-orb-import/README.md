@@ -99,6 +99,8 @@ name, and the greetings come back as a `list<string>`. `run.sh` runs the steps i
 ## Limits
 
 A compiled import reaches the provider's `main` object; selecting another object of the provider
-by key, as a TypeScript Orb does with `context.get`, is not expressed. WASI imports are not
-expressed by the macro either. Handing out an object for the caller to keep and call repeatedly is
+by key, as a TypeScript Orb does with `context.get`, is not expressed. A WASI interface is
+imported the same way and granted instead of bound; see
+[importing WASI interfaces](../../crates/orb-macro/README.md#importing-wasi-interfaces).
+Handing out an object for the caller to keep and call repeatedly is
 a WIT resource; see [rust-orb-wit-resource](../rust-orb-wit-resource/README.md).
