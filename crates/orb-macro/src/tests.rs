@@ -1689,9 +1689,366 @@ fn what_a_replaced_type_would_drop_is_refused() {
     }
 }
 
+const WALK: &str = "mod walk {
+    /// A point on a grid.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, core::default::Default)]
+    pub struct Point { pub x: i32, pub y: i32 }
+    /// A note left on the way.
+    #[derive(Clone, ::std::hash::Hash, std::fmt::Debug)]
+    pub struct Note { pub text: String, pub at: Point }
+    /// Where a walker faces.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+    pub enum Heading { #[default] North, East }
+    /// One move of a walk.
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    pub enum Move { Step(Heading), Jump(Point), Rest }
+    /// The notes of a walk; it derives nothing.
+    pub struct Trace { pub notes: Vec<Note> }
+    #[service]
+    pub struct Walker;
+    impl Walker {
+        pub fn walk(moves: Vec<Move>) -> Point { todo!() }
+        pub fn last_trace() -> Trace { todo!() }
+    }
+}";
+
+/// The `additional_type_attributes` option the module hands the bindings, if any.
+fn type_attributes(module: &ItemMod) -> Option<String> {
+    let generated = tokens(module);
+    let start = generated.find("additional_type_attributes")?;
+    let end = generated[start..].find("} ,")? + start + 3;
+    Some(generated[start..end].to_owned())
+}
+
+/// A type that enters the WIT is replaced by the generated type, which takes the author's derives,
+/// written in any spelling, less the traits the bindings implement themselves for its kind:
+/// `Debug` for every type, `Clone` and `Copy` for a record or a variant holding no string or list,
+/// `Clone` alone for one holding a string, and the comparisons for an enum. The derives of the
+/// standard library are named by their paths in `core`, a type deriving nothing is left out, and
+/// `#[default]` goes to its case.
+#[test]
+fn a_type_that_enters_the_wit_keeps_its_derives() {
+    let module = expanded("example:walk@1.0.0", WALK);
+    assert_eq!(
+        type_attributes(&module).as_deref(),
+        Some(concat!(
+            "additional_type_attributes : { ",
+            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash , :: core :: default :: Default)]] , ",
+            "\"example:walk/walker@1.0.0/note\" : [# [derive (:: core :: hash :: Hash)]] , ",
+            "\"example:walk/walker@1.0.0/heading\" : [# [derive (:: core :: hash :: Hash , :: core :: default :: Default)]] , ",
+            "\"example:walk/walker@1.0.0/move\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] } ,",
+        )),
+        "{}",
+        tokens(&module)
+    );
+    assert!(
+        tokens(&module).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/heading.north\" : [# [default]] } ,"
+        ),
+        "{}",
+        tokens(&module)
+    );
+    // An unversioned package names its types without a version; a module deriving only what
+    // the bindings implement hands them nothing.
+    let unversioned = expanded("example:walk", WALK);
+    assert!(
+        type_attributes(&unversioned)
+            .is_some_and(|option| option.contains("\"example:walk/walker/point\"")),
+        "{}",
+        tokens(&unversioned)
+    );
+    let bare = expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            #[derive(Debug, Clone, Copy)]
+            pub struct Point { pub x: i32, pub y: i32 }
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+            pub enum Heading { North, East }
+            #[service]
+            pub struct Walker;
+            impl Walker { pub fn walk(heading: Heading) -> Point { todo!() } }
+        }",
+    );
+    let generated = tokens(&bare);
+    assert!(
+        !generated.contains("additional_type_attributes"),
+        "{generated}"
+    );
+    assert!(
+        !generated.contains("additional_member_attributes"),
+        "{generated}"
+    );
+}
+
+/// The bindings name a derive from their own module, so the macro names it from its crate: it
+/// follows the `use` and `extern crate` declarations of the type's module, renames and groups
+/// included, `self::`, `super::` and the Orb's sub-modules; a first name nothing in the Orb
+/// declares is a crate's, and a path from `crate::` stays; the path as written is imported again
+/// in the type's module, which keeps the imports it names used. The helper attributes the derives
+/// read, single names that are none of Rust's own attributes, go with them, on the type and on its
+/// members; Rust's own attributes do not.
+#[test]
+fn a_derive_of_another_crate_is_named_from_its_crate() {
+    let module = expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            use strum::EnumIter;
+            use derive_more as more;
+            use ::strum::{self as s, IntoStaticStr as Static};
+            extern crate serde as wire;
+            use markers::Marked;
+            use educe;
+            use ordering::Hash;
+            pub mod derives {
+                pub use strum::Display;
+            }
+            /// Where a walker faces.
+            #[derive(EnumIter, more::Constructor, s::AsRefStr, Static, self::derives::Display)]
+            #[derive(crate::extra::Thing, wire::Serialize, educe::Educe, Hash)]
+            #[strum(serialize_all = \"kebab-case\")]
+            #[allow(dead_code)]
+            pub enum Heading {
+                #[strum(serialize = \"up\")]
+                #[allow(dead_code)]
+                North,
+                East,
+            }
+            pub mod shapes {
+                #[derive(super::Marked, PartialEq)]
+                pub struct Point { #[marked(skip)] #[allow(dead_code)] pub x: i32, pub y: i32 }
+            }
+            #[service]
+            pub struct Walker;
+            impl Walker { pub fn walk(heading: Heading) -> shapes::Point { todo!() } }
+        }",
+    );
+    assert_eq!(
+        type_attributes(&module).as_deref(),
+        Some(concat!(
+            "additional_type_attributes : { ",
+            "\"example:walk/walker@1.0.0/heading\" : [# [derive (:: strum :: EnumIter , :: derive_more :: Constructor , :: strum :: AsRefStr , :: strum :: IntoStaticStr , :: strum :: Display , crate :: extra :: Thing , :: serde :: Serialize , :: educe :: Educe , :: ordering :: Hash)] # [strum (serialize_all = \"kebab-case\")]] , ",
+            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: markers :: Marked , :: core :: cmp :: PartialEq)]] } ,",
+        )),
+        "{}",
+        tokens(&module)
+    );
+    assert!(
+        tokens(&module).contains(concat!(
+            "additional_member_attributes : { ",
+            "\"example:walk/walker@1.0.0/heading.north\" : [# [strum (serialize = \"up\")]] , ",
+            "\"example:walk/walker@1.0.0/point.x\" : [# [marked (skip)]] } ,"
+        )),
+        "{}",
+        tokens(&module)
+    );
+    // Each path is imported again, as written, in the module of its type, so the imports it goes
+    // through stay used once the generated type replaces the author's.
+    let generated = tokens(&module);
+    for expected in [
+        "# [allow (unused_imports)] use EnumIter as _ ; # [allow (unused_imports)] use more :: Constructor as _ ;",
+        "{ Point } ; # [allow (unused_imports)] use super :: Marked as _ ; # [allow (unused_imports)] use PartialEq as _ ; }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+}
+
+/// A state makes the bindings derive serde's traits on every generated type that can carry them:
+/// the author's serde derives are left to them there, and handed to them on a type that cannot,
+/// or in an Orb without a state, where the bindings derive none.
+#[test]
+fn serde_derives_go_where_the_bindings_derive_none() {
+    let module = |state: &str| {
+        format!(
+            "mod walk {{
+                use serde::{{Deserialize, Serialize}};
+                {state}
+                #[derive(Serialize, serde::Deserialize, Hash)]
+                pub struct Point {{ pub x: i32, pub y: i32 }}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> Point {{ todo!() }} }}
+            }}"
+        )
+    };
+    let stateful = expanded(
+        "example:walk@1.0.0",
+        &module("#[state] pub struct Count { pub steps: u32 }"),
+    );
+    assert_eq!(
+        type_attributes(&stateful).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: core :: hash :: Hash)]] } ,"
+        ),
+        "{}",
+        tokens(&stateful)
+    );
+    let stateless = expanded("example:walk@1.0.0", &module(""));
+    assert_eq!(
+        type_attributes(&stateless).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize , :: core :: hash :: Hash)]] } ,"
+        ),
+        "{}",
+        tokens(&stateless)
+    );
+    // A record holding a resource handle has no serde implementation from the bindings.
+    let held = expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            #[state]
+            pub struct Count { pub steps: u32 }
+            #[wit_resource]
+            pub struct Pen { pub ink: u32 }
+            impl Pen { pub fn ink(&self) -> u32 { self.ink } }
+            #[derive(serde::Serialize)]
+            pub struct Lease { pub pen: Pen }
+            #[service]
+            pub struct Walker;
+            impl Walker { pub fn lend() -> Lease { todo!() } }
+        }",
+    );
+    assert_eq!(
+        type_attributes(&held).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:walk/walker@1.0.0/lease\" : [# [derive (:: serde :: Serialize)]] } ,"
+        ),
+        "{}",
+        tokens(&held)
+    );
+}
+
+/// The types a derived hook reaches are defined in its interface, which the world imports and
+/// exports: the bindings generate each twice, and both take the author's derives.
+#[test]
+fn a_derived_hook_input_keeps_its_derives() {
+    let module = expanded(
+        "example:gate@1.0.0",
+        &GATE.replace(
+            "    /// One admission.",
+            "    /// One admission.\n    #[derive(Debug, Clone, PartialEq, Eq, Hash)]",
+        ),
+    );
+    assert_eq!(
+        type_attributes(&module).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:gate/guard@1.0.0/admission\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] } ,"
+        ),
+        "{}",
+        tokens(&module)
+    );
+}
+
+/// What the generated type cannot take is refused on the author's item: a derive of another crate
+/// implementing a trait the bindings implement, a derive of the standard library the type's
+/// contents rule out, a derive the macro cannot name from the bindings' module, a helper attribute
+/// on a case's payload, and `#[cfg_attr(..)]`, under which a derive would come and go. Kept out of
+/// the WIT, the same type is the author's, as written.
+#[test]
+fn what_the_generated_type_cannot_take_is_refused() {
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod walk {{
+                use strum::*;
+                #[wit_resource]
+                pub struct Pen {{ pub ink: u32 }}
+                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
+                {types}
+                #[service]
+                pub struct Walker;
+                impl Walker {{
+                    pub fn walk() -> {returned} {{ todo!() }}
+                    pub fn lend() -> Pen {{ todo!() }}
+                }}
+            }}"
+        )
+    };
+    for (types, returned, message) in [
+        (
+            "#[derive(derive_more::Debug)] pub struct Point { pub x: i32 }",
+            "Point",
+            "`derive_more::Debug` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type",
+        ),
+        (
+            "use derive_more::Debug; #[derive(Debug)] pub struct Point { pub x: i32 }",
+            "Point",
+            "`Debug` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already",
+        ),
+        (
+            "#[derive(educe::Clone)] pub struct Point { pub x: i32 }",
+            "Point",
+            "implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle",
+        ),
+        (
+            "#[derive(more::Ord)] pub enum Heading { North, East }",
+            "Heading",
+            "implements `Ord` already, as the bindings derive it for every enum",
+        ),
+        (
+            "#[derive(derive_more::Display)] pub enum Fault { Lost, Stuck }",
+            "Result<u32, Fault>",
+            "implements `Display` already, as the bindings implement it for the error of a function's result",
+        ),
+        (
+            "#[derive(thiserror::Error)] pub struct Fault { pub code: u32 }",
+            "Result<(), Fault>",
+            "implements `Error` already, as the bindings implement it for the error of a function's result",
+        ),
+        (
+            "#[derive(Clone)] pub struct Lease { pub pen: Pen }",
+            "Lease",
+            "`Clone` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Clone`",
+        ),
+        (
+            "#[derive(PartialEq)] pub enum Held { Pen(Pen), Nothing }",
+            "Held",
+            "`PartialEq` on `Held`: `Held` enters the WIT and holds a resource handle, which implements no `PartialEq`",
+        ),
+        (
+            "#[derive(Copy)] pub struct Note { pub text: String }",
+            "Note",
+            "`Copy` on `Note`: `Note` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`",
+        ),
+        (
+            "#[derive(EnumIter)] pub enum Heading { North, East }",
+            "Heading",
+            "`EnumIter` on `Heading`: `Heading` enters the WIT and the generated type replacing it is declared in the bindings' module, which `EnumIter` does not reach: this module imports no `EnumIter` by name, unless a glob import brings it; import it with `use`, or name it from its crate, such as `::name::EnumIter`",
+        ),
+        (
+            "#[derive(super::Marked)] pub struct Point { pub x: i32 }",
+            "Point",
+            "`super::Marked` on `Point` leaves the Orb module, where the macro cannot follow it",
+        ),
+        (
+            "#[derive(Default)] pub enum Move { Step(#[default] u32), Rest }",
+            "Move",
+            "`Move` enters the WIT and the generated type replaces it, which takes the attributes of its cases but not of their payloads: move this one to the case `Step`",
+        ),
+        (
+            "#[cfg_attr(test, derive(Hash))] pub struct Point { pub x: i32 }",
+            "Point",
+            "`Point` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`",
+        ),
+        (
+            "pub struct Point { #[cfg_attr(test, allow(dead_code))] pub x: i32 }",
+            "Point",
+            "never under `#[cfg_attr(..)]`",
+        ),
+        (
+            "pub enum Heading { #[cfg_attr(test, default)] North, East }",
+            "Heading",
+            "never under `#[cfg_attr(..)]`",
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &module(types, returned));
+        assert!(error.contains(message), "{types}: {error}");
+        expanded("example:walk@1.0.0", &module(types, "u32"));
+    }
+}
+
 /// A state starts from its `Default`: the macro implements it field by field unless the author
-/// gives it, by an `impl Default` anywhere in the Orb module or by a derive on a state the macro
-/// keeps, out of the WIT; the serde derives the author already wrote are not added again.
+/// gives it, by an `impl Default` anywhere in the Orb module or by a derive, which stays on a
+/// state out of the WIT and goes to the generated type replacing a state that enters it; the serde
+/// derives the author already wrote are not added again.
 #[test]
 fn the_author_may_give_a_state_its_default_and_its_derives() {
     let generated_default = "impl :: core :: default :: Default for Balance {";
@@ -1736,13 +2093,23 @@ fn the_author_may_give_a_state_its_default_and_its_derives() {
         let module = expanded("example:ledger@1.0.0", &state("", by_hand, returned));
         assert!(!tokens(&module).contains(generated_default), "{returned}");
     }
-    // A state that enters the WIT is the generated type: the author's derive goes with the item,
-    // so the macro implements `Default`, as the derive would have.
-    let entered = tokens(&expanded(
-        "example:ledger@1.0.0",
-        &state("#[derive(Default)]", "", "Balance"),
-    ));
-    assert!(entered.contains(generated_default), "{entered}");
+    // A state that enters the WIT is the generated type, which takes the author's derive: the
+    // derived `Default` is the state's, and the macro implements none.
+    for derive in [
+        "Default",
+        "core::default::Default",
+        "::std::default::Default",
+    ] {
+        let entered = tokens(&expanded(
+            "example:ledger@1.0.0",
+            &state(&format!("#[derive({derive})]"), "", "Balance"),
+        ));
+        assert!(!entered.contains(generated_default), "{entered}");
+        assert!(
+            entered.contains("additional_type_attributes : { \"example:ledger/pinned@1.0.0/balance\" : [# [derive (:: core :: default :: Default)]] } ,"),
+            "{entered}"
+        );
+    }
     // Two states of one name are told apart by the path the `impl` names.
     for (place, skipped, kept) in [
         (

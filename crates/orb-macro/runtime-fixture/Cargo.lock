@@ -303,6 +303,8 @@ name = "tembra-orb-runtime-fixture"
 version = "0.1.0"
 dependencies = [
  "dlmalloc",
+ "serde",
+ "serde_json",
  "tembra",
  "wit-bindgen",
 ]

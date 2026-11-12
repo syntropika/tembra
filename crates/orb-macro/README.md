@@ -101,6 +101,7 @@ starts with this explicit freestanding mode.
 | a struct with named fields and `#[state(service = Name, version = n)]`      | `import tembra:guest/state` and `export tembra:guest/state-init` in the world, and a `record` when a method uses it                                                |
 | a struct with `#[resource(version = n)]` and a function marked `#[open]`    | `import tembra:guest/resources` and `export tembra:guest/resources-init` in the world                                                                              |
 | `#[validate]` on a `fn(&self) -> Result<(), String>` of a `#[state]` struct | nothing in the WIT: the state's rule, run on every update and on reload                                                                                            |
+| `#[derive(..)]` on a struct or an enum that enters the WIT                  | nothing in the WIT: the generated type replacing it derives the same, besides what the bindings implement themselves                                               |
 | `#[close]` on a `fn(self)` of a `#[resource]` struct                        | nothing in the WIT: run by the kernel at teardown                                                                                                                  |
 | an inline `mod`                                                             | nothing of its own: its items are read as the Orb's, grouped with what belongs to them                                                                             |
 | `///` comments and `/** */` blocks                                          | `///` comments in the WIT, one per line                                                                                                                            |
@@ -277,8 +278,10 @@ The macro gives the state type two associated functions: `Count::read()` returns
 object running the current call, `Count::update(|count| ...)` changes it and stores it, returning
 the stored value. The initial value is the state's `Default`, which the macro implements field by
 field unless the author provides it: an `impl Default for Count` anywhere in the Orb module, or a
-`#[derive(Default)]` on a state that stays out of the WIT, whose struct the macro keeps. That is how
-a state starts from a value of the author's choosing:
+`#[derive(Default)]` on the state, which stays on the author's struct when the state stays out of
+the WIT and goes to the generated type replacing it when the state enters the WIT, as every derive
+of a type that enters it does (see [Limits](#limits)). That is how a state starts from a value of
+the author's choosing:
 
 ```rust
 impl Default for Count {
@@ -288,9 +291,19 @@ impl Default for Count {
 }
 ```
 
-The macro's `Default` gives each field its type's `Default`. A field whose type has none, an enum
-of the module for instance, is a compile error on that field: implement `Default` for the state,
-as above, or for the field's type.
+The macro's `Default`, like a derived one, gives each field its type's `Default`. A field whose type
+has none, an enum of the module for instance, is a compile error on that field: implement `Default`
+for the state, as above, or give the field's type one, by hand or by a derive, which for an enum
+marks the case it starts from:
+
+```rust
+#[derive(Default)]
+pub enum Phase {
+    #[default]
+    Open,
+    Closed,
+}
+```
 
 Behind them, the world imports the kernel's `tembra:guest/state` interface and exports
 `tembra:guest/state-init`: when the kernel creates a service object it asks the component for the
@@ -583,10 +596,14 @@ The macro rewrites the module with:
    copy must define what the bundled package defines, whatever its comments, or the macro names
    its file. With a state, also `serde` derives on the generated types, except the records and
    variants holding a flags type or a resource handle, which have no `serde` implementation to
-   derive;
+   derive. With derives on the types that enter the WIT, also `additional_type_attributes` and
+   `additional_member_attributes`, which hand them to the generated types with the helper
+   attributes they read;
 5. `pub use exports::...::{Stats}`: the author's record and enum definitions are replaced by the
-   generated types with the same names and public fields, so the author's functions and the
-   generated traits share one type; `pub use exports::...::guard;` for each contributed hook and each
+   generated types with the same names, public fields and derives, so the author's functions and
+   the generated traits share one type, and each derive of such a type is imported again under no
+   name, `use EnumIter as _;`, where the type was written, so the imports it names stay used;
+   `pub use exports::...::guard;` for each contributed hook and each
    implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::context;` with the `context` option;
 6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
@@ -633,11 +650,28 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) among its de
   `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has no equivalent, use `bool`.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it, and a record
   of a consumed package is not a state; a state copies it into a record of the module.
-- Replacing the author's types drops their `#[derive]`s: a state that enters the WIT starts from
-  the macro's field-by-field `Default` or from an `impl Default` the author writes, never from a
-  derive. What the replacement would drop without a word is refused: an explicit discriminant,
-  which a WIT enum has no room for, and a `#[serde(..)]` attribute, which would change a state's
-  JSON, are compile errors on a type that enters the WIT.
+- A type that enters the WIT is replaced by the type the bindings generate, which takes the
+  author's `#[derive(..)]`s and the helper attributes they read: the single-name attributes on the
+  type, its fields and its cases, such as `#[default]` or `#[strum(..)]`, but none of Rust's own
+  attributes, such as `#[allow(..)]` or `#[repr(..)]`. A derive of what the bindings implement
+  themselves is left to them: `Debug` for every type; `Clone` for a record or a variant that holds
+  no resource handle, and `Copy` when it holds no string or list either; `Clone`, `Copy`,
+  `PartialEq`, `Eq`, `PartialOrd` and `Ord` for an enum; `Display` and `Error` for the error of a
+  function's result; and `serde`'s derives in an Orb with a state. A derive of another crate named
+  after one of those traits would implement it twice, and a derive of the standard library that the
+  type's contents rule out could not apply, `Clone`, `Copy`, a comparison or `Hash` on a type
+  holding a resource handle, `Copy` on one holding a string or a list: both are compile errors on
+  the derive.
+- The bindings read a derive's path in their own module, so the macro names each derive from its
+  crate, `::strum::EnumIter` for `EnumIter` after `use strum::EnumIter;`, following the `use` and
+  `extern crate` declarations of the type's module, `self::`, `super::` and the Orb's sub-modules;
+  a derive of the standard library is named from `core`. A single name the module does not import
+  by name, other than a derive of the standard library, which only a glob import could bring, or a
+  path leaving the Orb module through `super::`, is a compile error saying what to write instead.
+- What the replacement would drop without a word is refused on a type that enters the WIT: an
+  explicit discriminant, which a WIT enum has no room for, a `#[serde(..)]` attribute, which would
+  change a state's JSON, a `#[cfg_attr(..)]`, under which a derive or its helper would come and go,
+  and a helper attribute on the payload of a case, which the bindings have no place for.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.
 

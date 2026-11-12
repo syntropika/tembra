@@ -16,9 +16,12 @@ no-std = ["dep:dlmalloc"]
 tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
 wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
 dlmalloc = { version = "0.2.12", features = ["global"], optional = true }
+# The code the macro generates for the walker's state names these.
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
 [package.metadata.cargo-machete]
-ignored = ["wit-bindgen", "dlmalloc"]
+ignored = ["wit-bindgen", "dlmalloc", "serde", "serde_json"]
 
 [profile.release]
 panic = "abort"

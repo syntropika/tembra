@@ -1010,23 +1010,45 @@ fn handles(resolve: &Resolve, ty: wit_parser::Type) -> Option<Handles> {
     }
 }
 
-/// The records and variants of the bindings that cannot derive `serde`'s traits: those holding a
-/// flags type, a resource handle, a stream or a future, directly or through other types, which
-/// the bindings give no `serde` implementation. They are named as the `additional_derives_ignore`
-/// option of `wit-bindgen` compares them, by the kebab-case form of their Rust name. `inline` is
-/// the WIT the bindings read, `dir` the consumed packages it refers to; a WIT the bindings would
-/// refuse yields no names, and the bindings report it.
-pub(crate) fn unserializable(dir: Option<&Path>, inline: &str) -> Vec<String> {
+/// What the bindings make of the WIT they read, for what the macro asks them to add to the types
+/// they generate.
+#[derive(Default)]
+pub(crate) struct Bindings {
+    /// The records and variants that cannot derive `serde`'s traits: those holding a flags type, a
+    /// resource handle, a stream or a future, directly or through other types, which the bindings
+    /// give no `serde` implementation. They are named as the `additional_derives_ignore` option of
+    /// `wit-bindgen` compares them, by `ignored_name`.
+    pub unserializable: Vec<String>,
+    /// How the bindings generate each record, variant and enum of an interface, by the type's full
+    /// name as the selectors of `additional_type_attributes` write it,
+    /// `ns:name/interface@version/type`.
+    pub types: BTreeMap<String, Generated>,
+}
+
+/// How `wit-bindgen` 0.63 generates a record, a variant or an enum, as `wit-bindgen-core` records
+/// it to choose what it derives and implements: whether the type holds a string or a list, whether
+/// it holds a resource handle, and whether a function of a world returns it as the error of its
+/// result.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Generated {
+    pub list: bool,
+    pub resource: bool,
+    pub error: bool,
+}
+
+/// Read the WIT the bindings read, `inline` with the consumed packages of `dir`, for what they make
+/// of its types; a WIT the bindings would refuse yields nothing, and the bindings report it.
+pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
     let mut resolve = Resolve::default();
     if let Some(dir) = dir
         && resolve.push_dir(dir).is_err()
     {
-        return Vec::new();
+        return Bindings::default();
     }
     if resolve.push_str("orb.wit", inline).is_err() {
-        return Vec::new();
+        return Bindings::default();
     }
-    let names: BTreeSet<String> = resolve
+    let unserializable: BTreeSet<String> = resolve
         .types
         .iter()
         .filter(|(_, definition)| {
@@ -1039,9 +1061,85 @@ pub(crate) fn unserializable(dir: Option<&Path>, inline: &str) -> Vec<String> {
             holds_unserializable(&resolve, wit_parser::Type::Id(*id), &mut BTreeSet::new())
         })
         .filter_map(|(_, definition)| definition.name.as_deref())
-        .map(|name| name.to_upper_camel_case().to_kebab_case())
+        .map(ignored_name)
         .collect();
-    names.into_iter().collect()
+    // Every record, variant and enum an interface defines, by its full name. `holds` reports owned
+    // handles, streams and futures where the bindings count any resource, but a type of the module
+    // holds no borrowed handle, bare resource or error context, which no Rust type the macro
+    // translates spells, so for such a type the two agree.
+    let full_name = |id: wit_parser::TypeId| {
+        let definition = &resolve.types[id];
+        let wit_parser::TypeOwner::Interface(owner) = definition.owner else {
+            return None;
+        };
+        Some(format!(
+            "{}/{}",
+            resolve.id_of(owner)?,
+            definition.name.as_ref()?
+        ))
+    };
+    let mut types: BTreeMap<String, Generated> = resolve
+        .types
+        .iter()
+        .filter(|(_, definition)| {
+            matches!(
+                definition.kind,
+                TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
+            )
+        })
+        .filter_map(|(id, _)| {
+            let name = full_name(id)?;
+            let (list, resource) = holds(&resolve, wit_parser::Type::Id(id));
+            let generated = Generated {
+                list,
+                resource,
+                error: false,
+            };
+            Some((name, generated))
+        })
+        .collect();
+    // The bindings mark the error of the result of every function of every world, through the
+    // aliases `use` leaves, and implement `Display` and `Error` for it.
+    for (_, world) in resolve.worlds.iter() {
+        for item in world.imports.values().chain(world.exports.values()) {
+            let functions: Vec<&wit_parser::Function> = match item {
+                wit_parser::WorldItem::Function(function) => vec![function],
+                wit_parser::WorldItem::Interface { id, .. } => {
+                    resolve.interfaces[*id].functions.values().collect()
+                }
+                wit_parser::WorldItem::Type { .. } => Vec::new(),
+            };
+            for function in functions {
+                let Some(wit_parser::Type::Id(result)) = function.result else {
+                    continue;
+                };
+                let TypeDefKind::Result(result) = &resolve.types[result].kind else {
+                    continue;
+                };
+                let Some(wit_parser::Type::Id(mut error)) = result.err else {
+                    continue;
+                };
+                while let TypeDefKind::Type(wit_parser::Type::Id(aliased)) =
+                    resolve.types[error].kind
+                {
+                    error = aliased;
+                }
+                if let Some(generated) = full_name(error).and_then(|name| types.get_mut(&name)) {
+                    generated.error = true;
+                }
+            }
+        }
+    }
+    Bindings {
+        unserializable: unserializable.into_iter().collect(),
+        types,
+    }
+}
+
+/// The name by which the `additional_derives_ignore` option of `wit-bindgen` compares a type of
+/// the given WIT name: the kebab-case form of the Rust name the bindings give it.
+pub(crate) fn ignored_name(name: &str) -> String {
+    name.to_upper_camel_case().to_kebab_case()
 }
 
 /// Whether a WIT type holds, anywhere, a value the bindings give no `serde` implementation: a
@@ -1390,6 +1488,7 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
         references,
         kind: ShapeKind::Record(named),
         scope: 0,
+        carried: Default::default(),
     })
 }
 
@@ -1446,6 +1545,7 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
         references,
         kind,
         scope: 0,
+        carried: Default::default(),
     })
 }
 
