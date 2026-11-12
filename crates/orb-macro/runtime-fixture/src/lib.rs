@@ -10,6 +10,7 @@ extern crate alloc;
         import = "wasi:random/random@0.3.0",
         import = "wasi:clocks/monotonic-clock@0.3.0",
         import("example:counters/counter@1.0.0", keyed),
+        import = "example:counters/counter@1.0.0",
         no_std
     )
 )]
@@ -20,7 +21,8 @@ extern crate alloc;
         wit = "consumed",
         import = "wasi:random/random@0.3.0",
         import = "wasi:clocks/monotonic-clock@0.3.0",
-        import("example:counters/counter@1.0.0", keyed)
+        import("example:counters/counter@1.0.0", keyed),
+        import = "example:counters/counter@1.0.0"
     )
 )]
 mod guest {
@@ -175,6 +177,12 @@ mod guest {
                 let (one, two) = (first.read().await, second.read().await);
                 Ok(format!("{added:?} {} {}", tally(&one), tally(&two)))
             }
+
+            /// The tally of the object of `key`, the provider's own record, which the view's module
+            /// names and this interface `use`s from the provider's.
+            pub async fn read(key: String) -> Result<counter_ref::Tally, String> {
+                Ok(counter_ref::get(vec![key]).await?.read().await)
+            }
         }
 
         /// A tally as `key@principal=count`.
@@ -185,6 +193,111 @@ mod guest {
                 tally.principal,
                 tally.count
             )
+        }
+    }
+
+    /// Reads the `main` object of `example:counters/counter@1.0.0`, which the attribute's plain
+    /// `import` reaches, and hands its tallies on as they are: the consumed record crosses this
+    /// Orb's derived interface alone, in a list and in a record of the module, and the kernel keeps
+    /// the last one in a state.
+    pub mod readings {
+        use super::counter;
+        use alloc::{string::String, vec, vec::Vec};
+
+        /// A tally of the provider, with the note of the reading that took it.
+        pub struct Reading {
+            pub tally: counter::Tally,
+            pub note: String,
+        }
+
+        /// The last tally a readings object took, and how many readings it made, kept by the
+        /// kernel as the JSON `serde` writes for the provider's record.
+        #[state(service = Readings)]
+        pub struct Recorded {
+            pub last: Option<counter::Tally>,
+            pub readings: u32,
+        }
+
+        #[service]
+        pub struct Readings;
+
+        impl Readings {
+            /// Add `amount` to the provider's count, read its tally and keep it.
+            pub async fn read(amount: u32, note: String) -> Reading {
+                counter::add(amount);
+                let tally = counter::read().await;
+                Recorded::update(|recorded| {
+                    recorded.last = Some(tally.clone());
+                    recorded.readings += 1;
+                });
+                Reading { tally, note }
+            }
+
+            /// The counts of the readings and of the tallies, added up.
+            pub fn total(readings: Vec<Reading>, tallies: Vec<counter::Tally>) -> u32 {
+                readings
+                    .iter()
+                    .map(|reading| &reading.tally)
+                    .chain(&tallies)
+                    .map(|tally| tally.count)
+                    .sum()
+            }
+
+            /// The tally with the parts of its key joined into one.
+            pub fn joined(tally: counter::Tally) -> counter::Tally {
+                counter::Tally {
+                    key: vec![tally.key.join("/")],
+                    ..tally
+                }
+            }
+        }
+    }
+
+    /// Keeps a shelf of `example:shelves/shelf@1.0.0`, an interface of a consumed package this Orb
+    /// implements, and sorts its books in `library`, a derived interface that takes and returns
+    /// them as the shelf's export defines them.
+    pub mod shelves {
+        use super::shelf;
+        use alloc::vec::Vec;
+        use core::sync::atomic::{AtomicU32, Ordering};
+
+        /// How many books the shelf holds.
+        static SHELVED: AtomicU32 = AtomicU32::new(0);
+
+        #[service("example:shelves/shelf@1.0.0")]
+        pub struct Shelf;
+
+        impl Shelf {
+            pub fn shelve(_book: shelf::Book) -> u32 {
+                SHELVED.fetch_add(1, Ordering::Relaxed) + 1
+            }
+        }
+
+        /// The books of one topic, longest first, and their pages.
+        pub struct Topical {
+            pub books: Vec<shelf::Book>,
+            pub pages: u32,
+        }
+
+        #[service]
+        pub struct Library;
+
+        impl Library {
+            /// The books on `topic`, longest first, with their pages added up.
+            pub fn on_topic(books: Vec<shelf::Book>, topic: shelf::Topic) -> Topical {
+                let mut books: Vec<shelf::Book> = books
+                    .into_iter()
+                    .filter(|book| book.topic == topic)
+                    .collect();
+                books.sort_by(|left, right| right.pages.cmp(&left.pages));
+                let pages = books.iter().map(|book| book.pages).sum();
+                Topical { books, pages }
+            }
+
+            /// The longest book, if any.
+            pub fn longest(books: Vec<shelf::Book>) -> Option<shelf::Book> {
+                books.into_iter().max_by_key(|book| book.pages)
+            }
         }
     }
 

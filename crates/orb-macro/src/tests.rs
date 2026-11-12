@@ -1766,24 +1766,46 @@ fn a_derived_function_takes_an_imported_handle() {
         }",
     );
     assert!(
-        error.contains("`Spelling::finish` takes `Bulder`, which names no resource of the imported interface example:text/texts@1.0.0: its resources are `Builder`, `AB`"),
+        error.contains("`Spelling::finish` takes `Bulder`, which names no type or resource of the imported interface example:text/texts@1.0.0: its resources are `Builder`, `AB`"),
         "{error}"
     );
-    let error = refused(
-        "mod speller {
-            pub struct Builder { pub text: String }
-            #[service]
-            pub struct Spelling;
-            impl Spelling {
-                pub fn finish(builder: texts::Builder) -> u32 { 0 }
-                pub fn draft() -> Builder { todo!() }
-            }
-        }",
-    );
+    // A type of the module named like the handle clashes in an interface that knows both, and
+    // nowhere else: the bridges name the handle by its path.
+    let named_like = |draft: &str| {
+        format!(
+            "mod speller {{
+                #[wit_resource(service = Drafts)]
+                pub struct Builder {{ pub text: String }}
+                #[service]
+                pub struct Spelling;
+                impl Spelling {{
+                    pub fn finish(builder: texts::Builder) -> u32 {{ 0 }}
+                }}
+                #[service]
+                pub struct Drafts;
+                impl Drafts {{ {draft} }}
+            }}"
+        )
+    };
+    let error = refused(&named_like(
+        "pub fn draft() -> Builder { todo!() } pub fn finish(builder: texts::Builder) -> u32 { 0 }",
+    ));
     assert!(
-        error.contains("`Builder` of this module has the name of `Builder`, the resource `builder` of the imported interface example:text/texts@1.0.0, which `Spelling::finish` takes"),
+        error.contains("`Builder`, used from example:text/texts@1.0.0, and the resource `Builder` are both `builder` in the interface `drafts`"),
         "{error}"
     );
+    let module = orb_with(
+        importing(),
+        &named_like("pub fn draft() -> Builder { todo!() }"),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let generated = tokens(&module);
+    for expected in [
+        "fn finish (builder : texts :: Builder) -> u32 { Spelling :: finish (builder) }",
+        "fn draft () -> exports :: example :: speller :: drafts :: Builder { exports :: example :: speller :: drafts :: Builder :: new (Drafts :: draft ()) }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
 }
 
 const PERMITS: &str = "mod office {

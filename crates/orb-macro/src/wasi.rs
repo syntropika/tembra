@@ -28,6 +28,11 @@ fn bundled() -> syn::Result<(Resolve, Vec<(PackageId, &'static str)>)> {
     Ok((resolve, sources))
 }
 
+/// The bundled WASI packages, resolved, for what an interface of them defines.
+pub(crate) fn resolve() -> syn::Result<Resolve> {
+    Ok(bundled()?.0)
+}
+
 /// The WASI packages the Orb's imports need, nested for the inline WIT: the package of each
 /// imported WASI interface and the bundled packages it builds on, in dependency order. A package
 /// the consumed directory `dir` resolves already, as a contract `cargo tembra build` wrote does

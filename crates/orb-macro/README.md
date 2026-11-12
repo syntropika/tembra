@@ -94,6 +94,7 @@ starts with this explicit freestanding mode.
 | `import("ns:name/interface@version", keyed)` on the attribute               | `import` of a view of that interface, `interface-ref` in the package: a resource with the interface's functions as methods, and `get`, selecting an object by key  |
 | a struct with `#[wit_resource]` and an `impl` block of `pub fn`             | a `resource` of its service's interface: the `#[constructor]` function its constructor, the `&self` functions its methods                                          |
 | a `#[wit_resource]` struct or an imported `iface::Name` as a parameter      | an owned handle, `own<t>`, which the call takes from its caller; an imported interface's resource is `use`d from it                                                |
+| a consumed interface's type named through its module, `greeting::Entry`     | `use` of that type from its interface, in the derived interface naming it: the consumed package's type, which the bindings and the author's code share             |
 | each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                                                                        |
 | a struct with named fields, when a service method uses it                   | a `record`                                                                                                                                                         |
 | an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`                                                                                                       |
@@ -118,7 +119,8 @@ module, and unit structs without the marker, remain ordinary Rust, whatever they
 that enters the WIT needs a WIT spelling for its fields and cases, so an array field or a variant
 with named fields is a compile error there and nowhere else. A state that stays out of the WIT, and
 every type of the module its fields reach that stays out too, get `serde`'s derives. A method that
-names a type the module does not declare is a compile error, and so is a service with the name of
+names a type the module does not declare, other than a consumed interface's type named through
+that interface's module, `greeting::Entry`, is a compile error, and so is a service with the name of
 the module, because WIT refuses a world and an interface of one name. So is a method named `then`,
 `release`, `state`, `ready`, `status` or `opaque`: every reference to a service object has those
 members, and the kernel refuses such a method when it installs the Orb. The package and every
@@ -170,7 +172,8 @@ as the portable hook contract requires, re-exports the generated module under th
 the author writes `guard::Admission`, and forwards the callback to the function. The function's Rust
 name is free; its single parameter and its result are the callback's. The priority travels in the
 component, in a `tembra:manifest` custom section, and `cargo tembra build` packages it with the
-artifact.
+artifact. A service's function names the hook's types the same way, `guard::Admission`, which its
+interface `use`s from the hook's: see [the types of a consumed interface](#the-types-of-a-consumed-interface).
 
 ## Declaring a hook
 
@@ -217,9 +220,13 @@ provider is native, is declared by its identity instead, with the directory hold
 `#[hook("example:admission/guard@1.0.0", composition = waterfall)]` under `wit = "../wit"`. The
 hook's types then belong to the consumed package, re-exported under the interface's name,
 `guard::Admission`, and `run` takes and returns them; the macro checks that the callback's shape
-fits the composition. Which role an interface plays travels in the `tembra:manifest` section next
-to the contribution priorities, and `cargo tembra build` packages it; an Orb declares a hook or
-contributes to it, never both.
+fits the composition. Those are the types of the hook's import, which `run` calls; the world exports
+the hook too, as the portable hook contract requires, and a derived interface takes the copy of the
+types the export holds, another Rust type, so a service's function does not name
+`guard::Admission`: it reports the hook's value in a type of the module, converted from it. A state
+holds the import's types as they are. Which role an interface plays travels in the
+`tembra:manifest` section next to the contribution priorities, and `cargo tembra build` packages
+it; an Orb declares a hook or contributes to it, never both.
 
 ## The lifetime of a service's objects
 
@@ -446,8 +453,11 @@ enters the WIT through them. A function returning the resource, alone or in an `
 `Result`, a `Vec` or a tuple, returns the struct there, and the bridge wraps it into its handle. The
 derived contract has no interface of its own, only the world, and `cargo tembra build` nests the
 shared package whole after it: the kernel holds every keeper of `example:ledger/book@1.0.0`, native
-or compiled, to one contract, and an installer binds a consumer of the interface to either. See
-[rust-orb-shared-interface](../../examples/rust-orb-shared-interface/README.md).
+or compiled, to one contract, and an installer binds a consumer of the interface to either. A
+derived service of the same Orb takes and returns the interface's types as they are, `book::Entry`,
+and a state holds them: see [the types of a consumed interface](#the-types-of-a-consumed-interface)
+and [rust-orb-shared-interface](../../examples/rust-orb-shared-interface/README.md), whose state
+keeps the entries.
 
 ## Importing another Orb's interface
 
@@ -479,7 +489,9 @@ resource's methods, destroyed in the provider when the handle drops. Which Orb a
 installer's choice: it binds the import to a provider Orb with `Install::requires`, as for any
 dependency, and the import reaches that provider's `main` object. The macro records the directory
 in the manifest and `cargo tembra build` nests the imported package whole in the contract, so the
-kernel checks the provider against the same signature. See
+kernel checks the provider against the same signature. The interface's types are the module's to
+pass on: a derived function takes or returns `greeting::Entry` as the imported functions do, see
+[the types of a consumed interface](#the-types-of-a-consumed-interface). See
 [rust-orb-import](../../examples/rust-orb-import/README.md) and, for a handed-out resource,
 [rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md). To reach the object of
 another key, import the interface [by key](#importing-another-orbs-interface-by-key).
@@ -536,8 +548,10 @@ world router {
 
 The view's resource takes the interface's name, and its methods are the interface's functions,
 with their parameters, results and documentation, `async` where a function is; the types they
-name are `use`d from the interface, so they stay the provider's. The view's generated module is
-re-exported under the view's name: `counter_ref::get(key)` acquires the object of the key, the
+name are `use`d from the interface, so they stay the provider's, and a derived function takes and
+returns them through the view's module, `counter_ref::Tally`, as
+[the types of a consumed interface](#the-types-of-a-consumed-interface) are. The view's generated
+module is re-exported under the view's name: `counter_ref::get(key)` acquires the object of the key, the
 `Vec<String>` of its parts, under the principal of the call, and returns a `counter_ref::Counter`
 whose methods call that object. A key the kernel refuses, one the provider does not admit for
 instance, is the `Err` of `get`, and the call goes on. One key reaches one object, through any
@@ -634,6 +648,96 @@ filesystem, socket or HTTP import needs the `FilesystemGrant`, `NetworkGrant` or
 configured provider. An interface the host does not serve as an import, such as `wasi:cli/run`,
 which a command exports, compiles but does not install.
 
+## The types of a consumed interface
+
+A derived signature names a type of a consumed interface through the module the Orb module
+re-exports for that interface, as the author's code does: `greeting::Entry` for
+`import = "example:greeter/greeting@1.0.0"`, `book::Entry` for an implemented
+`#[service("example:ledger/book@1.0.0")]`, `guard::Admission` for a hook the module contributes
+to, and `counter_ref::Tally` for a type the view of an interface imported by key uses, which is the
+interface's own. A record, a variant, an enum, a flags or an alias of the interface is a parameter
+or the result of a derived service's function or of a `#[wit_resource]` struct's constructor,
+methods and static functions, alone or in an `Option`, a `Result`, a `Vec` or a tuple, and a field
+or a case of a record or a variant of the module that enters the WIT:
+
+```rust
+#[tembra::orb(
+    package = "example:archivist@1.0.0",
+    wit = "../greeter/contract",
+    import = "example:greeter/greeting@1.0.0"
+)]
+mod archivist {
+    /// A greeter's entry, with when it was archived.
+    pub struct Archived { pub entry: greeting::Entry, pub at: u64 }
+
+    #[service]
+    pub struct Archive;
+
+    impl Archive {
+        pub fn keep(entry: greeting::Entry, at: u64) -> Archived { Archived { entry, at } }
+        pub fn latest(archived: Vec<Archived>) -> Option<greeting::Entry> { /* ... */ }
+    }
+}
+```
+
+```wit
+interface archive {
+  use example:greeter/greeting@1.0.0.{entry};
+  /// A greeter's entry, with when it was archived.
+  record archived {
+    entry: entry,
+    at: u64,
+  }
+  keep: func(entry: entry, at: u64) -> archived;
+  latest: func(archived: list<archived>) -> option<entry>;
+}
+```
+
+The derived interface naming the type, in its functions or in the types it defines, `use`s it from
+the interface defining it, under the kebab-case form of its Rust name, renamed with `as` where its
+WIT name differs, `a-b as ab` for `AB`. The bindings of the derived interface then name the type the
+consumed interface's bindings generate, so the author's value crosses as it is, with no copy into a
+type of the module and no conversion. Which type that is follows from the world: the types of an
+interface the world only imports are in its import module, which the Orb module re-exports, and so
+are those a view uses; an interface the world exports, an implemented one or a hook, has a copy of
+its types in its export module, which a derived interface, exported too, takes, and which the Orb
+module re-exports for an implemented interface and a contributed hook. The contract names the
+consumed package, which `cargo tembra build` nests whole, as it does for the import or the export.
+
+A consumed type implements what its bindings give it: a record or a variant `Clone`, `Copy` and
+`Debug` as its contents allow, an enum the comparisons too and a flags `Hash` as well, none of them
+`Default`. A derive of another trait on a type of the module holding one, `PartialEq` on
+`Archived`, does not compile.
+
+A state holds a consumed type too, in its fields or in the types of the module they reach. In an Orb
+with a state the bindings give the consumed packages' records, variants and enums `serde`'s
+derives, so the kernel keeps the value as the JSON `serde` writes for the bindings' type, with the
+Rust names of its fields and cases. A state is a struct of the module: it holds a consumed type,
+but is none.
+
+What a derived interface or a state does not take from a consumed interface is a compile error on
+the type that names it:
+
+- a name the interface does not define, the error listing its types and resources;
+- a type that holds a resource handle, a stream or a future anywhere: a derived interface takes the
+  consumed types that carry data only;
+- a resource of the interface, but an imported interface's handle taken as a parameter, alone or in
+  an option, a result, a list or a tuple ([taking a resource](#taking-a-resource)), and an object
+  of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
+- a type of a hook the module declares from a consumed package, whose `run` speaks the import's
+  types where a derived interface takes the export's ([declaring a hook](#declaring-a-hook));
+- a type or a handle of a WASI interface;
+- a consumed type in a derived hook's input, itself or in the types it reaches, which hold the
+  module's own;
+- in a state, a resource, a type holding a resource handle, and a consumed flags or a type holding
+  one, which the bindings generate without `serde`'s derives;
+- a type, a resource or a function of the module named like a consumed type in a derived interface
+  that knows both, since an interface's types and functions share one namespace.
+
+The runtime fixture's `readings` service takes and returns the record of an imported interface, and
+its `library` service the records of an interface it implements; see
+[runtime-fixture](runtime-fixture/README.md).
+
 ## Exporting a WIT resource
 
 A struct marked `#[wit_resource]` becomes a `resource` of the interface of the service whose
@@ -724,9 +828,10 @@ The caller's handle moves into the call, and the caller loses it: a native calle
 into the author's value, which the function then owns and drops, running `Drop`, unless it keeps
 it. An imported interface's handle crosses as the bindings' own type, the one the imported
 functions return; the derived interface knows its resource by the kebab-case form of the handle's
-Rust name, so a type or a resource of the module named like the handle is a compile error. A
-record or a variant holding a resource is the bindings' type, with the bindings' handle in the
-resource's place: a function taking one gets the handle, whose `into_inner` gives the value.
+Rust name, so a type or a resource of the module named like the handle is a compile error in an
+interface that also defines or uses it. A record or a variant holding a resource is the bindings'
+type, with the bindings' handle in the resource's place: a function taking one gets the handle,
+whose `into_inner` gives the value.
 
 The runtime moves an owned resource only into the interface that defines it, or into an Orb that
 imports that interface. It refuses at installation today an Orb whose function takes a borrowed
@@ -735,7 +840,8 @@ derives none: `&T` is refused as every reference in a signature is. A function t
 another service's interface or of an implemented interface, itself or in a record or a variant of
 the module, a WASI handle, which the runtime moves between no Orbs, and a hook's input holding a
 resource are compile errors too; so is a derived function returning an imported interface's handle,
-or another service's resource, which the runtime returns only from the interface that defines it.
+or another service's resource, which the runtime returns only from the interface that defines it,
+and a record or a variant of the module holding an imported interface's handle.
 
 ## Flags
 
@@ -900,10 +1006,12 @@ key) among its dependencies,
 ## Limits
 
 - WASI interfaces are imported, never implemented: serving incoming HTTP, an export of
-  `wasi:http/handler`, is not expressed. An Orb consumes another Orb's WIT by importing an
-  interface, plainly or by key, implementing one or contributing to a hook. A view takes the name
-  of the interface imported by key, so two interfaces of one name are not both imported by key.
-- A hook declared from a consumed package keeps that package's types: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
+  `wasi:http/handler`, is not expressed, and a WASI interface's types and handles stay out of a
+  derived signature. An Orb consumes another Orb's WIT by importing an interface, plainly or by
+  key, implementing one or contributing to a hook, and passes the interface's data types on as they
+  are. A view takes the name of the interface imported by key, so two interfaces of one name are
+  not both imported by key.
+- A hook declared from a consumed package keeps the types of its import, which `run` takes and returns, while a derived interface takes the types of its export: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list, of the module's own types. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
 - A service's functions are associated functions without `self`; only the methods of a
   `#[wit_resource]` struct take `&self`, never `&mut self`. Besides a service's state, a
   resource's fields and the root's resources, data lives in `static`s, as in the compiled
@@ -912,24 +1020,27 @@ key) among its dependencies,
   are opened in the order the kernel chooses; the `#[open]` and `#[close]` functions take no
   arguments besides the value.
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
-  camelCase spelling the executor gives WIT values on the portable boundary. The macro derives
-  `Serialize` and `Deserialize` on a state that stays out of the WIT, unless the author already
-  does. JSON holds no NaN or infinite float, so a state holding one cannot be stored, and the
-  JavaScript hosts (Node, mobile, browser) parse JSON numbers as doubles, so an integer beyond
-  ±2^53 in a state loses precision there.
+  camelCase spelling the executor gives WIT values on the portable boundary, a consumed type's
+  included. The macro derives `Serialize` and `Deserialize` on a state that stays out of the WIT,
+  unless the author already does. JSON holds no NaN or infinite float, so a state holding one
+  cannot be stored, and the JavaScript hosts (Node, mobile, browser) parse JSON numbers as doubles,
+  so an integer beyond ±2^53 in a state loses precision there.
 - Types: records, enums, variants, flags and the scalar, string, list, option, result and tuple
   types; 64-bit integers cross the boundary exactly. A flags is a `#[flags]` struct of one to 32
   `bool` fields; its functions `empty`, `bits` and `from_bits_retain` and its `BitOr` are the
-  macro's, for its bindings, and a derived hook's input holds none. A `resource` is a `#[wit_resource]` struct or the
-  handle of an imported interface. A derived function takes either as an owned parameter, a
-  struct only in the interface that defines it, and returns only a struct of its own interface; an implemented
-  interface takes the owned handles its WIT says. A borrowed parameter, `borrow<t>`, is not
-  derived: the runtime refuses it at installation today ("borrow requires a dedicated interpreter
-  value adapter"). No `stream` or `future`. `()` is nothing only as a function's result or a
-  side of a `Result`, which WIT then leaves out: `Result<T, ()>` is `result<t>`, `Result<(), E>` is
-  `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has no equivalent, use `bool`.
-- An implemented interface is fixed by its WIT: the `impl` adds no function to it, and a record
-  of a consumed package is not a state; a state copies it into a record of the module.
+  macro's, for its bindings, and a derived hook's input holds none. A consumed interface's data
+  type, named through its module, crosses as the consumed package's own type, see
+  [the types of a consumed interface](#the-types-of-a-consumed-interface). A `resource` is a
+  `#[wit_resource]` struct or the handle of an imported interface. A derived function takes either
+  as an owned parameter, a struct only in the interface that defines it, and returns only a struct
+  of its own interface; an implemented interface takes the owned handles its WIT says. A borrowed
+  parameter, `borrow<t>`, is not derived: the runtime refuses it at installation today ("borrow
+  requires a dedicated interpreter value adapter"). No `stream` or `future`. `()` is nothing only
+  as a function's result or a side of a `Result`, which WIT then leaves out: `Result<T, ()>` is
+  `result<t>`, `Result<(), E>` is `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has
+  no equivalent, use `bool`.
+- An implemented interface is fixed by its WIT: the `impl` adds no function to it. A state is a
+  struct of the module, which holds a consumed package's records as they are but is none of them.
 - A type that enters the WIT is replaced by the type the bindings generate, which takes the
   author's `#[derive(..)]`s and the helper attributes they read: the single-name attributes on the
   type, its fields and its cases, such as `#[default]` or `#[strum(..)]`, but none of Rust's own

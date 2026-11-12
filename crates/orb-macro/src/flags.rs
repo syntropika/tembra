@@ -155,8 +155,12 @@ pub(crate) fn shape(item: &syn::ItemStruct) -> syn::Result<Shape> {
 /// Refuse a flags a derived hook's input reaches: the bindings name the hook's types from its
 /// import module and from its export module, at two depths, and `with` names the author's struct
 /// through one path.
-pub(crate) fn check_hooks(shapes: &[Shape], declared: &[Declared]) -> syn::Result<()> {
-    let reached = wit::hook_shapes(shapes, declared);
+pub(crate) fn check_hooks(
+    shapes: &[Shape],
+    declared: &[Declared],
+    modules: &crate::foreign::Modules,
+) -> syn::Result<()> {
+    let reached = wit::hook_shapes(shapes, declared, modules);
     let flags = shapes.iter().find(|shape| {
         matches!(shape.kind, ShapeKind::Flags(_)) && reached.contains(&shape.ident.to_string())
     });

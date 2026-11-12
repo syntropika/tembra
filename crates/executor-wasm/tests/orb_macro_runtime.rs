@@ -66,12 +66,13 @@ fn std_and_freestanding_macro_guests_share_a_contract_and_execute() {
     assert_eq!(std_wit, freestanding_wit);
     assert_eq!(std_contract.model(), freestanding_contract.model());
     // The kernel serves the walker's state, the host chance's WASI imports, and an Orb provider
-    // answers the keyed import's view.
+    // answers the keyed import's view and the plain import of the same interface.
     let bindings = BTreeMap::from([
         ("tembra:guest/state@1.0.0".to_owned(), Binding::Kernel),
         host("wasi:random/random@0.3.0", "random"),
         host("wasi:clocks/monotonic-clock@0.3.0", "clocks"),
         view(),
+        provider(),
     ]);
     assert_eq!(
         std_contract.plan("runtime", 1, &bindings).unwrap().orb,
@@ -98,7 +99,7 @@ fn std_and_freestanding_macro_guests_share_a_contract_and_execute() {
         .map(|(name, bytes, contract)| {
             let roles = contract.embedded_roles(bytes).unwrap();
             let artifact = contract.component_artifact(bytes, name, 1, &roles).unwrap();
-            engine.load(&artifact, keyed(granted())).unwrap()
+            engine.load(&artifact, bound(granted())).unwrap()
         })
         .chain([counters()])
         .collect();
@@ -236,14 +237,16 @@ fn wasi_imports_reach_the_host_under_the_installations_grants() {
             ["wasi-clocks.wit", "wasi-random.wit", "tembra-guest.wit"],
             "{variable}"
         );
-        // The keyed import's view needs its provider named; the WASI imports need their grants.
-        let requires = BTreeMap::from([(
-            COUNTER_VIEW.to_owned(),
-            tembra_contracts::OrbProvider {
-                orb: COUNTERS.into(),
-                api_version: 1,
-            },
-        )]);
+        // The keyed import's view and the plain import need their provider named; the WASI
+        // imports need their grants.
+        let orb = tembra_contracts::OrbProvider {
+            orb: COUNTERS.into(),
+            api_version: 1,
+        };
+        let requires = BTreeMap::from([
+            (COUNTER_VIEW.to_owned(), orb.clone()),
+            (COUNTER.to_owned(), orb),
+        ]);
         let bindings = contract.providers(&requires, &granted().grants).unwrap();
         assert_eq!(
             bindings,
@@ -252,6 +255,7 @@ fn wasi_imports_reach_the_host_under_the_installations_grants() {
                 host(RANDOM, "random"),
                 host(CLOCK, "clocks"),
                 view(),
+                provider(),
             ]),
             "{variable}"
         );
@@ -267,7 +271,8 @@ fn wasi_imports_reach_the_host_under_the_installations_grants() {
             [(CLOCK, "clocks"), (RANDOM, "random")],
             "{variable}"
         );
-        // No WASI import requires an Orb: the view's provider is the only one.
+        // No WASI import requires an Orb: the provider of the view and of the plain import is the
+        // only one.
         let required: Vec<&str> = plan
             .orb
             .requires
@@ -293,7 +298,7 @@ fn wasi_imports_reach_the_host_under_the_installations_grants() {
                 (vec![SystemCapability::Random], CLOCK),
                 (vec![SystemCapability::Cli], ""),
             ] {
-                let mut install = keyed(Install::default());
+                let mut install = bound(Install::default());
                 install.grants.system = system.iter().copied().collect();
                 let Err(error) = engine.load(&artifact, install) else {
                     panic!("{variable}: installed with only {system:?}");
@@ -314,7 +319,7 @@ fn wasi_imports_reach_the_host_under_the_installations_grants() {
             let host = Host::new(pool.spawner());
             host.install(vec![
                 counters(),
-                engine.load(&artifact, keyed(granted())).unwrap(),
+                engine.load(&artifact, bound(granted())).unwrap(),
             ])
             .unwrap();
             let chance = Rc::new(
@@ -356,8 +361,9 @@ fn wasi_imports_reach_the_host_under_the_installations_grants() {
     }
 }
 
-/// The interface the fixture imports by key, the view the macro derives for it in the fixture's
-/// package, which the installer binds, and the native Orb providing the interface.
+/// The interface the fixture imports by key and plainly, the view the macro derives for the keyed
+/// import in the fixture's package, which the installer binds, and the native Orb providing the
+/// interface.
 const COUNTER: &str = "example:counters/counter@1.0.0";
 const COUNTER_VIEW: &str = "example:runtime/counter-ref@1.0.0";
 const COUNTERS: &str = "counters";
@@ -371,10 +377,21 @@ fn view() -> (String, Binding) {
     (COUNTER_VIEW.to_owned(), provider)
 }
 
-/// An installation of the fixture that binds its keyed import's view to the provider; without it
-/// the kernel refuses the fixture, as for any import of another Orb.
-fn keyed(install: Install) -> Install {
-    install.requires(COUNTER_VIEW, COUNTERS, 1)
+/// The binding of the plain import to its provider.
+fn provider() -> (String, Binding) {
+    let provider = Binding::Orb {
+        name: COUNTERS.into(),
+        api_version: 1,
+    };
+    (COUNTER.to_owned(), provider)
+}
+
+/// An installation of the fixture that binds the keyed import's view and the plain import to the
+/// provider; without them the kernel refuses the fixture, as for any import of another Orb.
+fn bound(install: Install) -> Install {
+    install
+        .requires(COUNTER_VIEW, COUNTERS, 1)
+        .requires(COUNTER, COUNTERS, 1)
 }
 
 /// One object of the provider: the key it was acquired with, the principal that acquired it and
@@ -426,19 +443,20 @@ fn counters() -> Orb {
     )
 }
 
-/// Call `count` of the fixture's `counting` service in a root of `principal`.
-fn count(
+/// Call `method` of the fixture's `counting` service in a root of `principal`.
+fn counting_call(
     pool: &mut LocalPool,
     host: &Host,
     counting: &Rc<Reference>,
     principal: &str,
+    method: &'static str,
     arguments: Value,
 ) -> Value {
     let counting = counting.clone();
     pool.run_until(host.root(principal, move |context| {
         async move {
             counting
-                .call_portable::<_, Value>(&context, "count", arguments)
+                .call_portable::<_, Value>(&context, method, arguments)
                 .await
         }
         .boxed_local()
@@ -450,7 +468,8 @@ fn count(
 /// view the macro derived for the fixture's keyed import, packaged with the role the component
 /// carries. In one call, two references of one key reach one object and another key's object
 /// counts on its own; each principal's calls reach objects of its own; a key the provider refuses
-/// comes back as the error of the WIT result, and the revision serves the next call.
+/// comes back as the error of the WIT result, and the revision serves the next call. The
+/// provider's record, which the view's module names, crosses `counting` as it is.
 #[test]
 #[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD and TEMBRA_WASM_ORB_MACRO_NO_STD"]
 fn a_keyed_import_reaches_the_object_of_each_key() {
@@ -481,7 +500,7 @@ fn a_keyed_import_reaches_the_object_of_each_key() {
                 decoded.contract.references()[COUNTER_VIEW].interface,
                 COUNTER
             );
-            orbs.push(engine.load(&artifact, keyed(granted())).unwrap());
+            orbs.push(engine.load(&artifact, bound(granted())).unwrap());
         }
         host.install(orbs).unwrap();
         for (name, _) in &guests {
@@ -496,7 +515,14 @@ fn a_keyed_import_reaches_the_object_of_each_key() {
             pool.run_until(counting.ready()).unwrap();
             for principal in ["alice", "bob"] {
                 assert_eq!(
-                    count(&mut pool, &host, &counting, principal, json!(["a", "b", 2])),
+                    counting_call(
+                        &mut pool,
+                        &host,
+                        &counting,
+                        principal,
+                        "count",
+                        json!(["a", "b", 2])
+                    ),
                     json!({
                         "tag": "ok",
                         "val": format!("[2, 4, 2] a@{principal}=4 b@{principal}=2"),
@@ -504,11 +530,12 @@ fn a_keyed_import_reaches_the_object_of_each_key() {
                     "{name}"
                 );
             }
-            let refused = count(
+            let refused = counting_call(
                 &mut pool,
                 &host,
                 &counting,
                 "alice",
+                "count",
                 json!(["refused", "b", 1]),
             );
             assert_eq!(refused["tag"], "err", "{name}: {refused}");
@@ -519,8 +546,21 @@ fn a_keyed_import_reaches_the_object_of_each_key() {
                 "{name}: {refused}"
             );
             assert_eq!(
-                count(&mut pool, &host, &counting, "alice", json!(["c", "c", 1])),
+                counting_call(
+                    &mut pool,
+                    &host,
+                    &counting,
+                    "alice",
+                    "count",
+                    json!(["c", "c", 1])
+                ),
                 json!({"tag": "ok", "val": "[1, 2, 3] c@alice=3 c@alice=3"}),
+                "{name}"
+            );
+            // An object lives while a call references it: the next call's is new.
+            assert_eq!(
+                counting_call(&mut pool, &host, &counting, "bob", "read", json!(["d"])),
+                json!({"tag": "ok", "val": {"key": ["d"], "principal": "bob", "count": 0}}),
                 "{name}"
             );
             counting.release().unwrap();
@@ -560,7 +600,7 @@ fn derived_functions_consume_the_resources_they_take() {
                 let (_, contract) = contract(bytes);
                 let roles = contract.embedded_roles(bytes).unwrap();
                 let artifact = contract.component_artifact(bytes, name, 1, &roles).unwrap();
-                engine.load(&artifact, keyed(granted())).unwrap()
+                engine.load(&artifact, bound(granted())).unwrap()
             })
             .chain([counters()])
             .collect();
@@ -675,7 +715,7 @@ fn flags_cross_the_boundary_both_ways() {
                 assert!(words.contains("flagsaccess{read,write,share,}"), "{wit}");
                 let roles = contract.embedded_roles(bytes).unwrap();
                 let artifact = contract.component_artifact(bytes, name, 1, &roles).unwrap();
-                engine.load(&artifact, keyed(granted())).unwrap()
+                engine.load(&artifact, bound(granted())).unwrap()
             })
             .chain([counters()])
             .collect();
@@ -760,4 +800,190 @@ fn permit(pool: &mut LocalPool, host: &Host, name: &str) {
         "{name}"
     );
     permits.release().unwrap();
+}
+
+/// The records of the consumed packages cross the derived interfaces of both guests, on both
+/// engines, as the consumed packages define them. `readings` `use`s the tally of the imported
+/// interface: the tally the plain import reads comes back alone and in a record of the module, goes
+/// back in as a parameter, alone and in a list, and the kernel keeps the last one in the readings
+/// object's state, as the JSON `serde` writes for the provider's record. `library` `use`s the book
+/// and the topic of the shelf the Orb implements, whose export defines them.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD and TEMBRA_WASM_ORB_MACRO_NO_STD"]
+fn consumed_records_cross_a_derived_interface_as_they_are() {
+    let guests = [
+        ("standard", component("TEMBRA_WASM_ORB_MACRO_STD")),
+        ("freestanding", component("TEMBRA_WASM_ORB_MACRO_NO_STD")),
+    ];
+    for interpreted in [false, true] {
+        let engine = if interpreted {
+            Engine::interpreted(Limits::default())
+        } else {
+            Engine::new(Limits::default())
+        }
+        .unwrap();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let orbs = guests
+            .iter()
+            .map(|(name, bytes)| {
+                let (wit, contract) = contract(bytes);
+                let words: String = wit.split_whitespace().collect();
+                for expected in [
+                    "interfacereadings{useexample:counters/counter@1.0.0.{tally};",
+                    "interfacelibrary{useexample:shelves/shelf@1.0.0.{book,topic};",
+                ] {
+                    assert!(words.contains(expected), "{expected}\n{wit}");
+                }
+                let roles = contract.embedded_roles(bytes).unwrap();
+                let artifact = contract.component_artifact(bytes, name, 1, &roles).unwrap();
+                engine.load(&artifact, bound(granted())).unwrap()
+            })
+            .chain([counters()])
+            .collect();
+        host.install(orbs).unwrap();
+        // Both guests reach the provider's `main` object, the host's: the second counts on.
+        for ((name, _), counted) in guests.iter().zip([0, 7]) {
+            read(&mut pool, &host, name, counted);
+            shelve(&mut pool, &host, name);
+        }
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(engine.instances(), 0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+    }
+}
+
+/// Drive the readings of the Orb `name`, whose plain import reaches the provider's `main` object
+/// after it has counted `counted`. A tally is the provider's record on the portable boundary and
+/// in the state.
+fn read(pool: &mut LocalPool, host: &Host, name: &str, counted: u32) {
+    let readings = Rc::new(
+        host.get(
+            &format!("{name}::example:runtime/readings@1.0.0"),
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(readings.ready()).unwrap();
+    let state = readings.state::<Value>().unwrap();
+    let call = |pool: &mut LocalPool, method: &'static str, arguments: Value| {
+        let readings = readings.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move {
+                readings
+                    .call_portable::<_, Value>(&context, method, arguments)
+                    .await
+            }
+            .boxed_local()
+        }))
+        .unwrap()
+    };
+    let tally = |count: u32| json!({"key": ["main"], "principal": "host", "count": count});
+    assert_eq!(
+        *state.value().unwrap(),
+        json!({"last": null, "readings": 0}),
+        "{name}"
+    );
+    let first = call(pool, "read", json!([3, "first"]));
+    let after_first = tally(counted + 3);
+    assert_eq!(
+        first,
+        json!({"tally": after_first, "note": "first"}),
+        "{name}"
+    );
+    assert_eq!(
+        *state.value().unwrap(),
+        json!({"last": after_first, "readings": 1}),
+        "{name}"
+    );
+    let second = call(pool, "read", json!([4, "second"]));
+    let after_second = tally(counted + 7);
+    assert_eq!(
+        second,
+        json!({"tally": after_second, "note": "second"}),
+        "{name}"
+    );
+    assert_eq!(
+        *state.value().unwrap(),
+        json!({"last": after_second, "readings": 2}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "total", json!([[first, second], [tally(5)]])),
+        json!(2 * counted + 15),
+        "{name}"
+    );
+    assert_eq!(
+        call(
+            pool,
+            "joined",
+            json!([{"key": ["a", "b"], "principal": "carol", "count": 2}])
+        ),
+        json!({"key": ["a/b"], "principal": "carol", "count": 2}),
+        "{name}"
+    );
+    readings.release().unwrap();
+}
+
+/// Drive the shelf and the library of the Orb `name`: the shelf takes a book of the interface it
+/// implements, and the library takes and returns the same books and topics, alone, in a list, in
+/// an option and in a record of the module.
+fn shelve(pool: &mut LocalPool, host: &Host, name: &str) {
+    let reference = |pool: &mut LocalPool, service: &str| {
+        let reference = Rc::new(host.get(service, vec!["main".into()], "alice").unwrap());
+        pool.run_until(reference.ready()).unwrap();
+        reference
+    };
+    let call =
+        |pool: &mut LocalPool, reference: &Rc<Reference>, method: &'static str, arguments| {
+            let reference = reference.clone();
+            pool.run_until(host.root("alice", move |context| {
+                async move {
+                    reference
+                        .call_portable::<_, Value>(&context, method, arguments)
+                        .await
+                }
+                .boxed_local()
+            }))
+            .unwrap()
+        };
+    let book = |title: &str, pages: u32, topic: &str| json!({"title": title, "pages": pages, "topic": topic});
+    let shelf = reference(pool, &format!("{name}::example:shelves/shelf@1.0.0"));
+    assert_eq!(
+        call(
+            pool,
+            &shelf,
+            "shelve",
+            json!([book("dune", 412, "fiction")])
+        ),
+        json!(1),
+        "{name}"
+    );
+    shelf.release().unwrap();
+    let library = reference(pool, &format!("{name}::example:runtime/library@1.0.0"));
+    let books = json!([
+        book("dune", 412, "fiction"),
+        book("cosmos", 365, "science"),
+        book("emma", 474, "fiction"),
+    ]);
+    assert_eq!(
+        call(pool, &library, "on-topic", json!([books, "fiction"])),
+        json!({
+            "books": [book("emma", 474, "fiction"), book("dune", 412, "fiction")],
+            "pages": 886,
+        }),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, &library, "longest", json!([books])),
+        book("emma", 474, "fiction"),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, &library, "longest", json!([[]])),
+        Value::Null,
+        "{name}"
+    );
+    library.release().unwrap();
 }

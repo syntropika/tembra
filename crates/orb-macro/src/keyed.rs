@@ -119,7 +119,7 @@ pub(crate) fn views(
 }
 
 /// The view's interface name for the provider interface `ns:name/interface@version`.
-fn view_name(target: &str) -> String {
+pub(crate) fn view_name(target: &str) -> String {
     let interface = target.split_once('/').map_or(target, |(_, rest)| rest);
     let interface = interface.split('@').next().unwrap_or(interface);
     format!("{interface}-ref")
@@ -320,7 +320,7 @@ impl Spelling<'_> {
 
 /// What a type holds anywhere that is no data, if anything: a resource or a handle to one, a
 /// future, a stream or an error context.
-fn no_data(
+pub(crate) fn no_data(
     resolve: &Resolve,
     ty: Type,
     seen: &mut BTreeSet<wit_parser::TypeId>,
