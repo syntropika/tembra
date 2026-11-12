@@ -1040,6 +1040,62 @@ fn a_contribution_in_a_sub_module_names_the_root_through_super() {
     );
 }
 
+const ACCESS_WIT: &str = "package example:access@1.0.0;
+interface grants {
+  flags permissions { read, write }
+  record grant { who: string, permissions: permissions }
+  variant change { granted(grant), revoked(string) }
+  record plain { who: string, count: option<u32> }
+  resource token;
+  record held { tokens: list<option<token>> }
+  give: func(grant: grant) -> u32;
+  apply: func(change: change) -> u32;
+  hold: func(held: held, plain: plain) -> u32;
+}
+";
+
+/// A state makes the bindings derive serde's traits on the generated types; a record or a variant
+/// holding a flags type or a resource handle, anywhere, has no serde implementation to derive, so
+/// the derives leave it out, whatever package it comes from.
+#[test]
+fn the_state_derives_leave_out_the_types_that_cannot_carry_them() {
+    let dir = consumed("access", ACCESS_WIT);
+    let imports = Options {
+        imports: vec!["example:access/grants@1.0.0".into()],
+        ..options("example:keeper@1.0.0", Some(&dir))
+    };
+    let module = orb_with(
+        imports,
+        "mod vault {
+            #[state]
+            pub struct Count { pub total: u32 }
+            #[service]
+            pub struct Keeper;
+            impl Keeper { pub fn total() -> u32 { Count::read().total } }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let generated = tokens(&module);
+    assert!(
+        generated.contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize] , additional_derives_ignore : [\"change\" , \"grant\" , \"held\"] ,"),
+        "{generated}"
+    );
+    // Without a state the bindings derive nothing more, and nothing is left out.
+    let stateless = orb_with(
+        Options {
+            imports: vec!["example:access/grants@1.0.0".into()],
+            ..options("example:keeper@1.0.0", Some(&dir))
+        },
+        &ledger("#[service]"),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        !tokens(&stateless).contains("additional_derives"),
+        "{}",
+        tokens(&stateless)
+    );
+}
+
 /// The prelude names the generated code could mean; it spells each by its path instead.
 const PRELUDE: &[&str] = &[
     "Option", "Some", "None", "Result", "Ok", "Err", "Default", "From", "Into", "FnOnce", "Sync",

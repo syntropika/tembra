@@ -490,6 +490,77 @@ fn owned_resource(resolve: &Resolve, mut ty: wit_parser::Type) -> Option<String>
     }
 }
 
+/// The records and variants of the bindings that cannot derive `serde`'s traits: those holding a
+/// flags type, a resource handle, a stream or a future, directly or through other types, which
+/// the bindings give no `serde` implementation. They are named as the `additional_derives_ignore`
+/// option of `wit-bindgen` compares them, by the kebab-case form of their Rust name. `inline` is
+/// the WIT the bindings read, `dir` the consumed packages it refers to; a WIT the bindings would
+/// refuse yields no names, and the bindings report it.
+pub(crate) fn unserializable(dir: Option<&Path>, inline: &str) -> Vec<String> {
+    let mut resolve = Resolve::default();
+    if let Some(dir) = dir
+        && resolve.push_dir(dir).is_err()
+    {
+        return Vec::new();
+    }
+    if resolve.push_str("orb.wit", inline).is_err() {
+        return Vec::new();
+    }
+    let names: BTreeSet<String> = resolve
+        .types
+        .iter()
+        .filter(|(_, definition)| {
+            matches!(
+                definition.kind,
+                TypeDefKind::Record(_) | TypeDefKind::Variant(_)
+            )
+        })
+        .filter(|(id, _)| {
+            holds_unserializable(&resolve, wit_parser::Type::Id(*id), &mut BTreeSet::new())
+        })
+        .filter_map(|(_, definition)| definition.name.as_deref())
+        .map(|name| name.to_upper_camel_case().to_kebab_case())
+        .collect();
+    names.into_iter().collect()
+}
+
+/// Whether a WIT type holds, anywhere, a value the bindings give no `serde` implementation: a
+/// flags type, a resource handle, a stream, a future, an error context, or an array longer than
+/// `serde`'s.
+fn holds_unserializable(
+    resolve: &Resolve,
+    ty: wit_parser::Type,
+    seen: &mut BTreeSet<wit_parser::TypeId>,
+) -> bool {
+    let id = match ty {
+        wit_parser::Type::Id(id) => id,
+        wit_parser::Type::ErrorContext => return true,
+        _ => return false,
+    };
+    // A type already looked at answered no, or the walk would have stopped there.
+    if !seen.insert(id) {
+        return false;
+    }
+    let mut holds = |ty: wit_parser::Type| holds_unserializable(resolve, ty, seen);
+    match &resolve.types[id].kind {
+        TypeDefKind::Flags(_)
+        | TypeDefKind::Handle(_)
+        | TypeDefKind::Resource
+        | TypeDefKind::Future(_)
+        | TypeDefKind::Stream(_) => true,
+        TypeDefKind::Record(record) => record.fields.iter().any(|field| holds(field.ty)),
+        TypeDefKind::Variant(variant) => variant.cases.iter().filter_map(|case| case.ty).any(holds),
+        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().any(holds),
+        TypeDefKind::Option(inner) | TypeDefKind::List(inner) | TypeDefKind::Type(inner) => {
+            holds(*inner)
+        }
+        TypeDefKind::FixedLengthList(inner, length) => *length > 32 || holds(*inner),
+        TypeDefKind::Map(key, value) => holds(*key) || holds(*value),
+        TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).any(holds),
+        TypeDefKind::Enum(_) | TypeDefKind::Unknown => false,
+    }
+}
+
 /// The callback of every hook: the single function of its interface in the consumed packages.
 pub(crate) fn callbacks<'a>(
     dir: &Path,

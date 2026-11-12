@@ -1646,9 +1646,18 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         quote! { path: #dir, }
     });
     // A state's record that a method mentions is a generated type, which the kernel's JSON needs
-    // to serialize; the derives reach every generated type.
-    let derives = (!states.is_empty())
-        .then(|| quote! { additional_derives: [::serde::Serialize, ::serde::Deserialize], });
+    // to serialize; the derives reach every generated type that can carry them. A record or a
+    // variant holding a flags type or a resource handle cannot: the bindings give those no serde
+    // implementation, so the derives leave it alone.
+    let derives = (!states.is_empty()).then(|| {
+        let ignored = wit::unserializable(wit_dir.as_deref(), &inline.value());
+        let ignore =
+            (!ignored.is_empty()).then(|| quote! { additional_derives_ignore: [#(#ignored),*], });
+        quote! {
+            additional_derives: [::serde::Serialize, ::serde::Deserialize],
+            #ignore
+        }
+    });
     let generate = quote! {
         ::wit_bindgen::generate!({
             #path

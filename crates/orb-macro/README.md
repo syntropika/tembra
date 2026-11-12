@@ -487,7 +487,9 @@ The macro rewrites the module with:
    builds with std, so `cargo check` and rust-analyzer work without a Wasm target;
 4. `wit_bindgen::generate!({ inline: WIT, world, generate_all })`, the official macro with the WIT
    as a string, plus `path` when the Orb consumes other packages and, with a state, the kernel's
-   `tembra:guest` package nested in the inline text and `serde` derives on the generated types;
+   `tembra:guest` package nested in the inline text and `serde` derives on the generated types,
+   except the records and variants holding a flags type or a resource handle, which have no
+   `serde` implementation to derive;
 5. `pub use exports::...::{Stats}`: the author's record and enum definitions are replaced by the
    generated types with the same names and public fields, so the author's functions and the
    generated traits share one type; `pub use exports::...::guard;` for each contributed hook and each
