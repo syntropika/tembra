@@ -902,8 +902,8 @@ fn sub_modules_group_a_service_with_its_state() {
         "impl passing :: Balance {",
         "< pinned :: Balance as :: core :: default :: Default > :: default ()",
         "< passing :: Balance as :: core :: default :: Default > :: default ()",
-        "\"example:ledger/pinned@1.0.0\" => Some (",
-        "\"example:ledger/passing@1.0.0\" => Some (",
+        "\"example:ledger/pinned@1.0.0\" => :: core :: option :: Option :: Some (",
+        "\"example:ledger/passing@1.0.0\" => :: core :: option :: Option :: Some (",
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
@@ -991,4 +991,107 @@ fn a_contribution_in_a_sub_module_names_the_root_through_super() {
         generated.contains("pub use exports :: example :: admission :: guard ;"),
         "{generated}"
     );
+}
+
+/// The prelude names the generated code could mean; it spells each by its path instead.
+const PRELUDE: &[&str] = &[
+    "Option", "Some", "None", "Result", "Ok", "Err", "Default", "From", "Into", "FnOnce", "Sync",
+    "String", "Vec", "Box", "Clone", "Iterator", "format", "vec", "panic",
+];
+
+/// The prelude names a token stream uses bare, not after `::`, outside the macro's own hidden
+/// modules, whose names resolve in a module of their own.
+fn bare_prelude_names(stream: proc_macro2::TokenStream, found: &mut Vec<String>) {
+    use proc_macro2::TokenTree;
+    let mut previous: Option<TokenTree> = None;
+    let mut hidden = false;
+    for tree in stream {
+        match &tree {
+            TokenTree::Group(group) if !hidden => bare_prelude_names(group.stream(), found),
+            TokenTree::Group(_) => hidden = false,
+            TokenTree::Ident(ident) => {
+                let name = ident.to_string();
+                let after_mod =
+                    matches!(&previous, Some(TokenTree::Ident(keyword)) if keyword == "mod");
+                hidden = after_mod && name.starts_with("__tembra_");
+                let qualified =
+                    matches!(&previous, Some(TokenTree::Punct(punct)) if punct.as_char() == ':');
+                if !qualified && PRELUDE.contains(&name.as_str()) {
+                    found.push(name);
+                }
+            }
+            _ => {}
+        }
+        previous = Some(tree);
+    }
+}
+
+const SHAPES_WIT: &str = "package example:ledger@1.0.0;
+interface book {
+  find: func(label: string) -> option<s64>;
+  check: func(amount: s64) -> result<s64, string>;
+}
+";
+
+/// The generated code names the prelude's items by their paths, so a module's own `Result`,
+/// `Option` or `Ok` cannot change what it means: the state's accessors and callbacks, the root
+/// resources, a derived hook's conversions and an implemented interface's bridge.
+#[test]
+fn generated_code_names_prelude_items_by_their_paths() {
+    let dir = consumed("hygiene", SHAPES_WIT);
+    let module = orb_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        "mod keeper {
+            #[state]
+            pub struct Count { pub total: i64 }
+            impl Count {
+                #[validate]
+                fn check(&self) -> core::result::Result<(), alloc::string::String> {
+                    core::result::Result::Ok(())
+                }
+            }
+            #[resource]
+            pub struct Counts { pub seen: u32 }
+            impl Counts {
+                #[open]
+                fn open() -> Self { Counts { seen: 0 } }
+                #[close]
+                fn close(self) {}
+            }
+            #[hook(composition = bail, input = Admission)]
+            pub struct Guard;
+            pub struct Admission { pub value: core::result::Result<u32, alloc::string::String> }
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper {
+                pub fn find(label: alloc::string::String) -> core::option::Option<i64> {
+                    core::option::Option::None
+                }
+                pub fn check(amount: i64) -> core::result::Result<i64, alloc::string::String> {
+                    core::result::Result::Ok(amount)
+                }
+            }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let mut found = Vec::new();
+    bare_prelude_names(
+        quote::quote! { fn f() -> Result<(), ()> { Ok(()) } },
+        &mut found,
+    );
+    assert_eq!(found, ["Result", "Ok"]);
+    found.clear();
+    bare_prelude_names(quote::quote!(#module), &mut found);
+    assert!(found.is_empty(), "{found:?}\n{}", tokens(&module));
+    let generated = tokens(&module);
+    for expected in [
+        "fn find (label : __tembra_alloc :: string :: String) -> :: core :: option :: Option < i64 >",
+        "fn check (amount : i64) -> :: core :: result :: Result < i64 , __tembra_alloc :: string :: String >",
+        ":: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok (:: core :: convert :: Into :: into (item))",
+        "-> :: core :: option :: Option < exports :: tembra :: guest :: state_init :: Declaration >",
+        "pub fn update (change : impl :: core :: ops :: FnOnce (& mut Self) ,) -> :: core :: result :: Result < Self , __tembra_state :: String >",
+        "if let :: core :: option :: Option :: Some (value) = __TEMBRA_RESOURCE_COUNTS . close ()",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
 }

@@ -2645,7 +2645,12 @@ fn convert(ty: &Type, value: proc_macro2::TokenStream) -> proc_macro2::TokenStre
                 ("Result", [ok, err]) => {
                     let ok = convert(ok, quote! { item });
                     let err = convert(err, quote! { item });
-                    quote! { match #value { Ok(item) => Ok(#ok), Err(item) => Err(#err) } }
+                    quote! {
+                        match #value {
+                            ::core::result::Result::Ok(item) => ::core::result::Result::Ok(#ok),
+                            ::core::result::Result::Err(item) => ::core::result::Result::Err(#err),
+                        }
+                    }
                 }
                 _ => quote! { ::core::convert::Into::into(#value) },
             }
@@ -2780,7 +2785,7 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
         let path = from_root(&modules[state.scope], &state.ident);
         let version = state.version;
         quote! {
-            #identity => Some(exports::tembra::guest::state_init::Declaration {
+            #identity => ::core::option::Option::Some(exports::tembra::guest::state_init::Declaration {
                 initial: __tembra_state::to_json(&<#path as ::core::default::Default>::default()),
                 version: #version,
                 validated: true,
@@ -2821,12 +2826,12 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
             quote! {
                 #[doc = #doc]
                 pub fn update(
-                    change: impl FnOnce(&mut Self),
-                ) -> Result<Self, __tembra_state::String> {
+                    change: impl ::core::ops::FnOnce(&mut Self),
+                ) -> ::core::result::Result<Self, __tembra_state::String> {
                     let mut value = Self::read();
                     change(&mut value);
                     value.#validator()?;
-                    Ok(__tembra_state::update(&value))
+                    ::core::result::Result::Ok(__tembra_state::update(&value))
                 }
             }
         } else {
@@ -2835,7 +2840,7 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
             );
             quote! {
                 #[doc = #doc]
-                pub fn update(change: impl FnOnce(&mut Self)) -> Self {
+                pub fn update(change: impl ::core::ops::FnOnce(&mut Self)) -> Self {
                     let mut value = Self::read();
                     change(&mut value);
                     __tembra_state::update(&value)
@@ -2863,19 +2868,19 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
         impl exports::tembra::guest::state_init::Guest for __TembraExports {
             fn declare(
                 service: __tembra_state::String,
-            ) -> Option<exports::tembra::guest::state_init::Declaration> {
+            ) -> ::core::option::Option<exports::tembra::guest::state_init::Declaration> {
                 match service.as_str() {
                     #(#declarations)*
-                    _ => None,
+                    _ => ::core::option::Option::None,
                 }
             }
             fn validate(
                 service: __tembra_state::String,
                 value: __tembra_state::String,
-            ) -> Result<(), __tembra_state::String> {
+            ) -> ::core::result::Result<(), __tembra_state::String> {
                 match service.as_str() {
                     #(#validators)*
-                    _ => Ok(()),
+                    _ => ::core::result::Result::Ok(()),
                 }
             }
         }
@@ -2948,7 +2953,7 @@ fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2:
         let version = resource.version;
         quote! {
             exports::tembra::guest::resources_init::Declaration {
-                name: __tembra_resource::String::from(#name),
+                name: ::core::convert::From::from(#name),
                 version: #version,
             }
         }
@@ -2968,7 +2973,13 @@ fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2:
         let slot = slot(resource);
         match &resource.close {
             Some(close) => {
-                quote! { #name => { if let Some(value) = #slot.close() { value.#close(); } } }
+                quote! {
+                    #name => {
+                        if let ::core::option::Option::Some(value) = #slot.close() {
+                            value.#close();
+                        }
+                    }
+                }
             }
             None => quote! { #name => { #slot.close(); } },
         }
@@ -2984,7 +2995,7 @@ fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2:
             static #slot: __tembra_resource::Slot<#path> = __tembra_resource::Slot::new();
             impl #path {
                 #[doc = #doc]
-                pub fn with<R>(use_: impl FnOnce(&mut Self) -> R) -> R {
+                pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
                     let _handle = self::tembra::guest::resources::read(#name);
                     #slot.with(use_)
                 }
@@ -2996,7 +3007,7 @@ fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2:
         // each of them in its own order through these callbacks.
         impl exports::tembra::guest::resources_init::Guest for __TembraExports {
             fn declare() -> __tembra_resource::Vec<exports::tembra::guest::resources_init::Declaration> {
-                __tembra_resource::Vec::from([#(#declarations),*])
+                ::core::convert::From::from([#(#declarations),*])
             }
             fn open(name: __tembra_resource::String) -> u32 {
                 match name.as_str() {
@@ -3019,31 +3030,31 @@ fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2:
             pub use alloc::{string::String, vec::Vec};
 
             /// One resource's value, absent until the kernel opens it and after it closes it.
-            pub struct Slot<T>(::core::cell::RefCell<Option<T>>);
+            pub struct Slot<T>(::core::cell::RefCell<::core::option::Option<T>>);
 
             // SAFETY: a component runs one export at a time on one thread, so the slot is never
             // reached from two threads; the RefCell refuses a reentrant use at run time.
-            unsafe impl<T> Sync for Slot<T> {}
+            unsafe impl<T> ::core::marker::Sync for Slot<T> {}
 
             impl<T> Slot<T> {
                 pub const fn new() -> Self {
-                    Self(::core::cell::RefCell::new(None))
+                    Self(::core::cell::RefCell::new(::core::option::Option::None))
                 }
 
                 pub fn open(&self, value: T) {
-                    *self.0.borrow_mut() = Some(value);
+                    *self.0.borrow_mut() = ::core::option::Option::Some(value);
                 }
 
-                pub fn close(&self) -> Option<T> {
+                pub fn close(&self) -> ::core::option::Option<T> {
                     self.0.borrow_mut().take()
                 }
 
-                pub fn with<R>(&self, use_: impl FnOnce(&mut T) -> R) -> R {
+                pub fn with<R>(&self, use_: impl ::core::ops::FnOnce(&mut T) -> R) -> R {
                     use_(self.0.borrow_mut().as_mut().expect("the resource is not open"))
                 }
             }
 
-            impl<T> Default for Slot<T> {
+            impl<T> ::core::default::Default for Slot<T> {
                 fn default() -> Self {
                     Self::new()
                 }

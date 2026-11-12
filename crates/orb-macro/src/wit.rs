@@ -591,7 +591,10 @@ fn rust_type(resolve: &Resolve, ty: wit_parser::Type, module: &str) -> syn::Resu
                     ));
                 }
                 TypeDefKind::Option(inner) => {
-                    format!("Option<{}>", rust_type(resolve, *inner, module)?)
+                    format!(
+                        "::core::option::Option<{}>",
+                        rust_type(resolve, *inner, module)?
+                    )
                 }
                 TypeDefKind::List(inner) => format!(
                     "__tembra_alloc::vec::Vec<{}>",
@@ -602,7 +605,11 @@ fn rust_type(resolve: &Resolve, ty: wit_parser::Type, module: &str) -> syn::Resu
                         Some(ty) => rust_type(resolve, ty, module),
                         None => Ok("()".to_owned()),
                     };
-                    format!("Result<{}, {}>", side(result.ok)?, side(result.err)?)
+                    format!(
+                        "::core::result::Result<{}, {}>",
+                        side(result.ok)?,
+                        side(result.err)?
+                    )
                 }
                 TypeDefKind::Tuple(tuple) => {
                     let types = tuple
