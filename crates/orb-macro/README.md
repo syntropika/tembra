@@ -611,7 +611,7 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) among its de
 - WASI interfaces are not expressed. An Orb consumes another Orb's WIT by importing an
   interface, implementing one or contributing to a hook; selecting another object by key, as a
   TypeScript Orb does with `context.get`, is not expressed.
-- A hook declared from a consumed package keeps that package's types: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them; a consumed hook whose input is an option, a result or a tuple over a string or a list, which the bindings borrow piece by piece, has no `run` that compiles.
+- A hook declared from a consumed package keeps that package's types: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
 - A service's functions are associated functions without `self`; only the methods of a
   `#[wit_resource]` struct take `&self`, never `&mut self`. Besides a service's state, a
   resource's fields and the root's resources, data lives in `static`s, as in the compiled

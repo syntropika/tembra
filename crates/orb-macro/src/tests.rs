@@ -2110,6 +2110,71 @@ fn run_borrows_an_input_that_holds_a_string_or_a_list() {
     );
 }
 
+/// An input that is an option, a result or a tuple over strings, lists or records holding one is
+/// lent piece by piece, as the bindings borrow it: a string as `&str`, a list as `&[T]`, a record
+/// as `&T`, and the other parts copied; an input holding no string or list crosses by value.
+#[test]
+fn run_lends_the_parts_of_an_option_a_result_or_a_tuple() {
+    let run = |name: &str, input: &str| {
+        let dir = consumed(
+            name,
+            &format!(
+                "package example:admission@1.0.0;
+                interface guard {{
+                  record note {{ text: string }}
+                  apply: func(input: {input}) -> {input};
+                }}"
+            ),
+        );
+        let module = orb_with(
+            options("example:gate@1.0.0", Some(&dir)),
+            "mod gate {
+                #[hook(\"example:admission/guard@1.0.0\", composition = waterfall)]
+                pub struct Guard;
+                #[service]
+                pub struct Admissions;
+                impl Admissions { pub fn count() -> u32 { 0 } }
+            }",
+        )
+        .unwrap_or_else(|error| panic!("{input}: {error}"));
+        let generated = tokens(&module);
+        let call = "self :: example :: admission :: guard :: apply (";
+        let start = generated.find(call).expect("the call") + call.len();
+        generated[start..].to_owned()
+    };
+    let some = ":: core :: option :: Option :: Some";
+    let none = ":: core :: option :: Option :: None";
+    let ok = ":: core :: result :: Result :: Ok";
+    let err = ":: core :: result :: Result :: Err";
+    for (name, input, expected) in [
+        (
+            "lent-option",
+            "option<string>",
+            format!(
+                "match & input {{ {some} (item) => {some} (item . as_str ()) , {none} => {none} , }})"
+            ),
+        ),
+        (
+            "lent-result",
+            "result<list<u8>, string>",
+            format!(
+                "match & input {{ {ok} (item) => {ok} (item . as_slice ()) , {err} (item) => {err} (item . as_str ()) , }})"
+            ),
+        ),
+        (
+            "lent-tuple",
+            "tuple<option<note>, u64, result<_, string>>",
+            format!(
+                "{{ let (item0 , item1 , item2 ,) = & input ; (match item0 {{ {some} (item) => {some} (item) , {none} => {none} , }} , :: core :: clone :: Clone :: clone (item1) , match item2 {{ {ok} (item) => {ok} (:: core :: clone :: Clone :: clone (item)) , {err} (item) => {err} (item . as_str ()) , }} ,) }})"
+            ),
+        ),
+        ("lent-plain", "option<u32>", "input)".to_owned()),
+    ] {
+        let lent = run(name, input);
+        assert!(lent.starts_with(&expected), "{input}: {expected}\n{lent}");
+    }
+}
+
 /// A waterfall callback returns its input type, through aliases and anonymous types alike, as
 /// the kernel compares them: `type out = admission` returns an admission, `list<u32>` is one
 /// type wherever it is written; another record is not the input type.

@@ -3248,11 +3248,12 @@ fn declaration_code(
     }
     let callback = &callbacks[&declaration.hook];
     let name = rust_ident(&callback.name);
-    // The import takes a string, a list or a type holding one by reference.
-    let argument = if callback.borrowed {
-        quote! { &input }
-    } else {
-        quote! { input }
+    // The import takes a string, a list or a type holding one by reference, and an option, a
+    // result or a tuple around them piece by piece.
+    let argument = match &callback.passed {
+        wit::Passed::Owned => quote! { input },
+        wit::Passed::Str | wit::Passed::List | wit::Passed::Named => quote! { &input },
+        parts => lent(parts, quote! { &input }),
     };
     let export_input: Type = syn::parse_str(&rooted(&callback.input.export, depth))?;
     let import_input: Type = syn::parse_str(&rooted(&callback.input.import, depth))?;
@@ -3290,6 +3291,48 @@ fn declaration_code(
             }
         }
     })
+}
+
+/// An expression lending the parts of `value`, a reference to a hook's input on the import side,
+/// the way the import takes them: a string as `&str`, a list as `&[T]`, another named type holding
+/// one as `&T`, the options, results and tuples around them rebuilt, and every other part copied,
+/// a scalar or a type holding no string, list or handle.
+fn lent(passed: &wit::Passed, value: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    match passed {
+        wit::Passed::Owned => quote! { ::core::clone::Clone::clone(#value) },
+        wit::Passed::Str => quote! { #value.as_str() },
+        wit::Passed::List => quote! { #value.as_slice() },
+        wit::Passed::Named => value,
+        wit::Passed::Option(inner) => {
+            let inner = lent(inner, quote! { item });
+            quote! {
+                match #value {
+                    ::core::option::Option::Some(item) => ::core::option::Option::Some(#inner),
+                    ::core::option::Option::None => ::core::option::Option::None,
+                }
+            }
+        }
+        wit::Passed::Result(ok, err) => {
+            let ok = lent(ok, quote! { item });
+            let err = lent(err, quote! { item });
+            quote! {
+                match #value {
+                    ::core::result::Result::Ok(item) => ::core::result::Result::Ok(#ok),
+                    ::core::result::Result::Err(item) => ::core::result::Result::Err(#err),
+                }
+            }
+        }
+        wit::Passed::Tuple(items) => {
+            let names: Vec<Ident> = (0..items.len())
+                .map(|index| format_ident!("item{index}"))
+                .collect();
+            let parts = items
+                .iter()
+                .zip(&names)
+                .map(|(passed, name)| lent(passed, quote! { #name }));
+            quote! { { let (#(#names,)*) = #value; (#(#parts,)*) } }
+        }
+    }
 }
 
 /// The code of a hook derived from `input = Type`: the export the contract requires, which traps

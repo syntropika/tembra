@@ -825,8 +825,8 @@ pub(crate) struct Callback {
     pub bail: bool,
     pub input: Spelled,
     pub result: Option<Spelled>,
-    /// The import takes the input by reference, as the bindings bind it: `run` passes `&input`.
-    pub borrowed: bool,
+    /// How the import takes the input, as the bindings bind it: `run` lends it so.
+    pub passed: Passed,
 }
 
 /// A WIT type as the generated bindings spell it in the hook's import module and in its export
@@ -1122,7 +1122,7 @@ pub(crate) fn callbacks<'a>(
                     bail: function.result.is_some_and(|ty| optional(&resolve, ty)),
                     input: spell(param.ty)?,
                     result: function.result.map(spell).transpose()?,
-                    borrowed: borrowed(&resolve, param.ty),
+                    passed: passed(&resolve, param.ty),
                 },
             ))
         })
@@ -1216,20 +1216,51 @@ fn holds(resolve: &Resolve, ty: wit_parser::Type) -> (bool, bool) {
     }
 }
 
-/// Whether an imported function takes a parameter of this type by reference, as `wit-bindgen`
-/// binds it by default: a string, a list, or a named type that holds a string or a list and no
-/// owned handle. An anonymous option, result or tuple borrows what it holds one by one, which
-/// `run` does not spell: it passes such an input as it is.
-fn borrowed(resolve: &Resolve, ty: wit_parser::Type) -> bool {
-    let wit_parser::Type::Id(id) = ty else {
-        return ty == wit_parser::Type::String;
-    };
+/// How an imported function takes a part of its parameter, as `wit-bindgen` binds it by default:
+/// a parameter holding a string or a list and no owned handle is borrowed at its top layer, which
+/// reaches through the anonymous options, results and tuples to the strings, lists and named
+/// types they hold; everything else is taken by value.
+pub(crate) enum Passed {
+    /// By value, with everything the part holds.
+    Owned,
+    /// A string, as `&str`.
+    Str,
+    /// A list, as `&[T]`.
+    List,
+    /// Any other named type holding a string or a list, as `&T`.
+    Named,
+    /// An option whose value is taken so.
+    Option(Box<Passed>),
+    /// A result whose sides are taken so; a side without a value is `Owned`.
+    Result(Box<Passed>, Box<Passed>),
+    /// A tuple whose elements are taken so.
+    Tuple(Vec<Passed>),
+}
+
+/// How an imported function takes a parameter of this type.
+fn passed(resolve: &Resolve, ty: wit_parser::Type) -> Passed {
     let (list, own) = holds(resolve, ty);
+    if own || !list {
+        return Passed::Owned;
+    }
+    let named = matches!(ty, wit_parser::Type::Id(id) if resolve.types[id].name.is_some());
+    // A string, or an alias of one.
+    let wit_parser::Type::Id(id) = dealias(resolve, ty) else {
+        return Passed::Str;
+    };
     let definition = &resolve.types[id];
-    match (&definition.name, &definition.kind) {
-        (None, TypeDefKind::List(_)) => !own,
-        (Some(_), _) => list && !own,
-        _ => false,
+    let side =
+        |ty: Option<wit_parser::Type>| Box::new(ty.map_or(Passed::Owned, |ty| passed(resolve, ty)));
+    match &definition.kind {
+        TypeDefKind::List(_) => Passed::List,
+        _ if named || definition.name.is_some() => Passed::Named,
+        TypeDefKind::Option(inner) => Passed::Option(Box::new(passed(resolve, *inner))),
+        TypeDefKind::Result(result) => Passed::Result(side(result.ok), side(result.err)),
+        TypeDefKind::Tuple(tuple) => {
+            Passed::Tuple(tuple.types.iter().map(|ty| passed(resolve, *ty)).collect())
+        }
+        TypeDefKind::Map(..) => Passed::Named,
+        _ => Passed::Owned,
     }
 }
 
