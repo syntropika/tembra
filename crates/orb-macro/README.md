@@ -56,7 +56,7 @@ mod greeter {
 | `import = "ns:name/interface@version"` on the attribute                     | `import` of that interface of a consumed package, bound to a provider at installation                                                                              |
 | a struct with `#[wit_resource]` and an `impl` block of `pub fn`             | a `resource` of its service's interface: the `#[constructor]` function its constructor, the `&self` functions its methods                                          |
 | each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                                                                        |
-| a struct with named fields, when a service method or a state uses it        | a `record`                                                                                                                                                         |
+| a struct with named fields, when a service method uses it                   | a `record`                                                                                                                                                         |
 | an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`                                                                                                       |
 | `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                                                                       |
 | a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`        | `import` and `export` of that hook interface in the world: a contribution                                                                                          |
@@ -69,10 +69,12 @@ mod greeter {
 | an inline `mod`                                                             | nothing of its own: its items are read as the Orb's, grouped with what belongs to them                                                                             |
 | `///` comments and `/** */` blocks                                          | `///` comments in the WIT, one per line                                                                                                                            |
 
-Nothing is exported by accident. A service is a unit struct marked `#[service]`; the `pub fn` of
-its `impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT
-only when a service method or a state uses it, directly or through the fields of another exported
-type; the other types of the module, and unit structs without the marker, remain ordinary Rust. A
+Nothing is exported by accident. A service is a unit struct marked `#[service]`; the `pub fn` of its
+`impl` blocks are its methods, private functions stay private. A struct or enum enters the WIT only
+when a service method, a WIT resource's function or a hook's input uses it, directly or through the
+fields of another type that enters; a state alone does not make a type enter. The other types of the
+module, and unit structs without the marker, remain ordinary Rust; a state that stays out of the
+WIT, and every type of the module its fields reach that stays out too, get `serde`'s derives. A
 method that names a type the module does not declare is a compile error, and so is a service with
 the name of the module, because WIT refuses a world and an interface of one name. So is a method
 named `then`, `release`, `state`, `ready`, `status` or `opaque`: every reference to a service object
@@ -236,6 +238,10 @@ impl Default for Count {
     }
 }
 ```
+
+The macro's `Default` gives each field its type's `Default`. A field whose type has none, an enum
+of the module for instance, is a compile error on that field: implement `Default` for the state,
+as above, or for the field's type.
 
 Behind them, the world imports the kernel's `tembra:guest/state` interface and exports
 `tembra:guest/state-init`: when the kernel creates a service object it asks the component for the

@@ -837,6 +837,50 @@ fn a_state_enters_the_wit_only_when_a_method_mentions_it() {
     assert!(!generated.contains("pub use exports :: example :: ledger :: pinned :: { Balance }"));
 }
 
+/// A state that stays out of the WIT is serialized by serde, and so is every type of the module
+/// its fields reach, directly or through other types, that stays out too: each gets the serde
+/// derives its author did not write. A type a method mentions enters the WIT, generated with the
+/// derives; a type no state reaches stays as written.
+#[test]
+fn the_types_a_state_out_of_the_wit_reaches_get_serde_derives() {
+    let module = expanded(
+        "example:ledger@1.0.0",
+        "mod ledger {
+            #[state]
+            pub struct Balance { pub total: i64, pub phase: Phase, pub notes: Vec<Note>, pub shown: Shown }
+            impl Default for Balance { fn default() -> Self { todo!() } }
+            pub enum Phase { Open, Closed }
+            pub struct Note { pub text: String, pub mood: Option<Mood> }
+            #[derive(serde::Serialize)]
+            pub enum Mood { Calm, Loud }
+            pub struct Shown { pub at: u64 }
+            pub struct Other { pub n: u32 }
+            #[service]
+            pub struct Pinned;
+            impl Pinned {
+                pub fn add(amount: i64) -> i64 { amount }
+                pub fn shown() -> Shown { todo!() }
+            }
+        }",
+    );
+    let derived = "# [derive (:: serde :: Serialize , :: serde :: Deserialize)]";
+    let generated = tokens(&module);
+    for expected in [
+        format!("{derived} pub struct Balance"),
+        format!("{derived} pub enum Phase"),
+        format!("{derived} pub struct Note"),
+        "# [derive (serde :: Serialize)] # [derive (:: serde :: Deserialize)] pub enum Mood".into(),
+        "pub use exports :: example :: ledger :: pinned :: { Shown } ;".into(),
+        "pub struct Other { pub n : u32 }".into(),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+    assert!(
+        !generated.contains(&format!("{derived} pub struct Other")),
+        "{generated}"
+    );
+}
+
 /// A state starts from its `Default`: the macro implements it field by field unless the author
 /// gives it, by an `impl Default` anywhere in the Orb module or by a derive on a state the macro
 /// keeps, out of the WIT; the serde derives the author already wrote are not added again.

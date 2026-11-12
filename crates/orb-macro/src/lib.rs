@@ -7,8 +7,10 @@
 //! kernel-managed state of a service's objects. A struct with `#[resource]` and a `pub fn open()`
 //! is a resource of the Orb's root, opened by the kernel at activation and usable by every
 //! method and hook callback. Structs with named fields and enums become `record`s, `enum`s and
-//! `variant`s only when a service method or a state uses them, directly or through another type;
-//! the rest of the module stays ordinary Rust.
+//! `variant`s only when a service method, a WIT resource's function or a hook's input uses them,
+//! directly or through another type; a state alone does not. The rest of the module stays
+//! ordinary Rust: a state that stays out of the WIT, and the module types its fields reach, get
+//! serde's derives.
 //!
 //! The macro derives the WIT contract from those items and generates what a WIT-first crate
 //! writes by hand: the `wit_bindgen::generate!` invocation with the WIT inline, the `Guest`
@@ -212,7 +214,8 @@ impl Composition {
 /// of one service.
 struct State {
     ident: Ident,
-    fields: Vec<Ident>,
+    /// The named fields, each with the span of its type, where a missing `Default` is reported.
+    fields: Vec<(Ident, Span)>,
     /// The owning service, as named by `service = ...` or resolved to the module's only one.
     service: Option<Ident>,
     version: u32,
@@ -1146,9 +1149,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     }
 
     // Only the types a service method, a resource or a hook uses, directly or through another
-    // type, enter the WIT; the others go back to their modules as ordinary Rust, a state with
-    // the serde derives the author did not write.
-    let mut unreached: Vec<(usize, Item)> = Vec::new();
+    // type, enter the WIT; the others go back to their modules as ordinary Rust. A state alone
+    // makes no type enter: a state that stays out of the WIT is serde's to serialize, and so is
+    // every type of the module its fields reach that stays out too, so each of them gets the
+    // serde derives the author did not write. The types that enter the WIT are generated with
+    // the derives already.
+    let mut unreached: Vec<(Item, Shape)> = Vec::new();
     let shapes = reachable(
         candidates,
         &services,
@@ -1156,27 +1162,37 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &hook_inputs,
         &mut unreached,
     )?;
-    for (scope, mut item) in unreached {
-        if let Item::Struct(item) = &mut item
+    let serialized = serialized(&unreached, &shapes, &states);
+    for (index, (mut item, shape)) in unreached.into_iter().enumerate() {
+        if let Item::Struct(item) = &item
             && let Some(state) = states
                 .iter_mut()
-                .find(|state| state.ident == item.ident && state.scope == scope)
+                .find(|state| state.ident == item.ident && state.scope == shape.scope)
         {
             // The author's struct stays, with its derives: a derived `Default` is the state's.
             state.authored_default |= state.derives_default;
+        }
+        let attrs = match &mut item {
+            Item::Struct(item) => Some(&mut item.attrs),
+            Item::Enum(item) => Some(&mut item.attrs),
+            _ => None,
+        };
+        if let Some(attrs) = attrs
+            && serialized.contains(&index)
+        {
             let missing: Vec<proc_macro2::TokenStream> = [
                 ("Serialize", quote! { ::serde::Serialize }),
                 ("Deserialize", quote! { ::serde::Deserialize }),
             ]
             .into_iter()
-            .filter(|(name, _)| !derives(&item.attrs, name))
+            .filter(|(name, _)| !derives(attrs, name))
             .map(|(_, path)| path)
             .collect();
             if !missing.is_empty() {
-                item.attrs.push(syn::parse_quote!(#[derive(#(#missing),*)]));
+                attrs.push(syn::parse_quote!(#[derive(#(#missing),*)]));
             }
         }
-        tree.at(&modules[scope]).items.push(item);
+        tree.at(&modules[shape.scope]).items.push(item);
     }
     // A name that enters the WIT is one across the Orb module: the types, the services, the
     // derived hooks and the resources of every module share the package's names.
@@ -2287,15 +2303,16 @@ fn implemented_service(
 }
 
 /// Keep, in module order, the candidate types that a derived service's method, a resource's
-/// function or a derived hook's input reaches; the others go back to their modules as ordinary
-/// Rust. A name resolves to the type of the module naming it, else to the one type of that name
-/// in the Orb; a type the module does not declare is an error, and a resource is a type of its own.
+/// function or a derived hook's input reaches; the others, with their shapes, go back to their
+/// modules as ordinary Rust. A name resolves to the type of the module naming it, else to the one
+/// type of that name in the Orb; a type the module does not declare is an error, and a resource is
+/// a type of its own.
 fn reachable(
     candidates: Vec<(Item, Shape)>,
     services: &[Service],
     resources: &[WitResource],
     hook_inputs: &[(&Type, usize)],
-    unreached: &mut Vec<(usize, Item)>,
+    unreached: &mut Vec<(Item, Shape)>,
 ) -> syn::Result<Vec<Shape>> {
     let mut declared: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, (_, shape)) in candidates.iter().enumerate() {
@@ -2386,10 +2403,66 @@ fn reachable(
         if kept.contains(&index) {
             shapes.push(shape);
         } else {
-            unreached.push((shape.scope, item));
+            unreached.push((item, shape));
         }
     }
     Ok(shapes)
+}
+
+/// The types, among those that stay out of the WIT, that serde serializes: each state that stays
+/// out, and every type of the module its fields reach, directly or through other such types. A
+/// name resolves as `reachable` resolves it; one that resolves to a type entering the WIT stops
+/// there, because that type is generated with serde's derives, and one the module does not
+/// declare is the author's to serialize.
+fn serialized(unreached: &[(Item, Shape)], entered: &[Shape], states: &[State]) -> BTreeSet<usize> {
+    let mut serialized = BTreeSet::new();
+    let mut pending: Vec<(Ident, usize)> = Vec::new();
+    for (index, (item, shape)) in unreached.iter().enumerate() {
+        let state = matches!(item, Item::Struct(_))
+            && states
+                .iter()
+                .any(|state| state.ident == shape.ident && state.scope == shape.scope);
+        if state && serialized.insert(index) {
+            pending.extend(
+                shape
+                    .references
+                    .iter()
+                    .map(|name| (name.clone(), shape.scope)),
+            );
+        }
+    }
+    while let Some((name, scope)) = pending.pop() {
+        // Each type of that name, with its module and its place among the unreached, if there.
+        let named: Vec<(usize, Option<usize>)> = entered
+            .iter()
+            .filter(|shape| shape.ident == name)
+            .map(|shape| (shape.scope, None))
+            .chain(
+                unreached
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, shape))| shape.ident == name)
+                    .map(|(index, (_, shape))| (shape.scope, Some(index))),
+            )
+            .collect();
+        let resolved = match named.iter().find(|(module, _)| *module == scope) {
+            Some(found) => Some(found),
+            None if named.len() == 1 => named.first(),
+            None => None,
+        };
+        if let Some((_, Some(index))) = resolved
+            && serialized.insert(*index)
+        {
+            let shape = &unreached[*index].1;
+            pending.extend(
+                shape
+                    .references
+                    .iter()
+                    .map(|name| (name.clone(), shape.scope)),
+            );
+        }
+    }
+    serialized
 }
 
 /// Read one public function of a service: a plain name for each owned parameter, no receiver.
@@ -2928,7 +3001,7 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
         fields: fields
             .named
             .iter()
-            .filter_map(|field| field.ident.clone())
+            .filter_map(|field| Some((field.ident.clone()?, field.ty.span())))
             .collect(),
         service,
         version,
@@ -2982,7 +3055,12 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
     });
     let accessors = states.iter().map(|state| {
         let path = from_root(&modules[state.scope], &state.ident);
-        let fields = &state.fields;
+        // Each field takes its type's `Default`; a type without one is reported on the field,
+        // where the author either gives the type a `Default` or implements the state's.
+        let fields = state.fields.iter().map(|(field, span)| {
+            let value = quote::quote_spanned!(*span=> ::core::default::Default::default());
+            quote! { #field: #value }
+        });
         let service = state.service.as_ref().expect("resolved owner").to_string();
         let read_doc = format!(
             " The state of the `{service}` object running the current call, read from the kernel."
@@ -3019,7 +3097,7 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
             quote! {
                 impl ::core::default::Default for #path {
                     fn default() -> Self {
-                        Self { #(#fields: ::core::default::Default::default()),* }
+                        Self { #(#fields),* }
                     }
                 }
             }
