@@ -4,10 +4,13 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
-use tembra_contracts::{ComponentRoles, Contract, HookComposition, Lifetime, ServicePolicy, guest};
+use tembra_contracts::{
+    ComponentRoles, Contract, HTTP_HANDLER, HookComposition, Lifetime, ServicePolicy,
+    SystemCapability, guest, system_capability,
+};
 use wasmparser::{Parser, Payload};
 use wit_component::{DecodedWasm, WitPrinter};
-use wit_parser::{InterfaceId, PackageId, Resolve, WorldId, WorldItem, WorldKey};
+use wit_parser::{FunctionKind, InterfaceId, PackageId, Resolve, WorldId, WorldItem, WorldKey};
 
 /// The custom section in which the macro stores the WIT it derived from the module.
 const WIT_SECTION: &str = "tembra:wit";
@@ -377,9 +380,62 @@ fn world_key(resolve: &Resolve, key: &WorldKey, local: Option<PackageId>) -> Str
     }
 }
 
-/// Exports as services and methods, with the lifetime a service chose, hooks declared and
-/// contributed to, kernel-managed state and resources, and imports with the grant they will need
-/// at installation.
+/// Whether an export is the incoming HTTP handler, by the rule of `tembra_contracts`: the exact
+/// `wasi:http/handler@0.3.0` interface under its own name, with the standard `handle` function.
+/// The host's ingress calls it; it is never a service.
+fn is_ingress(resolve: &Resolve, key: &WorldKey) -> bool {
+    let WorldKey::Interface(id) = key else {
+        return false;
+    };
+    let functions: Vec<_> = resolve.interfaces[*id].functions.values().collect();
+    resolve.id_of(*id).as_deref() == Some(HTTP_HANDLER)
+        && matches!(
+            functions.as_slice(),
+            [function] if function.name == "handle"
+                && function.kind == FunctionKind::AsyncFreestanding
+                && function.params.len() == 1
+                && function.result.is_some()
+        )
+}
+
+/// What installation asks for an import of a component.
+#[derive(Debug, PartialEq, Eq)]
+enum Import {
+    /// An interface of another Orb, bound with `Install::requires`.
+    Orb,
+    /// A standard WASI interface: the grant it needs, or that Tembra does not support it.
+    Wasi(&'static str),
+    /// The HTTP types of an Orb that serves incoming HTTP without importing the HTTP client:
+    /// bound to the host's ingress, with no grant.
+    Ingress,
+}
+
+/// What installation asks for the import `id`, by the rules of `tembra_contracts`: a system
+/// grant only for the interfaces `system_capability` admits, and no grant for the HTTP types of
+/// a `handler_only` Orb, which planning binds to the ingress. With the HTTP client imported, the
+/// client's HTTP grant serves the types too.
+fn classify_import(id: &str, handler_only: bool) -> Import {
+    let kind = match id.split('/').next().unwrap_or_default() {
+        "wasi:filesystem" => "filesystem (FilesystemGrant)",
+        "wasi:sockets" => "network (NetworkGrant)",
+        "wasi:http" if handler_only && id.starts_with("wasi:http/types@") => {
+            return Import::Ingress;
+        }
+        "wasi:http" => "http (HttpGrant)",
+        package if package.starts_with("wasi:") => match system_capability(id) {
+            Some(SystemCapability::Clocks) => "system: clocks",
+            Some(SystemCapability::Random) => "system: random",
+            Some(SystemCapability::Cli) => "system: cli",
+            None => "NOT SUPPORTED by Tembra",
+        },
+        _ => return Import::Orb,
+    };
+    Import::Wasi(kind)
+}
+
+/// Exports as services and methods, with the lifetime a service chose, the incoming HTTP
+/// handler, hooks declared and contributed to, kernel-managed state and resources, and imports
+/// with the grant they will need at installation.
 pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &ComponentRoles) {
     let ComponentRoles {
         contributions,
@@ -389,11 +445,15 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
     } = roles;
     let world = &resolve.worlds[world];
     let (mut state, mut resources) = (false, false);
+    let ingress = world.exports.keys().any(|key| is_ingress(resolve, key));
     println!("exports, the services of {orb_name}:");
     for (key, item) in &world.exports {
         let id = world_key(resolve, key, None);
         if contributions.contains_key(&id) || hooks.contains_key(&id) {
             continue; // a hook callback, not a service
+        }
+        if is_ingress(resolve, key) {
+            continue; // the incoming HTTP handler, on a line of its own
         }
         if guest::reserved(&id) {
             // The kernel's callbacks, answered to the kernel.
@@ -425,6 +485,11 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
             println!("  {id}");
         }
     }
+    if ingress {
+        println!(
+            "incoming HTTP handler: called by the host's ingress, never a portable Orb service ({HTTP_HANDLER})"
+        );
+    }
     if !hooks.is_empty() {
         println!("hooks declared, run by the kernel's plan of contributions:");
         for (id, composition) in hooks {
@@ -452,8 +517,16 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
             guest::RESOURCE
         );
     }
+    // An Orb serving incoming HTTP without the HTTP client gets no HTTP grant: planning binds its
+    // HTTP types to the ingress.
+    let handler_only = ingress
+        && !world
+            .imports
+            .keys()
+            .any(|key| world_key(resolve, key, None).starts_with("wasi:http/client@"));
     let mut requires = Vec::new();
     let mut grants: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut ingress_types = Vec::new();
     let mut context = false;
     for (key, item) in &world.imports {
         let WorldItem::Interface { id: interface, .. } = item else {
@@ -469,20 +542,17 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
             context |= id == guest::CONTEXT;
             continue;
         }
-        let kind = match id.split('/').next().unwrap_or_default() {
-            "wasi:filesystem" => "filesystem (FilesystemGrant)",
-            "wasi:sockets" => "network (NetworkGrant)",
-            "wasi:http" => "http (HttpGrant)",
-            "wasi:clocks" => "system: clocks",
-            "wasi:random" => "system: random",
-            "wasi:cli" => "system: cli",
-            other if other.starts_with("wasi:") => "NOT SUPPORTED by Tembra",
-            _ => {
-                requires.push(id);
-                continue;
-            }
-        };
-        grants.entry(kind).or_default().push(id);
+        match classify_import(&id, handler_only) {
+            Import::Orb => requires.push(id),
+            Import::Wasi(kind) => grants.entry(kind).or_default().push(id),
+            Import::Ingress => ingress_types.push(id),
+        }
+    }
+    if !ingress_types.is_empty() {
+        println!(
+            "incoming HTTP types: a handler-only Orb needs no grant for them ({})",
+            ingress_types.join(", ")
+        );
     }
     if context {
         println!(

@@ -43,7 +43,9 @@ pub use model::{
     Case, Entry, Field, Function, FunctionKind, Interface, Item, Kind, Model, PreparedContract,
     ResourceIdentity, Ty,
 };
-pub use permissions::{FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability};
+pub use permissions::{
+    FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability, system_capability,
+};
 pub use port::envelope;
 pub use references::ReferenceBinding;
 pub use resource_profile::ResourceSignature;
