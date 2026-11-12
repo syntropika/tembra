@@ -683,6 +683,60 @@ fn a_service_method_may_not_take_a_reserved_member_name() {
     );
 }
 
+const ENTRIES_WIT: &str = "package example:ledger@1.0.0;
+interface book {
+  resource entry {
+    constructor(label: string);
+    label: func() -> string;
+    blank: static func() -> entry;
+  }
+  open: func(label: string) -> entry;
+}
+";
+
+/// The resource of an implemented interface is bridged in its struct's own module, as a derived
+/// one is: there the author's constructor, methods and static functions are visible whatever
+/// their visibility, so the bridge calls them, never the trait's function of the same name.
+#[test]
+fn an_implemented_resource_is_bridged_in_its_own_module() {
+    let dir = consumed("entries", ENTRIES_WIT);
+    let module = orb_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        "mod keeper {
+            pub mod model {
+                pub mod entries {
+                    #[wit_resource(service = Keeper)]
+                    pub struct Entry { label: String }
+                    impl Entry {
+                        #[constructor]
+                        fn new(label: String) -> Self { Entry { label } }
+                        pub fn label(&self) -> String { self.label.clone() }
+                        pub fn blank() -> Entry { Entry::new(String::new()) }
+                    }
+                }
+            }
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper {
+                pub fn open(label: String) -> model::entries::Entry { todo!() }
+            }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let generated = tokens(&module);
+    for expected in [
+        "impl exports :: example :: ledger :: book :: Guest for __TembraExports { type Entry = model :: entries :: Entry ;",
+        "pub mod entries { pub struct Entry",
+        "} impl super :: super :: exports :: example :: ledger :: book :: GuestEntry for Entry {",
+        "extern crate alloc as __tembra_alloc ; } } struct __TembraExports ;",
+        "fn new (label : __tembra_alloc :: string :: String) -> Self { Entry :: new (label) }",
+        "fn label (& self ,) -> __tembra_alloc :: string :: String { Entry :: label (self ,) }",
+        "fn blank () -> super :: super :: exports :: example :: ledger :: book :: Entry { super :: super :: exports :: example :: ledger :: book :: Entry :: new (Entry :: blank ()) }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+}
+
 /// `import = "..."` on the attribute imports the interface in the world and re-exports its module.
 #[test]
 fn an_import_enters_the_world_and_is_reexported() {

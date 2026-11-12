@@ -484,14 +484,16 @@ mod ledger {
 A state or a WIT resource that names no service belongs to the one service of its sub-module, else
 to the one service of the Orb. A service's methods are the `pub fn` of the `impl` blocks of its own
 module, and a marked function goes in the module of its struct. The bridges the macro generates for
-an item go in the item's module, so the author's types resolve where they were written; what the
-Orb module itself reaches, a state and its fields, a root resource, a WIT resource and a marked
-function, is `pub` or `pub(super)` in a sub-module. A name that enters the WIT is one across the
-modules, because the package has one namespace: the services, the hooks, the resources and the
-types a method or a hook mentions; a state that stays out of the WIT may repeat its name module by
-module, as `Balance` does, and a module's own name wins when a method mentions it. The modules the
-macro re-exports in the Orb module, `context`, an imported interface, a hook declared from a
-consumed package, are reached from a sub-module through `super::`. See
+an item go in the item's module, so the author's types and functions resolve where they were
+written: a WIT resource's bridge, for a derived or an implemented interface, sits next to its struct
+and calls its `#[constructor]` whatever its visibility. What the Orb module itself reaches, a state
+and its fields, a root resource, a WIT resource, a state's `#[validate]` function and a root
+resource's `#[open]` and `#[close]` functions, is `pub` or `pub(super)` in a sub-module. A name that
+enters the WIT is one across the modules, because the package has one namespace: the services, the
+hooks, the resources and the types a method or a hook mentions; a state that stays out of the WIT
+may repeat its name module by module, as `Balance` does, and a module's own name wins when a method
+mentions it. The modules the macro re-exports in the Orb module, `context`, an imported interface, a
+hook declared from a consumed package, are reached from a sub-module through `super::`. See
 [rust-orb-service-lifetime](../../examples/rust-orb-service-lifetime/README.md).
 
 ## What it generates

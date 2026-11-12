@@ -564,7 +564,9 @@ impl Scan {
                         let Some((marker, span)) = carried.pop() else {
                             continue;
                         };
-                        if nested && !reaches_root(&function.vis) {
+                        // The Orb module calls a state's rule and a root resource's functions; a
+                        // WIT resource's constructor is called from its own module's bridge.
+                        if nested && marker != Marker::Constructor && !reaches_root(&function.vis) {
                             return Err(syn::Error::new(
                                 span,
                                 format!(
@@ -1521,7 +1523,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .filter(|service| service.implements.is_some())
     {
         let identity = service.implements.as_deref().unwrap_or_default();
-        let bridge = implemented_service(
+        let (bridge, implementations) = implemented_service(
             service,
             identity,
             &consumed[identity],
@@ -1529,6 +1531,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             &modules,
         )?;
         tree.at(&modules[service.scope]).generated.push(bridge);
+        for (scope, implementation) in implementations {
+            tree.at(&modules[scope]).generated.push(implementation);
+        }
     }
     // Implemented and imported interfaces are re-exported under their own names, like hooks, in
     // the Orb module; a sub-module reaches them through `super::`.
@@ -1640,6 +1645,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     };
     // Signatures spelled from a consumed WIT name strings and lists from `alloc`, which a module
     // may not name: the alias goes in every module that holds such a signature.
+    // The resources of an implemented interface are bridged in their own modules.
+    let implementers: Vec<&Ident> = services
+        .iter()
+        .filter(|service| service.implements.is_some())
+        .map(|service| &service.ident)
+        .collect();
     let alloc_scopes: BTreeSet<usize> = declared
         .iter()
         .filter(|declaration| declaration.input.is_none())
@@ -1649,6 +1660,17 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 .iter()
                 .filter(|service| service.implements.is_some())
                 .map(|service| service.scope),
+        )
+        .chain(
+            wit_resources
+                .iter()
+                .filter(|resource| {
+                    resource
+                        .service
+                        .as_ref()
+                        .is_some_and(|owner| implementers.contains(&owner))
+                })
+                .map(|resource| resource.scope),
         )
         .collect();
     for scope in &alloc_scopes {
@@ -2150,54 +2172,71 @@ struct Signature {
     wrap: Option<Ident>,
 }
 
+/// A function of a consumed interface spelled for a bridge `depth` modules below the Orb module.
+fn signature(function: &wit::ConsumedFunction, depth: usize) -> syn::Result<Signature> {
+    let spelled =
+        |spelling: &str| -> syn::Result<Type> { syn::parse_str(&rooted(spelling, depth)) };
+    let mut names = Vec::new();
+    let mut params = Vec::new();
+    for (param, spelling) in &function.params {
+        let ident = format_ident!("{}", param.to_snake_case());
+        let ty = spelled(&spelling.export)?;
+        params.push(quote! { #ident: #ty });
+        names.push(ident);
+    }
+    let result = match &function.result {
+        Some(spelling) => {
+            let ty = spelled(&spelling.export)?;
+            quote! { -> #ty }
+        }
+        None => quote! {},
+    };
+    let wrap = function
+        .result
+        .as_ref()
+        .and_then(|spelling| spelling.resource.as_deref())
+        .map(|resource| format_ident!("{resource}"));
+    Ok(Signature {
+        names,
+        params,
+        result,
+        wrap,
+    })
+}
+
+/// A call whose result, when it is a resource, is wrapped into the bindings' handle type of
+/// `module`, the interface's generated module.
+fn wrapped(
+    wrap: &Option<Ident>,
+    module: &proc_macro2::TokenStream,
+    call: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    match wrap {
+        Some(resource) => quote! { #module::#resource::new(#call) },
+        None => call,
+    }
+}
+
 /// The bridge of an implemented interface, with signatures spelled from its WIT: the functions
-/// forward to the author's of the same names, and each resource of the interface is the author's
-/// struct of the same name, whose constructor, methods and static functions forward likewise.
+/// forward to the author's of the same names, in the service's module, and each resource of the
+/// interface is the author's struct of the same name, whose constructor, methods and static
+/// functions forward likewise from the struct's own module, with the module's scope. There the
+/// author's functions are visible whatever their visibility: a bridge elsewhere that could not
+/// see the author's `new` would call the trait's own `new`, itself, forever.
 fn implemented_service(
     service: &Service,
     identity: &str,
     interface: &wit::Consumed,
     resources: &[WitResource],
     modules: &[Vec<Ident>],
-) -> syn::Result<proc_macro2::TokenStream> {
+) -> syn::Result<(
+    proc_macro2::TokenStream,
+    Vec<(usize, proc_macro2::TokenStream)>,
+)> {
     let depth = modules[service.scope].len();
     let root = supers(depth);
     let module = export_module(depth, &hook_path(identity));
     let target = &service.ident;
-    let spelled =
-        |spelling: &str| -> syn::Result<Type> { syn::parse_str(&rooted(spelling, depth)) };
-    let signature = |function: &wit::ConsumedFunction| -> syn::Result<Signature> {
-        let mut names = Vec::new();
-        let mut params = Vec::new();
-        for (param, spelling) in &function.params {
-            let ident = format_ident!("{}", param.to_snake_case());
-            let ty = spelled(&spelling.export)?;
-            params.push(quote! { #ident: #ty });
-            names.push(ident);
-        }
-        let result = match &function.result {
-            Some(spelling) => {
-                let ty = spelled(&spelling.export)?;
-                quote! { -> #ty }
-            }
-            None => quote! {},
-        };
-        let wrap = function
-            .result
-            .as_ref()
-            .and_then(|spelling| spelling.resource.as_deref())
-            .map(|resource| format_ident!("{resource}"));
-        Ok(Signature {
-            names,
-            params,
-            result,
-            wrap,
-        })
-    };
-    let wrapped = |wrap: &Option<Ident>, call: proc_macro2::TokenStream| match wrap {
-        Some(resource) => quote! { #module::#resource::new(#call) },
-        None => call,
-    };
     let mut functions = Vec::new();
     for function in &interface.functions {
         let ident = format_ident!("{}", function.name.to_snake_case());
@@ -2206,8 +2245,8 @@ fn implemented_service(
             params,
             result,
             wrap,
-        } = signature(function)?;
-        let body = wrapped(&wrap, quote! { #target::#ident(#(#names),*) });
+        } = signature(function, depth)?;
+        let body = wrapped(&wrap, &module, quote! { #target::#ident(#(#names),*) });
         functions.push(quote! { fn #ident(#(#params),*) #result { #body } });
     }
     let mut owned = Vec::new();
@@ -2219,8 +2258,11 @@ fn implemented_service(
         }) else {
             continue;
         };
-        let struct_ident = relative(depth, &modules[implementation.scope], &implementation.ident);
-        owned.push(quote! { type #ident = #struct_ident; });
+        let struct_path = relative(depth, &modules[implementation.scope], &implementation.ident);
+        owned.push(quote! { type #ident = #struct_path; });
+        // The resource's own bridge, in the struct's module.
+        let local = modules[implementation.scope].len();
+        let local_module = export_module(local, &hook_path(identity));
         let guest = format_ident!("Guest{}", ident);
         let constructor = match (&resource.constructor, &implementation.constructor) {
             (
@@ -2229,7 +2271,7 @@ fn implemented_service(
                     ident: constructor, ..
                 }),
             ) => {
-                let Signature { names, params, .. } = signature(&wit::ConsumedFunction {
+                let new = wit::ConsumedFunction {
                     name: "new".into(),
                     params: params
                         .iter()
@@ -2245,8 +2287,9 @@ fn implemented_service(
                         })
                         .collect(),
                     result: None,
-                })?;
-                quote! { fn new(#(#params),*) -> Self { #struct_ident::#constructor(#(#names),*) } }
+                };
+                let Signature { names, params, .. } = signature(&new, local)?;
+                quote! { fn new(#(#params),*) -> Self { #ident::#constructor(#(#names),*) } }
             }
             _ => quote! {},
         };
@@ -2258,8 +2301,9 @@ fn implemented_service(
                 params,
                 result,
                 wrap,
-            } = signature(method)?;
-            let body = wrapped(&wrap, quote! { #struct_ident::#name(self, #(#names),*) });
+            } = signature(method, local)?;
+            let call = quote! { #ident::#name(self, #(#names),*) };
+            let body = wrapped(&wrap, &local_module, call);
             members.push(quote! { fn #name(&self, #(#params),*) #result { #body } });
         }
         for function in &resource.statics {
@@ -2269,24 +2313,28 @@ fn implemented_service(
                 params,
                 result,
                 wrap,
-            } = signature(function)?;
-            let body = wrapped(&wrap, quote! { #struct_ident::#name(#(#names),*) });
+            } = signature(function, local)?;
+            let call = quote! { #ident::#name(#(#names),*) };
+            let body = wrapped(&wrap, &local_module, call);
             members.push(quote! { fn #name(#(#params),*) #result { #body } });
         }
-        implementations.push(quote! {
-            impl #module::#guest for #struct_ident {
-                #constructor
-                #(#members)*
-            }
-        });
+        implementations.push((
+            implementation.scope,
+            quote! {
+                impl #local_module::#guest for #ident {
+                    #constructor
+                    #(#members)*
+                }
+            },
+        ));
     }
-    Ok(quote! {
+    let bridge = quote! {
         impl #module::Guest for #root __TembraExports {
             #(#owned)*
             #(#functions)*
         }
-        #(#implementations)*
-    })
+    };
+    Ok((bridge, implementations))
 }
 
 /// Keep, in module order, the candidate types that a derived service's method, a resource's
