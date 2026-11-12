@@ -1,15 +1,15 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-12, 14:38 CET
-- **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
-  base `main`
-- **Stato:** strada A. La PR #1 è a `7119fcc`, sopra `main`
-  (`7966893`): la seconda review del 12/11 e i suoi fix,
-  più due commit di Javier. Corpo della PR aggiornato. CI
-  verde su `7119fcc` (run `43224859881` push e `43224872989`
-  pull_request, `quality` e `acceptance`): la PR è
-  `MERGEABLE`/`CLEAN`, ancora draft. Vedi «Seconda review
-  (12/11)».
+- **Aggiornato:** 2026-11-12, 15:00 CET
+- **PR:** https://github.com/syntropika/tembra/pull/1,
+  mergiata in `main` il 12/11 alle 14:59 CET
+- **Stato:** la PR #1 è in `main` con il merge commit
+  `b2189c1` (genitori `7966893` e `7119fcc`), fatto da
+  Giacomo dopo la CI verde su `7119fcc`. Giacomo discute con
+  Javier le scelte della seconda review: quelle da cambiare
+  vanno in commit nuovi, su un branch nuovo da `main` e in
+  una PR nuova, non su `feat/rust-first-orbs`. Vedi
+  «Seconda review (12/11)».
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -83,13 +83,19 @@ Da sapere:
   del base (per esempio
   `an_idle_producer_ends_both_calls_at_their_terminal_timeout`):
   rilanciare il job con `gh run rerun <id> --failed`.
+- Sulla PR #1 GitHub mostrava «Merge conflicts», anche
+  nella pagina «Preview» col merge commit scelto: era solo
+  il rebase a non potersi fare (`rebaseable: false`). Nella
+  pagina classica, scelto «Create a merge commit», la PR era
+  pulita. Si controlla con `gh api
+  repos/syntropika/tembra/pulls/<n>`: `mergeable_state` e
+  `rebaseable`.
 
 Resta da fare:
 
-- Il merge della PR: dopo l'ok di Javier (il corpo della PR
-  è una proposta per lui) e su richiesta di Giacomo.
-  `gh pr ready 1`, poi `gh pr merge 1 --merge`: un merge
-  commit tiene i 102 commit e gli SHA citati qui e nella PR.
+- Le scelte della seconda review sono in discussione con
+  Javier (messaggio di Giacomo del 12/11, dopo il merge):
+  quelle da cambiare vanno in commit nuovi da `main`.
 - #6: interi oltre 2^53 sugli host JS (decisione con Javier:
   JSON con interi a 64 bit come stringhe, o stato tipato).
 - `cargo tembra wit --emit` scrive un solo `.wit`, senza
