@@ -30,8 +30,11 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .unwrap_or_else(|| PathBuf::from("."));
     let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(&manifest_path)?)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
-    let crate_name = manifest["package"]["name"]
-        .as_str()
+    // Not by index: a manifest without [package], a virtual workspace root, would panic.
+    let crate_name = manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
         .context("Cargo.toml has no package.name")?
         .to_owned();
     let metadata: Metadata = manifest
@@ -147,3 +150,6 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     summary(&resolve, world_id, &orb_name, &roles);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
