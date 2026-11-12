@@ -136,10 +136,11 @@ A `.wasm` entry is a compiled WebAssembly component. `build()` checks its export
 selected world, including imports, and packages it with the contract. The component carries no
 installation identity, so the build name becomes the orb name and the target must supply
 `apiVersion`. A Rust component written with `#[orb]` carries its roles in its core module: the
-hooks it declares, the hooks it contributes to, with their priorities, and its services'
-lifetimes. `build()` packages them as the component carries them, together with the target's
-`contributes` and `references`; a hook named both by the component and by `contributes` must have
-the same priority.
+hooks it declares, the hooks it contributes to, with their priorities, its services'
+lifetimes and the reference views of the interfaces it imports by key. `build()` packages them as
+the component carries them, together with the target's `contributes` and `references`; a hook
+named both by the component and by `contributes` must have the same priority, and a view named
+both by the component and by `references` the same interface.
 
 ### Prepare a compiled Orb for browsers
 
@@ -314,6 +315,12 @@ await host.load(artifacts[0]!.path, {
 
 Rust packaging uses `tembra::wasm::ComponentRoles` as the last argument to
 `Contract::component_artifact`, with the same `references` mapping and optional `contributions`.
+A Rust Orb written with `#[orb]` writes neither the view nor the mapping: it imports the provider
+interface with `import("example:keyed/counter@1.0.0", keyed)`, the macro derives the view
+`counter-ref` in the Orb's own package from the interface's WIT and carries the mapping in the
+component, and `cargo tembra build` or `build()` packages it. The installer selects the provider
+for that view's binding, `<orb package>/counter-ref@<version>`; see
+[importing by key](../crates/orb-macro/README.md#importing-another-orbs-interface-by-key).
 
 The official WIT bindings expose acquisition and methods directly inside the compiled guest:
 

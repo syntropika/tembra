@@ -8,9 +8,12 @@
 //! is a resource of the Orb's root, opened by the kernel at activation and usable by every
 //! method and hook callback. Structs with named fields and enums become `record`s, `enum`s and
 //! `variant`s only when a service method, a WIT resource's function or a hook's input uses them,
-//! directly or through another type; a state alone does not. The rest of the module stays
-//! ordinary Rust: a state that stays out of the WIT, and the module types its fields reach, get
-//! serde's derives.
+//! directly or through another type; a state alone does not. Such a type is replaced by the type
+//! the bindings generate, which takes the author's derives and the helper attributes they read.
+//! A struct of `bool` fields marked `#[flags]` becomes a `flags` on the same terms, but stays the
+//! author's: the bindings take it as it is.
+//! The rest of the module stays ordinary Rust: a state that stays out of the WIT, and the module
+//! types its fields reach, get serde's derives.
 //!
 //! The macro derives the WIT contract from those items and generates what a WIT-first crate
 //! writes by hand: the `wit_bindgen::generate!` invocation with the WIT inline, the `Guest`
@@ -19,15 +22,24 @@
 //! The hook interfaces come from the provider's WIT, found in the
 //! directory named by `wit = "dir"` on the attribute, relative to the crate manifest; their
 //! generated modules are re-exported under their own names, so the author writes
-//! `guard::Admission`. The kernel's `tembra:guest` package is bundled with the macro; with
+//! `guard::Admission`. A derived signature names a consumed interface's types the same way, and
+//! the derived interface `use`s them, so they cross as the consumed package's own, with no
+//! conversion. The kernel's `tembra:guest` package is bundled with the macro; with
 //! `context` on the attribute the module imports its `context` interface and reads the call's
 //! principal and cancellation, the object's address and the host's log as `context::...`.
+//! `import = "wasi:..."` imports an interface of the WASI 0.3 packages `tembra-contracts` bundles,
+//! which the host serves under the installation's grants, with no directory to name.
 //!
 //! The crate using the macro must depend on `wit-bindgen` (features `macros` and `realloc`),
 //! and on `dlmalloc` (feature `global`) only in `no_std` mode; a crate with a state
 //! also depends on `serde` (`derive`, `alloc`) and `serde_json` (`alloc`). `cargo tembra build`
 //! compiles the crate, reads the same WIT and the hook priorities from the component and
 //! packages the artifact.
+mod flags;
+mod foreign;
+mod keyed;
+mod resource_params;
+mod wasi;
 mod wit;
 
 use heck::{ToLowerCamelCase, ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
@@ -79,6 +91,8 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
             options.package = Some(meta.value()?.parse::<LitStr>()?);
         } else if meta.path.is_ident("wit") {
             options.wit = Some(meta.value()?.parse::<LitStr>()?.value());
+        } else if meta.path.is_ident("import") && meta.input.peek(syn::token::Paren) {
+            options.keyed.push(keyed::option(&meta)?);
         } else if meta.path.is_ident("import") {
             options.imports.push(meta.value()?.parse::<LitStr>()?);
         } else if meta.path.is_ident("context") {
@@ -87,7 +101,7 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
             options.no_std = true;
         } else {
             return Err(meta.error(
-                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", context, no_std)]",
+                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", import(\"ns:name/interface@version\", keyed), context, no_std)]",
             ));
         }
         Ok(())
@@ -127,6 +141,9 @@ struct Options {
     /// Interfaces of other Orbs the module imports, from the consumed WIT packages, as written on
     /// the attribute; the installer binds each to a provider.
     imports: Vec<LitStr>,
+    /// Interfaces of other Orbs the module imports by key, as written on the attribute: the world
+    /// imports a view of each, whose `get` selects an object of the provider by key.
+    keyed: Vec<LitStr>,
 }
 
 /// A type declared in the module, with its WIT definition and the module types it refers to.
@@ -138,6 +155,26 @@ struct Shape {
     kind: ShapeKind,
     /// The module declaring the type, by scope; 0 is the Orb module.
     scope: usize,
+    /// The author's attributes the generated type replacing this one takes.
+    carried: Carried,
+}
+
+/// The author's attributes the generated type replacing a type takes, as written: the paths of
+/// its derives, and the helper attributes they read, on the type and on each field or case, by
+/// the member's WIT name.
+#[derive(Default)]
+struct Carried {
+    derives: Vec<syn::Path>,
+    helpers: Vec<Attribute>,
+    members: Vec<(String, Vec<Attribute>)>,
+}
+
+impl Carried {
+    fn is_empty(&self) -> bool {
+        self.derives.is_empty()
+            && self.helpers.is_empty()
+            && self.members.iter().all(|(_, helpers)| helpers.is_empty())
+    }
 }
 
 /// A struct with named fields or an enum of the module, before reachability decides whether it
@@ -147,44 +184,48 @@ struct Shape {
 struct Candidate {
     item: Item,
     ident: Ident,
+    /// The module types the fields name, read once the scan knows the consumed interfaces, whose
+    /// modules name none.
     references: Vec<Ident>,
     /// The module declaring the type, by scope; 0 is the Orb module.
     scope: usize,
+    /// A struct marked `#[flags]`, a `flags` once it enters the WIT, which stays the author's.
+    flags: bool,
 }
 
 impl Candidate {
     /// A struct with named fields, a record once it enters the WIT.
     fn record(item: syn::ItemStruct, scope: usize) -> Self {
-        let mut references = Vec::new();
-        for field in &item.fields {
-            wit::references(&field.ty, &mut references);
-        }
         Self {
             ident: item.ident.clone(),
             item: Item::Struct(item),
-            references,
+            references: Vec::new(),
             scope,
+            flags: false,
         }
     }
 
     /// An enum, an `enum` or a `variant` once it enters the WIT; until then its variants may
     /// carry fields of any shape.
     fn enumeration(item: syn::ItemEnum, scope: usize) -> Self {
-        let mut references = Vec::new();
-        for field in item.variants.iter().flat_map(|variant| &variant.fields) {
-            wit::references(&field.ty, &mut references);
-        }
         Self {
             ident: item.ident.clone(),
             item: Item::Enum(item),
-            references,
+            references: Vec::new(),
             scope,
+            flags: false,
         }
     }
 
     /// The type's WIT definition, once it enters the WIT, with what the generated type replacing
-    /// it would drop refused first.
+    /// it would drop refused first and what it takes of the author's attributes. A flags struct
+    /// is not replaced and keeps its attributes.
     fn translate(&self) -> syn::Result<Shape> {
+        if let (true, Item::Struct(item)) = (self.flags, &self.item) {
+            let mut shape = flags::shape(item)?;
+            shape.scope = self.scope;
+            return Ok(shape);
+        }
         replaceable(&self.item)?;
         let mut shape = match &self.item {
             Item::Struct(item) => wit::record(item)?,
@@ -197,16 +238,19 @@ impl Candidate {
             }
         };
         shape.scope = self.scope;
+        shape.references = self.references.clone();
+        shape.carried = carried(&self.item)?;
         Ok(shape)
     }
 }
 
 /// The construction of a shape: the named fields of a record, the cases of an enum, the cases of
-/// a variant with their payload.
+/// a variant with their payload, the author's struct of a flags, which the bindings take as it is.
 enum ShapeKind {
     Record(Vec<(Ident, Type)>),
     Enum(Vec<Ident>),
     Variant(Vec<(Ident, Option<Type>)>),
+    Flags(Box<syn::ItemStruct>),
 }
 
 /// An exported interface: a unit struct marked `#[service]` with an `impl` block of `pub fn`, and
@@ -347,12 +391,11 @@ struct State {
     identity: String,
     /// The module declaring the state, by scope; 0 is the Orb module.
     scope: usize,
-    /// The struct derives `Default`, which counts while the macro keeps the author's struct: when
-    /// the state stays out of the WIT.
+    /// The struct derives `Default`: the derive stays on the author's struct when the state stays
+    /// out of the WIT, and goes to the generated type replacing it when the state enters it.
     derives_default: bool,
     /// The author gives the state its `Default`, its initial value: by an `impl Default` in the
-    /// Orb module, or by a derive on a struct the macro keeps. Otherwise the macro implements it
-    /// field by field.
+    /// Orb module, or by a derive. Otherwise the macro implements it field by field.
     authored_default: bool,
 }
 
@@ -520,6 +563,95 @@ struct Scan {
     /// The type of each `impl Default for ..` of the Orb module, with the module it is written in.
     default_impls: Vec<(usize, Type)>,
     marked: Vec<Marked>,
+    /// What each module imports, by scope.
+    uses: Vec<Uses>,
+}
+
+/// The names a module binds with `use` and `extern crate`, each with the path it stands for, and
+/// whether the module also imports by glob: what the macro follows to name a derive the author
+/// writes in that module from another module, the bindings'.
+#[derive(Default)]
+struct Uses {
+    names: BTreeMap<String, Named>,
+    globs: bool,
+}
+
+/// A path as a list of names, from the crates when `global`, as `::serde::Serialize` is, and
+/// otherwise from the module that writes it.
+#[derive(Clone)]
+struct Named {
+    global: bool,
+    segments: Vec<Ident>,
+}
+
+impl Uses {
+    /// Record the names a `use` declaration binds.
+    fn add_use(&mut self, item: &syn::ItemUse) {
+        self.add_tree(&item.tree, item.leading_colon.is_some(), &mut Vec::new());
+    }
+
+    fn add_tree(&mut self, tree: &syn::UseTree, global: bool, prefix: &mut Vec<Ident>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.clone());
+                self.add_tree(&path.tree, global, prefix);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => self.bind(&name.ident, &name.ident, global, prefix),
+            syn::UseTree::Rename(rename) => {
+                self.bind(&rename.ident, &rename.rename, global, prefix);
+            }
+            syn::UseTree::Glob(_) => self.globs = true,
+            syn::UseTree::Group(group) => {
+                for tree in &group.items {
+                    self.add_tree(tree, global, prefix);
+                }
+            }
+        }
+    }
+
+    /// Bind `name` to the item `ident` after `prefix`: `self` stands for the prefix itself, under
+    /// its own last name unless renamed, and `_` binds nothing.
+    fn bind(&mut self, ident: &Ident, name: &Ident, global: bool, prefix: &[Ident]) {
+        let mut segments = prefix.to_vec();
+        let name = if ident == "self" {
+            match (name == "self", prefix.last()) {
+                (true, Some(last)) => last.clone(),
+                (true, None) => return,
+                (false, _) => name.clone(),
+            }
+        } else {
+            segments.push(ident.clone());
+            name.clone()
+        };
+        if name != "_" {
+            self.names
+                .insert(name.to_string(), Named { global, segments });
+        }
+    }
+
+    /// Record the name an `extern crate` declaration binds: the crate, or this crate for `self`.
+    fn add_extern_crate(&mut self, item: &syn::ItemExternCrate) {
+        let name = item
+            .rename
+            .as_ref()
+            .map_or(&item.ident, |(_, rename)| rename);
+        if name == "_" {
+            return;
+        }
+        let named = if item.ident == "self" {
+            Named {
+                global: false,
+                segments: vec![Ident::new("crate", item.ident.span())],
+            }
+        } else {
+            Named {
+                global: true,
+                segments: vec![item.ident.clone()],
+            }
+        };
+        self.names.insert(name.to_string(), named);
+    }
 }
 
 /// Whether an item of a sub-module is visible to the Orb module: `pub`, or `pub(..)`.
@@ -547,6 +679,7 @@ impl Scan {
                     let mut path = self.modules[scope].clone();
                     path.push(module.ident.clone());
                     self.modules.push(path);
+                    self.uses.push(Uses::default());
                     let (items, grandchildren) = self.scan(inner, child)?;
                     children.push(Module {
                         ident: Some(module.ident),
@@ -636,6 +769,9 @@ impl Scan {
                             scope,
                         });
                         passthrough.push(Item::Struct(s));
+                    } else if let Some(attribute) = take(&mut s.attrs, "flags") {
+                        self.candidates
+                            .push(flags::candidate(s, &attribute, scope, nested)?);
                     } else if matches!(s.fields, Fields::Named(_)) {
                         self.candidates.push(Candidate::record(s, scope));
                     } else {
@@ -769,6 +905,14 @@ impl Scan {
                         self.contributions.push(contribution);
                     }
                     passthrough.push(Item::Fn(function));
+                }
+                Item::Use(used) => {
+                    self.uses[scope].add_use(&used);
+                    passthrough.push(Item::Use(used));
+                }
+                Item::ExternCrate(declared) => {
+                    self.uses[scope].add_extern_crate(&declared);
+                    passthrough.push(Item::ExternCrate(declared));
                 }
                 other => passthrough.push(other),
             }
@@ -907,6 +1051,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         impls: Vec::new(),
         default_impls: Vec::new(),
         marked: Vec::new(),
+        uses: vec![Uses::default()],
     };
     let (items, children) = scan.scan(items, 0)?;
     let mut tree = Module {
@@ -920,7 +1065,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     };
     let Scan {
         modules,
-        candidates,
+        mut candidates,
         mut services,
         contributions,
         declared,
@@ -930,6 +1075,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         impls,
         default_impls,
         marked,
+        uses,
         ..
     } = scan;
     // A service's methods are the pub fn of the impl blocks of its own module.
@@ -1245,31 +1391,70 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         )?;
         resource.service = Some(owner.ident.clone());
     }
-    // A resource is handed out, never taken: no parameter of a derived service, of a derived
-    // resource or of a derived hook names one. An implemented interface's functions take what its
-    // WIT says, in the consumed package's types.
-    let resource_names: BTreeSet<String> = wit_resources
+    // The modules the Orb module re-exports for the consumed interfaces name the consumed types and
+    // handles, which are no types of the module.
+    let keyed_imports = options
+        .keyed
         .iter()
-        .map(|resource| resource.ident.to_string())
+        .map(|import| wit_identity(import, "an interface imported by key", true))
+        .collect::<syn::Result<Vec<String>>>()?;
+    let consumed_modules = foreign::Modules::new(
+        &imports,
+        &keyed_imports,
+        &services,
+        &contributions,
+        &declared,
+    );
+    for candidate in &mut candidates {
+        candidate.references = consumed_modules.item_references(&candidate.item);
+    }
+    // A derived function takes a resource of its own interface, owned, and a derived hook's input
+    // holds no resource. An implemented interface's functions take what its WIT says, in the
+    // consumed package's types.
+    resource_params::check(&services, &wit_resources, &declared, &consumed_modules)?;
+    // Consumed packages: the callback of every hook, contributed or declared, and every interface
+    // implemented or imported are read from their WIT packages.
+    let wit_dir = options.wit.as_deref().map(wit::absolute).transpose()?;
+    let implemented: Vec<String> = services
+        .iter()
+        .filter_map(|service| service.implements.clone())
         .collect();
-    let derived_resources: Vec<&WitResource> = wit_resources
+    // An imported WASI interface comes from the bundled WASI packages, nested in the inline WIT.
+    let imported: Vec<&String> = imports
         .iter()
-        .filter(|resource| !resource.implemented(&services))
+        .filter(|identity| !wasi::is_wasi(identity))
         .collect();
-    let derived_functions = services
-        .iter()
-        .filter(|service| service.implements.is_none())
-        .flat_map(|service| &service.functions)
+    let consumed = match (&wit_dir, implemented.is_empty() && imported.is_empty()) {
+        (_, true) => BTreeMap::new(),
+        (Some(dir), false) => wit::consumed(dir, implemented.iter().chain(imported))?,
+        (None, false) => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "implementing or importing an interface needs wit = \"<dir>\", the directory with its WIT package",
+            ));
+        }
+    };
+    // The callback of a contributed hook, or of a declared one named from a consumed package, is
+    // read from that package; a hook derived from `input = Type` needs no directory.
+    let consumed_hooks: Vec<&String> = hooks
+        .keys()
         .chain(
-            derived_resources
+            declarations
                 .iter()
-                .flat_map(|resource| resource.methods.iter().chain(&resource.statics)),
-        );
-    let constructor_params = derived_resources
-        .iter()
-        .filter_map(|resource| resource.constructor.as_ref())
-        .flat_map(|constructor| &constructor.params);
-    let input_ident = format_ident!("input");
+                .filter(|(_, declaration)| declaration.input.is_none())
+                .map(|(hook, _)| hook),
+        )
+        .collect();
+    let callbacks = match (&wit_dir, consumed_hooks.is_empty()) {
+        (_, true) => Default::default(),
+        (Some(dir), false) => wit::callbacks(dir, consumed_hooks.iter().copied())?,
+        (None, false) => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "hooks need wit = \"<dir>\", the directory with the hook's WIT package",
+            ));
+        }
+    };
     let hook_inputs: Vec<(&Type, usize)> = declared
         .iter()
         .filter_map(|declaration| {
@@ -1277,28 +1462,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             Some((ty, declaration.scope))
         })
         .collect();
-    for (ident, ty) in derived_functions
-        .flat_map(|function| &function.params)
-        .chain(constructor_params)
-        .map(|(ident, ty, _)| (ident, ty))
-        .chain(hook_inputs.iter().map(|(ty, _)| (&input_ident, *ty)))
-    {
-        let mut mentioned = Vec::new();
-        wit::references(ty, &mut mentioned);
-        if let Some(resource) = mentioned
-            .iter()
-            .find(|mention| resource_names.contains(&mention.to_string()))
-        {
-            return Err(syn::Error::new(
-                ty.span(),
-                format!(
-                    "`{ident}` takes the resource `{resource}`: a resource is handed out, never taken"
-                ),
-            ));
-        }
-    }
 
-    // A state whose `Default` the author implements by hand starts from the author's value.
+    // A state whose `Default` the author implements by hand or derives starts from the author's
+    // value: a derive stays on the author's struct or goes to the generated type replacing it.
     let declared_types: Vec<(usize, Ident)> = candidates
         .iter()
         .map(|candidate| (candidate.scope, candidate.ident.clone()))
@@ -1312,7 +1478,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         })
         .collect();
     for (state, authored) in states.iter_mut().zip(authored) {
-        state.authored_default = authored;
+        state.authored_default = authored || state.derives_default;
     }
 
     // Only the types a service method, a resource or a hook uses, directly or through another
@@ -1327,21 +1493,36 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &services,
         &wit_resources,
         &hook_inputs,
+        &consumed_modules,
         &mut unreached,
     )?;
+    // Where each type is defined, computed once for the WIT and for the re-exports below.
+    let placement = wit::placement(
+        &shapes,
+        &services,
+        &wit_resources,
+        &declared,
+        &consumed_modules,
+    );
+    // What each derived interface `use`s from the consumed interfaces: the types its functions and
+    // the types it defines name, and the handles its functions take, once each is checked where
+    // it is named, a state's fields included.
+    let foreign = foreign::foreign(foreign::Reach {
+        modules: &consumed_modules,
+        dir: wit_dir.as_deref(),
+        services: &services,
+        resources: &wit_resources,
+        declared: &declared,
+        shapes: &shapes,
+        placement: &placement,
+        states: &states,
+        unreached: &unreached,
+    })?;
     let serialized = serialized(&unreached, &shapes, &states);
     for (index, candidate) in unreached.into_iter().enumerate() {
         let Candidate {
             mut item, scope, ..
         } = candidate;
-        if let Item::Struct(item) = &item
-            && let Some(state) = states
-                .iter_mut()
-                .find(|state| state.ident == item.ident && state.scope == scope)
-        {
-            // The author's struct stays, with its derives: a derived `Default` is the state's.
-            state.authored_default |= state.derives_default;
-        }
         let attrs = match &mut item {
             Item::Struct(item) => Some(&mut item.attrs),
             Item::Enum(item) => Some(&mut item.attrs),
@@ -1364,6 +1545,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         }
         tree.at(&modules[scope]).items.push(item);
     }
+    // A flags struct that enters the WIT stays the author's, with what the bindings call on it.
+    flags::check_hooks(&shapes, &declared, &consumed_modules)?;
+    flags::emit(&shapes, &mut tree, &modules, &impls, !states.is_empty())?;
     // A name that enters the WIT is one across the Orb module: the types, the services, the
     // derived hooks and the resources of every module share the package's names.
     {
@@ -1407,24 +1591,17 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     }
-
-    // Consumed packages: the callback of every hook, contributed or declared, and every interface
-    // implemented or imported are read from their WIT packages.
-    let wit_dir = options.wit.as_deref().map(wit::absolute).transpose()?;
-    let implemented: Vec<String> = services
-        .iter()
-        .filter_map(|service| service.implements.clone())
-        .collect();
-    let consumed = match (&wit_dir, implemented.is_empty() && imports.is_empty()) {
-        (_, true) => BTreeMap::new(),
-        (Some(dir), false) => wit::consumed(dir, implemented.iter().chain(imports.iter()))?,
-        (None, false) => {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "implementing or importing an interface needs wit = \"<dir>\", the directory with its WIT package",
-            ));
-        }
-    };
+    // A derived function returns only its own interface's resources, through the records and
+    // variants it reaches too, and takes none of another interface's through them.
+    resource_params::check_reached(
+        &services,
+        &wit_resources,
+        &declared,
+        &shapes,
+        &consumed_modules,
+    )?;
+    // The view of each interface imported by key, derived from the interface's WIT.
+    let views = keyed::views(&options.keyed, wit_dir.as_deref(), &world, &interface_names)?;
     // An implemented interface is fixed by its WIT: the impl has exactly its functions, and each
     // of its resources is a #[wit_resource] struct of the same name with the resource's functions.
     for service in services
@@ -1538,27 +1715,6 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     }
-    // The callback of a contributed hook, or of a declared one named from a consumed package, is
-    // read from that package; a hook derived from `input = Type` needs no directory.
-    let consumed_hooks: Vec<&String> = hooks
-        .keys()
-        .chain(
-            declarations
-                .iter()
-                .filter(|(_, declaration)| declaration.input.is_none())
-                .map(|(hook, _)| hook),
-        )
-        .collect();
-    let callbacks = match (&wit_dir, consumed_hooks.is_empty()) {
-        (_, true) => Default::default(),
-        (Some(dir), false) => wit::callbacks(dir, consumed_hooks.iter().copied())?,
-        (None, false) => {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "hooks need wit = \"<dir>\", the directory with the hook's WIT package",
-            ));
-        }
-    };
     for declaration in declarations
         .values()
         .filter(|declaration| declaration.input.is_none())
@@ -1583,8 +1739,6 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             ));
         }
     }
-    // Where each type is defined, computed once for the WIT and for the re-exports below.
-    let placement = wit::placement(&shapes, &services, &wit_resources, &declared);
     let wit = wit::render(
         &package,
         &world,
@@ -1594,9 +1748,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             services: &services,
             resources: &wit_resources,
             declared: &declared,
+            foreign: &foreign,
+            modules: &consumed_modules,
         },
         consumed_hooks.iter().copied(),
         &imports,
+        &views,
         wit::Kernel {
             state: !states.is_empty(),
             resources: !resources.is_empty(),
@@ -1615,11 +1772,15 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // The generated types carry the author's names and public fields, so the author's functions
     // and the generated traits speak about one type: each is re-exported in the module that
     // declared it, from the interface `placement` defines it in, under the author's name where
-    // the bindings name it otherwise, `HttpRequest as HTTPRequest`.
-    let hook_shapes = wit::hook_shapes(&shapes, &declared);
+    // the bindings name it otherwise, `HttpRequest as HTTPRequest`. A flags struct is the
+    // author's own, which the bindings take.
+    let hook_shapes = wit::hook_shapes(&shapes, &declared, &consumed_modules);
     let interface_module = |ident: &Ident| rust_ident(&wit::kebab(ident));
     let mut grouped: Vec<((Ident, usize), Vec<proc_macro2::TokenStream>)> = Vec::new();
-    for shape in &shapes {
+    for shape in shapes
+        .iter()
+        .filter(|shape| !matches!(shape.kind, ShapeKind::Flags(_)))
+    {
         let interface = interface_module(&placement[&shape.ident.to_string()]);
         let key = (interface, shape.scope);
         let ident = &shape.ident;
@@ -1640,6 +1801,18 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             pub use #root exports::#ns_ident::#name_ident::#interface::{#(#imports),*};
         });
     }
+    // The generated types name each derive from its crate, so the author's item was the only one
+    // to name it through the imports of its module: each derive's path, as written, is imported
+    // again there, under no name, and those imports stay used.
+    for shape in shapes
+        .iter()
+        .filter(|shape| !shape.carried.derives.is_empty())
+    {
+        let paths = &shape.carried.derives;
+        tree.at(&modules[shape.scope]).generated.push(quote! {
+            #(#[allow(unused_imports)] use #paths as _;)*
+        });
+    }
     // The bindings' handle type of each WIT resource, by the author's name of its struct.
     let handle_types: BTreeMap<String, Ident> = wit_resources
         .iter()
@@ -1649,9 +1822,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         })
         .collect();
     // A derived service's bridge forwards each function, named as the bindings name it, to the
-    // author's; a resource the result holds is wrapped into the bindings' handle type, and the
-    // resources of the service's interface are the author's structs, each bridged in its own
-    // module.
+    // author's; a resource a parameter holds is taken back from the bindings' handle type, one the
+    // result holds is wrapped into it, and the resources of the service's interface are the
+    // author's structs, each bridged in its own module.
     for service in services
         .iter()
         .filter(|service| service.implements.is_none())
@@ -1664,14 +1837,21 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         let functions = service.functions.iter().map(|function| {
             let ident = &function.ident;
             let generated = rust_ident(&wit::kebab(ident));
-            let params = function
-                .params
-                .iter()
-                .map(|(ident, ty, _)| quote! { #ident: #ty });
-            let names = function.params.iter().map(|(ident, _, _)| ident);
+            let (params, names) = resource_params::bridged(
+                &function.params,
+                &module,
+                &handle_types,
+                &consumed_modules,
+            );
             let (asynchronous, await_) = async_bridge(function.asynchronous);
             let call = quote! { #target::#ident(#(#names),*) #await_ };
-            let (result, body) = derived_result(&function.result, &module, &handle_types, call);
+            let (result, body) = derived_result(
+                &function.result,
+                &module,
+                &handle_types,
+                &consumed_modules,
+                call,
+            );
             quote! { #asynchronous fn #generated(#(#params),*) #result { #body } }
         });
         let owned = wit_resources
@@ -1697,7 +1877,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 quote! { #resource_root exports::#ns_ident::#name_ident::#interface };
             tree.at(&modules[resource.scope])
                 .generated
-                .push(derived_resource(resource, &resource_module, &handle_types));
+                .push(derived_resource(
+                    resource,
+                    &resource_module,
+                    &handle_types,
+                    &consumed_modules,
+                ));
         }
     }
     // An implemented interface's bridge takes its signatures from the WIT: the functions forward
@@ -1732,7 +1917,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .chain(imports.iter().map(|identity| {
             let [ns, package, interface] = hook_path(identity);
             quote! { pub use self::#ns::#package::#interface; }
-        }));
+        }))
+        .chain(keyed::reexports(&package, &views));
     // The kernel's context interface is re-exported as `context`, so the author writes
     // `context::principal()`.
     let context_module = options
@@ -1777,8 +1963,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             });
     }
     // The manifest travels with the component, like the WIT: the contributions with their
-    // priorities, the declarations with their composition, and the services that chose a
-    // lifetime or a linger.
+    // priorities, the declarations with their composition, the services that chose a
+    // lifetime or a linger, and the interfaces imported by key.
     let policies = services
         .iter()
         .filter_map(|service| {
@@ -1816,8 +2002,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             Some(dir) => format!(",\"wit\":{}", json_string(dir)),
             None => String::new(),
         };
+        // The interfaces imported by key, each view's binding with the interface it reaches.
+        let references = keyed::manifest(&package, &views);
         let json = format!(
-            "{{\"contributes\":{{{contributes}}},\"declares\":{{{declares}}},\"services\":{{{services}}}{wit_dir}}}"
+            "{{\"contributes\":{{{contributes}}},\"declares\":{{{declares}}},\"services\":{{{services}}}{references}{wit_dir}}}"
         );
         let bytes = LitByteStr::new(json.as_bytes(), Span::call_site());
         let len = proc_macro2::Literal::usize_unsuffixed(json.len());
@@ -1898,28 +2086,38 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
     let world_literal = LitStr::new(&wit::escaped(&world), Span::call_site());
     // The bindings read the author's WIT and, nested in it, the kernel package a state, a
-    // resource or the context uses, unless the consumed directory holds it already, as a contract
-    // with its dependencies does; the hook packages come from the consumed directory. Foreign
-    // interfaces need `generate_all`.
+    // resource or the context uses and the WASI packages the imports need, unless the consumed
+    // directory holds them already, as a contract with its dependencies does; the hook packages
+    // come from the consumed directory. Foreign interfaces need `generate_all`.
     let kernel = !states.is_empty() || !resources.is_empty() || options.context;
+    let standard = wasi::packages(&options.imports, wit_dir.as_deref())?;
     let inline = if kernel && wit::guest_package_needed(wit_dir.as_deref())? {
         LitStr::new(
-            &format!("{wit}\n{}", wit::guest_package()?),
+            &format!("{wit}\n{}{standard}", wit::guest_package()?),
             Span::call_site(),
         )
     } else {
-        wit_literal.clone()
+        LitStr::new(&format!("{wit}{standard}"), Span::call_site())
     };
     let path = wit_dir.as_ref().map(|dir| {
         let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
         quote! { path: #dir, }
     });
+    // What the bindings make of the WIT, read when a generated type carries more than they give
+    // it: the serde derives of a state, or the author's derives and the attributes they read.
+    let serde = !states.is_empty();
+    let bindings = if serde || shapes.iter().any(|shape| !shape.carried.is_empty()) {
+        wit::bindings(wit_dir.as_deref(), &inline.value())
+    } else {
+        wit::Bindings::default()
+    };
     // A state's record that a method mentions is a generated type, which the kernel's JSON needs
     // to serialize; the derives reach every generated type that can carry them. A record or a
-    // variant holding a flags type or a resource handle cannot: the bindings give those no serde
-    // implementation, so the derives leave it alone.
-    let derives = (!states.is_empty()).then(|| {
-        let ignored = wit::unserializable(wit_dir.as_deref(), &inline.value());
+    // variant holding a resource handle or a consumed package's flags type cannot: the bindings
+    // give those no serde implementation, so the derives leave it alone. The module's own flags
+    // are the author's structs, which a state gives serde's derives.
+    let derives = serde.then(|| {
+        let ignored = &bindings.unserializable;
         let ignore =
             (!ignored.is_empty()).then(|| quote! { additional_derives_ignore: [#(#ignored),*], });
         quote! {
@@ -1927,6 +2125,18 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             #ignore
         }
     });
+    // The generated types replacing the author's take the author's derives, less what the
+    // bindings implement themselves, and the attributes those derives read.
+    let (types, members) = carried_attributes(
+        &shapes, &placement, &package, &bindings, serde, &uses, &modules,
+    )?;
+    let type_attributes =
+        (!types.is_empty()).then(|| quote! { additional_type_attributes: { #(#types),* }, });
+    let member_attributes =
+        (!members.is_empty()).then(|| quote! { additional_member_attributes: { #(#members),* }, });
+    // The bindings take each flags type as the author's struct.
+    let remapped = flags::remapped(&shapes, &placement, &package, &modules);
+    let with = (!remapped.is_empty()).then(|| quote! { with: { #(#remapped),* }, });
     let generate = quote! {
         ::wit_bindgen::generate!({
             #path
@@ -1934,6 +2144,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             world: #world_literal,
             generate_all,
             #derives
+            #type_attributes
+            #member_attributes
+            #with
         });
     };
     let runtime_prelude = options.no_std.then(prelude);
@@ -2302,14 +2515,15 @@ fn derived_result(
     result: &Option<(Type, String)>,
     module: &proc_macro2::TokenStream,
     resources: &BTreeMap<String, Ident>,
+    modules: &foreign::Modules,
     call: proc_macro2::TokenStream,
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
     let Some((ty, _)) = result else {
         return (quote! {}, call);
     };
-    match handles_of(ty, resources) {
+    match handles_of(ty, resources, modules) {
         Some(handles) => {
-            let spelled = with_handles(ty, resources, module);
+            let spelled = with_handles(ty, resources, module, modules);
             (quote! { -> #spelled }, wrap(&handles, call, module))
         }
         None => (quote! { -> #ty }, call),
@@ -2356,8 +2570,16 @@ impl Handles {
 
 /// Where an author's type holds a resource of the module, read by the names `wit_type` reads:
 /// `Option`, `Vec`, `Result` and tuples around a type whose last segment is the name of a
-/// resource's struct, which `resources` maps to the bindings' handle type.
-fn handles_of(ty: &Type, resources: &BTreeMap<String, Ident>) -> Option<Handles> {
+/// resource's struct, which `resources` maps to the bindings' handle type. A name a consumed
+/// interface's module reaches, `counter::Tally`, is that interface's, whatever its last segment.
+fn handles_of(
+    ty: &Type,
+    resources: &BTreeMap<String, Ident>,
+    modules: &foreign::Modules,
+) -> Option<Handles> {
+    if modules.named(ty).is_some() {
+        return None;
+    }
     match ty {
         Type::Path(path) => {
             let segment = path.path.segments.last()?;
@@ -2377,11 +2599,12 @@ fn handles_of(ty: &Type, resources: &BTreeMap<String, Ident>) -> Option<Handles>
                 (name, []) if resources.contains_key(name) => {
                     Some(Handles::Resource(resources[name].clone()))
                 }
-                ("Option", [inner]) => Handles::option(handles_of(inner, resources)),
-                ("Vec", [inner]) => Handles::list(handles_of(inner, resources)),
-                ("Result", [ok, err]) => {
-                    Handles::result(handles_of(ok, resources), handles_of(err, resources))
-                }
+                ("Option", [inner]) => Handles::option(handles_of(inner, resources, modules)),
+                ("Vec", [inner]) => Handles::list(handles_of(inner, resources, modules)),
+                ("Result", [ok, err]) => Handles::result(
+                    handles_of(ok, resources, modules),
+                    handles_of(err, resources, modules),
+                ),
                 _ => None,
             }
         }
@@ -2389,7 +2612,7 @@ fn handles_of(ty: &Type, resources: &BTreeMap<String, Ident>) -> Option<Handles>
             tuple
                 .elems
                 .iter()
-                .map(|ty| handles_of(ty, resources))
+                .map(|ty| handles_of(ty, resources, modules))
                 .collect(),
         ),
         _ => None,
@@ -2397,12 +2620,17 @@ fn handles_of(ty: &Type, resources: &BTreeMap<String, Ident>) -> Option<Handles>
 }
 
 /// The author's type as the bindings spell it in `module`: each resource of the module is the
-/// handle type there, everything else keeps the author's spelling.
+/// handle type there, everything else keeps the author's spelling, a name a consumed interface's
+/// module reaches included.
 fn with_handles(
     ty: &Type,
     resources: &BTreeMap<String, Ident>,
     module: &proc_macro2::TokenStream,
+    modules: &foreign::Modules,
 ) -> proc_macro2::TokenStream {
+    if modules.named(ty).is_some() {
+        return quote! { #ty };
+    }
     match ty {
         Type::Path(path) => {
             let Some(last) = path.path.segments.last() else {
@@ -2423,7 +2651,9 @@ fn with_handles(
                         .take(path.path.segments.len() - 1)
                         .map(|segment| quote! { #segment:: });
                     let arguments = arguments.args.iter().map(|argument| match argument {
-                        syn::GenericArgument::Type(ty) => with_handles(ty, resources, module),
+                        syn::GenericArgument::Type(ty) => {
+                            with_handles(ty, resources, module, modules)
+                        }
                         other => quote! { #other },
                     });
                     quote! { #leading #(#prefix)* #ident<#(#arguments),*> }
@@ -2435,7 +2665,7 @@ fn with_handles(
             let elements = tuple
                 .elems
                 .iter()
-                .map(|ty| with_handles(ty, resources, module));
+                .map(|ty| with_handles(ty, resources, module, modules));
             quote! { (#(#elements,)*) }
         }
         _ => quote! { #ty },
@@ -2450,18 +2680,31 @@ fn wrap(
     value: proc_macro2::TokenStream,
     module: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
+    rebuild(handles, value, &|resource, value| {
+        quote! { #module::#resource::new(#value) }
+    })
+}
+
+/// An expression rebuilding `value` around the resources `handles` places in it: `leaf` turns
+/// each resource, given the name of its handle type and the expression of its value, and the
+/// options, lists, results and tuples around one are rebuilt.
+fn rebuild(
+    handles: &Handles,
+    value: proc_macro2::TokenStream,
+    leaf: &dyn Fn(&Ident, proc_macro2::TokenStream) -> proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     let part = |handles: Option<&Handles>, value: proc_macro2::TokenStream| match handles {
-        Some(handles) => wrap(handles, value, module),
+        Some(handles) => rebuild(handles, value, leaf),
         None => value,
     };
     match handles {
-        Handles::Resource(resource) => quote! { #module::#resource::new(#value) },
+        Handles::Resource(resource) => leaf(resource, value),
         Handles::Option(inner) => {
-            let inner = wrap(inner, quote! { item }, module);
+            let inner = rebuild(inner, quote! { item }, leaf);
             quote! { #value.map(|item| #inner) }
         }
         Handles::List(inner) => {
-            let inner = wrap(inner, quote! { item }, module);
+            let inner = rebuild(inner, quote! { item }, leaf);
             quote! { #value.into_iter().map(|item| #inner).collect() }
         }
         Handles::Result(ok, err) => {
@@ -2494,42 +2737,34 @@ fn derived_resource(
     resource: &WitResource,
     module: &proc_macro2::TokenStream,
     resources: &BTreeMap<String, Ident>,
+    modules: &foreign::Modules,
 ) -> proc_macro2::TokenStream {
     let ident = &resource.ident;
     let guest = format_ident!("Guest{}", camel_ident(&wit::kebab(ident)));
     let constructor = resource.constructor.as_ref().map(|constructor| {
-        let names = constructor.params.iter().map(|(ident, _, _)| ident);
-        let params = constructor
-            .params
-            .iter()
-            .map(|(ident, ty, _)| quote! { #ident: #ty });
+        let (params, names) =
+            resource_params::bridged(&constructor.params, module, resources, modules);
         let function = &constructor.ident;
         quote! { fn new(#(#params),*) -> Self { #ident::#function(#(#names),*) } }
     });
     let methods = resource.methods.iter().map(|function| {
         let name = &function.ident;
         let generated = rust_ident(&wit::kebab(name));
-        let params = function
-            .params
-            .iter()
-            .map(|(ident, ty, _)| quote! { #ident: #ty });
-        let names = function.params.iter().map(|(ident, _, _)| ident);
+        let (params, names) =
+            resource_params::bridged(&function.params, module, resources, modules);
         let (asynchronous, await_) = async_bridge(function.asynchronous);
         let call = quote! { #ident::#name(self, #(#names),*) #await_ };
-        let (result, body) = derived_result(&function.result, module, resources, call);
+        let (result, body) = derived_result(&function.result, module, resources, modules, call);
         quote! { #asynchronous fn #generated(&self, #(#params),*) #result { #body } }
     });
     let statics = resource.statics.iter().map(|function| {
         let name = &function.ident;
         let generated = rust_ident(&wit::kebab(name));
-        let params = function
-            .params
-            .iter()
-            .map(|(ident, ty, _)| quote! { #ident: #ty });
-        let names = function.params.iter().map(|(ident, _, _)| ident);
+        let (params, names) =
+            resource_params::bridged(&function.params, module, resources, modules);
         let (asynchronous, await_) = async_bridge(function.asynchronous);
         let call = quote! { #ident::#name(#(#names),*) #await_ };
-        let (result, body) = derived_result(&function.result, module, resources, call);
+        let (result, body) = derived_result(&function.result, module, resources, modules, call);
         quote! { #asynchronous fn #generated(#(#params),*) #result { #body } }
     });
     quote! {
@@ -2759,12 +2994,14 @@ fn implemented_service(
 /// to their modules as ordinary Rust. The resources of an implemented interface reach nothing:
 /// their functions speak the consumed package's types, whatever the module's own are called. A
 /// name resolves to the type of the module naming it, else to the one type of that name in the
-/// Orb; a type the module does not declare is an error, and a resource is a type of its own.
+/// Orb; a type the module does not declare is an error, and a resource is a type of its own. What
+/// a consumed interface's module names, a type or a handle, is no type of the module.
 fn reachable(
     candidates: Vec<Candidate>,
     services: &[Service],
     resources: &[WitResource],
     hook_inputs: &[(&Type, usize)],
+    modules: &foreign::Modules,
     unreached: &mut Vec<Candidate>,
 ) -> syn::Result<Vec<Shape>> {
     let mut declared: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -2777,7 +3014,7 @@ fn reachable(
     let mut pending: Vec<(Ident, usize)> = Vec::new();
     let mention = |ty: &Type, scope: usize, pending: &mut Vec<(Ident, usize)>| {
         let mut idents = Vec::new();
-        wit::references(ty, &mut idents);
+        modules.references(ty, &mut idents);
         pending.extend(idents.into_iter().map(|ident| (ident, scope)));
     };
     let mention_function =
@@ -2947,11 +3184,16 @@ fn replaceable(item: &Item) -> syn::Result<()> {
         }
         _ => return Ok(()),
     };
-    let serde = attrs
+    let attributes: Vec<&Attribute> = attrs
         .into_iter()
         .chain(fields.into_iter().flat_map(|field| &field.attrs))
-        .find(|attribute| attribute.path().is_ident("serde"));
-    if let Some(attribute) = serde {
+        .collect();
+    let named = |name: &str| {
+        attributes
+            .iter()
+            .find(|attribute| attribute.path().is_ident(name))
+    };
+    if let Some(attribute) = named("serde") {
         return Err(syn::Error::new(
             attribute.span(),
             format!(
@@ -2959,7 +3201,434 @@ fn replaceable(item: &Item) -> syn::Result<()> {
             ),
         ));
     }
+    if let Some(attribute) = named("cfg_attr") {
+        return Err(syn::Error::new(
+            attribute.span(),
+            format!(
+                "`{ident}` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`: write them without it, or keep `{ident}` out of the WIT"
+            ),
+        ));
+    }
     Ok(())
+}
+
+/// The attributes Rust defines itself that may sit on a type, a field or a case: none of them is a
+/// derive's helper attribute, and the generated type replacing a type that enters the WIT takes
+/// none of them.
+const BUILT_IN_ATTRIBUTES: &[&str] = &[
+    "allow",
+    "automatically_derived",
+    "cfg",
+    "cfg_attr",
+    "debugger_visualizer",
+    "deny",
+    "deprecated",
+    "derive",
+    "doc",
+    "expect",
+    "forbid",
+    "must_use",
+    "non_exhaustive",
+    "repr",
+    "warn",
+];
+
+/// Whether an attribute may be a derive's helper attribute, as `#[default]` is for `Default`: a
+/// single name, which none of Rust's own attributes takes.
+fn helper(attribute: &Attribute) -> bool {
+    attribute
+        .path()
+        .get_ident()
+        .is_some_and(|ident| !BUILT_IN_ATTRIBUTES.contains(&ident.to_string().as_str()))
+}
+
+/// What the generated type replacing a type that enters the WIT takes of the author's attributes:
+/// the paths of its derives, and the helper attributes a derive reads, on the type and on each
+/// field or case. Its documentation goes into the WIT instead, and it takes none of Rust's own
+/// attributes. A case's payload has no place of its own in the bindings' options, so a helper
+/// attribute there is refused.
+fn carried(item: &Item) -> syn::Result<Carried> {
+    let helpers = |attrs: &[Attribute]| -> Vec<Attribute> {
+        attrs
+            .iter()
+            .filter(|attribute| helper(attribute))
+            .cloned()
+            .collect()
+    };
+    let (attrs, members) = match item {
+        Item::Struct(item) => (
+            &item.attrs,
+            item.fields
+                .iter()
+                .filter_map(|field| {
+                    Some((wit::kebab(field.ident.as_ref()?), helpers(&field.attrs)))
+                })
+                .collect(),
+        ),
+        Item::Enum(item) => {
+            for variant in &item.variants {
+                let payload = variant.fields.iter().flat_map(|field| &field.attrs);
+                if let Some(attribute) = payload.into_iter().find(|attribute| helper(attribute)) {
+                    return Err(syn::Error::new(
+                        attribute.span(),
+                        format!(
+                            "`{0}` enters the WIT and the generated type replaces it, which takes the attributes of its cases but not of their payloads: move this one to the case `{1}`, or keep `{0}` out of the WIT",
+                            item.ident, variant.ident
+                        ),
+                    ));
+                }
+            }
+            (
+                &item.attrs,
+                item.variants
+                    .iter()
+                    .map(|variant| (wit::kebab(&variant.ident), helpers(&variant.attrs)))
+                    .collect(),
+            )
+        }
+        _ => return Ok(Carried::default()),
+    };
+    let mut derives = Vec::new();
+    for attribute in attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("derive"))
+    {
+        derives.extend(attribute.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Path, Token![,]>::parse_terminated,
+        )?);
+    }
+    Ok(Carried {
+        derives,
+        helpers: helpers(attrs),
+        members,
+    })
+}
+
+/// The derives of the standard library, each with the module of `core` defining it.
+const STANDARD_DERIVES: [(&str, &str); 9] = [
+    ("Clone", "clone"),
+    ("Copy", "marker"),
+    ("Debug", "fmt"),
+    ("Default", "default"),
+    ("Eq", "cmp"),
+    ("Hash", "hash"),
+    ("Ord", "cmp"),
+    ("PartialEq", "cmp"),
+    ("PartialOrd", "cmp"),
+];
+
+/// What a derive's path names, followed from the module that writes it, so the bindings' module
+/// can name it too.
+enum Followed {
+    /// A path from the crates, `::strum::EnumIter`, or from this crate, `crate::derives::Thing`,
+    /// which names the same item in every module of the crate.
+    Path(Named),
+    /// A single name the module neither declares nor imports by name, `Hash`: one a prelude
+    /// brings, or a glob import when the module has one.
+    Name { ident: Ident, globs: bool },
+}
+
+/// Follow a derive's path, written in the module `scope`, to what it names: through the module's
+/// `use` and `extern crate` declarations, `self::`, `super::` and the sub-modules of the Orb, to a
+/// path from the crates or from this crate, where a first name nothing in the Orb declares is a
+/// crate's, or to a single name nothing in the module binds. `owner` is the type the derive is
+/// written on, for the errors.
+fn followed(
+    path: &syn::Path,
+    scope: usize,
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+    owner: &Ident,
+) -> syn::Result<Followed> {
+    let written = written(path);
+    let mut scope = scope;
+    let mut named = Named {
+        global: path.leading_colon.is_some(),
+        segments: path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.clone())
+            .collect(),
+    };
+    // Each step consumes a name or replaces one by what a declaration binds it to; declarations
+    // binding one another in a circle would never end.
+    for _ in 0..64 {
+        if named.global {
+            return Ok(Followed::Path(named));
+        }
+        let Some((first, rest)) = named.segments.split_first() else {
+            break;
+        };
+        let (first, rest) = (first.clone(), rest.to_vec());
+        if first == "crate" {
+            return Ok(Followed::Path(named));
+        }
+        if first == "self" || first == "super" {
+            if first == "super" {
+                let Some((_, parent)) = modules[scope].split_last() else {
+                    return Err(syn::Error::new(
+                        path.span(),
+                        format!(
+                            "`{written}` on `{owner}` leaves the Orb module, where the macro cannot follow it; the generated type replacing `{owner}` is declared in the bindings' module, so name the derive from its crate, such as `::name::Derive`, or from `crate::`"
+                        ),
+                    ));
+                };
+                scope = modules
+                    .iter()
+                    .position(|module| module == parent)
+                    .expect("the parent of a scanned module");
+            }
+            if rest.is_empty() {
+                break;
+            }
+            named.segments = rest;
+            continue;
+        }
+        if let Some(bound) = uses[scope].names.get(&first.to_string()) {
+            // `use name;` brings the crate `name` into scope.
+            if !bound.global && bound.segments.len() == 1 && bound.segments[0] == first {
+                named.global = true;
+                continue;
+            }
+            let mut segments = bound.segments.clone();
+            segments.extend(rest);
+            named = Named {
+                global: bound.global,
+                segments,
+            };
+            continue;
+        }
+        if rest.is_empty() {
+            return Ok(Followed::Name {
+                ident: first,
+                globs: uses[scope].globs,
+            });
+        }
+        let mut child = modules[scope].clone();
+        child.push(first);
+        match modules.iter().position(|module| *module == child) {
+            Some(index) => {
+                scope = index;
+                named.segments = rest;
+            }
+            None => named.global = true,
+        }
+    }
+    Err(syn::Error::new(
+        path.span(),
+        format!(
+            "the macro cannot follow `{written}` on `{owner}` to the item it names; the generated type replacing `{owner}` is declared in the bindings' module, so name the derive from its crate, such as `::name::Derive`, or from `crate::`"
+        ),
+    ))
+}
+
+/// A path as the author writes it, for the errors: `derive_more::Debug`.
+fn written(path: &syn::Path) -> String {
+    quote!(#path).to_string().replace(' ', "")
+}
+
+/// The traits the bindings implement themselves for a generated type, each with the reason, as
+/// `wit-bindgen` 0.63 writes the type: `Debug` by hand for every type; for a record or a variant,
+/// `Clone` derived unless it holds a resource handle, and `Copy` unless it also holds a string or a
+/// list; for an enum, `Clone`, `Copy`, `PartialEq`, `Eq`, `PartialOrd` and `Ord` derived; and
+/// `Display` and `Error` by hand for the error of a result.
+fn implemented(kind: &ShapeKind, generated: wit::Generated) -> Vec<(&'static str, &'static str)> {
+    let mut traits = vec![("Debug", "the bindings implement `Debug` for every type")];
+    match kind {
+        ShapeKind::Enum(_) => traits.extend(
+            ["Clone", "Copy", "PartialEq", "Eq", "PartialOrd", "Ord"]
+                .map(|name| (name, "the bindings derive it for every enum")),
+        ),
+        ShapeKind::Record(_) | ShapeKind::Variant(_) => {
+            if !generated.resource {
+                traits.push((
+                    "Clone",
+                    "the bindings derive it for a record or a variant that holds no resource handle",
+                ));
+            }
+            if !generated.resource && !generated.list {
+                traits.push((
+                    "Copy",
+                    "the bindings derive it for a record or a variant that holds no string, list or resource handle",
+                ));
+            }
+        }
+        // A flags struct keeps the author's derives on the author's struct.
+        ShapeKind::Flags(_) => {}
+    }
+    if generated.error {
+        traits.extend(["Display", "Error"].map(|name| {
+            (
+                name,
+                "the bindings implement it for the error of a function's result",
+            )
+        }));
+    }
+    traits
+}
+
+/// A derive written on a type that enters the WIT, by what it implements.
+enum Derive {
+    /// One of the standard library: its trait and the module of `core` defining it.
+    Standard(&'static str, &'static str),
+    /// `serde`'s `Serialize` or `Deserialize`, which a state makes the bindings derive.
+    Serde(Named),
+    /// Any other, by the path naming it, which implements the trait of its last name.
+    Other(Named),
+}
+
+impl Derive {
+    /// What a followed path names: a derive of the standard library when it leads from `core`,
+    /// `std` or `alloc` to one of their derives, `serde`'s when it leads from `serde` to one of its
+    /// two, another derive otherwise.
+    fn of(named: Named) -> Self {
+        let first = named.segments.first().map(Ident::to_string);
+        let last = named.segments.last().map(Ident::to_string);
+        let from = |crates: &[&str]| {
+            named.global
+                && first
+                    .as_deref()
+                    .is_some_and(|first| crates.contains(&first))
+        };
+        if from(&["core", "std", "alloc"])
+            && let Some(&(name, module)) = last
+                .as_deref()
+                .and_then(|last| STANDARD_DERIVES.iter().find(|(name, _)| *name == last))
+        {
+            return Self::Standard(name, module);
+        }
+        if from(&["serde", "serde_derive"])
+            && matches!(last.as_deref(), Some("Serialize" | "Deserialize"))
+        {
+            return Self::Serde(named);
+        }
+        Self::Other(named)
+    }
+}
+
+impl quote::ToTokens for Named {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        let global = self.global.then(|| quote! { :: });
+        let segments = &self.segments;
+        tokens.extend(quote! { #global #(#segments)::* });
+    }
+}
+
+/// One derive of a type that enters the WIT, as the generated type replacing the type takes it:
+/// `None` when the bindings, or the derives a state adds, implement it already, otherwise the
+/// path that names it from the bindings' module, `::core::hash::Hash` for a derive of the standard
+/// library. A derive the generated type cannot take is refused: one of another crate implementing
+/// a trait the bindings implement, which would implement it twice, and one of the standard library
+/// that the type's contents rule out.
+fn carried_derive(
+    shape: &Shape,
+    path: &syn::Path,
+    generated: wit::Generated,
+    serialized: bool,
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+) -> syn::Result<Option<proc_macro2::TokenStream>> {
+    let owner = &shape.ident;
+    let written = written(path);
+    let refuse = |message: String| Err(syn::Error::new(path.span(), message));
+    let derive = match followed(path, shape.scope, uses, modules, owner)? {
+        Followed::Path(named) => Derive::of(named),
+        // A single name no declaration of the module binds is a prelude's, which brings the
+        // derives of the standard library, or a glob import's, which the macro cannot read.
+        Followed::Name { ident, globs } => {
+            match STANDARD_DERIVES.iter().find(|(name, _)| ident == name) {
+                Some(&(name, module)) => Derive::Standard(name, module),
+                None => {
+                    let glob = if globs {
+                        ", unless a glob import brings it"
+                    } else {
+                        ""
+                    };
+                    return refuse(format!(
+                        "`{ident}` on `{owner}`: `{owner}` enters the WIT and the generated type replacing it is declared in the bindings' module, which `{ident}` does not reach: this module imports no `{ident}` by name{glob}; import it with `use`, or name it from its crate, such as `::name::{ident}`"
+                    ));
+                }
+            }
+        }
+    };
+    let own = implemented(&shape.kind, generated);
+    let implements = |name: &str| own.iter().find(|(known, _)| *known == name);
+    match derive {
+        Derive::Standard(name, module) => {
+            if implements(name).is_some() {
+                return Ok(None);
+            }
+            if generated.resource && name != "Default" {
+                return refuse(format!(
+                    "`{written}` on `{owner}`: `{owner}` enters the WIT and holds a resource handle, which implements no `{name}`, so the generated type replacing it cannot derive `{name}`; remove the derive, or keep `{owner}` out of the WIT"
+                ));
+            }
+            if generated.list && name == "Copy" {
+                return refuse(format!(
+                    "`{written}` on `{owner}`: `{owner}` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`; remove the derive"
+                ));
+            }
+            let (module, name) = (format_ident!("{module}"), format_ident!("{name}"));
+            Ok(Some(quote! { ::core::#module::#name }))
+        }
+        Derive::Serde(_) if serialized => Ok(None),
+        Derive::Serde(named) => Ok(Some(quote! { #named })),
+        Derive::Other(named) => {
+            let name = named.segments.last().map(Ident::to_string);
+            if let Some((name, reason)) = name.as_deref().and_then(implements) {
+                return refuse(format!(
+                    "`{written}` on `{owner}`: `{owner}` enters the WIT and the generated type replacing it implements `{name}` already, as {reason}; remove the derive, or keep `{owner}` out of the WIT"
+                ));
+            }
+            Ok(Some(quote! { #named }))
+        }
+    }
+}
+
+/// The attributes the bindings put on the generated types replacing the author's, as the options
+/// `additional_type_attributes` and `additional_member_attributes` of `wit-bindgen` select them,
+/// by the type's full WIT name, `ns:name/interface@version/type`, and the member's after a `.`:
+/// for each type that enters the WIT, its derives, less those the bindings implement themselves,
+/// and the helper attributes they read, on the type and on each field or case. `serde` tells
+/// whether a state makes the bindings derive serde's traits on the types that can carry them.
+fn carried_attributes(
+    shapes: &[Shape],
+    placement: &BTreeMap<String, Ident>,
+    package: &str,
+    bindings: &wit::Bindings,
+    serde: bool,
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+) -> syn::Result<(Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>)> {
+    let mut types = Vec::new();
+    let mut members = Vec::new();
+    for shape in shapes.iter().filter(|shape| !shape.carried.is_empty()) {
+        let interface = wit::kebab(&placement[&shape.ident.to_string()]);
+        let name = wit::kebab(&shape.ident);
+        let selector = format!("{}/{name}", identity(package, &interface));
+        let generated = bindings.types.get(&selector).copied().unwrap_or_default();
+        let serialized = serde && !bindings.unserializable.contains(&wit::ignored_name(&name));
+        let mut derives = Vec::new();
+        for path in &shape.carried.derives {
+            if let Some(derive) = carried_derive(shape, path, generated, serialized, uses, modules)?
+            {
+                derives.push(derive);
+            }
+        }
+        let derive = (!derives.is_empty()).then(|| quote! { #[derive(#(#derives),*)] });
+        let helpers = &shape.carried.helpers;
+        if derive.is_some() || !helpers.is_empty() {
+            let literal = LitStr::new(&selector, Span::call_site());
+            types.push(quote! { #literal: [#derive #(#helpers)*] });
+        }
+        for (member, helpers) in &shape.carried.members {
+            if !helpers.is_empty() {
+                let literal = LitStr::new(&format!("{selector}.{member}"), Span::call_site());
+                members.push(quote! { #literal: [#(#helpers)*] });
+            }
+        }
+    }
+    Ok((types, members))
 }
 
 /// The types, among those that stay out of the WIT, that serde serializes: each state that stays
@@ -3417,7 +4086,7 @@ fn holding_lists(shapes: &[Shape]) -> BTreeSet<String> {
                 ShapeKind::Variant(cases) => {
                     cases.iter().filter_map(|(_, ty)| ty.as_ref()).collect()
                 }
-                ShapeKind::Enum(_) => Vec::new(),
+                ShapeKind::Enum(_) | ShapeKind::Flags(_) => Vec::new(),
             };
             if types.iter().any(|ty| holds_list(ty, &holding)) {
                 holding.insert(shape.ident.to_string());
@@ -3488,6 +4157,7 @@ fn conversions(
                     });
                     quote! { match value { #(#arms,)* } }
                 }
+                ShapeKind::Flags(_) => unreachable!("a derived hook reaches no flags"),
             };
             let to_import = body(export);
             let to_export = body(import);
@@ -4250,3 +4920,12 @@ mod async_tests;
 
 #[cfg(test)]
 mod std_tests;
+
+#[cfg(test)]
+mod wasi_tests;
+
+#[cfg(test)]
+mod keyed_tests;
+
+#[cfg(test)]
+mod foreign_tests;

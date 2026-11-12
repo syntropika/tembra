@@ -272,10 +272,10 @@ fn interface(item: &WorldItem) -> Option<InterfaceId> {
 
 /// The component roles of a contract. A hook interface is one the world both imports and
 /// exports: the component's manifest says which it declares, with their composition, which it
-/// contributes to, with their priorities, and which of its services chose a lifetime or a linger,
-/// as `Contract::embedded_roles` reads and checks them. Every other hook interface is a
-/// contribution at priority 0, as for a component built without the macro, which carries no
-/// manifest.
+/// contributes to, with their priorities, which of its services chose a lifetime or a linger, and
+/// which imports are the views of interfaces it imports by key, as `Contract::embedded_roles`
+/// reads and checks them. Every other hook interface is a contribution at priority 0, as for a
+/// component built without the macro, which carries no manifest.
 pub fn roles(contract: &Contract, component: &[u8]) -> Result<ComponentRoles> {
     let mut roles = contract
         .embedded_roles(component)
@@ -441,13 +441,14 @@ fn classify_import(id: &str, handler_only: bool) -> Import {
 
 /// Exports as services and methods, with the lifetime a service chose, the incoming HTTP
 /// handler, hooks declared and contributed to, kernel-managed state and resources, and imports
-/// with the grant they will need at installation.
+/// with the grant they will need at installation; an import by key with the interface whose
+/// objects it reaches.
 pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &ComponentRoles) {
     let ComponentRoles {
         contributions,
         hooks,
         services,
-        ..
+        references,
     } = roles;
     let world = &resolve.worlds[world];
     let (mut state, mut resources) = (false, false);
@@ -576,7 +577,10 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
     if !requires.is_empty() {
         println!("imports of other Orbs, bound with Install::requires:");
         for id in requires {
-            println!("  {id}");
+            match references.get(&id) {
+                Some(target) => println!("  {id}  by key, the objects of {target}"),
+                None => println!("  {id}"),
+            }
         }
     }
     if !grants.is_empty() {

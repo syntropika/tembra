@@ -3,9 +3,11 @@
 //! The macro writes the module's manifest into the `tembra:manifest` custom section of the core
 //! module the component linker produces, as a JSON object:
 //! `{"contributes": {"ns:name/hook@version": n}, "declares": {"ns:name/hook@version": "waterfall"},
-//! "services": {"ns:name/service@version": {"lifetime": "host", "linger_ms": 0}}, "wit": "dir"}`.
+//! "services": {"ns:name/service@version": {"lifetime": "host", "linger_ms": 0}},
+//! "references": {"ns:orb/view@version": "ns:name/service@version"}, "wit": "dir"}`.
 //! Every tool that packages such a component reads its roles here, so a component packaged by
-//! `cargo tembra build` and one packaged through the Node binding carry the same roles.
+//! `cargo tembra build` and one packaged through the Node binding carry the same roles. A member
+//! the macro did not write, `references` in a manifest older than keyed imports, reads as empty.
 use crate::{
     ComponentRoles, Entry, Error, HookComposition, Item, PreparedContract, ServicePolicy,
     artifact::COMPONENT_HEADER, codec::Reader,
@@ -21,15 +23,17 @@ const MODULE_HEADER: [u8; 8] = *b"\0asm\x01\0\0\0";
 
 /// The manifest a component built with `#[orb]` carries: the hooks the module contributes to,
 /// with their priorities, the hooks it declares, with their composition, the services whose
-/// `#[service]` attribute names a lifetime or a linger, by interface identity, and the directory
-/// of the WIT packages the module consumes, relative to the crate manifest, as written on the
-/// attribute.
+/// `#[service]` attribute names a lifetime or a linger, by interface identity, the reference
+/// views of the interfaces it imports by key, each view's import mapped to the provider interface
+/// it reaches, and the directory of the WIT packages the module consumes, relative to the crate
+/// manifest, as written on the attribute.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EmbeddedManifest {
     pub contributes: BTreeMap<String, i32>,
     pub declares: BTreeMap<String, HookComposition>,
     pub services: BTreeMap<String, ServicePolicy>,
+    pub references: BTreeMap<String, String>,
     pub wit: Option<String>,
 }
 
@@ -51,7 +55,8 @@ impl EmbeddedManifest {
 /// The roles the manifest of `component` gives, checked against the contract. A hook the
 /// component declares or contributes to is an interface the world both imports and exports, and
 /// takes one of the two roles; a service policy names an interface the world exports and does
-/// not import. The contract checks the roles themselves when the component is packaged.
+/// not import; a reference view names an interface the world imports and does not export. The
+/// contract checks the roles themselves, a view's shape included, when the component is packaged.
 pub(crate) fn roles(
     contract: &PreparedContract,
     component: &[u8],
@@ -67,9 +72,11 @@ pub(crate) fn roles(
             .collect()
     };
     let exported = interfaces(&contract.model().exports);
-    let paired: BTreeSet<String> = interfaces(&contract.model().imports)
-        .into_iter()
-        .filter(|identity| exported.contains(identity))
+    let imported = interfaces(&contract.model().imports);
+    let paired: BTreeSet<String> = imported
+        .iter()
+        .filter(|identity| exported.contains(*identity))
+        .cloned()
         .collect();
     if let Some(identity) = manifest
         .declares
@@ -98,9 +105,18 @@ pub(crate) fn roles(
             "#[service] names a lifetime for {identity}, but the contract does not export it as a service"
         )));
     }
+    if let Some((view, target)) = manifest
+        .references
+        .iter()
+        .find(|(view, _)| !imported.contains(*view) || exported.contains(*view))
+    {
+        return Err(Error(format!(
+            "#[orb] imports {target} by key through the view {view}, but the contract does not import the view"
+        )));
+    }
     Ok(ComponentRoles {
         contributions: manifest.contributes,
-        references: BTreeMap::new(),
+        references: manifest.references,
         hooks: manifest.declares,
         services: manifest.services,
     })

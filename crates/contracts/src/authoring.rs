@@ -328,9 +328,10 @@ impl Contract {
 
     /// The roles a component built with `#[orb]` carries in its
     /// [`EmbeddedManifest`](crate::EmbeddedManifest), checked against this world: the hooks it
-    /// declares, with their composition, the hooks it contributes to, with their priorities, and
-    /// the lifetimes and lingers of its services. A component without a manifest carries none;
-    /// reference views are never embedded.
+    /// declares, with their composition, the hooks it contributes to, with their priorities, the
+    /// lifetimes and lingers of its services, and the reference views of the interfaces it
+    /// imports by key, each mapped to the provider interface it reaches. A component without a
+    /// manifest carries none.
     ///
     /// Every tool packaging such a component passes these roles to [`Self::component_artifact`],
     /// so the artifact keeps what the module declared whichever tool packaged it.

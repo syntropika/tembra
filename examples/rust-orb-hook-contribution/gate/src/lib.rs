@@ -6,8 +6,8 @@
 //! keeps the provider native to show a sandboxed contributor plugging into application code.
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, rc::Rc};
+use tembra::contracts::Contract;
 use tembra::{Hook, Orb, Service};
-use tembra_executor_wasm::Contract;
 
 /// The hook identity: the `guard` interface of the shared WIT package, which the contributor's
 /// `#[hook]` attribute names too.

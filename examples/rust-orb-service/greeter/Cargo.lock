@@ -254,6 +254,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tembra"
+version = "0.2.2"
+dependencies = [
+ "tembra-orb-macro",
+]
+
+[[package]]
 name = "tembra-contracts"
 version = "0.2.2"
 dependencies = [
@@ -272,7 +279,7 @@ version = "0.2.2"
 name = "tembra-example-greeter"
 version = "0.1.0"
 dependencies = [
- "tembra-orb-macro",
+ "tembra",
  "wit-bindgen",
 ]
 

@@ -4,14 +4,18 @@
 use futures::executor::LocalPool;
 use serde_json::{Value, json};
 use std::rc::Rc;
+use tembra::wasm::{Engine, Install, Limits};
 use tembra::{Host, Reference};
-use tembra_executor_wasm::{Engine, Install, Limits};
 
 /// The three services of the Orb `ledger`, each named after its exported interface, with the
 /// principal that may acquire its `main` object: a host-lifetime object belongs to the host.
 const SERVICES: [(&str, &str, &str); 3] = [
     ("pinned", "ledger::example:ledger/pinned@1.0.0", "host"),
-    ("lingering", "ledger::example:ledger/lingering@1.0.0", "alice"),
+    (
+        "lingering",
+        "ledger::example:ledger/lingering@1.0.0",
+        "alice",
+    ),
     ("passing", "ledger::example:ledger/passing@1.0.0", "alice"),
 ];
 
@@ -24,7 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = Host::new(pool.spawner());
     // The world imports only the kernel's state interface: nothing to require, nothing to grant.
     // Installing creates the pinned service's `main` object at once.
-    host.install(vec![engine.load(&std::fs::read(&artifact)?, Install::default())?])?;
+    host.install(vec![
+        engine.load(&std::fs::read(&artifact)?, Install::default())?,
+    ])?;
 
     for (label, service, principal) in SERVICES {
         let first = acquire(&mut pool, &host, service, principal)?;
@@ -35,7 +41,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let second = acquire(&mut pool, &host, service, principal)?;
         let after_one = call(&mut pool, &host, &second, principal, "add", json!([1]))?;
         second.release()?;
-        println!("{label:<10} add(5) -> {after_five}   released, acquired again   add(1) -> {after_one}");
+        println!(
+            "{label:<10} add(5) -> {after_five}   released, acquired again   add(1) -> {after_one}"
+        );
     }
     pool.run_until(host.close())?;
     // Cleanup failures are reported here, not as call errors.

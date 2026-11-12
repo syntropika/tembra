@@ -20,6 +20,7 @@ fn options(package: &str, wit: Option<&std::path::Path>) -> Options {
         context: false,
         no_std: false,
         imports: Vec::new(),
+        keyed: Vec::new(),
     }
 }
 
@@ -1159,8 +1160,8 @@ fn resolved(module: &ItemMod) -> String {
 }
 
 /// An interface `use`s what the constructors, methods and static functions of its own resources
-/// name, as it does for its own functions: a module record, another service's resource, a type a
-/// derived hook defines.
+/// name, as it does for its own functions: a module record, a type a derived hook defines. Another
+/// service's resource they cannot name, which the runtime would refuse.
 #[test]
 fn an_interface_uses_what_its_resources_mention() {
     let record = resolved(&expanded(
@@ -1181,27 +1182,6 @@ fn an_interface_uses_what_its_resources_mention() {
     assert!(
         record.contains("resource session {\n    info: func() -> info;\n  }"),
         "{record}"
-    );
-    let resource = resolved(&expanded(
-        "example:wa@1.0.0",
-        "mod wa {
-            #[wit_resource(service = Main)]
-            pub struct Token;
-            impl Token { pub fn id(&self) -> u32 { 7 } }
-            #[service]
-            pub struct Main;
-            impl Main { pub fn issue() -> Token { Token } }
-            #[wit_resource(service = Sessions)]
-            pub struct Session;
-            impl Session { pub fn grant(&self) -> Token { Token } }
-            #[service]
-            pub struct Sessions;
-            impl Sessions { pub fn open() -> Session { Session } }
-        }",
-    ));
-    assert!(
-        resource.contains("interface sessions {\n  use main.{token};\n"),
-        "{resource}"
     );
     let hook = resolved(&expanded(
         "example:wahook@1.0.0",
@@ -1242,18 +1222,24 @@ const FRONT: &str = "mod wb {
 }";
 
 /// A type is defined in the interface of the earliest service that mentions it, through its
-/// functions, its resources' functions or other types, and re-exported from there; so a first
-/// service handing out a later service's resource does not make the later one `use` it back.
-/// Interfaces that would still `use` each other are an error naming them.
+/// functions, its resources' functions or other types, and re-exported from there; a later service
+/// mentioning it `use`s it. A resource stays with its own service: another one handing it out is
+/// refused, as `a_resource_is_returned_only_from_its_own_interface` shows.
 #[test]
 fn a_type_is_defined_by_the_earliest_service_that_mentions_it() {
-    let module = expanded("example:wb@1.0.0", FRONT);
+    let module = expanded(
+        "example:wb@1.0.0",
+        &FRONT.replace(
+            "impl Front { pub fn start() -> Builder { Builder } }",
+            "impl Front { pub fn summary() -> Stats { Stats { words: 0 } } }",
+        ),
+    );
     assert_eq!(
         resolved(&module),
-        "package example:wb@1.0.0;\n\ninterface front {\n  use texts.{builder};\n  start: func() -> builder;\n}\n\ninterface texts {\n  /// Counts over the texts.\n  record stats {\n    words: u32,\n  }\n  resource builder {\n    text: func() -> u32;\n  }\n  counts: func() -> stats;\n}\n\nworld wb {\n  export front;\n  export texts;\n}\n"
+        "package example:wb@1.0.0;\n\ninterface front {\n  /// Counts over the texts.\n  record stats {\n    words: u32,\n  }\n  summary: func() -> stats;\n}\n\ninterface texts {\n  use front.{stats};\n  resource builder {\n    text: func() -> u32;\n  }\n  counts: func() -> stats;\n}\n\nworld wb {\n  export front;\n  export texts;\n}\n"
     );
     assert!(
-        tokens(&module).contains("pub use exports :: example :: wb :: texts :: { Stats } ;"),
+        tokens(&module).contains("pub use exports :: example :: wb :: front :: { Stats } ;"),
         "{}",
         tokens(&module)
     );
@@ -1282,19 +1268,135 @@ fn a_type_is_defined_by_the_earliest_service_that_mentions_it() {
         record.contains("interface sessions {\n  record info {\n    n: u32,\n    detail: detail,\n  }\n  record detail {\n"),
         "{record}"
     );
-    // Both services mention the record and the first hands out the second's resource: each
-    // interface would `use` the other.
-    let error = refused(
-        "example:wb@1.0.0",
-        &FRONT.replace(
+}
+
+/// The runtime returns a resource only from the interface that defines it, and moves one only into
+/// it: a derived function, a resource's method or a static function returning another interface's
+/// resource, alone, nested or in a record of the module, is refused on its result type, and so is
+/// a parameter whose record holds one, or a hook's input whose record holds a resource. The
+/// interface that defines the resource returns it, in a record too.
+#[test]
+fn a_resource_is_returned_only_from_its_own_interface() {
+    for (front, message) in [
+        (
             "impl Front { pub fn start() -> Builder { Builder } }",
-            "impl Front { pub fn start() -> Builder { Builder } pub fn summary() -> Stats { Stats { words: 0 } } }",
+            "`Front::start` returns `Builder`, a resource of the interface `texts`: the runtime returns a resource only from the interface that defines it, so return it from a function of `Texts` or of one of its resources",
         ),
+        (
+            "impl Front { pub fn find() -> Result<Option<Builder>, String> { Ok(None) } }",
+            "`Front::find` returns `Builder`, a resource of the interface `texts`",
+        ),
+        (
+            "pub struct Lease { pub builder: Builder }
+            impl Front { pub fn lend() -> Vec<Lease> { Vec::new() } }",
+            "`Front::lend` returns `Lease`, which holds `Builder`, a resource of the interface `texts`",
+        ),
+        (
+            "pub struct Lease { pub builder: Builder }
+            impl Front { pub fn keep(lease: Lease) {} }",
+            "`Front::keep` takes `Lease`, which holds `Builder`, a resource of the interface `texts`: the runtime moves an owned resource only into the interface that defines it, so take it in a function of `Texts` or of one of its resources",
+        ),
+        (
+            "impl Front { pub fn ping() -> u32 { 0 } }
+            #[wit_resource(service = Front)]
+            pub struct Draft;
+            impl Draft {
+                pub fn text(&self) -> u32 { 0 }
+                pub fn fork() -> (u32, Builder) { (0, Builder) }
+            }",
+            "`Draft::fork` returns `Builder`, a resource of the interface `texts`",
+        ),
+    ] {
+        let error = refused(
+            "example:wb@1.0.0",
+            &FRONT.replace(
+                "impl Front { pub fn start() -> Builder { Builder } }",
+                front,
+            ),
+        );
+        assert!(error.contains(message), "{front}: {error}");
+    }
+    let error = refused(
+        "example:wa@1.0.0",
+        "mod wa {
+            #[wit_resource(service = Main)]
+            pub struct Token;
+            impl Token { pub fn id(&self) -> u32 { 7 } }
+            #[service]
+            pub struct Main;
+            impl Main { pub fn issue() -> Token { Token } }
+            #[wit_resource(service = Sessions)]
+            pub struct Session;
+            impl Session { pub fn grant(&self) -> Token { Token } }
+            #[service]
+            pub struct Sessions;
+            impl Sessions { pub fn open() -> Session { Session } }
+        }",
     );
     assert!(
-        error.contains("`front` uses `{builder}` of `texts`, `texts` uses `{stats}` of `front`: WIT refuses interfaces that depend on themselves through `use`"),
+        error.contains("`Session::grant` returns `Token`, a resource of the interface `main`"),
         "{error}"
     );
+    let dir = consumed("returned-cursor", CURSOR_WIT);
+    let error = refused_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        "mod keeper {
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper { pub fn open() -> Cursor { Cursor::start() } }
+            #[wit_resource(service = Keeper)]
+            pub struct Cursor { at: u32 }
+            impl Cursor {
+                #[constructor]
+                pub fn start() -> Self { Cursor { at: 0 } }
+                pub fn current(&self) -> book::Entry { todo!() }
+                pub fn all(&self) -> Vec<book::Entry> { todo!() }
+                pub fn merge(&self, other: book::Cursor) -> u32 { self.at }
+            }
+            #[service]
+            pub struct Tools;
+            impl Tools { pub fn fresh() -> Option<Cursor> { None } }
+        }",
+    );
+    assert!(
+        error.contains("`Tools::fresh` returns `Cursor`, a resource of the implemented interface example:ledger/book@1.0.0: the runtime returns a resource only from the interface that defines it"),
+        "{error}"
+    );
+    let error = refused(
+        "example:wahook@1.0.0",
+        "mod wahook {
+            #[hook(composition = series, input = Admission)]
+            pub struct Guard;
+            pub struct Admission { pub ticket: Ticket }
+            #[wit_resource]
+            pub struct Ticket;
+            impl Ticket { pub fn id(&self) -> u32 { 0 } }
+            #[service]
+            pub struct Admissions;
+            impl Admissions { pub fn issue() -> Ticket { Ticket } }
+        }",
+    );
+    assert!(
+        error.contains("the input of the hook `Guard` holds `Admission`, which holds the resource `Ticket`: a hook's input holds no resource"),
+        "{error}"
+    );
+    let own = resolved(&expanded(
+        "example:wb@1.0.0",
+        &FRONT
+            .replace(
+                "impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }",
+                "pub struct Lease { pub builder: Builder }
+            impl Texts {
+                pub fn counts() -> Stats { Stats { words: 0 } }
+                pub fn lend() -> Option<Lease> { None }
+            }",
+            )
+            .replace(
+                "impl Front { pub fn start() -> Builder { Builder } }",
+                "impl Front { pub fn ping() -> u32 { 0 } }",
+            ),
+    ));
+    assert!(own.contains("  lend: func() -> option<lease>;\n"), "{own}");
 }
 
 const DESK: &str = "mod desk {
@@ -1352,14 +1454,6 @@ fn a_wit_resource_is_derived_from_the_struct_and_its_methods() {
         &DESK.replace("pub fn get(&self) -> u32", "pub fn get(&mut self) -> u32"),
     );
     assert!(error.contains("borrows `&self`"), "{error}");
-    let error = refused(
-        "example:desk@1.0.0",
-        &DESK.replace(
-            "pub fn open(n: u32) -> Session { Session::new(n) }",
-            "pub fn open(n: u32) -> Session { Session::new(n) } pub fn take(session: Session) {}",
-        ),
-    );
-    assert!(error.contains("handed out, never taken"), "{error}");
 }
 
 /// A resource inside an option, a result, a list or a tuple is wrapped where it is: the bridge
@@ -1417,6 +1511,514 @@ fn a_nested_resource_is_wrapped_where_it_is() {
         "{}",
         tokens(&twin)
     );
+}
+
+/// A derived function takes a resource of its own interface, owned, alone or inside an option, a
+/// result, a list or a tuple, and so do the resource's constructor, methods and static functions:
+/// the WIT names the resource where the author's type does, and the bridge takes each handle back
+/// into the author's value, which consumes it.
+#[test]
+fn a_derived_function_takes_a_resource_of_its_interface() {
+    let module = expanded(
+        "example:desk@1.0.0",
+        &DESK
+            .replace(
+                "pub fn open(n: u32) -> Session { Session::new(n) }",
+                "pub fn open(n: u32) -> Session { Session::new(n) }
+                pub fn close(session: Session) -> u32 { session.n }
+                pub fn close_all(sessions: Vec<Session>, last: Option<Session>) -> u32 { 0 }
+                pub fn settle(outcome: Result<Session, String>, pair: (Session, u32)) {}
+                pub async fn later(session: Session) -> u32 { session.n }",
+            )
+            .replace(
+                "pub fn new(n: u32) -> Session { Session { n } }",
+                "pub fn new(n: u32, from: Option<Session>) -> Session { Session { n } }
+                pub fn merge(&self, other: Session) -> u32 { self.n + other.n }
+                pub fn adopt(other: Session) -> Session { other }",
+            ),
+    );
+    let text = resolved(&module);
+    for expected in [
+        "    constructor(n: u32, %from: option<session>);\n",
+        "    merge: func(other: session) -> u32;\n",
+        "    adopt: static func(other: session) -> session;\n",
+        "  close: func(session: session) -> u32;\n",
+        "  close-all: func(sessions: list<session>, last: option<session>) -> u32;\n",
+        "  settle: func(outcome: result<session, string>, pair: tuple<session, u32>);\n",
+        "  later: async func(session: session) -> u32;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let handle = "exports :: example :: desk :: sessions :: Session";
+    let generated = tokens(&module);
+    for expected in [
+        format!(
+            "fn close (session : {handle}) -> u32 {{ Sessions :: close (session . into_inner ()) }}"
+        ),
+        format!(
+            "fn close_all (sessions : Vec < {handle} > , last : Option < {handle} >) -> u32 {{ Sessions :: close_all (sessions . into_iter () . map (| item | item . into_inner ()) . collect () , last . map (| item | item . into_inner ())) }}"
+        ),
+        format!(
+            "fn settle (outcome : Result < {handle} , String > , pair : ({handle} , u32 ,)) {{ Sessions :: settle (match outcome {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok (item . into_inner ()) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err (item) , }} , {{ let (item0 , item1 ,) = pair ; (item0 . into_inner () , item1 ,) }}) }}"
+        ),
+        format!(
+            "async fn later (session : {handle}) -> u32 {{ Sessions :: later (session . into_inner ()) . await }}"
+        ),
+        format!(
+            "fn new (n : u32 , from : Option < {handle} >) -> Self {{ Session :: new (n , from . map (| item | item . into_inner ())) }}"
+        ),
+        format!(
+            "fn merge (& self , other : {handle}) -> u32 {{ Session :: merge (self , other . into_inner ()) }}"
+        ),
+        format!(
+            "fn adopt (other : {handle}) -> {handle} {{ {handle} :: new (Session :: adopt (other . into_inner ())) }}"
+        ),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+}
+
+/// The runtime moves an owned resource only into the interface that defines it, and carries no
+/// borrowed argument between Orbs: a derived function taking a resource of another service's
+/// interface, a resource of an implemented interface or a borrowed resource is refused, and so is
+/// a derived hook whose input holds a resource.
+#[test]
+fn a_resource_the_runtime_cannot_carry_into_a_function_is_refused() {
+    let error = refused(
+        "example:wb@1.0.0",
+        &FRONT.replace(
+            "impl Front { pub fn start() -> Builder { Builder } }",
+            "impl Front { pub fn start() -> Builder { Builder } pub fn take(builder: Option<Builder>) {} }",
+        ),
+    );
+    assert!(
+        error.contains("`Front::take` takes `Builder`, a resource of the interface `texts`: the runtime moves an owned resource only into the interface that defines it, so take it in a function of `Texts` or of one of its resources"),
+        "{error}"
+    );
+    let error = refused(
+        "example:wb@1.0.0",
+        &FRONT.replace(
+            "impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }",
+            "impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }
+            #[wit_resource(service = Front)]
+            pub struct Draft;
+            impl Draft { pub fn keep(&self, builder: Builder) {} }",
+        ),
+    );
+    assert!(
+        error.contains("`Draft::keep` takes `Builder`, a resource of the interface `texts`"),
+        "{error}"
+    );
+    let error = refused(
+        "example:desk@1.0.0",
+        &DESK.replace(
+            "pub fn open(n: u32) -> Session { Session::new(n) }",
+            "pub fn open(n: u32) -> Session { Session::new(n) } pub fn peek(session: &Session) -> u32 { 0 }",
+        ),
+    );
+    assert!(
+        error.contains("WIT boundaries pass owned values"),
+        "{error}"
+    );
+    let dir = consumed("taken-cursor", CURSOR_WIT);
+    let error = refused_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        "mod keeper {
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper { pub fn open() -> Cursor { Cursor::start() } }
+            #[wit_resource(service = Keeper)]
+            pub struct Cursor { at: u32 }
+            impl Cursor {
+                #[constructor]
+                pub fn start() -> Self { Cursor { at: 0 } }
+                pub fn current(&self) -> book::Entry { todo!() }
+                pub fn all(&self) -> Vec<book::Entry> { todo!() }
+                pub fn merge(&self, other: book::Cursor) -> u32 { self.at }
+            }
+            #[service]
+            pub struct Tools;
+            impl Tools { pub fn measure(cursor: Cursor) -> u32 { 0 } }
+        }",
+    );
+    assert!(
+        error.contains("`Tools::measure` takes `Cursor`, a resource of the implemented interface example:ledger/book@1.0.0"),
+        "{error}"
+    );
+    let error = refused(
+        "example:wahook@1.0.0",
+        "mod wahook {
+            #[hook(composition = series, input = Ticket)]
+            pub struct Guard;
+            #[wit_resource]
+            pub struct Ticket;
+            impl Ticket { pub fn id(&self) -> u32 { 0 } }
+            #[service]
+            pub struct Admissions;
+            impl Admissions { pub fn issue() -> Ticket { Ticket } }
+        }",
+    );
+    assert!(
+        error.contains("the input of the hook `Guard` holds the resource `Ticket`: a hook's input holds no resource"),
+        "{error}"
+    );
+    let error = refused_with(
+        Options {
+            imports: vec![literal("wasi:filesystem/types@0.3.0")],
+            ..options("example:files@1.0.0", None)
+        },
+        "mod storage {
+            #[service]
+            pub struct Files;
+            impl Files { pub fn size(file: types::Descriptor) -> u64 { 0 } }
+        }",
+    );
+    assert!(
+        error.contains("`Files::size` takes `Descriptor`, a resource of the WASI interface wasi:filesystem/types@0.3.0: the runtime moves no WASI handle between Orbs"),
+        "{error}"
+    );
+}
+
+const TEXT_WIT: &str = "package example:text@1.0.0;
+interface texts {
+  resource builder {
+    constructor();
+    text: func() -> string;
+  }
+  resource a-b;
+  start: func() -> builder;
+}
+";
+
+/// An imported interface's handle, named through the interface's module, is a parameter of a
+/// derived function, alone or in a container: the derived interface `use`s the resource from the
+/// imported one, under the kebab-case name of its handle, and the bridge passes the handle on as
+/// it is, the bindings' own type.
+#[test]
+fn a_derived_function_takes_an_imported_handle() {
+    let dir = consumed("speller", TEXT_WIT);
+    let importing = || Options {
+        imports: vec![literal("example:text/texts@1.0.0")],
+        ..options("example:speller@1.0.0", Some(&dir))
+    };
+    let module = orb_with(
+        importing(),
+        "mod speller {
+            #[wit_resource]
+            pub struct Note { text: String }
+            impl Note {
+                #[constructor]
+                pub fn new(builder: texts::Builder) -> Self { Note { text: builder.text() } }
+                pub fn append(&self, more: Option<texts::Builder>) -> u32 { 0 }
+            }
+            #[service]
+            pub struct Spelling;
+            impl Spelling {
+                pub fn finish(builder: texts::Builder) -> String { builder.text() }
+                pub fn count(builders: Vec<texts::Builder>, odd: texts::AB) -> u32 { 0 }
+                pub fn jot(builder: texts::Builder) -> Note { Note::new(builder) }
+            }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let text = wit(&module);
+    for expected in [
+        "interface spelling {\n  use example:text/texts@1.0.0.{builder, a-b as ab};\n",
+        "    constructor(builder: builder);\n",
+        "    append: func(more: option<builder>) -> u32;\n",
+        "  finish: func(builder: builder) -> string;\n",
+        "  count: func(builders: list<builder>, odd: ab) -> u32;\n",
+        "world speller {\n  import example:text/texts@1.0.0;\n  export spelling;\n}\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let mut resolve = wit_parser::Resolve::default();
+    resolve.push_dir(&dir).unwrap();
+    resolve
+        .push_str("orb.wit", &text)
+        .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
+    let generated = tokens(&module);
+    for expected in [
+        "fn finish (builder : texts :: Builder) -> String { Spelling :: finish (builder) }",
+        "fn count (builders : Vec < texts :: Builder > , odd : texts :: AB) -> u32 { Spelling :: count (builders , odd) }",
+        "fn new (builder : texts :: Builder) -> Self { Note :: new (builder) }",
+        "fn append (& self , more : Option < texts :: Builder >) -> u32 { Note :: append (self , more) }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let refused = |module: &str| refused_with(importing(), module);
+    let error = refused(
+        "mod speller {
+            #[service]
+            pub struct Spelling;
+            impl Spelling { pub fn begin() -> Option<texts::Builder> { None } }
+        }",
+    );
+    assert!(
+        error.contains("`Spelling::begin` returns `Builder`, a resource of the imported interface example:text/texts@1.0.0: the runtime returns a resource only from the interface that defines it"),
+        "{error}"
+    );
+    let error = refused(
+        "mod speller {
+            #[service]
+            pub struct Spelling;
+            impl Spelling { pub fn finish(builder: texts::Bulder) -> u32 { 0 } }
+        }",
+    );
+    assert!(
+        error.contains("`Spelling::finish` takes `Bulder`, which names no type or resource of the imported interface example:text/texts@1.0.0: its resources are `Builder`, `AB`"),
+        "{error}"
+    );
+    // A type of the module named like the handle clashes in an interface that knows both, and
+    // nowhere else: the bridges name the handle by its path.
+    let named_like = |draft: &str| {
+        format!(
+            "mod speller {{
+                #[wit_resource(service = Drafts)]
+                pub struct Builder {{ pub text: String }}
+                #[service]
+                pub struct Spelling;
+                impl Spelling {{
+                    pub fn finish(builder: texts::Builder) -> u32 {{ 0 }}
+                }}
+                #[service]
+                pub struct Drafts;
+                impl Drafts {{ {draft} }}
+            }}"
+        )
+    };
+    let error = refused(&named_like(
+        "pub fn draft() -> Builder { todo!() } pub fn finish(builder: texts::Builder) -> u32 { 0 }",
+    ));
+    assert!(
+        error.contains("`Builder`, used from example:text/texts@1.0.0, and the resource `Builder` are both `builder` in the interface `drafts`"),
+        "{error}"
+    );
+    let module = orb_with(
+        importing(),
+        &named_like("pub fn draft() -> Builder { todo!() }"),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let generated = tokens(&module);
+    for expected in [
+        "fn finish (builder : texts :: Builder) -> u32 { Spelling :: finish (builder) }",
+        "fn draft () -> exports :: example :: speller :: drafts :: Builder { exports :: example :: speller :: drafts :: Builder :: new (Drafts :: draft ()) }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+}
+
+const PERMITS: &str = "mod office {
+    /// What a holder may do.
+    #[flags]
+    #[derive(Default, PartialEq, Clone)]
+    pub struct Access { pub read: bool, pub write: bool, pub r#type: bool }
+    pub struct Grant { pub who: String, pub access: Access }
+    #[service]
+    pub struct Permits;
+    impl Permits {
+        pub fn invert(access: Access) -> Access { todo!() }
+        pub fn merged(grants: Vec<Grant>, extra: Option<Access>) -> Grant { todo!() }
+    }
+}";
+
+/// A struct of `bool` fields marked `#[flags]` is a WIT `flags`, a flag per field in order, and
+/// stays the author's: the bindings take it through `with`, so nothing re-exports a generated type
+/// in its place, and the macro gives it what the bindings call on it, the derives a generated
+/// record holding it needs, and none the author wrote twice.
+#[test]
+fn a_flags_struct_is_a_wit_flags_the_author_keeps() {
+    let module = expanded("example:office@1.0.0", PERMITS);
+    let text = resolved(&module);
+    for expected in [
+        "  /// What a holder may do.\n  flags access {\n    read,\n    write,\n    %type,\n  }\n",
+        "  record grant {\n    who: string,\n    access: access,\n  }\n",
+        "  invert: func(access: access) -> access;\n",
+        "  merged: func(grants: list<grant>, extra: option<access>) -> grant;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let generated = tokens(&module);
+    for expected in [
+        "with : { \"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: Access } ,",
+        "pub use exports :: example :: office :: permits :: { Grant } ;",
+        "# [derive (Default , PartialEq , Clone)] # [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access",
+        "pub const fn empty () -> Self { Self { read : false , write : false , r#type : false } }",
+        "pub const fn bits (& self) -> u32 { (self . read as u32) | ((self . write as u32) << 1) | ((self . r#type as u32) << 2) }",
+        "pub const fn from_bits_retain (bits : u32) -> Self { Self { read : (bits & 1) != 0 , write : (bits & 2) != 0 , r#type : (bits & 4) != 0 } }",
+        "impl :: core :: ops :: BitOr for Access",
+        "Self { read : self . read | other . read , write : self . write | other . write , r#type : self . r#type | other . r#type }",
+        "fn invert (access : Access) -> Access { Permits :: invert (access) }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    // A trait the author implements by hand is not derived again.
+    let module = expanded(
+        "example:office@1.0.0",
+        &PERMITS.replace(
+            "pub struct Grant",
+            "impl core::fmt::Debug for Access {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { Ok(()) }
+            }
+            pub struct Grant",
+        ),
+    );
+    assert!(
+        tokens(&module).contains("# [derive (:: core :: marker :: Copy)] pub struct Access"),
+        "{}",
+        tokens(&module)
+    );
+}
+
+/// In an Orb with a state the flags derive serde's traits, and a record holding the module's own
+/// flags is no longer left out of the derives the state makes the bindings add: the flags are
+/// the author's struct, serde's now.
+#[test]
+fn a_flags_struct_is_serde_in_an_orb_with_a_state() {
+    let module = expanded(
+        "example:office@1.0.0",
+        &PERMITS.replace(
+            "pub struct Grant",
+            "#[state(service = Permits)]
+            pub struct Granted { pub last: Access, pub grants: u32 }
+            pub struct Grant",
+        ),
+    );
+    let generated = tokens(&module);
+    assert!(
+        generated.contains("# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug , :: serde :: Serialize , :: serde :: Deserialize)] pub struct Access"),
+        "{generated}"
+    );
+    assert!(
+        generated
+            .contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize] ,"),
+        "{generated}"
+    );
+    assert!(
+        !generated.contains("additional_derives_ignore"),
+        "{generated}"
+    );
+}
+
+/// A flags struct of a sub-module is named from its module, and must be visible to the Orb module;
+/// one no function uses stays ordinary Rust, without the functions the bindings call.
+#[test]
+fn a_flags_struct_of_a_sub_module_is_named_from_its_module() {
+    let module = expanded(
+        "example:office@1.0.0",
+        "mod office {
+            pub mod rights {
+                #[flags]
+                pub struct Access { pub read: bool }
+                #[flags]
+                pub struct Unused { pub seen: bool }
+                #[service]
+                pub struct Permits;
+                impl Permits { pub fn check(access: Access) -> bool { access.read } }
+            }
+        }",
+    );
+    let generated = tokens(&module);
+    assert!(
+        generated.contains("\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: rights :: Access"),
+        "{generated}"
+    );
+    assert!(
+        generated.contains("pub struct Unused { pub seen : bool }"),
+        "{generated}"
+    );
+    assert!(!generated.contains("for Unused"), "{generated}");
+    let error = refused(
+        "example:office@1.0.0",
+        "mod office {
+            pub mod rights {
+                #[flags]
+                struct Access { pub read: bool }
+                #[service]
+                pub struct Permits;
+                impl Permits { pub fn check() -> bool { true } }
+            }
+        }",
+    );
+    assert!(
+        error.contains("`Access` is a flags of a sub-module: make it visible to the Orb module"),
+        "{error}"
+    );
+}
+
+/// What WIT or the bindings rule out of a flags struct is refused on the item: a field that is no
+/// `bool`, no field or more than the component model's 32, a generic parameter, two fields of one
+/// WIT name, an option on the attribute, a function of a name the bindings call or the author's own
+/// `BitOr`, and a derived hook's input reaching the flags.
+#[test]
+fn what_a_flags_struct_cannot_be_is_refused() {
+    let module = |access: &str, extra: &str| {
+        format!(
+            "mod office {{
+                {access}
+                {extra}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn invert(access: Access) -> Access {{ access }} }}
+            }}"
+        )
+    };
+    let many = (0..33)
+        .map(|index| format!("pub f{index}: bool"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (access, extra, message) in [
+        (
+            "#[flags] pub struct Access { pub read: bool, pub level: u8 }".to_owned(),
+            "",
+            "the field `Access::level` is no `bool`: each field of a flags is a flag, a `bool`",
+        ),
+        (
+            "#[flags] pub struct Access {}".to_owned(),
+            "",
+            "`Access` has no field: a WIT flags holds at least one flag",
+        ),
+        (
+            format!("#[flags] pub struct Access {{ {many} }}"),
+            "",
+            "`Access` has 33 fields: a WIT flags holds at most 32 flags, as the component model rules",
+        ),
+        (
+            "#[flags] pub struct Access<T> { pub read: bool, pub marker: core::marker::PhantomData<T> }".to_owned(),
+            "",
+            "`Access` is a flags: it takes no generic parameter",
+        ),
+        (
+            "#[flags] pub struct Access { pub can_read: bool, pub canRead: bool }".to_owned(),
+            "",
+            "the fields `Access::can_read` and `Access::canRead` are both the flag `can-read`",
+        ),
+        (
+            "#[flags(bits = 8)] pub struct Access { pub read: bool }".to_owned(),
+            "",
+            "#[flags] takes no options",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl Access { pub fn bits(&self) -> u8 { 0 } }",
+            "`Access::bits` takes a name the macro gives a #[flags] struct, whose bindings call `empty`, `bits`, `from_bits_retain` on it",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "#[hook(composition = series, input = Admission)]
+            pub struct Guard;
+            pub struct Admission { pub access: Access }",
+            "`Access` is a flags that a derived hook's input reaches",
+        ),
+    ] {
+        let error = refused("example:office@1.0.0", &module(&access, extra));
+        assert!(error.contains(message), "{access} {extra}: {error}");
+    }
 }
 
 const NESTED_WIT: &str = "package example:ledger@1.0.0;
@@ -1689,9 +2291,366 @@ fn what_a_replaced_type_would_drop_is_refused() {
     }
 }
 
+const WALK: &str = "mod walk {
+    /// A point on a grid.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, core::default::Default)]
+    pub struct Point { pub x: i32, pub y: i32 }
+    /// A note left on the way.
+    #[derive(Clone, ::std::hash::Hash, std::fmt::Debug)]
+    pub struct Note { pub text: String, pub at: Point }
+    /// Where a walker faces.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+    pub enum Heading { #[default] North, East }
+    /// One move of a walk.
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    pub enum Move { Step(Heading), Jump(Point), Rest }
+    /// The notes of a walk; it derives nothing.
+    pub struct Trace { pub notes: Vec<Note> }
+    #[service]
+    pub struct Walker;
+    impl Walker {
+        pub fn walk(moves: Vec<Move>) -> Point { todo!() }
+        pub fn last_trace() -> Trace { todo!() }
+    }
+}";
+
+/// The `additional_type_attributes` option the module hands the bindings, if any.
+fn type_attributes(module: &ItemMod) -> Option<String> {
+    let generated = tokens(module);
+    let start = generated.find("additional_type_attributes")?;
+    let end = generated[start..].find("} ,")? + start + 3;
+    Some(generated[start..end].to_owned())
+}
+
+/// A type that enters the WIT is replaced by the generated type, which takes the author's derives,
+/// written in any spelling, less the traits the bindings implement themselves for its kind:
+/// `Debug` for every type, `Clone` and `Copy` for a record or a variant holding no string or list,
+/// `Clone` alone for one holding a string, and the comparisons for an enum. The derives of the
+/// standard library are named by their paths in `core`, a type deriving nothing is left out, and
+/// `#[default]` goes to its case.
+#[test]
+fn a_type_that_enters_the_wit_keeps_its_derives() {
+    let module = expanded("example:walk@1.0.0", WALK);
+    assert_eq!(
+        type_attributes(&module).as_deref(),
+        Some(concat!(
+            "additional_type_attributes : { ",
+            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash , :: core :: default :: Default)]] , ",
+            "\"example:walk/walker@1.0.0/note\" : [# [derive (:: core :: hash :: Hash)]] , ",
+            "\"example:walk/walker@1.0.0/heading\" : [# [derive (:: core :: hash :: Hash , :: core :: default :: Default)]] , ",
+            "\"example:walk/walker@1.0.0/move\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] } ,",
+        )),
+        "{}",
+        tokens(&module)
+    );
+    assert!(
+        tokens(&module).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/heading.north\" : [# [default]] } ,"
+        ),
+        "{}",
+        tokens(&module)
+    );
+    // An unversioned package names its types without a version; a module deriving only what
+    // the bindings implement hands them nothing.
+    let unversioned = expanded("example:walk", WALK);
+    assert!(
+        type_attributes(&unversioned)
+            .is_some_and(|option| option.contains("\"example:walk/walker/point\"")),
+        "{}",
+        tokens(&unversioned)
+    );
+    let bare = expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            #[derive(Debug, Clone, Copy)]
+            pub struct Point { pub x: i32, pub y: i32 }
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+            pub enum Heading { North, East }
+            #[service]
+            pub struct Walker;
+            impl Walker { pub fn walk(heading: Heading) -> Point { todo!() } }
+        }",
+    );
+    let generated = tokens(&bare);
+    assert!(
+        !generated.contains("additional_type_attributes"),
+        "{generated}"
+    );
+    assert!(
+        !generated.contains("additional_member_attributes"),
+        "{generated}"
+    );
+}
+
+/// The bindings name a derive from their own module, so the macro names it from its crate: it
+/// follows the `use` and `extern crate` declarations of the type's module, renames and groups
+/// included, `self::`, `super::` and the Orb's sub-modules; a first name nothing in the Orb
+/// declares is a crate's, and a path from `crate::` stays; the path as written is imported again
+/// in the type's module, which keeps the imports it names used. The helper attributes the derives
+/// read, single names that are none of Rust's own attributes, go with them, on the type and on its
+/// members; Rust's own attributes do not.
+#[test]
+fn a_derive_of_another_crate_is_named_from_its_crate() {
+    let module = expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            use strum::EnumIter;
+            use derive_more as more;
+            use ::strum::{self as s, IntoStaticStr as Static};
+            extern crate serde as wire;
+            use markers::Marked;
+            use educe;
+            use ordering::Hash;
+            pub mod derives {
+                pub use strum::Display;
+            }
+            /// Where a walker faces.
+            #[derive(EnumIter, more::Constructor, s::AsRefStr, Static, self::derives::Display)]
+            #[derive(crate::extra::Thing, wire::Serialize, educe::Educe, Hash)]
+            #[strum(serialize_all = \"kebab-case\")]
+            #[allow(dead_code)]
+            pub enum Heading {
+                #[strum(serialize = \"up\")]
+                #[allow(dead_code)]
+                North,
+                East,
+            }
+            pub mod shapes {
+                #[derive(super::Marked, PartialEq)]
+                pub struct Point { #[marked(skip)] #[allow(dead_code)] pub x: i32, pub y: i32 }
+            }
+            #[service]
+            pub struct Walker;
+            impl Walker { pub fn walk(heading: Heading) -> shapes::Point { todo!() } }
+        }",
+    );
+    assert_eq!(
+        type_attributes(&module).as_deref(),
+        Some(concat!(
+            "additional_type_attributes : { ",
+            "\"example:walk/walker@1.0.0/heading\" : [# [derive (:: strum :: EnumIter , :: derive_more :: Constructor , :: strum :: AsRefStr , :: strum :: IntoStaticStr , :: strum :: Display , crate :: extra :: Thing , :: serde :: Serialize , :: educe :: Educe , :: ordering :: Hash)] # [strum (serialize_all = \"kebab-case\")]] , ",
+            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: markers :: Marked , :: core :: cmp :: PartialEq)]] } ,",
+        )),
+        "{}",
+        tokens(&module)
+    );
+    assert!(
+        tokens(&module).contains(concat!(
+            "additional_member_attributes : { ",
+            "\"example:walk/walker@1.0.0/heading.north\" : [# [strum (serialize = \"up\")]] , ",
+            "\"example:walk/walker@1.0.0/point.x\" : [# [marked (skip)]] } ,"
+        )),
+        "{}",
+        tokens(&module)
+    );
+    // Each path is imported again, as written, in the module of its type, so the imports it goes
+    // through stay used once the generated type replaces the author's.
+    let generated = tokens(&module);
+    for expected in [
+        "# [allow (unused_imports)] use EnumIter as _ ; # [allow (unused_imports)] use more :: Constructor as _ ;",
+        "{ Point } ; # [allow (unused_imports)] use super :: Marked as _ ; # [allow (unused_imports)] use PartialEq as _ ; }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+}
+
+/// A state makes the bindings derive serde's traits on every generated type that can carry them:
+/// the author's serde derives are left to them there, and handed to them on a type that cannot,
+/// or in an Orb without a state, where the bindings derive none.
+#[test]
+fn serde_derives_go_where_the_bindings_derive_none() {
+    let module = |state: &str| {
+        format!(
+            "mod walk {{
+                use serde::{{Deserialize, Serialize}};
+                {state}
+                #[derive(Serialize, serde::Deserialize, Hash)]
+                pub struct Point {{ pub x: i32, pub y: i32 }}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> Point {{ todo!() }} }}
+            }}"
+        )
+    };
+    let stateful = expanded(
+        "example:walk@1.0.0",
+        &module("#[state] pub struct Count { pub steps: u32 }"),
+    );
+    assert_eq!(
+        type_attributes(&stateful).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: core :: hash :: Hash)]] } ,"
+        ),
+        "{}",
+        tokens(&stateful)
+    );
+    let stateless = expanded("example:walk@1.0.0", &module(""));
+    assert_eq!(
+        type_attributes(&stateless).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize , :: core :: hash :: Hash)]] } ,"
+        ),
+        "{}",
+        tokens(&stateless)
+    );
+    // A record holding a resource handle has no serde implementation from the bindings.
+    let held = expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            #[state]
+            pub struct Count { pub steps: u32 }
+            #[wit_resource]
+            pub struct Pen { pub ink: u32 }
+            impl Pen { pub fn ink(&self) -> u32 { self.ink } }
+            #[derive(serde::Serialize)]
+            pub struct Lease { pub pen: Pen }
+            #[service]
+            pub struct Walker;
+            impl Walker { pub fn lend() -> Lease { todo!() } }
+        }",
+    );
+    assert_eq!(
+        type_attributes(&held).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:walk/walker@1.0.0/lease\" : [# [derive (:: serde :: Serialize)]] } ,"
+        ),
+        "{}",
+        tokens(&held)
+    );
+}
+
+/// The types a derived hook reaches are defined in its interface, which the world imports and
+/// exports: the bindings generate each twice, and both take the author's derives.
+#[test]
+fn a_derived_hook_input_keeps_its_derives() {
+    let module = expanded(
+        "example:gate@1.0.0",
+        &GATE.replace(
+            "    /// One admission.",
+            "    /// One admission.\n    #[derive(Debug, Clone, PartialEq, Eq, Hash)]",
+        ),
+    );
+    assert_eq!(
+        type_attributes(&module).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:gate/guard@1.0.0/admission\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] } ,"
+        ),
+        "{}",
+        tokens(&module)
+    );
+}
+
+/// What the generated type cannot take is refused on the author's item: a derive of another crate
+/// implementing a trait the bindings implement, a derive of the standard library the type's
+/// contents rule out, a derive the macro cannot name from the bindings' module, a helper attribute
+/// on a case's payload, and `#[cfg_attr(..)]`, under which a derive would come and go. Kept out of
+/// the WIT, the same type is the author's, as written.
+#[test]
+fn what_the_generated_type_cannot_take_is_refused() {
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod walk {{
+                use strum::*;
+                #[wit_resource]
+                pub struct Pen {{ pub ink: u32 }}
+                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
+                {types}
+                #[service]
+                pub struct Walker;
+                impl Walker {{
+                    pub fn walk() -> {returned} {{ todo!() }}
+                    pub fn lend() -> Pen {{ todo!() }}
+                }}
+            }}"
+        )
+    };
+    for (types, returned, message) in [
+        (
+            "#[derive(derive_more::Debug)] pub struct Point { pub x: i32 }",
+            "Point",
+            "`derive_more::Debug` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type",
+        ),
+        (
+            "use derive_more::Debug; #[derive(Debug)] pub struct Point { pub x: i32 }",
+            "Point",
+            "`Debug` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already",
+        ),
+        (
+            "#[derive(educe::Clone)] pub struct Point { pub x: i32 }",
+            "Point",
+            "implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle",
+        ),
+        (
+            "#[derive(more::Ord)] pub enum Heading { North, East }",
+            "Heading",
+            "implements `Ord` already, as the bindings derive it for every enum",
+        ),
+        (
+            "#[derive(derive_more::Display)] pub enum Fault { Lost, Stuck }",
+            "Result<u32, Fault>",
+            "implements `Display` already, as the bindings implement it for the error of a function's result",
+        ),
+        (
+            "#[derive(thiserror::Error)] pub struct Fault { pub code: u32 }",
+            "Result<(), Fault>",
+            "implements `Error` already, as the bindings implement it for the error of a function's result",
+        ),
+        (
+            "#[derive(Clone)] pub struct Lease { pub pen: Pen }",
+            "Lease",
+            "`Clone` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Clone`",
+        ),
+        (
+            "#[derive(PartialEq)] pub enum Held { Pen(Pen), Nothing }",
+            "Held",
+            "`PartialEq` on `Held`: `Held` enters the WIT and holds a resource handle, which implements no `PartialEq`",
+        ),
+        (
+            "#[derive(Copy)] pub struct Note { pub text: String }",
+            "Note",
+            "`Copy` on `Note`: `Note` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`",
+        ),
+        (
+            "#[derive(EnumIter)] pub enum Heading { North, East }",
+            "Heading",
+            "`EnumIter` on `Heading`: `Heading` enters the WIT and the generated type replacing it is declared in the bindings' module, which `EnumIter` does not reach: this module imports no `EnumIter` by name, unless a glob import brings it; import it with `use`, or name it from its crate, such as `::name::EnumIter`",
+        ),
+        (
+            "#[derive(super::Marked)] pub struct Point { pub x: i32 }",
+            "Point",
+            "`super::Marked` on `Point` leaves the Orb module, where the macro cannot follow it",
+        ),
+        (
+            "#[derive(Default)] pub enum Move { Step(#[default] u32), Rest }",
+            "Move",
+            "`Move` enters the WIT and the generated type replaces it, which takes the attributes of its cases but not of their payloads: move this one to the case `Step`",
+        ),
+        (
+            "#[cfg_attr(test, derive(Hash))] pub struct Point { pub x: i32 }",
+            "Point",
+            "`Point` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`",
+        ),
+        (
+            "pub struct Point { #[cfg_attr(test, allow(dead_code))] pub x: i32 }",
+            "Point",
+            "never under `#[cfg_attr(..)]`",
+        ),
+        (
+            "pub enum Heading { #[cfg_attr(test, default)] North, East }",
+            "Heading",
+            "never under `#[cfg_attr(..)]`",
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &module(types, returned));
+        assert!(error.contains(message), "{types}: {error}");
+        expanded("example:walk@1.0.0", &module(types, "u32"));
+    }
+}
+
 /// A state starts from its `Default`: the macro implements it field by field unless the author
-/// gives it, by an `impl Default` anywhere in the Orb module or by a derive on a state the macro
-/// keeps, out of the WIT; the serde derives the author already wrote are not added again.
+/// gives it, by an `impl Default` anywhere in the Orb module or by a derive, which stays on a
+/// state out of the WIT and goes to the generated type replacing a state that enters it; the serde
+/// derives the author already wrote are not added again.
 #[test]
 fn the_author_may_give_a_state_its_default_and_its_derives() {
     let generated_default = "impl :: core :: default :: Default for Balance {";
@@ -1736,13 +2695,23 @@ fn the_author_may_give_a_state_its_default_and_its_derives() {
         let module = expanded("example:ledger@1.0.0", &state("", by_hand, returned));
         assert!(!tokens(&module).contains(generated_default), "{returned}");
     }
-    // A state that enters the WIT is the generated type: the author's derive goes with the item,
-    // so the macro implements `Default`, as the derive would have.
-    let entered = tokens(&expanded(
-        "example:ledger@1.0.0",
-        &state("#[derive(Default)]", "", "Balance"),
-    ));
-    assert!(entered.contains(generated_default), "{entered}");
+    // A state that enters the WIT is the generated type, which takes the author's derive: the
+    // derived `Default` is the state's, and the macro implements none.
+    for derive in [
+        "Default",
+        "core::default::Default",
+        "::std::default::Default",
+    ] {
+        let entered = tokens(&expanded(
+            "example:ledger@1.0.0",
+            &state(&format!("#[derive({derive})]"), "", "Balance"),
+        ));
+        assert!(!entered.contains(generated_default), "{entered}");
+        assert!(
+            entered.contains("additional_type_attributes : { \"example:ledger/pinned@1.0.0/balance\" : [# [derive (:: core :: default :: Default)]] } ,"),
+            "{entered}"
+        );
+    }
     // Two states of one name are told apart by the path the `impl` names.
     for (place, skipped, kept) in [
         (

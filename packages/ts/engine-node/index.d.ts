@@ -24,8 +24,10 @@ export class NodeContract {
   sourceArtifact(source: string, name: string, apiVersion: number): Uint8Array;
   /**
    * Package a checked component. The roles a component built with `#[orb]` carries (its declared
-   * hooks, contributions and service lifetimes) are packaged as it carries them; `contributes`
-   * adds contributions, and a hook named by both must have the same priority.
+   * hooks, contributions, service lifetimes and the reference views of its imports by key) are
+   * packaged as it carries them; `contributes` adds contributions, and a hook named by both must
+   * have the same priority; `references` adds reference views, and a view named by both must
+   * address the same interface.
    */
   componentArtifact(
     component: Uint8Array,

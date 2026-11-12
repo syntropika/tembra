@@ -18,7 +18,7 @@ refused, then binds the import to `greeter` and calls the welcomer.
 ## The import
 
 ```rust
-#[tembra_orb_macro::orb(
+#[tembra::orb(
     package = "example:welcomer@1.0.0",
     wit = "../greeter/contract",
     import = "example:greeter/greeting@1.0.0"
@@ -98,7 +98,10 @@ name, and the greetings come back as a `list<string>`. `run.sh` runs the steps i
 
 ## Limits
 
-A compiled import reaches the provider's `main` object; selecting another object of the provider
-by key, as a TypeScript Orb does with `context.get`, is not expressed. WASI imports are not
-expressed by the macro either. Handing out an object for the caller to keep and call repeatedly is
+A compiled import reaches the provider's `main` object; another object of the provider is reached
+by key with `import("example:greeter/greeting@1.0.0", keyed)`, see
+[importing by key](../../crates/orb-macro/README.md#importing-another-orbs-interface-by-key). A
+WASI interface is imported with `import = "wasi:..."` and granted instead of bound; see
+[importing WASI interfaces](../../crates/orb-macro/README.md#importing-wasi-interfaces).
+Handing out an object for the caller to keep and call repeatedly is
 a WIT resource; see [rust-orb-wit-resource](../rust-orb-wit-resource/README.md).

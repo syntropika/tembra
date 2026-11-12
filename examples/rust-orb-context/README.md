@@ -17,7 +17,7 @@ different principals with different keys.
 ## The context
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:audit@1.0.0", context)]
+#[tembra::orb(package = "example:audit@1.0.0", context)]
 mod audit {
     impl Auditor {
         /// The call's principal and the address of the object running it; a log record too.
@@ -93,5 +93,6 @@ runs the three steps in order.
 
 The principal and the cancellation belong to a call: outside one, in a resource's `open` for
 instance, asking for them traps the component. The context tells an Orb about the object running
-the call and about the caller's principal; selecting another object by key, as a TypeScript Orb
-does with `context.get`, is not expressed by the macro yet.
+the call and about the caller's principal; another Orb's object of a key, which a TypeScript Orb
+selects with `context.get`, is reached by
+[importing its interface by key](../../crates/orb-macro/README.md#importing-another-orbs-interface-by-key).

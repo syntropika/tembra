@@ -5,7 +5,7 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 
-#[tembra_orb_macro::orb(no_std, package = "example:text@1.0.0")]
+#[tembra::orb(no_std, package = "example:text@1.0.0")]
 mod text {
     use alloc::string::String;
     use core::cell::{Cell, RefCell};

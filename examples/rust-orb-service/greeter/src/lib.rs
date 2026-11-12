@@ -1,7 +1,7 @@
 //! A compiled Orb written from its code: the module is the contract, and `cargo tembra build`
 //! derives the WIT from the component.
 
-#[tembra_orb_macro::orb(package = "example:greeter@1.0.0")]
+#[tembra::orb(package = "example:greeter@1.0.0")]
 mod greeter {
     /// Counts over a text.
     pub struct Stats {

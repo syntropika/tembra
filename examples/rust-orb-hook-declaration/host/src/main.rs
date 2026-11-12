@@ -3,8 +3,8 @@
 use futures::executor::LocalPool;
 use serde_json::{Value, json};
 use std::rc::Rc;
+use tembra::wasm::{Engine, Install, Limits};
 use tembra::{Host, Reference};
-use tembra_executor_wasm::{Engine, Install, Limits};
 
 /// The hook identity: the `guard` interface the gate derives from its own code, named by the
 /// contributor's `#[hook]` attribute and bound here.
