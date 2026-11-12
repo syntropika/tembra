@@ -1645,7 +1645,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         wit_literal.clone()
     } else {
         LitStr::new(
-            &format!("{wit}\n{}", wit::guest_package()),
+            &format!("{wit}\n{}", wit::guest_package()?),
             Span::call_site(),
         )
     };

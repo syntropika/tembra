@@ -373,6 +373,32 @@ fn a_host_lifetime_cannot_linger_and_unknown_options_are_refused() {
     assert!(error.contains("unknown option"), "{error}");
 }
 
+/// The kernel's bundled package nests the same from a checkout whose line breaks are `\r\n`: the
+/// declaration opens the block, the rest of the file goes inside, and a world resolves it.
+#[test]
+fn the_kernel_package_nests_from_either_line_break() {
+    const GUEST: &str = include_str!("../../contracts/wit/tembra/guest.wit");
+    let lf = GUEST.replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    let nested = super::wit::nested(&lf).expect("a declaration");
+    assert_eq!(super::wit::nested(&crlf).as_deref(), Some(nested.as_str()));
+    let (declaration, body) = lf.split_once(";\n").expect("a declaration");
+    assert_eq!(
+        nested,
+        format!("{declaration} {{\n{}}}\n", body.trim_start_matches('\n'))
+    );
+    let mut resolve = wit_parser::Resolve::default();
+    resolve
+        .push_str(
+            "orb.wit",
+            &format!(
+                "package example:orb@1.0.0;\nworld orb {{\n  import tembra:guest/state@1.0.0;\n}}\n{nested}"
+            ),
+        )
+        .unwrap_or_else(|error| panic!("{error:#}"));
+    assert_eq!(super::wit::nested("interface lonely {}\n"), None);
+}
+
 /// A side of a `Result` that carries nothing is left out, as WIT spells it: `result<t>` for
 /// `Result<T, ()>`, `result<_, e>` for `Result<(), E>` and `result` for `Result<(), ()>`, the
 /// spellings the bindings read back as the author's types. `Option<()>` and `()` as a value have

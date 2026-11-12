@@ -288,12 +288,37 @@ const GUEST_CONTEXT: &str = "tembra:guest/context@1.0.0";
 
 /// The kernel's `tembra:guest` package in nested form, appended to the inline WIT so the bindings
 /// of a state resolve it; `cargo tembra` reads the same package from `tembra-contracts`.
-pub(crate) fn guest_package() -> String {
+pub(crate) fn guest_package() -> syn::Result<String> {
     const GUEST: &str = include_str!("../../contracts/wit/tembra/guest.wit");
-    let (package, body) = GUEST
-        .split_once(";\n")
-        .expect("the guest package starts with its declaration");
-    format!("{package} {{\n{}}}\n", body.trim_start_matches('\n'))
+    nested(GUEST)
+        .ok_or_else(|| error("the bundled tembra:guest package has no `package ..;` declaration"))
+}
+
+/// A WIT package file in nested form: its declaration, a line `package ns:name@version;`, opens
+/// a block holding the rest of the file. The file's lines may end with `\n` or `\r\n`, as a
+/// checkout writes them; the nested form ends its lines with `\n`.
+pub(crate) fn nested(file: &str) -> Option<String> {
+    let mut lines = file.lines();
+    let mut nested = String::new();
+    loop {
+        let line = lines.next()?;
+        let declared = line
+            .trim()
+            .strip_prefix("package ")
+            .and_then(|rest| rest.strip_suffix(';'));
+        if let Some(name) = declared {
+            nested.push_str(&format!("package {} {{\n", name.trim()));
+            break;
+        }
+        nested.push_str(line);
+        nested.push('\n');
+    }
+    for line in lines.skip_while(|line| line.trim().is_empty()) {
+        nested.push_str(line);
+        nested.push('\n');
+    }
+    nested.push_str("}\n");
+    Some(nested)
 }
 
 /// A directory of consumed WIT packages, resolved against the crate manifest.
