@@ -4,8 +4,8 @@
 use futures::executor::LocalPool;
 use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
+use tembra::wasm::{Contract, Engine, Install, Limits};
 use tembra::{Host, Orb, Reference, Service};
-use tembra_executor_wasm::{Contract, Engine, Install, Limits};
 
 /// The shared interface, implemented by both keepers.
 const BOOK: &str = "example:ledger/book@1.0.0";

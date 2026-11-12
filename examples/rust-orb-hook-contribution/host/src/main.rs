@@ -4,9 +4,9 @@
 use futures::executor::LocalPool;
 use serde_json::{Value, json};
 use std::rc::Rc;
+use tembra::wasm::{Engine, Install, Limits};
 use tembra::{Host, Reference};
 use tembra_example_native_gate::GUARD;
-use tembra_executor_wasm::{Engine, Install, Limits};
 
 /// The contributor's own service, derived from its WIT like any compiled Orb's.
 const REPORT: &str = "filter::example:filter/report@1.0.0";

@@ -5,7 +5,7 @@ use futures::executor::LocalPool;
 use serde_json::{Value, json};
 use std::rc::Rc;
 use tembra::Host;
-use tembra_executor_wasm::{Engine, Install, Limits};
+use tembra::wasm::{Engine, Install, Limits};
 
 /// The greeter's interface, imported by the welcomer and bound to the `greeter` Orb at installation.
 const GREETING: &str = "example:greeter/greeting@1.0.0";

@@ -3,8 +3,8 @@
 use futures::executor::LocalPool;
 use serde_json::{Value, json};
 use std::rc::Rc;
+use tembra::wasm::{Engine, Install, Limits};
 use tembra::{Host, Reference};
-use tembra_executor_wasm::{Engine, Install, Limits};
 
 /// The audit's service, derived from its WIT like any compiled Orb's.
 const AUDITOR: &str = "audit::example:audit/auditor@1.0.0";

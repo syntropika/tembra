@@ -4,8 +4,8 @@
 use futures::executor::LocalPool;
 use serde_json::{Value, json};
 use std::rc::Rc;
+use tembra::wasm::{Engine, Install, Limits};
 use tembra::{Host, Reference};
-use tembra_executor_wasm::{Engine, Install, Limits};
 
 /// The three services of the Orb `ledger`, each named after its exported interface, with the
 /// principal that may acquire its `main` object: a host-lifetime object belongs to the host.

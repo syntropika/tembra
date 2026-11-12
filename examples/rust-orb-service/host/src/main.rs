@@ -4,7 +4,7 @@ use futures::executor::LocalPool;
 use serde_json::{Value, json};
 use std::rc::Rc;
 use tembra::Host;
-use tembra_executor_wasm::{Engine, Install, Limits};
+use tembra::wasm::{Engine, Install, Limits};
 
 /// The service Tembra derives from the WIT: `<orb>::<package>/<interface>@<version>`.
 const SERVICE: &str = "greeter::example:greeter/greeting@1.0.0";
