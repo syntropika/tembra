@@ -825,6 +825,11 @@ pub(crate) fn references(ty: &Type, out: &mut Vec<Ident>) {
     }
 }
 
+/// Whether a Rust type is `()`.
+fn unit(ty: &Type) -> bool {
+    matches!(ty, Type::Tuple(tuple) if tuple.elems.is_empty())
+}
+
 /// Translate an owned Rust type into its WIT spelling.
 pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
     match ty {
@@ -835,23 +840,36 @@ pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
                 .last()
                 .ok_or_else(|| syn::Error::new(ty.span(), "empty type path"))?;
             let name = segment.ident.to_string();
-            let args = || -> syn::Result<Vec<String>> {
+            // The type parameters of `Vec`, `Option` and `Result`, exactly `count` of them.
+            let args = |count: usize| -> syn::Result<Vec<&Type>> {
                 let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
                     return Err(syn::Error::new(
                         segment.span(),
                         "type parameters are required",
                     ));
                 };
-                args.args
+                let types = args
+                    .args
                     .iter()
                     .map(|arg| match arg {
-                        syn::GenericArgument::Type(Type::Tuple(t)) if t.elems.is_empty() => {
-                            Ok("_".to_owned())
-                        }
-                        syn::GenericArgument::Type(ty) => wit_type(ty),
+                        syn::GenericArgument::Type(ty) => Ok(ty),
                         other => Err(syn::Error::new(other.span(), "unsupported type parameter")),
                     })
-                    .collect()
+                    .collect::<syn::Result<Vec<_>>>()?;
+                if types.len() != count {
+                    return Err(syn::Error::new(
+                        segment.span(),
+                        format!(
+                            "the macro reads `{name}` by its name as {}, so another `{name}`, such as a module's own alias, cannot stand for it here",
+                            if count == 1 {
+                                format!("`{name}<T>`")
+                            } else {
+                                format!("`{name}<T, E>`")
+                            }
+                        ),
+                    ));
+                }
+                Ok(types)
             };
             Ok(match name.as_str() {
                 "i8" => "s8".into(),
@@ -860,12 +878,36 @@ pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
                 "i64" => "s64".into(),
                 "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool" | "char" => name,
                 "String" => "string".into(),
-                "Vec" => format!("list<{}>", args()?.join(", ")),
-                "Option" => format!("option<{}>", args()?.join(", ")),
-                "Result" => format!("result<{}>", args()?.join(", ")),
+                "Vec" => format!("list<{}>", wit_type(args(1)?[0])?),
+                "Option" => {
+                    let inner = args(1)?[0];
+                    if unit(inner) {
+                        return Err(syn::Error::new(
+                            ty.span(),
+                            "`Option<()>` has no WIT equivalent, WIT has no empty value for an option to hold: use `bool`",
+                        ));
+                    }
+                    format!("option<{}>", wit_type(inner)?)
+                }
+                // WIT leaves out a side that carries nothing: `result<t>` is `Result<T, ()>`,
+                // `result<_, e>` is `Result<(), E>`, and `result` is `Result<(), ()>`.
+                "Result" => {
+                    let sides = args(2)?;
+                    let (ok, err) = (sides[0], sides[1]);
+                    match (unit(ok), unit(err)) {
+                        (true, true) => "result".into(),
+                        (true, false) => format!("result<_, {}>", wit_type(err)?),
+                        (false, true) => format!("result<{}>", wit_type(ok)?),
+                        (false, false) => format!("result<{}, {}>", wit_type(ok)?, wit_type(err)?),
+                    }
+                }
                 other => other.to_kebab_case(),
             })
         }
+        Type::Tuple(tuple) if tuple.elems.is_empty() => Err(syn::Error::new(
+            ty.span(),
+            "`()` has no WIT equivalent as a value, WIT has no empty tuple; it reads as nothing only as a function's result or a side of a `Result`",
+        )),
         Type::Tuple(tuple) => Ok(format!(
             "tuple<{}>",
             tuple

@@ -373,6 +373,52 @@ fn a_host_lifetime_cannot_linger_and_unknown_options_are_refused() {
     assert!(error.contains("unknown option"), "{error}");
 }
 
+/// A side of a `Result` that carries nothing is left out, as WIT spells it: `result<t>` for
+/// `Result<T, ()>`, `result<_, e>` for `Result<(), E>` and `result` for `Result<(), ()>`, the
+/// spellings the bindings read back as the author's types. `Option<()>` and `()` as a value have
+/// no WIT equivalent.
+#[test]
+fn a_side_of_a_result_that_carries_nothing_is_left_out() {
+    let method = |result: &str| {
+        ledger("#[service]").replace(
+            "pub fn count() -> u32 { 0 }",
+            &format!("pub fn parse(text: String) -> {result} {{ todo!() }}"),
+        )
+    };
+    for (rust, spelled) in [
+        ("Result<u32, ()>", "result<u32>"),
+        ("Result<(), String>", "result<_, string>"),
+        ("Result<(), ()>", "result"),
+        ("Result<u32, String>", "result<u32, string>"),
+        ("Option<Result<(), ()>>", "option<result>"),
+    ] {
+        let text = wit(&expanded(PACKAGE, &method(rust)));
+        assert!(
+            text.contains(&format!("  parse: func(text: string) -> {spelled};\n")),
+            "{rust}: {text}"
+        );
+        let mut resolve = wit_parser::Resolve::default();
+        resolve
+            .push_str("book.wit", &text)
+            .unwrap_or_else(|error| panic!("{rust}: {error:#}\n{text}"));
+    }
+    for (rust, message) in [
+        (
+            "Option<()>",
+            "`Option<()>` has no WIT equivalent, WIT has no empty value for an option to hold: use `bool`",
+        ),
+        ("Vec<()>", "`()` has no WIT equivalent as a value"),
+        ("(u32, ())", "`()` has no WIT equivalent as a value"),
+        (
+            "Result<u32>",
+            "the macro reads `Result` by its name as `Result<T, E>`",
+        ),
+    ] {
+        let error = refused(PACKAGE, &method(rust));
+        assert!(error.contains(message), "{rust}: {error}");
+    }
+}
+
 /// The package, and every identity an attribute names, of an implemented interface, a hook or an
 /// import, is a WIT identity: names of kebab-case words of lowercase letters and digits, each word
 /// starting with a letter and no name a WIT keyword, and a semantic version when there is one.

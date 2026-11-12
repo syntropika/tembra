@@ -532,7 +532,9 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
 - Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
   64-bit integers cross the boundary exactly. A `resource` is a `#[wit_resource]` struct or the
   handle of an imported interface, handed out as an owned handle and never taken as a
-  parameter. No `flags`, `stream` or `future`.
+  parameter. No `flags`, `stream` or `future`. `()` is nothing only as a function's result or a
+  side of a `Result`, which WIT then leaves out: `Result<T, ()>` is `result<t>`, `Result<(), E>` is
+  `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has no equivalent, use `bool`.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it, and a record
   of a consumed package is not a state; a state copies it into a record of the module.
 - Replacing the author's types drops their `#[derive]`s.
