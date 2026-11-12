@@ -76,7 +76,10 @@ type; the other types of the module, and unit structs without the marker, remain
 method that names a type the module does not declare is a compile error, and so is a service with
 the name of the module, because WIT refuses a world and an interface of one name. So is a method
 named `then`, `release`, `state`, `ready`, `status` or `opaque`: every reference to a service object
-has those members, and the kernel refuses such a method when it installs the Orb.
+has those members, and the kernel refuses such a method when it installs the Orb. The package and
+every identity an attribute names are WIT identities, `ns:name@version` and
+`ns:name/interface@version`: names of kebab-case words of lowercase letters and digits, each word
+starting with a letter, none of them a WIT keyword, and a semantic version.
 
 Nothing is bound by name either. The functions the generated code calls by role, a state's rule,
 a root resource's opening and closing and a WIT resource's constructor, carry a marker,

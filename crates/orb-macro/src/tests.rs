@@ -8,9 +8,14 @@ fn orb(package: &str, module: &str) -> syn::Result<ItemMod> {
     orb_with(options(package, None), module)
 }
 
+/// A string literal, as written on the attribute.
+fn literal(text: &str) -> syn::LitStr {
+    syn::LitStr::new(text, proc_macro2::Span::call_site())
+}
+
 fn options(package: &str, wit: Option<&std::path::Path>) -> Options {
     Options {
-        package: Some(package.to_owned()),
+        package: Some(literal(package)),
         wit: wit.map(|dir| dir.display().to_string()),
         context: false,
         imports: Vec::new(),
@@ -368,6 +373,137 @@ fn a_host_lifetime_cannot_linger_and_unknown_options_are_refused() {
     assert!(error.contains("unknown option"), "{error}");
 }
 
+/// The package, and every identity an attribute names, of an implemented interface, a hook or an
+/// import, is a WIT identity: names of kebab-case words of lowercase letters and digits, each word
+/// starting with a letter and no name a WIT keyword, and a semantic version when there is one.
+/// Anything else is an error on the literal, never a panic or a line of foreign WIT.
+#[test]
+fn the_identities_on_attributes_are_wit_identities() {
+    for (package, problem) in [
+        ("example:", "the package name `` is empty"),
+        ("example:@1.0.0", "the package name `` is empty"),
+        (":greeter@1.0.0", "the namespace `` is empty"),
+        (
+            "acme:2fa@1.0.0",
+            "the package name `2fa` has a word that does not start with a lowercase letter",
+        ),
+        (
+            "acme:two--factor@1.0.0",
+            "the package name `two--factor` has an empty word around a `-`",
+        ),
+        (
+            "Acme:greeter@1.0.0",
+            "the namespace `Acme` has a word that does not start with a lowercase letter",
+        ),
+        (
+            "acme:greeter_two@1.0.0",
+            "the package name `greeter_two` is not kebab-case words of lowercase letters and digits",
+        ),
+        (
+            "acme:list@1.0.0",
+            "the package name `list` is a WIT keyword",
+        ),
+        (
+            "acme:greeter@1.0",
+            "the version `1.0` is not a semantic version",
+        ),
+        (
+            "acme:greeter@01.0.0",
+            "the version `01.0.0` is not a semantic version",
+        ),
+        (
+            "acme:greeter@1.0.0; interface injected {}",
+            "the version `1.0.0; interface injected {}` is not a semantic version",
+        ),
+        (
+            "greeter",
+            "it has no `:` between the namespace and the package name",
+        ),
+    ] {
+        let error = refused(package, &ledger("#[service]"));
+        assert!(
+            error.contains(&format!(
+                "the package is named namespace:name@version, such as `example:name@1.0.0`; `{package}` is not: {problem}"
+            )),
+            "{package}: {error}"
+        );
+    }
+    for package in [
+        "example:book@1.0.0-rc.1+build.5",
+        "example:book",
+        "example:book2-v3@0.1.0",
+    ] {
+        let module = expanded(package, &ledger("#[service]"));
+        assert!(
+            wit(&module).starts_with(&format!("package {package};\n")),
+            "{}",
+            wit(&module)
+        );
+    }
+    // The bindings escape a namespace that is a Rust keyword, `self_`, but not a package name.
+    let module = expanded("self:book@1.0.0", &ledger("#[service]"));
+    assert!(
+        tokens(&module).contains("impl exports :: self_ :: book :: ledger :: Guest for"),
+        "{}",
+        tokens(&module)
+    );
+    let error = refused("example:self@1.0.0", &ledger("#[service]"));
+    assert!(
+        error.contains(
+            "the package name `self` is a Rust keyword, which the bindings cannot name a module after"
+        ),
+        "{error}"
+    );
+    let error = refused(
+        PACKAGE,
+        &ledger("#[service(\"example:ledger/book@1.0.0;\\nworld injected {}\")]"),
+    );
+    assert!(
+        error.contains("an implemented interface is named namespace:name/interface@version, such as `example:name/interface@1.0.0`"),
+        "{error}"
+    );
+    let error = refused(PACKAGE, &ledger("#[service(\"example:ledger@1.0.0\")]"));
+    assert!(
+        error.contains("it names no interface after a `/`"),
+        "{error}"
+    );
+    let error = refused(
+        PACKAGE,
+        &ledger("#[service]").replace(
+            "pub struct Ledger;",
+            "pub struct Ledger;\n#[hook(\"example:admission/Guard@1.0.0\", priority = 1)]\npub fn block(input: u32) -> u32 { input }",
+        ),
+    );
+    assert!(
+        error.contains("a hook is named namespace:name/interface@version")
+            && error.contains("the interface name `Guard` has a word that does not start"),
+        "{error}"
+    );
+    let error = refused(
+        PACKAGE,
+        &ledger("#[service]").replace(
+            "pub struct Ledger;",
+            "pub struct Ledger;\n#[hook(\"admission/guard@1.0.0\", composition = series)]\npub struct Guard;",
+        ),
+    );
+    assert!(
+        error.contains("a hook is named namespace:name/interface@version")
+            && error.contains("it has no `:`"),
+        "{error}"
+    );
+    let error = refused_with(
+        Options {
+            imports: vec![literal("example:ledger/book@1.0.0;\n  export injected;")],
+            ..options(PACKAGE, None)
+        },
+        &ledger("#[service]"),
+    );
+    assert!(
+        error.contains("an imported interface is named namespace:name/interface@version"),
+        "{error}"
+    );
+}
+
 const LEDGER_WIT: &str = "package example:ledger@1.0.0;
 interface book {
   record entry { label: string, amount: s64 }
@@ -481,7 +617,7 @@ fn an_import_enters_the_world_and_is_reexported() {
     let dir = consumed("reader", LEDGER_WIT);
     let module = orb_with(
         Options {
-            imports: vec!["example:ledger/book@1.0.0".into()],
+            imports: vec![literal("example:ledger/book@1.0.0")],
             ..options("example:reader@1.0.0", Some(&dir))
         },
         &ledger("#[service]"),
@@ -1175,7 +1311,7 @@ interface grants {
 fn the_state_derives_leave_out_the_types_that_cannot_carry_them() {
     let dir = consumed("access", ACCESS_WIT);
     let imports = Options {
-        imports: vec!["example:access/grants@1.0.0".into()],
+        imports: vec![literal("example:access/grants@1.0.0")],
         ..options("example:keeper@1.0.0", Some(&dir))
     };
     let module = orb_with(
@@ -1197,7 +1333,7 @@ fn the_state_derives_leave_out_the_types_that_cannot_carry_them() {
     // Without a state the bindings derive nothing more, and nothing is left out.
     let stateless = orb_with(
         Options {
-            imports: vec!["example:access/grants@1.0.0".into()],
+            imports: vec![literal("example:access/grants@1.0.0")],
             ..options("example:keeper@1.0.0", Some(&dir))
         },
         &ledger("#[service]"),

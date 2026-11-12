@@ -43,13 +43,11 @@ pub fn orb(attribute: TokenStream, item: TokenStream) -> TokenStream {
     let mut options = Options::default();
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("package") {
-            options.package = Some(meta.value()?.parse::<LitStr>()?.value());
+            options.package = Some(meta.value()?.parse::<LitStr>()?);
         } else if meta.path.is_ident("wit") {
             options.wit = Some(meta.value()?.parse::<LitStr>()?.value());
         } else if meta.path.is_ident("import") {
-            options
-                .imports
-                .push(meta.value()?.parse::<LitStr>()?.value());
+            options.imports.push(meta.value()?.parse::<LitStr>()?);
         } else if meta.path.is_ident("context") {
             options.context = true;
         } else {
@@ -70,15 +68,15 @@ pub fn orb(attribute: TokenStream, item: TokenStream) -> TokenStream {
 /// The attribute options.
 #[derive(Default)]
 struct Options {
-    /// The WIT package identity of this Orb.
-    package: Option<String>,
+    /// The WIT package identity of this Orb, as written on the attribute.
+    package: Option<LitStr>,
     /// A directory with the WIT packages this Orb consumes, relative to the crate manifest.
     wit: Option<String>,
     /// The module imports the kernel's `tembra:guest/context` interface.
     context: bool,
-    /// Interfaces of other Orbs the module imports, from the consumed WIT packages; the installer
-    /// binds each to a provider.
-    imports: Vec<String>,
+    /// Interfaces of other Orbs the module imports, from the consumed WIT packages, as written on
+    /// the attribute; the installer binds each to a provider.
+    imports: Vec<LitStr>,
 }
 
 /// A type declared in the module, with its WIT definition and the module types it refers to.
@@ -735,10 +733,15 @@ fn owner_of<'a>(
 fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenStream> {
     let package = options
         .package
+        .as_ref()
         .ok_or_else(|| syn::Error::new(module.span(), "missing package = \"ns:name@1.0.0\""))?;
-    let (namespace, rest) = package
-        .split_once(':')
-        .ok_or_else(|| syn::Error::new(module.span(), "package must be ns:name@version"))?;
+    let package = wit_identity(package, "the package", false)?;
+    let imports = options
+        .imports
+        .iter()
+        .map(|import| wit_identity(import, "an imported interface", true))
+        .collect::<syn::Result<Vec<String>>>()?;
+    let (namespace, rest) = package.split_once(':').unwrap_or_default();
     let name = rest.split_once('@').map_or(rest, |(name, _)| name);
     let world = wit::kebab(&module.ident);
     let Some((_, items)) = module.content else {
@@ -1179,12 +1182,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .iter()
         .filter_map(|service| service.implements.clone())
         .collect();
-    let consumed = match (
-        &wit_dir,
-        implemented.is_empty() && options.imports.is_empty(),
-    ) {
+    let consumed = match (&wit_dir, implemented.is_empty() && imports.is_empty()) {
         (_, true) => BTreeMap::new(),
-        (Some(dir), false) => wit::consumed(dir, implemented.iter().chain(options.imports.iter()))?,
+        (Some(dir), false) => wit::consumed(dir, implemented.iter().chain(imports.iter()))?,
         (None, false) => {
             return Err(syn::Error::new(
                 Span::call_site(),
@@ -1358,7 +1358,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             declared: &declared,
         },
         consumed_hooks.iter().copied(),
-        &options.imports,
+        &imports,
         wit::Kernel {
             state: !states.is_empty(),
             resources: !resources.is_empty(),
@@ -1372,14 +1372,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let module_ident = module.ident;
     let vis = module.vis;
     let (outer_attrs, inner_attrs) = placed(&module.attrs);
-    let ns_ident = format_ident!("{}", namespace.to_snake_case());
-    let name_ident = format_ident!("{}", name.to_snake_case());
+    let ns_ident = rust_module(namespace);
+    let name_ident = package_module(name);
     // The generated types carry the author's names and public fields, so the author's functions
     // and the generated traits speak about one type: each is re-exported in the module that
     // declared it. A type a derived hook reaches is defined in the first derived hook's
     // interface, any other in the first derived service's.
     let hook_shapes = wit::hook_shapes(&shapes, &declared);
-    let interface_module = |ident: &Ident| format_ident!("{}", ident.to_string().to_snake_case());
+    let interface_module = |ident: &Ident| rust_module(&wit::kebab(ident));
     let first_hook = declared
         .iter()
         .find(|declaration| declaration.input.is_some())
@@ -1489,7 +1489,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             let [ns, package, interface] = hook_path(identity);
             quote! { pub use exports::#ns::#package::#interface; }
         })
-        .chain(options.imports.iter().map(|identity| {
+        .chain(imports.iter().map(|identity| {
             let [ns, package, interface] = hook_path(identity);
             quote! { pub use self::#ns::#package::#interface; }
         }));
@@ -1779,14 +1779,7 @@ fn service_attribute(attribute: &Attribute) -> syn::Result<(Option<String>, Opti
         let mut implements = None;
         if input.peek(LitStr) {
             let identity: LitStr = input.parse()?;
-            let value = identity.value();
-            if !value.contains(':') || !value.contains('/') || value.contains(['"', '\\']) {
-                return Err(syn::Error::new(
-                    identity.span(),
-                    "an implemented interface is named ns:name/interface@version",
-                ));
-            }
-            implements = Some(value);
+            implements = Some(wit_identity(&identity, "an implemented interface", true)?);
             if !input.is_empty() {
                 input.parse::<Token![,]>()?;
             }
@@ -2327,13 +2320,7 @@ fn contribution(function: &ItemFn, attribute: &Attribute) -> syn::Result<Contrib
         }
         Ok((hook, priority))
     })?;
-    let id = hook.value();
-    if !id.contains(':') || !id.contains('/') || id.contains(['"', '\\']) {
-        return Err(syn::Error::new(
-            hook.span(),
-            "a hook is named ns:name/interface@version",
-        ));
-    }
+    let id = wit_identity(&hook, "a hook", true)?;
     if !matches!(function.vis, Visibility::Public(_)) {
         return Err(syn::Error::new(
             function.sig.span(),
@@ -2426,16 +2413,7 @@ fn declaration(
         ));
     };
     let (hook, input) = match (hook, input) {
-        (Some(hook), None) => {
-            let id = hook.value();
-            if !id.contains(':') || !id.contains('/') || id.contains(['"', '\\']) {
-                return Err(syn::Error::new(
-                    hook.span(),
-                    "a hook is named ns:name/interface@version",
-                ));
-            }
-            (id, None)
-        }
+        (Some(hook), None) => (wit_identity(&hook, "a hook", true)?, None),
         (None, Some(input)) => {
             // The input crosses to the import by value, or by reference for a string or a list;
             // the bindings take other containers in borrowed forms the macro does not spell.
@@ -3137,7 +3115,206 @@ pub(crate) fn hook_path(hook: &str) -> [Ident; 3] {
     let (package, rest) = hook.split_once('/').unwrap_or((hook, ""));
     let (namespace, name) = package.split_once(':').unwrap_or((package, ""));
     let interface = rest.split('@').next().unwrap_or(rest);
-    [namespace, name, interface].map(|part| format_ident!("{}", part.to_snake_case()))
+    [
+        rust_module(namespace),
+        package_module(name),
+        rust_module(interface),
+    ]
+}
+
+/// The Rust keywords `wit-bindgen` escapes with a trailing `_` when it names a module after a WIT
+/// namespace or interface.
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
+    "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+];
+
+/// The module `wit-bindgen` generates for a WIT namespace or interface name: its snake_case form,
+/// with `_` after a Rust keyword.
+pub(crate) fn rust_module(name: &str) -> Ident {
+    if RUST_KEYWORDS.contains(&name) {
+        format_ident!("{name}_")
+    } else {
+        format_ident!("{}", name.to_snake_case())
+    }
+}
+
+/// The module `wit-bindgen` generates for a WIT package name: its snake_case form, never escaped,
+/// which is why an identity's package name is no Rust keyword.
+pub(crate) fn package_module(name: &str) -> Ident {
+    format_ident!("{}", name.to_snake_case())
+}
+
+/// The keywords of WIT, which an identity cannot use as a name without the `%` escape.
+const WIT_KEYWORDS: &[&str] = &[
+    "use",
+    "type",
+    "func",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "s8",
+    "s16",
+    "s32",
+    "s64",
+    "f32",
+    "f64",
+    "char",
+    "resource",
+    "own",
+    "borrow",
+    "record",
+    "flags",
+    "variant",
+    "enum",
+    "bool",
+    "string",
+    "option",
+    "result",
+    "future",
+    "stream",
+    "error-context",
+    "list",
+    "map",
+    "_",
+    "as",
+    "from",
+    "static",
+    "interface",
+    "tuple",
+    "world",
+    "import",
+    "export",
+    "package",
+    "constructor",
+    "include",
+    "with",
+    "async",
+];
+
+/// Read a WIT identity written on an attribute: `namespace:name@version` for a package, or
+/// `namespace:name/interface@version` for an interface. Each name is a WIT identifier,
+/// kebab-case words of lowercase letters and digits, each word starting with a letter, that is
+/// no WIT keyword; the version, when there is one, is a semantic version. The identity reaches
+/// the WIT text and the generated module paths as written, so anything else is an error on the
+/// literal; `role` names what the identity is, for that error.
+fn wit_identity(literal: &LitStr, role: &str, interface: bool) -> syn::Result<String> {
+    let text = literal.value();
+    let form = if interface {
+        "namespace:name/interface@version"
+    } else {
+        "namespace:name@version"
+    };
+    match identity_problem(&text, interface) {
+        None => Ok(text),
+        Some(problem) => Err(syn::Error::new(
+            literal.span(),
+            format!(
+                "{role} is named {form}, such as `example:name{}@1.0.0`; `{text}` is not: {problem}",
+                if interface { "/interface" } else { "" }
+            ),
+        )),
+    }
+}
+
+/// What makes a text no WIT identity of the given kind, if anything.
+fn identity_problem(text: &str, interface: bool) -> Option<String> {
+    let (name, version) = match text.split_once('@') {
+        Some((name, version)) => (name, Some(version)),
+        None => (text, None),
+    };
+    let (package, interface) = match (interface, name.split_once('/')) {
+        (true, Some((package, interface))) => (package, Some(interface)),
+        (true, None) => return Some("it names no interface after a `/`".into()),
+        (false, _) => (name, None),
+    };
+    let Some((namespace, package)) = package.split_once(':') else {
+        return Some("it has no `:` between the namespace and the package name".into());
+    };
+    let names = [("namespace", namespace), ("package name", package)]
+        .into_iter()
+        .chain(interface.map(|interface| ("interface name", interface)));
+    for (part, value) in names {
+        if let Some(problem) = identifier_problem(value) {
+            return Some(format!("the {part} `{value}` {problem}"));
+        }
+        // The bindings name a module after each name: they escape a Rust keyword in a namespace
+        // or an interface name, but neither a package name nor the 2024 edition's `gen`.
+        if value == "gen" || (part == "package name" && RUST_KEYWORDS.contains(&value)) {
+            return Some(format!(
+                "the {part} `{value}` is a Rust keyword, which the bindings cannot name a module after"
+            ));
+        }
+    }
+    match version {
+        Some(version) if !semantic_version(version) => Some(format!(
+            "the version `{version}` is not a semantic version, such as `1.0.0`"
+        )),
+        _ => None,
+    }
+}
+
+/// What makes a name no WIT identifier, if anything.
+fn identifier_problem(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("is empty");
+    }
+    if WIT_KEYWORDS.contains(&name) {
+        return Some("is a WIT keyword");
+    }
+    for word in name.split('-') {
+        if word.is_empty() {
+            return Some("has an empty word around a `-`");
+        }
+        if !word.starts_with(|first: char| first.is_ascii_lowercase()) {
+            return Some("has a word that does not start with a lowercase letter");
+        }
+        if !word
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+        {
+            return Some("is not kebab-case words of lowercase letters and digits");
+        }
+    }
+    None
+}
+
+/// Whether a text is a semantic version: `major.minor.patch`, numbers without leading zeros,
+/// optionally followed by `-` and pre-release identifiers and by `+` and build identifiers.
+fn semantic_version(text: &str) -> bool {
+    let number = |part: &str| {
+        !part.is_empty()
+            && part.chars().all(|character| character.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'))
+    };
+    let identifiers = |list: &str, pre_release: bool| {
+        list.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+                && (!pre_release
+                    || !part.chars().all(|character| character.is_ascii_digit())
+                    || number(part))
+        })
+    };
+    let (rest, build) = match text.split_once('+') {
+        Some((rest, build)) => (rest, Some(build)),
+        None => (text, None),
+    };
+    let (core, pre_release) = match rest.split_once('-') {
+        Some((core, pre_release)) => (core, Some(pre_release)),
+        None => (rest, None),
+    };
+    let numbers: Vec<&str> = core.split('.').collect();
+    numbers.len() == 3
+        && numbers.iter().all(|part| number(part))
+        && pre_release.is_none_or(|list| identifiers(list, true))
+        && build.is_none_or(|list| identifiers(list, false))
 }
 
 #[cfg(test)]
