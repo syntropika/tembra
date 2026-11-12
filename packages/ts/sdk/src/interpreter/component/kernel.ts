@@ -60,12 +60,20 @@ export interface KernelTable {
   readonly hooks: Map<string, number>;
   /** Where the environment's object lives, read while it was declared. */
   address?: unknown;
+  /** Whether the component imports the context interface: an admitted call reads its principal. */
+  readonly context: boolean;
 }
 
 /** One callback's access to its environment's table, under the callback's own authority. */
 export interface KernelAccess {
   readonly table: KernelTable;
   readonly execution: ExecutionScope;
+  /**
+   * The principal of an admitted call, read when the call was admitted, for a component importing
+   * the context interface: the kernel refuses to read it once the call is cancelled, and it never
+   * changes.
+   */
+  readonly principal?: string | undefined;
 }
 
 /** A number this revision issued in a declaration, which the kernel calls back later. */
@@ -196,7 +204,7 @@ export class ComponentKernel {
     this.#scopes.set(scope.id, scope);
     const root = service === null ? undefined : environment.parent?.kernel;
     if (service !== null && !root) throw new Error("Missing component Orb kernel table");
-    const table = { scope, resources: new Map(), hooks: new Map() } as {
+    const table = { scope, resources: new Map(), hooks: new Map(), context: this.#context } as {
       -readonly [Field in keyof KernelTable]: KernelTable[Field];
     };
     table.root = root ?? table;
@@ -349,13 +357,17 @@ export class ComponentKernel {
     let snapshot: unknown;
     if (name === "read" && args.length === 0)
       snapshot = execution.sync({ operation: "state.read", id: table.state });
-    else if (name === "update" && args.length === 1)
-      snapshot = execution.sync({
-        operation: "state.update",
-        id: table.state,
-        value: json(args[0], "The state value"),
-      });
-    else throw new Error("unknown kernel state function");
+    else if (name === "update" && args.length === 1) {
+      const value = json(args[0], "The state value");
+      try {
+        snapshot = execution.sync({ operation: "state.update", id: table.state, value });
+      } catch (error) {
+        // The kernel keeps the previous value when it refuses the update of a cancelled call, and
+        // `update` answers with the value the kernel retained, as it promises.
+        if (execution.sync({ operation: "signal.cancelled" }) !== true) throw error;
+        snapshot = execution.sync({ operation: "state.read", id: table.state });
+      }
+    } else throw new Error("unknown kernel state function");
     return JSON.stringify((snapshot as { value: unknown }).value);
   }
 
@@ -374,18 +386,23 @@ export class ComponentKernel {
 
   /** The call's principal and cancellation, the object's address and the Orb's log. */
   #contextual(name: string, args: readonly unknown[]): unknown {
-    const { table, execution } = this.#current();
+    const { table, execution, principal } = this.#current();
     switch (name) {
       case "object":
         if (table.address === undefined)
           throw new Error("the address of this environment's object was not declared");
         return table.address;
       case "principal":
-        return execution.sync({ operation: "context.principal" });
+        return principal ?? execution.sync({ operation: "context.principal" });
       case "cancelled":
         return execution.sync({ operation: "signal.cancelled" });
       case "cancel":
-        execution.sync({ operation: "context.cancel" });
+        try {
+          execution.sync({ operation: "context.cancel" });
+        } catch (error) {
+          // Cancelling a call that is already cancelled changes nothing; the kernel refuses it.
+          if (execution.sync({ operation: "signal.cancelled" }) !== true) throw error;
+        }
         return null;
       case "log": {
         const [level, message] = args;

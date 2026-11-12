@@ -209,6 +209,10 @@ struct Authority {
     /// The kernel address of the environment's object (key and principal), for the context
     /// interface; declared only for components importing it.
     address: Option<Arc<Value>>,
+    /// The principal of the admitted call, read before the guest runs, for components importing
+    /// the context interface. The kernel refuses to read it once the call is cancelled, while
+    /// the call's principal never changes: `principal()` answers from here.
+    principal: Option<Arc<str>>,
 }
 
 struct Bound {
@@ -1401,13 +1405,16 @@ fn slot(value: &Value) -> Option<u32> {
     value.as_u64().and_then(|slot| u32::try_from(slot).ok())
 }
 
+/// A pending kernel state request, and for an update what answers it if the call was cancelled.
+struct StateAnswer {
+    receive: oneshot::Receiver<std::result::Result<String, String>>,
+    /// The call's channel and the state's handle, for an update only.
+    update: Option<(Channel, u32)>,
+}
+
 /// Capture the issuing call's authority and publish one synchronous kernel state request for the
 /// service object that call runs on.
-fn state_request(
-    state: &State,
-    function: &str,
-    params: &[Val],
-) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+fn state_request(state: &State, function: &str, params: &[Val]) -> wasmtime::Result<StateAnswer> {
     let authority = issuing_authority(state, "kernel state has no admitted invocation")?;
     let Some(id) = authority.state else {
         return Err(wasmtime::Error::msg(
@@ -1418,19 +1425,25 @@ fn state_request(
             },
         ));
     };
-    let packet = match (function, params) {
-        ("read", []) => json!({"operation": "state.read", "id": id}),
+    let (packet, update) = match (function, params) {
+        ("read", []) => (json!({"operation": "state.read", "id": id}), false),
         ("update", [Val::String(value)]) => {
             let mut value: Value = serde_json::from_str(value).map_err(|error| {
                 wasmtime::Error::msg(format!("the state value is not JSON: {error}"))
             })?;
             unsigned_zeros(&mut value);
-            json!({"operation": "state.update", "id": id, "value": value})
+            (
+                json!({"operation": "state.update", "id": id, "value": value}),
+                true,
+            )
         }
         _ => return Err(wasmtime::Error::msg("unknown kernel state function")),
-    }
-    .to_string();
-    synchronous(state, &authority, packet)
+    };
+    let channel = Channel::of(state, &authority);
+    Ok(StateAnswer {
+        receive: channel.publish(packet.to_string())?,
+        update: update.then_some((channel, id)),
+    })
 }
 
 /// Write every negative zero of a component's state JSON as zero, as `JSON.stringify` does.
@@ -1472,19 +1485,59 @@ fn synchronous(
     authority: &Authority,
     packet: String,
 ) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
-    if packet.len() > state.packet_bytes {
-        return Err(wasmtime::Error::msg("host packet limit exceeded"));
+    Channel::of(state, authority).publish(packet)
+}
+
+/// The issuing call's channel, kept by an import that may need to ask the host again once its
+/// first answer arrives, after the import has suspended and the Store is out of reach.
+struct Channel {
+    events: Sender<Event>,
+    packet_bytes: usize,
+}
+
+impl Channel {
+    fn of(state: &State, authority: &Authority) -> Self {
+        Self {
+            events: authority.events.clone(),
+            packet_bytes: state.packet_bytes,
+        }
     }
-    let (reply, receive) = oneshot::channel();
-    authority
-        .events
-        .try_send(Event::Host {
-            packet,
-            asynchronous: false,
-            reply,
-        })
-        .map_err(|_| wasmtime::Error::msg("host operation queue is full or closed"))?;
-    Ok(receive)
+
+    /// Publish one bounded synchronous host request.
+    fn publish(
+        &self,
+        packet: String,
+    ) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+        if packet.len() > self.packet_bytes {
+            return Err(wasmtime::Error::msg("host packet limit exceeded"));
+        }
+        let (reply, receive) = oneshot::channel();
+        self.events
+            .try_send(Event::Host {
+                packet,
+                asynchronous: false,
+                reply,
+            })
+            .map_err(|_| wasmtime::Error::msg("host operation queue is full or closed"))?;
+        Ok(receive)
+    }
+
+    /// Ask one request the kernel answers whether or not the call is cancelled.
+    async fn ask(&self, packet: Value) -> wasmtime::Result<Value> {
+        let text = self
+            .publish(packet.to_string())?
+            .await
+            .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+            .map_err(wasmtime::Error::msg)?;
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    /// Whether the call is cancelled, which is why the kernel refuses its writes, its
+    /// cancellation and its principal: a refusal for that reason has an answer that needs no
+    /// trap.
+    async fn cancelled(&self) -> wasmtime::Result<bool> {
+        Ok(self.ask(json!({"operation": "signal.cancelled"})).await? == json!(true))
+    }
 }
 
 /// Capture the issuing call's authority and publish one `hook.run` for a hook this Orb declares:
@@ -1540,10 +1593,17 @@ async fn hook_settle(
 
 /// How a kernel context function is answered.
 enum ContextAnswer {
-    /// Without the host: the object's declared address, or the log's empty answer.
+    /// Without the host: the object's declared address, the admitted call's principal, or the
+    /// log's empty answer.
     Local(Arc<Value>),
     /// By the host, on the issuing call's channel; the reply is lowered with the import's type.
     Host(oneshot::Receiver<std::result::Result<String, String>>),
+    /// The call's cancellation. Cancelling a call that is already cancelled changes nothing,
+    /// so the kernel's refusal of it then needs no trap.
+    Cancel(
+        oneshot::Receiver<std::result::Result<String, String>>,
+        Channel,
+    ),
 }
 
 /// Capture the issuing call's authority and answer one function of the kernel's context
@@ -1563,9 +1623,18 @@ fn context_request(
             })?;
             return Ok(ContextAnswer::Local(address));
         }
-        ("principal", []) => json!({"operation": "context.principal"}),
+        ("principal", []) => match &authority.principal {
+            Some(principal) => {
+                return Ok(ContextAnswer::Local(Arc::new(json!(principal.as_ref()))));
+            }
+            None => json!({"operation": "context.principal"}),
+        },
         ("cancelled", []) => json!({"operation": "signal.cancelled"}),
-        ("cancel", []) => json!({"operation": "context.cancel"}),
+        ("cancel", []) => {
+            let channel = Channel::of(state, &authority);
+            let receive = channel.publish(json!({"operation": "context.cancel"}).to_string())?;
+            return Ok(ContextAnswer::Cancel(receive, channel));
+        }
         ("log", [Val::Enum(level), Val::String(message)]) => {
             // A diagnostic record is the host's, attributed to this revision, and never needs
             // the call's authority: the session's diagnostics take it, as they take a source
@@ -1590,17 +1659,24 @@ async fn settle_context(
     ty: &ComponentFunc,
     results: &mut [Val],
 ) -> wasmtime::Result<()> {
+    let refused = |message| wasmtime::Error::msg(format!("kernel context refused: {message}"));
     let value = match answer {
-        ContextAnswer::Local(address) => Value::clone(&address),
+        ContextAnswer::Local(value) => Value::clone(&value),
         ContextAnswer::Host(receive) => {
             let text = receive
                 .await
                 .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
-                .map_err(|message| {
-                    wasmtime::Error::msg(format!("kernel context refused: {message}"))
-                })?;
+                .map_err(refused)?;
             serde_json::from_str(&text)?
         }
+        ContextAnswer::Cancel(receive, channel) => match receive
+            .await
+            .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+        {
+            Ok(_) => Value::Null,
+            Err(_) if channel.cancelled().await? => Value::Null,
+            Err(message) => return Err(refused(message)),
+        },
     };
     store_result(results, lower_result(ty, &value)?)
 }
@@ -1649,15 +1725,25 @@ async fn settle_resource(
     Ok(())
 }
 
-/// Lower the value the kernel retained as the JSON string result; a refusal traps the caller.
-async fn settle_state(
-    receive: oneshot::Receiver<std::result::Result<String, String>>,
-    results: &mut [Val],
-) -> wasmtime::Result<()> {
-    let text = receive
+/// Lower the value the kernel retained as the JSON string result. The kernel keeps the previous
+/// value when it refuses the update of a cancelled call, and `update` answers with that value, as
+/// it promises the value the kernel retained; any other refusal traps the caller.
+async fn settle_state(answer: StateAnswer, results: &mut [Val]) -> wasmtime::Result<()> {
+    let StateAnswer { receive, update } = answer;
+    let refused = |message| wasmtime::Error::msg(format!("kernel state refused: {message}"));
+    let text = match receive
         .await
         .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
-        .map_err(|message| wasmtime::Error::msg(format!("kernel state refused: {message}")))?;
+    {
+        Ok(text) => text,
+        Err(message) => match update {
+            Some((channel, id)) if channel.cancelled().await? => channel
+                .ask(json!({"operation": "state.read", "id": id}))
+                .await?
+                .to_string(),
+            _ => return Err(refused(message)),
+        },
+    };
     let snapshot: Value = serde_json::from_str(&text)?;
     let Some(result) = results.first_mut() else {
         return Err(wasmtime::Error::msg(
@@ -1885,6 +1971,7 @@ async fn serve(
                     .cloned()
                     .unwrap_or_default(),
                 address: environments.addresses.get(&environment).cloned(),
+                principal: None,
             };
             let call = Call {
                 function,
@@ -1918,10 +2005,11 @@ async fn serve(
                 ));
             }
             let target = target.clone();
-            let authority = match authority(environment, layout, environments, command) {
+            let mut authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
                 Err(error) => return Ok(Err(error)),
             };
+            authority.principal = admitted_principal(layout, command, limit).await;
             let call = Call {
                 function: target.function,
                 roles: target.roles,
@@ -1947,10 +2035,11 @@ async fn serve(
                     "a contribution runs only in its declared Orb root environment".into(),
                 ));
             }
-            let authority = match authority(environment, layout, environments, command) {
+            let mut authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
                 Err(error) => return Ok(Err(error)),
             };
+            authority.principal = admitted_principal(layout, command, limit).await;
             let call = Call {
                 function: target.function,
                 roles: target.roles,
@@ -1967,16 +2056,34 @@ async fn serve(
             let (Some(handler), Some(call)) = (exports.handler, command.ingress.take()) else {
                 return Ok(Err("this revision serves no incoming HTTP request".into()));
             };
-            let authority = match authority(environment, layout, environments, command) {
+            let mut authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
                 Err(error) => return Ok(Err(error)),
             };
+            authority.principal = admitted_principal(layout, command, limit).await;
             ingress(engine, store, handler, call, authority, groups).await
         }
         Packet::Invoke { .. } | Packet::Contribute { .. } | Packet::Unsupported => Ok(Err(
             "compiled components have no guest callbacks of this kind".into(),
         )),
     }
+}
+
+/// The principal of the call a command admits, read once before the guest runs, for a component
+/// importing the kernel's context: the kernel answers it only until the call is cancelled. A
+/// call cancelled before it starts has none here, and its guest asks the kernel as before.
+async fn admitted_principal(layout: &Layout, command: &Command, limit: usize) -> Option<Arc<str>> {
+    if !layout.context {
+        return None;
+    }
+    declaration(
+        &command.events,
+        json!({"operation": "context.principal"}),
+        limit,
+    )
+    .await
+    .ok()
+    .and_then(|principal| principal.as_str().map(Arc::from))
 }
 
 /// The admitted call's authority: its own event channel and its Orb root's dependency handles.
@@ -2009,6 +2116,7 @@ fn authority(
             .unwrap_or_default(),
         hooks: environments.hooks.get(&root).cloned().unwrap_or_default(),
         address: environments.addresses.get(&environment).cloned(),
+        principal: None,
     })
 }
 
@@ -2135,6 +2243,7 @@ async fn declare(
             resources: Arc::default(),
             hooks,
             address: environments.addresses.get(&environment).cloned(),
+            principal: None,
         };
         let call = Call {
             function,
@@ -2234,6 +2343,7 @@ async fn declare(
             .unwrap_or_default(),
         hooks: environments.hooks.get(&root).cloned().unwrap_or_default(),
         address: environments.addresses.get(&environment).cloned(),
+        principal: None,
     };
     let call = Call {
         function,

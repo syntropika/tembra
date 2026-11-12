@@ -220,10 +220,24 @@ fn a_platform_port_never_sees_a_compiled_log_as_a_host_request() {
                 .to_string(),
         )
         .unwrap();
-    match events.receive().unwrap() {
-        PortEvent::Complete(result) => assert_eq!(result.unwrap(), "null"),
-        PortEvent::Host { packet, .. } => panic!("the log reached the port as {packet}"),
-        PortEvent::Ingress(_) => unreachable!("no incoming HTTP exchange was started"),
+    loop {
+        match events.receive().unwrap() {
+            PortEvent::Complete(result) => {
+                assert_eq!(result.unwrap(), "null");
+                break;
+            }
+            // The call's principal is read once when the call is admitted; nothing else may
+            // reach the port, the log least of all.
+            PortEvent::Host { packet, reply, .. } => {
+                let request: Value = serde_json::from_str(&packet).unwrap();
+                assert_eq!(
+                    request["operation"], "context.principal",
+                    "the log reached the port as {packet}"
+                );
+                reply.complete(Ok("\"alice\"".into()));
+            }
+            PortEvent::Ingress(_) => unreachable!("no incoming HTTP exchange was started"),
+        }
     }
     let records = records.lock().unwrap();
     assert_eq!(records.len(), 1, "{records:?}");

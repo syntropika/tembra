@@ -368,6 +368,60 @@ describe("the kernel's context for compiled Orbs", () => {
       await owner.close();
     }
   });
+
+  test("a cancelled call still reads its principal, cancels again and keeps the state", async () => {
+    const POLITE = `package test:polite@1.0.0;
+interface probe {
+  late: func(value: string) -> string;
+  read: func() -> string;
+}
+world polite {
+  import tembra:guest/context@1.0.0;
+  import tembra:guest/state@1.0.0;
+  export tembra:guest/state-init@1.0.0;
+  export probe;
+}`;
+    const seen: unknown[] = [];
+    const polite: Compiled = {
+      name: "polite",
+      contract: await contract(POLITE, "polite"),
+      component: ({
+        "tembra:guest/context@1.0.0": context,
+        "tembra:guest/state@1.0.0": state,
+      }) => ({
+        "tembra:guest/state-init@1.0.0": {
+          declare: () => ({ initial: "0", version: 1, validated: true }),
+          validate: () => {},
+        },
+        "test:polite/probe@1.0.0": {
+          late: (value: string) => {
+            context!.cancel();
+            seen.push(context!.principal());
+            context!.cancel();
+            const retained = state!.update(value);
+            seen.push(retained);
+            return retained;
+          },
+          read: () => state!.read(),
+        },
+      }),
+    };
+    const owner = host([polite]);
+    try {
+      await owner.install({ artifact: Uint8Array.of(0) });
+      const probe = await owner.get("polite::test:polite/probe@1.0.0", "main");
+      // The guest learns its caller and that its write was not applied; its caller sees the call
+      // cancelled, and nothing poisons the revision.
+      await expect(
+        owner.root((context) => probe.late("7", context), { principal: "alice" }),
+      ).rejects.toThrow("cancelled");
+      expect(seen).toEqual(["alice", "0"]);
+      expect(await probe.read()).toBe("0");
+      probe.release();
+    } finally {
+      await owner.close();
+    }
+  });
 });
 
 describe("compiled descriptions", () => {

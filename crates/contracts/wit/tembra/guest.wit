@@ -7,7 +7,8 @@ package tembra:guest@1.0.0;
 interface state {
     /// The current value, as JSON.
     read: func() -> string;
-    /// Replace the value with the given JSON and return the value the kernel retained.
+    /// Replace the value with the given JSON and return the value the kernel retained. Once the
+    /// current call is cancelled the kernel keeps the previous value, and that is the answer.
     update: func(value: string) -> string;
 }
 
@@ -74,11 +75,12 @@ interface context {
     }
     /// The address of the object running the current call; the root's, for a hook contribution.
     object: func() -> address;
-    /// The principal of the current call.
+    /// The principal of the current call, the one it was admitted with, also once cancelled.
     principal: func() -> string;
     /// Whether the current call was cancelled.
     cancelled: func() -> bool;
-    /// Cancel the current call: the caller and this Orb both observe it cancelled.
+    /// Cancel the current call: the caller and this Orb both observe it cancelled. Cancelling a
+    /// cancelled call changes nothing.
     cancel: func();
     /// Write a diagnostic record attributed to this Orb, for the host's log observers.
     log: func(level: level, message: string);

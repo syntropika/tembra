@@ -28,6 +28,18 @@ import { lift, type Signature } from "../wit-shape.ts";
 
 const scopeEnded = Object.freeze(new Error("Component callback scope ended"));
 
+/**
+ * The principal of a call while it is admitted. The kernel refuses to read it once the call is
+ * cancelled; a call cancelled before it starts has none here, and its guest asks the kernel.
+ */
+function admittedPrincipal(context: Context): string | undefined {
+  try {
+    return context.principal;
+  } catch {
+    return undefined;
+  }
+}
+
 /** One prepared import function: the provider method it calls and its original WIT slot. */
 export interface BoundMethod {
   readonly name: string;
@@ -284,7 +296,13 @@ export class ComponentScope {
   private access(authority: Authority, execution?: ExecutionScope): KernelAccess | undefined {
     const table = this.kernel;
     if (!table) return undefined;
-    return { table, execution: execution ?? table.scope.exchange(authority) };
+    return {
+      table,
+      execution: execution ?? table.scope.exchange(authority),
+      ...("context" in authority && table.context
+        ? { principal: admittedPrincipal(authority.context) }
+        : {}),
+    };
   }
 
   /** Resolve a token this revision issued for exactly `binding`. */
