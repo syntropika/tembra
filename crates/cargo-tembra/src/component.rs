@@ -10,7 +10,10 @@ use tembra_contracts::{
 };
 use wasmparser::{Parser, Payload};
 use wit_component::{DecodedWasm, WitPrinter};
-use wit_parser::{FunctionKind, InterfaceId, PackageId, Resolve, WorldId, WorldItem, WorldKey};
+use wit_parser::{
+    FunctionKind, InterfaceId, PackageId, PackageName, Resolve, UnresolvedPackageGroup, WorldId,
+    WorldItem, WorldKey,
+};
 
 /// The custom section in which the macro stores the WIT it derived from the module.
 const WIT_SECTION: &str = "tembra:wit";
@@ -54,6 +57,7 @@ pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) 
 /// A component built with the macro carries the module's own WIT in a custom section; the
 /// packages it consumes are nested after it, whole, from the directory the macro named when it
 /// is given, else from the component's types, which keep only the functions the component calls.
+/// A package a nested one builds on is nested too, though the component's types do not reach it.
 /// Any other component gets the WIT derived from its types, with the given world name.
 pub fn contract_text(
     bytes: &[u8],
@@ -91,15 +95,9 @@ pub fn contract_text(
                 }
                 None => None,
             };
+            let consumed = consumed_packages(resolve, root, &package, &text, whole.as_ref());
             let mut text = text;
-            for id in nested(resolve, root, |name| *name != package) {
-                let (source, id) = match &whole {
-                    Some(whole) => match whole.package_names.get(&resolve.packages[id].name) {
-                        Some(id) => (whole, *id),
-                        None => (resolve, id),
-                    },
-                    None => (resolve, id),
-                };
+            for (source, id) in consumed {
                 let mut printer = WitPrinter::default();
                 printer
                     .print_package(source, id, false)
@@ -185,11 +183,69 @@ fn nested<'a>(
         .packages
         .iter()
         .filter(move |(id, package)| {
-            *id != root
-                && !matches!(package.name.namespace.as_str(), "wasi" | "tembra")
-                && keep(&package.name.to_string())
+            *id != root && !standard(&package.name) && keep(&package.name.to_string())
         })
         .map(|(id, _)| id)
+}
+
+/// Whether a package is in a namespace of the standard packages that ship with tembra-contracts,
+/// which a contract never nests.
+pub(crate) fn standard(name: &PackageName) -> bool {
+    matches!(name.namespace.as_str(), "wasi" | "tembra")
+}
+
+/// The packages the module's own package `own`, written as `text`, consumes, each with the
+/// resolve to print it from: the consumed directory `whole` when it holds the package, else the
+/// component's types. First those of the component's types, in their order, then any other the
+/// module's WIT names, which the linker may have dropped from the types with an import the code
+/// never calls, then any other these packages build on: a package printed whole may name one the
+/// component never reaches. A package found nowhere is left to the reading of the contract, which
+/// names it.
+fn consumed_packages<'a>(
+    resolve: &'a Resolve,
+    root: PackageId,
+    own: &str,
+    text: &str,
+    whole: Option<&'a Resolve>,
+) -> Vec<(&'a Resolve, PackageId)> {
+    // Each package wanted, by name, with the resolve that names it.
+    let mut wanted: Vec<(PackageName, &'a Resolve)> = nested(resolve, root, |name| name != own)
+        .map(|id| (resolve.packages[id].name.clone(), resolve))
+        .collect();
+    if let Ok(group) = UnresolvedPackageGroup::parse("contract.wit", text) {
+        wanted.extend(
+            group
+                .main
+                .foreign_deps
+                .into_keys()
+                .map(|name| (name, resolve)),
+        );
+    }
+    let mut packages: Vec<(&'a Resolve, PackageId)> = Vec::new();
+    let mut next = 0;
+    while let Some((name, named_by)) = wanted.get(next).cloned() {
+        next += 1;
+        let taken = packages
+            .iter()
+            .any(|(source, id)| source.packages[*id].name == name);
+        if standard(&name) || name.to_string() == own || taken {
+            continue;
+        }
+        let Some((source, id)) = whole
+            .into_iter()
+            .chain([named_by])
+            .find_map(|source| Some((source, *source.package_names.get(&name)?)))
+        else {
+            continue;
+        };
+        packages.push((source, id));
+        wanted.extend(
+            source
+                .package_direct_deps(id)
+                .map(|dependency| (source.packages[dependency].name.clone(), source)),
+        );
+    }
+    packages
 }
 
 /// The package the component defines: the one owning the interfaces it exports without importing.

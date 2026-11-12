@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use wit_parser::UnresolvedPackageGroup;
+use wit_parser::{Resolve, UnresolvedPackageGroup};
 
 /// `[package.metadata.tembra]`: what the WIT does not carry.
 #[derive(Default, serde::Deserialize)]
@@ -143,6 +143,14 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     )
     .map_err(|error| anyhow::anyhow!("{error}"))
     .with_context(|| format!("reading the contract derived for {}", wit_file.display()))?;
+    //    The standard packages the contract depends on, which tembra-contracts bundles, go to
+    //    contract/deps/, where wit-parser looks for the packages a directory names: another Orb's
+    //    `wit = "../x/contract"` resolves the directory on its own, and `Contract::from_dir`
+    //    skips them. That the directory resolves alone is checked before anything is written.
+    let dependencies = contract.standard_dependencies();
+    let deps_dir = wit_dir.join("deps");
+    resolves_alone(&wit_file, &text, &deps_dir, &dependencies)
+        .with_context(|| format!("reading {} on its own", wit_dir.display()))?;
     std::fs::create_dir_all(&wit_dir)?;
     // Removed before the new file is written: where file names ignore case, a former name that
     // differs only in case is the new file.
@@ -155,6 +163,9 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     }
     std::fs::write(&wit_file, &text)?;
     println!("contract -> {}", wit_file.display());
+    for file in write_dependencies(&deps_dir, &dependencies)? {
+        println!("contract -> {}", file.display());
+    }
 
     // 3. Verify and package: the same component_artifact the SDK build uses for a provider.
     //    Hook interfaces are the ones the contract both imports and exports; which are declared,
@@ -265,6 +276,93 @@ fn former_contracts(dir: &Path, current: &Path, text: &str) -> Result<Vec<PathBu
             continue;
         };
         if package(&path, &source).as_ref() == Some(&own) {
+            formers.push(path);
+        }
+    }
+    formers.sort();
+    Ok(formers)
+}
+
+/// Check that a contract directory resolves on its own, as `Resolve::push_dir` reads it: the
+/// contract `text`, to be written as `file`, and the standard packages it depends on, to be
+/// written into `deps`.
+fn resolves_alone(
+    file: &Path,
+    text: &str,
+    deps: &Path,
+    dependencies: &[(&str, &str)],
+) -> Result<()> {
+    let parse = |path: &Path, source: &str| {
+        UnresolvedPackageGroup::parse(path, source)
+            .map_err(|(map, error)| anyhow::anyhow!("{}", error.render(&map)))
+    };
+    let main = parse(file, text)?;
+    let dependencies = dependencies
+        .iter()
+        .map(|(name, source)| parse(&deps.join(name), source))
+        .collect::<Result<Vec<_>>>()?;
+    let mut resolve = Resolve::default();
+    resolve
+        .push_groups(main, dependencies)
+        .map_err(|error| anyhow::anyhow!("{}", resolve.render_error(&error.into())))?;
+    Ok(())
+}
+
+/// Write the standard packages the contract depends on into `deps`, one file each, and return
+/// the files written. A standard package an earlier build wrote there that the contract no longer
+/// depends on is removed first, and `deps` too when nothing else is left in it.
+fn write_dependencies(deps: &Path, dependencies: &[(&str, &str)]) -> Result<Vec<PathBuf>> {
+    let files: Vec<PathBuf> = dependencies
+        .iter()
+        .map(|(name, _)| deps.join(name))
+        .collect();
+    for former in former_dependencies(deps, &files)? {
+        std::fs::remove_file(&former).with_context(|| format!("removing {}", former.display()))?;
+        eprintln!(
+            "removed {}, a standard package the contract no longer depends on",
+            former.display()
+        );
+    }
+    if !files.is_empty() {
+        std::fs::create_dir_all(deps)?;
+    }
+    for ((_, source), file) in dependencies.iter().zip(&files) {
+        std::fs::write(file, source)?;
+    }
+    if deps.is_dir()
+        && std::fs::read_dir(deps)
+            .with_context(|| format!("reading {}", deps.display()))?
+            .next()
+            .is_none()
+    {
+        std::fs::remove_dir(deps).with_context(|| format!("removing {}", deps.display()))?;
+    }
+    Ok(files)
+}
+
+/// The standard packages an earlier build wrote into `deps` and this one does not: the `.wit`
+/// files other than `current` whose package is a standard one, of the `wasi` or `tembra`
+/// namespace. A file of another package, or one that does not parse, is not this tool's output
+/// and stays.
+fn former_dependencies(deps: &Path, current: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if !deps.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut formers = Vec::new();
+    for entry in std::fs::read_dir(deps).with_context(|| format!("reading {}", deps.display()))? {
+        let path = entry?.path();
+        if current.contains(&path)
+            || path.extension().is_none_or(|extension| extension != "wit")
+            || !path.is_file()
+        {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if UnresolvedPackageGroup::parse(&path, &source)
+            .is_ok_and(|group| crate::component::standard(&group.main.name))
+        {
             formers.push(path);
         }
     }

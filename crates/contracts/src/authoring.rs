@@ -100,7 +100,10 @@ impl Contract {
     /// Follows `Resolve::push_dir`: dependency directories and text files are parsed once into
     /// their public unresolved form, so the world's own imports are known before elaboration
     /// adds type-only dependencies. Encoded packages (`*.wasm`, `*.wat`, or a `*.wit` whose
-    /// content is binary) are merged through `push_file` and carry no provenance.
+    /// content is binary) are merged through `push_file` and carry no provenance. A `deps/` file
+    /// that is a bundled standard contract line for line, as [`Self::standard_dependencies`]
+    /// lists them, adds nothing: the bundled package is resolved already. Any other definition
+    /// of a bundled package is refused.
     pub fn from_dir(path: impl AsRef<Path>, world: Option<&str>) -> Result<Self, Error> {
         let path = path.as_ref();
         let (mut resolve, mut known) = crate::standard::resolve()?;
@@ -139,6 +142,11 @@ impl Contract {
                 }
                 let source =
                     String::from_utf8(bytes).map_err(|error| package(&dependency, error))?;
+                // A copy of a bundled standard contract, there so that the directory resolves
+                // with `Resolve::push_dir` alone too, adds nothing to the bundled package.
+                if crate::standard::bundled(&source) {
+                    continue;
+                }
                 let group = parse_source(&dependency, &source)
                     .map_err(|error| package(&dependency, error))?;
                 dependencies.push((dependency, group));
@@ -214,6 +222,46 @@ impl Contract {
             .package
             .ok_or_else(|| Error("selected world has no package".into()))?;
         wit_component::encode(&self.resolve, package, false).map_err(parser)
+    }
+
+    /// The bundled standard contracts this contract depends on, directly or through another of
+    /// its packages, as `(file name, source)` in dependency order. A directory holding the
+    /// contract's own packages, with these files in its `deps/`, resolves on its own: with
+    /// `Resolve::push_dir`, as another Orb's bindings read it, and with [`Self::from_dir`].
+    pub fn standard_dependencies(&self) -> Vec<(&'static str, &'static str)> {
+        let standard = crate::standard::packages();
+        let bundled = |id: PackageId| {
+            standard
+                .iter()
+                .any(|(name, ..)| *name == self.resolve.packages[id].name)
+        };
+        // Every package a package of the contract reaches, a bundled one included: a bundled
+        // package resolves only with the bundled packages it builds on.
+        let mut reached = BTreeSet::new();
+        let mut pending: Vec<PackageId> = self
+            .resolve
+            .packages
+            .iter()
+            .map(|(id, _)| id)
+            .filter(|id| !bundled(*id))
+            .collect();
+        while let Some(id) = pending.pop() {
+            for dependency in self.resolve.package_direct_deps(id) {
+                if reached.insert(dependency) {
+                    pending.push(dependency);
+                }
+            }
+        }
+        standard
+            .into_iter()
+            .filter(|(name, ..)| {
+                self.resolve
+                    .package_names
+                    .get(name)
+                    .is_some_and(|id| reached.contains(id))
+            })
+            .map(|(_, file, source)| (file, source))
+            .collect()
     }
 
     /// Require a compiled component's exported interfaces and signatures to match this world.

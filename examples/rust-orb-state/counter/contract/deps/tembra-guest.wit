@@ -1,0 +1,87 @@
+package tembra:guest@1.0.0;
+
+/// The kernel-managed state of a service object. The kernel retains one JSON value per object
+/// across reloads and notifies the observers of the object's references. A call reaches the
+/// state of the object it runs on. The executor serves this interface itself: a world imports
+/// it without a provider and without a grant.
+interface state {
+    /// The current value, as JSON.
+    read: func() -> string;
+    /// Replace the value with the given JSON and return the value the kernel retained. Once the
+    /// current call is cancelled the kernel keeps the previous value, and that is the answer.
+    update: func(value: string) -> string;
+}
+
+/// Exported by a compiled Orb whose services own kernel-managed state. The kernel asks when it
+/// creates a service object and binds the answer to the state it retains for that object; on a
+/// reload it asks the new instance to validate the value it inherits, when the declaration says so.
+interface state-init {
+    /// The initial value, as JSON, the version the kernel compares on reload, and whether the
+    /// component validates the retained value before a reload adopts it.
+    record declaration {
+        initial: string,
+        version: u32,
+        validated: bool,
+    }
+    /// The state of the service exporting the named interface, if it owns one.
+    declare: func(service: string) -> option<declaration>;
+    /// Check the retained value, as JSON, of the named service's state; an error refuses the
+    /// reload with its message.
+    validate: func(service: string, value: string) -> result<_, string>;
+}
+
+/// The resources of a compiled Orb's root: values its component opens when the Orb is activated
+/// and closes when it is torn down, in the order the kernel decides. The kernel tracks each
+/// resource and the handle the component gave it; the value stays in the component, one per
+/// instance, because guest values cannot cross isolated heaps.
+interface resources {
+    /// The handle of the named open resource; fails before the resource is ready.
+    read: func(name: string) -> u32;
+}
+
+/// Exported by a compiled Orb whose root owns resources. The kernel asks for the declarations
+/// when it creates the root, opens each resource during activation and closes it at teardown.
+interface resources-init {
+    /// A resource of the root: its name and the version of its contract.
+    record declaration {
+        name: string,
+        version: u32,
+    }
+    /// The resources the root declares.
+    declare: func() -> list<declaration>;
+    /// Open the named resource and return the component's handle to its value.
+    open: func(name: string) -> u32;
+    /// Close the named resource's value.
+    close: func(name: string, handle: u32);
+}
+
+/// The kernel's view of the call a compiled Orb is serving and of the object it runs on. The
+/// executor serves this interface itself: a world imports it without a provider and without a
+/// grant, and exports nothing for it.
+interface context {
+    /// The severity of a diagnostic record.
+    enum level {
+        log,
+        debug,
+        info,
+        warn,
+        error,
+    }
+    /// Where an object lives in the kernel: the key its reference was acquired with and the
+    /// principal that acquired it. The Orb root has an empty key and the host as its principal.
+    record address {
+        key: list<string>,
+        principal: string,
+    }
+    /// The address of the object running the current call; the root's, for a hook contribution.
+    object: func() -> address;
+    /// The principal of the current call, the one it was admitted with, also once cancelled.
+    principal: func() -> string;
+    /// Whether the current call was cancelled.
+    cancelled: func() -> bool;
+    /// Cancel the current call: the caller and this Orb both observe it cancelled. Cancelling a
+    /// cancelled call changes nothing.
+    cancel: func();
+    /// Write a diagnostic record attributed to this Orb, for the host's log observers.
+    log: func(level: level, message: string);
+}

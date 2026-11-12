@@ -246,6 +246,129 @@ fn standard_contracts_are_managed_and_encoded_with_the_package() {
     );
 }
 
+/// A contract that imports a nested package, whose world uses the kernel's state, and the WASI
+/// filesystem, which builds on the clocks.
+const RELAY: &str = "package example:relay@1.0.0;
+
+interface relaying {
+  twice: func() -> u32;
+}
+
+world relay {
+  import example:tally/tally@1.0.0;
+  import wasi:filesystem/types@0.3.0;
+  export relaying;
+}
+
+package example:tally@1.0.0 {
+  interface tally {
+    bump: func() -> u32;
+  }
+  world counter {
+    import tembra:guest/state@1.0.0;
+    export tembra:guest/state-init@1.0.0;
+    export tally;
+  }
+}
+";
+
+/// A contract lists the bundled standard contracts it depends on, through any of its packages and
+/// through each other, in dependency order, so that its directory resolves with them alone; a
+/// contract without any lists none.
+#[test]
+fn a_contract_lists_the_standard_contracts_it_depends_on() {
+    let contract = Contract::from_source("relay.wit", RELAY, Some("relay")).unwrap();
+    let files: Vec<&str> = contract
+        .standard_dependencies()
+        .into_iter()
+        .map(|(file, _)| file)
+        .collect();
+    assert_eq!(
+        files,
+        ["wasi-clocks.wit", "wasi-filesystem.wit", "tembra-guest.wit"]
+    );
+    let plain = Contract::from_source("example.wit", SOURCE, Some("consumer")).unwrap();
+    assert!(plain.standard_dependencies().is_empty());
+    // The worlds of WASI HTTP import the CLI, whose worlds import the rest of the release.
+    let http = "package example:fetch@1.0.0;\n\ninterface fetching {\n  fetch: func(url: string) -> string;\n}\n\n\
+                world fetch {\n  import wasi:http/types@0.3.0;\n  export fetching;\n}\n";
+    let contract = Contract::from_source("fetch.wit", http, Some("fetch")).unwrap();
+    let dependencies = contract.standard_dependencies();
+    assert_eq!(
+        dependencies
+            .iter()
+            .map(|(file, _)| *file)
+            .collect::<Vec<_>>(),
+        [
+            "wasi-clocks.wit",
+            "wasi-random.wit",
+            "wasi-filesystem.wit",
+            "wasi-sockets.wit",
+            "wasi-cli.wit",
+            "wasi-http.wit"
+        ]
+    );
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("fetch.wit"), http).unwrap();
+    std::fs::create_dir(root.path().join("deps")).unwrap();
+    for (file, source) in dependencies {
+        std::fs::write(root.path().join("deps").join(file), source).unwrap();
+    }
+    wit_parser::Resolve::default()
+        .push_dir(root.path())
+        .unwrap();
+    let read = Contract::from_dir(root.path(), Some("fetch")).unwrap();
+    assert_eq!(read.prepared(), contract.prepared());
+}
+
+/// With the standard contracts it depends on in `deps/`, a contract directory resolves on its own,
+/// as another Orb's bindings read it with `Resolve::push_dir`, and `Contract::from_dir` reads it as
+/// the contract itself: it skips an exact copy of a bundled contract, whatever its line endings,
+/// and refuses any other definition of a bundled package.
+#[test]
+fn a_contract_directory_resolves_alone_with_its_standard_contracts() {
+    let contract = Contract::from_source("relay.wit", RELAY, Some("relay")).unwrap();
+    let directory = |line_ending: &str, note: &str| {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("relay.wit"), RELAY).unwrap();
+        std::fs::create_dir(root.path().join("deps")).unwrap();
+        for (file, source) in contract.standard_dependencies() {
+            let source = format!("{source}{note}").replace('\n', line_ending);
+            std::fs::write(root.path().join("deps").join(file), source).unwrap();
+        }
+        root
+    };
+    for line_ending in ["\n", "\r\n"] {
+        let root = directory(line_ending, "");
+        wit_parser::Resolve::default()
+            .push_dir(root.path())
+            .unwrap();
+        let read = Contract::from_dir(root.path(), Some("relay")).unwrap();
+        assert_eq!(read.prepared(), contract.prepared());
+    }
+    let changed = directory("\n", "// A local change.\n");
+    wit_parser::Resolve::default()
+        .push_dir(changed.path())
+        .unwrap();
+    let error = Contract::from_dir(changed.path(), Some("relay"))
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .0
+            .contains("already provided by the standard contracts bundled"),
+        "{error}"
+    );
+    // Without them, the directory names packages it does not hold.
+    let alone = tempfile::tempdir().unwrap();
+    std::fs::write(alone.path().join("relay.wit"), RELAY).unwrap();
+    assert!(
+        wit_parser::Resolve::default()
+            .push_dir(alone.path())
+            .is_err()
+    );
+}
+
 #[test]
 fn lossy_values_are_refused_before_the_interpreter_runs() {
     let nested = Contract::from_source("nested.wit","package example:values; interface values { type maybe = option<u32>; read: func() -> option<maybe>; } world run { export values; }",None).unwrap();

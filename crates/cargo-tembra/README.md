@@ -34,19 +34,29 @@ the text the macro derived: `///` comments included, and with the hook imports t
 because nothing calls them. The packages the Orb consumes, a hook's interface, an interface it
 implements or imports, are nested after it whole, read from that directory, so an imported
 interface keeps the functions the component never calls and names the same interface its provider
-exports; a component without that directory gets them from its own types. The standard packages
-that ship with `tembra-contracts`, WASI and the kernel's `tembra:guest`, are not nested. Any other
-component gets a contract derived from its types alone, with the world name from the metadata and
-every interface the world both imports and exports a contribution at priority 0.
+exports; a component without that directory gets them from its own types. A package a nested one
+builds on is nested too, another Orb's import for instance, though the component never reaches
+it. The standard packages that ship with `tembra-contracts`, WASI and the kernel's `tembra:guest`,
+are not nested: each one the contract depends on, directly or through a nested package, is written
+to `contract/deps/` as `tembra-contracts` bundles it. Any other component gets a contract derived
+from its types alone, with the world name from the metadata and every interface the world both
+imports and exports a contribution at priority 0.
+
+`contract/` thus resolves on its own, in the layout `wit-parser` reads: another Orb consumes it
+with `wit = "../x/contract"`, and `Contract::from_dir` reads it, as `inspect --wit` does, skipping
+the bundled copies in `deps/`. One limit remains: an Orb that keeps state, owns resources or reads
+the context does not compile yet against a contract holding `deps/tembra-guest.wit`, because the
+macro adds the kernel's package to its bindings a second time.
 
 The contract goes to `contract/`, not `wit/`: `wit-bindgen` loads a `wit` directory inside the
 crate on its own, even with an inline WIT, and finding the package twice it panics with
 "attempting to re-add package".
 
 `build` reads the contract on its own before writing it, so no other file in `contract/` takes
-part in it. The world is named after the Orb's module: when the module is renamed, the `.wit` file
-of the former name, which declares the same package, is removed, and `build` says so on stderr.
-Any other file stays.
+part in it, and checks that it resolves with its standard packages alone. The world is named after
+the Orb's module: when the module is renamed, the `.wit` file of the former name, which declares
+the same package, is removed, and `build` says so on stderr. A standard package in `deps/` the
+contract no longer depends on is removed the same way. Any other file stays.
 
 ## Manifest metadata
 
@@ -70,6 +80,7 @@ same roles whichever tool packages it.
 ```text
 <crate>/contract/
   <world>.wit        the contract: the Orb's WIT, consumed packages nested after it; commit it
+  deps/              the standard packages it depends on, such as tembra-guest.wit; commit them
 <crate>/artifacts/
   <name>.wasm        the compiled component
   <name>.orb.wasm    the Tembra artifact: the component plus the tembra:orb section

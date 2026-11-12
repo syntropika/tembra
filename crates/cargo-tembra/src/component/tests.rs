@@ -1,6 +1,6 @@
 //! Reading a component: the verdict of `inspect` against a WIT, and how the summary accounts for
 //! the component's imports and exports.
-use super::{Import, classify_import, inspect, is_ingress, world_key};
+use super::{Import, classify_import, consumed_packages, inspect, is_ingress, world_key};
 use crate::scratch;
 use wit_parser::Resolve;
 
@@ -91,6 +91,87 @@ world web {{
             ("example:web/handler@1.0.0".to_owned(), false),
             ("example:web/api@1.0.0".to_owned(), false),
         ]
+    );
+}
+
+/// The contract another Orb's build wrote: its package, the one it imports nested whole, whose
+/// world imports the kernel's state.
+const SECOND: &str = "package example:second@1.0.0;
+
+interface relay {
+  twice: func() -> u32;
+}
+
+world second {
+  import example:first/tally@1.0.0;
+  export relay;
+}
+
+package example:first@1.0.0 {
+  interface tally {
+    bump: func() -> u32;
+    reset: func();
+  }
+  world first {
+    import tembra:guest/state@1.0.0;
+    export tembra:guest/state-init@1.0.0;
+    export tally;
+  }
+}
+";
+
+#[test]
+fn a_consumed_package_brings_the_packages_it_builds_on() {
+    // The consumed directory, read whole: the other contract and the kernel's package it names.
+    let guest = tembra_contracts::Contract::from_source("second.wit", SECOND, Some("second"))
+        .unwrap()
+        .standard_dependencies();
+    let mut whole = Resolve::default();
+    for (name, source) in guest {
+        whole.push_str(name, source).unwrap();
+    }
+    whole.push_str("second.wit", SECOND).unwrap();
+    // The component's own types reach the imported package alone, and only what it calls.
+    let mut types = Resolve::default();
+    types
+        .push_str(
+            "second.wit",
+            "package example:second@1.0.0; interface relay { twice: func() -> u32; }",
+        )
+        .unwrap();
+    types
+        .push_str(
+            "third.wit",
+            "package example:third@1.0.0; interface caller { call: func() -> u32; }",
+        )
+        .unwrap();
+    let root = types
+        .push_str(
+            "root.wit",
+            "package root:component; world root { import example:second/relay@1.0.0; export example:third/caller@1.0.0; }",
+        )
+        .unwrap();
+    let own = "package example:third@1.0.0;\n\ninterface caller {\n  call: func() -> u32;\n}\n\n\
+               world third {\n  import example:second/relay@1.0.0;\n  export caller;\n}\n";
+    let consumed = consumed_packages(&types, root, "example:third@1.0.0", own, Some(&whole));
+    // Each from the consumed directory, whole; the kernel's package is never nested.
+    let names: Vec<String> = consumed
+        .iter()
+        .map(|(source, id)| {
+            assert!(std::ptr::eq(*source, &whole));
+            source.packages[*id].name.to_string()
+        })
+        .collect();
+    assert_eq!(names, ["example:second@1.0.0", "example:first@1.0.0"]);
+    // Without the consumed directory, the component's types are all there is.
+    let consumed = consumed_packages(&types, root, "example:third@1.0.0", own, None);
+    assert_eq!(consumed.len(), 1);
+    assert_eq!(
+        types.packages[consumed[0].1]
+            .interfaces
+            .keys()
+            .collect::<Vec<_>>(),
+        ["relay"]
     );
 }
 
