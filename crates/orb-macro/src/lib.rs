@@ -3244,14 +3244,16 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
         return quote! {};
     }
     // Every state is validated: the value a reload hands the new instance must at least read as
-    // the state's type, or the first `read` would trap.
+    // the state's type, or the first `read` would trap. The initial value is held to the same
+    // rule before the kernel keeps it.
     let declarations = states.iter().map(|state| {
         let identity = LitStr::new(&state.identity, Span::call_site());
         let path = from_root(&modules[state.scope], &state.ident);
+        let name = LitStr::new(&state.ident.to_string(), Span::call_site());
         let version = state.version;
         quote! {
             #identity => ::core::option::Option::Some(exports::tembra::guest::state_init::Declaration {
-                initial: __tembra_state::to_json(&<#path as ::core::default::Default>::default()),
+                initial: __tembra_state::initial(&<#path as ::core::default::Default>::default(), #name),
                 version: #version,
                 validated: true,
             }),
@@ -3286,12 +3288,16 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
             quote! { #field: #value }
         });
         let service = state.service.as_ref().expect("resolved owner").to_string();
+        let name = LitStr::new(&state.ident.to_string(), Span::call_site());
         let read_doc = format!(
             " The state of the `{service}` object running the current call, read from the kernel."
         );
+        // A value whose JSON would not read back as the state, a NaN float for one, is never sent
+        // to the kernel: a state with a rule answers the refusal like the rule's own, any other
+        // traps; the kernel keeps the previous value either way.
         let update = if let Some(validator) = &state.validator {
             let doc = format!(
-                " Change the state of the `{service}` object running the current call, validate it and store it in the kernel; returns the stored value, or the validator's refusal, in which case the kernel keeps the previous value."
+                " Change the state of the `{service}` object running the current call, validate it and store it in the kernel; returns the stored value, or the refusal of the validator or of a value JSON cannot hold, such as a NaN float, in which case the kernel keeps the previous value."
             );
             quote! {
                 #[doc = #doc]
@@ -3301,19 +3307,22 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
                     let mut value = Self::read();
                     change(&mut value);
                     value.#validator()?;
-                    ::core::result::Result::Ok(__tembra_state::update(&value))
+                    __tembra_state::update(&value, #name)
                 }
             }
         } else {
             let doc = format!(
-                " Change the state of the `{service}` object running the current call and store it in the kernel; returns the stored value."
+                " Change the state of the `{service}` object running the current call and store it in the kernel; returns the stored value. A value JSON cannot hold, such as a NaN float, traps instead, and the kernel keeps the previous value."
             );
             quote! {
                 #[doc = #doc]
                 pub fn update(change: impl ::core::ops::FnOnce(&mut Self)) -> Self {
                     let mut value = Self::read();
                     change(&mut value);
-                    __tembra_state::update(&value)
+                    match __tembra_state::update(&value, #name) {
+                        ::core::result::Result::Ok(stored) => stored,
+                        ::core::result::Result::Err(refusal) => ::core::panic!("{}", refusal),
+                    }
                 }
             }
         };
@@ -3370,12 +3379,44 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
                 parse(&super::tembra::guest::state::read())
             }
 
-            pub fn update<T: ::serde::Serialize + ::serde::de::DeserializeOwned>(value: &T) -> T {
-                parse(&super::tembra::guest::state::update(&to_json(value)))
+            /// Store a value and return the stored one, or the refusal of a value whose JSON
+            /// would not read back, which never reaches the kernel.
+            pub fn update<T: ::serde::Serialize + ::serde::de::DeserializeOwned>(
+                value: &T,
+                name: &str,
+            ) -> Result<T, String> {
+                let json = storable(value, name)?;
+                Ok(parse(&super::tembra::guest::state::update(&json)))
             }
 
-            pub fn to_json<T: ::serde::Serialize>(value: &T) -> String {
-                ::serde_json::to_string(value).expect("a state serializes to JSON")
+            /// The JSON of an initial value for the declaration, which has no refusal to answer
+            /// with: a value whose JSON would not read back traps the object's creation.
+            pub fn initial<T: ::serde::Serialize + ::serde::de::DeserializeOwned>(
+                value: &T,
+                name: &str,
+            ) -> String {
+                match storable(value, name) {
+                    Ok(json) => json,
+                    Err(refusal) => panic!("{}", refusal),
+                }
+            }
+
+            /// The JSON of a state, once it reads back as the state's type. serde_json writes a
+            /// NaN or infinite float as `null`, which reads back as no float: the kernel would
+            /// keep a value that every later `read`, and the validation of a reload, refuses.
+            fn storable<T: ::serde::Serialize + ::serde::de::DeserializeOwned>(
+                value: &T,
+                name: &str,
+            ) -> Result<String, String> {
+                let json = ::serde_json::to_string(value).map_err(|error| {
+                    format!("the `{name}` state does not serialize to JSON, so it cannot be stored: {error}")
+                })?;
+                match ::serde_json::from_str::<T>(&json) {
+                    Ok(_) => Ok(json),
+                    Err(error) => Err(format!(
+                        "the `{name}` state does not read back from its JSON, so it cannot be stored: {error}; JSON has no NaN or infinite float, which serde_json writes as `null`"
+                    )),
+                }
             }
 
             fn parse<T: ::serde::de::DeserializeOwned>(text: &str) -> T {

@@ -255,6 +255,33 @@ fn a_validated_state_declares_so_and_updates_fallibly() {
     );
 }
 
+/// A value whose JSON would not read back as the state, a NaN float for one, never reaches the
+/// kernel: `update` checks the round trip first and a refusal leaves the stored value in place,
+/// answered like the rule's own when the state has one and trapping otherwise; the declaration
+/// checks the initial value the same way.
+#[test]
+fn a_state_json_cannot_hold_is_never_stored() {
+    let validated = tokens(&expanded("example:counter@1.0.0", COUNTER));
+    for expected in [
+        "value . validate () ? ; __tembra_state :: update (& value , \"Count\") }",
+        "initial : __tembra_state :: initial (& < Count as :: core :: default :: Default > :: default () , \"Count\") ,",
+        "let json = storable (value , name) ? ; Ok (parse (& super :: tembra :: guest :: state :: update (& json)))",
+        "match :: serde_json :: from_str :: < T > (& json) { Ok (_) => Ok (json) , Err (error) => Err (format ! (",
+        "Err (refusal) => panic ! (\"{}\" , refusal) ,",
+    ] {
+        assert!(validated.contains(expected), "{expected}\n{validated}");
+    }
+    assert!(!validated.contains("to_json"), "{validated}");
+    let plain = tokens(&expanded(
+        "example:counter@1.0.0",
+        &COUNTER.replace("#[validate]\n", ""),
+    ));
+    assert!(
+        plain.contains("change (& mut value) ; match __tembra_state :: update (& value , \"Count\") { :: core :: result :: Result :: Ok (stored) => stored , :: core :: result :: Result :: Err (refusal) => :: core :: panic ! (\"{}\" , refusal) , }"),
+        "{plain}"
+    );
+}
+
 /// A marker goes on a function of a struct of its kind, in an inherent impl block, and a
 /// function carries one role.
 #[test]

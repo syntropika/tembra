@@ -296,6 +296,15 @@ answers a reload, with a rule or without: the new instance first reads the value
 own state type, so a value of another shape, a field added or renamed under the same `version`,
 fails the reload instead of the first `read`.
 
+The kernel keeps the state as JSON, which has no room for a NaN or an infinite float: `serde_json`
+writes one as `null`, which reads back as no float, so a stored value holding one would fail every
+later `read` and the reload. `update` checks that the JSON of the new value reads back as the
+state's type before it sends the value to the kernel: a state with a rule returns the refusal from
+`update`, as it returns the rule's, and any other state traps; the kernel keeps the previous value
+either way. The initial value is checked the same way when the kernel creates the object, and one
+that does not read back traps the creation. The JavaScript hosts, Node, mobile and the browser,
+parse the state's JSON numbers as doubles, so an integer beyond ±2^53 loses precision there.
+
 Two rules follow from the kernel, not from the macro. A service's state is reached only by the
 methods of that service: a call runs on one object, and the kernel refuses an update from any
 other context. An Orb's root is not an object, so a hook contribution, which runs in the root, has
@@ -564,8 +573,9 @@ The macro rewrites the module with:
    constructor and methods forwarded and the handles wrapped at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
 8. with a state, `Default`, field by field unless the author provides it, and the `read`/`update`
    functions on each state type, over a hidden module that maps the kernel's JSON to the type with
-   `serde_json`, and the kernel's `validate` callback, which reads the value a reload would adopt
-   as the state type and runs the state's `#[validate]` function on it;
+   `serde_json` and holds back a value whose JSON would not read back as the type, and the
+   kernel's `validate` callback, which reads the value a reload would adopt as the state type and
+   runs the state's `#[validate]` function on it;
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
    function and emptied by the `#[close]` one, and the `with` function on each resource type.
 
@@ -589,7 +599,9 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) among its de
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary. The macro derives
   `Serialize` and `Deserialize` on a state that stays out of the WIT, unless the author already
-  does.
+  does. JSON holds no NaN or infinite float, so a state holding one cannot be stored, and the
+  JavaScript hosts (Node, mobile, browser) parse JSON numbers as doubles, so an integer beyond
+  ±2^53 in a state loses precision there.
 - Types: records, enums, variants and the scalar, string, list, option, result and tuple types;
   64-bit integers cross the boundary exactly. A `resource` is a `#[wit_resource]` struct or the
   handle of an imported interface, handed out as an owned handle and never taken as a
