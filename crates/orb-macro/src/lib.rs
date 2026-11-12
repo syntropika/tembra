@@ -1898,15 +1898,17 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
     let world_literal = LitStr::new(&wit::escaped(&world), Span::call_site());
     // The bindings read the author's WIT and, nested in it, the kernel package a state, a
-    // resource or the context uses; the hook packages come from the consumed directory. Foreign
+    // resource or the context uses, unless the consumed directory holds it already, as a contract
+    // with its dependencies does; the hook packages come from the consumed directory. Foreign
     // interfaces need `generate_all`.
-    let inline = if states.is_empty() && resources.is_empty() && !options.context {
-        wit_literal.clone()
-    } else {
+    let kernel = !states.is_empty() || !resources.is_empty() || options.context;
+    let inline = if kernel && wit::guest_package_needed(wit_dir.as_deref())? {
         LitStr::new(
             &format!("{wit}\n{}", wit::guest_package()?),
             Span::call_site(),
         )
+    } else {
+        wit_literal.clone()
     };
     let path = wit_dir.as_ref().map(|dir| {
         let dir = LitStr::new(&dir.display().to_string(), Span::call_site());

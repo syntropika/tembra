@@ -607,12 +607,176 @@ const GUEST_RESOURCES: &str = "tembra:guest/resources@1.0.0";
 const GUEST_RESOURCES_INIT: &str = "tembra:guest/resources-init@1.0.0";
 const GUEST_CONTEXT: &str = "tembra:guest/context@1.0.0";
 
+/// The kernel's `tembra:guest` package, as `tembra-contracts` bundles it for every host.
+const GUEST: &str = tembra_contracts::guest::SOURCE;
+
 /// The kernel's `tembra:guest` package in nested form, appended to the inline WIT so the bindings
-/// of a state resolve it; `cargo tembra` reads the same package from `tembra-contracts`.
+/// of a state, a resource or the context resolve it.
 pub(crate) fn guest_package() -> syn::Result<String> {
-    const GUEST: &str = tembra_contracts::guest::SOURCE;
     nested(GUEST)
         .ok_or_else(|| error("the bundled tembra:guest package has no `package ..;` declaration"))
+}
+
+/// Whether the inline WIT needs the kernel's bundled package nested in it: not when the consumed
+/// directory resolves that package already, as a contract `cargo tembra build` wrote does from its
+/// `deps/`, since the bindings would read it twice. Such a copy must define what the bundled
+/// package defines, its comments aside; another definition is an error naming its file.
+pub(crate) fn guest_package_needed(dir: Option<&Path>) -> syn::Result<bool> {
+    let Some(dir) = dir else {
+        return Ok(true);
+    };
+    let consumed = resolve(dir)?;
+    let mut bundled = Resolve::default();
+    let bundled_id = bundled
+        .push_str("guest.wit", GUEST)
+        .map_err(|cause| error(format!("the bundled tembra:guest package: {cause:#}")))?;
+    let name = &bundled.packages[bundled_id].name;
+    let Some(&consumed_id) = consumed.package_names.get(name) else {
+        return Ok(true);
+    };
+    if definitions(&consumed, consumed_id) != definitions(&bundled, bundled_id) {
+        let place = consumed.packages[consumed_id]
+            .interfaces
+            .values()
+            .next()
+            .map(|id| {
+                consumed
+                    .source_map
+                    .render_location(consumed.interfaces[*id].span)
+            })
+            .unwrap_or_else(|| dir.display().to_string());
+        return Err(error(format!(
+            "{place}: this copy of {name}, the kernel's package, defines it otherwise than the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version"
+        )));
+    }
+    Ok(false)
+}
+
+/// What a package defines, as text without its documentation: each interface, in name order, with
+/// its types and functions, a type by its structure and a named type by its place. Two copies of
+/// one package that differ only in their comments read the same.
+fn definitions(resolve: &Resolve, package: wit_parser::PackageId) -> String {
+    let mut text = String::new();
+    let mut interfaces: Vec<(&String, &wit_parser::InterfaceId)> =
+        resolve.packages[package].interfaces.iter().collect();
+    interfaces.sort();
+    for (name, id) in interfaces {
+        let interface = &resolve.interfaces[*id];
+        text.push_str(&format!("interface {name}\n"));
+        for (name, ty) in &interface.types {
+            text.push_str(&format!("  type {name} = {}\n", definition(resolve, *ty)));
+        }
+        for (name, function) in &interface.functions {
+            let params: Vec<String> = function
+                .params
+                .iter()
+                .map(|param| format!("{}: {}", param.name, reference(resolve, param.ty)))
+                .collect();
+            let result = function
+                .result
+                .map(|ty| reference(resolve, ty))
+                .unwrap_or_default();
+            let asynchronous = if function.kind.is_async() {
+                "async "
+            } else {
+                ""
+            };
+            text.push_str(&format!(
+                "  {name}: {asynchronous}func({}) -> {result}\n",
+                params.join(", ")
+            ));
+        }
+    }
+    let mut worlds: Vec<&String> = resolve.packages[package].worlds.keys().collect();
+    worlds.sort();
+    for name in worlds {
+        text.push_str(&format!("world {name}\n"));
+    }
+    text
+}
+
+/// The structure of a type definition, its parts by `reference`.
+fn definition(resolve: &Resolve, id: wit_parser::TypeId) -> String {
+    let part = |ty: &wit_parser::Type| reference(resolve, *ty);
+    let side = |ty: &Option<wit_parser::Type>| ty.as_ref().map_or_else(|| "_".to_owned(), part);
+    let joined = |parts: Vec<String>| parts.join(", ");
+    match &resolve.types[id].kind {
+        TypeDefKind::Record(record) => format!(
+            "record {{{}}}",
+            joined(
+                record
+                    .fields
+                    .iter()
+                    .map(|field| format!("{}: {}", field.name, part(&field.ty)))
+                    .collect()
+            )
+        ),
+        TypeDefKind::Variant(variant) => format!(
+            "variant {{{}}}",
+            joined(
+                variant
+                    .cases
+                    .iter()
+                    .map(|case| format!("{}({})", case.name, side(&case.ty)))
+                    .collect()
+            )
+        ),
+        TypeDefKind::Enum(cases) => format!(
+            "enum {{{}}}",
+            joined(cases.cases.iter().map(|case| case.name.clone()).collect())
+        ),
+        TypeDefKind::Flags(flags) => format!(
+            "flags {{{}}}",
+            joined(flags.flags.iter().map(|flag| flag.name.clone()).collect())
+        ),
+        TypeDefKind::Tuple(tuple) => {
+            format!("tuple<{}>", joined(tuple.types.iter().map(part).collect()))
+        }
+        TypeDefKind::Handle(wit_parser::Handle::Own(resource)) => {
+            format!(
+                "own<{}>",
+                reference(resolve, wit_parser::Type::Id(*resource))
+            )
+        }
+        TypeDefKind::Handle(wit_parser::Handle::Borrow(resource)) => {
+            format!(
+                "borrow<{}>",
+                reference(resolve, wit_parser::Type::Id(*resource))
+            )
+        }
+        TypeDefKind::Option(ty) => format!("option<{}>", part(ty)),
+        TypeDefKind::Result(result) => {
+            format!("result<{}, {}>", side(&result.ok), side(&result.err))
+        }
+        TypeDefKind::List(ty) => format!("list<{}>", part(ty)),
+        TypeDefKind::FixedLengthList(ty, length) => format!("list<{}, {length}>", part(ty)),
+        TypeDefKind::Map(key, value) => format!("map<{}, {}>", part(key), part(value)),
+        TypeDefKind::Future(ty) => format!("future<{}>", side(ty)),
+        TypeDefKind::Stream(ty) => format!("stream<{}>", side(ty)),
+        TypeDefKind::Type(ty) => part(ty),
+        TypeDefKind::Resource => "resource".to_owned(),
+        TypeDefKind::Unknown => "unknown".to_owned(),
+    }
+}
+
+/// A type as a part of another: a named type by its interface and name, an anonymous one by its
+/// structure, a primitive by its name.
+fn reference(resolve: &Resolve, ty: wit_parser::Type) -> String {
+    let wit_parser::Type::Id(id) = ty else {
+        return format!("{ty:?}");
+    };
+    let definition_of = &resolve.types[id];
+    match (&definition_of.name, &definition_of.owner) {
+        (Some(name), wit_parser::TypeOwner::Interface(owner)) => {
+            let interface = resolve
+                .id_of(*owner)
+                .or_else(|| resolve.interfaces[*owner].name.clone())
+                .unwrap_or_default();
+            format!("{interface}.{name}")
+        }
+        (Some(name), _) => name.clone(),
+        (None, _) => definition(resolve, id),
+    }
 }
 
 /// A WIT package file in nested form: its declaration, a line `package ns:name@version;`, opens

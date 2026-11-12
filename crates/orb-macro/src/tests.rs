@@ -2532,6 +2532,83 @@ fn a_refused_module_brings_the_runtime_prelude_of_a_freestanding_guest() {
     }
 }
 
+const FIRST_WIT: &str = "package example:first@1.0.0;
+interface counter {
+  add: func(by: u32) -> u32;
+}
+world first {
+  import tembra:guest/state@1.0.0;
+  export tembra:guest/state-init@1.0.0;
+  export counter;
+}
+";
+
+/// A contract `cargo tembra build` wrote for an Orb with kernel state holds the kernel's package in
+/// `deps/`: an Orb with a state of its own consuming it reads that package once, the bundled copy
+/// left out of its inline WIT, whatever the copy's comments say; a copy defining the package
+/// otherwise is an error naming its file.
+#[test]
+fn a_consumed_contract_may_bring_the_kernel_package() {
+    const GUEST: &str = tembra_contracts::guest::SOURCE;
+    let fourth = "mod fourth {
+        #[state]
+        pub struct Seen { pub calls: u32 }
+        #[service]
+        pub struct Relay;
+        impl Relay { pub fn add(by: u32) -> u32 { counter::add(by) } }
+    }";
+    let with_deps = |name: &str, guest: &str| {
+        let dir = consumed(name, FIRST_WIT);
+        std::fs::create_dir_all(dir.join("deps")).unwrap();
+        std::fs::write(dir.join("deps").join("tembra-guest.wit"), guest).unwrap();
+        orb_with(
+            Options {
+                imports: vec![literal("example:first/counter@1.0.0")],
+                ..options("example:fourth@1.0.0", Some(&dir))
+            },
+            fourth,
+        )
+    };
+    let commented = GUEST
+        .replace("/// ", "/// (another text) ")
+        .replace('\n', "\r\n");
+    for (name, guest) in [
+        ("first-deps", GUEST),
+        ("first-comments", commented.as_str()),
+    ] {
+        let module = with_deps(name, guest).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let generated = tokens(&module);
+        assert!(
+            generated.contains("inline : \"package example:fourth@1.0.0;"),
+            "{generated}"
+        );
+        assert!(
+            !generated.contains("package tembra:guest@1.0.0"),
+            "{name}: {generated}"
+        );
+    }
+    let error = with_deps(
+        "first-different",
+        &GUEST.replacen("read: func() -> string;", "read: func() -> u32;", 1),
+    )
+    .map(|_| ())
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("deps/tembra-guest.wit:")
+            && error.contains("this copy of tembra:guest@1.0.0, the kernel's package, defines it otherwise than the one bundled with this macro"),
+        "{error}"
+    );
+    // Without the package in the consumed directory, the inline WIT brings the bundled one.
+    let dir = consumed("first-alone", LEDGER_WIT);
+    let module = orb_with(
+        options("example:fourth@1.0.0", Some(&dir)),
+        &fourth.replace("counter::add(by)", "by"),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert!(tokens(&module).contains("package tembra:guest@1.0.0 {"));
+}
+
 /// The prelude names the generated code could mean; it spells each by its path instead.
 const PRELUDE: &[&str] = &[
     "Option", "Some", "None", "Result", "Ok", "Err", "Default", "From", "Into", "FnOnce", "Sync",

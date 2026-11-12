@@ -577,10 +577,13 @@ The macro rewrites the module with:
    refuses the module of a `no_std` guest, the prelude comes with its error, which is then the
    only one the compiler reports;
 4. `wit_bindgen::generate!({ inline: WIT, world, generate_all })`, the official macro with the WIT
-   as a string, plus `path` when the Orb consumes other packages and, with a state, the kernel's
-   `tembra:guest` package nested in the inline text and `serde` derives on the generated types,
-   except the records and variants holding a flags type or a resource handle, which have no
-   `serde` implementation to derive;
+   as a string, plus `path` when the Orb consumes other packages and, with a state, a resource or
+   the context, the kernel's `tembra:guest` package nested in the inline text, unless the consumed
+   directory holds it already, as a contract `cargo tembra build` wrote does in its `deps/`; that
+   copy must define what the bundled package defines, whatever its comments, or the macro names
+   its file. With a state, also `serde` derives on the generated types, except the records and
+   variants holding a flags type or a resource handle, which have no `serde` implementation to
+   derive;
 5. `pub use exports::...::{Stats}`: the author's record and enum definitions are replaced by the
    generated types with the same names and public fields, so the author's functions and the
    generated traits share one type; `pub use exports::...::guard;` for each contributed hook and each
