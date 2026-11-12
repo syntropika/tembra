@@ -1,14 +1,13 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-12, 02:01 CET
+- **Aggiornato:** 2026-11-12, 02:24 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   base `main`
-- **Stato:** strada A. La PR #1 è a `9e4f696`: i 52 commit
-  del ribase più i 3 della PR #2 (adapter browser), sopra
-  `main` (`865e4c6`). GitHub la dà `MERGEABLE`/`UNSTABLE`:
-  `quality` verde, `acceptance` rossa su test di stream del
-  base che Javier sta correggendo (vedi «CI della PR #1»).
-  Poi i fix (vedi «Da fare»).
+- **Stato:** strada A. Javier ha portato `main` a `7966893`
+  (le sue correzioni degli stream comprese). Secondo ribase
+  fatto e verificato, in locale: `8dfb26e`, 55 commit sopra
+  `7966893`. Manca il force-push, che lancia Giacomo (vedi
+  «Secondo ribase»). Poi i fix (vedi «Da fare»).
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -113,8 +112,10 @@ come dice «Inizia qui», poi riprendi da
 
 - Dal 12/11: PR #1 è `feat/rust-first-orbs` a `9e4f696`, base
   `main`. La PR #2 (`feat/rust-first-orbs-browser` a
-  `c18a95a`, l'adapter browser) è mergiata dentro. Il resto
-  di questa sezione descrive l'11/11, prima del ribase.
+  `c18a95a`, l'adapter browser) è mergiata dentro. `main` è a
+  `7966893`, e il ribase su `7966893` (`8dfb26e`) aspetta il
+  force-push. Il resto di questa sezione descrive l'11/11,
+  prima del ribase.
 - PR #1 era `feat/rust-first-orbs` a `d1c4e12`: 52 commit
   sopra `b08f386`, con base `feat/wasm-orb-runtime`. La CI era
   rossa.
@@ -387,10 +388,71 @@ Non è la PR. Durata di `source_stream_imports.rs`:
 - `just check` su `1ad2bc1`: verde, 609 test Rust in 115
   binari, più TypeScript ed esempi.
 
-Proposta, in attesa dell'ok di Giacomo: portare i sette
-commit nella PR con `cherry-pick -x` (push normale, niente
-force). Quando Javier porta avanti `main`, il ribase li
-scarta perché identici.
+La proposta di portare i sette commit nella PR è superata:
+alle 02:01 CET Javier ha portato `main` a `7966893`, in
+fast-forward, e la PR è stata ribasata lì (sotto).
+
+### Secondo ribase, su `7966893` (12/11)
+
+`main` è passato da `865e4c6` a `7966893`: 15 commit di
+Javier, fra cui le correzioni degli stream, la facciata unica
+`tembra` (`c77fe93`) e le risorse WIT possedute come argomenti
+(`5345542`).
+
+- Merge di prova: `refs/probe/rust-first-orbs-merge-7966893`
+  (`9c35ada`), nel worktree `.worktrees/probe`. `just check`
+  verde: 613 test Rust in 118 binari, più TypeScript ed
+  esempi.
+- Ribase: branch locale `rebase/rust-first-orbs-onto-7966893`
+  a `8dfb26e` (anche `refs/probe/rust-first-orbs-rebased-
+  7966893`), nel worktree `.worktrees/pr`. 55 commit, ognuno
+  passa `cargo fmt --check` e `cargo check --workspace
+  --all-targets`; il commit browser passa anche
+  `bun run typecheck`. Albero `7354261`, identico al merge di
+  prova.
+- Backup su origin: `archive/rust-first-orbs-9e4f696`.
+
+Conflitti testuali (7 file), risolti tenendo le scelte di
+Javier:
+
+- `Cargo.lock`: entrambi i pacchetti nuovi
+  (`tembra-orb-macro`, `tembra-runtime`).
+- `README.md`: la tabella della PR, con la descrizione nuova
+  di `crates/tembra/` («Single Rust facade...»).
+- `docs/rust.md`: la frase nuova di Javier sull'esempio
+  misto, poi il testo della PR.
+- `contracts/src/standard.rs`: Javier ha spostato l'elenco
+  WASI in `WASI_SOURCES`, che usa anche il `build.rs` di
+  executor-wasm per i binding dei sorgenti. `guest.wit` resta
+  fuori da `WASI_SOURCES` e si aggiunge in coda:
+  `WASI_SOURCES.iter().chain([&guest])`.
+- `interpreter/component/{execution,revision,scope}.ts`
+  (PR #2 contro le risorse e gli stream di Javier): import
+  uniti; nel costruttore il kernel e il listener `retired`;
+  al rilascio prima la pulizia delle risorse di Javier, poi
+  `kernel.release`.
+
+Conflitti che il merge testuale non mostra:
+
+- `component/worker.rs`: `Call` ha il campo nuovo
+  `arguments` (risorse possedute). Le 4 chiamate del kernel
+  della PR (commit dello stato, delle risorse root e della
+  validazione) passano `arguments: None`, come la
+  `Contribute` di Javier.
+- `scope.ts`: `CallbackScope` chiede `report` e
+  `releaseResource`. Lo scope dei callback del kernel (PR
+  #2) li ha: `report` come lo scope delle invocazioni,
+  `releaseResource` chiude subito, perché lì niente può
+  riacquisire la risorsa.
+
+Il force-push lo lancia Giacomo (comando nella risposta del
+12/11, 02:23 CET):
+
+```bash
+git push origin \
+  --force-with-lease=feat/rust-first-orbs:9e4f696 \
+  8dfb26e:feat/rust-first-orbs
+```
 
 ### Prima del ribase (`d1c4e12`)
 
