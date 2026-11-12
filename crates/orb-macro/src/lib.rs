@@ -144,6 +144,16 @@ struct WitResource {
     scope: usize,
 }
 
+impl WitResource {
+    /// Whether the resource belongs to an implemented interface, whose WIT defines it: its
+    /// functions take and return the consumed package's types, never the module's.
+    fn implemented(&self, services: &[Service]) -> bool {
+        services.iter().any(|service| {
+            service.implements.is_some() && self.service.as_ref() == Some(&service.ident)
+        })
+    }
+}
+
 /// A WIT resource's constructor: the function marked `#[constructor]` and its parameters, with
 /// the WIT spelling of their types.
 struct Constructor {
@@ -1100,19 +1110,27 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         )?;
         resource.service = Some(owner.ident.clone());
     }
-    // A resource is handed out, never taken: no parameter of a derived service, of a resource or
-    // of a derived hook names one.
+    // A resource is handed out, never taken: no parameter of a derived service, of a derived
+    // resource or of a derived hook names one. An implemented interface's functions take what its
+    // WIT says, in the consumed package's types.
     let resource_names: BTreeSet<String> = wit_resources
         .iter()
         .map(|resource| resource.ident.to_string())
+        .collect();
+    let derived_resources: Vec<&WitResource> = wit_resources
+        .iter()
+        .filter(|resource| !resource.implemented(&services))
         .collect();
     let derived_functions = services
         .iter()
         .filter(|service| service.implements.is_none())
         .flat_map(|service| &service.functions)
-        .chain(wit_resources.iter().flat_map(|resource| &resource.methods))
-        .chain(wit_resources.iter().flat_map(|resource| &resource.statics));
-    let constructor_params = wit_resources
+        .chain(
+            derived_resources
+                .iter()
+                .flat_map(|resource| resource.methods.iter().chain(&resource.statics)),
+        );
+    let constructor_params = derived_resources
         .iter()
         .filter_map(|resource| resource.constructor.as_ref())
         .flat_map(|constructor| &constructor.params);
@@ -1447,7 +1465,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         }
     }
     // Where each type is defined, computed once for the WIT and for the re-exports below.
-    let placement = wit::placement(&shapes, &services, &wit_resources, &declared)?;
+    let placement = wit::placement(&shapes, &services, &wit_resources, &declared);
     let wit = wit::render(
         &package,
         &world,
@@ -2417,11 +2435,12 @@ fn implemented_service(
     Ok((bridge, implementations))
 }
 
-/// Keep, in module order, the candidate types that a derived service's method, a resource's
-/// function or a derived hook's input reaches; the others, with their shapes, go back to their
-/// modules as ordinary Rust. A name resolves to the type of the module naming it, else to the one
-/// type of that name in the Orb; a type the module does not declare is an error, and a resource is
-/// a type of its own.
+/// Keep, in module order, the candidate types that a derived service's method, a derived
+/// resource's function or a derived hook's input reaches; the others, with their shapes, go back
+/// to their modules as ordinary Rust. The resources of an implemented interface reach nothing:
+/// their functions speak the consumed package's types, whatever the module's own are called. A
+/// name resolves to the type of the module naming it, else to the one type of that name in the
+/// Orb; a type the module does not declare is an error, and a resource is a type of its own.
 fn reachable(
     candidates: Vec<(Item, Shape)>,
     services: &[Service],
@@ -2459,7 +2478,10 @@ fn reachable(
             mention_function(function, service.scope, &mut pending);
         }
     }
-    for resource in resources {
+    for resource in resources
+        .iter()
+        .filter(|resource| !resource.implemented(services))
+    {
         for (_, ty, _) in resource
             .constructor
             .iter()

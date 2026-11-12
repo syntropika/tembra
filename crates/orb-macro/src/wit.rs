@@ -92,14 +92,14 @@ fn service_mentions(service: &Service, resources: &[WitResource]) -> Vec<Ident> 
 /// order, that mentions it: in its functions, in its own resources' functions, or through the
 /// fields of other shapes. So a later service that names a shape no earlier one does defines it
 /// itself, and an earlier service that hands out a later service's resource does not make the
-/// later one `use` it back. A shape only a resource of an implemented interface mentions goes to
-/// the first derived service.
+/// later one `use` it back. Every shape that enters the WIT is reached from a derived hook, a
+/// derived service or one of its resources, so each has a place.
 pub(crate) fn placement(
     shapes: &[Shape],
     services: &[Service],
     resources: &[WitResource],
     declared: &[Declared],
-) -> syn::Result<BTreeMap<String, Ident>> {
+) -> BTreeMap<String, Ident> {
     let by_name: BTreeMap<String, &Shape> = shapes
         .iter()
         .map(|shape| (shape.ident.to_string(), shape))
@@ -131,23 +131,7 @@ pub(crate) fn placement(
             }
         }
     }
-    let fallback = derived.first().map(|service| &service.ident).or(first_hook);
-    for shape in shapes {
-        let name = shape.ident.to_string();
-        if placed.contains_key(&name) {
-            continue;
-        }
-        let Some(fallback) = fallback else {
-            return Err(syn::Error::new(
-                shape.ident.span(),
-                format!(
-                    "`{name}` enters the WIT through a resource of an implemented interface, but the package has no interface of its own to define it: no derived service or hook mentions it"
-                ),
-            ));
-        };
-        placed.insert(name, fallback.clone());
-    }
-    Ok(placed)
+    placed
 }
 
 /// Which kernel interfaces the world uses.

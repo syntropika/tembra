@@ -409,7 +409,9 @@ from each WIT function to the `pub fn` of the same name. The interface is fixed 
 `impl` provides every function, with its parameter and result types, and nothing else; a missing or
 extra `pub fn` is a compile error and a wrong type fails to compile at the bridge. A resource of the
 interface is implemented by a `#[wit_resource(service = Keeper)]` struct of the resource's name,
-with its constructor and methods. The derived contract has no interface of its own, only the world,
+with its constructor and methods; they too take and return what the WIT says, in the package's
+types, `book::Entry` or an owned `book::Cursor` handle, so no type of the module enters the WIT
+through them. The derived contract has no interface of its own, only the world,
 and `cargo tembra build` nests the shared package whole after it: the kernel holds every keeper of
 `example:ledger/book@1.0.0`, native or compiled, to one contract, and an installer binds a consumer
 of the interface to either. See

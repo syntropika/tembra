@@ -765,6 +765,73 @@ fn an_implemented_resource_is_bridged_in_its_own_module() {
     }
 }
 
+const CURSOR_WIT: &str = "package example:ledger@1.0.0;
+interface book {
+  record entry { label: string, amount: s64 }
+  resource cursor {
+    constructor();
+    current: func() -> entry;
+    all: func() -> list<entry>;
+    merge: func(other: cursor) -> u32;
+  }
+  open: func() -> cursor;
+}
+";
+
+/// The resource of an implemented interface speaks the consumed package's types: its functions
+/// reach none of the module's, so a struct of the module named like a consumed record stays the
+/// author's, out of the WIT, and the resource takes what its WIT says, an owned handle included.
+#[test]
+fn an_implemented_resource_reaches_none_of_the_module_types() {
+    let dir = consumed("cursor", CURSOR_WIT);
+    let module = |extra: &str| {
+        format!(
+            "mod keeper {{
+                {extra}
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper {{ pub fn open() -> Cursor {{ Cursor::start() }} }}
+                #[wit_resource(service = Keeper)]
+                pub struct Cursor {{ at: u32 }}
+                impl Cursor {{
+                    #[constructor]
+                    pub fn start() -> Self {{ Cursor {{ at: 0 }} }}
+                    pub fn current(&self) -> book::Entry {{ todo!() }}
+                    pub fn all(&self) -> Vec<book::Entry> {{ todo!() }}
+                    pub fn merge(&self, other: book::Cursor) -> u32 {{ self.at }}
+                }}
+            }}"
+        )
+    };
+    let alone = orb_with(options("example:keeper@1.0.0", Some(&dir)), &module(""))
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        wit(&alone),
+        "package example:keeper@1.0.0;\n\nworld keeper {\n  export example:ledger/book@1.0.0;\n}\n"
+    );
+    for (extra, kept) in [
+        (
+            "pub struct Entry { pub note: core::cell::Cell<u32> }",
+            "pub struct Entry { pub note : core :: cell :: Cell < u32 > }",
+        ),
+        (
+            "pub struct Entry { pub note: String }
+            #[service]
+            pub struct Notes;
+            impl Notes { pub fn count() -> u32 { 0 } }",
+            "pub struct Entry { pub note : String }",
+        ),
+    ] {
+        let module = orb_with(options("example:keeper@1.0.0", Some(&dir)), &module(extra))
+            .unwrap_or_else(|error| panic!("{extra}: {error}"));
+        let text = wit(&module);
+        assert!(!text.contains("record"), "{extra}: {text}");
+        let generated = tokens(&module);
+        assert!(generated.contains(kept), "{kept}\n{generated}");
+        assert!(!generated.contains(":: { Entry }"), "{generated}");
+    }
+}
+
 /// `import = "..."` on the attribute imports the interface in the world and re-exports its module.
 #[test]
 fn an_import_enters_the_world_and_is_reexported() {
