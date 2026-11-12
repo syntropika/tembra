@@ -31,6 +31,7 @@
 //! also depends on `serde` (`derive`, `alloc`) and `serde_json` (`alloc`). `cargo tembra build`
 //! compiles the crate, reads the same WIT and the hook priorities from the component and
 //! packages the artifact.
+mod keyed;
 mod wasi;
 mod wit;
 
@@ -83,6 +84,8 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
             options.package = Some(meta.value()?.parse::<LitStr>()?);
         } else if meta.path.is_ident("wit") {
             options.wit = Some(meta.value()?.parse::<LitStr>()?.value());
+        } else if meta.path.is_ident("import") && meta.input.peek(syn::token::Paren) {
+            options.keyed.push(keyed::option(&meta)?);
         } else if meta.path.is_ident("import") {
             options.imports.push(meta.value()?.parse::<LitStr>()?);
         } else if meta.path.is_ident("context") {
@@ -91,7 +94,7 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
             options.no_std = true;
         } else {
             return Err(meta.error(
-                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", context, no_std)]",
+                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", import(\"ns:name/interface@version\", keyed), context, no_std)]",
             ));
         }
         Ok(())
@@ -131,6 +134,9 @@ struct Options {
     /// Interfaces of other Orbs the module imports, from the consumed WIT packages, as written on
     /// the attribute; the installer binds each to a provider.
     imports: Vec<LitStr>,
+    /// Interfaces of other Orbs the module imports by key, as written on the attribute: the world
+    /// imports a view of each, whose `get` selects an object of the provider by key.
+    keyed: Vec<LitStr>,
 }
 
 /// A type declared in the module, with its WIT definition and the module types it refers to.
@@ -1547,6 +1553,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             ));
         }
     };
+    // The view of each interface imported by key, derived from the interface's WIT.
+    let views = keyed::views(&options.keyed, wit_dir.as_deref(), &world, &interface_names)?;
     // An implemented interface is fixed by its WIT: the impl has exactly its functions, and each
     // of its resources is a #[wit_resource] struct of the same name with the resource's functions.
     for service in services
@@ -1719,6 +1727,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         },
         consumed_hooks.iter().copied(),
         &imports,
+        &views,
         wit::Kernel {
             state: !states.is_empty(),
             resources: !resources.is_empty(),
@@ -1866,7 +1875,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .chain(imports.iter().map(|identity| {
             let [ns, package, interface] = hook_path(identity);
             quote! { pub use self::#ns::#package::#interface; }
-        }));
+        }))
+        .chain(keyed::reexports(&package, &views));
     // The kernel's context interface is re-exported as `context`, so the author writes
     // `context::principal()`.
     let context_module = options
@@ -1911,8 +1921,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             });
     }
     // The manifest travels with the component, like the WIT: the contributions with their
-    // priorities, the declarations with their composition, and the services that chose a
-    // lifetime or a linger.
+    // priorities, the declarations with their composition, the services that chose a
+    // lifetime or a linger, and the interfaces imported by key.
     let policies = services
         .iter()
         .filter_map(|service| {
@@ -1950,8 +1960,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             Some(dir) => format!(",\"wit\":{}", json_string(dir)),
             None => String::new(),
         };
+        // The interfaces imported by key, each view's binding with the interface it reaches.
+        let references = keyed::manifest(&package, &views);
         let json = format!(
-            "{{\"contributes\":{{{contributes}}},\"declares\":{{{declares}}},\"services\":{{{services}}}{wit_dir}}}"
+            "{{\"contributes\":{{{contributes}}},\"declares\":{{{declares}}},\"services\":{{{services}}}{references}{wit_dir}}}"
         );
         let bytes = LitByteStr::new(json.as_bytes(), Span::call_site());
         let len = proc_macro2::Literal::usize_unsuffixed(json.len());
@@ -4837,3 +4849,6 @@ mod std_tests;
 
 #[cfg(test)]
 mod wasi_tests;
+
+#[cfg(test)]
+mod keyed_tests;

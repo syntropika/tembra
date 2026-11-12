@@ -14,7 +14,7 @@ no-std = ["dep:dlmalloc"]
 
 [dependencies]
 tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
-# `async` for `chance`, which awaits a WASI clock.
+# `async` for `chance`, which awaits a WASI clock, and for the keyed import's `get`.
 wit-bindgen = { version = "=0.63.0", default-features = false, features = [
   "macros",
   "realloc",

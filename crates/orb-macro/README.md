@@ -91,6 +91,7 @@ starts with this explicit freestanding mode.
 | `#[service(lifetime = host)]` or `#[service(linger_ms = n)]`                | nothing in the WIT: the ownership policy of the service's objects, in the manifest                                                                                 |
 | `import = "ns:name/interface@version"` on the attribute                     | `import` of that interface of a consumed package, bound to a provider at installation                                                                              |
 | `import = "wasi:name/interface@0.3.0"` on the attribute                     | `import` of that interface of a WASI package bundled with `tembra-contracts`, granted at installation                                                              |
+| `import("ns:name/interface@version", keyed)` on the attribute               | `import` of a view of that interface, `interface-ref` in the package: a resource with the interface's functions as methods, and `get`, selecting an object by key  |
 | a struct with `#[wit_resource]` and an `impl` block of `pub fn`             | a `resource` of its service's interface: the `#[constructor]` function its constructor, the `&self` functions its methods                                          |
 | each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                                                                        |
 | a struct with named fields, when a service method uses it                   | a `record`                                                                                                                                                         |
@@ -478,7 +479,86 @@ dependency, and the import reaches that provider's `main` object. The macro reco
 in the manifest and `cargo tembra build` nests the imported package whole in the contract, so the
 kernel checks the provider against the same signature. See
 [rust-orb-import](../../examples/rust-orb-import/README.md) and, for a handed-out resource,
-[rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md).
+[rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md). To reach the object of
+another key, import the interface [by key](#importing-another-orbs-interface-by-key).
+
+## Importing another Orb's interface by key
+
+The kernel keeps one object per key and principal of a service. A plain import reaches the
+provider's `main` object; `import("ns:name/interface@version", keyed)` on the attribute,
+repeatable, reaches the object of a key the call chooses, as a TypeScript Orb does with
+`context.get`:
+
+```rust
+#[tembra::orb(
+    package = "example:router@1.0.0",
+    wit = "../counters/contract",
+    import("example:counters/counter@1.0.0", keyed)
+)]
+mod router {
+    #[service]
+    pub struct Routing;
+
+    impl Routing {
+        /// Add one to the count of the object of `key` and return its count.
+        pub async fn bump(key: String) -> Result<u32, String> {
+            let counter = counter_ref::get(vec![key]).await?;
+            Ok(counter.add(1))
+        }
+    }
+}
+```
+
+The macro reads the interface from the directory `wit` names, as for a plain import, and derives
+a view of it, an interface of the Orb's package named after it followed by `-ref`, which the
+world imports:
+
+```wit
+/// The objects of `example:counters/counter@1.0.0`, each selected by its key.
+interface counter-ref {
+  use example:counters/counter@1.0.0.{tally};
+  /// An object of `example:counters/counter@1.0.0`: its methods are the interface's functions.
+  resource counter {
+    add: func(amount: u32) -> u32;
+    read: async func() -> tally;
+  }
+  /// The object of `key` under the principal of the call, or why it was refused.
+  get: async func(key: list<string>) -> result<counter, string>;
+}
+
+world router {
+  import counter-ref;
+  export routing;
+}
+```
+
+The view's resource takes the interface's name, and its methods are the interface's functions,
+with their parameters, results and documentation, `async` where a function is; the types they
+name are `use`d from the interface, so they stay the provider's. The view's generated module is
+re-exported under the view's name: `counter_ref::get(key)` acquires the object of the key, the
+`Vec<String>` of its parts, under the principal of the call, and returns a `counter_ref::Counter`
+whose methods call that object. A key the kernel refuses, one the provider does not admit for
+instance, is the `Err` of `get`, and the call goes on. One key reaches one object, through any
+number of handles; another key or another principal reaches another object. `get` is
+asynchronous: the function calling it is a `pub async fn`, `async` in the WIT as well, and the
+crate enables the `async` feature of `wit-bindgen`. A handle belongs to the call's root: dropping
+it releases its claim when the call settles, and the root's end expires every claim, a handle
+kept in a `static` included, so a later call cannot use it.
+
+The manifest's `references` map the view to the interface it reaches, and `cargo tembra build`
+packages that role in the artifact; the kernel checks the view's methods against the provider's
+functions when the Orb is installed. The installer binds the view by its own identity, as it
+binds a plain import:
+
+```rust
+let install = Install::default().requires("example:router/counter-ref@1.0.0", "counters", 1);
+let router = engine.load(&artifact, install)?;
+```
+
+The objects of a view carry data: an interface with a resource, or a function taking or
+returning a resource handle, a stream or a future, is not imported by key. A plain import of the
+same interface may stand next to the keyed one, re-exported under the interface's name. The
+`counting` service of the [runtime fixture](runtime-fixture/src/lib.rs) imports by key.
 
 ## Importing WASI interfaces
 
@@ -652,7 +732,8 @@ The macro rewrites the module with:
 1. `pub const WIT: &str`, the derived WIT text;
 2. the same text as a `tembra:wit` custom section of the Wasm module, and the manifest, the
    declared hooks with their composition, the contributions with their priorities, the
-   services that chose a lifetime or a linger and the `wit` directory, as a `tembra:manifest`
+   services that chose a lifetime or a linger, the views of the interfaces imported by key with
+   the interface each reaches, and the `wit` directory, as a `tembra:manifest`
    section. `cargo tembra build` reads them and packages the contract exactly as written here,
    with the `///` comments the binary type section loses, the hook imports the linker drops
    because nothing calls them, and every consumed package nested whole, not the part the
@@ -679,7 +760,7 @@ The macro rewrites the module with:
    the generated traits share one type, and each derive of such a type is imported again under no
    name, `use EnumIter as _;`, where the type was written, so the imports it names stay used;
    `pub use exports::...::guard;` for each contributed hook and each
-   implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::context;` with the `context` option;
+   implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option;
 6. the author's items, unchanged;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
    by forwarding to the author's functions, hook callbacks and the kernel's `state-init` and
@@ -694,7 +775,8 @@ The macro rewrites the module with:
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
    function and emptied by the `#[close]` one, and the `with` function on each resource type.
 
-The crate must list `wit-bindgen` (features `macros` and `realloc`) among its dependencies,
+The crate must list `wit-bindgen` (features `macros` and `realloc`, and `async` with an import by
+key) among its dependencies,
 `dlmalloc` (feature `global`) only with `no_std`, and `serde` (features `derive`, `alloc`) and `serde_json`
 (feature `alloc`) when it has a state: the generated code names them.
 
@@ -702,8 +784,8 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) among its de
 
 - WASI interfaces are imported, never implemented: serving incoming HTTP, an export of
   `wasi:http/handler`, is not expressed. An Orb consumes another Orb's WIT by importing an
-  interface, implementing one or contributing to a hook; selecting another object by key, as a
-  TypeScript Orb does with `context.get`, is not expressed.
+  interface, plainly or by key, implementing one or contributing to a hook. A view takes the name
+  of the interface imported by key, so two interfaces of one name are not both imported by key.
 - A hook declared from a consumed package keeps that package's types: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
 - A service's functions are associated functions without `self`; only the methods of a
   `#[wit_resource]` struct take `&self`, never `&mut self`. Besides a service's state, a

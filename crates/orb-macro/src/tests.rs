@@ -20,6 +20,7 @@ fn options(package: &str, wit: Option<&std::path::Path>) -> Options {
         context: false,
         no_std: false,
         imports: Vec::new(),
+        keyed: Vec::new(),
     }
 }
 

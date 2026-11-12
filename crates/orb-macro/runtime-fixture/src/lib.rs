@@ -6,8 +6,10 @@ extern crate alloc;
     feature = "no-std",
     tembra::orb(
         package = "example:runtime@1.0.0",
+        wit = "consumed",
         import = "wasi:random/random@0.3.0",
         import = "wasi:clocks/monotonic-clock@0.3.0",
+        import("example:counters/counter@1.0.0", keyed),
         no_std
     )
 )]
@@ -15,8 +17,10 @@ extern crate alloc;
     not(feature = "no-std"),
     tembra::orb(
         package = "example:runtime@1.0.0",
+        wit = "consumed",
         import = "wasi:random/random@0.3.0",
-        import = "wasi:clocks/monotonic-clock@0.3.0"
+        import = "wasi:clocks/monotonic-clock@0.3.0",
+        import("example:counters/counter@1.0.0", keyed)
     )
 )]
 mod guest {
@@ -146,6 +150,41 @@ mod guest {
             let start = monotonic_clock::now();
             monotonic_clock::wait_for(nanoseconds).await;
             monotonic_clock::now() - start
+        }
+    }
+
+    /// Reaches the objects of `example:counters/counter@1.0.0` by key, through the view the macro
+    /// derives for the attribute's `import("example:counters/counter@1.0.0", keyed)`.
+    pub mod keyed {
+        use super::counter_ref;
+        use alloc::{format, string::String, vec};
+
+        #[service]
+        pub struct Counting;
+
+        impl Counting {
+            /// Add `amount` to the object of `key` through two references and to the object of
+            /// `other` through one, then read both: the references of one key reach one object,
+            /// and another key's object counts on its own. A key the provider refuses is the
+            /// error.
+            pub async fn count(key: String, other: String, amount: u32) -> Result<String, String> {
+                let first = counter_ref::get(vec![key.clone()]).await?;
+                let again = counter_ref::get(vec![key]).await?;
+                let second = counter_ref::get(vec![other]).await?;
+                let added = [first.add(amount), again.add(amount), second.add(amount)];
+                let (one, two) = (first.read().await, second.read().await);
+                Ok(format!("{added:?} {} {}", tally(&one), tally(&two)))
+            }
+        }
+
+        /// A tally as `key@principal=count`.
+        fn tally(tally: &counter_ref::Tally) -> String {
+            format!(
+                "{}@{}={}",
+                tally.key.join("/"),
+                tally.principal,
+                tally.count
+            )
         }
     }
 }

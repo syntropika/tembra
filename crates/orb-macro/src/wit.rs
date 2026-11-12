@@ -252,16 +252,18 @@ struct Interface<'a> {
 /// Write the package: one interface per derived hook, with its callback `apply`, the first of them
 /// defining the types the hooks reach; one interface per derived service, with the resources it
 /// owns and the types `placement` gives it; each interface `use`s what it mentions and another
-/// interface defines. Then a world using the kernel's interfaces for its states, resources and
-/// context, importing every consumed interface, importing and exporting every hook, consumed or
-/// derived, and exporting every service interface, derived or implemented. Interfaces that `use`
-/// each other, which WIT refuses, are an error naming them.
+/// interface defines; then the view of each interface imported by key. Then a world using the
+/// kernel's interfaces for its states, resources and context, importing every consumed interface
+/// and every view, importing and exporting every hook, consumed or derived, and exporting every
+/// service interface, derived or implemented. Interfaces that `use` each other, which WIT
+/// refuses, are an error naming them.
 pub(crate) fn render<'a>(
     package: &str,
     world: &str,
     items: Items<'_>,
     hooks: impl Iterator<Item = &'a String>,
     imports: &[String],
+    views: &[crate::keyed::View],
     kernel: Kernel,
 ) -> syn::Result<String> {
     let Items {
@@ -463,6 +465,10 @@ pub(crate) fn render<'a>(
         }
         wit.push_str("}\n");
     }
+    for view in views {
+        wit.push('\n');
+        wit.push_str(&view.text);
+    }
     wit.push_str(&format!("\nworld {} {{\n", escaped(world)));
     if kernel.state {
         wit.push_str(&format!(
@@ -479,6 +485,9 @@ pub(crate) fn render<'a>(
     }
     for import in imports {
         wit.push_str(&format!("  import {import};\n"));
+    }
+    for view in views {
+        wit.push_str(&format!("  import {};\n", escaped(&view.name)));
     }
     for hook in hooks {
         wit.push_str(&format!("  import {hook};\n  export {hook};\n"));
@@ -876,7 +885,7 @@ pub(crate) fn resolve(dir: &Path) -> syn::Result<Resolve> {
 }
 
 /// The interface of the consumed packages with the given identity.
-fn interface<'a>(
+pub(crate) fn interface<'a>(
     resolve: &'a Resolve,
     dir: &Path,
     identity: &str,

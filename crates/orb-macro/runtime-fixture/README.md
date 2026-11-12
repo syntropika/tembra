@@ -15,12 +15,18 @@ Its `chance` service imports `wasi:random/random` and `wasi:clocks/monotonic-clo
 monotonic clock, so both builds enable `wit-bindgen`'s `async` feature. Every installation of the
 fixture grants the `random` and `clocks` system capabilities; the kernel refuses one that does not.
 
+Its `counting` service, in the `keyed` module, imports `example:counters/counter@1.0.0` by key,
+from the package in `consumed/`: its asynchronous `count` acquires the provider's objects of two
+keys through the view the macro derives, `counter_ref`, adds to them and reads them back. Every
+installation of the fixture binds the view to a provider; the test's is native, its objects each
+count on their own and it refuses the key `refused`.
+
 Run `just test-orb-macro` from the repository root to build both real components and execute
 `executor-wasm/tests/orb_macro_runtime.rs` on Cranelift and Pulley. The test decodes both component
 contracts, compares their WIT and typed metadata, calls each guest, observes the walker's state,
-and verifies physical Store and kernel cleanup. It installs each guest without the grants of
-chance's WASI imports, which the kernel refuses, then with them, and draws and waits through them.
-Explicit execution requires both fixture paths and
+reaches the provider's objects by key, and verifies physical Store and kernel cleanup. It installs
+each guest without the grants of chance's WASI imports, which the kernel refuses, then with them,
+and draws and waits through them. Explicit execution requires both fixture paths and
 fails if either is absent. The macro-only facade dependency disables host features in both guest
 builds.
 
