@@ -1,6 +1,6 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-12, 15:00 CET
+- **Aggiornato:** 2026-11-12, 15:17 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1,
   mergiata in `main` il 12/11 alle 14:59 CET
 - **Stato:** la PR #1 è in `main` con il merge commit
@@ -10,6 +10,12 @@
   vanno in commit nuovi, su un branch nuovo da `main` e in
   una PR nuova, non su `feat/rust-first-orbs`. Vedi
   «Seconda review (12/11)».
+- **Seguito:** PR #3 (draft,
+  https://github.com/syntropika/tembra/pull/3), branch
+  `feat/rust-first-orbs-follow-ups` da `main`: la lista
+  «Pending» come checklist, con una nota per voce su cosa
+  c'è e quanto manca. Ogni commit che chiude una voce la
+  spunta nel corpo della PR.
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -93,6 +99,9 @@ Da sapere:
 
 Resta da fare:
 
+- Le voci aperte della PR #3, a partire dalle piccole: gli
+  import degli esempi via `tembra::wasm`, i `#[derive]`
+  dell'autore, la dipendenza git di `cargo tembra new`.
 - Le scelte della seconda review sono in discussione con
   Javier (messaggio di Giacomo del 12/11, dopo il merge):
   quelle da cambiare vanno in commit nuovi da `main`.
