@@ -40,8 +40,9 @@ A component built with the macro carries the module's WIT in a `tembra:wit` cust
 its manifest in a `tembra:manifest` section: the hooks it declares, with the composition from
 `#[hook(..., composition = c)]`, the hooks it contributes to, with the priority from
 `#[hook(..., priority = n)]`, the services that chose a lifetime or a linger with
-`#[service(lifetime = host)]` or `#[service(linger_ms = n)]`, and the directory of the WIT packages
-the module consumes, as `wit = "dir"` wrote it. `build` takes the contract from there, so it is
+`#[service(lifetime = host)]` or `#[service(linger_ms = n)]`, the view of each interface it imports
+with `import("ns:name/interface@version", keyed)` and the interface the view reaches, and the
+directory of the WIT packages the module consumes, as `wit = "dir"` wrote it. `build` takes the contract from there, so it is
 the text the macro derived: `///` comments included, and with the hook imports the linker drops
 because nothing calls them. The packages the Orb consumes, a hook's interface, an interface it
 implements or imports, are nested after it whole, read from that directory, so an imported
@@ -82,8 +83,9 @@ world = "filter"        # only for a component without an embedded contract; def
 The name and the API version live here because the WIT does not carry them: they are two of the
 arguments `Contract::component_artifact` takes; another is its `ComponentRoles`. Hook interfaces are
 read from the contract, the interfaces its world both imports and exports; the component says
-which it declares and which it contributes to, with composition and priority, and which of its
-services chose a lifetime. `build` reads these roles with `Contract::embedded_roles` of
+which it declares and which it contributes to, with composition and priority, which of its
+services chose a lifetime, and which of its imports are views of interfaces it imports by key,
+with the interface each reaches. `build` reads these roles with `Contract::embedded_roles` of
 `tembra-contracts`, as the SDK's `build()` does for a `.wasm` entry, so the component carries the
 same roles whichever tool packages it.
 
@@ -120,6 +122,8 @@ composition of each. A service that chose a lifetime or a linger says so after i
 example `lifetime: host, pinned until the host closes`. An Orb with a `#[state]`, a
 `#[resource]` or `context` on the attribute adds a line naming the kernel's interface it uses:
 the executor serves it, so it appears among neither the imports to bind nor the grants to give.
+An interface imported by key is listed among the imports of other Orbs by its view, the binding
+`Install::requires` names, followed by `by key, the objects of` and the interface it reaches.
 
 For an Orb that imports WASI, the last part names the grants an installer must give, for example
 `system: cli` and `system: clocks` for a std Orb that prints. Without it, those fourteen `wasi:cli`
