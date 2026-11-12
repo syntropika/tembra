@@ -4,25 +4,24 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { crates } from "./metadata.ts";
 
+/** Package only public workspace crates, including every facade dependency. */
+export function packageCrates(root: string, verify = true): void {
+  const packages = crates(root).flatMap((item) => ["--package", item.name]);
+  if (!packages.length) throw new Error("No publishable workspace crates");
+  execFileSync(
+    "cargo",
+    ["package", "--locked", "--all-features", ...packages, ...(verify ? [] : ["--no-verify"])],
+    { cwd: root, stdio: "inherit" },
+  );
+}
+
 /** Resume verified crate publication without replacing an existing version's contents. */
 export async function publishCrates(
   root: string,
   directory: string,
   version: string,
 ): Promise<void> {
-  execFileSync(
-    "cargo",
-    [
-      "package",
-      "--locked",
-      "--workspace",
-      "--exclude",
-      "tembra-node-binding",
-      "--all-features",
-      "--no-verify",
-    ],
-    { cwd: root, stdio: "inherit" },
-  );
+  packageCrates(root, false);
   const pending = [];
   for (const item of crates(root)) {
     const checksum = createHash("sha256")

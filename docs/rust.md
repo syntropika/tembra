@@ -10,8 +10,40 @@ tembra = "0.2.2"
 
 Enable `features = ["wasm"]` to expose `tembra::wasm` on native targets. Other optional features
 (`hooks`, `subscriptions`, `views`, `telemetry` and `rpc`) configure the same shared host.
+Enable `contracts` to use the prepared model through `tembra::contracts`, or `authoring` to
+add WIT parsing, component verification and artifact packaging through that same module.
 The browser target keeps the native host lean even when workspace features are enabled;
 browser applications execute isolated Orbs through the TypeScript SDK.
+
+## Author a compiled Orb
+
+Guest crates use the same facade with host execution disabled:
+
+```toml
+[dependencies]
+tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
+wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
+```
+
+```rust,ignore
+#[tembra::orb(package = "example:greeting@1.0.0")]
+mod greeting {
+    #[service]
+    pub struct Api;
+
+    impl Api {
+        pub fn hello(name: String) -> String {
+            format!("Hello, {name}!")
+        }
+    }
+}
+```
+
+The macro uses `std` by default. A freestanding guest uses `#![no_std]`, the `no_std` macro
+option and `dlmalloc`; see the [macro guide](../crates/orb-macro/README.md). `wit-bindgen`
+remains the explicit dependency used by the generated bindings. The `macros` feature builds
+the procedural macro for the compiler; it adds no host runtime, Wasmtime or WIT parser to the
+guest binary.
 
 ## Declare an orb
 
@@ -48,6 +80,15 @@ The application supplies a `LocalSpawn` executor, such as `LocalPool::spawner()`
 `Host::new()` does not start a runtime or worker thread.
 Use `host.install()` to register orbs and `host.get()` to acquire an object reference.
 Native `get()` returns before activation finishes; `ready().await` waits for it.
+`get()` and `get_with_options()` are nonblocking: if the previous instance at the exact
+service, key and principal is closing, they return `unavailable/disposing`.
+Use `host.get_wait(service, key, principal, options).await` to wait for that instance's
+physical close before acquiring again. `context.get_wait(service, key, options).await`
+uses the caller's principal and releases the claim when its root ends. Cancellation or
+root expiry stops the wait without interrupting cleanup. Other admission failures return
+immediately, and admission requirements are checked again after the close. These methods
+wait for address availability; call `ready().await` separately to await activation.
+Compiled WIT instance selection uses this same waiting acquisition path.
 
 Use `host.root()` to obtain a context.
 `reference.call(&ctx, method, arguments)` waits for activation and invokes the method.
@@ -101,7 +142,25 @@ call or provide services through the same kernel. Each loaded orb runs in its ow
 See [Wasm orb execution](../crates/executor-wasm/README.md) and
 [the mixed native/Wasm consumer example](../examples/rust/wasm.rs). It installs a native counter,
 a source Orb and a compiled component in one host. Backend values are reexports of the same
-implementation types; the facade adds no serialization, wrapper runtime or dispatch step.
+implementation types; the facade adds no serialization, wrapper runtime or dispatch step. To write
+a compiled orb in Rust without a WIT file, see
+[the Rust orb example](../examples/rust-orb-service/README.md): `#[orb]` derives the
+contract from a module and `cargo tembra build` packages the artifact. A service of such an orb
+can own kernel-managed state with `#[state]`, validated by the state's own rule; see
+[the Rust state example](../examples/rust-orb-state/README.md). Such an orb can also declare a hook
+for other orbs to contribute to; see
+[the Rust hook declaration example](../examples/rust-orb-hook-declaration/README.md). Its methods
+can read the call's principal, the object's address and write to the host's log through the
+kernel's context interface, see [the Rust context example](../examples/rust-orb-context/README.md),
+and each service can choose the lifetime of its objects, see
+[the Rust service lifetime example](../examples/rust-orb-service-lifetime/README.md). A service
+can implement an interface of a shared WIT package instead of deriving one, see
+[the Rust shared interface example](../examples/rust-orb-shared-interface/README.md), import
+another orb's interface and call it, see
+[the Rust import example](../examples/rust-orb-import/README.md), and hand out WIT resources to
+other orbs, see [the Rust WIT resource example](../examples/rust-orb-wit-resource/README.md). The
+same artifact runs in browsers through an adapter the application's build prepares from it, see
+[browser preparation](tooling.md#prepare-a-compiled-orb-for-browsers).
 
 ## Serve incoming HTTP
 

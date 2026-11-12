@@ -1,0 +1,33 @@
+package example:keeper@1.0.0;
+
+world keeper {
+  import tembra:guest/state@1.0.0;
+  export tembra:guest/state-init@1.0.0;
+  export example:ledger/book@1.0.0;
+}
+
+package example:ledger@1.0.0 {
+  /// A book of entries, the contract shared by whoever keeps a ledger and whoever consults it.
+  interface book {
+    /// One entry of the book.
+    record entry {
+      /// What the entry is for.
+      label: string,
+      /// The amount, positive or negative.
+      amount: s64,
+    }
+
+    /// Add an entry and return how many entries the book holds.
+    add: func(entry: entry) -> u32;
+
+    /// The sum of every amount.
+    total: func() -> s64;
+
+    /// The entries, in the order they were added.
+    entries: func() -> list<entry>;
+  }
+  /// The world of an Orb that keeps a book.
+  world keeper {
+    export book;
+  }
+}

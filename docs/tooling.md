@@ -133,8 +133,13 @@ available. The orb receives filesystem and network access only through granted W
 ## Compiled orbs
 
 A `.wasm` entry is a compiled WebAssembly component. `build()` checks its exports against the
-selected world, including imports, and packages it with the contract. The component carries no Tembra metadata, so
-the build name becomes the orb name and the target must supply `apiVersion`.
+selected world, including imports, and packages it with the contract. The component carries no
+installation identity, so the build name becomes the orb name and the target must supply
+`apiVersion`. A Rust component written with `#[orb]` carries its roles in its core module: the
+hooks it declares, the hooks it contributes to, with their priorities, and its services'
+lifetimes. `build()` packages them as the component carries them, together with the target's
+`contributes` and `references`; a hook named both by the component and by `contributes` must have
+the same priority.
 
 ### Prepare a compiled Orb for browsers
 
@@ -175,6 +180,23 @@ JCO, the component parser and the instrumenter stay in tooling. Browser executio
 prepared bindings and core modules; each installation gets fresh memories, handles, grants and
 execution budgets. Prepared components require the browser's JavaScript Promise Integration
 support. Raw compiled artifacts without a registered adapter are refused.
+
+A Rust Orb written with `#[orb]` is already an artifact once `cargo tembra build` packaged it, with
+the roles its component declares: the hooks it declares and its services' lifetimes. Prepare those
+exact bytes rather than building the component again:
+
+```ts
+import { prepareBrowserComponent } from "@syntropika/tembra-sdk/tooling";
+
+const artifact = await Bun.file("counter/artifacts/counter.orb.wasm").bytes();
+const sha256 = new Bun.CryptoHasher("sha256").update(artifact).digest("hex");
+await prepareBrowserComponent(artifact, sha256, "dist/tembra/counter/browser");
+```
+
+The adapter serves the kernel interfaces the Orb imports (`tembra:guest` state, root resources and
+the call's context) and runs the hooks it declares, as native hosts do: each operation becomes the
+host request a source Orb issues and reaches the same kernel logic, so the Orb behaves alike on
+every host.
 
 Source JS/TS targets do not use this step. Their closed scripts run through the shared dquickts
 interpreter and remain dynamically loadable without generating per-Orb browser bindings.

@@ -21,7 +21,7 @@ pub use context_values::*;
 pub use error::{Code, Error, Reason, Result};
 #[cfg(feature = "hooks")]
 pub use hooks::*;
-pub use host::Host;
+pub use host::{Disposal, Host};
 pub use model::*;
 pub use program::{Completion, Effect, Replacement, Scope, Step};
 pub use state::{PreparedState, Snapshot};

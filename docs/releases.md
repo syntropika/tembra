@@ -17,10 +17,10 @@ The workflow publishes these npm packages in dependency order:
   an Android Maven package containing arm64-v8a, armeabi-v7a, x86 and x86_64 libraries.
 
 The publishable Rust workspace crates are `tembra-core`, `tembra-bridge`, `tembra-runtime`, `tembra`,
-`tembra-browser-wasm`, `tembra-contracts` and `tembra-executor-wasm`. `tembra-node-binding` and
+`tembra-browser-wasm`, `tembra-contracts`, `tembra-orb-macro` and `tembra-executor-wasm`. `tembra-node-binding` and
 `tembra-mobile` are private platform implementations distributed through the Node, Swift and
 Kotlin packages. `tembra-contracts-wasm` is not published. The public `tembra` facade reexports the shared host
-from `tembra-runtime` and optionally the Wasm backend, so those dependencies must be released
+from `tembra-runtime`, the optional contracts module, the Orb macro and the Wasm backend, so those dependencies must be released
 before the facade can resolve from the registry. All local dependencies of publishable Rust
 crates have exact registry versions as well as local paths.
 

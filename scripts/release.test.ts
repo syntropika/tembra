@@ -15,6 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { manifest, releaseVersion, validate } from "./release/metadata.ts";
 import { checkArtifacts, stagePackage } from "./release/npm.ts";
+import { packageCrates } from "./release/crates.ts";
 
 test("only canonical release tags choose latest; prereleases choose next", () => {
   expect(releaseVersion("v1.2.3")).toEqual({ version: "1.2.3", channel: "latest" });
@@ -36,6 +37,34 @@ test("all checked-in registry versions agree and a different tag is rejected", (
   const version = manifest(root).version;
   expect(validate(root, `v${version}`).version).toBe(version);
   expect(() => validate(root, "v999.0.0")).toThrow("version does not match");
+});
+
+test("crate packaging excludes private helpers with checkout-only dependencies", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "tembra-crate-release-"));
+  try {
+    writeFileSync(
+      path.join(root, "Cargo.toml"),
+      '[workspace]\nmembers = ["public", "private"]\nresolver = "2"\n',
+    );
+    for (const name of ["public", "private"]) {
+      mkdirSync(path.join(root, name, "src"), { recursive: true });
+      writeFileSync(path.join(root, name, "src/lib.rs"), "pub fn value() -> u32 { 42 }\n");
+      writeFileSync(
+        path.join(root, name, "Cargo.toml"),
+        `[package]\nname = "tembra-release-${name}-fixture"\nversion = "0.1.0"\nedition = "2024"\n` +
+          (name === "private"
+            ? 'publish = false\n[dependencies]\ntembra-release-public-fixture = { path = "../public" }\n'
+            : 'description = "Release qualification fixture"\nlicense = "Apache-2.0"\nrepository = "https://github.com/syntropika/tembra"\n'),
+      );
+    }
+    execFileSync("cargo", ["generate-lockfile", "--offline"], { cwd: root, stdio: "pipe" });
+    packageCrates(root, false);
+    expect(
+      readdirSync(path.join(root, "target/package")).filter((file) => file.endsWith(".crate")),
+    ).toEqual(["tembra-release-public-fixture-0.1.0.crate"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("staged npm archives resolve workspace dependencies without shipping development files", () => {

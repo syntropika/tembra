@@ -66,7 +66,7 @@ fn redefined(
         let name = &unresolved.name;
         if resolve.package_names.contains_key(name) {
             let owner = if standard.contains(name) {
-                "the standard WASI contracts bundled with Tembra"
+                "the standard contracts bundled with Tembra"
             } else {
                 "an encoded WIT dependency"
             };
@@ -100,7 +100,10 @@ impl Contract {
     /// Follows `Resolve::push_dir`: dependency directories and text files are parsed once into
     /// their public unresolved form, so the world's own imports are known before elaboration
     /// adds type-only dependencies. Encoded packages (`*.wasm`, `*.wat`, or a `*.wit` whose
-    /// content is binary) are merged through `push_file` and carry no provenance.
+    /// content is binary) are merged through `push_file` and carry no provenance. A `deps/` file
+    /// that is a bundled standard contract line for line, as [`Self::standard_dependencies`]
+    /// lists them, adds nothing: the bundled package is resolved already. Any other definition
+    /// of a bundled package is refused.
     pub fn from_dir(path: impl AsRef<Path>, world: Option<&str>) -> Result<Self, Error> {
         let path = path.as_ref();
         let (mut resolve, mut known) = crate::standard::resolve()?;
@@ -139,6 +142,11 @@ impl Contract {
                 }
                 let source =
                     String::from_utf8(bytes).map_err(|error| package(&dependency, error))?;
+                // A copy of a bundled standard contract, there so that the directory resolves
+                // with `Resolve::push_dir` alone too, adds nothing to the bundled package.
+                if crate::standard::bundled(&source) {
+                    continue;
+                }
                 let group = parse_source(&dependency, &source)
                     .map_err(|error| package(&dependency, error))?;
                 dependencies.push((dependency, group));
@@ -216,6 +224,46 @@ impl Contract {
         wit_component::encode(&self.resolve, package, false).map_err(parser)
     }
 
+    /// The bundled standard contracts this contract depends on, directly or through another of
+    /// its packages, as `(file name, source)` in dependency order. A directory holding the
+    /// contract's own packages, with these files in its `deps/`, resolves on its own: with
+    /// `Resolve::push_dir`, as another Orb's bindings read it, and with [`Self::from_dir`].
+    pub fn standard_dependencies(&self) -> Vec<(&'static str, &'static str)> {
+        let standard = crate::standard::packages();
+        let bundled = |id: PackageId| {
+            standard
+                .iter()
+                .any(|(name, ..)| *name == self.resolve.packages[id].name)
+        };
+        // Every package a package of the contract reaches, a bundled one included: a bundled
+        // package resolves only with the bundled packages it builds on.
+        let mut reached = BTreeSet::new();
+        let mut pending: Vec<PackageId> = self
+            .resolve
+            .packages
+            .iter()
+            .map(|(id, _)| id)
+            .filter(|id| !bundled(*id))
+            .collect();
+        while let Some(id) = pending.pop() {
+            for dependency in self.resolve.package_direct_deps(id) {
+                if reached.insert(dependency) {
+                    pending.push(dependency);
+                }
+            }
+        }
+        standard
+            .into_iter()
+            .filter(|(name, ..)| {
+                self.resolve
+                    .package_names
+                    .get(name)
+                    .is_some_and(|id| reached.contains(id))
+            })
+            .map(|(_, file, source)| (file, source))
+            .collect()
+    }
+
     /// Require a compiled component's exported interfaces and signatures to match this world.
     pub fn check_component_exports(&self, bytes: &[u8]) -> Result<(), Error> {
         verify_component(&self.prepared, bytes)
@@ -244,8 +292,9 @@ impl Contract {
     /// Package a component with typed roles; WIT owns every callback and view signature.
     ///
     /// Contribution roles name exported hook callbacks. Reference roles map an imported
-    /// reference-view binding to the provider interface it addresses; each is checked here and
-    /// again whenever the artifact is decoded.
+    /// reference-view binding to the provider interface it addresses. Hook roles name the hooks
+    /// the component declares, and service roles the lifetime of its services, which it cannot
+    /// state in WIT. Each is checked here and again whenever the artifact is decoded.
     pub fn component_artifact(
         &self,
         component: &[u8],
@@ -254,8 +303,7 @@ impl Contract {
         roles: &ComponentRoles,
     ) -> Result<Vec<u8>, Error> {
         self.prepared.check_resource_profile()?;
-        self.prepared
-            .check_contribution_roles(&roles.contributions)?;
+        self.prepared.check_roles(roles)?;
         self.prepared.reference_bindings(&roles.references)?;
         let identity = Identity {
             name: name.into(),
@@ -276,6 +324,18 @@ impl Contract {
             &encode_orb_roles(&identity, &self.prepared, roles),
         );
         Ok(bytes)
+    }
+
+    /// The roles a component built with `#[orb]` carries in its
+    /// [`EmbeddedManifest`](crate::EmbeddedManifest), checked against this world: the hooks it
+    /// declares, with their composition, the hooks it contributes to, with their priorities, and
+    /// the lifetimes and lingers of its services. A component without a manifest carries none;
+    /// reference views are never embedded.
+    ///
+    /// Every tool packaging such a component passes these roles to [`Self::component_artifact`],
+    /// so the artifact keeps what the module declared whichever tool packaged it.
+    pub fn embedded_roles(&self, component: &[u8]) -> Result<ComponentRoles, Error> {
+        crate::embedded::roles(&self.prepared, component)
     }
 }
 

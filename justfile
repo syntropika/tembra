@@ -142,6 +142,41 @@ examples:
     cargo run --locked -p tembra --features hooks --example hooks
     cargo run --locked -p tembra --example composition
 
+# Build and run every #[orb] example; the contracts and lockfiles committed beside them must not change.
+test-orb-examples:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for script in examples/rust-orb-*/run.sh; do
+        echo "== $script"
+        "$script"
+    done
+    git diff --exit-code -- examples
+
+# Build the macro's async and std/no_std guests into one reusable target directory.
+build-orb-macro target-dir:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fixture_target="$1"
+    mkdir -p "$fixture_target"
+    fixture_target="$(cd "$fixture_target" && pwd)"
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/async-fixture/Cargo.toml --target-dir "$fixture_target" -- -Clinker=wasm-component-ld
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --target-dir "$fixture_target" -- -Clinker=wasm-component-ld
+    cp "$fixture_target/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$fixture_target/std.wasm"
+    cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --target-dir "$fixture_target" --features no-std -- -Clinker=wasm-component-ld
+    cp "$fixture_target/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$fixture_target/no-std.wasm"
+
+# Execute real macro component boundaries; acceptance uses the same fixture builder.
+test-orb-macro:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fixture_target="${CARGO_TARGET_DIR:-target}/orb-macro"
+    just build-orb-macro "$fixture_target"
+    fixture_target="$(cd "$fixture_target" && pwd)"
+    TEMBRA_WASM_ORB_MACRO_ASYNC="$fixture_target/wasm32-unknown-unknown/release/tembra_orb_macro_async_fixture.wasm" \
+    TEMBRA_WASM_ORB_MACRO_STD="$fixture_target/std.wasm" \
+    TEMBRA_WASM_ORB_MACRO_NO_STD="$fixture_target/no-std.wasm" \
+        cargo test --locked -p tembra-executor-wasm --test orb_macro_async --test orb_macro_runtime -- --ignored
+
 check: fmt-check build-node build-wasm build-sdk
     bun run typecheck
     just lint
@@ -153,6 +188,7 @@ check: fmt-check build-node build-wasm build-sdk
 install-tools:
     cargo install --locked cargo-machete --version 0.9.2
     cargo install --locked wasm-bindgen-cli --version 0.2.129
+    cargo install --locked wasm-component-ld --version 0.5.31
 
 install-ts: install
 check-all: check

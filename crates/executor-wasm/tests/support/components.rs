@@ -121,8 +121,34 @@ pub const EAGER_CONSUMER: &str = r#"(module
 
 /// Encode a core module and its WIT world as a component, then package it as an Orb artifact.
 pub fn artifact(world: &str, module: &str, name: &str) -> Vec<u8> {
+    artifact_with(world, module, name, &Default::default())
+}
+
+/// Like [`artifact`], with the roles the artifact carries beside its contract.
+pub fn artifact_with(
+    world: &str,
+    module: &str,
+    name: &str,
+    roles: &tembra_contracts::ComponentRoles,
+) -> Vec<u8> {
+    encode(WIT, world, module, name, roles)
+}
+
+/// The kernel's package, bundled with the contracts, for worlds importing its interfaces.
+pub const GUEST: &str = include_str!("../../../contracts/wit/tembra/guest.wit");
+
+/// Encode a core module and a world of `wit` as a component, then package it as an Orb artifact
+/// with the given roles. The kernel's `tembra:guest` package is resolvable from `wit`.
+pub fn encode(
+    wit: &str,
+    world: &str,
+    module: &str,
+    name: &str,
+    roles: &tembra_contracts::ComponentRoles,
+) -> Vec<u8> {
     let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("deps.wit", WIT).unwrap();
+    resolve.push_str("guest.wit", GUEST).unwrap();
+    let package = resolve.push_str("orb.wit", wit).unwrap();
     let selected = resolve.select_world(&[package], Some(world)).unwrap();
     let mut core = wat::parse_str(module).unwrap();
     wit_component::embed_component_metadata(
@@ -139,8 +165,8 @@ pub fn artifact(world: &str, module: &str, name: &str) -> Vec<u8> {
         .unwrap()
         .encode()
         .unwrap();
-    tembra_contracts::Contract::from_source("deps.wit", WIT, Some(world))
+    tembra_contracts::Contract::from_source("orb.wit", wit, Some(world))
         .unwrap()
-        .component_artifact(&component, name, 1, &Default::default())
+        .component_artifact(&component, name, 1, roles)
         .unwrap()
 }

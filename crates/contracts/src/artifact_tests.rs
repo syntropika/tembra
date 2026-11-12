@@ -8,6 +8,12 @@ fn contract(source: &str) -> Contract {
 }
 
 fn component(contract: &Contract) -> Vec<u8> {
+    component_carrying(contract, &[])
+}
+
+/// A component of the contract's world whose core module carries the given custom sections, as
+/// the component linker keeps those of the compiled code.
+fn component_carrying(contract: &Contract, sections: &[(&str, &[u8])]) -> Vec<u8> {
     let mut module = wit_component::dummy_module(
         &contract.resolve,
         contract.world,
@@ -21,12 +27,26 @@ fn component(contract: &Contract) -> Vec<u8> {
         false,
     )
     .unwrap();
+    for (name, data) in sections {
+        append(&mut module, name, data);
+    }
     wit_component::ComponentEncoder::default()
         .module(&module)
         .unwrap()
         .validate(true)
         .encode()
         .unwrap()
+}
+
+/// The digest a registered prepared browser adapter names for `bytes`.
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Decode the browser metadata of `bytes` as a host that registered their adapter.
+fn prepared(bytes: &[u8]) -> Result<PreparedComponent, Error> {
+    PreparedComponent::decode(bytes, &[sha256(bytes)])
 }
 
 fn append(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
@@ -49,10 +69,9 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
     let bytes = contract
         .component_artifact(&component, "extension", 1, &contributions)
         .unwrap();
-    assert_eq!(
-        Artifact::decode(&bytes).unwrap().contributions,
-        contributions.contributions
-    );
+    let decoded = Artifact::decode(&bytes).unwrap();
+    assert_eq!(decoded.contributions, contributions.contributions);
+    assert!(decoded.hooks.is_empty());
     let invalid = ComponentRoles {
         contributions: [("test:hooks/missing@1.0.0".into(), 1)].into(),
         ..Default::default()
@@ -82,6 +101,359 @@ fn compiled_contribution_metadata_is_typed_bounded_and_verified_on_decode() {
     );
     crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
     assert!(Artifact::decode(&source).is_err());
+}
+
+/// A compiled provider exports the hook it declares and imports it to run its plan. The artifact
+/// carries the composition; a shape the composition refuses, a role the world does not export,
+/// an interface in both roles and a source bundle claiming the role are all refused.
+#[test]
+fn compiled_hook_declarations_travel_in_the_artifact_and_are_checked() {
+    let contract = Contract::from_source("hooks.wit", "package test:hooks@1.0.0; interface guard { record admission { value: s32, blocked: bool } apply: func(input: admission) -> admission; } interface gate { admit: func(value: s32) -> admission; use guard.{admission}; } world provider { import guard; export guard; export gate; }", Some("provider")).unwrap();
+    let component = component(&contract);
+    let identity = "test:hooks/guard@1.0.0";
+    let roles = ComponentRoles {
+        hooks: [(identity.into(), HookComposition::Waterfall)].into(),
+        ..Default::default()
+    };
+    let bytes = contract
+        .component_artifact(&component, "gate", 1, &roles)
+        .unwrap();
+    let decoded = Artifact::decode(&bytes).unwrap();
+    assert_eq!(decoded.hooks, roles.hooks);
+    assert!(decoded.contributions.is_empty());
+    // A browser decodes the same declaration from the metadata its prepared adapter names.
+    let browser = prepared(&bytes).unwrap();
+    assert_eq!(browser.hooks, roles.hooks);
+    assert_eq!(
+        browser.describe_hooks(),
+        serde_json::json!({ identity: "waterfall" })
+    );
+    for refused in [
+        ComponentRoles {
+            hooks: [(identity.into(), HookComposition::Series)].into(),
+            ..Default::default()
+        },
+        ComponentRoles {
+            hooks: [("test:hooks/gate@1.0.0".into(), HookComposition::Waterfall)].into(),
+            ..Default::default()
+        },
+        ComponentRoles {
+            hooks: [(identity.into(), HookComposition::Waterfall)].into(),
+            contributions: [(identity.into(), 0)].into(),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            contract
+                .component_artifact(&component, "gate", 1, &refused)
+                .is_err()
+        );
+        // Forged metadata is refused by the browser decoder exactly as by the native one.
+        let mut forged = component.clone();
+        crate::artifact::append_section(
+            &mut forged,
+            "tembra:orb",
+            &crate::artifact::encode_orb_roles(
+                &Identity {
+                    name: "gate".into(),
+                    api_version: 1,
+                    world: "provider".into(),
+                },
+                contract.prepared(),
+                &refused,
+            ),
+        );
+        assert!(Artifact::decode(&forged).is_err());
+        assert!(prepared(&forged).is_err());
+    }
+    let packaged = Identity {
+        name: "gate".into(),
+        api_version: 1,
+        world: "provider".into(),
+    };
+    let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
+    crate::artifact::append_section(
+        &mut source,
+        "tembra:orb",
+        &crate::artifact::encode_orb_roles(&packaged, contract.prepared(), &roles),
+    );
+    crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
+    assert!(Artifact::decode(&source).is_err());
+}
+
+/// A compiled service's lifetime and linger travel in the component roles and are applied by
+/// the implementation check. A policy for an interface that is no service (a hook callback, a kernel
+/// callback, an import, an unknown identity), a lingering host-lifetime object and a source
+/// bundle claiming a policy are refused.
+#[test]
+fn compiled_service_policies_travel_in_the_artifact_and_are_checked() {
+    let contract = Contract::from_source("policies.wit", "package test:policies@1.0.0; interface guard { apply: func(value: u32) -> u32; } interface ledger { count: func() -> u32; } world book { import guard; export guard; export ledger; import tembra:guest/state@1.0.0; export tembra:guest/state-init@1.0.0; }", Some("book")).unwrap();
+    let component = component(&contract);
+    let ledger = "test:policies/ledger@1.0.0";
+    let roles = ComponentRoles {
+        hooks: [(
+            "test:policies/guard@1.0.0".into(),
+            HookComposition::Waterfall,
+        )]
+        .into(),
+        services: [(
+            ledger.into(),
+            ServicePolicy {
+                lifetime: Lifetime::Host,
+                linger_ms: 0,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let bytes = contract
+        .component_artifact(&component, "book", 1, &roles)
+        .unwrap();
+    let decoded = Artifact::decode(&bytes).unwrap();
+    assert!(decoded.contributions.is_empty());
+    assert_eq!(decoded.hooks, roles.hooks);
+    assert_eq!(decoded.services, roles.services);
+    // A browser decodes the same policies from the metadata its prepared adapter names.
+    let browser = prepared(&bytes).unwrap();
+    assert_eq!(browser.hooks, roles.hooks);
+    assert_eq!(browser.services, roles.services);
+    assert_eq!(
+        browser.describe_services(),
+        serde_json::json!({ ledger: { "lifetime": "host", "linger_ms": 0 } })
+    );
+    let lingering = ComponentRoles {
+        services: [(
+            ledger.into(),
+            ServicePolicy {
+                lifetime: Lifetime::Referenced,
+                linger_ms: 2_500,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let decoded = Artifact::decode(
+        &contract
+            .component_artifact(&component, "book", 1, &lingering)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded.services[ledger].linger_ms, 2_500);
+    let policy = |identity: &str, lifetime, linger_ms| ComponentRoles {
+        hooks: roles.hooks.clone(),
+        services: [(
+            identity.into(),
+            ServicePolicy {
+                lifetime,
+                linger_ms,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    for (refused, reason) in [
+        (
+            policy("test:policies/guard@1.0.0", Lifetime::Host, 0),
+            "a hook callback",
+        ),
+        (
+            policy("tembra:guest/state-init@1.0.0", Lifetime::Host, 0),
+            "a kernel callback",
+        ),
+        (
+            policy("tembra:guest/state@1.0.0", Lifetime::Host, 0),
+            "an import",
+        ),
+        (
+            policy("test:policies/missing@1.0.0", Lifetime::Host, 0),
+            "an unknown interface",
+        ),
+        (
+            policy(ledger, Lifetime::Host, 10),
+            "a lingering host object",
+        ),
+    ] {
+        assert!(
+            contract
+                .component_artifact(&component, "book", 1, &refused)
+                .is_err(),
+            "{reason}"
+        );
+        let identity = Identity {
+            name: "book".into(),
+            api_version: 1,
+            world: "book".into(),
+        };
+        let mut forged = component.clone();
+        crate::artifact::append_section(
+            &mut forged,
+            "tembra:orb",
+            &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &refused),
+        );
+        assert!(Artifact::decode(&forged).is_err(), "{reason}");
+        assert!(prepared(&forged).is_err(), "{reason}");
+    }
+    let mut source = crate::artifact::COMPONENT_HEADER.to_vec();
+    crate::artifact::append_section(
+        &mut source,
+        "tembra:orb",
+        &crate::artifact::encode_orb_roles(
+            &Identity {
+                name: "book".into(),
+                api_version: 1,
+                world: "book".into(),
+            },
+            contract.prepared(),
+            &lingering,
+        ),
+    );
+    crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
+    assert!(Artifact::decode(&source).is_err());
+}
+
+/// A world declaring a hook, contributing to another and offering a service, as `#[orb]` derives
+/// one; its manifest names the three roles.
+const EMBEDDED: &str = "package test:embedded@1.0.0; interface guard { apply: func(value: u32) -> u32; } interface audit { observe: func(value: u32); } interface ledger { count: func() -> u32; } world book { import guard; export guard; import audit; export audit; export ledger; }";
+
+/// The manifest `#[orb]` writes into its component's core module.
+fn manifest(json: &str) -> Vec<u8> {
+    let contract = Contract::from_source("embedded.wit", EMBEDDED, Some("book")).unwrap();
+    component_carrying(&contract, &[("tembra:manifest", json.as_bytes())])
+}
+
+/// The roles a component built with `#[orb]` carries are read from the custom section of its core
+/// module, checked against the contract and packaged as they are; a component without the section
+/// carries none.
+#[test]
+fn roles_embedded_in_the_core_module_are_read_and_packaged() {
+    let contract = Contract::from_source("embedded.wit", EMBEDDED, Some("book")).unwrap();
+    let component = manifest(
+        r#"{"contributes":{"test:embedded/audit@1.0.0":-3},"declares":{"test:embedded/guard@1.0.0":"waterfall"},"services":{"test:embedded/ledger@1.0.0":{"lifetime":"host","linger_ms":0}},"wit":"../wit"}"#,
+    );
+    let host = ServicePolicy {
+        lifetime: Lifetime::Host,
+        linger_ms: 0,
+    };
+    assert_eq!(
+        EmbeddedManifest::read(&component).unwrap(),
+        EmbeddedManifest {
+            contributes: [("test:embedded/audit@1.0.0".into(), -3)].into(),
+            declares: [(
+                "test:embedded/guard@1.0.0".into(),
+                HookComposition::Waterfall
+            )]
+            .into(),
+            services: [("test:embedded/ledger@1.0.0".into(), host)].into(),
+            wit: Some("../wit".into()),
+        }
+    );
+    let roles = contract.embedded_roles(&component).unwrap();
+    assert_eq!(
+        roles,
+        ComponentRoles {
+            contributions: [("test:embedded/audit@1.0.0".into(), -3)].into(),
+            references: BTreeMap::new(),
+            hooks: [(
+                "test:embedded/guard@1.0.0".into(),
+                HookComposition::Waterfall
+            )]
+            .into(),
+            services: [("test:embedded/ledger@1.0.0".into(), host)].into(),
+        }
+    );
+    let decoded = Artifact::decode(
+        &contract
+            .component_artifact(&component, "book", 1, &roles)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded.contributions, roles.contributions);
+    assert_eq!(decoded.hooks, roles.hooks);
+    assert_eq!(decoded.services, roles.services);
+    // A component built without the macro carries no manifest and no roles.
+    let plain = component_carrying(&contract, &[]);
+    assert_eq!(
+        EmbeddedManifest::read(&plain).unwrap(),
+        EmbeddedManifest::default()
+    );
+    assert_eq!(
+        contract.embedded_roles(&plain).unwrap(),
+        ComponentRoles::default()
+    );
+}
+
+/// A manifest naming a role the contract does not offer, or that is no manifest at all, is
+/// refused before any packaging.
+#[test]
+fn embedded_roles_the_contract_does_not_offer_are_refused() {
+    let contract = Contract::from_source("embedded.wit", EMBEDDED, Some("book")).unwrap();
+    for (json, refusal) in [
+        (
+            r#"{"declares":{"test:embedded/ledger@1.0.0":"series"}}"#,
+            "#[hook] declares test:embedded/ledger@1.0.0, but the contract does not import and export it",
+        ),
+        (
+            r#"{"declares":{"test:embedded/guard@1.0.0":"waterfall"},"contributes":{"test:embedded/guard@1.0.0":1}}"#,
+            "#[hook] contributes to test:embedded/guard@1.0.0, but the contract does not import and export it as a contribution",
+        ),
+        (
+            r#"{"contributes":{"test:embedded/missing@1.0.0":1}}"#,
+            "#[hook] contributes to test:embedded/missing@1.0.0, but the contract does not import and export it as a contribution",
+        ),
+        (
+            r#"{"services":{"test:embedded/guard@1.0.0":{"lifetime":"host"}}}"#,
+            "#[service] names a lifetime for test:embedded/guard@1.0.0, but the contract does not export it as a service",
+        ),
+        (
+            r#"{"services":{"test:embedded/missing@1.0.0":{"linger_ms":10}}}"#,
+            "#[service] names a lifetime for test:embedded/missing@1.0.0, but the contract does not export it as a service",
+        ),
+    ] {
+        assert_eq!(
+            contract.embedded_roles(&manifest(json)).unwrap_err().0,
+            refusal
+        );
+    }
+    for malformed in [r#"{"priorities":{}}"#, r#""waterfall""#, "{"] {
+        let error = contract.embedded_roles(&manifest(malformed)).unwrap_err();
+        assert!(
+            error
+                .0
+                .starts_with("the tembra:manifest section is not a JSON object"),
+            "{error}"
+        );
+    }
+}
+
+/// The manifest is the section of the first core module holding one, in the order of the binary,
+/// the modules of nested components included; a core module is no component.
+#[test]
+fn the_manifest_is_read_from_the_first_core_module_holding_one() {
+    let module = |manifest: Option<&str>| {
+        let mut module = wasm_encoder::Module::new();
+        if let Some(manifest) = manifest {
+            module.section(&CustomSection {
+                name: Cow::Borrowed("tembra:manifest"),
+                data: Cow::Borrowed(manifest.as_bytes()),
+            });
+        }
+        module
+    };
+    let mut nested = wasm_encoder::Component::new();
+    nested.section(&wasm_encoder::ModuleSection(&module(Some(
+        r#"{"wit":"nested"}"#,
+    ))));
+    let mut component = wasm_encoder::Component::new();
+    component.section(&wasm_encoder::ModuleSection(&module(None)));
+    component.section(&wasm_encoder::NestedComponentSection(&nested));
+    component.section(&wasm_encoder::ModuleSection(&module(Some(
+        r#"{"wit":"later"}"#,
+    ))));
+    assert_eq!(
+        EmbeddedManifest::read(&component.finish()).unwrap().wit,
+        Some("nested".into())
+    );
+    assert!(EmbeddedManifest::read(&module(Some("{}")).finish()).is_err());
 }
 
 #[test]

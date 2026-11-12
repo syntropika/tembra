@@ -4,7 +4,10 @@
 //! only `tembra:orb` (identity and compact contract) and `tembra:source`. Compiled Orbs append
 //! `tembra:orb` to the real component, whose actual WIT types are verified against the contract
 //! by the native `authoring` verifier before any linking.
-use crate::{Error, PreparedContract, codec::Reader, model::MAX_NAME};
+use crate::{
+    Error, HookComposition, Lifetime, PreparedContract, ServicePolicy, codec::Reader,
+    model::MAX_NAME,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -24,8 +27,11 @@ pub struct Identity {
 /// Checked roles a compiled component's artifact metadata assigns to real WIT items.
 ///
 /// `contributions` maps exported hook callbacks to their priority. `references` maps an imported
-/// reference-view binding to the provider interface identity it addresses. Source artifacts carry
-/// neither: their contributions live in the bundle and they cannot import reference views.
+/// reference-view binding to the provider interface identity it addresses. `hooks` maps an
+/// exported hook interface the component declares to its composition, and `services` maps an
+/// exported service interface to the ownership policy the kernel applies to its objects. Source
+/// artifacts carry none of them: their contributions, hooks and service lifetimes live in the
+/// bundle and they cannot import reference views.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComponentRoles {
@@ -33,6 +39,10 @@ pub struct ComponentRoles {
     pub contributions: BTreeMap<String, i32>,
     #[serde(default)]
     pub references: BTreeMap<String, String>,
+    #[serde(default)]
+    pub hooks: BTreeMap<String, HookComposition>,
+    #[serde(default)]
+    pub services: BTreeMap<String, ServicePolicy>,
 }
 
 /// A closed source bundle or compiled component, never executable host JavaScript.
@@ -49,6 +59,12 @@ pub struct Artifact {
     /// Compiled callback roles; source bundles declare their contributions in executable code.
     /// Checked reference roles are attached to `contract` ([`PreparedContract::references`]).
     pub contributions: BTreeMap<String, i32>,
+    /// Hooks a compiled component declares, with their composition; source bundles declare
+    /// their hooks in executable code.
+    pub hooks: BTreeMap<String, HookComposition>,
+    /// Ownership policies of a compiled component's services; source bundles declare their
+    /// services' lifetimes in executable code.
+    pub services: BTreeMap<String, ServicePolicy>,
 }
 
 impl Identity {
@@ -99,19 +115,21 @@ impl Artifact {
             return Err(Error("unsupported artifact metadata section".into()));
         }
         let (identity, contract, roles) = decode_orb(orb)?;
-        let ComponentRoles {
-            contributions,
-            references,
-        } = roles;
         let (contract, implementation) = if let Some(source) = source {
-            if !contributions.is_empty() {
+            if !roles.contributions.is_empty() {
                 return Err(Error(
                     "source artifacts declare contributions in their bundle".into(),
                 ));
             }
-            if !references.is_empty() {
+            if !roles.references.is_empty() {
                 return Err(Error(
                     "source artifacts cannot carry reference view roles".into(),
+                ));
+            }
+            if !roles.hooks.is_empty() || !roles.services.is_empty() {
+                return Err(Error(
+                    "source artifacts declare their hooks and service lifetimes in their bundle"
+                        .into(),
                 ));
             }
             if bytes[..8] != COMPONENT_HEADER || container.other {
@@ -125,15 +143,23 @@ impl Artifact {
             (contract, Implementation::Source(source))
         } else {
             verify_component(&contract, bytes)?;
-            contract.check_contribution_roles(&contributions)?;
-            let contract = contract.with_references(&references)?;
+            contract.check_roles(&roles)?;
+            let contract = contract.with_references(&roles.references)?;
             (contract, Implementation::Component(bytes.to_vec()))
         };
+        let ComponentRoles {
+            contributions,
+            hooks,
+            services,
+            references: _,
+        } = roles;
         Ok(Self {
             identity,
             contract,
             implementation,
             contributions,
+            hooks,
+            services,
         })
     }
 
@@ -179,6 +205,10 @@ pub struct PreparedComponent {
     pub identity: Identity,
     pub contract: PreparedContract,
     pub contributions: BTreeMap<String, i32>,
+    /// Hooks the component declares, with their composition, as [`Artifact::hooks`].
+    pub hooks: BTreeMap<String, HookComposition>,
+    /// Ownership policies of the component's services, as [`Artifact::services`].
+    pub services: BTreeMap<String, ServicePolicy>,
     /// Lowercase hexadecimal SHA-256 of the exact artifact bytes.
     pub digest: String,
 }
@@ -206,16 +236,22 @@ impl PreparedComponent {
             return Err(Error("unsupported artifact metadata section".into()));
         }
         let (identity, contract, roles) = decode_orb(orb)?;
+        // The same checks as a natively verified artifact: the browser runs declared hooks and
+        // service policies exactly as the other hosts do.
+        contract.check_roles(&roles)?;
+        let contract = contract.with_references(&roles.references)?;
         let ComponentRoles {
             contributions,
-            references,
+            hooks,
+            services,
+            references: _,
         } = roles;
-        contract.check_contribution_roles(&contributions)?;
-        let contract = contract.with_references(&references)?;
         Ok(Self {
             identity,
             contract,
             contributions,
+            hooks,
+            services,
             digest,
         })
     }
@@ -231,6 +267,16 @@ impl PreparedComponent {
     /// Compiled contribution roles and their priorities.
     pub fn describe_contributions(&self) -> serde_json::Value {
         serde_json::to_value(&self.contributions).expect("serializable contribution roles")
+    }
+
+    /// Declared hooks and their composition, by exported interface identity.
+    pub fn describe_hooks(&self) -> serde_json::Value {
+        serde_json::to_value(&self.hooks).expect("serializable hook declarations")
+    }
+
+    /// Service lifetimes and lingers, by exported interface identity.
+    pub fn describe_services(&self) -> serde_json::Value {
+        serde_json::to_value(&self.services).expect("serializable service policies")
     }
 }
 
@@ -254,8 +300,10 @@ pub(crate) fn encode_orb(identity: &Identity, contract: &PreparedContract) -> Ve
     encode_orb_roles(identity, contract, &ComponentRoles::default())
 }
 
-/// Encode identity, contract and roles. Every payload spells both role maps, even when empty;
-/// the format is deliberately not compatible with payloads written before reference roles.
+/// Encode identity, contract and roles. Every payload spells every role map, even when empty:
+/// contributions with their priorities, declared hooks with their composition, service policies
+/// with their lifetime and linger, then reference views with their targets. The format is
+/// deliberately not compatible with payloads written before reference roles.
 pub(crate) fn encode_orb_roles(
     identity: &Identity,
     contract: &PreparedContract,
@@ -269,6 +317,24 @@ pub(crate) fn encode_orb_roles(
     for (binding, priority) in &roles.contributions {
         writer.str(binding);
         writer.u32(u32::from_le_bytes(priority.to_le_bytes()));
+    }
+    writer.len(roles.hooks.len());
+    for (binding, composition) in &roles.hooks {
+        writer.str(binding);
+        writer.byte(match composition {
+            HookComposition::Series => 0,
+            HookComposition::Waterfall => 1,
+            HookComposition::Bail => 2,
+        });
+    }
+    writer.len(roles.services.len());
+    for (identity, policy) in &roles.services {
+        writer.str(identity);
+        writer.byte(match policy.lifetime {
+            Lifetime::Referenced => 0,
+            Lifetime::Host => 1,
+        });
+        writer.u32(policy.linger_ms);
     }
     writer.len(roles.references.len());
     for (binding, target) in &roles.references {
@@ -292,6 +358,34 @@ fn decode_orb(bytes: &[u8]) -> Result<(Identity, PreparedContract, ComponentRole
         let priority = i32::from_le_bytes(reader.u32()?.to_le_bytes());
         if roles.contributions.insert(binding, priority).is_some() {
             return Err(Error("duplicate compiled contribution role".into()));
+        }
+    }
+    for _ in 0..reader.count(crate::model::MAX_ITEMS)? {
+        let binding = reader.str()?;
+        let composition = match reader.byte()? {
+            0 => HookComposition::Series,
+            1 => HookComposition::Waterfall,
+            2 => HookComposition::Bail,
+            _ => return Err(Error("unknown compiled hook composition".into())),
+        };
+        if roles.hooks.insert(binding, composition).is_some() {
+            return Err(Error("duplicate compiled hook declaration".into()));
+        }
+    }
+    for _ in 0..reader.count(crate::model::MAX_ITEMS)? {
+        let identity = reader.str()?;
+        let lifetime = match reader.byte()? {
+            0 => Lifetime::Referenced,
+            1 => Lifetime::Host,
+            _ => return Err(Error("unknown compiled service lifetime".into())),
+        };
+        let linger_ms = reader.u32()?;
+        let policy = ServicePolicy {
+            lifetime,
+            linger_ms,
+        };
+        if roles.services.insert(identity, policy).is_some() {
+            return Err(Error("duplicate compiled service policy".into()));
         }
     }
     for _ in 0..reader.count(crate::model::MAX_ITEMS)? {

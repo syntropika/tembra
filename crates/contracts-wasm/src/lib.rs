@@ -119,6 +119,16 @@ impl WasmPreparedComponent {
         self.component.describe_contributions().to_string()
     }
 
+    /// Declared hooks and their composition (`series`, `waterfall`, `bail`), as a JSON object.
+    pub fn hooks(&self) -> String {
+        self.component.describe_hooks().to_string()
+    }
+
+    /// Service policies (`lifetime`, `linger_ms`) by exported interface, as a JSON object.
+    pub fn services(&self) -> String {
+        self.component.describe_services().to_string()
+    }
+
     /// Answer the typed install-time queries: `install`, `implementation` and `describe`.
     pub fn request(&self, packet: &str) -> String {
         self.component.contract.request_resources(packet)

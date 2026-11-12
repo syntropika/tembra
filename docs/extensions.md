@@ -83,7 +83,9 @@ replacement reject a mismatched signature before activation.
 Compiled contributors implement the same WIT callback export. Their build target supplies
 `contributes: { "example:hooks/guard@1.0.0": 0 }` alongside `entry`, `wit`, `world` and
 `apiVersion`. Only the binding and priority are stored in the artifact; callback slots and
-signatures are derived on loading. The contributed import is a type anchor, not a callable
+signatures are derived on loading. A Rust contributor can also mark a `pub fn` with
+`#[hook("example:hooks/guard@1.0.0", priority = 0)]` under `#[orb]` and build with `cargo tembra`; see the
+[Rust hook contribution example](../examples/rust-orb-hook-contribution/README.md). The contributed import is a type anchor, not a callable
 service dependency; attempting to call it traps the contributor.
 
 Native Rust providers attach the prepared callback digest with `Hook::signature(...)`.
@@ -100,7 +102,11 @@ respectively, no value, the input type, or an option:
   is no decision and continues to the next participant; if nobody decides, the hook returns
   `none`. A native participant can still decide after isolated ones.
 
-Compiled Orbs can contribute to hooks but cannot yet declare and aggregate them. Portable middleware, custom composition and observation
+Compiled Orbs can contribute to hooks and declare them, with `series`, `waterfall` or `bail`
+composition, when their artifact carries the role: `cargo tembra build`, or the SDK's
+[`build()`](tooling.md#compiled-orbs) given the component, packages it from
+`#[hook(..., composition = c)]`, see the
+[Rust hook declaration example](../examples/rust-orb-hook-declaration/README.md). Portable middleware, custom composition and observation
 are not exposed. Native providers can still apply their own composition, including
 `waterfall_until`, to isolated contributions.
 

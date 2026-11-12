@@ -37,8 +37,9 @@ pub enum SystemCapability {
     Cli,
 }
 
-/// Recognize the process-local interfaces supplied by the pinned WASI runtime.
-pub(crate) fn system_capability(contract: &str) -> Option<SystemCapability> {
+/// Recognize the process-local interfaces supplied by the pinned WASI runtime. Planning binds an
+/// import to a system grant by this rule only; tooling names the grant an import needs with it.
+pub fn system_capability(contract: &str) -> Option<SystemCapability> {
     let capability = match contract.strip_suffix("@0.3.0")? {
         "wasi:clocks/monotonic-clock" | "wasi:clocks/system-clock" => SystemCapability::Clocks,
         "wasi:random/random" | "wasi:random/insecure" | "wasi:random/insecure-seed" => {

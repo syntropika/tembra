@@ -8,6 +8,9 @@ mod artifact;
 mod authoring;
 mod codec;
 mod describe;
+#[cfg(feature = "authoring")]
+mod embedded;
+pub mod guest;
 mod hooks;
 mod implementation;
 mod lower;
@@ -20,6 +23,7 @@ mod prepare;
 mod provenance;
 mod references;
 mod resource_profile;
+mod roles;
 mod selection;
 mod signatures;
 #[cfg(feature = "authoring")]
@@ -32,6 +36,8 @@ pub use artifact::{
 };
 #[cfg(feature = "authoring")]
 pub use authoring::Contract;
+#[cfg(feature = "authoring")]
+pub use embedded::EmbeddedManifest;
 pub use hooks::{ContributionBinding, HookBinding, HookComposition, HookPlan};
 pub use implementation::{
     Implementation, IngressBinding, Lifetime, ServiceBinding, ServiceImplementation,
@@ -41,10 +47,13 @@ pub use model::{
     Case, Entry, Field, Function, FunctionKind, Interface, Item, Kind, Model, PreparedContract,
     ResourceIdentity, Ty,
 };
-pub use permissions::{FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability};
+pub use permissions::{
+    FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability, system_capability,
+};
 pub use port::envelope;
 pub use references::ReferenceBinding;
 pub use resource_profile::ResourceSignature;
+pub use roles::ServicePolicy;
 pub use selection::OrbProvider;
 #[doc(hidden)]
 pub use standard_sources::WASI_SOURCES;

@@ -1,0 +1,23 @@
+package example:ledger@1.0.0;
+
+/// A book of entries, the contract shared by whoever keeps a ledger and whoever consults it.
+interface book {
+  /// One entry of the book.
+  record entry {
+    /// What the entry is for.
+    label: string,
+    /// The amount, positive or negative.
+    amount: s64,
+  }
+  /// Add an entry and return how many entries the book holds.
+  add: func(entry: entry) -> u32;
+  /// The sum of every amount.
+  total: func() -> s64;
+  /// The entries, in the order they were added.
+  entries: func() -> list<entry>;
+}
+
+/// The world of an Orb that keeps a book.
+world keeper {
+  export book;
+}

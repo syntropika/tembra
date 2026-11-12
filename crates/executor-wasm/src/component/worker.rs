@@ -14,6 +14,32 @@
 //! that outlives the returned value still runs under the call's own authority and can never
 //! observe a later call's scope.
 //!
+//! Kernel-managed state follows the same path. A component exporting `tembra:guest/state-init`
+//! is asked, while each service object is created, for that object's declaration; the worker
+//! declares it through the existing synchronous `state.declare` request, with a worker-numbered
+//! validation callback when the declaration asks for one, which the kernel runs through a
+//! `validate` command before a reload adopts the retained value. The `tembra:guest/state`
+//! imports then issue `state.read` and `state.update` on the channel of the call that physically
+//! issued them, for the handle of the object that call runs on.
+//!
+//! Root resources follow the TypeScript guest model. A component exporting
+//! `tembra:guest/resources-init` is asked for its declarations while the root is created; each is
+//! declared through the existing `resource.declare` request with worker-issued callback numbers,
+//! and the kernel later runs the component's `open` and `close` through `callback` commands. The
+//! kernel keeps only the handle the component returned; the value stays in the component.
+//!
+//! A component declaring hooks exports each hook's interface, as a source provider does, and
+//! imports it as the typed entry to its plan. While the root is created the worker binds each
+//! declared hook through the existing `hook.declare` request; a call of the import issues
+//! `hook.run` on the channel of the call that physically issued it, and the kernel runs the
+//! plan of contributions exactly as it does for a source provider.
+//!
+//! A component importing `tembra:guest/context` reads the kernel's view of its call: the
+//! principal and the cancellation of the call that physically issued the import, through the
+//! existing `context.principal`, `signal.cancelled` and `context.cancel` requests, the host's
+//! log through `console`, and the address of the object the call runs on, which the worker asks
+//! for with `address` while each environment is declared and keeps for its calls.
+//!
 //! Standard `wasi:http` imports use upstream `wasmtime-wasi-http` P3 resources and its sender.
 //! Each request is attributed the same way as a dependency import: the hook captures the entered
 //! task group's authority synchronously, checks the installation's HTTP origin grants and then
@@ -32,6 +58,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex, mpsc},
 };
+use tembra_contracts::guest;
 use tokio::sync::oneshot;
 use wasmtime::{
     Store, StoreLimits, StoreLimitsBuilder,
@@ -57,6 +84,15 @@ pub(crate) struct Layout {
     pub contributions: BTreeSet<u32>,
     /// The exact incoming HTTP handler export, served only through the ingress adapter.
     pub ingress: Option<String>,
+    /// The component exports `tembra:guest/state-init`: its service objects may own kernel state.
+    pub state_init: bool,
+    /// The component exports `tembra:guest/resources-init`: its root owns resources.
+    pub resource_init: bool,
+    /// The hooks this Orb declares: the import binding of each, to the alias of its export,
+    /// which `hook.declare` names.
+    pub hooks: BTreeMap<String, String>,
+    /// The component imports `tembra:guest/context`: its calls read the kernel's view of them.
+    pub context: bool,
 }
 
 /// The standard handler's `handle`, typed against the host's own request and response
@@ -67,6 +103,10 @@ type Handler = TypedFunc<(Resource<p3::Request>,), (Result<Resource<p3::Response
 struct Exports {
     /// Each callable export by its function id, the export slot `bind` returned.
     functions: BTreeMap<u32, Target>,
+    /// The kernel's own callbacks (`tembra:guest` state and resource initialisation), by
+    /// interface and function. They have no slot and belong to no service, so a host command
+    /// can never select them; only the worker runs them, for the kernel.
+    kernel: BTreeMap<(String, String), Func>,
     handler: Option<Handler>,
 }
 
@@ -113,10 +153,23 @@ pub(crate) struct Import {
     /// Imported resource types and the dynamic host type each is linked as.
     pub resources: Vec<(String, u32)>,
     pub functions: Vec<ImportFunction>,
-    /// This import anchors a contribution's type and grants no callable service reference.
-    pub contribution: bool,
+    pub role: Role,
     /// This interface acquires root-owned references explicitly, without a default main.
     pub reference: bool,
+}
+
+/// What an import of the checked layout is linked to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Role {
+    /// A selected Orb provider, called through the root's dependency reference.
+    Dependency,
+    /// A type anchor of a contribution; calling it traps.
+    Contribution,
+    /// One of the kernel's own interfaces (state, resources, context), served for the call that
+    /// issues it.
+    Kernel,
+    /// The typed entry to a hook this Orb declares; calling it runs the plan through the kernel.
+    Hook,
 }
 
 pub(crate) struct ImportFunction {
@@ -145,6 +198,21 @@ struct Authority {
     /// owned imported resource of this Store.
     scope: u64,
     handles: Arc<BTreeMap<String, u32>>,
+    /// The environment the call runs in: the root for contributions, else a service object.
+    environment: u64,
+    /// The kernel state handle of that service object, once declared.
+    state: Option<u32>,
+    /// The root's resource handles by name, for the kernel's resource reads.
+    resources: Arc<BTreeMap<String, u32>>,
+    /// The root's hook handles by import binding, for running the hooks this Orb declares.
+    hooks: Arc<BTreeMap<String, u32>>,
+    /// The kernel address of the environment's object (key and principal), for the context
+    /// interface; declared only for components importing it.
+    address: Option<Arc<Value>>,
+    /// The principal of the admitted call, read before the guest runs, for components importing
+    /// the context interface. The kernel refuses to read it once the call is cancelled, while
+    /// the call's principal never changes: `principal()` answers from here.
+    principal: Option<Arc<str>>,
 }
 
 struct Bound {
@@ -236,6 +304,9 @@ pub(crate) struct State {
     dropped: Dropped,
     /// Only these host-dynamic types were linked from checked Orb imports.
     payloads: BTreeSet<u32>,
+    /// The session's diagnostics: the context interface's log reaches the host's log observers
+    /// through them, as a source Orb's console records do, never as a host request.
+    diagnostics: crate::worker::diagnostics::Diagnostics,
 }
 
 impl crate::worker::stream_adapter::AdapterStore for State {
@@ -405,17 +476,70 @@ enum Packet {
     Ingress {
         environment: u64,
     },
+    /// A resource opener or closer the worker numbered in its `resource.declare` request.
+    Callback {
+        callback: u32,
+        #[serde(default)]
+        value: Option<u32>,
+    },
+    /// The validator the worker numbered in a `state.declare` request, with the retained value
+    /// a reload would adopt.
+    Validate {
+        callback: u32,
+        value: Value,
+    },
     #[serde(other)]
     Unsupported,
 }
 
-/// Dependency handles issued to Orb root environments, and each service's root.
+/// Dependency handles issued to Orb root environments, each service's root, the kernel state
+/// handle declared by each service object, and the root's resources with their callbacks.
 #[derive(Default)]
 struct Environments {
     roots: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
     parents: BTreeMap<u64, u64>,
     /// Every declared, unreleased environment and its service alias (`None` for an Orb root).
     services: BTreeMap<u64, Option<String>>,
+    states: BTreeMap<u64, u32>,
+    resources: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
+    callbacks: BTreeMap<u32, Callback>,
+    next_callback: u32,
+    hooks: BTreeMap<u64, Arc<BTreeMap<String, u32>>>,
+    /// The kernel address of each environment's object, asked while it was declared.
+    addresses: BTreeMap<u64, Arc<Value>>,
+}
+
+/// One callback the worker numbered in a declaration, for the kernel to run later.
+#[derive(Clone)]
+enum Callback {
+    /// The opener or the closer of a root resource.
+    Resource {
+        environment: u64,
+        name: String,
+        open: bool,
+    },
+    /// The validator of a service object's state: the interface identity `validate` is told.
+    State { environment: u64, interface: String },
+}
+
+impl Callback {
+    fn environment(&self) -> u64 {
+        match self {
+            Self::Resource { environment, .. } | Self::State { environment, .. } => *environment,
+        }
+    }
+}
+
+impl Environments {
+    /// Number one more callback.
+    fn callback(&mut self) -> std::result::Result<u32, String> {
+        let next = self
+            .next_callback
+            .checked_add(1)
+            .ok_or("callback space exhausted")?;
+        self.next_callback = next;
+        Ok(next)
+    }
 }
 
 /// Instantiate the component, report readiness, then serve commands until the owner closes or a
@@ -427,19 +551,21 @@ pub(crate) async fn run(
     grants: Arc<crate::Grants>,
     layout: Layout,
     ready: mpsc::Sender<std::result::Result<(), String>>,
-    // The session's callback epochs and quarantine cause travel with its command queue.
-    calls: (
+    // The session's callback epochs, quarantine cause and diagnostics travel with its command
+    // queue.
+    (commands, scope, poison, diagnostics): (
         mpsc::Receiver<Command>,
         crate::io::CallbackScope,
         Arc<Mutex<Option<String>>>,
+        crate::worker::diagnostics::Diagnostics,
     ),
 ) -> Terminal {
     let transport = crate::http::Transport::default();
     let terminal = live(
         (engine, component, wasi, grants, layout),
         ready,
-        calls,
-        &transport,
+        (commands, scope, poison),
+        (&transport, diagnostics),
     )
     .await;
     // The Store is gone: aborted connection drivers drop on the next runtime turn and close
@@ -465,14 +591,23 @@ async fn live(
         crate::io::CallbackScope,
         Arc<Mutex<Option<String>>>,
     ),
-    transport: &crate::http::Transport,
+    (transport, diagnostics): (
+        &crate::http::Transport,
+        crate::worker::diagnostics::Diagnostics,
+    ),
 ) -> Terminal {
     let groups = Arc::new(Mutex::new(Groups {
         scope,
         ..Groups::default()
     }));
     let instance = instantiate(
-        &engine, &component, wasi, grants, &layout, &groups, transport,
+        &engine,
+        &component,
+        wasi,
+        grants,
+        &layout,
+        &groups,
+        (transport, diagnostics),
     )
     .await;
     let (mut store, exports) = match instance {
@@ -526,7 +661,10 @@ async fn instantiate(
     grants: Arc<crate::Grants>,
     layout: &Layout,
     groups: &Arc<Mutex<Groups>>,
-    transport: &crate::http::Transport,
+    (transport, diagnostics): (
+        &crate::http::Transport,
+        crate::worker::diagnostics::Diagnostics,
+    ),
 ) -> wasmtime::Result<(Store<State>, Exports)> {
     let mut linker = Linker::<State>::new(&engine.engine);
     link_wasi(&mut linker)?;
@@ -562,6 +700,7 @@ async fn instantiate(
                 .iter()
                 .flat_map(|import| import.resources.iter().map(|(_, payload)| *payload))
                 .collect(),
+            diagnostics,
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -628,6 +767,35 @@ async fn instantiate(
             }
         }
     }
+    let mut kernel = BTreeMap::new();
+    let mut kernel_callbacks = |interface: &str, functions: &[&str]| -> wasmtime::Result<()> {
+        let (_, export) = instance
+            .get_export(&mut store, None, interface)
+            .ok_or_else(|| wasmtime::Error::msg(format!("missing kernel export {interface}")))?;
+        for function in functions {
+            let (_, index) = instance
+                .get_export(&mut store, Some(&export), function)
+                .ok_or_else(|| {
+                    wasmtime::Error::msg(format!("missing kernel callback {interface}#{function}"))
+                })?;
+            let callback = instance.get_func(&mut store, index).ok_or_else(|| {
+                wasmtime::Error::msg(format!(
+                    "kernel export {interface}#{function} is not a function"
+                ))
+            })?;
+            kernel.insert((interface.to_owned(), (*function).to_owned()), callback);
+        }
+        Ok(())
+    };
+    if layout.state_init {
+        kernel_callbacks(guest::STATE_INIT, &[guest::DECLARE, guest::VALIDATE])?;
+    }
+    if layout.resource_init {
+        kernel_callbacks(
+            guest::RESOURCE_INIT,
+            &[guest::DECLARE, guest::OPEN, guest::CLOSE],
+        )?;
+    }
     // The handler's actual binary type must be exactly the standard one; anything else refuses
     // the installation here rather than failing a later request.
     let handler = match &layout.ingress {
@@ -654,12 +822,14 @@ async fn instantiate(
         store,
         Exports {
             functions: exports,
+            kernel,
             handler,
         },
     ))
 }
 
-/// Define each selected dependency function; WASI imports remain the installation's grants.
+/// Define each selected dependency function and the kernel's state functions; WASI imports
+/// remain the installation's grants.
 ///
 /// An imported resource is a dynamic host type per import and resource. Its representation is
 /// a slot of the importer's own host handle table; dropping it queues the slot's release.
@@ -675,15 +845,94 @@ fn link_imports(linker: &mut Linker<State>, layout: &Layout) -> wasmtime::Result
             })?;
         }
         for function in &import.functions {
-            if import.contribution {
-                let message = format!(
-                    "hook import {} is a contribution type anchor and cannot be called",
-                    import.binding
-                );
-                instance.func_new(&function.name, move |_, _, _, _| {
-                    Err(wasmtime::Error::msg(message.clone()))
-                })?;
-                continue;
+            match import.role {
+                Role::Contribution => {
+                    let message = format!(
+                        "hook import {} is a contribution type anchor and cannot be called",
+                        import.binding
+                    );
+                    instance.func_new(&function.name, move |_, _, _, _| {
+                        Err(wasmtime::Error::msg(message.clone()))
+                    })?;
+                    continue;
+                }
+                Role::Kernel => {
+                    let name = function.name.clone();
+                    match import.binding.as_str() {
+                        guest::STATE => {
+                            instance.func_new_async(
+                                &function.name,
+                                move |store, _, params, results| {
+                                    let request = state_request(store.data(), &name, params);
+                                    Box::new(async move { settle_state(request?, results).await })
+                                },
+                            )?;
+                        }
+                        guest::RESOURCE => {
+                            instance.func_new_async(
+                                &function.name,
+                                move |store, _, params, results| {
+                                    let request = resource_request(store.data(), &name, params);
+                                    Box::new(
+                                        async move { settle_resource(request?, results).await },
+                                    )
+                                },
+                            )?;
+                        }
+                        guest::CONTEXT => {
+                            instance.func_new_async(
+                                &function.name,
+                                move |store, ty, params, results| {
+                                    let answer = context_request(store.data(), &name, params);
+                                    Box::new(
+                                        async move { settle_context(answer?, &ty, results).await },
+                                    )
+                                },
+                            )?;
+                        }
+                        other => {
+                            return Err(wasmtime::Error::msg(format!(
+                                "unsupported kernel import {other}"
+                            )));
+                        }
+                    }
+                    continue;
+                }
+                Role::Hook => {
+                    let binding = import.binding.clone();
+                    // An `async func` callback is linked as a concurrent host function, as a
+                    // dependency's is; Wasmtime refuses a synchronous one for it.
+                    if function.asynchronous {
+                        instance.func_new_concurrent(
+                            &function.name,
+                            move |accessor: &Accessor<State>, ty, params, results| {
+                                // The first poll runs inside the issuing guest call, so the
+                                // entered group is still the caller's when its authority is
+                                // captured.
+                                let request = accessor.with(|mut access| {
+                                    hook_request(access.get(), &binding, params)
+                                });
+                                Box::pin(async move {
+                                    let value = hook_settle(request?).await?;
+                                    store_result(results, lower_result(&ty, &value)?)
+                                })
+                            },
+                        )?;
+                    } else {
+                        instance.func_new_async(
+                            &function.name,
+                            move |store, ty, params, results| {
+                                let request = hook_request(store.data(), &binding, params);
+                                Box::new(async move {
+                                    let value = hook_settle(request?).await?;
+                                    store_result(results, lower_result(&ty, &value)?)
+                                })
+                            },
+                        )?;
+                    }
+                    continue;
+                }
+                Role::Dependency => {}
             }
             let target = Arc::new((import.binding.clone(), function.spelling.clone()));
             if let Some(payload) = function.acquire {
@@ -900,18 +1149,7 @@ fn store_result(results: &mut [Val], value: Option<Val>) -> wasmtime::Result<()>
 
 /// Capture the authority of the guest thread issuing an import, before any suspension.
 fn import_authority(state: &State) -> wasmtime::Result<Authority> {
-    let authority = {
-        let groups = state
-            .groups
-            .lock()
-            .map_err(|_| wasmtime::Error::msg("task-group attribution is poisoned"))?;
-        groups
-            .current
-            .and_then(|group| groups.bound.get(&group))
-            .map(|bound| bound.authority.clone())
-            .ok_or_else(|| wasmtime::Error::msg("dependency import has no admitted invocation"))?
-    };
-    Ok(authority)
+    issuing_authority(state, "dependency import has no admitted invocation")
 }
 
 /// Acquire a kernel object using only the checked import binding and guest-chosen key.
@@ -1167,6 +1405,355 @@ fn slot(value: &Value) -> Option<u32> {
     value.as_u64().and_then(|slot| u32::try_from(slot).ok())
 }
 
+/// A pending kernel state request, and for an update what answers it if the call was cancelled.
+struct StateAnswer {
+    receive: oneshot::Receiver<std::result::Result<String, String>>,
+    /// The call's channel and the state's handle, for an update only.
+    update: Option<(Channel, u32)>,
+}
+
+/// Capture the issuing call's authority and publish one synchronous kernel state request for the
+/// service object that call runs on.
+fn state_request(state: &State, function: &str, params: &[Val]) -> wasmtime::Result<StateAnswer> {
+    let authority = issuing_authority(state, "kernel state has no admitted invocation")?;
+    let Some(id) = authority.state else {
+        return Err(wasmtime::Error::msg(
+            if authority.environment == authority.scope {
+                "contributions run in the Orb root, which owns no kernel state"
+            } else {
+                "this service object declares no kernel state"
+            },
+        ));
+    };
+    let (packet, update) = match (function, params) {
+        ("read", []) => (json!({"operation": "state.read", "id": id}), false),
+        ("update", [Val::String(value)]) => {
+            let mut value: Value = serde_json::from_str(value).map_err(|error| {
+                wasmtime::Error::msg(format!("the state value is not JSON: {error}"))
+            })?;
+            unsigned_zeros(&mut value);
+            (
+                json!({"operation": "state.update", "id": id, "value": value}),
+                true,
+            )
+        }
+        _ => return Err(wasmtime::Error::msg("unknown kernel state function")),
+    };
+    let channel = Channel::of(state, &authority);
+    Ok(StateAnswer {
+        receive: channel.publish(packet.to_string())?,
+        update: update.then_some((channel, id)),
+    })
+}
+
+/// Write every negative zero of a component's state JSON as zero, as `JSON.stringify` does.
+///
+/// The portable value profile has no negative zero: a platform host would commit the value, then
+/// refuse to encode it in its reply, and the object's state could never be read again.
+fn unsigned_zeros(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            if number
+                .as_f64()
+                .is_some_and(|float| float == 0.0 && float.is_sign_negative())
+            {
+                *value = json!(0);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(unsigned_zeros),
+        Value::Object(fields) => fields.values_mut().for_each(unsigned_zeros),
+        Value::Null | Value::Bool(_) | Value::String(_) => {}
+    }
+}
+
+/// The authority of the task group that issued the current import call.
+fn issuing_authority(state: &State, missing: &str) -> wasmtime::Result<Authority> {
+    let groups = state
+        .groups
+        .lock()
+        .map_err(|_| wasmtime::Error::msg("task-group attribution is poisoned"))?;
+    groups
+        .current
+        .and_then(|group| groups.bound.get(&group))
+        .map(|bound| bound.authority.clone())
+        .ok_or_else(|| wasmtime::Error::msg(missing.to_owned()))
+}
+
+/// Publish one bounded synchronous host request on the issuing call's channel.
+fn synchronous(
+    state: &State,
+    authority: &Authority,
+    packet: String,
+) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+    Channel::of(state, authority).publish(packet)
+}
+
+/// The issuing call's channel, kept by an import that may need to ask the host again once its
+/// first answer arrives, after the import has suspended and the Store is out of reach.
+struct Channel {
+    events: Sender<Event>,
+    packet_bytes: usize,
+}
+
+impl Channel {
+    fn of(state: &State, authority: &Authority) -> Self {
+        Self {
+            events: authority.events.clone(),
+            packet_bytes: state.packet_bytes,
+        }
+    }
+
+    /// Publish one bounded synchronous host request.
+    fn publish(
+        &self,
+        packet: String,
+    ) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+        if packet.len() > self.packet_bytes {
+            return Err(wasmtime::Error::msg("host packet limit exceeded"));
+        }
+        let (reply, receive) = oneshot::channel();
+        self.events
+            .try_send(Event::Host {
+                packet,
+                asynchronous: false,
+                reply,
+            })
+            .map_err(|_| wasmtime::Error::msg("host operation queue is full or closed"))?;
+        Ok(receive)
+    }
+
+    /// Ask one request the kernel answers whether or not the call is cancelled.
+    async fn ask(&self, packet: Value) -> wasmtime::Result<Value> {
+        let text = self
+            .publish(packet.to_string())?
+            .await
+            .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+            .map_err(wasmtime::Error::msg)?;
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    /// Whether the call is cancelled, which is why the kernel refuses its writes, its
+    /// cancellation and its principal: a refusal for that reason has an answer that needs no
+    /// trap.
+    async fn cancelled(&self) -> wasmtime::Result<bool> {
+        Ok(self.ask(json!({"operation": "signal.cancelled"})).await? == json!(true))
+    }
+}
+
+/// Capture the issuing call's authority and publish one `hook.run` for a hook this Orb declares:
+/// the kernel runs the plan of contributions over the single input and answers with the result.
+fn hook_request(
+    state: &State,
+    binding: &str,
+    params: &[Val],
+) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+    let authority = issuing_authority(state, "running a hook needs an admitted invocation")?;
+    let Some(id) = authority.hooks.get(binding) else {
+        return Err(wasmtime::Error::msg(format!(
+            "the Orb root declares no hook for the import {binding}"
+        )));
+    };
+    let [input] = params else {
+        return Err(wasmtime::Error::msg("a hook callback takes one input"));
+    };
+    let value =
+        values::lift(input.clone()).map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+    let packet = json!({
+        "operation": "hook.run",
+        "scope": authority.scope,
+        "id": id,
+        "value": value,
+    })
+    .to_string();
+    if packet.len() > state.packet_bytes {
+        return Err(wasmtime::Error::msg("host packet limit exceeded"));
+    }
+    let (reply, receive) = oneshot::channel();
+    authority
+        .events
+        .try_send(Event::Host {
+            packet,
+            asynchronous: true,
+            reply,
+        })
+        .map_err(|_| wasmtime::Error::msg("host operation queue is full or closed"))?;
+    Ok(receive)
+}
+
+/// The composed result of a hook run; a refusal traps the caller.
+async fn hook_settle(
+    receive: oneshot::Receiver<std::result::Result<String, String>>,
+) -> wasmtime::Result<Value> {
+    let text = receive
+        .await
+        .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+        .map_err(|message| wasmtime::Error::msg(format!("hook run failed: {message}")))?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+/// How a kernel context function is answered.
+enum ContextAnswer {
+    /// Without the host: the object's declared address, the admitted call's principal, or the
+    /// log's empty answer.
+    Local(Arc<Value>),
+    /// By the host, on the issuing call's channel; the reply is lowered with the import's type.
+    Host(oneshot::Receiver<std::result::Result<String, String>>),
+    /// The call's cancellation. Cancelling a call that is already cancelled changes nothing,
+    /// so the kernel's refusal of it then needs no trap.
+    Cancel(
+        oneshot::Receiver<std::result::Result<String, String>>,
+        Channel,
+    ),
+}
+
+/// Capture the issuing call's authority and answer one function of the kernel's context
+/// interface: the object's address from the authority, the log through the session's
+/// diagnostics, the call's principal and cancellation through the existing synchronous requests
+/// of the call's channel.
+fn context_request(
+    state: &State,
+    function: &str,
+    params: &[Val],
+) -> wasmtime::Result<ContextAnswer> {
+    let authority = issuing_authority(state, "the kernel context needs an admitted invocation")?;
+    let packet = match (function, params) {
+        ("object", []) => {
+            let address = authority.address.clone().ok_or_else(|| {
+                wasmtime::Error::msg("the address of this environment's object was not declared")
+            })?;
+            return Ok(ContextAnswer::Local(address));
+        }
+        ("principal", []) => match &authority.principal {
+            Some(principal) => {
+                return Ok(ContextAnswer::Local(Arc::new(json!(principal.as_ref()))));
+            }
+            None => json!({"operation": "context.principal"}),
+        },
+        ("cancelled", []) => json!({"operation": "signal.cancelled"}),
+        ("cancel", []) => {
+            let channel = Channel::of(state, &authority);
+            let receive = channel.publish(json!({"operation": "context.cancel"}).to_string())?;
+            return Ok(ContextAnswer::Cancel(receive, channel));
+        }
+        ("log", [Val::Enum(level), Val::String(message)]) => {
+            // A diagnostic record is the host's, attributed to this revision, and never needs
+            // the call's authority: the session's diagnostics take it, as they take a source
+            // Orb's console records. Platform ports refuse `console` requests by design.
+            let level = serde_json::from_value::<crate::protocol::LogLevel>(json!(level))
+                .map_err(|_| wasmtime::Error::msg(format!("unknown log level {level}")))?;
+            let answer = state
+                .diagnostics
+                .emit(level, message.clone())
+                .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+            return Ok(ContextAnswer::Local(Arc::new(answer)));
+        }
+        _ => return Err(wasmtime::Error::msg("unknown kernel context function")),
+    }
+    .to_string();
+    Ok(ContextAnswer::Host(synchronous(state, &authority, packet)?))
+}
+
+/// Lower a context answer with the import's actual type; a refusal traps the caller.
+async fn settle_context(
+    answer: ContextAnswer,
+    ty: &ComponentFunc,
+    results: &mut [Val],
+) -> wasmtime::Result<()> {
+    let refused = |message| wasmtime::Error::msg(format!("kernel context refused: {message}"));
+    let value = match answer {
+        ContextAnswer::Local(value) => Value::clone(&value),
+        ContextAnswer::Host(receive) => {
+            let text = receive
+                .await
+                .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+                .map_err(refused)?;
+            serde_json::from_str(&text)?
+        }
+        ContextAnswer::Cancel(receive, channel) => match receive
+            .await
+            .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+        {
+            Ok(_) => Value::Null,
+            Err(_) if channel.cancelled().await? => Value::Null,
+            Err(message) => return Err(refused(message)),
+        },
+    };
+    store_result(results, lower_result(ty, &value)?)
+}
+
+/// Capture the issuing call's authority and publish one `resource.read` for a root resource the
+/// component named; the kernel answers with the handle the component gave it when it opened.
+fn resource_request(
+    state: &State,
+    function: &str,
+    params: &[Val],
+) -> wasmtime::Result<oneshot::Receiver<std::result::Result<String, String>>> {
+    let authority = issuing_authority(state, "kernel resources have no admitted invocation")?;
+    let ("read", [Val::String(name)]) = (function, params) else {
+        return Err(wasmtime::Error::msg("unknown kernel resource function"));
+    };
+    let Some(id) = authority.resources.get(name.as_str()) else {
+        return Err(wasmtime::Error::msg(format!(
+            "the Orb root declares no resource named {name}"
+        )));
+    };
+    let packet =
+        json!({"operation": "resource.read", "scope": authority.scope, "id": id}).to_string();
+    synchronous(state, &authority, packet)
+}
+
+/// Lower the handle of an open resource; a refusal (not ready, unknown) traps the caller.
+async fn settle_resource(
+    receive: oneshot::Receiver<std::result::Result<String, String>>,
+    results: &mut [Val],
+) -> wasmtime::Result<()> {
+    let text = receive
+        .await
+        .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+        .map_err(|message| wasmtime::Error::msg(format!("kernel resource refused: {message}")))?;
+    let handle: Value = serde_json::from_str(&text)?;
+    let handle = handle
+        .as_u64()
+        .and_then(|handle| u32::try_from(handle).ok())
+        .ok_or_else(|| wasmtime::Error::msg("resource handle is not a u32"))?;
+    let Some(result) = results.first_mut() else {
+        return Err(wasmtime::Error::msg(
+            "kernel resource reads return the handle",
+        ));
+    };
+    *result = Val::U32(handle);
+    Ok(())
+}
+
+/// Lower the value the kernel retained as the JSON string result. The kernel keeps the previous
+/// value when it refuses the update of a cancelled call, and `update` answers with that value, as
+/// it promises the value the kernel retained; any other refusal traps the caller.
+async fn settle_state(answer: StateAnswer, results: &mut [Val]) -> wasmtime::Result<()> {
+    let StateAnswer { receive, update } = answer;
+    let refused = |message| wasmtime::Error::msg(format!("kernel state refused: {message}"));
+    let text = match receive
+        .await
+        .map_err(|_| wasmtime::Error::msg("host callback scope ended"))?
+    {
+        Ok(text) => text,
+        Err(message) => match update {
+            Some((channel, id)) if channel.cancelled().await? => channel
+                .ask(json!({"operation": "state.read", "id": id}))
+                .await?
+                .to_string(),
+            _ => return Err(refused(message)),
+        },
+    };
+    let snapshot: Value = serde_json::from_str(&text)?;
+    let Some(result) = results.first_mut() else {
+        return Err(wasmtime::Error::msg(
+            "kernel state functions return the retained value",
+        ));
+    };
+    *result = Val::String(snapshot["value"].to_string());
+    Ok(())
+}
+
 /// Send one synchronous declaration request through the command's own channel.
 async fn declaration(
     events: &Sender<Event>,
@@ -1212,12 +1799,13 @@ async fn serve(
         Err(error) => return Ok(Err(format!("malformed component command: {error}"))),
     };
     let expected = match packet {
-        Packet::Create { .. } => Operation::Declare,
+        Packet::Create { .. } | Packet::Validate { .. } => Operation::Declare,
         Packet::Invoke { .. }
         | Packet::Contribute { .. }
         | Packet::Release { .. }
         | Packet::Destroy { .. }
-        | Packet::Ingress { .. } => Operation::Start,
+        | Packet::Ingress { .. }
+        | Packet::Callback { .. } => Operation::Start,
         Packet::Unsupported => return Ok(Err("unknown compiled command".into())),
     };
     if command.operation != expected {
@@ -1228,25 +1816,40 @@ async fn serve(
         Packet::Create {
             environment,
             service,
-        } => {
-            let declared = declare(
-                environment,
-                service.clone(),
-                layout,
-                environments,
-                &command.events,
-                limit,
-            )
-            .await;
-            if declared.is_ok() {
+        } => match declare(
+            environment,
+            service.clone(),
+            layout,
+            environments,
+            Runtime {
+                engine,
+                store,
+                exports,
+                groups,
+            },
+            &command.events,
+            limit,
+        )
+        .await
+        {
+            Ok(()) => {
                 environments.services.insert(environment, service);
+                Ok(Ok("null".to_owned()))
             }
-            Ok(declared.map(|()| "null".to_owned()))
-        }
+            Err(Failure::Refused(message)) => Ok(Err(message)),
+            Err(Failure::Trap(error)) => Err(error),
+        },
         Packet::Release { environment } => {
             environments.services.remove(&environment);
             environments.roots.remove(&environment);
             let root = environments.parents.remove(&environment);
+            environments.states.remove(&environment);
+            environments.resources.remove(&environment);
+            environments.hooks.remove(&environment);
+            environments.addresses.remove(&environment);
+            environments
+                .callbacks
+                .retain(|_, callback| callback.environment() != environment);
             // Resources this environment issued are destroyed with it; entries leave the table
             // first, so no owner can reach them afterwards.
             let resources = store.data_mut().instances.take(environment);
@@ -1281,6 +1884,105 @@ async fn serve(
             release_dropped(&dropped, &(command.events.clone(), root)).await;
             Ok(Ok("null".into()))
         }
+        Packet::Validate { callback, value } => {
+            let Some(Callback::State {
+                environment,
+                interface,
+            }) = environments.callbacks.get(&callback).cloned()
+            else {
+                return Ok(Err("unknown compiled state validator".into()));
+            };
+            let Some(function) = exports
+                .kernel
+                .get(&(guest::STATE_INIT.to_owned(), guest::VALIDATE.to_owned()))
+                .copied()
+            else {
+                return Ok(Err("component declares no kernel state validator".into()));
+            };
+            // The validator runs under the declaration's channel, where the kernel answers only
+            // reads of the retained state and the log.
+            let authority = match authority(environment, layout, environments, command) {
+                Ok(authority) => authority,
+                Err(error) => return Ok(Err(error)),
+            };
+            let call = Call {
+                function,
+                roles: Resolved::default(),
+                environment,
+                receiver: None,
+                stream: None,
+                arguments: None,
+            };
+            let args = json!([interface, value.to_string()]);
+            let verdict = match invoke(engine, store, call, &args, authority, groups).await? {
+                Ok(verdict) => verdict,
+                Err(error) => return Ok(Err(error)),
+            };
+            let verdict: Value = serde_json::from_str(&verdict)?;
+            Ok(match verdict["tag"].as_str() {
+                Some("ok") => Ok("null".into()),
+                Some("err") => Err(verdict["val"]
+                    .as_str()
+                    .map(|message| format!("the state was refused: {message}"))
+                    .unwrap_or_else(|| "the state was refused".into())),
+                _ => Err("the state validator answered no result".into()),
+            })
+        }
+        Packet::Callback { callback, value } => {
+            let Some(Callback::Resource {
+                environment,
+                name,
+                open,
+            }) = environments.callbacks.get(&callback).cloned()
+            else {
+                return Ok(Err("unknown compiled resource callback".into()));
+            };
+            let function = if open { guest::OPEN } else { guest::CLOSE };
+            let Some(function) = exports
+                .kernel
+                .get(&(guest::RESOURCE_INIT.to_owned(), function.to_owned()))
+                .copied()
+            else {
+                return Ok(Err("component declares no kernel resource callbacks".into()));
+            };
+            let args = match (open, value) {
+                (true, _) => json!([name]),
+                (false, Some(handle)) => json!([name, handle]),
+                (false, None) => return Ok(Err("resource closer without a handle".into())),
+            };
+            let authority = Authority {
+                events: command.events.clone(),
+                scope: environment,
+                handles: environments
+                    .roots
+                    .get(&environment)
+                    .cloned()
+                    .unwrap_or_default(),
+                environment,
+                state: None,
+                resources: environments
+                    .resources
+                    .get(&environment)
+                    .cloned()
+                    .unwrap_or_default(),
+                hooks: environments
+                    .hooks
+                    .get(&environment)
+                    .cloned()
+                    .unwrap_or_default(),
+                address: environments.addresses.get(&environment).cloned(),
+                principal: None,
+            };
+            let call = Call {
+                function,
+                roles: Resolved::default(),
+                environment,
+                receiver: None,
+                stream: None,
+                arguments: None,
+            };
+            invoke(engine, store, call, &args, authority, groups).await
+        }
         Packet::Invoke {
             environment,
             function,
@@ -1303,10 +2005,11 @@ async fn serve(
                 ));
             }
             let target = target.clone();
-            let authority = match authority(environment, layout, environments, command) {
+            let mut authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
                 Err(error) => return Ok(Err(error)),
             };
+            authority.principal = admitted_principal(layout, command, limit).await;
             let call = Call {
                 function: target.function,
                 roles: target.roles,
@@ -1332,10 +2035,11 @@ async fn serve(
                     "a contribution runs only in its declared Orb root environment".into(),
                 ));
             }
-            let authority = match authority(environment, layout, environments, command) {
+            let mut authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
                 Err(error) => return Ok(Err(error)),
             };
+            authority.principal = admitted_principal(layout, command, limit).await;
             let call = Call {
                 function: target.function,
                 roles: target.roles,
@@ -1352,16 +2056,34 @@ async fn serve(
             let (Some(handler), Some(call)) = (exports.handler, command.ingress.take()) else {
                 return Ok(Err("this revision serves no incoming HTTP request".into()));
             };
-            let authority = match authority(environment, layout, environments, command) {
+            let mut authority = match authority(environment, layout, environments, command) {
                 Ok(authority) => authority,
                 Err(error) => return Ok(Err(error)),
             };
+            authority.principal = admitted_principal(layout, command, limit).await;
             ingress(engine, store, handler, call, authority, groups).await
         }
         Packet::Invoke { .. } | Packet::Contribute { .. } | Packet::Unsupported => Ok(Err(
             "compiled components have no guest callbacks of this kind".into(),
         )),
     }
+}
+
+/// The principal of the call a command admits, read once before the guest runs, for a component
+/// importing the kernel's context: the kernel answers it only until the call is cancelled. A
+/// call cancelled before it starts has none here, and its guest asks the kernel as before.
+async fn admitted_principal(layout: &Layout, command: &Command, limit: usize) -> Option<Arc<str>> {
+    if !layout.context {
+        return None;
+    }
+    declaration(
+        &command.events,
+        json!({"operation": "context.principal"}),
+        limit,
+    )
+    .await
+    .ok()
+    .and_then(|principal| principal.as_str().map(Arc::from))
 }
 
 /// The admitted call's authority: its own event channel and its Orb root's dependency handles.
@@ -1385,52 +2107,294 @@ fn authority(
         events: command.events.clone(),
         scope: root,
         handles,
+        environment,
+        state: environments.states.get(&environment).copied(),
+        resources: environments
+            .resources
+            .get(&root)
+            .cloned()
+            .unwrap_or_default(),
+        hooks: environments.hooks.get(&root).cloned().unwrap_or_default(),
+        address: environments.addresses.get(&environment).cloned(),
+        principal: None,
     })
 }
 
-/// Acquire default-key dependency references for an Orb root; services record their root.
+/// A declaration refused by the host refuses only this object; a trap retires the Store.
+enum Failure {
+    Refused(String),
+    Trap(wasmtime::Error),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self::Refused(message)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        Self::Refused(message.to_owned())
+    }
+}
+
+impl From<wasmtime::Error> for Failure {
+    fn from(error: wasmtime::Error) -> Self {
+        Self::Trap(error)
+    }
+}
+
+/// The Store and its exports, lent to a declaration that calls back into the component.
+struct Runtime<'a> {
+    engine: &'a Engine,
+    store: &'a mut Store<State>,
+    exports: &'a Exports,
+    groups: &'a Arc<Mutex<Groups>>,
+}
+
+/// Declare one environment. An Orb root acquires default-key references for its dependency
+/// imports; a service object records its root and, when the component owns kernel state, asks
+/// the component for this service's declaration and declares it in the object's own table.
 async fn declare(
     environment: u64,
     service: Option<String>,
     layout: &Layout,
     environments: &mut Environments,
+    runtime: Runtime<'_>,
     events: &Sender<Event>,
     limit: usize,
-) -> std::result::Result<(), String> {
-    if layout.imports.is_empty() {
+) -> std::result::Result<(), Failure> {
+    let Runtime {
+        engine,
+        store,
+        exports,
+        groups,
+    } = runtime;
+    if layout.imports.is_empty() && !layout.state_init && !layout.resource_init {
         return Ok(());
     }
-    if service.is_some() {
-        let root = declaration(events, json!({"operation": "orb"}), limit).await?;
-        let root = root
-            .as_u64()
-            .filter(|root| environments.roots.contains_key(root))
-            .ok_or("service environment has no declared Orb root")?;
-        environments.parents.insert(environment, root);
-        return Ok(());
+    // The address of this environment's object, which the kernel tells only while the
+    // environment is declared; the context interface answers `object` from it.
+    if layout.context {
+        let address = declaration(events, json!({"operation": "address"}), limit).await?;
+        environments
+            .addresses
+            .insert(environment, Arc::new(address));
     }
-    let mut handles = BTreeMap::new();
-    for import in &layout.imports {
-        if import.contribution || import.reference {
-            continue;
+    let Some(alias) = service else {
+        let mut handles = BTreeMap::new();
+        for import in &layout.imports {
+            // A reference view acquires its objects by key and declares no default `main`.
+            if import.role != Role::Dependency || import.reference {
+                continue;
+            }
+            let id = declaration(
+                events,
+                json!({
+                    "operation": "reference.declare",
+                    "service": import.binding,
+                    "key": [DEFAULT_KEY],
+                }),
+                limit,
+            )
+            .await?;
+            let id = id
+                .as_u64()
+                .and_then(|id| u32::try_from(id).ok())
+                .ok_or("invalid dependency reference handle")?;
+            handles.insert(import.binding.clone(), id);
         }
-        let id = declaration(
-            events,
-            json!({
-                "operation": "reference.declare",
-                "service": import.binding,
-                "key": [DEFAULT_KEY],
-            }),
-            limit,
-        )
-        .await?;
-        let id = id
-            .as_u64()
-            .and_then(|id| u32::try_from(id).ok())
-            .ok_or("invalid dependency reference handle")?;
-        handles.insert(import.binding.clone(), id);
+        let handles = Arc::new(handles);
+        environments.roots.insert(environment, handles.clone());
+        // The hooks this Orb declares are bound in the root's table, as a source provider binds
+        // them in its factory; the import of each runs the plan through that handle.
+        let mut hooks = BTreeMap::new();
+        for (binding, alias) in &layout.hooks {
+            let id = declaration(
+                events,
+                json!({"operation": "hook.declare", "name": alias}),
+                limit,
+            )
+            .await?;
+            let id = id
+                .as_u64()
+                .and_then(|id| u32::try_from(id).ok())
+                .ok_or("invalid hook handle")?;
+            hooks.insert(binding.clone(), id);
+        }
+        let hooks = Arc::new(hooks);
+        environments.hooks.insert(environment, hooks.clone());
+        if !layout.resource_init {
+            return Ok(());
+        }
+        // The root's resources: the component lists them, the worker numbers their callbacks
+        // and declares each one; the kernel opens them during activation through `callback`.
+        let function = exports
+            .kernel
+            .get(&(guest::RESOURCE_INIT.to_owned(), guest::DECLARE.to_owned()))
+            .copied()
+            .ok_or("component declares no kernel resource callbacks")?;
+        let authority = Authority {
+            events: events.clone(),
+            scope: environment,
+            handles,
+            environment,
+            state: None,
+            resources: Arc::default(),
+            hooks,
+            address: environments.addresses.get(&environment).cloned(),
+            principal: None,
+        };
+        let call = Call {
+            function,
+            roles: Resolved::default(),
+            environment,
+            receiver: None,
+            stream: None,
+            arguments: None,
+        };
+        let answer = invoke(engine, store, call, &json!([]), authority, groups).await??;
+        let declared: Value = serde_json::from_str(&answer).map_err(|error| error.to_string())?;
+        let declared = declared
+            .as_array()
+            .ok_or("the resource declarations are not a list")?;
+        let mut resources = BTreeMap::new();
+        for resource in declared {
+            let name = resource["name"]
+                .as_str()
+                .ok_or("a resource declaration carries no name")?
+                .to_owned();
+            let version = resource["version"]
+                .as_u64()
+                .ok_or("a resource declaration carries no version")?;
+            let (open, close) = (environments.callback()?, environments.callback()?);
+            let id = declaration(
+                events,
+                json!({
+                    "operation": "resource.declare",
+                    "name": name,
+                    "version": version,
+                    "open": open,
+                    "close": close,
+                    "dependencies": [],
+                }),
+                limit,
+            )
+            .await?;
+            let id = id
+                .as_u64()
+                .and_then(|id| u32::try_from(id).ok())
+                .ok_or("invalid resource handle")?;
+            for (callback, opens) in [(open, true), (close, false)] {
+                environments.callbacks.insert(
+                    callback,
+                    Callback::Resource {
+                        environment,
+                        name: name.clone(),
+                        open: opens,
+                    },
+                );
+            }
+            if resources.insert(name, id).is_some() {
+                return Err("a resource is declared twice".into());
+            }
+        }
+        environments
+            .resources
+            .insert(environment, Arc::new(resources));
+        return Ok(());
+    };
+    let root = declaration(events, json!({"operation": "orb"}), limit).await?;
+    let root = root
+        .as_u64()
+        .filter(|root| environments.roots.contains_key(root))
+        .ok_or("service environment has no declared Orb root")?;
+    environments.parents.insert(environment, root);
+    if !layout.state_init {
+        return Ok(());
     }
-    environments.roots.insert(environment, Arc::new(handles));
+    // Only the objects of a service the component exports own kernel state. The incoming HTTP
+    // handler is created as a service of its own but answers no interface of the component, so
+    // its objects declare none, as in the browser's component kernel.
+    let Some(interface) = layout
+        .exports
+        .iter()
+        .find(|export| export.service == alias)
+        .map(|export| export.interface.clone())
+    else {
+        return Ok(());
+    };
+    let function = exports
+        .kernel
+        .get(&(guest::STATE_INIT.to_owned(), guest::DECLARE.to_owned()))
+        .copied()
+        .ok_or("component declares no kernel state-init callback")?;
+    // The callback runs under the declaration's channel; it may not read state (none exists yet).
+    let authority = Authority {
+        events: events.clone(),
+        scope: root,
+        handles: environments.roots.get(&root).cloned().unwrap_or_default(),
+        environment,
+        state: None,
+        resources: environments
+            .resources
+            .get(&root)
+            .cloned()
+            .unwrap_or_default(),
+        hooks: environments.hooks.get(&root).cloned().unwrap_or_default(),
+        address: environments.addresses.get(&environment).cloned(),
+        principal: None,
+    };
+    let call = Call {
+        function,
+        roles: Resolved::default(),
+        environment,
+        receiver: None,
+        stream: None,
+        arguments: None,
+    };
+    let answer = invoke(engine, store, call, &json!([interface]), authority, groups).await??;
+    let declared: Value = serde_json::from_str(&answer).map_err(|error| error.to_string())?;
+    if declared.is_null() {
+        return Ok(());
+    }
+    let initial = declared["initial"]
+        .as_str()
+        .ok_or("the state declaration carries no initial value")?;
+    let mut initial: Value = serde_json::from_str(initial)
+        .map_err(|error| format!("the initial state is not JSON: {error}"))?;
+    unsigned_zeros(&mut initial);
+    let version = declared["version"]
+        .as_u64()
+        .ok_or("the state declaration carries no version")?;
+    // A validated state gets a worker-numbered callback; the kernel runs it, through a
+    // `validate` command of this Store, on the value a reload would hand to this instance.
+    let validate = match declared["validated"].as_bool() {
+        Some(true) => {
+            let callback = environments.callback()?;
+            environments.callbacks.insert(
+                callback,
+                Callback::State {
+                    environment,
+                    interface,
+                },
+            );
+            Some(callback)
+        }
+        Some(false) => None,
+        None => return Err("the state declaration does not say whether it is validated".into()),
+    };
+    let id = declaration(
+        events,
+        json!({"operation": "state.declare", "initial": initial, "version": version, "validate": validate}),
+        limit,
+    )
+    .await?;
+    let id = id
+        .as_u64()
+        .and_then(|id| u32::try_from(id).ok())
+        .ok_or("invalid state handle")?;
+    environments.states.insert(environment, id);
     Ok(())
 }
 
@@ -2053,5 +3017,26 @@ mod import_reply_tests {
             }
             drop(publish);
         });
+    }
+}
+
+#[cfg(test)]
+mod state_value_tests {
+    use super::unsigned_zeros;
+    use serde_json::json;
+
+    /// A state field that rounds to negative zero is stored as zero, wherever it sits, and no
+    /// other value changes: the platform hosts' value profile has no negative zero.
+    #[test]
+    fn negative_zeros_of_a_state_become_zero() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(r#"{"x":-0.0,"y":[-0,0.5,-1.5],"z":{"w":-0.0},"s":"text"}"#)
+                .unwrap();
+        unsigned_zeros(&mut value);
+        assert_eq!(
+            value,
+            json!({"x": 0, "y": [0, 0.5, -1.5], "z": {"w": 0}, "s": "text"})
+        );
+        assert!(!value.to_string().contains("-0"), "{value}");
     }
 }

@@ -205,6 +205,15 @@ the claim: a retained guest handle cannot use it in another root or after expiry
 callbacks cannot acquire instances. Declared factory dependencies keep their existing scope
 ownership. This keyed-reference API does not transfer WIT resource handles or streams.
 
+A compiled component may import the kernel's own interfaces, served by the executor without a
+provider or a grant: `tembra:guest/state` and `tembra:guest/resources`, each with the export that
+answers it, and `tembra:guest/context`, which stands alone and gives a call the principal and the
+cancellation of the invocation that issued it, the key and principal of the object it runs on, and
+the host's log with the host's attribution. The service roles packaged with the artifact give each
+service its lifetime and linger, as a source bundle declares them in code. Prepared browser
+components serve the same interfaces and run the hooks they declare through their adapter, which
+issues the same host requests, answered by the same SDK scope as on Node and mobile.
+
 ## WASI coverage
 
 The bundled WIT definitions contain all six packages of the pinned WASI 0.3
@@ -276,13 +285,14 @@ requires JSPI; source Orbs reuse the interpreter without JSPI.
 Guests can use state reads, updates and selections, selected dependency
 references, resource dependencies, internal cooperative waits, console output,
 the granted filesystem, standard sockets and HTTP, and WIT-checked hook contributions.
-Source Orbs can also declare `series`, `waterfall` and `bail` hooks. See
+Source Orbs, and compiled Orbs whose artifact declares them, can also declare `series`,
+`waterfall` and `bail` hooks. See
 [portable hook contracts](../../docs/extensions.md#portable-hook-contracts).
 
 Not yet available:
 
 - guest tasks, listeners, state subscriptions and migration;
-- compiled hook providers and portable custom composition, middleware or observation;
+- portable custom composition, middleware or observation;
 - service access policies and exclusive or opaque resources;
 - causal reentry into the same interpreter;
 - durable checkpoint and restore;

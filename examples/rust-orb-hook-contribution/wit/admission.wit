@@ -1,0 +1,15 @@
+package example:admission@1.0.0;
+
+/// Waterfall hook: each participant may change the value or block the admission.
+interface guard {
+    record admission {
+        value: s32,
+        blocked: bool,
+    }
+    apply: func(input: admission) -> admission;
+}
+
+/// The provider declares the hook; its own service is native and needs no WIT.
+world provider {
+    export guard;
+}

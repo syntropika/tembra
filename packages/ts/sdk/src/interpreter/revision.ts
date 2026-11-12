@@ -85,6 +85,24 @@ export function exportedFunctions(
   });
 }
 
+/**
+ * One definition per hook a checked implementation declares, composed as it declares: shared by
+ * source revisions and prepared components, so a hook composes alike whatever declared it.
+ */
+export function declaredHooks(bindings: readonly HookBinding[]): Record<string, HookDefinition> {
+  const hooks: Record<string, HookDefinition> = {};
+  for (const binding of bindings) {
+    const hook =
+      binding.composition === "series"
+        ? series()
+        : binding.composition === "bail"
+          ? bail()
+          : waterfall();
+    hooks[binding.name] = Object.assign(hook, { [signature]: binding.signature });
+  }
+  return hooks;
+}
+
 /** One isolated revision translates callbacks into ordinary SDK declarations and calls. */
 export class Revision {
   readonly gate = new Gate();
@@ -340,16 +358,7 @@ export class Revision {
         description,
         create,
       );
-    const hooks: Record<string, HookDefinition> = {};
-    for (const binding of checked.hooks.hooks) {
-      const hook =
-        binding.composition === "series"
-          ? series()
-          : binding.composition === "bail"
-            ? bail()
-            : waterfall();
-      hooks[binding.name] = Object.assign(hook, { [signature]: binding.signature });
-    }
+    const hooks = declaredHooks(checked.hooks.hooks);
     const contributes: Record<string, Record<string, Contribution>> = {};
     for (const binding of checked.hooks.contributions) {
       const shape = compile(callback(binding.name, binding.method));

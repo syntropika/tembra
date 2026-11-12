@@ -246,6 +246,129 @@ fn standard_contracts_are_managed_and_encoded_with_the_package() {
     );
 }
 
+/// A contract that imports a nested package, whose world uses the kernel's state, and the WASI
+/// filesystem, which builds on the clocks.
+const RELAY: &str = "package example:relay@1.0.0;
+
+interface relaying {
+  twice: func() -> u32;
+}
+
+world relay {
+  import example:tally/tally@1.0.0;
+  import wasi:filesystem/types@0.3.0;
+  export relaying;
+}
+
+package example:tally@1.0.0 {
+  interface tally {
+    bump: func() -> u32;
+  }
+  world counter {
+    import tembra:guest/state@1.0.0;
+    export tembra:guest/state-init@1.0.0;
+    export tally;
+  }
+}
+";
+
+/// A contract lists the bundled standard contracts it depends on, through any of its packages and
+/// through each other, in dependency order, so that its directory resolves with them alone; a
+/// contract without any lists none.
+#[test]
+fn a_contract_lists_the_standard_contracts_it_depends_on() {
+    let contract = Contract::from_source("relay.wit", RELAY, Some("relay")).unwrap();
+    let files: Vec<&str> = contract
+        .standard_dependencies()
+        .into_iter()
+        .map(|(file, _)| file)
+        .collect();
+    assert_eq!(
+        files,
+        ["wasi-clocks.wit", "wasi-filesystem.wit", "tembra-guest.wit"]
+    );
+    let plain = Contract::from_source("example.wit", SOURCE, Some("consumer")).unwrap();
+    assert!(plain.standard_dependencies().is_empty());
+    // The worlds of WASI HTTP import the CLI, whose worlds import the rest of the release.
+    let http = "package example:fetch@1.0.0;\n\ninterface fetching {\n  fetch: func(url: string) -> string;\n}\n\n\
+                world fetch {\n  import wasi:http/types@0.3.0;\n  export fetching;\n}\n";
+    let contract = Contract::from_source("fetch.wit", http, Some("fetch")).unwrap();
+    let dependencies = contract.standard_dependencies();
+    assert_eq!(
+        dependencies
+            .iter()
+            .map(|(file, _)| *file)
+            .collect::<Vec<_>>(),
+        [
+            "wasi-clocks.wit",
+            "wasi-random.wit",
+            "wasi-filesystem.wit",
+            "wasi-sockets.wit",
+            "wasi-cli.wit",
+            "wasi-http.wit"
+        ]
+    );
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("fetch.wit"), http).unwrap();
+    std::fs::create_dir(root.path().join("deps")).unwrap();
+    for (file, source) in dependencies {
+        std::fs::write(root.path().join("deps").join(file), source).unwrap();
+    }
+    wit_parser::Resolve::default()
+        .push_dir(root.path())
+        .unwrap();
+    let read = Contract::from_dir(root.path(), Some("fetch")).unwrap();
+    assert_eq!(read.prepared(), contract.prepared());
+}
+
+/// With the standard contracts it depends on in `deps/`, a contract directory resolves on its own,
+/// as another Orb's bindings read it with `Resolve::push_dir`, and `Contract::from_dir` reads it as
+/// the contract itself: it skips an exact copy of a bundled contract, whatever its line endings,
+/// and refuses any other definition of a bundled package.
+#[test]
+fn a_contract_directory_resolves_alone_with_its_standard_contracts() {
+    let contract = Contract::from_source("relay.wit", RELAY, Some("relay")).unwrap();
+    let directory = |line_ending: &str, note: &str| {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("relay.wit"), RELAY).unwrap();
+        std::fs::create_dir(root.path().join("deps")).unwrap();
+        for (file, source) in contract.standard_dependencies() {
+            let source = format!("{source}{note}").replace('\n', line_ending);
+            std::fs::write(root.path().join("deps").join(file), source).unwrap();
+        }
+        root
+    };
+    for line_ending in ["\n", "\r\n"] {
+        let root = directory(line_ending, "");
+        wit_parser::Resolve::default()
+            .push_dir(root.path())
+            .unwrap();
+        let read = Contract::from_dir(root.path(), Some("relay")).unwrap();
+        assert_eq!(read.prepared(), contract.prepared());
+    }
+    let changed = directory("\n", "// A local change.\n");
+    wit_parser::Resolve::default()
+        .push_dir(changed.path())
+        .unwrap();
+    let error = Contract::from_dir(changed.path(), Some("relay"))
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .0
+            .contains("already provided by the standard contracts bundled"),
+        "{error}"
+    );
+    // Without them, the directory names packages it does not hold.
+    let alone = tempfile::tempdir().unwrap();
+    std::fs::write(alone.path().join("relay.wit"), RELAY).unwrap();
+    assert!(
+        wit_parser::Resolve::default()
+            .push_dir(alone.path())
+            .is_err()
+    );
+}
+
 #[test]
 fn lossy_values_are_refused_before_the_interpreter_runs() {
     let nested = Contract::from_source("nested.wit","package example:values; interface values { type maybe = option<u32>; read: func() -> option<maybe>; } world run { export values; }",None).unwrap();
@@ -290,4 +413,127 @@ fn executable_export_comparison_checks_signatures_and_function_sets() {
     assert!(expected.check_exports(&changed).is_err());
     let other = Contract::from_source("other.wit", SOURCE, Some("consumer")).unwrap();
     assert!(expected.check_exports(&other).is_err());
+}
+
+const STATEFUL: &str = r#"
+package example:counter@1.0.0;
+interface counter { add: func(by: s64) -> s64; }
+world stateful {
+    import tembra:guest/state@1.0.0;
+    export tembra:guest/state-init@1.0.0;
+    import tembra:guest/resources@1.0.0;
+    export tembra:guest/resources-init@1.0.0;
+    export counter;
+}
+"#;
+
+#[test]
+fn kernel_interfaces_bind_to_the_kernel_without_a_provider_or_grant() {
+    let contract = Contract::from_source("counter.wit", STATEFUL, None).unwrap();
+    let bindings = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap();
+    assert_eq!(bindings.get(guest::STATE), Some(&Binding::Kernel));
+    assert_eq!(bindings.get(guest::RESOURCE), Some(&Binding::Kernel));
+    let plan = contract.plan("counter", 1, &bindings).unwrap();
+    assert!(plan.host_imports.is_empty());
+    assert!(plan.orb.requires.is_empty());
+    // The state-init export answers the kernel; only the Orb's own interface is a service.
+    assert_eq!(
+        plan.orb
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        ["counter::example:counter/counter@1.0.0"]
+    );
+    // A kernel binding given by hand is checked like any other.
+    let wrong: BTreeMap<String, Binding> = [(
+        guest::STATE.to_owned(),
+        Binding::Orb {
+            name: "kernel".into(),
+            api_version: 1,
+        },
+    )]
+    .into();
+    assert!(contract.plan("counter", 1, &wrong).is_err());
+
+    // The import and the export come together, for each kernel interface.
+    for (export, name) in [
+        ("    export tembra:guest/state-init@1.0.0;\n", "state-init"),
+        (
+            "    export tembra:guest/resources-init@1.0.0;\n",
+            "resources-init",
+        ),
+    ] {
+        let half = STATEFUL.replace(export, "");
+        let contract = Contract::from_source("half.wit", &half, None).unwrap();
+        let bindings = contract
+            .providers(&BTreeMap::new(), &Grants::default())
+            .unwrap();
+        let error = contract.plan("counter", 1, &bindings).unwrap_err();
+        assert!(error.0.contains(name), "{error}");
+    }
+
+    // The namespace is reserved: other kernel interfaces are refused, and the package cannot
+    // be redefined by an Orb.
+    let reversed = STATEFUL
+        .replace(
+            "import tembra:guest/state@1.0.0;",
+            "import tembra:guest/state-init@1.0.0;",
+        )
+        .replace("    export tembra:guest/state-init@1.0.0;\n", "");
+    let contract = Contract::from_source("reversed.wit", &reversed, None).unwrap();
+    let error = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap_err();
+    assert!(error.message.contains("reserved"), "{error}");
+    let Err(redefined) = Contract::from_source(
+        "guest.wit",
+        "package tembra:guest@1.0.0; interface state { read: func() -> string; } world w { import state; }",
+        None,
+    ) else {
+        panic!("an Orb redefined the kernel package");
+    };
+    assert!(redefined.0.contains("already provided"), "{redefined}");
+}
+
+/// The context interface is served by the kernel alone: a world imports it with no export, no
+/// provider and no grant, and nothing may export it.
+#[test]
+fn the_context_interface_is_imported_alone() {
+    let aware = r#"
+package example:aware@1.0.0;
+interface probe { whoami: func() -> string; }
+world aware {
+    import tembra:guest/context@1.0.0;
+    export probe;
+}
+"#;
+    let contract = Contract::from_source("aware.wit", aware, None).unwrap();
+    let bindings = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap();
+    assert_eq!(bindings.get(guest::CONTEXT), Some(&Binding::Kernel));
+    let plan = contract.plan("aware", 1, &bindings).unwrap();
+    assert!(plan.host_imports.is_empty());
+    assert!(plan.orb.requires.is_empty());
+    assert_eq!(
+        plan.orb
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        ["aware::example:aware/probe@1.0.0"]
+    );
+    let exporting = aware.replace(
+        "import tembra:guest/context@1.0.0;",
+        "export tembra:guest/context@1.0.0;",
+    );
+    let contract = Contract::from_source("exporting.wit", &exporting, None).unwrap();
+    let bindings = contract
+        .providers(&BTreeMap::new(), &Grants::default())
+        .unwrap();
+    let error = contract.plan("aware", 1, &bindings).unwrap_err();
+    assert!(error.0.contains("reserved"), "{error}");
 }

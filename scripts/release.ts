@@ -3,13 +3,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validate } from "./release/metadata.ts";
 import { pack, publishNpm } from "./release/npm.ts";
-import { publishCrates } from "./release/crates.ts";
+import { packageCrates, publishCrates } from "./release/crates.ts";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const [command, tag, destination] = process.argv.slice(2);
 if (!tag)
   throw new Error(
-    "Usage: bun scripts/release.ts <validate|pack|publish-npm|publish-crates> <tag> [artifact-directory]",
+    "Usage: bun scripts/release.ts <validate|pack|package-crates|publish-npm|publish-crates> <tag> [artifact-directory]",
   );
 const release = validate(root, tag);
 if (command === "validate") {
@@ -21,6 +21,8 @@ if (command === "validate") {
   console.log(`Release ${release.version} (${release.channel})`);
 } else if (command === "pack" && destination) {
   pack(root, path.resolve(destination), release.version);
+} else if (command === "package-crates") {
+  packageCrates(root);
 } else if (command === "publish-npm" && destination) {
   await publishNpm(path.resolve(destination), release.channel);
 } else if (command === "publish-crates" && destination) {

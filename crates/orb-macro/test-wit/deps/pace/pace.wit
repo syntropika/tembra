@@ -1,0 +1,5 @@
+package example:pace@1.0.0;
+interface clock {
+  wait: async func(value: u64) -> u64;
+}
+world pacer { export clock; }

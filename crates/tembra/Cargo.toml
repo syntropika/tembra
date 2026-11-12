@@ -43,17 +43,25 @@ path = "../../examples/rust/wasm.rs"
 required-features = ["wasm"]
 
 [features]
-default = []
+default = ["host"]
+host = ["dep:tembra-runtime"]
+# Guest crates enable macros without linking the application's host implementation.
+macros = ["dep:tembra-orb-macro"]
+contracts = ["dep:tembra-contracts"]
+# WIT parsing and artifact packaging are build-time tools, separate from prepared contracts.
+authoring = ["contracts", "tembra-contracts/authoring"]
 # Native Wasmtime execution is optional and never compiled into the browser target.
-wasm = ["dep:tembra-executor-wasm"]
-rpc = ["tembra-runtime/rpc"]
-hooks = ["tembra-runtime/hooks"]
-subscriptions = ["tembra-runtime/subscriptions"]
-views = ["tembra-runtime/views"]
-telemetry = ["tembra-runtime/telemetry"]
+wasm = ["host", "contracts", "dep:tembra-executor-wasm"]
+rpc = ["host", "tembra-runtime/rpc"]
+hooks = ["host", "tembra-runtime/hooks"]
+subscriptions = ["host", "tembra-runtime/subscriptions"]
+views = ["host", "tembra-runtime/views"]
+telemetry = ["host", "tembra-runtime/telemetry"]
 
 [dependencies]
-tembra-runtime.workspace = true
+tembra-runtime = { workspace = true, optional = true }
+tembra-contracts = { workspace = true, default-features = false, optional = true }
+tembra-orb-macro = { path = "../orb-macro", version = "=0.2.2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tembra-executor-wasm = { path = "../executor-wasm", version = "=0.2.2", optional = true }
@@ -63,6 +71,10 @@ futures-timer = "3"
 futures.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
+
+[[test]]
+name = "contract_facade"
+required-features = ["authoring"]
 
 [lints]
 workspace = true

@@ -9,14 +9,14 @@ For module layout and code style, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Use [mise](https://mise.jdx.dev/) to install and select the pinned development tools:
 
-| Tool                           | Configuration                                                           | Purpose                                    |
-| ------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------ |
-| Rust                           | [rust-toolchain.toml](rust-toolchain.toml)                              | Cargo, rustfmt, Clippy and the WASM target |
-| Bun                            | [mise.toml](mise.toml) and [.bun-version](.bun-version)                 | TypeScript dependencies, builds and tests  |
-| Node.js                        | [mise.toml](mise.toml) and [.node-version](.node-version)               | SDK compatibility tests for Node           |
-| Just                           | [mise.toml](mise.toml) and [CI workflow](.github/workflows/quality.yml) | Repository commands                        |
-| wasm-bindgen and cargo-machete | [justfile](justfile)                                                    | WASM bindings and dependency checks        |
-| Chrome or Chromium             | `TEMBRA_BROWSER`                                                        | Browser and module Worker acceptance       |
+| Tool                                              | Configuration                                                           | Purpose                                                |
+| ------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------ |
+| Rust                                              | [rust-toolchain.toml](rust-toolchain.toml)                              | Cargo, rustfmt, Clippy and the WASM target             |
+| Bun                                               | [mise.toml](mise.toml) and [.bun-version](.bun-version)                 | TypeScript dependencies, builds and tests              |
+| Node.js                                           | [mise.toml](mise.toml) and [.node-version](.node-version)               | SDK compatibility tests for Node                       |
+| Just                                              | [mise.toml](mise.toml) and [CI workflow](.github/workflows/quality.yml) | Repository commands                                    |
+| wasm-bindgen, wasm-component-ld and cargo-machete | [justfile](justfile)                                                    | WASM bindings, component linking and dependency checks |
+| Chrome or Chromium                                | `TEMBRA_BROWSER`                                                        | Browser and module Worker acceptance                   |
 
 Rustup reads the pinned Rust toolchain and installs its configured components and target.
 From the repository root, install the mise tools, build tools and TypeScript dependencies:

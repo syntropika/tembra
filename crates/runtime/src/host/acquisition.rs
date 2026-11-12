@@ -20,6 +20,44 @@ impl Host {
         self.acquire(service, key, principal, options, None)
     }
 
+    /// Acquire after the exact previous instance has physically closed, repeating admission.
+    /// Other refusals return immediately. Dropping this future never cancels the old cleanup.
+    /// This waits for address availability; use [`Reference::ready`] to await activation.
+    pub async fn get_wait(
+        &self,
+        service: &str,
+        key: Vec<String>,
+        principal: &str,
+        options: AcquisitionOptions,
+    ) -> Result<Reference> {
+        loop {
+            match self.get_with_options(service, key.clone(), principal, options.clone()) {
+                Ok(reference) => return Ok(reference),
+                Err(error) => self.closing(service, &key, principal, error)?.await,
+            }
+        }
+    }
+
+    pub(super) fn closing(
+        &self,
+        service: &str,
+        key: &[String],
+        principal: &str,
+        error: Error,
+    ) -> Result<core::Disposal> {
+        if error.code == core::Code::Unavailable && error.reason == Reason::Disposing.as_str() {
+            let address = core::Address {
+                service: service.into(),
+                key: key.to_vec(),
+                principal: principal.into(),
+            };
+            if let Some(wait) = self.kernel().wait_for_disposal(&address) {
+                return Ok(wait);
+            }
+        }
+        Err(error)
+    }
+
     pub(super) fn acquire(
         &self,
         service: &str,

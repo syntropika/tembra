@@ -149,6 +149,7 @@ impl Engine {
         };
         let (session, description, (services, hooks, ingress)) = match &artifact.implementation {
             tembra_contracts::ArtifactImplementation::Source(source) => {
+                contract.check_source_kernel().map_err(failure)?;
                 let io =
                     crate::io::SourceIo::new(&self.providers, &plan.host_imports, grants, cli)?;
                 let session = Session::start(self.clone(), name.into(), io)?;
@@ -162,6 +163,8 @@ impl Engine {
                     name,
                     api_version,
                     &artifact.contributions,
+                    &artifact.hooks,
+                    &artifact.services,
                 );
                 let checked = checked(&description)?;
                 let session = self.component_session(
