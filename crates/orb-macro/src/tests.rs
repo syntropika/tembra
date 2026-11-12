@@ -783,6 +783,76 @@ fn an_interface_uses_what_its_resources_mention() {
     );
 }
 
+const FRONT: &str = "mod wb {
+    /// Counts over the texts.
+    pub struct Stats { pub words: u32 }
+    #[service]
+    pub struct Front;
+    impl Front { pub fn start() -> Builder { Builder } }
+    #[wit_resource(service = Texts)]
+    pub struct Builder;
+    impl Builder { pub fn text(&self) -> u32 { 0 } }
+    #[service]
+    pub struct Texts;
+    impl Texts { pub fn counts() -> Stats { Stats { words: 0 } } }
+}";
+
+/// A type is defined in the interface of the earliest service that mentions it, through its
+/// functions, its resources' functions or other types, and re-exported from there; so a first
+/// service handing out a later service's resource does not make the later one `use` it back.
+/// Interfaces that would still `use` each other are an error naming them.
+#[test]
+fn a_type_is_defined_by_the_earliest_service_that_mentions_it() {
+    let module = expanded("example:wb@1.0.0", FRONT);
+    assert_eq!(
+        resolved(&module),
+        "package example:wb@1.0.0;\n\ninterface front {\n  use texts.{builder};\n  start: func() -> builder;\n}\n\ninterface texts {\n  /// Counts over the texts.\n  record stats {\n    words: u32,\n  }\n  resource builder {\n    text: func() -> u32;\n  }\n  counts: func() -> stats;\n}\n\nworld wb {\n  export front;\n  export texts;\n}\n"
+    );
+    assert!(
+        tokens(&module).contains("pub use exports :: example :: wb :: texts :: { Stats } ;"),
+        "{}",
+        tokens(&module)
+    );
+    // A type only a later service's resource mentions is that service's.
+    let record = resolved(&expanded(
+        "example:wa@1.0.0",
+        "mod wa {
+            pub struct Info { pub n: u32, pub detail: Detail }
+            pub struct Detail { pub text: String }
+            #[service]
+            pub struct Main;
+            impl Main { pub fn ping() -> u32 { 1 } }
+            #[wit_resource(service = Sessions)]
+            pub struct Session;
+            impl Session { pub fn info(&self) -> Info { todo!() } }
+            #[service]
+            pub struct Sessions;
+            impl Sessions { pub fn open() -> Session { Session } }
+        }",
+    ));
+    assert!(
+        record.contains("interface main {\n  ping: func() -> u32;\n}"),
+        "{record}"
+    );
+    assert!(
+        record.contains("interface sessions {\n  record info {\n    n: u32,\n    detail: detail,\n  }\n  record detail {\n"),
+        "{record}"
+    );
+    // Both services mention the record and the first hands out the second's resource: each
+    // interface would `use` the other.
+    let error = refused(
+        "example:wb@1.0.0",
+        &FRONT.replace(
+            "impl Front { pub fn start() -> Builder { Builder } }",
+            "impl Front { pub fn start() -> Builder { Builder } pub fn summary() -> Stats { Stats { words: 0 } } }",
+        ),
+    );
+    assert!(
+        error.contains("`front` uses `{builder}` of `texts`, `texts` uses `{stats}` of `front`: WIT refuses interfaces that depend on themselves through `use`"),
+        "{error}"
+    );
+}
+
 const DESK: &str = "mod desk {
     /// One session.
     #[wit_resource]

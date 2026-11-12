@@ -450,7 +450,10 @@ the kernel destroys the value, which runs `Drop`. WIT methods borrow `self`, so 
 value through `Cell` or `RefCell`; a `&mut self` method is a compile error, and so is a function
 taking a resource as a parameter: a resource is handed out, never taken. The resource belongs to
 one interface, that of `#[wit_resource(service = Name)]` or of the module's only service; another
-service of the module may return it, and its interface `use`s the type. See
+service of the module may return it, and its interface `use`s the type. A record or an enum is
+defined in the interface of the earliest service, in declaration order, that mentions it, in its
+functions or its resources' functions, and the others `use` it from there; interfaces that would
+`use` each other, which WIT refuses, are a compile error naming them. See
 [rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md).
 
 ## Organizing the module in sub-modules

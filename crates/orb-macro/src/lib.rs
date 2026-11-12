@@ -1411,11 +1411,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             ));
         }
     }
+    // Where each type is defined, computed once for the WIT and for the re-exports below.
+    let placement = wit::placement(&shapes, &services, &wit_resources, &declared)?;
     let wit = wit::render(
         &package,
         &world,
         wit::Items {
             shapes: &shapes,
+            placement: &placement,
             services: &services,
             resources: &wit_resources,
             declared: &declared,
@@ -1427,7 +1430,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             resources: !resources.is_empty(),
             context: options.context,
         },
-    );
+    )?;
 
     // Generate the Rust side: the bindings from the inline WIT, the author's types replaced by
     // the generated ones, the bridges to the author's functions, each in the module of the item
@@ -1439,28 +1442,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let name_ident = package_module(name);
     // The generated types carry the author's names and public fields, so the author's functions
     // and the generated traits speak about one type: each is re-exported in the module that
-    // declared it. A type a derived hook reaches is defined in the first derived hook's
-    // interface, any other in the first derived service's.
+    // declared it, from the interface `placement` defines it in.
     let hook_shapes = wit::hook_shapes(&shapes, &declared);
     let interface_module = |ident: &Ident| rust_module(&wit::kebab(ident));
-    let first_hook = declared
-        .iter()
-        .find(|declaration| declaration.input.is_some())
-        .map(|declaration| interface_module(&declaration.ident));
-    let first_service = services
-        .iter()
-        .find(|service| service.implements.is_none())
-        .map(|service| interface_module(&service.ident));
     let mut grouped: Vec<((Ident, usize), Vec<&Ident>)> = Vec::new();
     for shape in &shapes {
-        let interface = if hook_shapes.contains(&shape.ident.to_string()) {
-            &first_hook
-        } else {
-            &first_service
-        };
-        let interface = interface
-            .clone()
-            .expect("a shape is reached from a hook or a derived service");
+        let interface = interface_module(&placement[&shape.ident.to_string()]);
         let key = (interface, shape.scope);
         match grouped.iter_mut().find(|(known, _)| *known == key) {
             Some((_, idents)) => idents.push(&shape.ident),

@@ -16,10 +16,12 @@ pub(crate) fn kebab(ident: &Ident) -> String {
     ident.to_string().to_kebab_case()
 }
 
-/// The items of the module that enter the WIT: its exported types, its services, its resources
-/// and its declared hooks, of which the derived ones are interfaces of the package.
+/// The items of the module that enter the WIT: its exported types, where each is defined, its
+/// services, its resources and its declared hooks, of which the derived ones are interfaces of
+/// the package.
 pub(crate) struct Items<'a> {
     pub shapes: &'a [Shape],
+    pub placement: &'a BTreeMap<String, Ident>,
     pub services: &'a [Service],
     pub resources: &'a [WitResource],
     pub declared: &'a [Declared],
@@ -51,6 +53,103 @@ pub(crate) fn hook_shapes(shapes: &[Shape], declared: &[Declared]) -> BTreeSet<S
     reached
 }
 
+/// The module types a derived service's interface mentions in its own text: its functions, and
+/// the constructors, methods and static functions of the resources it owns.
+fn service_mentions(service: &Service, resources: &[WitResource]) -> Vec<Ident> {
+    let mut mentioned = Vec::new();
+    let owned: Vec<&WitResource> = resources
+        .iter()
+        .filter(|resource| resource.service.as_ref() == Some(&service.ident))
+        .collect();
+    let functions = service.functions.iter().chain(
+        owned
+            .iter()
+            .flat_map(|resource| resource.methods.iter().chain(&resource.statics)),
+    );
+    for function in functions {
+        for (_, ty, _) in &function.params {
+            references(ty, &mut mentioned);
+        }
+        if let Some((ty, _)) = &function.result {
+            references(ty, &mut mentioned);
+        }
+    }
+    for constructor in owned
+        .iter()
+        .filter_map(|resource| resource.constructor.as_ref())
+    {
+        for (_, ty, _) in &constructor.params {
+            references(ty, &mut mentioned);
+        }
+    }
+    mentioned
+}
+
+/// Where each shape that enters the WIT is defined, by name: the Rust name of the hook or
+/// service whose interface defines it. A shape a derived hook reaches is defined in the first
+/// derived hook's interface, which the hook's import brings into the world without any other.
+/// Any other shape is defined in the interface of the earliest derived service, in declaration
+/// order, that mentions it: in its functions, in its own resources' functions, or through the
+/// fields of other shapes. So a later service that names a shape no earlier one does defines it
+/// itself, and an earlier service that hands out a later service's resource does not make the
+/// later one `use` it back. A shape only a resource of an implemented interface mentions goes to
+/// the first derived service.
+pub(crate) fn placement(
+    shapes: &[Shape],
+    services: &[Service],
+    resources: &[WitResource],
+    declared: &[Declared],
+) -> syn::Result<BTreeMap<String, Ident>> {
+    let by_name: BTreeMap<String, &Shape> = shapes
+        .iter()
+        .map(|shape| (shape.ident.to_string(), shape))
+        .collect();
+    let mut placed: BTreeMap<String, Ident> = BTreeMap::new();
+    let first_hook = declared
+        .iter()
+        .find(|declaration| declaration.input.is_some())
+        .map(|declaration| &declaration.ident);
+    for name in hook_shapes(shapes, declared) {
+        let hook = first_hook.expect("a shape a derived hook reaches");
+        placed.insert(name, hook.clone());
+    }
+    let derived: Vec<&Service> = services
+        .iter()
+        .filter(|service| service.implements.is_none())
+        .collect();
+    for service in &derived {
+        let mut pending = service_mentions(service, resources);
+        let mut seen = BTreeSet::new();
+        while let Some(ident) = pending.pop() {
+            let name = ident.to_string();
+            let Some(shape) = by_name.get(&name) else {
+                continue;
+            };
+            if seen.insert(name.clone()) {
+                placed.entry(name).or_insert_with(|| service.ident.clone());
+                pending.extend(shape.references.iter().cloned());
+            }
+        }
+    }
+    let fallback = derived.first().map(|service| &service.ident).or(first_hook);
+    for shape in shapes {
+        let name = shape.ident.to_string();
+        if placed.contains_key(&name) {
+            continue;
+        }
+        let Some(fallback) = fallback else {
+            return Err(syn::Error::new(
+                shape.ident.span(),
+                format!(
+                    "`{name}` enters the WIT through a resource of an implemented interface, but the package has no interface of its own to define it: no derived service or hook mentions it"
+                ),
+            ));
+        };
+        placed.insert(name, fallback.clone());
+    }
+    Ok(placed)
+}
+
 /// Which kernel interfaces the world uses.
 pub(crate) struct Kernel {
     pub state: bool,
@@ -58,12 +157,23 @@ pub(crate) struct Kernel {
     pub context: bool,
 }
 
-/// Write the package: one interface per derived hook, with its callback `apply` and, in the first
-/// of them, the types the hooks reach; one interface per derived service, the other types in the
-/// first of them and borrowed by the others with `use`, each WIT resource in the interface of the
-/// service that owns it; then a world using the kernel's interfaces for its states, resources and
+/// One interface of the package: its name, its docs, the shapes it defines, what it `use`s from
+/// which other interface, and the struct it is derived from, for the errors.
+struct Interface<'a> {
+    name: String,
+    ident: &'a Ident,
+    docs: &'a [String],
+    defined: Vec<&'a Shape>,
+    uses: Vec<(String, Vec<String>)>,
+}
+
+/// Write the package: one interface per derived hook, with its callback `apply`, the first of them
+/// defining the types the hooks reach; one interface per derived service, with the resources it
+/// owns and the types `placement` gives it; each interface `use`s what it mentions and another
+/// interface defines. Then a world using the kernel's interfaces for its states, resources and
 /// context, importing every consumed interface, importing and exporting every hook, consumed or
-/// derived, and exporting every service interface, derived or implemented.
+/// derived, and exporting every service interface, derived or implemented. Interfaces that `use`
+/// each other, which WIT refuses, are an error naming them.
 pub(crate) fn render<'a>(
     package: &str,
     world: &str,
@@ -71,14 +181,14 @@ pub(crate) fn render<'a>(
     hooks: impl Iterator<Item = &'a String>,
     imports: &[String],
     kernel: Kernel,
-) -> String {
+) -> syn::Result<String> {
     let Items {
         shapes,
+        placement,
         services,
         resources,
         declared,
     } = items;
-    let mut wit = format!("package {package};\n");
     let derived_hooks: Vec<&Declared> = declared
         .iter()
         .filter(|declaration| declaration.input.is_some())
@@ -89,125 +199,141 @@ pub(crate) fn render<'a>(
         .collect();
     let owner_of =
         |resource: &WitResource| kebab(resource.service.as_ref().expect("resolved owner"));
-    let in_hooks = hook_shapes(shapes, declared);
-    let first_hook = derived_hooks.first().map(|hook| kebab(&hook.ident));
-    let first_service = derived.first().map(|service| kebab(&service.ident));
-    // An interface borrows with `use` the shapes it mentions and another interface defines: the
-    // hooks' shapes from the first derived hook, the others from the first derived service.
-    let borrow = |wit: &mut String, mentioned: &[Ident], from: Option<&str>, hooks: bool| {
-        let Some(from) = from else {
-            return;
-        };
-        let names: Vec<String> = shapes
+    // The interfaces in the order the package lists them: the derived hooks, then the services.
+    let order: Vec<(String, &Ident, &[String])> = derived_hooks
+        .iter()
+        .map(|hook| (kebab(&hook.ident), &hook.ident, hook.docs.as_slice()))
+        .chain(derived.iter().map(|service| {
+            (
+                kebab(&service.ident),
+                &service.ident,
+                service.docs.as_slice(),
+            )
+        }))
+        .collect();
+    let mut interfaces = Vec::new();
+    for (name, ident, docs) in &order {
+        let defined: Vec<&Shape> = shapes
             .iter()
-            .filter(|shape| {
-                mentioned.contains(&shape.ident)
-                    && in_hooks.contains(&shape.ident.to_string()) == hooks
-            })
-            .map(|shape| kebab(&shape.ident))
+            .filter(|shape| placement.get(&shape.ident.to_string()) == Some(*ident))
             .collect();
-        if !names.is_empty() {
-            wit.push_str(&format!("  use {from}.{{{}}};\n", names.join(", ")));
-        }
-    };
-    for (index, hook) in derived_hooks.iter().enumerate() {
-        let (input, spelling) = hook.input.as_ref().expect("a derived hook");
-        wit.push('\n');
-        for doc in &hook.docs {
-            wit.push_str(&format!("///{doc}\n"));
-        }
-        wit.push_str(&format!("interface {} {{\n", kebab(&hook.ident)));
-        if index == 0 {
-            for shape in shapes
-                .iter()
-                .filter(|shape| in_hooks.contains(&shape.ident.to_string()))
-            {
-                wit.push_str(&shape.wit);
+        // What the interface's text mentions: the hook's input, or the service's functions and
+        // its resources' functions, and the fields of the shapes it defines.
+        let mut mentioned = match derived_hooks.iter().find(|hook| &hook.ident == *ident) {
+            Some(hook) => {
+                let mut mentioned = Vec::new();
+                let (input, _) = hook.input.as_ref().expect("a derived hook");
+                references(input, &mut mentioned);
+                mentioned
             }
-        } else {
-            let mut mentioned = Vec::new();
-            references(input, &mut mentioned);
-            borrow(&mut wit, &mentioned, first_hook.as_deref(), true);
-        }
-        let result = match hook.composition {
-            Composition::Series => String::new(),
-            Composition::Waterfall => format!(" -> {spelling}"),
-            Composition::Bail => format!(" -> option<{spelling}>"),
+            None => {
+                let service = derived
+                    .iter()
+                    .find(|service| &service.ident == *ident)
+                    .expect("a derived service");
+                service_mentions(service, resources)
+            }
         };
-        wit.push_str(&format!("  apply: func(input: {spelling}){result};\n}}\n"));
-    }
-    for (index, service) in derived.iter().enumerate() {
-        wit.push('\n');
-        for doc in &service.docs {
-            wit.push_str(&format!("///{doc}\n"));
+        for shape in &defined {
+            mentioned.extend(shape.references.iter().cloned());
         }
-        let name = kebab(&service.ident);
-        wit.push_str(&format!("interface {name} {{\n"));
-        // The interface mentions what its functions name, and what the constructors, methods
-        // and static functions of its own resources name.
-        let mut mentioned = Vec::new();
-        let owned = || {
-            resources
-                .iter()
-                .filter(|resource| owner_of(resource) == name)
-        };
-        let functions = service
-            .functions
+        // Each name another interface defines is borrowed from it with `use`, the shapes then
+        // the resources, one line per interface in package order.
+        let mut uses: Vec<(String, Vec<String>)> = order
             .iter()
-            .chain(owned().flat_map(|resource| resource.methods.iter().chain(&resource.statics)));
-        for function in functions {
-            for (_, ty, _) in &function.params {
-                references(ty, &mut mentioned);
-            }
-            if let Some((ty, _)) = &function.result {
-                references(ty, &mut mentioned);
-            }
-        }
-        for constructor in owned().filter_map(|resource| resource.constructor.as_ref()) {
-            for (_, ty, _) in &constructor.params {
-                references(ty, &mut mentioned);
-            }
-        }
-        if index == 0 {
-            // The shapes defined here may name a hook's shape in their fields.
-            for shape in shapes
-                .iter()
-                .filter(|shape| !in_hooks.contains(&shape.ident.to_string()))
+            .filter(|(other, _, _)| other != name)
+            .map(|(other, _, _)| (other.clone(), Vec::new()))
+            .collect();
+        let mut borrow = |from: String, item: String| {
+            if let Some((_, names)) = uses.iter_mut().find(|(other, _)| *other == from)
+                && !names.contains(&item)
             {
-                mentioned.extend(shape.references.iter().cloned());
+                names.push(item);
             }
-            borrow(&mut wit, &mentioned, first_hook.as_deref(), true);
-            for shape in shapes
-                .iter()
-                .filter(|shape| !in_hooks.contains(&shape.ident.to_string()))
+        };
+        for shape in shapes
+            .iter()
+            .filter(|shape| mentioned.contains(&shape.ident))
+        {
+            if let Some(owner) = placement.get(&shape.ident.to_string())
+                && owner != *ident
             {
-                wit.push_str(&shape.wit);
+                borrow(kebab(owner), kebab(&shape.ident));
             }
-        } else {
-            borrow(&mut wit, &mentioned, first_service.as_deref(), false);
-            borrow(&mut wit, &mentioned, first_hook.as_deref(), true);
-        }
-        // A resource of another service that this one hands out is borrowed with `use`.
-        let mut borrowed: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for resource in resources {
-            if owner_of(resource) != name && mentioned.contains(&resource.ident) {
-                borrowed
-                    .entry(owner_of(resource))
-                    .or_default()
-                    .push(kebab(&resource.ident));
-            }
-        }
-        for (owner, names) in borrowed {
-            wit.push_str(&format!("  use {owner}.{{{}}};\n", names.join(", ")));
         }
         for resource in resources
             .iter()
-            .filter(|resource| owner_of(resource) == name)
+            .filter(|resource| mentioned.contains(&resource.ident))
         {
-            wit.push_str(&resource_text(resource));
+            if owner_of(resource) != *name {
+                borrow(owner_of(resource), kebab(&resource.ident));
+            }
         }
-        for function in &service.functions {
-            wit.push_str(&function_text(function, "  ", ""));
+        uses.retain(|(_, names)| !names.is_empty());
+        interfaces.push(Interface {
+            name: name.clone(),
+            ident,
+            docs,
+            defined,
+            uses,
+        });
+    }
+    if let Some(cycle) = use_cycle(&interfaces) {
+        let first = &interfaces[cycle[0]];
+        let steps: Vec<String> = cycle
+            .iter()
+            .zip(cycle.iter().cycle().skip(1))
+            .map(|(&from, &to)| {
+                let (from, to) = (&interfaces[from], &interfaces[to]);
+                let names = to_names(from, &to.name);
+                format!("`{}` uses {} of `{}`", from.name, names, to.name)
+            })
+            .collect();
+        return Err(syn::Error::new(
+            first.ident.span(),
+            format!(
+                "{}: WIT refuses interfaces that depend on themselves through `use`; let one service's interface define or own what the others use",
+                steps.join(", ")
+            ),
+        ));
+    }
+    let mut wit = format!("package {package};\n");
+    for interface in &interfaces {
+        wit.push('\n');
+        for doc in interface.docs {
+            wit.push_str(&format!("///{doc}\n"));
+        }
+        wit.push_str(&format!("interface {} {{\n", interface.name));
+        for (from, names) in &interface.uses {
+            wit.push_str(&format!("  use {from}.{{{}}};\n", names.join(", ")));
+        }
+        for shape in &interface.defined {
+            wit.push_str(&shape.wit);
+        }
+        if let Some(hook) = derived_hooks
+            .iter()
+            .find(|hook| &hook.ident == interface.ident)
+        {
+            let (_, spelling) = hook.input.as_ref().expect("a derived hook");
+            let result = match hook.composition {
+                Composition::Series => String::new(),
+                Composition::Waterfall => format!(" -> {spelling}"),
+                Composition::Bail => format!(" -> option<{spelling}>"),
+            };
+            wit.push_str(&format!("  apply: func(input: {spelling}){result};\n"));
+        } else if let Some(service) = derived
+            .iter()
+            .find(|service| &service.ident == interface.ident)
+        {
+            for resource in resources
+                .iter()
+                .filter(|resource| owner_of(resource) == interface.name)
+            {
+                wit.push_str(&resource_text(resource));
+            }
+            for function in &service.functions {
+                wit.push_str(&function_text(function, "  ", ""));
+            }
         }
         wit.push_str("}\n");
     }
@@ -242,7 +368,56 @@ pub(crate) fn render<'a>(
         }
     }
     wit.push_str("}\n");
-    wit
+    Ok(wit)
+}
+
+/// The names an interface `use`s from another one, for the errors: `{a, b}`.
+fn to_names(interface: &Interface<'_>, from: &str) -> String {
+    let names = interface
+        .uses
+        .iter()
+        .find(|(other, _)| other == from)
+        .map(|(_, names)| names.join(", "))
+        .unwrap_or_default();
+    format!("`{{{names}}}`")
+}
+
+/// A cycle of interfaces that `use` one another, as indexes in `interfaces`, if there is one.
+fn use_cycle(interfaces: &[Interface<'_>]) -> Option<Vec<usize>> {
+    let edges: Vec<Vec<usize>> = interfaces
+        .iter()
+        .map(|interface| {
+            interface
+                .uses
+                .iter()
+                .filter_map(|(from, _)| interfaces.iter().position(|other| other.name == *from))
+                .collect()
+        })
+        .collect();
+    // Depth first, with the path walked so far: an edge back into the path closes a cycle.
+    fn visit(
+        node: usize,
+        edges: &[Vec<usize>],
+        path: &mut Vec<usize>,
+        done: &mut BTreeSet<usize>,
+    ) -> Option<Vec<usize>> {
+        if let Some(start) = path.iter().position(|&walked| walked == node) {
+            return Some(path[start..].to_vec());
+        }
+        if !done.insert(node) {
+            return None;
+        }
+        path.push(node);
+        for &next in &edges[node] {
+            if let Some(cycle) = visit(next, edges, path, done) {
+                return Some(cycle);
+            }
+        }
+        path.pop();
+        None
+    }
+    let mut done = BTreeSet::new();
+    (0..interfaces.len()).find_map(|node| visit(node, &edges, &mut Vec::new(), &mut done))
 }
 
 /// One function of an interface or a resource, with its `///` lines, at the given indentation.
