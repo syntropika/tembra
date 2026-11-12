@@ -103,7 +103,8 @@ respectively, no value, the input type, or an option:
   `none`. A native participant can still decide after isolated ones.
 
 Compiled Orbs can contribute to hooks and declare them, with `series`, `waterfall` or `bail`
-composition, when their artifact carries the role: `cargo tembra build` packages it from
+composition, when their artifact carries the role: `cargo tembra build`, or the SDK's
+[`build()`](tooling.md#compiled-orbs) given the component, packages it from
 `#[hook(..., composition = c)]`, see the
 [Rust hook declaration example](../examples/rust-orb-hook-declaration/README.md). Portable middleware, custom composition and observation
 are not exposed. Native providers can still apply their own composition, including

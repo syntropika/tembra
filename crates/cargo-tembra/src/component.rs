@@ -5,8 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use tembra_contracts::{
-    ComponentRoles, Contract, HTTP_HANDLER, HookComposition, Lifetime, ServicePolicy,
-    SystemCapability, guest, system_capability,
+    ComponentRoles, Contract, HTTP_HANDLER, Lifetime, ServicePolicy, SystemCapability, guest,
+    system_capability,
 };
 use wasmparser::{Parser, Payload};
 use wit_component::{DecodedWasm, WitPrinter};
@@ -14,21 +14,6 @@ use wit_parser::{FunctionKind, InterfaceId, PackageId, Resolve, WorldId, WorldIt
 
 /// The custom section in which the macro stores the WIT it derived from the module.
 const WIT_SECTION: &str = "tembra:wit";
-/// The custom section in which the macro stores the module's manifest, as a JSON object.
-const MANIFEST_SECTION: &str = "tembra:manifest";
-
-/// The manifest the macro stored in the component: the hooks it contributes to, with their
-/// priorities, the hooks it declares, with their composition, the services whose `#[service]`
-/// attribute names a lifetime or a linger, by interface identity, and the directory of the WIT
-/// packages the module consumes, relative to the crate manifest, as written on the attribute.
-#[derive(Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct EmbeddedManifest {
-    pub contributes: BTreeMap<String, i32>,
-    pub declares: BTreeMap<String, HookComposition>,
-    pub services: BTreeMap<String, ServicePolicy>,
-    pub wit: Option<String>,
-}
 
 /// `cargo tembra wit`: print the reconstructed WIT, or write the contract with --emit.
 pub fn wit(component: &Path, emit: Option<PathBuf>, world_name: Option<String>) -> Result<()> {
@@ -135,18 +120,6 @@ fn embedded_wit(bytes: &[u8]) -> Result<Option<String>> {
         .transpose()
 }
 
-/// The manifest the macro stored in the component:
-/// `{"contributes": {"ns:name/hook@version": n}, "declares": {"ns:name/hook@version": "waterfall"},
-/// "services": {"ns:name/service@version": {"lifetime": "host", "linger_ms": 0}}}`.
-pub fn embedded_manifest(bytes: &[u8]) -> Result<EmbeddedManifest> {
-    match embedded_section(bytes, MANIFEST_SECTION)? {
-        Some(data) => serde_json::from_slice(&data).context(
-            "the tembra:manifest section is not a JSON object of hook roles and service policies",
-        ),
-        None => Ok(EmbeddedManifest::default()),
-    }
-}
-
 /// A custom section of the component's core module, by name.
 fn embedded_section(bytes: &[u8], name: &str) -> Result<Option<Vec<u8>>> {
     for payload in Parser::new(0).parse_all(bytes) {
@@ -242,11 +215,15 @@ fn interface(item: &WorldItem) -> Option<InterfaceId> {
 }
 
 /// The component roles of a contract. A hook interface is one the world both imports and
-/// exports: the ones the component declares, with their composition, are its own hooks; the
-/// others are contributions, with the priority the component carries, or 0. A service policy
-/// names an interface the world exports and no hook. A role or policy the component names for
-/// any other interface is an error.
-pub fn roles(contract: &Contract, embedded: &EmbeddedManifest) -> Result<ComponentRoles> {
+/// exports: the component's manifest says which it declares, with their composition, which it
+/// contributes to, with their priorities, and which of its services chose a lifetime or a linger,
+/// as `Contract::embedded_roles` reads and checks them. Every other hook interface is a
+/// contribution at priority 0, as for a component built without the macro, which carries no
+/// manifest.
+pub fn roles(contract: &Contract, component: &[u8]) -> Result<ComponentRoles> {
+    let mut roles = contract
+        .embedded_roles(component)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     let model = contract.prepared().model();
     let identities = |entries: &[tembra_contracts::Entry]| -> BTreeSet<String> {
         entries
@@ -258,39 +235,12 @@ pub fn roles(contract: &Contract, embedded: &EmbeddedManifest) -> Result<Compone
             .collect()
     };
     let exported = identities(&model.exports);
-    let paired: BTreeSet<String> = identities(&model.imports)
-        .into_iter()
-        .filter(|id| exported.contains(id))
-        .collect();
-    for id in embedded.declares.keys() {
-        if !paired.contains(id) {
-            bail!("#[hook] declares {id}, but the contract does not import and export it");
+    for id in identities(&model.imports) {
+        if exported.contains(&id) && !roles.hooks.contains_key(&id) {
+            roles.contributions.entry(id).or_insert(0);
         }
     }
-    let mut contributions: BTreeMap<String, i32> = paired
-        .iter()
-        .filter(|id| !embedded.declares.contains_key(*id))
-        .map(|id| (id.clone(), 0))
-        .collect();
-    for (id, priority) in &embedded.contributes {
-        let slot = contributions.get_mut(id).with_context(|| {
-            format!("#[hook] contributes to {id}, but the contract does not import and export it as a contribution")
-        })?;
-        *slot = *priority;
-    }
-    for id in embedded.services.keys() {
-        if !exported.contains(id) || paired.contains(id) {
-            bail!(
-                "#[service] names a lifetime for {id}, but the contract does not export it as a service"
-            );
-        }
-    }
-    Ok(ComponentRoles {
-        contributions,
-        hooks: embedded.declares.clone(),
-        services: embedded.services.clone(),
-        ..Default::default()
-    })
+    Ok(roles)
 }
 
 /// `cargo tembra inspect`: core import sections, the summary and, against a WIT, the verdict.
@@ -342,7 +292,7 @@ pub fn inspect(
         None => None,
     };
     let roles = match &contract {
-        Some((contract, ..)) => self::roles(contract, &embedded_manifest(&bytes)?)?,
+        Some((contract, ..)) => self::roles(contract, &bytes)?,
         None => ComponentRoles::default(),
     };
     summary(&resolve, world, "orb", &roles);

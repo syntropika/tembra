@@ -277,6 +277,18 @@ impl Contract {
         );
         Ok(bytes)
     }
+
+    /// The roles a component built with `#[orb]` carries in its
+    /// [`EmbeddedManifest`](crate::EmbeddedManifest), checked against this world: the hooks it
+    /// declares, with their composition, the hooks it contributes to, with their priorities, and
+    /// the lifetimes and lingers of its services. A component without a manifest carries none;
+    /// reference views are never embedded.
+    ///
+    /// Every tool packaging such a component passes these roles to [`Self::component_artifact`],
+    /// so the artifact keeps what the module declared whichever tool packaged it.
+    pub fn embedded_roles(&self, component: &[u8]) -> Result<ComponentRoles, Error> {
+        crate::embedded::roles(&self.prepared, component)
+    }
 }
 
 /// Require exact exports and check every retained executable import against its declared signature.

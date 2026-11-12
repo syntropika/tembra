@@ -4,7 +4,11 @@ export interface BuildTarget {
   world?: string;
   /** Compiled components receive their identity from this target's name and API version. */
   apiVersion?: number;
-  /** Compiled callback interfaces contributing to their selected Orb's hook, with execution priority. */
+  /**
+   * Compiled callback interfaces contributing to their selected Orb's hook, with execution
+   * priority, next to those a component built with `#[orb]` carries; a hook named by both must
+   * have the same priority.
+   */
   contributes?: Readonly<Record<string, number>>;
   /**
    * Compiled reference-view imports, by import binding, mapped to the provider interface identity

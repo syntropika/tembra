@@ -61,7 +61,9 @@ The name and the API version live here because the WIT does not carry them: they
 arguments `Contract::component_artifact` takes; another is its `ComponentRoles`. Hook interfaces are
 read from the contract, the interfaces its world both imports and exports; the component says
 which it declares and which it contributes to, with composition and priority, and which of its
-services chose a lifetime.
+services chose a lifetime. `build` reads these roles with `Contract::embedded_roles` of
+`tembra-contracts`, as the SDK's `build()` does for a `.wasm` entry, so the component carries the
+same roles whichever tool packages it.
 
 ## Build outputs
 

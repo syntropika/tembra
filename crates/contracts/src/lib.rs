@@ -8,6 +8,8 @@ mod artifact;
 mod authoring;
 mod codec;
 mod describe;
+#[cfg(feature = "authoring")]
+mod embedded;
 pub mod guest;
 mod hooks;
 mod implementation;
@@ -34,6 +36,8 @@ pub use artifact::{
 };
 #[cfg(feature = "authoring")]
 pub use authoring::Contract;
+#[cfg(feature = "authoring")]
+pub use embedded::EmbeddedManifest;
 pub use hooks::{ContributionBinding, HookBinding, HookComposition, HookPlan};
 pub use implementation::{
     Implementation, IngressBinding, Lifetime, ServiceBinding, ServiceImplementation,

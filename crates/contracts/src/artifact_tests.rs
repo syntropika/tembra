@@ -8,6 +8,12 @@ fn contract(source: &str) -> Contract {
 }
 
 fn component(contract: &Contract) -> Vec<u8> {
+    component_carrying(contract, &[])
+}
+
+/// A component of the contract's world whose core module carries the given custom sections, as
+/// the component linker keeps those of the compiled code.
+fn component_carrying(contract: &Contract, sections: &[(&str, &[u8])]) -> Vec<u8> {
     let mut module = wit_component::dummy_module(
         &contract.resolve,
         contract.world,
@@ -21,6 +27,9 @@ fn component(contract: &Contract) -> Vec<u8> {
         false,
     )
     .unwrap();
+    for (name, data) in sections {
+        append(&mut module, name, data);
+    }
     wit_component::ComponentEncoder::default()
         .module(&module)
         .unwrap()
@@ -300,6 +309,151 @@ fn compiled_service_policies_travel_in_the_artifact_and_are_checked() {
     );
     crate::artifact::append_section(&mut source, "tembra:source", b"globalThis.__tembraOrb={}");
     assert!(Artifact::decode(&source).is_err());
+}
+
+/// A world declaring a hook, contributing to another and offering a service, as `#[orb]` derives
+/// one; its manifest names the three roles.
+const EMBEDDED: &str = "package test:embedded@1.0.0; interface guard { apply: func(value: u32) -> u32; } interface audit { observe: func(value: u32); } interface ledger { count: func() -> u32; } world book { import guard; export guard; import audit; export audit; export ledger; }";
+
+/// The manifest `#[orb]` writes into its component's core module.
+fn manifest(json: &str) -> Vec<u8> {
+    let contract = Contract::from_source("embedded.wit", EMBEDDED, Some("book")).unwrap();
+    component_carrying(&contract, &[("tembra:manifest", json.as_bytes())])
+}
+
+/// The roles a component built with `#[orb]` carries are read from the custom section of its core
+/// module, checked against the contract and packaged as they are; a component without the section
+/// carries none.
+#[test]
+fn roles_embedded_in_the_core_module_are_read_and_packaged() {
+    let contract = Contract::from_source("embedded.wit", EMBEDDED, Some("book")).unwrap();
+    let component = manifest(
+        r#"{"contributes":{"test:embedded/audit@1.0.0":-3},"declares":{"test:embedded/guard@1.0.0":"waterfall"},"services":{"test:embedded/ledger@1.0.0":{"lifetime":"host","linger_ms":0}},"wit":"../wit"}"#,
+    );
+    let host = ServicePolicy {
+        lifetime: Lifetime::Host,
+        linger_ms: 0,
+    };
+    assert_eq!(
+        EmbeddedManifest::read(&component).unwrap(),
+        EmbeddedManifest {
+            contributes: [("test:embedded/audit@1.0.0".into(), -3)].into(),
+            declares: [(
+                "test:embedded/guard@1.0.0".into(),
+                HookComposition::Waterfall
+            )]
+            .into(),
+            services: [("test:embedded/ledger@1.0.0".into(), host)].into(),
+            wit: Some("../wit".into()),
+        }
+    );
+    let roles = contract.embedded_roles(&component).unwrap();
+    assert_eq!(
+        roles,
+        ComponentRoles {
+            contributions: [("test:embedded/audit@1.0.0".into(), -3)].into(),
+            references: BTreeMap::new(),
+            hooks: [(
+                "test:embedded/guard@1.0.0".into(),
+                HookComposition::Waterfall
+            )]
+            .into(),
+            services: [("test:embedded/ledger@1.0.0".into(), host)].into(),
+        }
+    );
+    let decoded = Artifact::decode(
+        &contract
+            .component_artifact(&component, "book", 1, &roles)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded.contributions, roles.contributions);
+    assert_eq!(decoded.hooks, roles.hooks);
+    assert_eq!(decoded.services, roles.services);
+    // A component built without the macro carries no manifest and no roles.
+    let plain = component_carrying(&contract, &[]);
+    assert_eq!(
+        EmbeddedManifest::read(&plain).unwrap(),
+        EmbeddedManifest::default()
+    );
+    assert_eq!(
+        contract.embedded_roles(&plain).unwrap(),
+        ComponentRoles::default()
+    );
+}
+
+/// A manifest naming a role the contract does not offer, or that is no manifest at all, is
+/// refused before any packaging.
+#[test]
+fn embedded_roles_the_contract_does_not_offer_are_refused() {
+    let contract = Contract::from_source("embedded.wit", EMBEDDED, Some("book")).unwrap();
+    for (json, refusal) in [
+        (
+            r#"{"declares":{"test:embedded/ledger@1.0.0":"series"}}"#,
+            "#[hook] declares test:embedded/ledger@1.0.0, but the contract does not import and export it",
+        ),
+        (
+            r#"{"declares":{"test:embedded/guard@1.0.0":"waterfall"},"contributes":{"test:embedded/guard@1.0.0":1}}"#,
+            "#[hook] contributes to test:embedded/guard@1.0.0, but the contract does not import and export it as a contribution",
+        ),
+        (
+            r#"{"contributes":{"test:embedded/missing@1.0.0":1}}"#,
+            "#[hook] contributes to test:embedded/missing@1.0.0, but the contract does not import and export it as a contribution",
+        ),
+        (
+            r#"{"services":{"test:embedded/guard@1.0.0":{"lifetime":"host"}}}"#,
+            "#[service] names a lifetime for test:embedded/guard@1.0.0, but the contract does not export it as a service",
+        ),
+        (
+            r#"{"services":{"test:embedded/missing@1.0.0":{"linger_ms":10}}}"#,
+            "#[service] names a lifetime for test:embedded/missing@1.0.0, but the contract does not export it as a service",
+        ),
+    ] {
+        assert_eq!(
+            contract.embedded_roles(&manifest(json)).unwrap_err().0,
+            refusal
+        );
+    }
+    for malformed in [r#"{"priorities":{}}"#, r#""waterfall""#, "{"] {
+        let error = contract.embedded_roles(&manifest(malformed)).unwrap_err();
+        assert!(
+            error
+                .0
+                .starts_with("the tembra:manifest section is not a JSON object"),
+            "{error}"
+        );
+    }
+}
+
+/// The manifest is the section of the first core module holding one, in the order of the binary,
+/// the modules of nested components included; a core module is no component.
+#[test]
+fn the_manifest_is_read_from_the_first_core_module_holding_one() {
+    let module = |manifest: Option<&str>| {
+        let mut module = wasm_encoder::Module::new();
+        if let Some(manifest) = manifest {
+            module.section(&CustomSection {
+                name: Cow::Borrowed("tembra:manifest"),
+                data: Cow::Borrowed(manifest.as_bytes()),
+            });
+        }
+        module
+    };
+    let mut nested = wasm_encoder::Component::new();
+    nested.section(&wasm_encoder::ModuleSection(&module(Some(
+        r#"{"wit":"nested"}"#,
+    ))));
+    let mut component = wasm_encoder::Component::new();
+    component.section(&wasm_encoder::ModuleSection(&module(None)));
+    component.section(&wasm_encoder::NestedComponentSection(&nested));
+    component.section(&wasm_encoder::ModuleSection(&module(Some(
+        r#"{"wit":"later"}"#,
+    ))));
+    assert_eq!(
+        EmbeddedManifest::read(&component.finish()).unwrap().wit,
+        Some("nested".into())
+    );
+    assert!(EmbeddedManifest::read(&module(Some("{}")).finish()).is_err());
 }
 
 #[test]

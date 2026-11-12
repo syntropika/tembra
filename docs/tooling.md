@@ -133,8 +133,13 @@ available. The orb receives filesystem and network access only through granted W
 ## Compiled orbs
 
 A `.wasm` entry is a compiled WebAssembly component. `build()` checks its exports against the
-selected world, including imports, and packages it with the contract. The component carries no Tembra metadata, so
-the build name becomes the orb name and the target must supply `apiVersion`.
+selected world, including imports, and packages it with the contract. The component carries no
+installation identity, so the build name becomes the orb name and the target must supply
+`apiVersion`. A Rust component written with `#[orb]` carries its roles in its core module: the
+hooks it declares, the hooks it contributes to, with their priorities, and its services'
+lifetimes. `build()` packages them as the component carries them, together with the target's
+`contributes` and `references`; a hook named both by the component and by `contributes` must have
+the same priority.
 
 ### Prepare a compiled Orb for browsers
 

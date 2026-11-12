@@ -1,5 +1,5 @@
 //! `cargo tembra build`: compile, derive the WIT, verify, package, summarize.
-use crate::component::{contract_text, decode, embedded_manifest, summary};
+use crate::component::{contract_text, decode, summary};
 use anyhow::{Context, Result, bail};
 use heck::ToKebabCase;
 use sha2::{Digest, Sha256};
@@ -126,8 +126,10 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     //    derived from its types, written to contract/<world>.wit. Not wit/: wit-bindgen loads a
     //    directory of that name on its own and finds the package twice. The packages the module
     //    consumes are nested whole from the directory the macro named.
-    let embedded = embedded_manifest(&component)?;
-    let consumed = embedded.wit.as_ref().map(|dir| manifest_dir.join(dir));
+    let consumed = tembra_contracts::EmbeddedManifest::read(&component)
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+        .wit
+        .map(|dir| manifest_dir.join(dir));
     let (text, world) = contract_text(&component, &resolve, world_id, &world, consumed.as_deref())?;
     let wit_dir = manifest_dir.join("contract");
     let wit_file = wit_dir.join(format!("{world}.wit"));
@@ -159,7 +161,7 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     //    with what composition, and which are contributions, with what priority, travels in the
     //    component with the lifetime each service chose: the macro writes them from the #[hook]
     //    and #[service] attributes.
-    let roles = crate::component::roles(&contract, &embedded)?;
+    let roles = crate::component::roles(&contract, &component)?;
     let artifact = contract
         .component_artifact(&component, &orb_name, api_version, &roles)
         .map_err(|error| anyhow::anyhow!("{error}"))

@@ -117,9 +117,13 @@ impl NodeContract {
 
     /// Package a checked component with its WIT-derived roles.
     ///
-    /// `contributes` maps exported hook callbacks to priorities. `references` maps an imported
-    /// reference-view binding to the provider interface identity it addresses; the contract
-    /// checks each view's shape before packaging.
+    /// A component built with `#[orb]` carries roles in its core module: the hooks it declares,
+    /// with their composition, the hooks it contributes to, with their priorities, and the
+    /// lifetimes of its services. They are packaged as the component carries them.
+    /// `contributes` maps exported hook callbacks to priorities, next to the contributions the
+    /// component carries; a hook both name must have the same priority in both. `references` maps
+    /// an imported reference-view binding to the provider interface identity it addresses; the
+    /// contract checks each view's shape before packaging.
     #[napi]
     pub fn component_artifact(
         &self,
@@ -145,13 +149,12 @@ impl NodeContract {
                 Ok((binding, priority as i32))
             })
             .collect::<napi::Result<_>>()?;
-        let roles = tembra_contracts::ComponentRoles {
-            contributions,
-            references: references.unwrap_or_default().into_iter().collect(),
-            ..Default::default()
-        };
-        self.contract
-            .component_artifact(&component, &name, api_version, &roles)
+        let references = references.unwrap_or_default().into_iter().collect();
+        component_roles(&self.contract, &component, contributions, references)
+            .and_then(|roles| {
+                self.contract
+                    .component_artifact(&component, &name, api_version, &roles)
+            })
             .map(Into::into)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
@@ -179,3 +182,31 @@ impl NodeContract {
         self.contract.request(&packet)
     }
 }
+
+/// The roles to package a component with: the ones it carries, as
+/// `Contract::embedded_roles` reads them, with the given contributions and reference views. A
+/// hook the component and the caller both contribute to keeps the priority they agree on; two
+/// different priorities are refused, naming both.
+fn component_roles(
+    contract: &tembra_contracts::Contract,
+    component: &[u8],
+    contributions: std::collections::BTreeMap<String, i32>,
+    references: std::collections::BTreeMap<String, String>,
+) -> Result<tembra_contracts::ComponentRoles, tembra_contracts::Error> {
+    let mut roles = contract.embedded_roles(component)?;
+    for (hook, priority) in contributions {
+        if let Some(embedded) = roles.contributions.get(&hook)
+            && *embedded != priority
+        {
+            return Err(tembra_contracts::Error(format!(
+                "{hook}: the component contributes at priority {embedded}, `contributes` at priority {priority}"
+            )));
+        }
+        roles.contributions.insert(hook, priority);
+    }
+    roles.references = references;
+    Ok(roles)
+}
+
+#[cfg(test)]
+mod tests;
