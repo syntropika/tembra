@@ -531,6 +531,8 @@ pub(crate) struct Callback {
     pub bail: bool,
     pub input: Spelled,
     pub result: Option<Spelled>,
+    /// The import takes the input by reference, as the bindings bind it: `run` passes `&input`.
+    pub borrowed: bool,
 }
 
 /// A WIT type as the generated bindings spell it in the hook's import module and in its export
@@ -818,6 +820,7 @@ pub(crate) fn callbacks<'a>(
                     bail: function.result.is_some_and(|ty| optional(&resolve, ty)),
                     input: spell(param.ty)?,
                     result: function.result.map(spell).transpose()?,
+                    borrowed: borrowed(&resolve, param.ty),
                 },
             ))
         })
@@ -876,6 +879,54 @@ fn same_type(resolve: &Resolve, left: wit_parser::Type, right: wit_parser::Type)
             TypeDefKind::Handle(wit_parser::Handle::Borrow(left)),
             TypeDefKind::Handle(wit_parser::Handle::Borrow(right)),
         ) => same(wit_parser::Type::Id(*left), wit_parser::Type::Id(*right)),
+        _ => false,
+    }
+}
+
+/// What `wit-bindgen` records of a type to choose how an import takes it: whether the type holds a
+/// list or a string, and whether it holds an owned handle, a stream or a future, anywhere.
+fn holds(resolve: &Resolve, ty: wit_parser::Type) -> (bool, bool) {
+    let wit_parser::Type::Id(id) = ty else {
+        return (ty == wit_parser::Type::String, false);
+    };
+    let all = |types: Vec<wit_parser::Type>| {
+        types.into_iter().fold((false, false), |(list, own), ty| {
+            let (inner_list, inner_own) = holds(resolve, ty);
+            (list || inner_list, own || inner_own)
+        })
+    };
+    match &resolve.types[id].kind {
+        TypeDefKind::Record(record) => all(record.fields.iter().map(|field| field.ty).collect()),
+        TypeDefKind::Variant(variant) => {
+            all(variant.cases.iter().filter_map(|case| case.ty).collect())
+        }
+        TypeDefKind::Tuple(tuple) => all(tuple.types.clone()),
+        TypeDefKind::Result(result) => all(result.ok.into_iter().chain(result.err).collect()),
+        TypeDefKind::List(inner) => (true, holds(resolve, *inner).1),
+        TypeDefKind::Map(key, value) => (true, all(vec![*key, *value]).1),
+        TypeDefKind::Option(inner)
+        | TypeDefKind::Type(inner)
+        | TypeDefKind::FixedLengthList(inner, _) => holds(resolve, *inner),
+        TypeDefKind::Handle(wit_parser::Handle::Own(_))
+        | TypeDefKind::Future(_)
+        | TypeDefKind::Stream(_) => (false, true),
+        _ => (false, false),
+    }
+}
+
+/// Whether an imported function takes a parameter of this type by reference, as `wit-bindgen`
+/// binds it by default: a string, a list, or a named type that holds a string or a list and no
+/// owned handle. An anonymous option, result or tuple borrows what it holds one by one, which
+/// `run` does not spell: it passes such an input as it is.
+fn borrowed(resolve: &Resolve, ty: wit_parser::Type) -> bool {
+    let wit_parser::Type::Id(id) = ty else {
+        return ty == wit_parser::Type::String;
+    };
+    let (list, own) = holds(resolve, ty);
+    let definition = &resolve.types[id];
+    match (&definition.name, &definition.kind) {
+        (None, TypeDefKind::List(_)) => !own,
+        (Some(_), _) => list && !own,
         _ => false,
     }
 }

@@ -1680,6 +1680,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     }
     // The hooks: the export the contract requires and `run`, in the declaring module; the
     // conversions between the two sides of the derived hooks' types, once, in the Orb module.
+    let holding = holding_lists(&shapes);
     let defining = declared
         .iter()
         .find(|declaration| declaration.input.is_some())
@@ -1690,6 +1691,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             declaration,
             &callbacks,
             &hook_shapes,
+            &holding,
             defining.as_ref(),
             depth,
         )?;
@@ -2763,6 +2765,7 @@ fn declaration_code(
     declaration: &Declared,
     callbacks: &BTreeMap<String, wit::Callback>,
     hook_shapes: &BTreeSet<String>,
+    holding: &BTreeSet<String>,
     defining: Option<&[Ident; 3]>,
     depth: usize,
 ) -> syn::Result<proc_macro2::TokenStream> {
@@ -2776,14 +2779,19 @@ fn declaration_code(
             declaration,
             input,
             hook_shapes,
+            holding,
             &import_types,
-            &export,
-            &import,
-            &root,
+            depth,
         ));
     }
     let callback = &callbacks[&declaration.hook];
     let name = format_ident!("{}", callback.name.to_snake_case());
+    // The import takes a string, a list or a type holding one by reference.
+    let argument = if callback.borrowed {
+        quote! { &input }
+    } else {
+        quote! { input }
+    };
     let export_input: Type = syn::parse_str(&rooted(&callback.input.export, depth))?;
     let import_input: Type = syn::parse_str(&rooted(&callback.input.import, depth))?;
     let output = |spelling: &str| -> syn::Result<proc_macro2::TokenStream> {
@@ -2816,7 +2824,7 @@ fn declaration_code(
         impl #ident {
             #[doc = #doc]
             pub fn run(input: #import_input) #import_result {
-                #import::#name(input)
+                #import::#name(#argument)
             }
         }
     })
@@ -2830,11 +2838,14 @@ fn derived_hook_code(
     declaration: &Declared,
     input: &Type,
     hook_shapes: &BTreeSet<String>,
+    holding: &BTreeSet<String>,
     import_types: &proc_macro2::TokenStream,
-    export: &proc_macro2::TokenStream,
-    import: &proc_macro2::TokenStream,
-    root: &proc_macro2::TokenStream,
+    depth: usize,
 ) -> proc_macro2::TokenStream {
+    let path = hook_path(&declaration.hook);
+    let root = supers(depth);
+    let export = export_module(depth, &path);
+    let import = import_module(depth, &path);
     let ident = &declaration.ident;
     let import_input = respell(input, hook_shapes, import_types);
     let (result, settle) = match declaration.composition {
@@ -2860,9 +2871,9 @@ fn derived_hook_code(
         declaration.hook
     );
     let converted = convert(input, quote! { input });
-    // A string or a list crosses to an import by reference, as the bindings take them.
-    let by_reference = matches!(input, Type::Path(path)
-        if path.path.segments.last().is_some_and(|segment| segment.ident == "String" || segment.ident == "Vec"));
+    // A string, a list, or a module type that holds one anywhere crosses to an import by
+    // reference, as the bindings take them.
+    let by_reference = holds_list(input, holding);
     let argument = if by_reference {
         quote! { &input }
     } else {
@@ -2886,6 +2897,50 @@ fn derived_hook_code(
                 #body
             }
         }
+    }
+}
+
+/// The module types whose values hold a string or a list anywhere, in their fields or payloads,
+/// directly or through other module types.
+fn holding_lists(shapes: &[Shape]) -> BTreeSet<String> {
+    let mut holding = BTreeSet::new();
+    loop {
+        let known = holding.len();
+        for shape in shapes {
+            let types: Vec<&Type> = match &shape.kind {
+                ShapeKind::Record(fields) => fields.iter().map(|(_, ty)| ty).collect(),
+                ShapeKind::Variant(cases) => {
+                    cases.iter().filter_map(|(_, ty)| ty.as_ref()).collect()
+                }
+                ShapeKind::Enum(_) => Vec::new(),
+            };
+            if types.iter().any(|ty| holds_list(ty, &holding)) {
+                holding.insert(shape.ident.to_string());
+            }
+        }
+        if holding.len() == known {
+            return holding;
+        }
+    }
+}
+
+/// Whether a type of the module holds a string or a list: it is one, its type parameters or its
+/// tuple elements hold one, or it is a module type of `holding`.
+fn holds_list(ty: &Type, holding: &BTreeSet<String>) -> bool {
+    match ty {
+        Type::Path(path) => path.path.segments.last().is_some_and(|segment| {
+            let name = segment.ident.to_string();
+            let arguments = match &segment.arguments {
+                syn::PathArguments::AngleBracketed(arguments) => arguments
+                    .args
+                    .iter()
+                    .any(|argument| matches!(argument, syn::GenericArgument::Type(ty) if holds_list(ty, holding))),
+                _ => false,
+            };
+            name == "String" || name == "Vec" || holding.contains(&name) || arguments
+        }),
+        Type::Tuple(tuple) => tuple.elems.iter().any(|ty| holds_list(ty, holding)),
+        _ => false,
     }
 }
 

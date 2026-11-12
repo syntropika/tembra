@@ -1489,6 +1489,71 @@ fn a_declared_hook_may_name_a_consumed_interface() {
     assert!(error.contains("hooks need wit ="), "{error}");
 }
 
+/// `run` hands the hook's import its input the way the bindings take it: by reference for a
+/// string, a list, or a record or variant that holds one anywhere, by value otherwise; for a hook
+/// derived from the module and for one named from a consumed package alike.
+#[test]
+fn run_borrows_an_input_that_holds_a_string_or_a_list() {
+    let derived = |types: &str| {
+        tokens(&expanded(
+            "example:gate@1.0.0",
+            &GATE.replace(
+                "pub struct Admission { pub value: i32, pub blocked: bool }",
+                types,
+            ),
+        ))
+    };
+    let borrowed = "self :: example :: gate :: guard :: apply (& input)";
+    let owned = "self :: example :: gate :: guard :: apply (input)";
+    for (types, by_reference) in [
+        (
+            "pub struct Admission { pub value: i32, pub blocked: bool }",
+            false,
+        ),
+        (
+            "pub struct Admission { pub value: i32, pub blocked: bool, pub note: String }",
+            true,
+        ),
+        (
+            "pub struct Admission { pub value: i32, pub blocked: bool, pub detail: Option<Detail> }
+            pub struct Detail { pub tags: Vec<u32> }",
+            true,
+        ),
+        (
+            "pub struct Admission { pub value: i32, pub blocked: bool, pub kind: Kind }
+            pub enum Kind { Plain, Named(String) }",
+            true,
+        ),
+    ] {
+        let generated = derived(types);
+        let expected = if by_reference { borrowed } else { owned };
+        assert!(generated.contains(expected), "{types}\n{generated}");
+    }
+    let consumed_run = |name: &str, record: &str| {
+        let dir = consumed(
+            name,
+            &ADMISSION_WIT.replace("record admission { value: s32, blocked: bool }", record),
+        );
+        tokens(
+            &orb_with(options("example:gate@1.0.0", Some(&dir)), SHARED_GATE)
+                .unwrap_or_else(|error| panic!("{error}")),
+        )
+    };
+    let plain = consumed_run("plain", "record admission { value: s32, blocked: bool }");
+    assert!(
+        plain.contains("{ self :: example :: admission :: guard :: apply (input) }"),
+        "{plain}"
+    );
+    let noted = consumed_run(
+        "noted",
+        "record admission { value: s32, blocked: bool, notes: list<string> }",
+    );
+    assert!(
+        noted.contains("{ self :: example :: admission :: guard :: apply (& input) }"),
+        "{noted}"
+    );
+}
+
 /// A waterfall callback returns its input type, through aliases and anonymous types alike, as
 /// the kernel compares them: `type out = admission` returns an admission, `list<u32>` is one
 /// type wherever it is written; another record is not the input type.
