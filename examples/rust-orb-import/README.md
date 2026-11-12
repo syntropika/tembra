@@ -18,7 +18,7 @@ refused, then binds the import to `greeter` and calls the welcomer.
 ## The import
 
 ```rust
-#[tembra_orb_macro::orb(
+#[tembra::orb(
     package = "example:welcomer@1.0.0",
     wit = "../greeter/contract",
     import = "example:greeter/greeting@1.0.0"

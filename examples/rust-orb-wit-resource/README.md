@@ -68,7 +68,7 @@ owner drops the handle the kernel destroys the value, which runs `Drop`, and `dr
 ## The consumer
 
 ```rust
-#[tembra_orb_macro::orb(
+#[tembra::orb(
     package = "example:speller@1.0.0",
     wit = "../text/contract",
     import = "example:text/texts@1.0.0"

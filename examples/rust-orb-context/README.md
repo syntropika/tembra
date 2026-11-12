@@ -17,7 +17,7 @@ different principals with different keys.
 ## The context
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:audit@1.0.0", context)]
+#[tembra::orb(package = "example:audit@1.0.0", context)]
 mod audit {
     impl Auditor {
         /// The call's principal and the address of the object running it; a log record too.

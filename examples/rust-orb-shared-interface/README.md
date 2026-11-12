@@ -17,7 +17,7 @@ installer decides which Orb keeps a book, the contract stays the WIT package.
 ## Implementing instead of deriving
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:keeper@1.0.0", wit = "../wit")]
+#[tembra::orb(package = "example:keeper@1.0.0", wit = "../wit")]
 mod keeper {
     /// Implements `book` of the shared package: every function of the interface.
     #[service("example:ledger/book@1.0.0")]
