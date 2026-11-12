@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+use wit_parser::UnresolvedPackageGroup;
 
 /// `[package.metadata.tembra]`: what the WIT does not carry.
 #[derive(Default, serde::Deserialize)]
@@ -130,12 +131,28 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     let (text, world) = contract_text(&component, &resolve, world_id, &world, consumed.as_deref())?;
     let wit_dir = manifest_dir.join("contract");
     let wit_file = wit_dir.join(format!("{world}.wit"));
+    //    The contract is read on its own, before anything is written: no other file in
+    //    contract/ takes part in it. The world takes the module's name, so renaming the module
+    //    leaves the former contract behind, a file of the same package, which is removed.
+    let contract = tembra_contracts::Contract::from_source(
+        &wit_file.display().to_string(),
+        &text,
+        Some(&world),
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))
+    .with_context(|| format!("reading the contract derived for {}", wit_file.display()))?;
     std::fs::create_dir_all(&wit_dir)?;
-    std::fs::write(&wit_file, text)?;
+    // Removed before the new file is written: where file names ignore case, a former name that
+    // differs only in case is the new file.
+    for former in former_contracts(&wit_dir, &wit_file, &text)? {
+        std::fs::remove_file(&former).with_context(|| format!("removing {}", former.display()))?;
+        eprintln!(
+            "removed {}, the contract of the world's former name",
+            former.display()
+        );
+    }
+    std::fs::write(&wit_file, &text)?;
     println!("contract -> {}", wit_file.display());
-    let contract = tembra_contracts::Contract::from_dir(&wit_dir, Some(&world))
-        .map_err(|error| anyhow::anyhow!("{error}"))
-        .with_context(|| format!("reading the WIT in {}", wit_dir.display()))?;
 
     // 3. Verify and package: the same component_artifact the SDK build uses for a provider.
     //    Hook interfaces are the ones the contract both imports and exports; which are declared,
@@ -219,6 +236,38 @@ fn built_component(messages: impl BufRead, package: &Path) -> Result<Option<Path
         }
     }
     Ok(component)
+}
+
+/// The contracts an earlier build wrote into `dir` under a former name of the world: the `.wit`
+/// files other than `current` whose own package is the one `text` declares. A file declaring
+/// another package, or one that does not parse, is not this tool's output and stays.
+fn former_contracts(dir: &Path, current: &Path, text: &str) -> Result<Vec<PathBuf>> {
+    let package = |path: &Path, source: &str| {
+        UnresolvedPackageGroup::parse(path, source)
+            .ok()
+            .map(|group| group.main.name)
+    };
+    let Some(own) = package(current, text) else {
+        return Ok(Vec::new());
+    };
+    let mut formers = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.file_name() == current.file_name()
+            || path.extension().is_none_or(|extension| extension != "wit")
+            || !path.is_file()
+        {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if package(&path, &source).as_ref() == Some(&own) {
+            formers.push(path);
+        }
+    }
+    formers.sort();
+    Ok(formers)
 }
 
 /// The checksums of a directory after a build, `previous` being the file's former content: one

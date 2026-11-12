@@ -42,6 +42,11 @@ The contract goes to `contract/`, not `wit/`: `wit-bindgen` loads a `wit` direct
 crate on its own, even with an inline WIT, and finding the package twice it panics with
 "attempting to re-add package".
 
+`build` reads the contract on its own before writing it, so no other file in `contract/` takes
+part in it. The world is named after the Orb's module: when the module is renamed, the `.wit` file
+of the former name, which declares the same package, is removed, and `build` says so on stderr.
+Any other file stays.
+
 ## Manifest metadata
 
 ```toml

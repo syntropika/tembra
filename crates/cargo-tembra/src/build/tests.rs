@@ -1,5 +1,5 @@
 //! The build's reading of its inputs and writing of its outputs, checked without compiling an Orb.
-use super::{build, built_component, merged_checksums};
+use super::{build, built_component, former_contracts, merged_checksums};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -56,6 +56,42 @@ fn the_component_is_the_wasm_file_cargo_built_for_the_package() {
     // A library that is no cdylib is no component, whatever lies in the target directory.
     let rlib = artifact(&package, &["lib"], &["/target/liborb.rlib"]);
     assert_eq!(built_component(rlib.as_bytes(), &package).unwrap(), None);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_former_contract_is_a_wit_file_of_the_same_package() {
+    let dir = scratch("former-contracts");
+    let contract = |package: &str, world: &str| {
+        format!(
+            "package {package};\n\ninterface counter {{\n  add: func(by: s64) -> s64;\n}}\n\n\
+             world {world} {{\n  export counter;\n}}\n"
+        )
+    };
+    let text = contract("example:counter@1.0.0", "ledger");
+    let files = [
+        // The file being written, as an earlier build left it.
+        ("ledger.wit", text.clone()),
+        // The world's former name: the one to remove.
+        ("tally.wit", contract("example:counter@1.0.0", "tally")),
+        // Another package, another version of this one, and this one nested in another.
+        ("other.wit", contract("example:other@1.0.0", "other")),
+        ("next.wit", contract("example:counter@2.0.0", "next")),
+        (
+            "speller.wit",
+            "package example:speller@1.0.0;\n\nworld speller {\n  import example:counter/counter@1.0.0;\n}\n\n\
+             package example:counter@1.0.0 {\n  interface counter {\n    add: func(by: s64) -> s64;\n  }\n}\n"
+                .to_owned(),
+        ),
+        // A file that does not parse, and one that is no .wit file.
+        ("broken.wit", "package example:counter@1.0.0;\n\nworld {\n".to_owned()),
+        ("notes.txt", contract("example:counter@1.0.0", "notes")),
+    ];
+    for (name, content) in &files {
+        std::fs::write(dir.join(name), content).unwrap();
+    }
+    let formers = former_contracts(&dir, &dir.join("ledger.wit"), &text).unwrap();
+    assert_eq!(formers, [dir.join("tally.wit")]);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
