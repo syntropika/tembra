@@ -9,12 +9,11 @@ extern crate alloc;
 mod keeper {
     use alloc::vec::Vec;
 
-    /// The entries of one book object, kept by the kernel. The macro does not place a consumed
-    /// package's record in a state, so an entry is copied into a record of this module.
+    /// The entries of one book object, kept by the kernel: the shared package's own records,
+    /// which the bindings give `serde`'s derives in an Orb with a state.
     #[state]
     pub struct Entries {
-        pub labels: Vec<alloc::string::String>,
-        pub amounts: Vec<i64>,
+        pub entries: Vec<book::Entry>,
     }
 
     /// Implements `book` of the shared package: every function of the interface, with the types
@@ -25,27 +24,23 @@ mod keeper {
     impl Keeper {
         /// Add an entry and return how many entries the book holds.
         pub fn add(entry: book::Entry) -> u32 {
-            let entries = Entries::update(|entries| {
-                entries.labels.push(entry.label.clone());
-                entries.amounts.push(entry.amount);
-            });
-            entries.amounts.len() as u32
+            Entries::update(|entries| entries.entries.push(entry))
+                .entries
+                .len() as u32
         }
 
         /// The sum of every amount.
         pub fn total() -> i64 {
-            Entries::read().amounts.iter().sum()
+            Entries::read()
+                .entries
+                .iter()
+                .map(|entry| entry.amount)
+                .sum()
         }
 
         /// The entries, in the order they were added.
         pub fn entries() -> Vec<book::Entry> {
-            let entries = Entries::read();
-            entries
-                .labels
-                .into_iter()
-                .zip(entries.amounts)
-                .map(|(label, amount)| book::Entry { label, amount })
-                .collect()
+            Entries::read().entries
         }
     }
 }
