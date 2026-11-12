@@ -2436,12 +2436,67 @@ fn reachable(
     let mut shapes = Vec::new();
     for (index, (item, shape)) in candidates.into_iter().enumerate() {
         if kept.contains(&index) {
+            replaceable(&item)?;
             shapes.push(shape);
         } else {
             unreached.push((item, shape));
         }
     }
     Ok(shapes)
+}
+
+/// Refuse what a type that enters the WIT carries but the generated type replacing it would drop
+/// without a word: an explicit discriminant, which a WIT enum has no room for, and a
+/// `#[serde(..)]` attribute, which the generated type cannot carry, so a state's JSON would
+/// silently change shape.
+fn replaceable(item: &Item) -> syn::Result<()> {
+    let (ident, attrs, fields): (&Ident, Vec<&Attribute>, Vec<&syn::Field>) = match item {
+        Item::Struct(item) => (
+            &item.ident,
+            item.attrs.iter().collect(),
+            item.fields.iter().collect(),
+        ),
+        Item::Enum(item) => {
+            for variant in &item.variants {
+                if let Some((_, discriminant)) = &variant.discriminant {
+                    return Err(syn::Error::new(
+                        discriminant.span(),
+                        format!(
+                            "`{0}::{1} = {2}`: `{0}` enters the WIT, whose enums have no explicit discriminants, and the generated type replaces this one; remove the discriminant, or keep `{0}` out of the WIT",
+                            item.ident,
+                            variant.ident,
+                            quote!(#discriminant)
+                        ),
+                    ));
+                }
+            }
+            let attrs = item
+                .attrs
+                .iter()
+                .chain(item.variants.iter().flat_map(|variant| &variant.attrs))
+                .collect();
+            let fields = item
+                .variants
+                .iter()
+                .flat_map(|variant| &variant.fields)
+                .collect();
+            (&item.ident, attrs, fields)
+        }
+        _ => return Ok(()),
+    };
+    let serde = attrs
+        .into_iter()
+        .chain(fields.into_iter().flat_map(|field| &field.attrs))
+        .find(|attribute| attribute.path().is_ident("serde"));
+    if let Some(attribute) = serde {
+        return Err(syn::Error::new(
+            attribute.span(),
+            format!(
+                "`{ident}` enters the WIT and the generated type replaces it, which cannot carry `#[serde(..)]`: a state would change its JSON without a word; remove the attribute, or keep `{ident}` out of the WIT"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The types, among those that stay out of the WIT, that serde serializes: each state that stays

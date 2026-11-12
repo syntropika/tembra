@@ -564,6 +564,8 @@ The crate must list `wit-bindgen` (features `macros` and `realloc`) and `dlmallo
   of a consumed package is not a state; a state copies it into a record of the module.
 - Replacing the author's types drops their `#[derive]`s: a state that enters the WIT starts from
   the macro's field-by-field `Default` or from an `impl Default` the author writes, never from a
-  derive.
+  derive. What the replacement would drop without a word is refused: an explicit discriminant,
+  which a WIT enum has no room for, and a `#[serde(..)]` attribute, which would change a state's
+  JSON, are compile errors on a type that enters the WIT.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.

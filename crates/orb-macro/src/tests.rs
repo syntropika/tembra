@@ -1084,6 +1084,55 @@ fn the_types_a_state_out_of_the_wit_reaches_get_serde_derives() {
     );
 }
 
+/// A type that enters the WIT is replaced by the generated one, which has no room for an explicit
+/// discriminant and cannot carry `#[serde(..)]`: both are refused there, on the item, its fields
+/// or its variants, and kept on a type that stays out of the WIT, which the macro leaves as written.
+#[test]
+fn what_a_replaced_type_would_drop_is_refused() {
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod ledger {{
+                {types}
+                #[service]
+                pub struct Desk;
+                impl Desk {{ pub fn get() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    let priority = "pub enum Priority { Low = 10, High = 90 }";
+    let error = refused("example:ledger@1.0.0", &module(priority, "Priority"));
+    assert!(
+        error.contains("`Priority::Low = 10`: `Priority` enters the WIT, whose enums have no explicit discriminants"),
+        "{error}"
+    );
+    expanded("example:ledger@1.0.0", &module(priority, "u32"));
+    for (types, returned) in [
+        (
+            "#[serde(rename_all = \"camelCase\")] pub struct Entry { pub total_amount: i64 }",
+            "Entry",
+        ),
+        (
+            "pub struct Entry { #[serde(rename = \"t\")] pub total: i64 }",
+            "Entry",
+        ),
+        (
+            "pub enum Kind { #[serde(rename = \"p\")] Plain, Weighted(u32) }",
+            "Vec<Kind>",
+        ),
+        (
+            "#[state] #[serde(deny_unknown_fields)] pub struct Entry { pub total: i64 }",
+            "Entry",
+        ),
+    ] {
+        let error = refused("example:ledger@1.0.0", &module(types, returned));
+        assert!(
+            error.contains("enters the WIT and the generated type replaces it, which cannot carry `#[serde(..)]`"),
+            "{types}: {error}"
+        );
+        expanded("example:ledger@1.0.0", &module(types, "u32"));
+    }
+}
+
 /// A state starts from its `Default`: the macro implements it field by field unless the author
 /// gives it, by an `impl Default` anywhere in the Orb module or by a derive on a state the macro
 /// keeps, out of the WIT; the serde derives the author already wrote are not added again.
