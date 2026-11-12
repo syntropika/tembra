@@ -3,7 +3,7 @@
 //! command; the WIT, the component checks, the artifact and the grant summary follow.
 //!
 //! ```text
-//! cargo tembra new <name> --package ns:name@1.0.0
+//! cargo tembra new <name> --package ns:name@1.0.0 [--tembra <root>]
 //! cargo tembra build [--debug] [--manifest-path <Cargo.toml>] [--out <dir>]
 //! cargo tembra wit <component.wasm> [--emit <dir> --world <name>]
 //! cargo tembra inspect <component.wasm> [--wit <dir> --world <name>]
@@ -33,7 +33,9 @@ enum Command {
         /// WIT package identity, for example example:greeter@1.0.0.
         #[arg(long)]
         package: String,
-        /// Root of the tembra checkout; by default found by walking up from the current directory.
+        /// Root of a tembra checkout to depend on by path. By default the checkout above the
+        /// current directory or, outside one, the repository at the commit cargo-tembra was built
+        /// from.
         #[arg(long)]
         tembra: Option<PathBuf>,
     },

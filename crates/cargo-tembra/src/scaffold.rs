@@ -1,48 +1,106 @@
-//! `cargo tembra new`: an Orb crate using the public facade inside this checkout.
+//! `cargo tembra new`: an Orb crate using the public facade, from a tembra checkout or from the
+//! repository at the commit this cargo-tembra was built from.
 use anyhow::{Context, Result, bail};
 use heck::ToSnakeCase;
-use std::path::PathBuf;
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
+
+/// The repository a crate outside a checkout takes the facade from: this package's own.
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// The commit of that repository this cargo-tembra was built from, which the build script reads
+/// with git; empty for a build without git or outside a git checkout.
+const BUILT_FROM: &str = env!("TEMBRA_COMMIT");
+
+/// Where the new crate takes the `tembra` facade from.
+#[derive(Debug, PartialEq)]
+enum Facade {
+    /// The facade crate of a checkout on this machine, `<root>/crates/tembra`.
+    Path(String),
+    /// The facade in a git repository, at one commit.
+    Git { repository: String, rev: String },
+}
+
+impl fmt::Display for Facade {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Facade::Path(path) => formatter.write_str(path),
+            Facade::Git { repository, rev } => write!(formatter, "{repository} at {rev}"),
+        }
+    }
+}
 
 /// Write the crate skeleton: a manifest with `[package.metadata.tembra]` and one module.
 pub fn new(name: &str, package: &str, tembra: Option<PathBuf>) -> Result<()> {
-    let root = match tembra {
-        Some(path) => path,
-        None => repository_root()
-            .context("no tembra checkout above the current directory; pass --tembra <path>")?,
-    };
-    let root = without_verbatim_prefix(root.canonicalize()?);
+    let checkout = std::env::current_dir()
+        .ok()
+        .and_then(|current| checkout_above(&current));
+    let commit = Some(BUILT_FROM).filter(|commit| !commit.is_empty());
+    let facade = facade(tembra, checkout, commit)?;
     if !package.contains(':') || !package.contains('@') {
         bail!("--package must be ns:name@version, for example example:{name}@1.0.0");
     }
-    let facade_crate = root.join("crates").join("tembra");
-    let facade_path = facade_crate.to_str().with_context(|| {
-        format!(
-            "{} is not valid UTF-8, which a Cargo.toml cannot hold",
-            facade_crate.display()
-        )
-    })?;
     let directory = PathBuf::from(name);
     if directory.exists() {
         bail!("{} already exists", directory.display());
     }
     std::fs::create_dir_all(directory.join("src"))?;
     std::fs::write(directory.join(".gitignore"), "target/\nartifacts/\n")?;
-    std::fs::write(directory.join("Cargo.toml"), manifest(name, facade_path))?;
+    std::fs::write(directory.join("Cargo.toml"), manifest(name, &facade))?;
     std::fs::write(directory.join("src").join("lib.rs"), library(name, package))?;
-    println!("created {}/", directory.display());
+    println!("created {}/ with tembra from {facade}", directory.display());
     println!("  cd {} && cargo tembra build", directory.display());
     Ok(())
 }
 
-/// The checkout holding the facade crate, found from the current directory.
-fn repository_root() -> Option<PathBuf> {
-    let mut current = std::env::current_dir().ok()?;
-    loop {
-        if current.join("crates/tembra/Cargo.toml").is_file() {
-            return Some(current);
+/// The facade the new crate depends on. By path: the checkout `--tembra` names, else the one
+/// above the current directory. Outside a checkout, through git: the repository at the commit
+/// this cargo-tembra was built from, so that the macro the crate compiles with writes the
+/// contract and manifest this CLI reads. A cargo-tembra built without git or outside a git
+/// checkout knows no commit, and asks for a checkout rather than depend on whatever the default
+/// branch holds.
+fn facade(
+    tembra: Option<PathBuf>,
+    checkout: Option<PathBuf>,
+    commit: Option<&str>,
+) -> Result<Facade> {
+    match (tembra.or(checkout), commit) {
+        (Some(root), _) => {
+            let canonical = root
+                .canonicalize()
+                .with_context(|| format!("cannot read {}", root.display()))?;
+            let facade_crate = without_verbatim_prefix(canonical)
+                .join("crates")
+                .join("tembra");
+            let path = facade_crate.to_str().with_context(|| {
+                format!(
+                    "{} is not valid UTF-8, which a Cargo.toml cannot hold",
+                    facade_crate.display()
+                )
+            })?;
+            Ok(Facade::Path(path.to_owned()))
         }
-        current = current.parent()?.to_path_buf();
+        (None, Some(rev)) => Ok(Facade::Git {
+            repository: REPOSITORY.to_owned(),
+            rev: rev.to_owned(),
+        }),
+        (None, None) => bail!(
+            "no tembra checkout above the current directory, and this cargo-tembra was built \
+             without git or outside a git checkout, so it knows no commit of {REPOSITORY} to \
+             depend on; pass --tembra <path>"
+        ),
     }
+}
+
+/// The tembra checkout `directory` lies in: the nearest directory, going up from it, that holds
+/// the facade crate.
+fn checkout_above(directory: &Path) -> Option<PathBuf> {
+    directory
+        .ancestors()
+        .find(|ancestor| ancestor.join("crates/tembra/Cargo.toml").is_file())
+        .map(Path::to_path_buf)
 }
 
 /// The path `canonicalize` returned, without the verbatim prefix it gives a drive path on
@@ -60,10 +118,23 @@ fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
     drive.unwrap_or(path)
 }
 
-/// The crate's manifest. The facade's path is written as a TOML string, escaped as TOML requires:
-/// the path of a checkout may hold quotes and backslashes.
-fn manifest(name: &str, facade_path: &str) -> String {
-    let facade_path = toml::Value::String(facade_path.to_owned());
+/// The comment above a git dependency on the facade: why it stays at one commit.
+const PINNED: &str = "\
+# The commit cargo-tembra was built from, so that the macro matches the CLI that packages
+# the Orb; move it along with cargo-tembra.
+";
+
+/// The crate's manifest. The facade's path, repository and commit are written as TOML strings,
+/// escaped as TOML requires: the path of a checkout may hold quotes and backslashes.
+fn manifest(name: &str, facade: &Facade) -> String {
+    let string = |text: &str| toml::Value::String(text.to_owned());
+    let (comment, source) = match facade {
+        Facade::Path(path) => ("", format!("path = {}", string(path))),
+        Facade::Git { repository, rev } => (
+            PINNED,
+            format!("git = {}, rev = {}", string(repository), string(rev)),
+        ),
+    };
     format!(
         r#"[package]
 name = "{name}"
@@ -82,7 +153,7 @@ name = "{name}"
 api-version = 1
 
 [dependencies]
-tembra = {{ path = {facade_path}, default-features = false, features = ["macros"] }}
+{comment}tembra = {{ {source}, default-features = false, features = ["macros"] }}
 # The code generated by the macro names these crates: the first two always, serde for a #[state].
 wit-bindgen = {{ version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }}
 dlmalloc = {{ version = "0.2.12", features = ["global"] }}

@@ -5,6 +5,8 @@ An author writes a module with [`#[orb]`](../orb-macro/README.md) and runs one c
 the component checks, the artifact and the grant summary follow.
 
 ```sh
+cargo install --git https://github.com/syntropika/tembra cargo-tembra --locked
+# or, in a checkout of the repository:
 cargo install --path crates/cargo-tembra
 cargo tembra --help
 ```
@@ -13,14 +15,24 @@ cargo tembra --help
 
 | Command                                                              | Effect                                                                                                                                                                                                                                                                                                     |
 | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cargo tembra new <name> --package ns:name@1.0.0`                    | creates an Orb crate: `Cargo.toml` with `[package.metadata.tembra]`, `src/lib.rs` with an `#[orb]` module and a first method                                                                                                                                                                               |
+| `cargo tembra new <name> --package ns:name@1.0.0 [--tembra <root>]`  | creates an Orb crate: `Cargo.toml` with `[package.metadata.tembra]`, `src/lib.rs` with an `#[orb]` module and a first method; the crate depends on the `tembra` facade by path in a checkout or with `--tembra`, elsewhere through git at the commit `cargo-tembra` was built from                         |
 | `cargo tembra build [--debug] [--out <dir>]`                         | compiles for `wasm32-unknown-unknown` with `wasm-component-ld`, writes the contract to `contract/`, verifies the component against it, packages into `artifacts/`, writes checksums and summarizes services with their lifetime, hooks declared and contributed to, kernel state and resources, and grants |
 | `cargo tembra wit <component.wasm> [--emit <dir> --world <name>]`    | prints the WIT reconstructed from a component, or writes its contract as a `.wit` file                                                                                                                                                                                                                     |
 | `cargo tembra inspect <component.wasm> [--wit <dir> --world <name>]` | core import sections, services and methods, required grants and, against a WIT, hook contributions and the verifier's verdict                                                                                                                                                                              |
 
-`new` finds the tembra checkout by walking up from the current directory, because the created
-crate depends on the public `tembra` facade by path with only its `macros` feature; outside the
-checkout, pass `--tembra <root>`.
+The crate `new` creates depends on the public `tembra` facade with only its `macros` feature. In a
+tembra checkout, found by walking up from the current directory, or in the one `--tembra <root>`
+names, it takes the facade from the checkout's `crates/tembra`, by path. Anywhere else it takes it
+from this repository through git, at the commit this `cargo-tembra` was built from, so that the
+macro the crate compiles with writes the contract and manifest this `cargo-tembra` reads; after
+installing `cargo-tembra` from another commit, move the crate's `rev` along.
+
+The build of `cargo-tembra` reads that commit with git from the sources it compiles: the checkout
+`cargo install --git` builds in keeps its `.git`, as a clone or a worktree does for
+`cargo install --path`. Built without git, or from sources without `.git` such as an archive,
+`cargo-tembra` knows no commit, and `new` outside a checkout asks for `--tembra` rather than
+depend on whatever the default branch holds. A commit the repository does not have, one not
+pushed yet, fails when Cargo fetches it; `--tembra` serves there too.
 
 ## Where the contract comes from
 
@@ -129,8 +141,9 @@ serves the kernel interfaces and the declared hooks itself, as the native execut
 
 ## Not yet
 
-- Registry-based scaffolding instead of a checkout path. The facade already exports the macro;
-  generated bindings still use the explicit `wit-bindgen` and `dlmalloc` dependencies.
+- Registry-based scaffolding instead of a checkout path or a git commit. The facade already
+  exports the macro; generated bindings still use the explicit `wit-bindgen` and `dlmalloc`
+  dependencies.
 - `run --call`, behind an optional feature, to install and call the Orb with the executor.
 - `wasm-opt`, once Binaryen handles components; today it works on core modules only.
 - Reproducible builds in a container, like the optimizer, when a marketplace must trust a hash.
