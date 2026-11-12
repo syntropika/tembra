@@ -1,13 +1,15 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-12, 14:15 CET
+- **Aggiornato:** 2026-11-12, 14:38 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   base `main`
 - **Stato:** strada A. La PR #1 è a `7119fcc`, sopra `main`
   (`7966893`): la seconda review del 12/11 e i suoi fix,
-  più due commit di Javier. Corpo della PR aggiornato. CI su
-  `7119fcc` in corso (run `43224859881` push e `43224872989`
-  pull_request). Vedi «Seconda review (12/11)».
+  più due commit di Javier. Corpo della PR aggiornato. CI
+  verde su `7119fcc` (run `43224859881` push e `43224872989`
+  pull_request, `quality` e `acceptance`): la PR è
+  `MERGEABLE`/`CLEAN`, ancora draft. Vedi «Seconda review
+  (12/11)».
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -84,6 +86,10 @@ Da sapere:
 
 Resta da fare:
 
+- Il merge della PR: dopo l'ok di Javier (il corpo della PR
+  è una proposta per lui) e su richiesta di Giacomo.
+  `gh pr ready 1`, poi `gh pr merge 1 --merge`: un merge
+  commit tiene i 102 commit e gli SHA citati qui e nella PR.
 - #6: interi oltre 2^53 sugli host JS (decisione con Javier:
   JSON con interi a 64 bit come stringhe, o stato tipato).
 - `cargo tembra wit --emit` scrive un solo `.wit`, senza
