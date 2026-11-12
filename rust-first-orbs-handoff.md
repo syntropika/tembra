@@ -1,13 +1,14 @@
 # Rust-first Orbs: resoconto e da fare
 
-- **Aggiornato:** 2026-11-12, 02:24 CET
+- **Aggiornato:** 2026-11-12, 02:59 CET
 - **PR:** https://github.com/syntropika/tembra/pull/1 (draft),
   base `main`
-- **Stato:** strada A. Javier ha portato `main` a `7966893`
-  (le sue correzioni degli stream comprese). Secondo ribase
-  fatto e verificato, in locale: `8dfb26e`, 55 commit sopra
-  `7966893`. Manca il force-push, che lancia Giacomo (vedi
-  «Secondo ribase»). Poi i fix (vedi «Da fare»).
+- **Stato:** strada A. La PR #1 è a `8dfb26e`: 55 commit
+  sopra `main` (`7966893`), ribasati il 12/11 (vedi «Secondo
+  ribase»). CI verde, `quality` e `acceptance`; GitHub la dà
+  `MERGEABLE`/`CLEAN` (è ancora draft). In attesa dell'ok di
+  Giacomo: due commit locali sugli esempi e il corpo della PR
+  aggiornato. Poi i fix (vedi «Da fare»).
 
 Questo file è l'unico contenuto del branch
 `notes/rust-first-orbs` di origin, separato dalla PR. Serve
@@ -110,12 +111,11 @@ come dice «Inizia qui», poi riprendi da
 
 ## In breve
 
-- Dal 12/11: PR #1 è `feat/rust-first-orbs` a `9e4f696`, base
-  `main`. La PR #2 (`feat/rust-first-orbs-browser` a
-  `c18a95a`, l'adapter browser) è mergiata dentro. `main` è a
-  `7966893`, e il ribase su `7966893` (`8dfb26e`) aspetta il
-  force-push. Il resto di questa sezione descrive l'11/11,
-  prima del ribase.
+- Dal 12/11: PR #1 è `feat/rust-first-orbs` a `8dfb26e`, base
+  `main` (`7966893`), CI verde. Contiene la PR #2
+  (`feat/rust-first-orbs-browser` a `c18a95a`, l'adapter
+  browser). Il resto di questa sezione descrive l'11/11, prima
+  del ribase.
 - PR #1 era `feat/rust-first-orbs` a `d1c4e12`: 52 commit
   sopra `b08f386`, con base `feat/wasm-orb-runtime`. La CI era
   rossa.
@@ -445,14 +445,36 @@ Conflitti che il merge testuale non mostra:
   `releaseResource` chiude subito, perché lì niente può
   riacquisire la risorsa.
 
-Il force-push lo lancia Giacomo (comando nella risposta del
-12/11, 02:23 CET):
+Giacomo ha mandato in chat il comando del force-push, e alle
+02:27 CET Claude l'ha lanciato:
 
-```bash
-git push origin \
-  --force-with-lease=feat/rust-first-orbs:9e4f696 \
-  8dfb26e:feat/rust-first-orbs
+```text
++ 9e4f696...8dfb26e 8dfb26e -> feat/rust-first-orbs
+  (forced update)
 ```
+
+- CI su `8dfb26e`: run `43134607159` (pull_request) e
+  `43134599472` (push), entrambe verdi alle 02:58 CET,
+  `quality` e `acceptance`. La PR è `MERGEABLE`/`CLEAN`.
+- I nove esempi (`run.sh`) stampano lo stesso output del
+  primo ribase. Lanciarli riscrive però i `Cargo.lock` dei
+  loro host, perché `main` ha spostato il runtime in
+  `tembra-runtime`.
+- Sul server, nel worktree `.worktrees/pr` (ora sul branch
+  `feat/rust-first-orbs`), due commit locali da pushare con
+  l'ok di Giacomo, con push normale:
+  - `87fb7d4` chore(examples): i nove `Cargo.lock` degli host
+    su `tembra-runtime`;
+  - `727b577` fix(examples): `rust-orb-import/run.sh`
+    eseguibile (fix 10 della lista).
+- Bozza del corpo della PR, da applicare con l'ok di Giacomo:
+  `/home/claude/github/tembra/.worktrees/pr-body-7966893.md`.
+  Cambia l'intro (base `7966893`), aggiunge «What the rebase
+  on `7966893` changed here» e aggiorna «Checks».
+- Il classificatore ha bloccato l'annullamento delle run CI
+  del branch di backup (`43134173504`) e di quella ferma
+  dall'outage (`43095862614`): non servono, ma si possono
+  lasciare.
 
 ### Prima del ribase (`d1c4e12`)
 
