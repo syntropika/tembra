@@ -358,14 +358,22 @@ impl Module {
         let body = quote! { #(#items)* #(#generated)* #(#children)* };
         match &self.ident {
             Some(ident) => {
-                let attrs = &self.attrs;
+                let (outer, inner) = placed(&self.attrs);
                 let vis = &self.vis;
                 let unsafety = &self.unsafety;
-                quote! { #(#attrs)* #vis #unsafety mod #ident { #body } }
+                quote! { #(#outer)* #vis #unsafety mod #ident { #(#inner)* #body } }
             }
             None => body,
         }
     }
+}
+
+/// The attributes of a module, split by where they go: the outer ones before `mod`, the inner
+/// ones, `#![..]` and `//!`, first inside its braces.
+fn placed(attrs: &[Attribute]) -> (Vec<&Attribute>, Vec<&Attribute>) {
+    attrs
+        .iter()
+        .partition(|attribute| matches!(attribute.style, syn::AttrStyle::Outer))
 }
 
 /// What the scan of the Orb module collects, across its sub-modules.
@@ -1363,7 +1371,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // it serves, and the no_std prelude.
     let module_ident = module.ident;
     let vis = module.vis;
-    let attrs = module.attrs;
+    let (outer_attrs, inner_attrs) = placed(&module.attrs);
     let ns_ident = format_ident!("{}", namespace.to_snake_case());
     let name_ident = format_ident!("{}", name.to_snake_case());
     // The generated types carry the author's names and public fields, so the author's functions
@@ -1668,8 +1676,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         });
     };
     Ok(quote! {
-        #(#attrs)*
+        #(#outer_attrs)*
         #vis mod #module_ident {
+            #(#inner_attrs)*
+
             /// The WIT derived from this module.
             pub const WIT: &str = #wit_literal;
 

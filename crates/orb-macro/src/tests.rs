@@ -1015,6 +1015,65 @@ fn sub_modules_are_refused_when_ill_formed() {
     );
 }
 
+/// Inner attributes, `//!` and `#![..]`, of the Orb module and of a sub-module stay first inside
+/// their module's braces; outer ones stay before `mod`.
+#[test]
+fn inner_attributes_stay_inside_their_module() {
+    let module = expanded(
+        PACKAGE,
+        "/// The book.
+        #[allow(unused)]
+        mod book {
+            //! The Orb module's own documentation.
+            #![allow(dead_code)]
+            /// The rules.
+            pub mod rules {
+                //! A sub-module's documentation.
+                #![allow(unused_imports)]
+                pub fn helper() {}
+            }
+            #[service]
+            pub struct Ledger;
+            impl Ledger { pub fn count() -> u32 { 0 } }
+        }",
+    );
+    let styles = |module: &ItemMod| -> Vec<(String, bool)> {
+        module
+            .attrs
+            .iter()
+            .map(|attribute| {
+                let path = attribute.path().get_ident().map(ToString::to_string);
+                let inner = matches!(attribute.style, syn::AttrStyle::Inner(_));
+                (path.unwrap_or_default(), inner)
+            })
+            .collect()
+    };
+    assert_eq!(
+        styles(&module),
+        [
+            ("doc".into(), false),
+            ("allow".into(), false),
+            ("doc".into(), true),
+            ("allow".into(), true)
+        ]
+    );
+    let rules = items(&module)
+        .iter()
+        .find_map(|item| match item {
+            Item::Mod(rules) if rules.ident == "rules" => Some(rules),
+            _ => None,
+        })
+        .expect("the sub-module");
+    assert_eq!(
+        styles(rules),
+        [
+            ("doc".into(), false),
+            ("doc".into(), true),
+            ("allow".into(), true)
+        ]
+    );
+}
+
 /// A contribution in a sub-module names the Orb module's generated modules through `super::`.
 #[test]
 fn a_contribution_in_a_sub_module_names_the_root_through_super() {
