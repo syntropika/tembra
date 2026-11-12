@@ -1,11 +1,12 @@
 //! `cargo tembra build`: compile, derive the WIT, verify, package, summarize.
 use crate::component::{contract_text, decode, embedded_manifest, summary};
 use anyhow::{Context, Result, bail};
-use heck::{ToKebabCase, ToSnakeCase};
+use heck::ToKebabCase;
 use sha2::{Digest, Sha256};
 use std::{
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 /// `[package.metadata.tembra]`: what the WIT does not carry.
@@ -19,6 +20,25 @@ struct Metadata {
     /// The world name of a component without an embedded contract; default: the Orb name in
     /// kebab-case. A component built with the macro names its world itself.
     world: Option<String>,
+}
+
+/// One line of cargo's JSON output, as far as `build` reads it: a `compiler-artifact` message
+/// names the manifest of its package, the kinds of its target and the files it produced.
+#[derive(serde::Deserialize)]
+struct Message {
+    reason: String,
+    #[serde(default)]
+    manifest_path: PathBuf,
+    #[serde(default)]
+    target: Target,
+    #[serde(default)]
+    filenames: Vec<PathBuf>,
+}
+
+/// The target of a compiled artifact; an Orb's library has the kind `cdylib`.
+#[derive(Default, serde::Deserialize)]
+struct Target {
+    kind: Vec<String>,
 }
 
 pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>) -> Result<()> {
@@ -55,8 +75,14 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     let target_dir = manifest_dir.join("target");
     let profile = if release { "release" } else { "debug" };
 
-    // 1. Compile the component on stable: a core module linked by the component linker.
+    // 1. Compile the component on stable: a core module linked by the component linker. Cargo
+    //    reports the files it built as JSON on stdout and still renders the diagnostics on
+    //    stderr. The component is the file cargo names: a name derived from the crate's misses
+    //    a [lib] name, and may find a file an earlier build left.
     println!("compiling {crate_name} for wasm32-unknown-unknown ({profile})");
+    let package = manifest_path
+        .canonicalize()
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
     let mut cargo = Command::new("cargo");
     cargo
         .arg("rustc")
@@ -65,21 +91,31 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .arg("--target")
         .arg("wasm32-unknown-unknown")
         .arg("--target-dir")
-        .arg(&target_dir);
+        .arg(&target_dir)
+        .arg("--message-format=json-render-diagnostics")
+        .stdout(Stdio::piped());
     if release {
         cargo.arg("--release");
     }
     cargo.arg("--").arg("-Clinker=wasm-component-ld");
-    let status = cargo.status().context("cannot run cargo")?;
+    let mut child = cargo.spawn().context("cannot run cargo")?;
+    let messages = child
+        .stdout
+        .take()
+        .context("cannot read the messages of cargo")?;
+    let built = built_component(BufReader::new(messages), &package);
+    let status = child.wait().context("cannot run cargo")?;
+    let built = built?;
     if !status.success() {
         bail!(
             "compilation failed; if the target is missing: rustup target add wasm32-unknown-unknown"
         );
     }
-    let component_path = target_dir
-        .join("wasm32-unknown-unknown")
-        .join(profile)
-        .join(format!("{}.wasm", crate_name.to_snake_case()));
+    let component_path = built.with_context(|| {
+        format!(
+            "cargo built no cdylib for {crate_name}; an Orb's [lib] has crate-type = [\"cdylib\"]"
+        )
+    })?;
     let component = std::fs::read(&component_path)
         .with_context(|| format!("missing {}", component_path.display()))?;
     let (resolve, world_id) = decode(&component)?;
@@ -149,6 +185,34 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     println!("  checksums.txt");
     summary(&resolve, world_id, &orb_name, &roles);
     Ok(())
+}
+
+/// The component cargo built for the package whose canonical manifest is `package`: the `.wasm`
+/// file of the package's `cdylib` target, as cargo's `compiler-artifact` message names it, for a
+/// fresh target too. Lines that are not cargo messages, a procedural macro's prints, go to stdout
+/// as they would without the JSON format.
+fn built_component(messages: impl BufRead, package: &Path) -> Result<Option<PathBuf>> {
+    let mut component = None;
+    for line in messages.lines() {
+        let line = line.context("reading the messages of cargo")?;
+        let Ok(message) = serde_json::from_str::<Message>(&line) else {
+            println!("{line}");
+            continue;
+        };
+        if message.reason == "compiler-artifact"
+            && message.target.kind.iter().any(|kind| kind == "cdylib")
+            && message
+                .manifest_path
+                .canonicalize()
+                .is_ok_and(|manifest| manifest == package)
+        {
+            component = message.filenames.into_iter().find(|file| {
+                file.extension()
+                    .is_some_and(|extension| extension == "wasm")
+            });
+        }
+    }
+    Ok(component)
 }
 
 #[cfg(test)]

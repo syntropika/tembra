@@ -1,6 +1,7 @@
 //! The build's reading of its inputs and writing of its outputs, checked without compiling an Orb.
-use super::build;
-use std::path::PathBuf;
+use super::{build, built_component};
+use serde_json::json;
+use std::path::{Path, PathBuf};
 
 /// An empty directory for one test, under the system's temporary directory.
 fn scratch(name: &str) -> PathBuf {
@@ -8,6 +9,53 @@ fn scratch(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// A `compiler-artifact` message as cargo writes it, for a target of the given kinds.
+fn artifact(manifest: &Path, kinds: &[&str], filenames: &[&str]) -> String {
+    json!({
+        "reason": "compiler-artifact",
+        "package_id": "path+file:///orb#orb@0.1.0",
+        "manifest_path": manifest,
+        "target": {"kind": kinds, "crate_types": kinds, "name": "orb", "src_path": "/orb/src/lib.rs"},
+        "features": [],
+        "filenames": filenames,
+        "executable": null,
+        "fresh": true,
+    })
+    .to_string()
+}
+
+#[test]
+fn the_component_is_the_wasm_file_cargo_built_for_the_package() {
+    let dir = scratch("built-component");
+    let (orb, dependency) = (dir.join("orb"), dir.join("dependency"));
+    for crate_dir in [&orb, &dependency] {
+        std::fs::create_dir_all(crate_dir).unwrap();
+        std::fs::write(crate_dir.join("Cargo.toml"), "").unwrap();
+    }
+    let package = orb.join("Cargo.toml").canonicalize().unwrap();
+    // The library's name is not the package's, and other packages build a cdylib too.
+    let messages = [
+        artifact(
+            &dependency.join("Cargo.toml"),
+            &["cdylib", "rlib"],
+            &["/target/dependency.wasm", "/target/libdependency.rlib"],
+        ),
+        artifact(&package, &["custom-build"], &["/target/build-script-build"]),
+        "a procedural macro's print".to_owned(),
+        artifact(&package, &["cdylib"], &["/target/greeter_orb.wasm"]),
+        json!({"reason": "build-finished", "success": true}).to_string(),
+    ]
+    .join("\n");
+    assert_eq!(
+        built_component(messages.as_bytes(), &package).unwrap(),
+        Some(PathBuf::from("/target/greeter_orb.wasm"))
+    );
+    // A library that is no cdylib is no component, whatever lies in the target directory.
+    let rlib = artifact(&package, &["lib"], &["/target/liborb.rlib"]);
+    assert_eq!(built_component(rlib.as_bytes(), &package).unwrap(), None);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
