@@ -347,7 +347,13 @@ pub fn inspect(
         println!("checked against world {name} of {}:", wit_dir.display());
         match contract.component_artifact(&bytes, "orb", 1, &roles) {
             Ok(artifact) => println!("  ACCEPTED, artifact of {} bytes", artifact.len()),
-            Err(error) => println!("  REFUSED: {error}"),
+            Err(error) => {
+                println!("  REFUSED: {error}");
+                bail!(
+                    "the component does not satisfy world {name} of {}",
+                    wit_dir.display()
+                );
+            }
         }
     }
     Ok(())
@@ -504,3 +510,6 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

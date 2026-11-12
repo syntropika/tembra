@@ -96,3 +96,12 @@ fn main() -> Result<()> {
         } => component::inspect(&component, wit, world),
     }
 }
+
+/// An empty directory for one test, under the system's temporary directory.
+#[cfg(test)]
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("cargo-tembra-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}

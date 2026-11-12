@@ -1,16 +1,9 @@
 //! The build's reading of its inputs and writing of its outputs, checked without compiling an Orb.
 use super::{build, built_component, former_contracts, merged_checksums};
+use crate::scratch;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-
-/// An empty directory for one test, under the system's temporary directory.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("cargo-tembra-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 /// A `compiler-artifact` message as cargo writes it, for a target of the given kinds.
 fn artifact(manifest: &Path, kinds: &[&str], filenames: &[&str]) -> String {
