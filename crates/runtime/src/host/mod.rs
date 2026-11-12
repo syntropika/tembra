@@ -110,6 +110,9 @@ struct Inner {
     openers: RefCell<BTreeMap<core::Id, Opener>>,
     cancellations: RefCell<BTreeMap<core::Id, ResourceSignal>>,
     context_signals: RefCell<BTreeMap<core::Id, std::rc::Weak<resources::CancellationState>>>,
+    /// Logical root completion observed only by acquisitions waiting for an address.
+    /// Kept separate from cancellation: admitted physical work may outlive its root's wait.
+    root_end_signals: RefCell<BTreeMap<core::Id, std::rc::Weak<resources::CancellationState>>>,
     /// Signals of entered invocations, by call, with their root; created when first observed.
     call_signals:
         RefCell<BTreeMap<core::Id, (core::Id, std::rc::Weak<resources::CancellationState>)>>,
@@ -179,6 +182,7 @@ impl Host {
             openers: RefCell::new(BTreeMap::new()),
             cancellations: RefCell::new(BTreeMap::new()),
             context_signals: RefCell::new(BTreeMap::new()),
+            root_end_signals: RefCell::new(BTreeMap::new()),
             call_signals: RefCell::new(BTreeMap::new()),
             errors: RefCell::new(Vec::new()),
             external_actions: Cell::new(false),

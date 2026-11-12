@@ -224,6 +224,22 @@ impl Host {
         signal
     }
 
+    /// Private lifecycle notification for waiting acquisition, never exposed as Context::signal.
+    /// Normal root completion must not cancel admitted or streaming physical work.
+    fn root_end_signal(&self, root: core::Id) -> Cancellation {
+        let mut signals = self.0.root_end_signals.borrow_mut();
+        signals.retain(|_, signal| signal.strong_count() != 0);
+        if let Some(signal) = signals.get(&root).and_then(std::rc::Weak::upgrade) {
+            return Cancellation(signal);
+        }
+        let signal = Cancellation::new("root_end");
+        if self.kernel().check_root(root).is_err() {
+            signal.cancel();
+        }
+        signals.insert(root, Rc::downgrade(&signal.0));
+        signal
+    }
+
     /// Mirror a shared kernel cancellation action into native context signals, and cancel the
     /// stream ends delivered to this root at once.
     pub fn cancel_context(&self, root: core::Id) {
@@ -321,7 +337,6 @@ impl Context {
         options: crate::AcquisitionOptions,
     ) -> Result<Rc<Reference>> {
         let signal = self.signal();
-        let root_signal = self.host.context_signal(self.root);
         loop {
             match self.get(service, key.clone(), options.clone()) {
                 Ok(reference) => return Ok(reference),
@@ -329,6 +344,7 @@ impl Context {
                     let wait = self
                         .host
                         .closing(service, &key, &self.principal()?, error)?;
+                    let root_signal = self.host.root_end_signal(self.root);
                     let cancelled = std::pin::pin!(async {
                         let call = std::pin::pin!(signal.cancelled());
                         let root = std::pin::pin!(root_signal.cancelled());
@@ -375,14 +391,14 @@ impl Host {
     /// Stream ends delivered to the root are closed first, so their producers stop before the
     /// root's claims are revoked; a retained end then refuses every read.
     pub fn end_context(&self, root: core::Id) {
-        if let Some(signal) = self
+        let ended = self
             .0
-            .context_signals
-            .borrow()
-            .get(&root)
-            .and_then(std::rc::Weak::upgrade)
-        {
-            Cancellation(signal).cancel_because("root");
+            .root_end_signals
+            .borrow_mut()
+            .remove(&root)
+            .and_then(|signal| signal.upgrade());
+        if let Some(ended) = ended {
+            Cancellation(ended).cancel();
         }
         for stream in self.root_streams(root, true) {
             stream.end_root();

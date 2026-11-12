@@ -425,3 +425,27 @@ fn normal_root_end_wakes_an_entered_acquisition_without_cancelling_admitted_work
     pool.run_until(closing.host.close()).unwrap();
     assert!(closing.host.errors().is_empty());
 }
+
+#[test]
+fn normal_root_end_preserves_the_retained_root_cancellation_signal() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let (context, signal) = pool
+        .run_until(host.root("personal", |context| {
+            async move {
+                let signal = context.signal();
+                Ok((context, signal))
+            }
+            .boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(
+        context.check().unwrap_err().code,
+        tembra::core::Code::Expired
+    );
+    assert!(
+        !signal.is_cancelled(),
+        "logical root completion must not cancel retained physical work"
+    );
+    pool.run_until(host.close()).unwrap();
+}

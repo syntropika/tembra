@@ -207,12 +207,20 @@ const timings: string[] = [];
 for (const suite of selected) {
   const started = performance.now();
   if (suite === "native") {
+    const macro = path.resolve(root, process.env.CARGO_TARGET_DIR ?? "target", "orb-macro");
+    run("just", ["build-orb-macro", macro]);
     // Acceptance runs both self-contained components and tests requiring these real artifacts.
     run(
       "cargo",
       ["test", "--locked", "-p", "tembra-executor-wasm", "--tests", "--", "--include-ignored"],
       {
         ...environment,
+        TEMBRA_WASM_ORB_MACRO_ASYNC: path.join(
+          macro,
+          "wasm32-unknown-unknown/release/tembra_orb_macro_async_fixture.wasm",
+        ),
+        TEMBRA_WASM_ORB_MACRO_STD: path.join(macro, "std.wasm"),
+        TEMBRA_WASM_ORB_MACRO_NO_STD: path.join(macro, "no-std.wasm"),
         TEMBRA_WASM_SCRATCH: fresh("scratch"),
       },
     );

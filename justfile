@@ -152,11 +152,11 @@ test-orb-examples:
     done
     git diff --exit-code -- examples
 
-# Compile the macro's async and std/no_std guests, then execute their real component boundaries.
-test-orb-macro:
+# Build the macro's async and std/no_std guests into one reusable target directory.
+build-orb-macro target-dir:
     #!/usr/bin/env bash
     set -euo pipefail
-    fixture_target="${CARGO_TARGET_DIR:-target}/orb-macro"
+    fixture_target="$1"
     mkdir -p "$fixture_target"
     fixture_target="$(cd "$fixture_target" && pwd)"
     cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/async-fixture/Cargo.toml --target-dir "$fixture_target" -- -Clinker=wasm-component-ld
@@ -164,6 +164,14 @@ test-orb-macro:
     cp "$fixture_target/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$fixture_target/std.wasm"
     cargo rustc --locked --release --target wasm32-unknown-unknown --manifest-path crates/orb-macro/runtime-fixture/Cargo.toml --target-dir "$fixture_target" --features no-std -- -Clinker=wasm-component-ld
     cp "$fixture_target/wasm32-unknown-unknown/release/tembra_orb_runtime_fixture.wasm" "$fixture_target/no-std.wasm"
+
+# Execute real macro component boundaries; acceptance uses the same fixture builder.
+test-orb-macro:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fixture_target="${CARGO_TARGET_DIR:-target}/orb-macro"
+    just build-orb-macro "$fixture_target"
+    fixture_target="$(cd "$fixture_target" && pwd)"
     TEMBRA_WASM_ORB_MACRO_ASYNC="$fixture_target/wasm32-unknown-unknown/release/tembra_orb_macro_async_fixture.wasm" \
     TEMBRA_WASM_ORB_MACRO_STD="$fixture_target/std.wasm" \
     TEMBRA_WASM_ORB_MACRO_NO_STD="$fixture_target/no-std.wasm" \
