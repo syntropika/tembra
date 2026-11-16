@@ -2514,6 +2514,48 @@ fn what_a_flags_struct_cannot_be_is_refused() {
     );
 }
 
+/// A tuple or unit struct of another module with a flags struct's name is another type: the impls
+/// written for it in its module are its own, not the flags struct's, which the macro completes and
+/// checks as if they were not there.
+#[test]
+fn a_namesake_of_a_flags_struct_in_another_module_keeps_its_impls() {
+    let module = |legacy: &str| {
+        format!(
+            "mod office {{
+                pub mod rights {{
+                    #[flags]
+                    pub struct Access {{ pub read: bool, pub write: bool }}
+                    #[service]
+                    pub struct Guard;
+                    impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                }}
+                pub mod legacy {{
+                    pub struct Access(pub u32);
+                    {legacy}
+                }}
+            }}"
+        )
+    };
+    // A `Clone` of the namesake leaves the flags struct's `Clone` to the macro.
+    let generated = tokens(&expanded(
+        "example:office@1.0.0",
+        &module("impl Clone for Access { fn clone(&self) -> Self { Access(self.0) } }"),
+    ));
+    assert!(
+        generated.contains(
+            "# [derive (:: core :: clone :: Clone , :: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }"
+        ),
+        "{generated}"
+    );
+    // A `BitOr` or a `bits` of the namesake is not the flags struct's.
+    for legacy in [
+        "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { Access(self.0 | other.0) } }",
+        "impl Access { pub fn bits(&self) -> u32 { self.0 } }",
+    ] {
+        expanded("example:office@1.0.0", &module(legacy));
+    }
+}
+
 /// The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
 /// `#[cfg_attr(..)]`: a field, a case or a case's payload under `#[cfg(..)]`, which the WIT would
 /// hold in every configuration, is refused, on a flags as on a record, an enum or a variant, and

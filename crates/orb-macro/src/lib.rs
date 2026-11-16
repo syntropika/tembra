@@ -587,6 +587,10 @@ struct Scan {
     marked: Vec<Marked>,
     /// What each module imports, by scope.
     uses: Vec<Uses>,
+    /// Every type each module declares, with its scope: a struct of any shape, an enum, a type
+    /// alias or a union, candidate for the WIT or not, which tell the type an `impl` names apart
+    /// from a namesake a `use` brings in.
+    types: Vec<(usize, Ident)>,
 }
 
 /// The names a module binds with `use` and `extern crate`, each with the path it stands for, and
@@ -791,6 +795,16 @@ impl Scan {
         let depth = self.modules[scope].len();
         for item in items {
             self.uses[scope].add_item(&item);
+            let declared_type = match &item {
+                Item::Struct(item) => Some(&item.ident),
+                Item::Enum(item) => Some(&item.ident),
+                Item::Type(item) => Some(&item.ident),
+                Item::Union(item) => Some(&item.ident),
+                _ => None,
+            };
+            if let Some(ident) = declared_type {
+                self.types.push((scope, ident.clone()));
+            }
             match item {
                 Item::Mod(module) => {
                     let Some((_, inner)) = module.content else {
@@ -1273,6 +1287,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         default_impls: Vec::new(),
         marked: Vec::new(),
         uses: vec![Uses::default()],
+        types: Vec::new(),
     };
     let (items, children) = scan.scan(items, 0)?;
     let mut tree = Module {
@@ -1298,6 +1313,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         default_impls,
         marked,
         uses,
+        types: declared_types,
         ..
     } = scan;
     // A service's methods are the pub fn of the impl blocks of its own module.
@@ -1700,10 +1716,6 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
 
     // A state whose `Default` the author implements by hand or derives starts from the author's
     // value: a derive stays on the author's struct or goes to the generated type replacing it.
-    let declared_types: Vec<(usize, Ident)> = candidates
-        .iter()
-        .map(|candidate| (candidate.scope, candidate.ident.clone()))
-        .collect();
     let authored: Vec<bool> = states
         .iter()
         .map(|state| {
