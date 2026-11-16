@@ -22,3 +22,43 @@ pub use tembra_orb_macro::orb;
 /// Isolated WebAssembly execution, providers and prepared WIT contracts.
 #[cfg(all(feature = "wasm", not(target_arch = "wasm32")))]
 pub use tembra_executor_wasm as wasm;
+
+/// Expand the input only when this crate links the native runtime, through its `host` feature.
+///
+/// `#[tembra::orb]` wraps its native output in it: `orb()`, the clients and every other item
+/// that names the runtime, such as `Orb` or `Service`. Invoke it in item position with those
+/// items as its input, through the absolute path, since the generated module can hold a
+/// `tembra` module of WIT bindings that shadows this crate:
+///
+/// ```text
+/// ::tembra::__host! {
+///     pub fn orb() -> ::tembra::Result<::tembra::Orb> { /* .. */ }
+/// }
+/// ```
+///
+/// The macro reads this crate's features, not the caller's, and Cargo unifies them across a
+/// build. A native host that depends on an Orb crate enables `host`, so the items exist. A
+/// component build of the same crate enables only `macros`, so the macro expands to nothing and
+/// the runtime is not linked.
+#[cfg(feature = "host")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __host {
+    ($($item:tt)*) => {
+        $($item)*
+    };
+}
+
+/// Without `host`, the input is dropped; the other definition describes the macro.
+#[cfg(not(feature = "host"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __host {
+    ($($item:tt)*) => {};
+}
+
+// A build without `host` compiles this only because the macro drops it: `Orb` exists only with
+// `host`.
+__host! {
+    const _: Option<Orb> = None;
+}
