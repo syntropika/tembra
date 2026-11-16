@@ -252,7 +252,7 @@ impl Reference {
                 }
                 (Route::Foreign, Some((encode, decode))) => {
                     async {
-                        let value = encode(arguments)?.into_data()?;
+                        let value = encode(arguments)?.data_only()?;
                         let result = host
                             .foreign(serde_json::json!({
                                 "kind": "invoke", "call": call.id, "frame": call.context, "input": value,

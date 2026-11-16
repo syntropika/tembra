@@ -7,7 +7,7 @@
 //! belong to the object that issued them, as a compiled exporter's instances belong to their
 //! Store: they close with their last owner, and with the object when it is reloaded or released
 //! or the host closes. No executor, Wasm or contract is involved.
-use futures::{FutureExt, channel::oneshot, executor::LocalPool, task::LocalSpawnExt};
+use futures::{FutureExt, channel::oneshot, executor::LocalPool};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -29,6 +29,7 @@ const RETAIN: &str = "[method]decoder.retain";
 const OPEN_BUNDLE: &str = "open-bundle";
 const BUFFER: &str = "[constructor]buffer";
 const FOREIGN: &str = "foreign";
+const ISSUED: &str = "issued";
 
 /// The exporter's own value. Dropping it is the close, which releases the claim it may hold.
 struct Decoder {
@@ -193,6 +194,8 @@ fn service(codecs: Rc<Codecs>) -> Service<Rc<Codecs>> {
             let index = result.attach(Issued::new(Foreign(Decoder::nominal())));
             result.map_value(|_| Ok(json!(index)))
         })
+        // A function taking data only: how many decoders were issued.
+        .method(ISSUED, |codecs, _, (): ()| async move { Ok(codecs.next.get()) })
 }
 
 /// Another service of the Orb, whose objects own a resource. A reload keeps the resource when
@@ -284,43 +287,78 @@ impl Fixture {
 #[test]
 fn a_constructor_issues_a_value_that_a_method_reads_as_self_until_its_last_owner_drops() {
     let mut fixture = fixture();
-    let owned = Rc::new(fixture.construct(CONSTRUCTOR));
+    let owned = fixture.construct(CONSTRUCTOR);
     assert_eq!(owned.nominal(), &Decoder::nominal());
     let (finish, gate) = oneshot::channel();
     *fixture.codecs.feed_gate.borrow_mut() = Some(gate);
-    let fed = Rc::new(RefCell::new(None));
-    {
-        let host = fixture.host.clone();
-        let caller = owned.clone();
-        let fed = fed.clone();
-        fixture
-            .pool
-            .spawner()
-            .spawn_local(async move {
-                let result = host
-                    .root("host", move |context| {
-                        async move {
-                            caller
-                                .call_portable::<_, u32>(&context, FEED, (5_u32,))
-                                .await
-                        }
-                        .boxed_local()
-                    })
-                    .await;
-                *fed.borrow_mut() = Some(result);
-            })
-            .unwrap();
-    }
+    let (release, released) = oneshot::channel::<()>();
+    // The caller issues the call, which then holds no owner of its own, and lets its handle go,
+    // the only owner, once the method holds the value across its await.
+    let fed = fixture
+        .host
+        .spawn_root("host", move |context| {
+            async move {
+                let (_, fed) = owned
+                    .issue_portable::<_, u32>(&context, FEED, (5_u32,))
+                    .await?;
+                let _ = released.await;
+                drop(owned);
+                fed.await
+            }
+            .boxed_local()
+        })
+        .unwrap();
     fixture.pool.run_until_stalled();
     assert!(fixture.codecs.feed_entered.get());
-    // The test's owner goes while the method still holds the value across its await.
-    drop(owned);
+    release.send(()).unwrap();
     fixture.pool.run_until_stalled();
     assert_eq!(fixture.closed(), 0, "the running method keeps its self");
     finish.send(()).unwrap();
-    fixture.pool.run_until_stalled();
-    assert_eq!(fed.borrow_mut().take().unwrap().unwrap(), 1005);
-    assert_eq!(fixture.closed(), 1, "dropped with its last owner");
+    assert_eq!(fixture.pool.run_until(fed).unwrap().unwrap(), 1005);
+    assert_eq!(
+        fixture.closed(),
+        1,
+        "dropped once the call ends, its last owner"
+    );
+    fixture.close();
+}
+
+#[test]
+fn a_function_without_self_refuses_one() {
+    let mut fixture = fixture();
+    let decoder = fixture.construct(CONSTRUCTOR);
+    let (refused, decoder) = fixture
+        .root(async move |context| {
+            let mut refused = Vec::new();
+            for (function, arguments) in [
+                (CONSTRUCTOR, json!([])),
+                (OPEN_BUNDLE, json!([false])),
+                (ISSUED, Value::Null),
+            ] {
+                let error = decoder
+                    .call_portable::<_, Delivered>(&context, function, arguments)
+                    .await
+                    .err()
+                    .expect("a function without self is refused one");
+                refused.push((error.code, error.reason));
+            }
+            Ok((refused, decoder))
+        })
+        .unwrap();
+    // As a compiled exporter refuses it, before the function runs: a function of the exporter as
+    // one lent no resource, and a function taking data only as data-only.
+    let invalid = |reason: &str| (core::Code::Invalid, reason.to_owned());
+    assert_eq!(
+        refused,
+        [
+            invalid("resource"),
+            invalid("resource"),
+            invalid("local_value")
+        ]
+    );
+    assert_eq!(fixture.codecs.next.get(), 1, "no decoder was issued");
+    drop(decoder);
+    assert_eq!(fixture.closed(), 1);
     fixture.close();
 }
 

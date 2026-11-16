@@ -128,7 +128,7 @@ impl<E: 'static> Service<E> {
                     .and_then(|environment| {
                         // Serde methods take data only; capabilities are refused and closed.
                         let arguments =
-                            serde_json::from_value(arguments.into_data()?).map_err(|error| {
+                            serde_json::from_value(arguments.data_only()?).map_err(|error| {
                                 Error::invalid(Reason::Arguments, error.to_string())
                             })?;
                         Ok(portable(environment, context, arguments))
@@ -185,7 +185,7 @@ impl<E: 'static> Service<E> {
                     .map_err(|_| type_error())
                     .and_then(|environment| {
                         // Codec methods take data only; capabilities are refused and closed.
-                        let arguments = decode(arguments.into_data()?)
+                        let arguments = decode(arguments.data_only()?)
                             .map_err(|message| Error::invalid(Reason::Arguments, message))?;
                         Ok(portable(environment, context, arguments))
                     });

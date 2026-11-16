@@ -345,9 +345,24 @@ impl Payload {
             && self.streams.is_empty()
     }
 
-    /// Return the data of a data-only payload. Capabilities are refused, which drops and so
-    /// closes them.
+    /// Return the data of a call to an exporter's function without `self`: a `self` lent to it
+    /// is refused as a compiled exporter's function refuses it, `Invalid/resource`, and any other
+    /// capability as a data-only boundary refuses it, `Invalid/local_value`. Refused, they drop
+    /// and so close.
     pub fn into_data(self) -> Result<Value> {
+        if self.receiver.is_some() {
+            return Err(Error::invalid(
+                Reason::Resource,
+                "this function takes no resource receiver",
+            ));
+        }
+        self.data_only()
+    }
+
+    /// Return the data of a data-only payload, as a data-only boundary or a method taking data
+    /// only reads it: every capability, a lent `self` too, is refused as `Invalid/local_value`,
+    /// which drops and so closes it.
+    pub(crate) fn data_only(self) -> Result<Value> {
         if self.is_data() {
             Ok(self.value)
         } else {
@@ -478,7 +493,7 @@ pub trait FromPayload: Sized {
 
 impl<T: DeserializeOwned> FromPayload for T {
     fn from_payload(payload: Payload, _: &Origin) -> Result<Self> {
-        serde_json::from_value(payload.into_data()?)
+        serde_json::from_value(payload.data_only()?)
             .map_err(|error| Error::invalid(Reason::Result, error.to_string()))
     }
 }
