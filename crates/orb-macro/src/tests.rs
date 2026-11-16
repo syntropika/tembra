@@ -3585,6 +3585,33 @@ fn the_author_may_give_a_state_its_default_and_its_derives() {
     }
 }
 
+/// The `Default` the macro writes for a state follows each field's `#[cfg(..)]`, as a derived one
+/// does: the field's initializer carries the attribute, and none of the field's others, so the
+/// value holds the fields the struct holds in every configuration.
+#[test]
+fn the_default_the_macro_writes_follows_the_fields_cfg() {
+    let generated = tokens(&expanded(
+        "example:ledger@1.0.0",
+        "mod ledger {
+            #[state]
+            pub struct Balance {
+                /// What the balance holds.
+                pub total: i64,
+                #[cfg(feature = \"audit\")]
+                #[serde(default)]
+                pub audited: u32,
+            }
+            #[service]
+            pub struct Pinned;
+            impl Pinned { pub fn add(amount: i64) -> i64 { todo!() } }
+        }",
+    ));
+    assert!(
+        generated.contains("impl :: core :: default :: Default for Balance { fn default () -> Self { Self { total : :: core :: default :: Default :: default () , # [cfg (feature = \"audit\")] audited : :: core :: default :: Default :: default () } } }"),
+        "{generated}"
+    );
+}
+
 const GATE: &str = "mod gate {
     /// Each contributor may change the admission or block it.
     #[hook(composition = waterfall, input = Admission)]

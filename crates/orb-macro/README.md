@@ -306,10 +306,10 @@ impl Default for Count {
 }
 ```
 
-The macro's `Default`, like a derived one, gives each field its type's `Default`. A field whose type
-has none, an enum of the module for instance, is a compile error on that field: implement `Default`
-for the state, as above, or give the field's type one, by hand or by a derive, which for an enum
-marks the case it starts from:
+The macro's `Default`, like a derived one, gives each field its type's `Default`, and follows a
+field's `#[cfg(..)]`. A field whose type has none, an enum of the module for instance, is a
+compile error on that field: implement `Default` for the state, as above, or give the field's
+type one, by hand or by a derive, which for an enum marks the case it starts from:
 
 ```rust
 #[derive(Default)]

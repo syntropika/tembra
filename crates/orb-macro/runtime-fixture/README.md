@@ -25,10 +25,12 @@ count on their own and it refuses the key `refused`.
 Its `readings` service imports the same interface plainly, which reaches the provider's `main`
 object, and passes the provider's `tally` record on as it is: `read` returns it in a record of the
 module, `total` and `joined` take it back, alone and in a list, and the service's state keeps the
-last one, which the kernel stores as the JSON `serde` writes for the provider's record. Its
-`library` service takes and returns the `book` and `topic` of `example:shelves/shelf@1.0.0`, in
-`consumed/deps/`, an interface the fixture's `shelf` service implements: the types of the shelf's
-export. Every installation binds the plain import to the provider too.
+last one, which the kernel stores as the JSON `serde` writes for the provider's record. The state
+also holds a field under `#[cfg(any())]`, which no build compiles, and the `Default` the macro
+writes for the state leaves the field out with it. Its `library` service takes and returns the
+`book` and `topic` of `example:shelves/shelf@1.0.0`, in `consumed/deps/`, an interface the
+fixture's `shelf` service implements: the types of the shelf's export. Every installation binds the
+plain import to the provider too.
 
 Run `just test-orb-macro` from the repository root to build both real components and execute
 `executor-wasm/tests/orb_macro_runtime.rs`, one test on Cranelift and one on Pulley. Each test

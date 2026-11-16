@@ -216,6 +216,10 @@ mod guest {
         pub struct Recorded {
             pub last: Option<counter::Tally>,
             pub readings: u32,
+            /// How many readings were thrown away: no build holds the field, as `any()` is never
+            /// on, and the `Default` the macro writes for the state leaves it out with it.
+            #[cfg(any())]
+            pub discarded: u32,
         }
 
         #[service]

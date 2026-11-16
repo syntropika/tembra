@@ -380,8 +380,9 @@ impl Composition {
 /// of one service.
 struct State {
     ident: Ident,
-    /// The named fields, each with the span of its type, where a missing `Default` is reported.
-    fields: Vec<(Ident, Span)>,
+    /// The named fields, each with the span of its type, where a missing `Default` is reported,
+    /// and its `#[cfg(..)]` attributes, which the macro's `Default` writes on its initializer.
+    fields: Vec<(Ident, Span, Vec<Attribute>)>,
     /// The owning service, as named by `service = ...` or resolved to the module's only one.
     service: Option<Ident>,
     version: u32,
@@ -4982,7 +4983,15 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
         fields: fields
             .named
             .iter()
-            .filter_map(|field| Some((field.ident.clone()?, field.ty.span())))
+            .filter_map(|field| {
+                let cfg = field
+                    .attrs
+                    .iter()
+                    .filter(|attribute| attribute.path().is_ident("cfg"))
+                    .cloned()
+                    .collect();
+                Some((field.ident.clone()?, field.ty.span(), cfg))
+            })
             .collect(),
         service,
         version,
@@ -5039,10 +5048,12 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
     let accessors = states.iter().map(|state| {
         let path = from_root(&modules[state.scope], &state.ident);
         // Each field takes its type's `Default`; a type without one is reported on the field,
-        // where the author either gives the type a `Default` or implements the state's.
-        let fields = state.fields.iter().map(|(field, span)| {
+        // where the author either gives the type a `Default` or implements the state's. The
+        // initializer carries the field's `#[cfg(..)]`, which the compiler evaluates after the
+        // macro, so the value holds the fields the struct holds, as a derived `Default` does.
+        let fields = state.fields.iter().map(|(field, span, cfg)| {
             let value = quote::quote_spanned!(*span=> ::core::default::Default::default());
-            quote! { #field: #value }
+            quote! { #(#cfg)* #field: #value }
         });
         let service = state.service.as_ref().expect("resolved owner").to_string();
         let name = LitStr::new(&state.ident.to_string(), Span::call_site());
