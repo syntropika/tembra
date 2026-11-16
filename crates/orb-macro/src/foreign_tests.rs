@@ -919,3 +919,62 @@ fn a_state_holds_the_consumed_types_serde_writes() {
         assert!(error.contains(message), "{fields}\n{error}");
     }
 }
+
+/// A catalog whose entry `serde` writes, beside a record holding a resource handle, and an
+/// interface of loans the Orb does not import.
+const CATALOG: &str = "package example:shop@1.0.0;
+
+interface catalog {
+  record entry { name: string, price: u32 }
+  resource cart;
+  record slot { cart: cart }
+  lookup: func(name: string) -> option<entry>;
+  fill: func(slot: slot) -> u32;
+}
+
+interface lending {
+  resource pen;
+  record loan { pen: pen }
+}
+";
+
+/// The bindings leave a type out of a state's serde derives by its bare name, as they compare the
+/// names of `additional_derives_ignore`: a consumed record `serde` writes loses them to a record of
+/// the module of the same name that holds a resource handle, and a record of the module to such a
+/// consumed record. The macro gives each its derives back by its full name, the module's with the
+/// author's, so a state holds it. The ignore list names only the types the bindings generate:
+/// `loan`, in an interface the Orb does not import, is not on it.
+#[test]
+fn a_state_holds_a_type_named_like_one_serde_cannot_write() {
+    let dir = consumed("namesake", CATALOG);
+    let module = expanded(
+        shopping(&dir),
+        "mod shopper {
+            #[state]
+            pub struct Kept { pub last: Option<catalog::Entry>, pub slot: Option<Slot> }
+            #[wit_resource]
+            pub struct Pen { pub ink: u32 }
+            impl Pen { pub fn ink(&self) -> u32 { self.ink } }
+            pub struct Entry { pub pen: Pen }
+            #[derive(serde::Serialize, Hash)]
+            pub struct Slot { pub shelf: u32 }
+            #[service]
+            pub struct Shopping;
+            impl Shopping {
+                pub fn lend() -> Entry { todo!() }
+                pub fn place() -> Slot { todo!() }
+            }
+        }",
+    );
+    let generated = tokens(&module);
+    for expected in [
+        "additional_derives_ignore : [\"entry\" , \"slot\"] ,",
+        concat!(
+            "additional_type_attributes : { ",
+            "\"example:shopper/shopping@1.0.0/slot\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize , :: core :: hash :: Hash)]] , ",
+            "\"example:shop/catalog@1.0.0/entry\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize)]] } ,",
+        ),
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+}

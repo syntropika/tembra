@@ -2286,7 +2286,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // A state's record that a method mentions is a generated type, which the kernel's JSON needs
     // to serialize; the derives reach every generated type that can carry them. A record or a
     // variant holding a resource handle or a consumed package's flags type cannot: the bindings
-    // give those no serde implementation, so the derives leave it alone. The module's own flags
+    // give those no serde implementation, so the derives leave it alone. The bindings leave a
+    // type alone by its bare name, so one that can carry them but shares the name of such a record
+    // or variant takes them by its full name, with the attributes below. The module's own flags
     // are the author's structs, which a state gives serde's derives.
     let derives = serde.then(|| {
         let ignored = &bindings.unserializable;
@@ -4253,7 +4255,9 @@ fn readable(
 /// for each type that enters the WIT, its derives, less those the bindings implement themselves,
 /// and the helper attributes they read, on the type and on each field or case, each of which the
 /// bindings' module must know (`readable`). `serde` tells whether a state makes the bindings
-/// derive serde's traits on the types that can carry them.
+/// derive serde's traits on the types that can carry them; a type the ignore option leaves without
+/// them only for the name of one that cannot carry them, of the module or consumed, takes them
+/// here instead.
 fn carried_attributes(
     shapes: &[Shape],
     placement: &BTreeMap<String, Ident>,
@@ -4265,12 +4269,18 @@ fn carried_attributes(
 ) -> syn::Result<(Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>)> {
     let mut types = Vec::new();
     let mut members = Vec::new();
-    for shape in shapes.iter().filter(|shape| !shape.carried.is_empty()) {
+    let mut namesakes: BTreeSet<&String> = bindings.namesakes.iter().filter(|_| serde).collect();
+    for shape in shapes {
         let interface = wit::kebab(&placement[&shape.ident.to_string()]);
         let name = wit::kebab(&shape.ident);
         let selector = format!("{}/{name}", identity(package, &interface));
+        let namesake = namesakes.remove(&selector);
+        if shape.carried.is_empty() && !namesake {
+            continue;
+        }
         let generated = bindings.types.get(&selector).copied().unwrap_or_default();
-        let serialized = serde && !bindings.unserializable.contains(&wit::ignored_name(&name));
+        let serialized =
+            serde && (namesake || !bindings.unserializable.contains(&wit::ignored_name(&name)));
         // What each derive reads of the helper attributes: a derive refused for what the bindings
         // implement names those no other derive reads, which go with it.
         let reads: Vec<Reads> = shape
@@ -4280,6 +4290,12 @@ fn carried_attributes(
             .map(|path| Reads::of(shape, path, uses, modules))
             .collect();
         let mut derives = Vec::new();
+        if namesake {
+            derives.extend([
+                quote! { ::serde::Serialize },
+                quote! { ::serde::Deserialize },
+            ]);
+        }
         let mut readers = Vec::new();
         for (index, path) in shape.carried.derives.iter().enumerate() {
             let mut others = reads.clone();
@@ -4305,6 +4321,10 @@ fn carried_attributes(
                 members.push(quote! { #literal: [#(#helpers)*] });
             }
         }
+    }
+    for selector in namesakes {
+        let literal = LitStr::new(selector, Span::call_site());
+        types.push(quote! { #literal: [#[derive(::serde::Serialize, ::serde::Deserialize)]] });
     }
     Ok((types, members))
 }

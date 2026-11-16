@@ -1115,11 +1115,17 @@ fn handles(resolve: &Resolve, ty: wit_parser::Type) -> Option<Handles> {
 /// they generate.
 #[derive(Default)]
 pub(crate) struct Bindings {
-    /// The records and variants that cannot derive `serde`'s traits: those holding a consumed
-    /// package's flags type, a resource handle, a stream or a future, directly or through other
-    /// types, which the bindings give no `serde` implementation. They are named as the
-    /// `additional_derives_ignore` option of `wit-bindgen` compares them, by `ignored_name`.
+    /// The records and variants of the world's interfaces, which the bindings generate, that cannot
+    /// derive `serde`'s traits: those holding a consumed package's flags type, a resource handle, a
+    /// stream or a future, directly or through other types, which the bindings give no `serde`
+    /// implementation. They are named as the `additional_derives_ignore` option of `wit-bindgen`
+    /// compares them, by `ignored_name`.
     pub unserializable: Vec<String>,
+    /// The records, variants and enums of the world's interfaces, which the bindings generate,
+    /// that can derive `serde`'s traits but share their name, as `ignored_name` gives it, with one
+    /// of `unserializable`, so the ignore option leaves them without the derives as well. They are
+    /// named by their full names, as in `types`, for the selectors that give the derives back.
+    pub namesakes: BTreeSet<String>,
     /// How the bindings generate each record, variant and enum of an interface, by the type's full
     /// name as the selectors of `additional_type_attributes` write it,
     /// `ns:name/interface@version/type`.
@@ -1154,6 +1160,21 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
     let Ok(own) = resolve.push_str("orb.wit", inline) else {
         return Bindings::default();
     };
+    // The bindings generate the types of every interface the world imports or exports, and the
+    // derives reach those alone.
+    let generated: BTreeSet<wit_parser::InterfaceId> = resolve.packages[own]
+        .worlds
+        .values()
+        .flat_map(|world| {
+            let world = &resolve.worlds[*world];
+            world.imports.values().chain(world.exports.values())
+        })
+        .filter_map(|item| match item {
+            wit_parser::WorldItem::Interface { id, .. } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let in_world = |owner: wit_parser::TypeOwner| matches!(owner, wit_parser::TypeOwner::Interface(owner) if generated.contains(&owner));
     let unserializable: BTreeSet<String> = resolve
         .types
         .iter()
@@ -1161,7 +1182,7 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
             matches!(
                 definition.kind,
                 TypeDefKind::Record(_) | TypeDefKind::Variant(_)
-            )
+            ) && in_world(definition.owner)
         })
         .filter(|(id, _)| {
             holds_unserializable(
@@ -1189,6 +1210,31 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
             definition.name.as_ref()?
         ))
     };
+    // The ignore option also leaves out of the derives the types that only share a name with one
+    // in `unserializable`.
+    let namesakes = resolve
+        .types
+        .iter()
+        .filter(|(_, definition)| {
+            matches!(
+                definition.kind,
+                TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
+            ) && in_world(definition.owner)
+                && definition
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| unserializable.contains(&ignored_name(name)))
+        })
+        .filter(|(id, _)| {
+            !holds_unserializable(
+                &resolve,
+                wit_parser::Type::Id(*id),
+                &mut BTreeSet::new(),
+                own,
+            )
+        })
+        .filter_map(|(id, _)| full_name(id))
+        .collect();
     let mut types: BTreeMap<String, Generated> = resolve
         .types
         .iter()
@@ -1244,6 +1290,7 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
     }
     Bindings {
         unserializable: unserializable.into_iter().collect(),
+        namesakes,
         types,
     }
 }

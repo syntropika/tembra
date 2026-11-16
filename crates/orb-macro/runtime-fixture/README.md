@@ -32,6 +32,12 @@ writes for the state leaves the field out with it. Its `library` service takes a
 fixture's `shelf` service implements: the types of the shelf's export. Every installation binds the
 plain import to the provider too.
 
+The fixture also imports `example:ledger/book@1.0.0`, from `consumed/deps/`, and uses none of it,
+so the component does not import it and no installation binds it. The ledger's `tally` holds
+resource handles, which `serde` cannot write. The bindings leave a type out of a state's `serde`
+derives by its bare name, so they leave the provider's `tally` out too, and the macro gives it its
+derives back by its full name for the state of `readings`.
+
 Run `just test-orb-macro` from the repository root to build both real components and execute
 `executor-wasm/tests/orb_macro_runtime.rs`, one test on Cranelift and one on Pulley. Each test
 decodes both component contracts, compares their WIT and typed metadata, loads each guest once with

@@ -1007,7 +1007,9 @@ The macro rewrites the module with:
    sources `tembra-contracts` bundles.
    With a state, also `serde` derives on the generated types, except the records and
    variants holding a consumed package's flags type or a resource handle, which have no `serde`
-   implementation to derive. With derives on the types that enter the WIT, also `additional_type_attributes` and
+   implementation to derive. `wit-bindgen` leaves those out by their bare names, so a type
+   sharing the name of one, in another interface or package, takes the derives by its full name
+   in `additional_type_attributes`. With derives on the types that enter the WIT, also `additional_type_attributes` and
    `additional_member_attributes`, which hand them to the generated types with the helper
    attributes they read. With a `#[flags]` struct, also `with`, which maps each flags type onto
    the author's struct;

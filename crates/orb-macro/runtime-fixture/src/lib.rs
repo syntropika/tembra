@@ -11,6 +11,7 @@ extern crate alloc;
         import = "wasi:clocks/monotonic-clock@0.3.0",
         import("example:counters/counter@1.0.0", keyed),
         import = "example:counters/counter@1.0.0",
+        import = "example:ledger/book@1.0.0",
         no_std
     )
 )]
@@ -22,7 +23,8 @@ extern crate alloc;
         import = "wasi:random/random@0.3.0",
         import = "wasi:clocks/monotonic-clock@0.3.0",
         import("example:counters/counter@1.0.0", keyed),
-        import = "example:counters/counter@1.0.0"
+        import = "example:counters/counter@1.0.0",
+        import = "example:ledger/book@1.0.0"
     )
 )]
 mod guest {
