@@ -14,7 +14,8 @@
 //! and a derived interface, exported too, uses that copy: the Orb module re-exports the export
 //! module of an implemented interface and of a contributed hook, but the import module of a hook it
 //! declares, which `run` calls, so a derived interface names none of a declared hook's types. A
-//! WASI interface's names stay out of a derived interface, and a consumed type crosses one when it
+//! WASI interface's names stay out of a derived interface, named through the WASI interface's
+//! module or through a consumed interface that `use`s them, and a consumed type crosses one when it
 //! carries data only. A state may hold a consumed type that `serde` can write, which the bindings
 //! derive for it in an Orb with a state.
 use crate::{
@@ -601,13 +602,26 @@ fn checked<'a>(
         Place::Field { interface, .. } => (*interface, false),
         Place::Input { .. } | Place::State { .. } => unreachable!("checked above"),
     };
+    // A WASI interface's type or resource, named through the WASI interface's module or through
+    // a consumed interface that `use`s it: the runtime carries neither between Orbs.
+    if interface.role == Role::Wasi || definition.wasi.is_some() {
+        let from = match &definition.wasi {
+            Some(wasi) if interface.role != Role::Wasi => {
+                format!(", which it uses from the WASI interface {wasi}")
+            }
+            _ => String::new(),
+        };
+        return match &definition.kind {
+            wit::Kind::Resource => refuse(format!(
+                "{what} of {of}{from}: the runtime moves no WASI handle between Orbs"
+            )),
+            wit::Kind::Type { .. } => refuse(format!(
+                "{what} of {of}{from}: the types of a WASI interface stay out of a derived interface; use a type of the module"
+            )),
+        };
+    }
     match (interface.role, &definition.kind) {
-        (Role::Wasi, wit::Kind::Resource) => refuse(format!(
-            "{what} of {of}: the runtime moves no WASI handle between Orbs"
-        )),
-        (Role::Wasi, wit::Kind::Type { .. }) => refuse(format!(
-            "{what} of {of}: the types of a WASI interface stay out of a derived interface; use a type of the module"
-        )),
+        (Role::Wasi, _) => unreachable!("checked above"),
         (Role::Declared, _) => {
             let run = declared
                 .iter()

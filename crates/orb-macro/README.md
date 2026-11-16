@@ -728,7 +728,9 @@ the type that names it:
   of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
 - a type of a hook the module declares from a consumed package, whose `run` speaks the import's
   types where a derived interface takes the export's ([declaring a hook](#declaring-a-hook));
-- a type or a handle of a WASI interface;
+- a type or a handle of a WASI interface, named through that interface's module or through a
+  consumed interface that `use`s it from WASI, `files::Descriptor` for a
+  `use wasi:filesystem/types@0.3.0.{descriptor};` in `files`;
 - a consumed type in a derived hook's input, itself or in the types it reaches, which hold the
   module's own;
 - in a state, a resource, a type holding a resource handle, and a consumed flags or a type holding
@@ -839,10 +841,11 @@ imports that interface. It refuses at installation today an Orb whose function t
 resource, `borrow<t>` ("borrow requires a dedicated interpreter value adapter"), so the macro
 derives none: `&T` is refused as every reference in a signature is. A function taking a resource of
 another service's interface or of an implemented interface, itself or in a record or a variant of
-the module, a WASI handle, which the runtime moves between no Orbs, and a hook's input holding a
-resource are compile errors too; so is a derived function returning an imported interface's handle,
-or another service's resource, which the runtime returns only from the interface that defines it,
-and a record or a variant of the module holding an imported interface's handle.
+the module, a WASI handle, also one an imported interface `use`s from WASI, which the runtime moves
+between no Orbs, and a hook's input holding a resource are compile errors too; so is a derived
+function returning an imported interface's handle, or another service's resource, which the runtime
+returns only from the interface that defines it, and a record or a variant of the module holding an
+imported interface's handle.
 
 ## Flags
 
@@ -1007,10 +1010,10 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
 
 - WASI interfaces are imported, never implemented: serving incoming HTTP, an export of
   `wasi:http/handler`, is not expressed, and a WASI interface's types and handles stay out of a
-  derived signature. An Orb consumes another Orb's WIT by importing an interface, plainly or by
-  key, implementing one or contributing to a hook, and passes the interface's data types on as they
-  are. A view takes the name of the interface imported by key, so two interfaces of one name are
-  not both imported by key.
+  derived signature, also where another Orb's interface `use`s them. An Orb consumes another
+  Orb's WIT by importing an interface, plainly or by key, implementing one or contributing to a
+  hook, and passes the interface's data types on as they are. A view takes the name of the
+  interface imported by key, so two interfaces of one name are not both imported by key.
 - A hook declared from a consumed package keeps the types of its import, which `run` takes and returns, while a derived interface takes the types of its export: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list, of the module's own types. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
 - A service's functions are associated functions without `self`; only the methods of a
   `#[wit_resource]` struct take `&self`, never `&mut self`. Besides a service's state, a

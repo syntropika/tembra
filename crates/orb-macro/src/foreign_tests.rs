@@ -546,6 +546,101 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
     );
 }
 
+/// A consumed package whose interface uses the bundled WASI packages: the filesystem's descriptor
+/// and the system clock's instant, which it aliases too, next to a record of its own.
+const FILES: &str = "package example:files@1.0.0;
+
+interface files {
+  use wasi:filesystem/types@0.3.0.{descriptor};
+  use wasi:clocks/system-clock@0.3.0.{instant};
+  type stamp = instant;
+  record item { name: string, touched: u64 }
+  count: func() -> u32;
+}
+";
+
+/// A directory holding one consumed WIT package that uses WASI packages, each bundled package it
+/// needs in `deps/` as its file, as a contract `cargo tembra build` wrote holds them.
+fn consumed_with_wasi(name: &str, wit: &str, deps: &[&str]) -> PathBuf {
+    let dir = consumed(name, wit);
+    std::fs::create_dir_all(dir.join("deps")).unwrap();
+    for file in deps {
+        let (_, source) = tembra_contracts::WASI_SOURCES
+            .iter()
+            .find(|(known, _)| known == file)
+            .expect("a bundled WASI package");
+        std::fs::write(dir.join("deps").join(file), source).unwrap();
+    }
+    dir
+}
+
+/// A type or a resource a consumed interface `use`s from a WASI interface is the WASI interface's,
+/// through the alias: a derived function taking the filesystem's descriptor through `files` is
+/// refused as taking a WASI handle, which the runtime moves between no Orbs, alone or in a
+/// container, and a WASI record reached so, or an alias of one, stays out of a derived interface
+/// as a directly named WASI type does; the interface's own types stay in.
+#[test]
+fn a_wasi_type_a_consumed_interface_uses_is_refused_as_a_wasi_type() {
+    let dir = consumed_with_wasi("files", FILES, &["wasi-clocks.wit", "wasi-filesystem.wit"]);
+    let filing = || {
+        options(
+            "example:keeper@1.0.0",
+            Some(&dir),
+            &["example:files/files@1.0.0"],
+        )
+    };
+    let keeper = |functions: &str| {
+        format!(
+            "mod filing {{
+                #[service]
+                pub struct Keeper;
+                impl Keeper {{ {functions} }}
+            }}"
+        )
+    };
+    let module = expanded(
+        filing(),
+        &keeper("pub fn keep(item: files::Item) -> u32 { item.touched as u32 }"),
+    );
+    let text = resolved(&module, &dir);
+    assert!(
+        text.contains("interface keeper {\n  use example:files/files@1.0.0.{item};\n  keep: func(item: item) -> u32;\n}\n"),
+        "{text}"
+    );
+    let handle = "the runtime moves no WASI handle between Orbs";
+    let stays_out =
+        "the types of a WASI interface stay out of a derived interface; use a type of the module";
+    for (functions, message) in [
+        (
+            "pub fn keep(d: files::Descriptor) -> u32 { 0 }",
+            format!(
+                "`Keeper::keep` takes `Descriptor`, a resource of the imported interface example:files/files@1.0.0, which it uses from the WASI interface wasi:filesystem/types@0.3.0: {handle}"
+            ),
+        ),
+        (
+            "pub fn keep(d: Option<files::Descriptor>) -> u32 { 0 }",
+            format!(
+                "`Keeper::keep` takes `Descriptor`, a resource of the imported interface example:files/files@1.0.0, which it uses from the WASI interface wasi:filesystem/types@0.3.0: {handle}"
+            ),
+        ),
+        (
+            "pub fn when() -> files::Instant { todo!() }",
+            format!(
+                "`Keeper::when` returns `Instant`, a type of the imported interface example:files/files@1.0.0, which it uses from the WASI interface wasi:clocks/system-clock@0.3.0: {stays_out}"
+            ),
+        ),
+        (
+            "pub fn when(stamp: files::Stamp) -> u64 { 0 }",
+            format!(
+                "`Keeper::when` takes `Stamp`, a type of the imported interface example:files/files@1.0.0, which it uses from the WASI interface wasi:clocks/system-clock@0.3.0: {stays_out}"
+            ),
+        ),
+    ] {
+        let error = refused(filing(), &keeper(functions));
+        assert!(error.contains(&message), "{functions}\n{error}");
+    }
+}
+
 /// A state holds a consumed type whose bindings `serde` writes, in its fields or in the module
 /// types they reach, whether it stays out of the WIT, with serde's derives the macro adds, or
 /// enters it; a resource, a type holding a resource handle and a consumed flags are refused.

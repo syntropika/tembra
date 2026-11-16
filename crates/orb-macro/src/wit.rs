@@ -960,10 +960,15 @@ pub(crate) struct Defined {
     items: Vec<(Ident, Definition)>,
 }
 
-/// A type or a resource of a consumed interface: its WIT name, and what it is.
+/// A type or a resource of a consumed interface: its WIT name, what it is, and the WASI interface
+/// defining it, if one does.
 pub(crate) struct Definition {
     pub name: String,
     pub kind: Kind,
+    /// The WASI interface the definition belongs to: the consumed interface itself, when it is one
+    /// of WASI, or the one its alias chain leads into, `wasi:filesystem/types@0.3.0` for the
+    /// `descriptor` another Orb's interface `use`s from there.
+    pub wasi: Option<String>,
 }
 
 /// What an item of a consumed interface is, for the places that name it.
@@ -1083,6 +1088,7 @@ pub(crate) fn defined<'a>(
                 let definition = Definition {
                     name: name.clone(),
                     kind,
+                    wasi: wasi_origin(resolve, ty),
                 };
                 (crate::type_ident(name), definition)
             })
@@ -1090,6 +1096,26 @@ pub(crate) fn defined<'a>(
         defined.insert(identity.to_owned(), Defined { items });
     }
     Ok(defined)
+}
+
+/// The WASI interface a WIT type belongs to, if one does: the interface defining it, or the one
+/// its alias chain leads into, since `use wasi:filesystem/types@0.3.0.{descriptor};` makes
+/// `descriptor` an alias of the WASI resource in the interface writing it.
+fn wasi_origin(resolve: &Resolve, mut ty: wit_parser::Type) -> Option<String> {
+    while let wit_parser::Type::Id(id) = ty {
+        let definition = &resolve.types[id];
+        if let wit_parser::TypeOwner::Interface(owner) = definition.owner
+            && let Some(identity) = resolve.id_of(owner)
+            && crate::wasi::is_wasi(&identity)
+        {
+            return Some(identity);
+        }
+        let TypeDefKind::Type(inner) = definition.kind else {
+            return None;
+        };
+        ty = inner;
+    }
+    None
 }
 
 /// What a WIT type of a consumed package holds anywhere that its bindings give no `serde`
