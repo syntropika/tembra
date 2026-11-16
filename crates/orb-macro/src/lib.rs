@@ -2581,8 +2581,17 @@ fn component(
         }
     };
     // Signatures spelled from a consumed WIT name strings and lists from `alloc`, which a module
-    // may not name: the alias goes in every module that holds such a signature.
+    // may not name: the alias goes in every module that holds such a signature, and so do the
+    // bridges spelling free JSON as the bindings' string of its text.
     // The resources of an implemented interface are bridged in their own modules.
+    let holds_json = |function: &Function| {
+        function
+            .params
+            .iter()
+            .map(|(_, ty, _)| ty)
+            .chain(function.result.as_ref().map(|(ty, _)| ty))
+            .any(wit::holds_free_json)
+    };
     let implementers: Vec<&Ident> = services
         .iter()
         .filter(|service| service.implements.is_some())
@@ -2606,6 +2615,30 @@ fn component(
                         .service
                         .as_ref()
                         .is_some_and(|owner| implementers.contains(&owner))
+                })
+                .map(|resource| resource.scope),
+        )
+        .chain(
+            services
+                .iter()
+                .filter(|service| service.functions.iter().any(holds_json))
+                .map(|service| service.scope),
+        )
+        .chain(
+            wit_resources
+                .iter()
+                .filter(|resource| {
+                    resource
+                        .methods
+                        .iter()
+                        .chain(&resource.statics)
+                        .any(holds_json)
+                        || resource.constructor.as_ref().is_some_and(|constructor| {
+                            constructor
+                                .params
+                                .iter()
+                                .any(|(_, ty, _)| wit::holds_free_json(ty))
+                        })
                 })
                 .map(|resource| resource.scope),
         )
@@ -3199,7 +3232,7 @@ fn derived_result(
     // holds no resource, as `resource_params::check_converted` makes sure.
     if mentions(ty, scope, converted, modules) {
         let spelled = with_handles(ty, scope, converted, module, modules);
-        return (quote! { -> #spelled }, convert(ty, call));
+        return (quote! { -> #spelled }, convert(ty, call, Towards::Bindings));
     }
     match handles_of(ty, scope, resources, modules) {
         Some(handles) => {
@@ -3304,8 +3337,8 @@ fn handles_of(
 }
 
 /// The author's type, written in the module `scope`, as the bindings spell it in `module`: each
-/// resource of the module is the handle type there, everything else keeps the author's spelling,
-/// a name a consumed interface's module reaches included.
+/// resource of the module is the handle type there, free JSON a string, everything else keeps the
+/// author's spelling, a name a consumed interface's module reaches included.
 fn with_handles(
     ty: &Type,
     scope: usize,
@@ -3315,6 +3348,10 @@ fn with_handles(
 ) -> proc_macro2::TokenStream {
     if modules.named(ty, scope).is_some() {
         return quote! { #ty };
+    }
+    // Free JSON is the bindings' string of its text, from the `alloc` of the scopes holding it.
+    if wit::free_json(ty) {
+        return quote! { __tembra_alloc::string::String };
     }
     match ty {
         Type::Path(path) => {
@@ -3761,10 +3798,17 @@ fn reachable(
             continue;
         }
         let Some(indexes) = declared.get(&ident.to_string()) else {
+            // Free JSON imported by `use` reads as a type of the module: it is free JSON only by
+            // its path.
+            let hint = if ident == "Value" {
+                "; for free JSON, write it by its path, `serde_json::Value`"
+            } else {
+                ""
+            };
             return Err(syn::Error::new(
                 ident.span(),
                 format!(
-                    "`{ident}` is used by a service method or a hook but is not a struct or enum of this module"
+                    "`{ident}` is used by a service method or a hook but is not a struct or enum of this module{hint}"
                 ),
             ));
         };
@@ -4904,10 +4948,10 @@ fn derived_hook_code(
         Composition::Series => (quote! {}, None),
         Composition::Waterfall => (
             quote! { -> #input },
-            Some(convert(input, quote! { answer })),
+            Some(convert(input, quote! { answer }, Towards::Author)),
         ),
         Composition::Bail => {
-            let item = convert(input, quote! { item });
+            let item = convert(input, quote! { item }, Towards::Author);
             (
                 quote! { -> ::core::option::Option<#input> },
                 Some(quote! { answer.map(|item| #item) }),
@@ -4922,7 +4966,7 @@ fn derived_hook_code(
         " Run the hook `{}`: the kernel calls its contributions in plan order and returns the composed result.",
         declaration.hook
     );
-    let converted = convert(input, quote! { input });
+    let converted = convert(input, quote! { input }, Towards::Bindings);
     // A string, a list, or a module type that holds one anywhere crosses to an import by
     // reference, as the bindings take them.
     let by_reference = holds_list(input, holding);
@@ -5010,12 +5054,13 @@ fn conversions(
         .iter()
         .filter(|shape| hook_shapes.contains(&shape.ident.to_string()))
         .map(|shape| {
-            // The bindings' name of the type, on both sides.
+            // The bindings' name of the type, on both sides. Both are the bindings', between which
+            // only the module's types convert: a derived hook's input holds no free JSON.
             let ident = type_ident(&wit::kebab(&shape.ident));
             let body = |from: &proc_macro2::TokenStream| match &shape.kind {
                 ShapeKind::Record(fields) => {
                     let fields = fields.iter().map(|(field, ty)| {
-                        let value = convert(ty, quote! { value.#field });
+                        let value = convert(ty, quote! { value.#field }, Towards::Bindings);
                         quote! { #field: #value }
                     });
                     quote! { Self { #(#fields),* } }
@@ -5029,7 +5074,7 @@ fn conversions(
                 ShapeKind::Variant(cases) => {
                     let arms = cases.iter().map(|(case, payload)| match payload {
                         Payload::Unnamed(ty) => {
-                            let item = convert(ty, quote! { item });
+                            let item = convert(ty, quote! { item }, Towards::Bindings);
                             quote! { #from::#ident::#case(item) => Self::#case(#item) }
                         }
                         Payload::None => quote! { #from::#ident::#case => Self::#case },
@@ -5055,10 +5100,42 @@ fn conversions(
     quote! { #(#impls)* }
 }
 
+/// Which side of the bindings a conversion goes to, which free JSON needs: the author's
+/// `serde_json::Value` is the bindings' `String` of its text, written one way and read the other.
+#[derive(Clone, Copy)]
+enum Towards {
+    /// From the author's type to the bindings'.
+    Bindings,
+    /// From the bindings' type to the author's.
+    Author,
+}
+
 /// An expression converting `value`, of the author's type `ty` on one side of the bindings, to the
-/// other side: containers are rebuilt element by element, everything else goes through `Into`,
-/// the identity for scalars and strings, the generated `From` for the module's types.
-fn convert(ty: &Type, value: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+/// other side, `towards`: containers are rebuilt element by element, free JSON is written as its
+/// text or read from it, and everything else goes through `Into`, the identity for scalars and
+/// strings, the generated `From` for the module's types. A text that holds no JSON traps, as a
+/// component does when it cannot answer: only a native Orb has an error channel for it.
+fn convert(
+    ty: &Type,
+    value: proc_macro2::TokenStream,
+    towards: Towards,
+) -> proc_macro2::TokenStream {
+    if let (true, Type::Path(path)) = (wit::free_json(ty), ty) {
+        // The crate as the author's path names it, `serde_json` or `::serde_json`.
+        let leading = &path.path.leading_colon;
+        let segments = path.path.segments.iter().take(path.path.segments.len() - 1);
+        let json = quote! { #leading #(#segments)::* };
+        let (read, value) = match towards {
+            Towards::Bindings => (quote! { #json::to_string(&#value) }, quote! { text }),
+            Towards::Author => (quote! { #json::from_str::<#ty>(&#value) }, quote! { json }),
+        };
+        return quote! {
+            match #read {
+                ::core::result::Result::Ok(#value) => #value,
+                ::core::result::Result::Err(error) => ::core::panic!("{}", error),
+            }
+        };
+    }
     match ty {
         Type::Path(path) => {
             let Some(segment) = path.path.segments.last() else {
@@ -5077,16 +5154,16 @@ fn convert(ty: &Type, value: proc_macro2::TokenStream) -> proc_macro2::TokenStre
             };
             match (segment.ident.to_string().as_str(), arguments.as_slice()) {
                 ("Vec", [item]) => {
-                    let item = convert(item, quote! { item });
+                    let item = convert(item, quote! { item }, towards);
                     quote! { #value.into_iter().map(|item| #item).collect() }
                 }
                 ("Option", [item]) => {
-                    let item = convert(item, quote! { item });
+                    let item = convert(item, quote! { item }, towards);
                     quote! { #value.map(|item| #item) }
                 }
                 ("Result", [ok, err]) => {
-                    let ok = convert(ok, quote! { item });
-                    let err = convert(err, quote! { item });
+                    let ok = convert(ok, quote! { item }, towards);
+                    let err = convert(err, quote! { item }, towards);
                     quote! {
                         match #value {
                             ::core::result::Result::Ok(item) => ::core::result::Result::Ok(#ok),
@@ -5106,8 +5183,8 @@ fn convert(ty: &Type, value: proc_macro2::TokenStream) -> proc_macro2::TokenStre
                 .elems
                 .iter()
                 .zip(&names)
-                .map(|(ty, name)| convert(ty, quote! { #name }));
-            quote! { { let (#(#names),*) = #value; (#(#converted),*) } }
+                .map(|(ty, name)| convert(ty, quote! { #name }, towards));
+            quote! { { let (#(#names,)*) = #value; (#(#converted,)*) } }
         }
         _ => quote! { ::core::convert::Into::into(#value) },
     }
@@ -5156,12 +5233,13 @@ fn respell(
 /// The types that enter the WIT and stay the author's, converted to and from the bindings' types
 /// at the boundary, by name, each with the bindings' name of its type: every enum with a case with
 /// named fields, whose case the bindings give a tuple payload, the record of the case, where the
-/// author writes the fields, and every type holding such an enum, directly or through other types
-/// of the module, which the author builds from the author's enum.
+/// author writes the fields, every type holding free JSON, which the bindings hold as its text,
+/// and every type holding one of those, directly or through other types of the module, which the
+/// author builds from the author's type.
 fn converted(shapes: &[Shape]) -> BTreeMap<String, Ident> {
     let mut converted: BTreeSet<String> = shapes
         .iter()
-        .filter(|shape| has_named_case(shape))
+        .filter(|shape| has_named_case(shape) || holds_json(shape))
         .map(|shape| shape.ident.to_string())
         .collect();
     loop {
@@ -5195,24 +5273,53 @@ fn has_named_case(shape: &Shape) -> bool {
         if cases.iter().any(|(_, payload)| matches!(payload, Payload::Named(_))))
 }
 
-/// Why a type is one the macro converts, for the errors, after the type's name and a comma: it is
-/// an enum with a case with named fields, or it holds one.
-pub(crate) fn converted_reason(shape: &Shape) -> &'static str {
-    if has_named_case(shape) {
-        "an enum with a case with named fields"
-    } else {
-        "which holds an enum with a case with named fields"
+/// Whether a record's fields or a variant's payloads hold free JSON.
+fn holds_json(shape: &Shape) -> bool {
+    match &shape.kind {
+        ShapeKind::Record(fields) => fields.iter().any(|(_, ty)| wit::holds_free_json(ty)),
+        ShapeKind::Variant(cases) => cases
+            .iter()
+            .any(|(_, payload)| payload.types().into_iter().any(wit::holds_free_json)),
+        ShapeKind::Enum(_) | ShapeKind::Flags(_) => false,
     }
 }
 
-/// Whether a type written in the module `scope` names a type the macro converts, itself or inside
-/// its type parameters and tuples.
+/// Why a type is one the macro converts, for the errors, after the type's name and a comma: it is
+/// an enum with a case with named fields, or it holds one, or free JSON, itself or through the
+/// other types of the module, `shapes`, it names.
+pub(crate) fn converted_reason(shape: &Shape, shapes: &[Shape]) -> &'static str {
+    if has_named_case(shape) {
+        return "an enum with a case with named fields";
+    }
+    let mut pending = vec![shape];
+    let mut seen = BTreeSet::new();
+    while let Some(held) = pending.pop() {
+        if !seen.insert(held.ident.to_string()) {
+            continue;
+        }
+        if has_named_case(held) {
+            return "which holds an enum with a case with named fields";
+        }
+        pending.extend(
+            held.references
+                .iter()
+                .filter_map(|name| shapes.iter().find(|shape| shape.ident == *name)),
+        );
+    }
+    "which holds free JSON, `serde_json::Value`"
+}
+
+/// Whether a type written in the module `scope` names a type the macro converts, or free JSON,
+/// itself or inside its type parameters and tuples.
 pub(crate) fn mentions(
     ty: &Type,
     scope: usize,
     converted: &BTreeMap<String, Ident>,
     modules: &foreign::Modules,
 ) -> bool {
+    if wit::holds_free_json(ty) {
+        return true;
+    }
     let mut names = Vec::new();
     modules.references(ty, scope, &mut names);
     names
@@ -5276,13 +5383,28 @@ fn check_converted_hooks(
         let name = shape.ident.to_string();
         converted.contains_key(&name) && has_named_case(shape) && reached.contains(&name)
     });
-    match shape {
-        Some(shape) => Err(syn::Error::new(
+    if let Some(shape) = shape {
+        return Err(syn::Error::new(
             shape.ident.span(),
             format!(
                 "`{}` is an enum with a case with named fields that a derived hook's input reaches: the macro converts such an enum, and every type holding it, to the bindings' type of a service's interface, and a hook's input has two in the bindings, its export's and its import's; give the case an unnamed payload, a record of the module, or keep the enum out of the hook's input",
                 shape.ident
             ),
+        ));
+    }
+    // Free JSON is converted the same way, in the input itself or in a type it reaches.
+    let input = declared.iter().find_map(|declaration| {
+        let (ty, _) = declaration.input.as_ref()?;
+        wit::holds_free_json(ty).then_some(ty.span())
+    });
+    let holder = shapes.iter().find(|shape| {
+        let name = shape.ident.to_string();
+        converted.contains_key(&name) && holds_json(shape) && reached.contains(&name)
+    });
+    match input.or(holder.map(|shape| shape.ident.span())) {
+        Some(span) => Err(syn::Error::new(
+            span,
+            "a derived hook's input holds free JSON, `serde_json::Value`: the macro converts free JSON, and every type holding it, to the text the bindings of a service's interface hold, and a hook's input has two types in the bindings, its export's and its import's; keep the JSON out of the hook's input",
         )),
         None => Ok(()),
     }
@@ -5391,12 +5513,12 @@ fn converted_conversions(
             ShapeKind::Record(fields) => {
                 let outward = fields.iter().map(|(field, ty)| {
                     let named = rust_ident(&wit::kebab(field));
-                    let value = convert(ty, quote! { value.#field });
+                    let value = convert(ty, quote! { value.#field }, Towards::Bindings);
                     quote! { #named: #value }
                 });
                 let inward = fields.iter().map(|(field, ty)| {
                     let named = rust_ident(&wit::kebab(field));
-                    let value = convert(ty, quote! { value.#named });
+                    let value = convert(ty, quote! { value.#named }, Towards::Author);
                     quote! { #field: #value }
                 });
                 (
@@ -5410,7 +5532,7 @@ fn converted_conversions(
                     match payload {
                         Payload::None => quote! { #ident::#case => Self::#named },
                         Payload::Unnamed(ty) => {
-                            let item = convert(ty, quote! { item });
+                            let item = convert(ty, quote! { item }, Towards::Bindings);
                             quote! { #ident::#case(item) => Self::#named(#item) }
                         }
                         Payload::Named(fields) => {
@@ -5418,7 +5540,7 @@ fn converted_conversions(
                             let names = fields.iter().map(|(field, _)| field);
                             let values = fields.iter().map(|(field, ty)| {
                                 let named = rust_ident(&wit::kebab(field));
-                                let value = convert(ty, quote! { #field });
+                                let value = convert(ty, quote! { #field }, Towards::Bindings);
                                 quote! { #named: #value }
                             });
                             quote! {
@@ -5432,13 +5554,13 @@ fn converted_conversions(
                     match payload {
                         Payload::None => quote! { #bindings::#generated::#named => Self::#case },
                         Payload::Unnamed(ty) => {
-                            let item = convert(ty, quote! { item });
+                            let item = convert(ty, quote! { item }, Towards::Author);
                             quote! { #bindings::#generated::#named(item) => Self::#case(#item) }
                         }
                         Payload::Named(fields) => {
                             let values = fields.iter().map(|(field, ty)| {
                                 let named = rust_ident(&wit::kebab(field));
-                                let value = convert(ty, quote! { item.#named });
+                                let value = convert(ty, quote! { item.#named }, Towards::Author);
                                 quote! { #field: #value }
                             });
                             quote! {

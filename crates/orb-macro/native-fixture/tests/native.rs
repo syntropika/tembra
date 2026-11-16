@@ -10,7 +10,7 @@ use tembra::{
     contracts::Contract,
     core::{Code, Lifetime},
 };
-use tembra_orb_native_fixture::calculator::{self, Heading, Move, Pen, Point, Shape, Stroke};
+use tembra_orb_native_fixture::calculator::{self, Heading, Move, Note, Pen, Point, Shape, Stroke};
 
 const MATH: &str = "calculator::example:calculator/math@1.0.0";
 const PLOTTER: &str = "calculator::example:calculator/plotter@1.0.0";
@@ -795,6 +795,91 @@ fn a_private_sub_module_service_is_registered() {
                     .await?,
                 json!("there")
             );
+            Ok(())
+        }
+        .boxed_local()
+    });
+}
+
+/// Free JSON, `serde_json::Value`, is a WIT `string` that holds its JSON text: a local caller
+/// passes and gets the value, a portable one its text, alone, in a list and in a record of the
+/// module, which the macro keeps the author's. The contract accepts what crosses, and a text that
+/// holds no JSON, or JSON that is no text, fails the call as its arguments.
+#[test]
+fn free_json_crosses_as_its_text() {
+    for function in [
+        "annotated: func(document: string, note: string) -> string;",
+        "notes: func(documents: list<string>) -> list<note>;",
+    ] {
+        assert!(calculator::WIT.contains(function), "{function}");
+    }
+    with_main(MEMO, |memo, context| {
+        async move {
+            assert_eq!(
+                memo.call::<_, Value>(
+                    &context,
+                    "annotated",
+                    (json!({ "count": 2 }), "seen".to_string())
+                )
+                .await?,
+                json!({ "count": 2, "note": "seen" })
+            );
+            assert_eq!(
+                memo.call::<_, Vec<Note>>(&context, "notes", (vec![json!([1]), Value::Null],))
+                    .await?,
+                [
+                    Note {
+                        title: "0".to_string(),
+                        body: json!([1]),
+                    },
+                    Note {
+                        title: "1".to_string(),
+                        body: Value::Null,
+                    },
+                ]
+            );
+            let contract = contract();
+            let interface = "example:calculator/memo@1.0.0";
+            for (method, arguments, result) in [
+                (
+                    "annotated",
+                    json!([r#"{"tags":["a"],"count":2}"#, "seen"]),
+                    json!(r#"{"count":2,"note":"seen","tags":["a"]}"#),
+                ),
+                ("annotated", json!(["[1,2]", "seen"]), json!("[1,2]")),
+                (
+                    "notes",
+                    json!([[r#"{"k":true}"#, "null"]]),
+                    json!([
+                        { "title": "0", "body": r#"{"k":true}"# },
+                        { "title": "1", "body": "null" },
+                    ]),
+                ),
+            ] {
+                assert!(accepted(&contract, interface, method, true, &arguments));
+                let answer = memo
+                    .call_portable::<_, Value>(&context, method, arguments)
+                    .await?;
+                assert_eq!(answer, result, "{method}");
+                assert!(accepted(&contract, interface, method, false, &answer));
+            }
+            for (arguments, message) in [
+                (
+                    json!(["{", "seen"]),
+                    "expected JSON text: EOF while parsing an object at line 1 column 1",
+                ),
+                (
+                    json!([{ "count": 2 }, "seen"]),
+                    "expected JSON text as a string",
+                ),
+            ] {
+                let error = memo
+                    .call_portable::<_, Value>(&context, "annotated", arguments)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.reason, "arguments", "{error}");
+                assert_eq!(error.message, message);
+            }
             Ok(())
         }
         .boxed_local()

@@ -488,4 +488,45 @@ mod guest {
                 .ok_or_else(|| String::from("no outcome"))
         }
     }
+
+    /// A titled document: free JSON in a record, which the macro keeps the author's, converted to
+    /// and from the bindings' record of its text.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Note {
+        pub title: String,
+        pub body: serde_json::Value,
+    }
+
+    /// Free JSON, `serde_json::Value`, crosses as a WIT `string` that holds its text: alone, in a
+    /// list, in an option and in a record of the module.
+    #[service]
+    pub struct Documents;
+
+    impl Documents {
+        /// The document, with `note` under the key `note` when it is an object.
+        pub fn annotated(document: serde_json::Value, note: String) -> serde_json::Value {
+            let mut document = document;
+            if let Some(object) = document.as_object_mut() {
+                object.insert(String::from("note"), serde_json::Value::String(note));
+            }
+            document
+        }
+
+        /// A note of each document, titled by its position.
+        pub fn notes(documents: Vec<serde_json::Value>) -> Vec<Note> {
+            documents
+                .into_iter()
+                .enumerate()
+                .map(|(index, body)| Note {
+                    title: format!("{index}"),
+                    body,
+                })
+                .collect()
+        }
+
+        /// The body of the note when it is an object.
+        pub fn object(note: Note) -> Option<serde_json::Value> {
+            note.body.is_object().then_some(note.body)
+        }
+    }
 }

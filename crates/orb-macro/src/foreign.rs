@@ -216,11 +216,11 @@ impl Modules {
     }
 
     /// The module types a type written in the module `scope` mentions: the last name of each path,
-    /// but the types with a WIT spelling of their own, looking through type parameters and tuples,
-    /// and none of the names a consumed interface's module reaches, which are no types of the
-    /// module.
+    /// but the types with a WIT spelling of their own, free JSON among them, looking through type
+    /// parameters and tuples, and none of the names a consumed interface's module reaches, which
+    /// are no types of the module.
     pub(crate) fn references(&self, ty: &Type, scope: usize, out: &mut Vec<Ident>) {
-        if self.named(ty, scope).is_some() {
+        if self.named(ty, scope).is_some() || wit::free_json(ty) {
             return;
         }
         match ty {

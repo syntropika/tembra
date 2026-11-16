@@ -104,6 +104,7 @@ starts with this explicit freestanding mode.
 | a case with named fields, `Refused { reason: String }`, of such an enum     | a `record` of its own, `<enum>-<case>`, the case's payload; the enum stays the author's, converted to and from the bindings' type, and so does every type holding it |
 | a struct of `bool` fields with `#[flags]`, when a service method uses it    | a `flags`, a flag per field in kebab-case; the struct stays the author's, which the bindings take as it is                                                           |
 | `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                                                                         |
+| free JSON, `serde_json::Value`, by that path                                | a `string` that holds its JSON text, written and read at the boundary; a type holding it stays the author's, converted to and from the bindings' type                |
 | a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`        | `import` and `export` of that hook interface in the world: a contribution                                                                                            |
 | a unit struct with `#[hook("ns:name/hook@version", composition = c)]`       | `import` and `export` of that hook interface in the world: a declaration                                                                                             |
 | a unit struct with `#[hook(composition = c, input = Type)]`                 | a hook `interface` of the package under the struct's name, its callback `apply` and the types the input reaches, imported and exported by the world: a declaration   |
@@ -124,7 +125,7 @@ that enters the WIT needs a WIT spelling for its fields and cases, so an array f
 two unnamed payloads is a compile error there and nowhere else. A state that stays out of the WIT, and
 every type of the module its fields reach that stays out too, get `serde`'s derives. A method that
 names a type the module does not declare, other than a consumed interface's type named through
-that interface's module, `greeting::Entry`, is a compile error, and so is a service with the name of
+that interface's module, `greeting::Entry`, or free JSON, `serde_json::Value`, is a compile error, and so is a service with the name of
 the module, because WIT refuses a world and an interface of one name. So is a method named `then`,
 `release`, `state`, `ready`, `status` or `opaque`: every reference to a service object has those
 members, and the kernel refuses such a method when it installs the Orb. The package and every
@@ -1111,12 +1112,17 @@ record of a case with named fields as an object; an option as `null` or the valu
 as exact numbers; a flags as an object of the flags set, each `true`, which reads a flag left out, or
 `false`, as unset. A float crosses only when finite and not `-0`, and an `f32` only when it narrows
 to such a number too: a value the codec refuses fails the call as its arguments, before the method
-runs, and a result it cannot write fails it as its result. Each type of the module that enters the
-WIT reads and writes its JSON in its own module, through a hidden trait of the Orb module.
+runs, and a result it cannot write fails it as its result. Free JSON, `serde_json::Value`, crosses
+as a string that holds its text. Natively, a text that holds no JSON fails only that call, with the
+reason `arguments`. A component has no error channel for it: its method panics and traps, as any
+panic in a component method does, and the trap takes the revision down for every caller, each
+later call and every other object failing as `unavailable`, until a reload installs the Orb again.
+Each type of the module that enters the WIT reads and writes its JSON in its own module, through a
+hidden trait of the Orb module.
 
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
-`char`, records, enums, variants, flags, `Result`s, and `Vec`, `Option` and tuples of them. A type of
-a consumed interface, a resource, the `context` option, `#[state]`, `#[resource]`,
+`char`, free JSON, records, enums, variants, flags, `Result`s, and `Vec`, `Option` and tuples of
+them. A type of a consumed interface, a resource, the `context` option, `#[state]`, `#[resource]`,
 `#[wit_resource]`, an import and a hook are compile errors where the runtime is linked, naming the
 item, until the native side covers them, and so is an `Option` of an `Option`, which the boundary's
 JSON cannot tell from `None`; a component build of the same module is unaffected.

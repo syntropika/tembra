@@ -4862,6 +4862,96 @@ fn the_native_side_refuses_a_nested_option() {
     }
 }
 
+/// Free JSON, `serde_json::Value` by its path, is a WIT `string` that holds its JSON text. The
+/// component's bridges spell it as the bindings' string, from `alloc`, and read or write its text
+/// wherever a method holds it; a record holding it stays the author's, converted to and from the
+/// bindings' record of its text. The native codec reads and writes the text. A bare `Value` names
+/// a type of the module, which the refusal says to write by its path, and free JSON beside a
+/// resource, or in a derived hook's input, is refused.
+#[test]
+fn free_json_is_a_string_that_holds_its_text() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            pub struct Note { pub title: String, pub body: serde_json::Value }
+            #[service]
+            pub struct Ledger;
+            impl Ledger {
+                pub fn annotated(document: serde_json::Value, notes: Vec<Option<::serde_json::Value>>) -> serde_json::Value { todo!() }
+                pub fn noted(note: Note) -> (Note, serde_json::Value) { todo!() }
+            }
+        }",
+    );
+    let wit = wit(&module);
+    for expected in [
+        "record note {\n    title: string,\n    body: string,\n  }",
+        "annotated: func(document: string, notes: list<option<string>>) -> string;",
+        "noted: func(note: note) -> tuple<note, string>;",
+    ] {
+        assert!(wit.contains(expected), "{expected}\n{wit}");
+    }
+    let generated = tokens(&module);
+    for expected in [
+        "extern crate alloc as __tembra_alloc ;",
+        "fn annotated (document : __tembra_alloc :: string :: String , notes : Vec < Option < __tembra_alloc :: string :: String > >) -> __tembra_alloc :: string :: String {",
+        "match serde_json :: from_str :: < serde_json :: Value > (& document) { :: core :: result :: Result :: Ok (json) => json , :: core :: result :: Result :: Err (error) => :: core :: panic ! (\"{}\" , error) , }",
+        "notes . into_iter () . map (| item | item . map (| item | match :: serde_json :: from_str :: < :: serde_json :: Value > (& item) {",
+        "match serde_json :: to_string (& Ledger :: annotated (",
+        "{ :: core :: result :: Result :: Ok (text) => text , :: core :: result :: Result :: Err (error) => :: core :: panic ! (\"{}\" , error) , }",
+        "fn noted (note : exports :: example :: book :: ledger :: Note) -> (exports :: example :: book :: ledger :: Note , __tembra_alloc :: string :: String ,) {",
+        "body : match serde_json :: to_string (& value . body) {",
+        "body : match serde_json :: from_str :: < serde_json :: Value > (& value . body) {",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let native = native(&module, &[]);
+    for expected in [
+        ":: tembra :: serde_json :: Value :: String (text) => { :: tembra :: serde_json :: from_str :: < serde_json :: Value > (& text) . map_err (| error | :: std :: format ! (\"expected JSON text: {}\" , error)) }",
+        "\"expected JSON text as a string\"",
+        ":: tembra :: serde_json :: to_string (& value) . map (:: tembra :: serde_json :: Value :: String) . map_err (| error | error . to_string ())",
+        "impl __TembraBoundary for Note {",
+        "body : match object . remove (\"body\") {",
+    ] {
+        assert!(native.contains(expected), "{expected}\n{native}");
+    }
+    for (module, message) in [
+        (
+            "mod book {
+                use serde_json::Value;
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn read(document: Value) {} }
+            }",
+            "`Value` is used by a service method or a hook but is not a struct or enum of this module; for free JSON, write it by its path, `serde_json::Value`",
+        ),
+        (
+            "mod book {
+                #[wit_resource]
+                pub struct Ticket;
+                impl Ticket { #[constructor] pub fn new() -> Self { Ticket } }
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn issue() -> (Ticket, serde_json::Value) { todo!() } }
+            }",
+            "which holds the resource `Ticket` and free JSON, `serde_json::Value`",
+        ),
+        (
+            "mod book {
+                #[hook(composition = series, input = Event)]
+                pub struct Audit;
+                pub struct Event { pub data: serde_json::Value }
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn count() -> u32 { 0 } }
+            }",
+            "a derived hook's input holds free JSON",
+        ),
+    ] {
+        let error = refused(PACKAGE, module);
+        assert!(error.contains(message), "{message}\n{error}");
+    }
+}
+
 /// Each codec is declared inside the function registering its service, so two services whose
 /// names and methods meet in one name, `Ledger::count_words` and `LedgerCount::words`, each keep
 /// their own: the module's functions and constants are only `orb()`, `orb_named`, the manifest's

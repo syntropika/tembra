@@ -606,6 +606,8 @@ enum Kind<'a> {
     /// A record, an enum, a variant or a flags of the module: its own JSON, through the boundary
     /// trait it implements.
     Named(&'a Type),
+    /// Free JSON, `serde_json::Value`: a WIT `string` that holds its JSON text.
+    Json(&'a Type),
 }
 
 /// A type the codec does not cover: the type, and what it is and why it is refused, after the
@@ -636,6 +638,9 @@ fn kind<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>,
         ty,
         reason: reason.to_owned(),
     };
+    if wit::free_json(ty) {
+        return Ok(Kind::Json(ty));
+    }
     match ty {
         Type::Tuple(tuple) => Ok(Kind::Tuple(
             tuple
@@ -890,6 +895,17 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
             )
         }
         Kind::Named(ty) => quote! { <#ty as #boundary>::decode(#value) },
+        Kind::Json(ty) => quote! {
+            match #value {
+                ::tembra::serde_json::Value::String(text) => {
+                    ::tembra::serde_json::from_str::<#ty>(&text)
+                        .map_err(|error| ::std::format!("expected JSON text: {}", error))
+                }
+                _ => ::core::result::Result::Err(::std::string::String::from(
+                    "expected JSON text as a string",
+                )),
+            }
+        },
     }
 }
 
@@ -973,6 +989,11 @@ fn encode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
             quote! { match #value { #ok, #err } }
         }
         Kind::Named(ty) => quote! { <#ty as #boundary>::encode(#value) },
+        Kind::Json(_) => quote! {
+            ::tembra::serde_json::to_string(&#value)
+                .map(::tembra::serde_json::Value::String)
+                .map_err(|error| error.to_string())
+        },
     }
 }
 

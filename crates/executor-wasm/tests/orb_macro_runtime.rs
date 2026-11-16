@@ -1104,3 +1104,196 @@ fn shelve(pool: &mut LocalPool, host: &Host, name: &str) {
     );
     library.release().unwrap();
 }
+
+/// Free JSON, `serde_json::Value`, crosses the boundary both ways on both guests and both engines
+/// as a WIT `string` holding its JSON text: alone, in a list, in an option and in a record of the
+/// module, which the contract spells with strings.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD and TEMBRA_WASM_ORB_MACRO_NO_STD"]
+fn free_json_crosses_as_its_text() {
+    let guests = [
+        ("standard", component("TEMBRA_WASM_ORB_MACRO_STD")),
+        ("freestanding", component("TEMBRA_WASM_ORB_MACRO_NO_STD")),
+    ];
+    for interpreted in [false, true] {
+        let engine = if interpreted {
+            Engine::interpreted(Limits::default())
+        } else {
+            Engine::new(Limits::default())
+        }
+        .unwrap();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let orbs = guests
+            .iter()
+            .map(|(name, bytes)| {
+                let (wit, contract) = contract(bytes);
+                let words: String = wit.split_whitespace().collect();
+                for expected in [
+                    "recordnote{title:string,body:string,}",
+                    "annotated:func(document:string,note:string)->string;",
+                    "notes:func(documents:list<string>)->list<note>;",
+                    "object:func(note:note)->option<string>;",
+                ] {
+                    assert!(words.contains(expected), "{expected}\n{wit}");
+                }
+                let roles = contract.embedded_roles(bytes).unwrap();
+                let artifact = contract.component_artifact(bytes, name, 1, &roles).unwrap();
+                engine.load(&artifact, bound(granted())).unwrap()
+            })
+            .chain([counters()])
+            .collect();
+        host.install(orbs).unwrap();
+        for (name, _) in &guests {
+            document(&mut pool, &host, name);
+        }
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(engine.instances(), 0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+    }
+}
+
+/// Text that holds no JSON makes the component's method panic, since reading it into the author's
+/// `serde_json::Value` has no error channel there, and the panic traps the component, as any panic
+/// in a component method does. The caller sees a component trap, `unavailable`, and the revision
+/// is retired for every caller until a reload installs the Orb again: the same object's next call
+/// fails, whatever its JSON, and so does another principal's object, which no longer activates.
+/// After the reload both are served. A native Orb fails only the call, as its arguments.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn text_without_json_traps_the_component_until_a_reload() {
+    let bytes = component("TEMBRA_WASM_ORB_MACRO_STD");
+    let engine = Engine::new(Limits::default()).unwrap();
+    let load = || {
+        let (_, contract) = contract(&bytes);
+        let roles = contract.embedded_roles(&bytes).unwrap();
+        let artifact = contract
+            .component_artifact(&bytes, "standard", 1, &roles)
+            .unwrap();
+        engine.load(&artifact, bound(granted())).unwrap()
+    };
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![load(), counters()]).unwrap();
+    let service = "standard::example:runtime/documents@1.0.0";
+    let annotated =
+        |pool: &mut LocalPool, reference: &Rc<Reference>, principal: &'static str, text: &str| {
+            let reference = reference.clone();
+            let arguments = json!([text, "seen"]);
+            pool.run_until(host.root(principal, move |context| {
+                async move {
+                    reference
+                        .call_portable::<_, Value>(&context, "annotated", arguments)
+                        .await
+                }
+                .boxed_local()
+            }))
+        };
+    let trapped = |error: tembra::Error, reason: &str| {
+        assert_eq!(
+            (error.code, error.reason.as_str()),
+            (Code::Unavailable, reason),
+            "{error}"
+        );
+        assert!(error.message.starts_with("component trap"), "{error}");
+    };
+    let alice = Rc::new(host.get(service, vec!["main".into()], "alice").unwrap());
+    pool.run_until(alice.ready()).unwrap();
+    assert_eq!(
+        annotated(&mut pool, &alice, "alice", "{}").unwrap(),
+        json!(r#"{"note":"seen"}"#)
+    );
+    trapped(
+        annotated(&mut pool, &alice, "alice", "{").unwrap_err(),
+        "wasm_executor",
+    );
+    trapped(
+        annotated(&mut pool, &alice, "alice", "{}").unwrap_err(),
+        "wasm_executor_quarantined",
+    );
+    let bob = Rc::new(host.get(service, vec!["other".into()], "bob").unwrap());
+    trapped(
+        pool.run_until(bob.ready()).unwrap_err(),
+        "wasm_executor_quarantined",
+    );
+    let _ = bob.release();
+    pool.run_until(host.settled());
+    pool.run_until(host.reload(vec![load()], 5000)).unwrap();
+    assert_eq!(
+        annotated(&mut pool, &alice, "alice", "[1]").unwrap(),
+        json!("[1]")
+    );
+    let bob = Rc::new(host.get(service, vec!["other".into()], "bob").unwrap());
+    pool.run_until(bob.ready()).unwrap();
+    assert_eq!(
+        annotated(&mut pool, &bob, "bob", "{}").unwrap(),
+        json!(r#"{"note":"seen"}"#)
+    );
+    bob.release().unwrap();
+    alice.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+}
+
+/// Drive the documents of the Orb `name`: each JSON value crosses as its text, which the
+/// component reads into a `serde_json::Value` and writes back, its object's keys in order.
+fn document(pool: &mut LocalPool, host: &Host, name: &str) {
+    let documents = Rc::new(
+        host.get(
+            &format!("{name}::example:runtime/documents@1.0.0"),
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(documents.ready()).unwrap();
+    let call = |pool: &mut LocalPool, method: &'static str, arguments: Value| {
+        let documents = documents.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move {
+                documents
+                    .call_portable::<_, Value>(&context, method, arguments)
+                    .await
+            }
+            .boxed_local()
+        }))
+        .unwrap()
+    };
+    assert_eq!(
+        call(
+            pool,
+            "annotated",
+            json!([r#"{"tags":["a","b"],"count":2}"#, "seen"])
+        ),
+        json!(r#"{"count":2,"note":"seen","tags":["a","b"]}"#),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "annotated", json!(["[1,2]", "seen"])),
+        json!("[1,2]"),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "notes", json!([[r#"{"k":true}"#, "null"]])),
+        json!([
+            {"title": "0", "body": r#"{"k":true}"#},
+            {"title": "1", "body": "null"},
+        ]),
+        "{name}"
+    );
+    assert_eq!(
+        call(
+            pool,
+            "object",
+            json!([{"title": "t", "body": r#"{"k":1}"#}])
+        ),
+        json!(r#"{"k":1}"#),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "object", json!([{"title": "t", "body": "[1]"}])),
+        Value::Null,
+        "{name}"
+    );
+    documents.release().unwrap();
+}

@@ -30,6 +30,11 @@ last one, which the kernel stores as the JSON `serde` writes for the provider's 
 `consumed/deps/`, an interface the fixture's `shelf` service implements: the types of the shelf's
 export. Every installation binds the plain import to the provider too.
 
+Its `documents` service takes and returns free JSON, `serde_json::Value`, which crosses as a WIT
+`string` holding its text: alone, in a list, in an option and in the `note` record, which the macro
+keeps the author's, converted to and from the bindings' record of the text. Both builds read and
+write the text with `serde_json`, the `no-std` one through its `alloc` feature.
+
 Run `just test-orb-macro` from the repository root to build both real components and execute
 `executor-wasm/tests/orb_macro_runtime.rs` on Cranelift and Pulley. The test decodes both component
 contracts, compares their WIT and typed metadata, calls each guest, observes the walker's state,

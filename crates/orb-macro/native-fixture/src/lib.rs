@@ -253,13 +253,44 @@ pub mod calculator {
         #[service(linger_ms = 2500)]
         pub struct Memo;
 
+        /// A titled document: free JSON in a record, which the macro keeps the author's.
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct Note {
+            pub title: String,
+            pub body: serde_json::Value,
+        }
+
         impl Memo {
             /// The text, as given.
             pub fn echo(text: String) -> String {
                 text
             }
+
+            /// The document, with `note` under the key `note` when it is an object: free JSON
+            /// crosses as a WIT `string` that holds its text.
+            pub fn annotated(document: serde_json::Value, note: String) -> serde_json::Value {
+                let mut document = document;
+                if let Some(object) = document.as_object_mut() {
+                    object.insert("note".to_string(), serde_json::Value::String(note));
+                }
+                document
+            }
+
+            /// A note of each document, titled by its position.
+            pub fn notes(documents: Vec<serde_json::Value>) -> Vec<Note> {
+                documents
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, body)| Note {
+                        title: index.to_string(),
+                        body,
+                    })
+                    .collect()
+            }
         }
     }
+
+    pub use memo::Note;
 }
 
 /// Notes kept for the host, with what the host lends the Orb: the argument of `notebook::orb(..)`.

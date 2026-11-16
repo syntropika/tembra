@@ -1830,8 +1830,42 @@ fn unit(ty: &Type) -> bool {
     matches!(ty, Type::Tuple(tuple) if tuple.elems.is_empty())
 }
 
+/// Whether a Rust type is free JSON, `serde_json::Value`, by the end of its path: a WIT `string`
+/// that holds JSON text, which each side of the boundary reads and writes.
+pub(crate) fn free_json(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let segments: Vec<&syn::PathSegment> = path.path.segments.iter().collect();
+    path.qself.is_none()
+        && matches!(segments.as_slice(), [.., json, value]
+            if json.ident == "serde_json"
+                && value.ident == "Value"
+                && json.arguments.is_none()
+                && value.arguments.is_none())
+}
+
+/// Whether a Rust type holds free JSON: is it, or holds it in its type parameters or its tuple's
+/// elements.
+pub(crate) fn holds_free_json(ty: &Type) -> bool {
+    free_json(ty)
+        || match ty {
+            Type::Path(path) => path.path.segments.last().is_some_and(|segment| {
+                matches!(&segment.arguments, syn::PathArguments::AngleBracketed(arguments)
+                if arguments.args.iter().any(|argument| {
+                    matches!(argument, syn::GenericArgument::Type(ty) if holds_free_json(ty))
+                }))
+            }),
+            Type::Tuple(tuple) => tuple.elems.iter().any(holds_free_json),
+            _ => false,
+        }
+}
+
 /// Translate an owned Rust type into its WIT spelling.
 pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
+    if free_json(ty) {
+        return Ok("string".into());
+    }
     match ty {
         Type::Path(path) => {
             let segment = path
