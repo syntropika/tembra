@@ -2165,8 +2165,8 @@ fn a_flags_struct_of_a_sub_module_is_named_from_its_module() {
         error.contains("`Access::empty` takes a name the macro gives a #[flags] struct"),
         "{error}"
     );
-    // A name a `use` brings into the module is the struct too, when no other type of the Orb has
-    // its name; with two types of that name the macro cannot tell, and keeps its derive.
+    // A name a `use` brings into the module is the struct too, followed through the `use`, with
+    // or without another type of the Orb of that name.
     let imported = |extra: &str| office(&format!("use rights::Access; {extra}"));
     let module = expanded(
         "example:office@1.0.0",
@@ -2196,7 +2196,7 @@ fn a_flags_struct_of_a_sub_module_is_named_from_its_module() {
     );
     assert!(
         tokens(&module).contains(
-            "# [derive (:: core :: clone :: Clone , :: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool }"
+            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool }"
         ),
         "{}",
         tokens(&module)
@@ -2516,7 +2516,8 @@ fn what_a_flags_struct_cannot_be_is_refused() {
 
 /// A tuple or unit struct of another module with a flags struct's name is another type: the impls
 /// written for it in its module are its own, not the flags struct's, which the macro completes and
-/// checks as if they were not there.
+/// checks as if they were not there. An impl in a third module that names the flags struct through
+/// a `use` is the flags struct's, whatever namesake another module declares.
 #[test]
 fn a_namesake_of_a_flags_struct_in_another_module_keeps_its_impls() {
     let module = |legacy: &str| {
@@ -2553,6 +2554,49 @@ fn a_namesake_of_a_flags_struct_in_another_module_keeps_its_impls() {
         "impl Access { pub fn bits(&self) -> u32 { self.0 } }",
     ] {
         expanded("example:office@1.0.0", &module(legacy));
+    }
+    // An impl reached through a `use` in a third module is the flags struct's, whatever namesake
+    // another module declares: the `use` is followed before any fallback on the name.
+    let module = |ops: &str| {
+        format!(
+            "mod office {{
+                pub mod rights {{
+                    #[flags]
+                    pub struct Access {{ pub read: bool, pub write: bool }}
+                    #[service]
+                    pub struct Guard;
+                    impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                }}
+                pub mod legacy {{ pub type Access = u32; }}
+                pub mod ops {{
+                    use super::rights::Access;
+                    {ops}
+                }}
+            }}"
+        )
+    };
+    let generated = tokens(&expanded(
+        "example:office@1.0.0",
+        &module("impl Clone for Access { fn clone(&self) -> Self { *self } }"),
+    ));
+    assert!(
+        generated.contains(
+            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }"
+        ),
+        "{generated}"
+    );
+    for (ops, message) in [
+        (
+            "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "impl Access { pub fn bits(&self) -> u32 { 0 } }",
+            "`Access::bits` takes a name the macro gives a #[flags] struct",
+        ),
+    ] {
+        let error = refused("example:office@1.0.0", &module(ops));
+        assert!(error.contains(message), "{ops}: {error}");
     }
 }
 

@@ -1720,7 +1720,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .iter()
         .map(|state| {
             default_impls.iter().any(|(scope, ty)| {
-                names_state(ty, *scope, state, &states, &modules, &declared_types)
+                names_state(ty, *scope, state, &states, &modules, &uses, &declared_types)
             })
         })
         .collect();
@@ -1881,6 +1881,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &mut tree,
         &modules,
         &impls,
+        &uses,
         &declared_types,
         !states.is_empty(),
     )?;
@@ -1895,6 +1896,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         let mut traits = flags::implemented_by_hand(
             &mut tree,
             &modules,
+            &uses,
             &declared_types,
             &shape.ident,
             shape.scope,
@@ -2660,36 +2662,37 @@ fn implemented_by(derive: &Ident, attrs: &[Attribute]) -> Vec<String> {
 }
 
 /// Whether the type of an `impl Default for ..`, written in the module `scope`, is `state`: its
-/// path, followed from that module through `self::`, `super::` and sub-modules, ends at the
-/// state; a path ending at another type of the Orb module is not the state, and one leaving the
-/// Orb module neither. A name the macro cannot follow, such as one a `use` brings in, is the
-/// state when no other state has its name.
+/// path, followed from that module through the module's `use`s, `self::`, `super::` and
+/// sub-modules (`type_module`), ends at the state; a path ending at another type of the Orb module
+/// is not the state, and one leaving the Orb module neither. A name the macro cannot follow, one a
+/// glob import brings in, is the state when no other state has its name.
 fn names_state(
     ty: &Type,
     scope: usize,
     state: &State,
     states: &[State],
     modules: &[Vec<Ident>],
+    uses: &[Uses],
     declared: &[(usize, Ident)],
 ) -> bool {
     let Type::Path(path) = ty else {
         return false;
     };
-    let Some(last) = path.path.segments.last() else {
-        return false;
-    };
-    if path.qself.is_some() || last.ident != state.ident {
+    if path.qself.is_some() {
         return false;
     }
-    let Some(module) = module_of(&path.path, &modules[scope]) else {
+    let Some((module, name)) = type_module(&path.path, scope, uses, modules) else {
         return false;
     };
-    if module == modules[state.scope] {
+    if name != state.ident {
+        return false;
+    }
+    if module == state.scope {
         return true;
     }
     let elsewhere = declared
         .iter()
-        .any(|(scope, ident)| modules[*scope] == module && *ident == last.ident);
+        .any(|(scope, ident)| *scope == module && *ident == name);
     !elsewhere
         && states
             .iter()
@@ -2700,7 +2703,8 @@ fn names_state(
 
 /// The module, as a path from the Orb module, in which a type path written in the module `from`
 /// names its type: `self::` stays, `super::` goes up, any other segment goes down a sub-module.
-/// `None` for a path that leaves the Orb module.
+/// `None` for a path that leaves the Orb module. `foreign::Modules` reads a path so, by its text
+/// alone; `type_module` follows the Orb's modules' `use`s as well.
 fn module_of(path: &syn::Path, from: &[Ident]) -> Option<Vec<Ident>> {
     if path.leading_colon.is_some() {
         return None;
@@ -2721,6 +2725,53 @@ fn module_of(path: &syn::Path, from: &[Ident]) -> Option<Vec<Ident>> {
         }
     }
     Some(module)
+}
+
+/// The module, by scope, in which a type path written in the module `scope` names its type, with
+/// the type's name there. The path's prefix is followed as a glob import's is (`glob_module`):
+/// through the `use` binding its first name, `self::`, `super::` and the sub-modules of the Orb.
+/// A single name a `use` of the module binds, `Access` after `use super::rights::Access;`, stands
+/// for the path it imports, and so does one the module reached re-exports. `None` for a path that
+/// leaves the Orb module, through a crate, `crate::` or `Self`.
+fn type_module(
+    path: &syn::Path,
+    scope: usize,
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+) -> Option<(usize, Ident)> {
+    if path.leading_colon.is_some() {
+        return None;
+    }
+    let mut scope = scope;
+    let mut segments: Vec<Ident> = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.clone())
+        .collect();
+    // Each step consumes the path's prefix or replaces the name by what a `use` binds it to;
+    // declarations binding one another in a circle would never end.
+    for _ in 0..64 {
+        let (name, prefix) = segments.split_last()?;
+        let (name, prefix) = (name.clone(), prefix.to_vec());
+        if !prefix.is_empty() {
+            let prefix = Named {
+                global: false,
+                segments: prefix,
+            };
+            scope = glob_module(&prefix, scope, uses, modules)?;
+        }
+        match uses[scope].names.get(&name.to_string()) {
+            // `use name;` brings the crate `name` into scope, and a path from the crates leaves.
+            Some(bound)
+                if bound.global || (bound.segments.len() == 1 && bound.segments[0] == name) =>
+            {
+                return None;
+            }
+            Some(bound) => segments = bound.segments.clone(),
+            None => return Some((scope, name)),
+        }
+    }
+    None
 }
 
 /// Remove and return the marker attribute with the given name, if present.

@@ -15,7 +15,8 @@
 //! named from its import module too, one module higher, which one path cannot serve: a hook's input
 //! holds no flags.
 use crate::{
-    Candidate, Declared, Module, Shape, ShapeKind, identity, reaches_root, reaching, relative, wit,
+    Candidate, Declared, Module, Shape, ShapeKind, Uses, identity, reaches_root, reaching,
+    relative, wit,
 };
 use proc_macro2::Span;
 use quote::quote;
@@ -208,15 +209,17 @@ pub(crate) fn remapped(
 /// Put each flags struct that enters the WIT back in its module, with the derives it lacks and
 /// the functions the bindings call on it. A function of a reserved name in an impl block of the
 /// struct, or a `BitOr` of the struct with itself or with a type parameter, written in any module
-/// of the Orb, is refused: the macro's would clash with it. `declared` are the types of the Orb's
-/// modules, by scope, which tell a name a `use` brings in apart. Returns the traits each struct
-/// has, by its name: the macro's derives, the author's, and those the Orb's modules implement for
-/// it by hand, which decide the derives of the generated types holding the struct.
+/// of the Orb, is refused: the macro's would clash with it. `uses` are the modules' imports,
+/// through which the type of an impl is followed, and `declared` the types of the Orb's modules,
+/// by scope, which tell a name a glob import brings in apart. Returns the traits each struct has,
+/// by its name: the macro's derives, the author's, and those the Orb's modules implement for it
+/// by hand, which decide the derives of the generated types holding the struct.
 pub(crate) fn emit(
     shapes: &[Shape],
     tree: &mut Module,
     modules: &[Vec<Ident>],
     impls: &[(usize, syn::ItemImpl)],
+    uses: &[Uses],
     declared: &[(usize, Ident)],
     serde: bool,
 ) -> syn::Result<BTreeMap<String, BTreeSet<String>>> {
@@ -227,8 +230,9 @@ pub(crate) fn emit(
         };
         let mut item = (**item).clone();
         let ident = item.ident.clone();
-        let names_struct =
-            |ty: &Type, scope: usize| names(ty, scope, &ident, shape.scope, modules, declared);
+        let names_struct = |ty: &Type, scope: usize| {
+            names(ty, scope, &ident, shape.scope, modules, uses, declared)
+        };
         let own = impls
             .iter()
             .filter(|(scope, block)| names_struct(&block.self_ty, *scope));
@@ -299,48 +303,52 @@ pub(crate) fn emit(
 pub(crate) fn implemented_by_hand(
     tree: &mut Module,
     modules: &[Vec<Ident>],
+    uses: &[Uses],
     declared: &[(usize, Ident)],
     ident: &Ident,
     home: usize,
 ) -> BTreeSet<String> {
-    let names_type = |ty: &Type, scope: usize| names(ty, scope, ident, home, modules, declared);
+    let names_type =
+        |ty: &Type, scope: usize| names(ty, scope, ident, home, modules, uses, declared);
     traits_implemented(tree, modules, names_type)
         .into_keys()
         .collect()
 }
 
 /// Whether a type, written in the module `scope`, is the type `ident` of the module `home`: a path
-/// ending in the type's name that names it in that module (`module_of`), as `Access` in its own
-/// module and `model::Access` from the Orb module. A name the macro cannot place, one a `use`
-/// brings into a module declaring no type of that name, is the type when no other type of the
-/// Orb's modules has its name, as the state's `impl Default` is read; a path leaving the Orb
-/// module is not the type.
+/// that names it in that module, followed through the module's `use`s, `self::`, `super::` and
+/// the sub-modules (`type_module`), as `Access` in its own module, `model::Access` from the Orb
+/// module and `Access` after `use super::model::Access;` in any module. A name the macro cannot
+/// place, one a glob import brings into a module declaring no type of that name, is the type when
+/// no other type of the Orb's modules has its name, as the state's `impl Default` is read; a path
+/// leaving the Orb module is not the type.
 fn names(
     ty: &Type,
     scope: usize,
     ident: &Ident,
     home: usize,
     modules: &[Vec<Ident>],
+    uses: &[Uses],
     declared: &[(usize, Ident)],
 ) -> bool {
     let Type::Path(path) = ty else {
         return false;
     };
-    let Some(last) = path.path.segments.last() else {
-        return false;
-    };
-    if path.qself.is_some() || last.ident != *ident {
+    if path.qself.is_some() {
         return false;
     }
-    let Some(module) = crate::module_of(&path.path, &modules[scope]) else {
+    let Some((module, name)) = crate::type_module(&path.path, scope, uses, modules) else {
         return false;
     };
-    if module == modules[home] {
+    if name != *ident {
+        return false;
+    }
+    if module == home {
         return true;
     }
     let elsewhere = declared
         .iter()
-        .any(|(scope, name)| modules[*scope] == module && *name == *ident);
+        .any(|(scope, name)| *scope == module && *name == *ident);
     !elsewhere && declared.iter().filter(|(_, name)| *name == *ident).count() == 1
 }
 
