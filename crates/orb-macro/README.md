@@ -1124,6 +1124,14 @@ the call's cancellation. The WIT, the codec and the tuple of arguments leave it 
 side passes the call's own context there. Only a native host has a context to pass, so such a
 module is native only.
 
+A `pub fn` marked `#[local]` is a method for native callers only, for values that exist only in
+the host process, such as a closure or a type without serde. The WIT leaves it out, with the types
+only it uses, which need no WIT spelling; the native side registers it with `local_method` under
+the name it would have in WIT, so a local caller passes its arguments as for any method, or calls
+it through the service's client, and a portable caller is refused with `LocalValue`. No other
+method of the service, local or portable, may take that name, and a service without a `#[create]`
+keeps at least one portable method for its interface. Such a module is native only too.
+
 The codec reads and writes the JSON form compiled and TypeScript callers send and validate: the
 arguments as an array, `null` too without parameters; a record as an object of its fields, keyed by
 the lowerCamelCase form of their WIT names; an enum as the WIT name of its case; a variant and a

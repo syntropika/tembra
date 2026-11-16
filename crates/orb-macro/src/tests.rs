@@ -4706,6 +4706,148 @@ fn a_native_method_takes_the_calls_context_outside_the_wit() {
     }
 }
 
+/// A `pub fn` marked `#[local]` is a method for native callers only: the WIT leaves it out, with
+/// the types only it reaches, which need no WIT spelling and stay the author's; the native side
+/// registers it with `local_method`, under the name it would have in WIT and with the handle of
+/// any method, and writes no codec for it; the component bridges no such function. The marker
+/// goes on a `pub fn` of a service, whose other methods, local or portable, take other names, and
+/// which keeps a portable one.
+#[test]
+fn a_local_method_is_registered_natively_and_kept_out_of_the_wit() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            pub struct Tape { pub entries: Vec<u32> }
+            #[service]
+            pub struct Ledger;
+            impl Ledger {
+                pub fn count() -> u32 { 0 }
+                /// Run a callback over a tape.
+                #[local]
+                pub fn apply_each(tape: Tape, operation: Rc<dyn Fn(u32) -> u32>) -> Tape { tape }
+                #[local]
+                pub async fn rewind(context: &Context, label: &'static str) {}
+            }
+        }",
+    );
+    let wit = wit(&module);
+    assert!(wit.contains("count: func() -> u32;"), "{wit}");
+    for absent in ["apply", "callback", "rewind", "tape"] {
+        assert!(!wit.contains(absent), "{absent}\n{wit}");
+    }
+    let handles = native(&module, &[]);
+    for expected in [
+        ". method_with (\"count\" ,",
+        ". local_method (\"apply-each\" , | _ , __tembra_context : :: tembra :: Context , (tape , operation ,) : (Tape , Rc < dyn Fn (u32) -> u32 > ,) | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: apply_each (tape , operation)) } ,)",
+        ". local_method (\"rewind\" , | _ , __tembra_context : :: tembra :: Context , (label ,) : (& 'static str ,) | async move { __tembra_context . check () ? ; Ledger :: rewind (& __tembra_context , label) . await ; :: core :: result :: Result :: Ok (()) } ,)",
+    ] {
+        assert!(handles.contains(expected), "{expected}\n{handles}");
+    }
+    for absent in ["__TEMBRA_CODEC_APPLY_EACH", "__TEMBRA_CODEC_REWIND"] {
+        assert!(!handles.contains(absent), "{absent}\n{handles}");
+    }
+    // The client calls a local method as any other, with its documentation.
+    for expected in [
+        "# [doc = \" Run a callback over a tape.\"] pub async fn apply_each (& self , context : & :: tembra :: Context , tape : Tape , operation : Rc < dyn Fn (u32) -> u32 >) -> :: tembra :: Result < Tape >",
+        ". call :: < (Tape , Rc < dyn Fn (u32) -> u32 > ,) , Tape > (context , \"apply-each\" , (tape , operation ,))",
+        "pub async fn rewind (& self , context : & :: tembra :: Context , label : & 'static str) -> :: tembra :: Result < () >",
+    ] {
+        assert!(handles.contains(expected), "{expected}\n{handles}");
+    }
+    let generated = tokens(&module);
+    for expected in [
+        "pub struct Tape { pub entries : Vec < u32 > }",
+        "Guest for __TembraExports { fn count () -> u32 { Ledger :: count () } }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    for (module, message) in [
+        (
+            "mod book {
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn count() -> u32 { 0 }
+                    #[local]
+                    fn hidden() {}
+                }
+            }",
+            "#[local] marks a `pub fn` of a #[service] struct",
+        ),
+        (
+            "mod book {
+                pub struct Tape;
+                impl Tape { #[local] pub fn rewind() {} }
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn count() -> u32 { 0 } }
+            }",
+            "#[local] marks a function of a #[service] struct; `Tape` is not one",
+        ),
+        (
+            "mod book {
+                #[local]
+                pub fn rewind() {}
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn count() -> u32 { 0 } }
+            }",
+            "#[local] goes on a function in the impl block of a #[service] struct, not on a free function",
+        ),
+        // A local method's name is taken among the portable methods' and the other local ones'.
+        (
+            "mod book {
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn get_entry(id: u32) -> String { String::new() }
+                    #[local]
+                    pub fn getEntry(id: u32, cache: Rc<Cache>) -> String { String::new() }
+                }
+            }",
+            "`Ledger::get_entry` and `Ledger::getEntry` are both `get-entry` in the methods of `Ledger`, where local and portable methods share one namespace; rename one of them",
+        ),
+        (
+            "mod book {
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn count() -> u32 { 0 }
+                    #[local]
+                    pub fn rewind_tape() {}
+                    #[local]
+                    pub fn rewindTape() {}
+                }
+            }",
+            "`Ledger::rewind_tape` and `Ledger::rewindTape` are both `rewind-tape` in the methods of `Ledger`, where local and portable methods share one namespace; rename one of them",
+        ),
+        // Its interface is made of the portable ones.
+        (
+            "mod book {
+                #[service]
+                pub struct Ledger;
+                impl Ledger { #[local] pub fn rewind() {} }
+            }",
+            "a service needs at least one portable method, a pub fn without #[local], or a function marked #[create] that declares what its objects run",
+        ),
+        // It borrows `&self` only where a create builds the object, as a portable one does.
+        (
+            "mod book {
+                #[service]
+                pub struct Ledger;
+                impl Ledger {
+                    pub fn count() -> u32 { 0 }
+                    #[local]
+                    pub fn rewind(&self) {}
+                }
+            }",
+            "`Ledger::rewind` borrows `&self`, which a #[create] builds: give `Ledger` a function marked #[create], or remove self",
+        ),
+    ] {
+        assert_eq!(refused(PACKAGE, module), message);
+    }
+}
+
 /// What the native side does not cover yet is a compile error inside the facade's wrapper, so a
 /// component build of the module is unaffected: the `context` option, a state, a root resource, an
 /// import, a hook contributed to or declared, and a WIT resource, each named.

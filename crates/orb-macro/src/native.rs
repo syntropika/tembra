@@ -325,11 +325,12 @@ fn codec_ident(function: &Function) -> Ident {
 /// The registration of one service, in its own module: the function `orb()` calls, which declares
 /// the codec of each method and builds the `Service` named `{orb}::{identity}` with the signature
 /// of its interface, unless it has no method, the ownership policy of its attribute and one method
-/// per `pub fn`, under its WIT name. The method runs `context.check()` first and then the author's
-/// function, awaited when it is `async`, with the arguments as a tuple in WIT order. A service with
-/// a create takes the inputs `orb(..)` shares, and its factory calls the create with them and the
-/// object's declaration: the service it returns is the object's environment, which a method
-/// borrowing `&self` is called on. The guard of the attribute, if any, runs first in the factory.
+/// per `pub fn`, under its WIT name; a `#[local]` one, under the name it would have there, has no
+/// portable entrypoint. The method runs `context.check()` first and then the author's function,
+/// awaited when it is `async`, with the arguments as a tuple in WIT order. A service with a create
+/// takes the inputs `orb(..)` shares, and its factory calls the create with them and the object's
+/// declaration: the service it returns is the object's environment, which a method borrowing
+/// `&self` is called on. The guard of the attribute, if any, runs first in the factory.
 fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused> {
     let depth = analysis.modules[service.scope].len();
     let root = crate::supers(depth);
@@ -381,7 +382,10 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
     for method in &service.functions {
         let codec = codec_ident(method);
         codecs.push(self::codec(service, method, &codec, analysis)?);
-        methods.push(self::method(service, method, &codec));
+        methods.push(self::method(service, method, Some(&codec)));
+    }
+    for local in &service.locals {
+        methods.push(self::method(service, local, None));
     }
     let doc = format!(
         " The service `{}` of the native Orb named `orb`, as `orb()` registers it.",
@@ -435,12 +439,13 @@ fn guard(service: &Service, identity: &str) -> Option<TokenStream> {
     })
 }
 
-/// The `method_with` call binding one method: the handle takes the arguments as a tuple of the
-/// author's parameter types, checks the context and calls the author's function, on the object's
-/// environment when it borrows `&self`, passing the context itself where the function takes
-/// `&Context`, and answering with its value, or with the `tembra::Result` it returns, whose
+/// The call binding one method: `method_with` and its codec, or `local_method` for a `#[local]`
+/// one, without a codec, which refuses portable callers. The handle takes the arguments as a tuple
+/// of the author's parameter types, checks the context and calls the author's function, on the
+/// object's environment when it borrows `&self`, passing the context itself where the function
+/// takes `&Context`, and answering with its value, or with the `tembra::Result` it returns, whose
 /// failure is the call's error.
-fn method(service: &Service, function: &Function, codec: &Ident) -> TokenStream {
+fn method(service: &Service, function: &Function, codec: Option<&Ident>) -> TokenStream {
     let name = wit::kebab(&function.ident);
     let target = &service.ident;
     let ident = &function.ident;
@@ -468,58 +473,67 @@ fn method(service: &Service, function: &Function, codec: &Ident) -> TokenStream 
         (Some(_), false) => quote! { ::core::result::Result::Ok(#call) },
         (None, false) => quote! { #call; ::core::result::Result::Ok(()) },
     };
+    let (register, codec) = match codec {
+        Some(codec) => (quote! { method_with }, quote! { #codec, }),
+        None => (quote! { local_method }, quote! {}),
+    };
     quote! {
-        .method_with(
+        .#register(
             #name,
             |#environment, __tembra_context: ::tembra::Context, (#(#params,)*): (#(#types,)*)| async move {
                 __tembra_context.check()?;
                 #body
             },
-            #codec,
+            #codec
         )
     }
 }
 
 /// The typed client of a service, `MathClient` for `Math`, in the service's module and as visible
 /// as its struct: `new` wraps a reference to one of its objects, and each function of the
-/// interface is an async method that takes the call's `&Context` first and then the function's
-/// parameters, and calls the method's local entrypoint with them as a tuple in WIT order, `()`
-/// without parameters, so the compiler checks the types `Reference::call` checks at run time. A
-/// function named `new` is `new_` on the client, since `new` builds the client; its WIT name stays
-/// `new`. The context's name is hygienic: a parameter of the same name stays the author's.
+/// interface, and each `#[local]` method, is an async method that takes the call's `&Context` first
+/// and then the function's parameters, and calls the method's local entrypoint with them as a tuple
+/// in WIT order, `()` without parameters, so the compiler checks the types `Reference::call` checks
+/// at run time. A function named `new` is `new_` on the client, since `new` builds the client; its
+/// WIT name stays `new`. The context's name is hygienic: a parameter of the same name stays the
+/// author's.
 fn client(service: &Service) -> TokenStream {
     let vis = &service.vis;
     let ident = format_ident!("{}Client", service.ident);
     let context = Ident::new("context", Span::mixed_site());
-    let methods = service.functions.iter().map(|function| {
-        let name = wit::kebab(&function.ident);
-        let method = if function.ident == "new" {
-            format_ident!("new_", span = function.ident.span())
-        } else {
-            function.ident.clone()
-        };
-        let docs = &function.docs;
-        let params: Vec<&Ident> = function.params.iter().map(|(name, _, _)| name).collect();
-        let types: Vec<&Type> = function.params.iter().map(|(_, ty, _)| ty).collect();
-        let result = match &function.result {
-            Some((ty, _)) => quote! { #ty },
-            None => quote! { () },
-        };
-        quote! {
-            #(#[doc = #docs])*
-            pub async fn #method(
-                &self,
-                #context: &::tembra::Context
-                #(, #params: #types)*
-            ) -> ::tembra::Result<#result> {
-                self.reference
-                    .call::<(#(#types,)*), #result>(#context, #name, (#(#params,)*))
-                    .await
+    let methods = service
+        .functions
+        .iter()
+        .chain(&service.locals)
+        .map(|function| {
+            let name = wit::kebab(&function.ident);
+            let method = if function.ident == "new" {
+                format_ident!("new_", span = function.ident.span())
+            } else {
+                function.ident.clone()
+            };
+            let docs = &function.docs;
+            let params: Vec<&Ident> = function.params.iter().map(|(name, _, _)| name).collect();
+            let types: Vec<&Type> = function.params.iter().map(|(_, ty, _)| ty).collect();
+            let result = match &function.result {
+                Some((ty, _)) => quote! { #ty },
+                None => quote! { () },
+            };
+            quote! {
+                #(#[doc = #docs])*
+                pub async fn #method(
+                    &self,
+                    #context: &::tembra::Context
+                    #(, #params: #types)*
+                ) -> ::tembra::Result<#result> {
+                    self.reference
+                        .call::<(#(#types,)*), #result>(#context, #name, (#(#params,)*))
+                        .await
+                }
             }
-        }
-    });
+        });
     let doc = format!(
-        " A typed client of the service `{}`: one async method per function of its interface, which takes the call's context first and then the function's parameters.",
+        " A typed client of the service `{}`: one async method per function of its interface and per `#[local]` method, which takes the call's context first and then the function's parameters.",
         service.ident
     );
     quote! {

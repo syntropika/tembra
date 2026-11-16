@@ -310,6 +310,9 @@ struct Service {
     vis: Visibility,
     docs: Vec<String>,
     functions: Vec<Function>,
+    /// The `pub fn` marked `#[local]`: methods for native callers only, with the Rust types as
+    /// written, which the WIT leaves out.
+    locals: Vec<Function>,
     policy: Option<Policy>,
     implements: Option<String>,
     /// The module declaring the service, by scope; 0 is the Orb module.
@@ -407,7 +410,8 @@ struct Policy {
     linger_ms: u32,
 }
 
-/// One exported function, with the WIT spelling of its parameter and result types.
+/// One exported function, with the WIT spelling of its parameter and result types: empty for a
+/// `#[local]` method, which stays out of the WIT.
 struct Function {
     ident: Ident,
     asynchronous: bool,
@@ -553,15 +557,18 @@ enum Marker {
     Constructor,
     /// `#[create]`: a service's native factory, `fn(&Inputs, &Declaration) -> tembra::Result<Self>`.
     Create,
+    /// `#[local]`: a service method for native callers only, kept out of the WIT.
+    Local,
 }
 
 impl Marker {
-    const ALL: [Marker; 5] = [
+    const ALL: [Marker; 6] = [
         Marker::Validate,
         Marker::Open,
         Marker::Close,
         Marker::Constructor,
         Marker::Create,
+        Marker::Local,
     ];
 
     fn name(self) -> &'static str {
@@ -571,6 +578,7 @@ impl Marker {
             Self::Close => "close",
             Self::Constructor => "constructor",
             Self::Create => "create",
+            Self::Local => "local",
         }
     }
 
@@ -584,6 +592,7 @@ impl Marker {
             Self::Create => {
                 "`fn(&Inputs, &Declaration) -> tembra::Result<Self>` of a #[service] struct"
             }
+            Self::Local => "a `pub fn` of a #[service] struct",
         }
     }
 
@@ -593,7 +602,7 @@ impl Marker {
             Self::Validate => "#[state]",
             Self::Open | Self::Close => "#[resource]",
             Self::Constructor => "#[wit_resource]",
-            Self::Create => "#[service]",
+            Self::Create | Self::Local => "#[service]",
         }
     }
 }
@@ -906,6 +915,7 @@ impl Scan {
                             vis: s.vis.clone(),
                             docs: wit::docs(&s.attrs)?,
                             functions: Vec::new(),
+                            locals: Vec::new(),
                             policy,
                             implements,
                             scope,
@@ -958,9 +968,12 @@ impl Scan {
                         };
                         // The Orb module calls a state's rule and a root resource's functions; a
                         // WIT resource's constructor is called from its own module's bridge, and a
-                        // service's create from its own module's registration.
+                        // service's create and local methods from its own module's registration.
                         if nested
-                            && !matches!(marker, Marker::Constructor | Marker::Create)
+                            && !matches!(
+                                marker,
+                                Marker::Constructor | Marker::Create | Marker::Local
+                            )
                             && !reaches_root(&function.vis)
                         {
                             return Err(syn::Error::new(
@@ -1497,7 +1510,8 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         uses,
         ..
     } = scan;
-    // A service's methods are the pub fn of the impl blocks of its own module, but its create.
+    // A service's methods are the pub fn of the impl blocks of its own module, but its create;
+    // those marked #[local] are for native callers only, and stay out of the WIT.
     for (scope, item) in &impls {
         let Type::Path(path) = &*item.self_ty else {
             continue;
@@ -1512,14 +1526,18 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             let syn::ImplItem::Fn(function) = impl_item else {
                 continue;
             };
-            let create = marked.iter().any(|marked| {
-                marked.marker == Marker::Create
-                    && marked.scope == *scope
-                    && marked.self_ty == service.ident
-                    && marked.function.sig.ident == function.sig.ident
-            });
+            let marked_as = |marker: Marker| {
+                marked.iter().find(|marked| {
+                    marked.marker == marker
+                        && marked.scope == *scope
+                        && marked.self_ty == service.ident
+                        && marked.function.sig.ident == function.sig.ident
+                })
+            };
+            let create = marked_as(Marker::Create).is_some();
+            let local = marked_as(Marker::Local);
             if matches!(function.vis, Visibility::Public(_)) && !create {
-                let read = method(function)?;
+                let read = method(function, local.is_some())?;
                 // In a module with a `Context` of its own, `&Context` names that type, which no
                 // WIT parameter takes by reference, not the call's context.
                 if read.context.is_some()
@@ -1533,8 +1551,9 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
                         ),
                     ));
                 }
-                // An implemented interface's names are fixed by its WIT, checked with it below.
-                if service.implements.is_none()
+                // An implemented interface's names are fixed by its WIT, checked with it below; a
+                // local method's are the service's own.
+                if (service.implements.is_none() || local.is_some())
                     && let Some(member) = reserved_member(&wit::kebab(&read.ident))
                 {
                     return Err(syn::Error::new(
@@ -1547,7 +1566,15 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
                         ),
                     ));
                 }
-                service.functions.push(read);
+                match local {
+                    Some(_) => service.locals.push(read),
+                    None => service.functions.push(read),
+                }
+            } else if let Some(local) = local {
+                return Err(syn::Error::new(
+                    local.span,
+                    format!("#[local] marks {}", Marker::Local.shape()),
+                ));
             }
         }
     }
@@ -1564,7 +1591,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             Marker::Constructor => wit_resources
                 .iter()
                 .any(|resource| resource.ident == marked.self_ty && resource.scope == marked.scope),
-            Marker::Create => services
+            Marker::Create | Marker::Local => services
                 .iter()
                 .any(|service| service.ident == marked.self_ty && service.scope == marked.scope),
         };
@@ -1690,7 +1717,12 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
                     ),
                 ));
             }
-            if let Some(function) = service.functions.iter().find(|function| function.receiver) {
+            if let Some(function) = service
+                .functions
+                .iter()
+                .chain(&service.locals)
+                .find(|function| function.receiver)
+            {
                 return Err(syn::Error::new(
                     function.ident.span(),
                     format!(
@@ -1756,20 +1788,43 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             ));
         }
     }
-    // A service exports its methods. In a native-only module, one that its create builds may have
-    // none: its objects then only run what the create declares, such as tasks, while they are
-    // referenced.
+    // A service exports its methods, but its #[local] ones. In a native-only module, one that its
+    // create builds may have none: its objects then only run what the create declares, such as
+    // tasks, while they are referenced.
     if let Some(service) = services.iter().find(|service| {
         service.implements.is_none() && service.functions.is_empty() && service.create.is_none()
     }) {
         return Err(syn::Error::new(
             service.ident.span(),
-            if !native_only.is_empty() {
+            if !service.locals.is_empty() {
+                "a service needs at least one portable method, a pub fn without #[local], or a function marked #[create] that declares what its objects run"
+            } else if !native_only.is_empty() {
                 "a service needs at least one pub fn in an impl block, or a function marked #[create] that declares what its objects run"
             } else {
                 "a service needs at least one pub fn in an impl block"
             },
         ));
+    }
+    // A service object keeps one method of each name, and a local one would replace a portable one
+    // of its name: local methods take their names among the portable ones and each other's.
+    for service in &services {
+        let mut claimed: BTreeMap<String, &Ident> = service
+            .functions
+            .iter()
+            .map(|function| (wit::kebab(&function.ident), &function.ident))
+            .collect();
+        for local in &service.locals {
+            let name = wit::kebab(&local.ident);
+            if let Some(previous) = claimed.insert(name.clone(), &local.ident) {
+                return Err(syn::Error::new(
+                    local.ident.span(),
+                    format!(
+                        "`{0}::{previous}` and `{0}::{1}` are both `{name}` in the methods of `{0}`, where local and portable methods share one namespace; rename one of them",
+                        service.ident, local.ident
+                    ),
+                ));
+            }
+        }
     }
     // The module names the world; WIT refuses a world and an interface with one name.
     if let Some(service) = services
@@ -4677,8 +4732,16 @@ fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> B
 /// Read one public function of a service: a plain name for each owned parameter, `&self` when
 /// the service's create builds it, and at most one `&Context`, the call's, which stays out of the
 /// WIT. A result spelled `tembra::Result<T>` is the method's error channel, so its WIT result is
-/// `T`.
-fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
+/// `T`. A `local` method stays out of the WIT whole, so its types need no WIT spelling; its
+/// documentation goes to its client's method, as any method's does.
+fn method(function: &syn::ImplItemFn, local: bool) -> syn::Result<Function> {
+    let spelled = |ty: &Type| {
+        if local {
+            Ok(String::new())
+        } else {
+            wit::wit_type(ty)
+        }
+    };
     let mut params = Vec::new();
     let mut receiver = false;
     let mut context = None;
@@ -4712,11 +4775,7 @@ fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
                         "parameters need a plain name",
                     ));
                 };
-                params.push((
-                    pat.ident.clone(),
-                    (*typed.ty).clone(),
-                    wit::wit_type(&typed.ty)?,
-                ));
+                params.push((pat.ident.clone(), (*typed.ty).clone(), spelled(&typed.ty)?));
             }
         }
     }
@@ -4724,7 +4783,7 @@ fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
     let value = output.and_then(tembra_result);
     let result = match value.or(output) {
         Some(Type::Tuple(unit)) if unit.elems.is_empty() => None,
-        Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
+        Some(ty) => Some((ty.clone(), spelled(ty)?)),
         None => None,
     };
     Ok(Function {

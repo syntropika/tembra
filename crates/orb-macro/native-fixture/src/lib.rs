@@ -294,7 +294,8 @@ pub mod calculator {
 }
 
 /// Notes kept for the host, with what the host lends the Orb: the argument of `notebook::orb(..)`.
-/// Native only, as host values, the objects a create builds and a method's `&Context` are.
+/// Native only, as host values, the objects a create builds, a method's `&Context` and a `#[local]`
+/// method's closure are.
 #[cfg(not(target_arch = "wasm32"))]
 #[tembra::orb(package = "example:notes@1.0.0")]
 pub mod notebook {
@@ -456,6 +457,13 @@ pub mod notebook {
         /// The principal of the caller's root.
         pub fn caller(context: &Context) -> String {
             context.principal().unwrap_or_default()
+        }
+
+        /// The value through an operation the caller hands over: a closure, which only exists
+        /// natively and has no serde, so the method is `#[local]` and the WIT leaves it out.
+        #[local]
+        pub fn apply(value: u32, operation: Rc<dyn Fn(u32) -> u32>) -> u32 {
+            operation(value)
         }
     }
 }

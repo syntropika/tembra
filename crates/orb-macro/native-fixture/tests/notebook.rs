@@ -36,16 +36,21 @@ fn reported(events: &Events, kind: &str) -> Vec<String> {
 
 /// `orb(..)` takes the Orb's `#[inputs]`, which stay out of the WIT: the Orb declares the plan of
 /// the module's contract, as `calculator::orb()` does, and builds no object before a host
-/// acquires one.
+/// acquires one. A `#[local]` method is the native service's alone, so the expectation adds it.
 #[test]
 fn orb_takes_the_inputs() {
     let events = Events::default();
     let orb = notebook::orb(inputs(&events)).unwrap();
-    let expected = Contract::from_source("notebook.wit", notebook::WIT, Some("notebook"))
+    let mut expected = Contract::from_source("notebook.wit", notebook::WIT, Some("notebook"))
         .unwrap()
         .plan("calculator", 2, &Default::default())
         .unwrap()
         .orb;
+    for service in &mut expected.services {
+        if service.name == SESSION {
+            service.methods.insert("apply".into());
+        }
+    }
     assert_eq!(orb.declaration(), &expected);
     assert!(!notebook::WIT.contains("record"), "{}", notebook::WIT);
     assert!(events.borrow().is_empty(), "{:?}", events.borrow());
@@ -288,6 +293,49 @@ fn a_tembra_result_is_the_error_channel_any_other_result_a_value() {
     }))
     .unwrap();
     notes.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}
+
+/// A `#[local]` method takes what only exists natively, here a closure: a local caller passes it in
+/// the tuple of arguments, or through the service's client, whose compiler checks its types, and a
+/// portable caller is refused as `local_value`.
+#[test]
+fn a_local_method_takes_native_values_and_refuses_portable_callers() {
+    assert!(!notebook::WIT.contains("apply"), "{}", notebook::WIT);
+    let events = Events::default();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![notebook::orb(inputs(&events)).unwrap()])
+        .unwrap();
+    let session = Rc::new(host.get(SESSION, vec!["main".into()], "host").unwrap());
+    let called = session.clone();
+    pool.run_until(host.root("host", move |context| {
+        async move {
+            let double: Rc<dyn Fn(u32) -> u32> = Rc::new(|value| value * 2);
+            assert_eq!(
+                called
+                    .call::<_, u32>(&context, "apply", (21u32, double))
+                    .await?,
+                42
+            );
+            let client = notebook::SessionClient::new(called.clone());
+            assert_eq!(
+                client
+                    .apply(&context, 21, Rc::new(|value| value + 1))
+                    .await?,
+                22
+            );
+            let error = called
+                .call_portable::<_, Value>(&context, "apply", json!([21]))
+                .await
+                .unwrap_err();
+            assert_eq!(error.reason, "local_value", "{error}");
+            Ok(())
+        }
+        .boxed_local()
+    }))
+    .unwrap();
+    session.release().unwrap();
     pool.run_until(host.close()).unwrap();
 }
 
