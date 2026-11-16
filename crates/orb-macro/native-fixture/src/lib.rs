@@ -67,6 +67,162 @@ pub mod calculator {
         pub fn label(value: u32, context: String) -> String {
             format!("{context}: {value}")
         }
+
+        /// The ratio of two numbers, which the boundary carries only when finite and not `-0`.
+        pub fn ratio(dividend: f32, divisor: f32) -> f32 {
+            dividend / divisor
+        }
+    }
+
+    /// A point of the plotter's grid: 64-bit coordinates cross the boundary as exact numbers.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Point {
+        pub x: i64,
+        pub y: i64,
+    }
+
+    /// Where the pen moves.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum Heading {
+        North,
+        East,
+        South,
+        West,
+    }
+
+    /// What the plotter draws: a case without a value, one with a value, and one with named fields,
+    /// which carries a record of its own, so the macro keeps the enum the author's.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Shape {
+        Dot,
+        Square(u32),
+        Rect { width: u32, height: u32 },
+    }
+
+    /// How a shape is drawn.
+    #[flags]
+    #[derive(PartialEq)]
+    pub struct Pen {
+        pub filled: bool,
+        pub dashed_line: bool,
+    }
+
+    /// The moves of a walk, in a private module: their JSON is written there, and the Orb module's
+    /// services name them by path.
+    mod moves {
+        /// One move of a walk: no case has named fields, so the bindings generate the enum.
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        pub enum Move {
+            Turn(super::Heading),
+            Step(u32),
+            Stay,
+        }
+    }
+
+    pub use moves::Move;
+
+    /// A shape drawn with a pen: it holds an enum the macro keeps the author's, so it stays the
+    /// author's too.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Stroke {
+        pub shape: Shape,
+        pub pen: Pen,
+    }
+
+    /// Plots on a grid, with records, enums, variants, flags, options, results and 64-bit
+    /// integers.
+    #[service]
+    pub struct Plotter;
+
+    impl Plotter {
+        /// The point `steps` away towards the heading, or the point itself without one.
+        pub fn step(from: Point, heading: Option<Heading>, steps: u64) -> Point {
+            let steps = steps as i64;
+            match heading {
+                None => from,
+                Some(Heading::North) => Point {
+                    y: from.y + steps,
+                    ..from
+                },
+                Some(Heading::East) => Point {
+                    x: from.x + steps,
+                    ..from
+                },
+                Some(Heading::South) => Point {
+                    y: from.y - steps,
+                    ..from
+                },
+                Some(Heading::West) => Point {
+                    x: from.x - steps,
+                    ..from
+                },
+            }
+        }
+
+        /// Where a walk from the point ends, heading north until it turns.
+        pub fn walk(from: Point, path: Vec<moves::Move>) -> Point {
+            let mut heading = Heading::North;
+            let mut at = from;
+            for step in path {
+                match step {
+                    moves::Move::Turn(to) => heading = to,
+                    moves::Move::Step(count) => {
+                        at = Self::step(at, Some(heading), u64::from(count));
+                    }
+                    moves::Move::Stay => {}
+                }
+            }
+            at
+        }
+
+        /// The area of a shape, or why it has none.
+        pub fn area(shape: Shape) -> Result<u64, String> {
+            match shape {
+                Shape::Dot => Err("a dot has no area".to_string()),
+                Shape::Square(side) => Ok(u64::from(side) * u64::from(side)),
+                Shape::Rect { width, height } => Ok(u64::from(width) * u64::from(height)),
+            }
+        }
+
+        /// The area, or the fallback when there is none.
+        pub fn settled(area: Result<u64, String>, fallback: u64) -> u64 {
+            area.unwrap_or(fallback)
+        }
+
+        /// The stroke with its shape scaled by the factor and each flag of its pen flipped.
+        pub fn redrawn(stroke: Stroke, factor: u32) -> Stroke {
+            let shape = match stroke.shape {
+                Shape::Dot => Shape::Dot,
+                Shape::Square(side) => Shape::Square(side * factor),
+                Shape::Rect { width, height } => Shape::Rect {
+                    width: width * factor,
+                    height: height * factor,
+                },
+            };
+            let pen = Pen {
+                filled: !stroke.pen.filled,
+                dashed_line: !stroke.pen.dashed_line,
+            };
+            Stroke { shape, pen }
+        }
+
+        /// Which of the points lie on a heading's axis from the origin, in order, and how many do
+        /// not: a list of options and a result without values.
+        pub fn sorted(points: Vec<Point>) -> (Vec<Option<Heading>>, Result<(), u32>) {
+            let headings: Vec<Option<Heading>> = points
+                .iter()
+                .map(|point| match (point.x.signum(), point.y.signum()) {
+                    (0, 1) => Some(Heading::North),
+                    (1, 0) => Some(Heading::East),
+                    (0, -1) => Some(Heading::South),
+                    (-1, 0) => Some(Heading::West),
+                    _ => None,
+                })
+                .collect();
+            let off = headings.iter().filter(|heading| heading.is_none()).count() as u32;
+            let result = if off == 0 { Ok(()) } else { Err(off) };
+            (headings, result)
+        }
     }
 
     /// A running total for the host's lifetime. The service lives in a sub-module, with its data,

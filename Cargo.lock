@@ -1883,6 +1883,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tembra-contracts",
+ "tembra-orb-native-fixture",
  "tembra-runtime",
  "tempfile",
  "tokio",

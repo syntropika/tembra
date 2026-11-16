@@ -2641,8 +2641,8 @@ fn component(
     });
     let state_code = state_code(states, modules);
     let resource_code = resource_code(resources, modules);
-    // The native side's items of each sub-module, after the component's, with the service they
-    // register; a component build expands them to nothing.
+    // The native side's items of each sub-module, after the component's, with the services they
+    // register and the types whose JSON they write; a component build expands them to nothing.
     for (scope, items) in nested {
         tree.at(&modules[*scope]).generated.push(items.clone());
     }

@@ -1096,11 +1096,23 @@ address of the service's objects: the native factory refuses an object at anothe
 `principal`, before the create runs. A component does not check them. A host-lifetime object
 belongs to the principal `host`, so `lifetime = host` takes no other principal.
 
+The codec reads and writes the JSON form compiled and TypeScript callers send and validate: the
+arguments as an array, `null` too without parameters; a record as an object of its fields, keyed by
+the lowerCamelCase form of their WIT names; an enum as the WIT name of its case; a variant and a
+`Result` as `{"tag": .., "val": ..}`, without `val` for a case or a side that carries nothing, the
+record of a case with named fields as an object; an option as `null` or the value; 64-bit integers
+as exact numbers; a flags as an object of the flags set, each `true`, which reads a flag left out, or
+`false`, as unset. A float crosses only when finite and not `-0`, and an `f32` only when it narrows
+to such a number too: a value the codec refuses fails the call as its arguments, before the method
+runs, and a result it cannot write fails it as its result. Each type of the module that enters the
+WIT reads and writes its JSON in its own module, through a hidden trait of the Orb module.
+
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
-`char`, and `Vec`, `Option` and tuples of them. A record, an enum, a variant, a flags, a `Result`,
-a resource, the `context` option, `#[state]`, `#[resource]`, `#[wit_resource]`, an import and a hook
-are compile errors where the runtime is linked, naming the item, until the native side covers them;
-a component build of the same module is unaffected.
+`char`, records, enums, variants, flags, `Result`s, and `Vec`, `Option` and tuples of them. A type of
+a consumed interface, a resource, the `context` option, `#[state]`, `#[resource]`,
+`#[wit_resource]`, an import and a hook are compile errors where the runtime is linked, naming the
+item, until the native side covers them, and so is an `Option` of an `Option`, which the boundary's
+JSON cannot tell from `None`; a component build of the same module is unaffected.
 
 ## What it generates
 
@@ -1163,9 +1175,11 @@ The macro rewrites the module with:
 10. inside `tembra::__host!`, so only where the facade links the runtime, `pub fn orb()`, or
     `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest through
     `pub fn orb_named(name, api_version, ..)`, with its `#[root]` as the Orb's create, from one
-    hidden function per service, written in the service's module with the codec constant of each
-    of its methods and the service's typed client, `<Service>Client`, and an `include_bytes!` of
-    the manifest, see [using the Orb natively](#using-the-orb-natively).
+    hidden function per service, written in the service's module and declaring the codec of each
+    of its methods, next to the service's typed client, `<Service>Client`, an `include_bytes!` of
+    the manifest, and a hidden trait that each type of the module entering the WIT implements in
+    its own module, reading and writing its JSON, see
+    [using the Orb natively](#using-the-orb-natively).
 
 The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) among its dependencies,
 `dlmalloc` (feature `global`) only with `no_std`, and `serde` (features `derive`, `alloc`) and
