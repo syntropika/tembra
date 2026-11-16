@@ -4986,13 +4986,13 @@ fn a_create_is_refused_when_ill_formed() {
 }
 
 /// `#[service(key = main)]` and `#[service(principal = "..")]` guard the address of the service's
-/// objects: the native factory refuses another key, or another principal, as forbidden, before it
-/// builds the object, with its create when it has one. The guards are no part of the WIT or of
-/// the manifest.
+/// objects: the native factory refuses another key, or another principal, as forbidden with the
+/// reason `key` or `principal`, before it builds the object, with its create when it has one. The
+/// guards are no part of the WIT or of the manifest.
 #[test]
 fn an_address_guard_refuses_another_key_or_principal() {
-    let key = "if address . key != [\"main\"] { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: Code :: Forbidden , :: tembra :: core :: Reason :: Address , \"the objects of example:book/ledger@1.0.0 use the key main\")) ; }";
-    let principal = "if address . principal != \"host\" { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: Code :: Forbidden , :: tembra :: core :: Reason :: Address , \"the objects of example:book/ledger@1.0.0 belong to the principal host\")) ; }";
+    let key = "if address . key != [\"main\"] { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: Code :: Forbidden , \"key\" , \"the objects of example:book/ledger@1.0.0 use the key main\")) ; }";
+    let principal = "if address . principal != \"host\" { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: Code :: Forbidden , \"principal\" , \"the objects of example:book/ledger@1.0.0 belong to the principal host\")) ; }";
     let module = expanded(PACKAGE, &ledger("#[service(key = main)]"));
     let generated = native(&module, &[]);
     assert!(
@@ -5043,6 +5043,29 @@ fn an_address_guard_refuses_another_key_or_principal() {
     assert_eq!(
         error,
         "the key guard is `key = main`: an object's key is then [\"main\"]"
+    );
+}
+
+/// The host creates a host-lifetime object as `main` for the principal `host` when it installs the
+/// Orb, so a guard naming another principal would refuse it there: the macro refuses the
+/// combination, in either order, and keeps the guard of the principal `host`.
+#[test]
+fn a_host_lifetime_guards_no_other_principal() {
+    let message = "host-lifetime objects belong to the principal host: the host creates them for itself when it installs the Orb, and `principal = \"alice\"` would refuse them";
+    for attribute in [
+        "#[service(lifetime = host, principal = \"alice\")]",
+        "#[service(principal = \"alice\", key = main, lifetime = host)]",
+    ] {
+        assert_eq!(refused(PACKAGE, &ledger(attribute)), message, "{attribute}");
+    }
+    let module = expanded(
+        PACKAGE,
+        &ledger("#[service(lifetime = host, principal = \"host\")]"),
+    );
+    let generated = native(&module, &[]);
+    assert!(
+        generated.contains("if address . principal != \"host\""),
+        "{generated}"
     );
 }
 

@@ -139,8 +139,8 @@ fn each_object_is_built_once_by_its_create() {
 }
 
 /// `Board`'s guard, `key = main` and `principal = "host"`: acquiring another key or another
-/// principal is forbidden, and its create never runs for them; the address the guard names is
-/// built and answers.
+/// principal is forbidden, with the reason a hand-written factory gives, and its create never runs
+/// for them; the address the guard names is built and answers.
 #[test]
 fn the_guard_admits_only_its_address() {
     let events = Events::default();
@@ -148,15 +148,17 @@ fn the_guard_admits_only_its_address() {
     let host = Host::new(pool.spawner());
     host.install(vec![notebook::orb(inputs(&events)).unwrap()])
         .unwrap();
-    for (key, principal, message) in [
+    for (key, principal, reason, message) in [
         (
             "other",
             "host",
+            "key",
             "the objects of example:notes/board@1.0.0 use the key main",
         ),
         (
             "main",
             "alice",
+            "principal",
             "the objects of example:notes/board@1.0.0 belong to the principal host",
         ),
     ] {
@@ -165,7 +167,7 @@ fn the_guard_admits_only_its_address() {
             .err()
             .unwrap_or_else(|| panic!("{key}/{principal} was admitted"));
         assert_eq!(error.code, Code::Forbidden, "{error}");
-        assert_eq!(error.reason, "address", "{error}");
+        assert_eq!(error.reason, reason, "{error}");
         assert_eq!(error.message, message);
     }
     assert!(events.borrow().is_empty(), "{:?}", events.borrow());

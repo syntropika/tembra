@@ -1020,12 +1020,12 @@ Orb module, without generic parameters.
 
 A service reads them in its function marked `#[create]`,
 `fn(&Inputs, &Declaration) -> tembra::Result<Self>`, which builds each object of the service, a
-key and a principal, once, before its first call. The `Declaration` gives the object's address and
-declares its state, its resources and its tasks. What the create returns is the object's
-environment: the service struct may then have fields, and its methods borrow them through
-`&self`, a receiver the WIT leaves out. Without a `#[create]`, a service stays a unit struct whose
-methods take no `self`. Only a native host builds such objects, so the component has no bridge for
-the service.
+key and a principal, before its first call, and builds it again for the new code when the host
+reloads the Orb with `Host::reload`. The `Declaration` gives the object's address and declares its
+state, its resources and its tasks. What the create returns is the object's environment: the
+service struct may then have fields, and its methods borrow them through `&self`, a receiver the
+WIT leaves out. Without a `#[create]`, a service stays a unit struct whose methods take no `self`.
+Only a native host builds such objects, so the component has no bridge for the service.
 
 ```rust,ignore
 #[service]
@@ -1046,10 +1046,24 @@ impl Notes {
 }
 ```
 
+Like any native-only module, a module with a `#[create]` serves only a native host. The create
+names `Declaration` and `tembra::Result`, which the facade has only with `host`, so the crate
+depends on `tembra` with `host` on native targets and compiles the module only there, under
+`#[cfg(not(target_arch = "wasm32"))]`, as the native fixture's manifest and its `notebook` do:
+
+```toml
+[dependencies]
+tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tembra = { version = "0.2.2", default-features = false, features = ["macros", "host"] }
+```
+
 `#[service(key = main)]` and `#[service(principal = "name")]`, alone or together, guard the
 address of the service's objects: the native factory refuses an object at another key than
-`["main"]`, or of another principal, with the code `forbidden` and the reason `address`, before the
-create runs. A component does not check them.
+`["main"]` with the code `forbidden` and the reason `key`, or of another principal with the reason
+`principal`, before the create runs. A component does not check them. A host-lifetime object
+belongs to the principal `host`, so `lifetime = host` takes no other principal.
 
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, and `Vec`, `Option` and tuples of them. A record, an enum, a variant, a flags, a `Result`,

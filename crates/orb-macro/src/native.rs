@@ -312,26 +312,28 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
 }
 
 /// The guard of a service's objects, first in its factory, if its attribute has one: an object at
-/// another key than `main`, or of another principal, is refused as forbidden, before the create
-/// runs. `identity` names the service's interface in the errors.
+/// another key than `main`, or of another principal, is refused as forbidden, with the reason
+/// `key` or `principal` as a hand-written factory gives it, before the create runs. `identity`
+/// names the service's interface in the errors.
 fn guard(service: &Service, identity: &str) -> Option<TokenStream> {
-    let refusal = |message: String| {
+    let refusal = |reason: &str, message: String| {
         quote! {
             return ::core::result::Result::Err(::tembra::Error::new(
                 ::tembra::Code::Forbidden,
-                ::tembra::core::Reason::Address,
+                #reason,
                 #message
             ));
         }
     };
     let key = service.guard.main.then(|| {
-        let refused = refusal(format!("the objects of {identity} use the key main"));
+        let refused = refusal("key", format!("the objects of {identity} use the key main"));
         quote! { if address.key != ["main"] { #refused } }
     });
     let principal = service.guard.principal.as_ref().map(|principal| {
-        let refused = refusal(format!(
-            "the objects of {identity} belong to the principal {principal}"
-        ));
+        let refused = refusal(
+            "principal",
+            format!("the objects of {identity} belong to the principal {principal}"),
+        );
         quote! { if address.principal != #principal { #refused } }
     });
     (key.is_some() || principal.is_some()).then(|| {

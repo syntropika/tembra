@@ -2835,7 +2835,7 @@ fn identity(package: &str, interface: &str) -> String {
 /// the objects until the host closes, `linger_ms = n` keeps an unreferenced object for `n`
 /// milliseconds; a host-lifetime object cannot linger, as the kernel rules. Then the guard of
 /// their address, if any: `key = main` admits the key `["main"]` alone, `principal = "name"` that
-/// principal alone.
+/// principal alone, which is `host` for a host-lifetime object, as the kernel rules.
 fn service_attribute(
     attribute: &Attribute,
 ) -> syn::Result<(Option<String>, Option<Policy>, Guard)> {
@@ -2899,6 +2899,18 @@ fn service_attribute(
             return Err(syn::Error::new(
                 span,
                 "host-lifetime objects cannot linger: they live until the host closes",
+            ));
+        }
+        // The host creates a host-lifetime object as `main` for itself when it installs the Orb.
+        if host
+            && let Some(principal) = &guard.principal
+            && principal != "host"
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "host-lifetime objects belong to the principal host: the host creates them for itself when it installs the Orb, and `principal = \"{principal}\"` would refuse them"
+                ),
             ));
         }
         Ok((implements, chosen.then_some(Policy { host, linger_ms }), guard))
