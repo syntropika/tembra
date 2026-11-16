@@ -80,9 +80,11 @@ fn wrapped(items: TokenStream) -> TokenStream {
     quote! { ::tembra::__host! { #items } }
 }
 
-/// `orb()`: the Orb named and versioned by the manifest, with every service registered. With an
-/// `#[inputs]` struct, `inputs` the path the Orb module names it by, it is `orb(inputs)`, and when
-/// a service has a create, `shared`, the inputs go to each such service as one `Rc`.
+/// `orb()`, the Orb named and versioned by the manifest, and `orb_named`, which builds it with
+/// every service registered under the name and API version a host gives it; `orb()` forwards to
+/// it. With an `#[inputs]` struct, `inputs` the path the Orb module names it by, they are
+/// `orb(inputs)` and `orb_named(name, api_version, inputs)`, and when a service has a create,
+/// `shared`, the inputs go to each such service as one `Rc`.
 ///
 /// Cargo does not rebuild a crate when only `[package.metadata.tembra]` changes, so the generated
 /// code includes the manifest, which makes the compiler track the file: the next build then reads
@@ -96,12 +98,19 @@ fn orb(
     let name = &metadata.name;
     let version = metadata.api_version;
     let mut doc = format!(
-        " The Orb for a native host: `{name}` at API version {version}, as the crate manifest names it. Install it with `Host::install`; its services are named `{name}::<interface identity>`."
+        " The Orb for a native host: `{name}` at API version {version}, as the crate manifest names it. Install it with `Host::install`; its services are named `{name}::<interface identity>`. `orb_named` builds it under another name or version."
     );
-    let parameter = inputs.map(|path| {
-        doc.push_str(" `inputs` are what the host lends every service of the Orb.");
-        quote! { inputs: #path }
-    });
+    let mut named = String::from(
+        " The Orb for a native host, named `name` at API version `api_version`, for a host that chooses them at run time or installs the crate more than once: its services are named `<name>::<interface identity>`.",
+    );
+    if inputs.is_some() {
+        let lent = " `inputs` are what the host lends every service of the Orb.";
+        doc.push_str(lent);
+        named.push_str(lent);
+    }
+    let parameter = inputs.map(|path| quote! { inputs: #path });
+    let named_parameter = inputs.map(|path| quote! { , inputs: #path });
+    let argument = inputs.map(|_| quote! { , inputs });
     let shared = shared.then(|| quote! { let inputs = ::std::rc::Rc::new(inputs); });
     quote! {
         const _: &[u8] = ::core::include_bytes!(::core::concat!(
@@ -111,9 +120,17 @@ fn orb(
 
         #[doc = #doc]
         pub fn orb(#parameter) -> ::tembra::Result<::tembra::Orb> {
-            let name = #name;
+            orb_named(#name, #version #argument)
+        }
+
+        #[doc = #named]
+        pub fn orb_named(
+            name: &str,
+            api_version: u32
+            #named_parameter
+        ) -> ::tembra::Result<::tembra::Orb> {
             #shared
-            ::core::result::Result::Ok(::tembra::Orb::new(name, #version) #(.service(#calls))*)
+            ::core::result::Result::Ok(::tembra::Orb::new(name, api_version) #(.service(#calls))*)
         }
     }
 }

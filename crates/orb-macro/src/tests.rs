@@ -4373,11 +4373,12 @@ fn generated_code_names_prelude_items_by_their_paths() {
     }
 }
 
-/// The native side generates `orb()`, inside the facade's wrapper: the Orb named and versioned by
-/// the manifest's table, with one `Service` per `#[service]`, built by a hidden function of the
-/// service's module and named `{orb}::{identity}`, with the signature constant and one
-/// `method_with` per `pub fn` under its WIT name, whose handle checks the context first. The
-/// manifest is included, so Cargo rebuilds the crate when only the table changes.
+/// The native side generates `orb()`, inside the facade's wrapper: `orb_named` with the name and
+/// version of the manifest's table. `orb_named` builds the Orb under the name and version it is
+/// given, with one `Service` per `#[service]`, built by a hidden function of the service's module
+/// and named `{orb}::{identity}`, with the signature constant and one `method_with` per `pub fn`
+/// under its WIT name, whose handle checks the context first. The manifest is included, so Cargo
+/// rebuilds the crate when only the table changes.
 #[test]
 fn the_native_side_generates_orb_from_the_manifest_and_the_services() {
     let module = orb_as(
@@ -4392,7 +4393,8 @@ fn the_native_side_generates_orb_from_the_manifest_and_the_services() {
     let native = native(&module, &[]);
     for expected in [
         "const _ : & [u8] = :: core :: include_bytes ! (:: core :: concat ! (:: core :: env ! (\"CARGO_MANIFEST_DIR\") , \"/Cargo.toml\")) ;",
-        "pub fn orb () -> :: tembra :: Result < :: tembra :: Orb > { let name = \"ledgers\" ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , 3u32) . service (self :: __tembra_service_ledger (name))) }",
+        "pub fn orb () -> :: tembra :: Result < :: tembra :: Orb > { orb_named (\"ledgers\" , 3u32) }",
+        "pub fn orb_named (name : & str , api_version : u32) -> :: tembra :: Result < :: tembra :: Orb > { :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . service (self :: __tembra_service_ledger (name))) }",
         "pub (crate) fn __tembra_service_ledger (orb : & str) -> :: tembra :: Service < () > { :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , | _ | { :: core :: result :: Result :: Ok (()) }) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (__TEMBRA_SIGNATURE_LEDGER))) . method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) } , __TEMBRA_CODEC_LEDGER_COUNT ,) }",
         "const __TEMBRA_CODEC_LEDGER_COUNT : :: tembra :: Codec < () , u32 > = :: tembra :: Codec { decode : | value | {",
     ] {
@@ -4748,9 +4750,9 @@ fn the_native_side_refuses_the_types_its_codecs_do_not_cover_yet() {
     );
 }
 
-/// A struct marked `#[inputs]` is the argument of `orb(..)`: the author's struct, as written but
-/// for the marker, whatever its fields hold, and no type of the WIT. In a sub-module, the Orb
-/// module names it by its path.
+/// A struct marked `#[inputs]` is the argument of `orb(..)`, and of `orb_named(..)` after the name
+/// and the API version: the author's struct, as written but for the marker, whatever its fields
+/// hold, and no type of the WIT. In a sub-module, the Orb module names it by its path.
 #[test]
 fn the_inputs_are_the_argument_of_orb() {
     let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
@@ -4766,10 +4768,12 @@ fn the_inputs_are_the_argument_of_orb() {
         ),
     );
     let root = native(&module, &[]);
-    assert!(
-        root.contains("pub fn orb (inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb >"),
-        "{root}"
-    );
+    for expected in [
+        "pub fn orb (inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { orb_named (\"book\" , 1u32 , inputs) }",
+        "pub fn orb_named (name : & str , api_version : u32 , inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb >",
+    ] {
+        assert!(root.contains(expected), "{expected}\n{root}");
+    }
     let tokens = tokens(&module);
     assert!(
         tokens.contains(
@@ -4851,7 +4855,8 @@ fn a_service_with_a_create_is_built_by_it() {
     );
     let root = native(&module, &[]);
     for expected in [
-        "pub fn orb (inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { let name = \"book\" ; let inputs = :: std :: rc :: Rc :: new (inputs) ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , 1u32) . service (self :: __tembra_service_ledger (name , & inputs)) . service (self :: __tembra_service_plain (name))) }",
+        "pub fn orb (inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { orb_named (\"book\" , 1u32 , inputs) }",
+        "pub fn orb_named (name : & str , api_version : u32 , inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { let inputs = :: std :: rc :: Rc :: new (inputs) ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . service (self :: __tembra_service_ledger (name , & inputs)) . service (self :: __tembra_service_plain (name))) }",
         "pub (crate) fn __tembra_service_ledger (orb : & str , inputs : & :: std :: rc :: Rc < Inputs >) -> :: tembra :: Service < Ledger > { let inputs = :: std :: rc :: Rc :: clone (inputs) ; :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , move | declaration | Ledger :: create (& inputs , & declaration))",
         ". method_with (\"count\" , | __tembra_self : :: std :: rc :: Rc < Ledger > , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (__tembra_self . count ()) } , __TEMBRA_CODEC_LEDGER_COUNT ,)",
         ":: core :: result :: Result :: Ok (__tembra_self . total (extra) . await)",

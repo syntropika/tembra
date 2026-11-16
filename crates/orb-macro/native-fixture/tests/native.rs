@@ -76,6 +76,62 @@ fn the_declaration_is_the_plan_of_the_contract() {
     );
 }
 
+/// `orb_named` builds the Orb under the name and API version a host chooses, so one crate installs
+/// twice: each Orb names its services after itself, and each answers. `orb()` is `orb_named` with
+/// the manifest's name and version.
+#[test]
+fn one_crate_installs_twice_under_two_names() {
+    assert_eq!(
+        calculator::orb().unwrap().declaration(),
+        calculator::orb_named("calculator", 2)
+            .unwrap()
+            .declaration()
+    );
+    let (left, right) = (
+        calculator::orb_named("left", 1).unwrap(),
+        calculator::orb_named("right", 3).unwrap(),
+    );
+    for (orb, name, version) in [(&left, "left", 1), (&right, "right", 3)] {
+        let declaration = orb.declaration();
+        assert_eq!(
+            (declaration.name.as_str(), declaration.api_version),
+            (name, version)
+        );
+        assert!(declaration.services.iter().all(|service| {
+            service
+                .name
+                .starts_with(&format!("{name}::example:calculator/"))
+        }));
+    }
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![left, right]).unwrap();
+    let math = |orb: &str| {
+        let service = format!("{orb}::example:calculator/math@1.0.0");
+        Rc::new(host.get(&service, vec!["main".into()], "host").unwrap())
+    };
+    let (left, right) = (math("left"), math("right"));
+    let called = (left.clone(), right.clone());
+    pool.run_until(host.root("host", move |context| {
+        async move {
+            let (left, right) = called;
+            assert_eq!(left.call::<_, u32>(&context, "add", (1u32, 2u32)).await?, 3);
+            assert_eq!(
+                right
+                    .call_portable::<_, Value>(&context, "add", json!([3, 4]))
+                    .await?,
+                json!(7)
+            );
+            Ok(())
+        }
+        .boxed_local()
+    }))
+    .unwrap();
+    left.release().unwrap();
+    right.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}
+
 /// A local caller passes the arguments as a tuple in WIT order, `()` without arguments, and gets
 /// the result as the Rust value; the codec never runs. The types are exact: other ones are refused
 /// before the method runs.

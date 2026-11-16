@@ -976,7 +976,9 @@ make the module `pub` for a host to use it, or re-export the client where the ru
 since a component build has none. A portable caller's JSON array of arguments goes through a codec
 the macro writes from the WIT, so the author's types need no serde. The Orb's name and API version
 come from `[package.metadata.tembra]` of the crate manifest, with the defaults of
-`cargo tembra build`: the crate name and 1.
+`cargo tembra build`: the crate name and 1. `orb_named(name, api_version, ..)` builds the same Orb
+under a name and API version the host chooses at run time, so that a host can also install the
+crate twice; `orb(..)` only calls it with the manifest's, passing its own arguments on.
 
 ```rust,ignore
 #[tembra::orb(package = "example:calculator@1.0.0")]
@@ -1009,8 +1011,8 @@ needs no dependency of its own for the runtime or its JSON; a host whose `tembra
 no `orb()`. The crate is rebuilt when its manifest changes, so `orb()` follows the table.
 
 A native host can lend the Orb values a component cannot be given. The struct marked `#[inputs]`
-is the argument of `orb(..)`, one value for every service of the Orb, which the host builds:
-`notebook::orb(notebook::Inputs { .. })`. It stays the author's struct, out of the WIT, so its
+is the argument of `orb(..)`, and of `orb_named(..)` after the name and API version, one value for
+every service of the Orb, which the host builds: `notebook::orb(notebook::Inputs { .. })`. It stays the author's struct, out of the WIT, so its
 fields may hold anything, such as `Rc` handles or closures. An Orb has at most one, visible to the
 Orb module, without generic parameters.
 
@@ -1112,10 +1114,11 @@ The macro rewrites the module with:
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
    function and emptied by the `#[close]` one, and the `with` function on each resource type;
 10. inside `tembra::__host!`, so only where the facade links the runtime, `pub fn orb()`, or
-    `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest from one
-    hidden function per service, written in the service's module with the codec constant of each
-    of its methods and the service's typed client, `<Service>Client`, and an `include_bytes!` of
-    the manifest, see [using the Orb natively](#using-the-orb-natively).
+    `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest through
+    `pub fn orb_named(name, api_version, ..)`, from one hidden function per service, written in
+    the service's module with the codec constant of each of its methods and the service's typed
+    client, `<Service>Client`, and an `include_bytes!` of the manifest, see
+    [using the Orb natively](#using-the-orb-natively).
 
 The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) among its dependencies,
 `dlmalloc` (feature `global`) only with `no_std`, and `serde` (features `derive`, `alloc`) and
