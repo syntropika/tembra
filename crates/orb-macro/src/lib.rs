@@ -51,6 +51,7 @@ use syn::{
     Attribute, Fields, FnArg, Ident, Item, ItemFn, ItemMod, LitByteStr, LitInt, LitStr, Pat,
     ReturnType, Token, Type, Visibility, spanned::Spanned,
 };
+use tembra_contracts::{EmbeddedManifest, HookComposition, Lifetime, ServicePolicy};
 
 /// Declare a compiled Orb from a module; the crate documentation lists the rules.
 #[proc_macro_attribute]
@@ -2132,50 +2133,46 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     }
     // The manifest travels with the component, like the WIT: the contributions with their
     // priorities, the declarations with their composition, the services that chose a
-    // lifetime or a linger, and the interfaces imported by key.
-    let policies = services
-        .iter()
-        .filter_map(|service| {
-            let policy = service.policy.as_ref()?;
-            let lifetime = if policy.host { "host" } else { "referenced" };
-            Some(format!(
-                "\"{}\":{{\"lifetime\":\"{lifetime}\",\"linger_ms\":{}}}",
-                service.identity(&package),
-                policy.linger_ms
-            ))
-        })
-        .collect::<Vec<_>>();
-    let manifest_section = if hooks.is_empty()
-        && declarations.is_empty()
-        && policies.is_empty()
-        && options.wit.is_none()
-    {
+    // lifetime or a linger, the interfaces imported by key, and the directory of the consumed
+    // packages, as written on the attribute: `cargo tembra build` nests the whole packages from
+    // there, where the component's own types would keep only the functions it calls.
+    let manifest = EmbeddedManifest {
+        contributes: hooks.clone(),
+        declares: declarations
+            .iter()
+            .map(|(hook, declaration)| {
+                let composition = match declaration.composition {
+                    Composition::Series => HookComposition::Series,
+                    Composition::Waterfall => HookComposition::Waterfall,
+                    Composition::Bail => HookComposition::Bail,
+                };
+                (hook.clone(), composition)
+            })
+            .collect(),
+        services: services
+            .iter()
+            .filter_map(|service| {
+                let policy = service.policy.as_ref()?;
+                let lifetime = if policy.host {
+                    Lifetime::Host
+                } else {
+                    Lifetime::Referenced
+                };
+                let policy = ServicePolicy {
+                    lifetime,
+                    linger_ms: policy.linger_ms,
+                };
+                Some((service.identity(&package), policy))
+            })
+            .collect(),
+        references: keyed::manifest(&package, &views),
+        wit: options.wit.clone(),
+    };
+    let manifest_section = if manifest == EmbeddedManifest::default() {
         quote! {}
     } else {
-        let contributes = hooks
-            .iter()
-            .map(|(hook, priority)| format!("\"{hook}\":{priority}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let declares = declarations
-            .iter()
-            .map(|(hook, declaration)| format!("\"{hook}\":\"{}\"", declaration.composition.name()))
-            .collect::<Vec<_>>()
-            .join(",");
-        let services = policies.join(",");
-        // The directory of the consumed packages, as written on the attribute: `cargo tembra
-        // build` nests the whole packages from there, where the component's own types would
-        // keep only the functions it calls.
-        let wit_dir = match &options.wit {
-            Some(dir) => format!(",\"wit\":{}", json_string(dir)),
-            None => String::new(),
-        };
-        // The interfaces imported by key, each view's binding with the interface it reaches.
-        let references = keyed::manifest(&package, &views);
-        let json = format!(
-            "{{\"contributes\":{{{contributes}}},\"declares\":{{{declares}}},\"services\":{{{services}}}{references}{wit_dir}}}"
-        );
-        let bytes = LitByteStr::new(json.as_bytes(), Span::call_site());
+        let json = serde_json::to_vec(&manifest).expect("the manifest serializes");
+        let bytes = LitByteStr::new(&json, Span::call_site());
         let len = proc_macro2::Literal::usize_unsuffixed(json.len());
         quote! {
             #[cfg(target_arch = "wasm32")]
@@ -2456,23 +2453,6 @@ fn module_of(path: &syn::Path, from: &[Ident]) -> Option<Vec<Ident>> {
 fn take(attrs: &mut Vec<Attribute>, name: &str) -> Option<Attribute> {
     let index = attrs.iter().position(|attr| attr.path().is_ident(name))?;
     Some(attrs.remove(index))
-}
-
-/// A JSON string literal of a path or name: quotes, backslashes and control characters escaped.
-fn json_string(text: &str) -> String {
-    let mut json = String::from('"');
-    for character in text.chars() {
-        match character {
-            '"' => json.push_str("\\\""),
-            '\\' => json.push_str("\\\\"),
-            character if character.is_control() => {
-                json.push_str(&format!("\\u{:04x}", character as u32));
-            }
-            character => json.push(character),
-        }
-    }
-    json.push('"');
-    json
 }
 
 /// The versioned identity of an interface of this package: `ns:name/interface@version`.

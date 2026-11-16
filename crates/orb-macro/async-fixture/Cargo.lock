@@ -293,6 +293,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
+ "serde_json",
  "syn 2.0.119",
  "tembra-contracts",
  "wit-parser 0.261.0",

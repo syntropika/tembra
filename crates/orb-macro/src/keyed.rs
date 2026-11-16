@@ -399,18 +399,12 @@ fn binding(package: &str, view: &View) -> String {
     crate::identity(package, &view.name)
 }
 
-/// The manifest's `references`, each view's binding mapped to the provider interface it reaches,
-/// as a member to append to the manifest's object; nothing without a keyed import, so the
-/// manifest of an Orb without one is what it was.
-pub(crate) fn manifest(package: &str, views: &[View]) -> String {
-    if views.is_empty() {
-        return String::new();
-    }
-    let references: Vec<String> = views
+/// The manifest's `references`: each view's binding mapped to the provider interface it reaches.
+pub(crate) fn manifest(package: &str, views: &[View]) -> BTreeMap<String, String> {
+    views
         .iter()
-        .map(|view| format!("\"{}\":\"{}\"", binding(package, view), view.target))
-        .collect();
-    format!(",\"references\":{{{}}}", references.join(","))
+        .map(|view| (binding(package, view), view.target.clone()))
+        .collect()
 }
 
 /// The re-export of each view's generated module in the Orb module, under the view's interface

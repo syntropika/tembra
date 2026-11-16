@@ -15,6 +15,7 @@ tembra-contracts = { workspace = true, default-features = false }
 heck = "0.5"
 proc-macro2 = "1"
 quote = "1"
+serde_json.workspace = true
 syn = { version = "2", features = ["full"] }
 wit-parser = "=0.261.0"
 

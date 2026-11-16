@@ -574,6 +574,49 @@ fn the_manifest_is_read_from_the_first_core_module_holding_one() {
     assert!(EmbeddedManifest::read(&module(Some("{}")).finish()).is_err());
 }
 
+/// `#[orb]` writes the manifest it serializes, which reads back as it was. One without a keyed
+/// import or a consumed directory leaves `references` and `wit` out, as before keyed imports.
+#[test]
+fn a_serialized_manifest_reads_back_as_written() {
+    let written = EmbeddedManifest {
+        contributes: [("test:embedded/audit@1.0.0".into(), -3)].into(),
+        declares: [(
+            "test:embedded/guard@1.0.0".into(),
+            HookComposition::Waterfall,
+        )]
+        .into(),
+        services: [(
+            "test:embedded/ledger@1.0.0".into(),
+            ServicePolicy {
+                lifetime: Lifetime::Host,
+                linger_ms: 0,
+            },
+        )]
+        .into(),
+        references: [(
+            "example:router/counter-ref@1.0.0".into(),
+            "example:counters/counter@1.0.0".into(),
+        )]
+        .into(),
+        wit: Some("../wit".into()),
+    };
+    let json = serde_json::to_string(&written).unwrap();
+    assert_eq!(
+        EmbeddedManifest::read(&manifest(&json)).unwrap(),
+        written,
+        "{json}"
+    );
+    let plain = EmbeddedManifest {
+        references: BTreeMap::new(),
+        wit: None,
+        ..written
+    };
+    assert_eq!(
+        serde_json::to_string(&plain).unwrap(),
+        r#"{"contributes":{"test:embedded/audit@1.0.0":-3},"declares":{"test:embedded/guard@1.0.0":"waterfall"},"services":{"test:embedded/ledger@1.0.0":{"lifetime":"host","linger_ms":0}}}"#
+    );
+}
+
 #[test]
 fn source_and_compiled_artifacts_round_trip_without_executing_source() {
     let contract = contract(
