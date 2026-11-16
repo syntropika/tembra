@@ -327,6 +327,13 @@ fn an_interface_without_a_view_is_refused() {
             "`watch` carries a stream",
         ),
         ("empty", "record tally { count: u32 }", "has no function"),
+        // A resource no function names: the kernel binds an interface with a resource as
+        // callable, so the view's `use` of the interface would need a provider of its own.
+        (
+            "bare",
+            "resource cursor; record tally { count: u32 } read: func() -> tally;",
+            "has the resource `cursor`, and the objects of a view carry data, so an interface with a resource is not imported by key",
+        ),
     ] {
         let dir = consumed(
             name,
@@ -341,6 +348,24 @@ fn an_interface_without_a_view_is_refused() {
             "{name}: {refusal}"
         );
     }
+    // A resource `use`d from another interface is the interface's as well.
+    let dir = consumed(
+        "used",
+        "package example:shapes@1.0.0;
+interface cursors { resource cursor; }
+interface counter { use cursors.{cursor}; read: func() -> u32; }
+",
+    );
+    let used = refused(
+        options(Some(&dir), &["example:shapes/counter@1.0.0"]),
+        ROUTER,
+    );
+    assert!(
+        used.contains(
+            "example:shapes/counter@1.0.0 cannot be imported by key: it has the resource `cursor`"
+        ),
+        "{used}"
+    );
 }
 
 /// An interface the module implements is not imported by key: the view would `use` the

@@ -198,6 +198,18 @@ fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<
             params.join(", ")
         ));
     }
+    // A resource among the interface's types, named by no function: the kernel binds an interface
+    // with a resource as callable, so the view's `use` of the interface would need a provider of
+    // its own, which the installation names for the view alone.
+    if let Some((type_name, _)) = interface
+        .types
+        .iter()
+        .find(|(_, id)| is_resource(resolve, **id))
+    {
+        return Err(format!(
+            "{target} cannot be imported by key: it has the resource `{type_name}`, and the objects of a view carry data, so an interface with a resource is not imported by key"
+        ));
+    }
     // Types and functions share the interface's names: what it uses, its resource and `get`.
     for claimed in [resource.as_str(), GET] {
         if spelling.used.contains(claimed) {
@@ -237,6 +249,17 @@ fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<
     ));
     text.push_str("}\n");
     Ok(text)
+}
+
+/// Whether a type of an interface is a resource, defined there or `use`d from another interface.
+fn is_resource(resolve: &Resolve, mut id: wit_parser::TypeId) -> bool {
+    loop {
+        match &resolve.types[id].kind {
+            TypeDefKind::Resource => return true,
+            TypeDefKind::Type(Type::Id(inner)) => id = *inner,
+            _ => return false,
+        }
+    }
 }
 
 /// A function's documentation as `///` lines at the given indentation, as WIT prints it.
