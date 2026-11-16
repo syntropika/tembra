@@ -591,6 +591,10 @@ struct Scan {
     /// alias or a union, candidate for the WIT or not, which tell the type an `impl` names apart
     /// from a namesake a `use` brings in.
     types: Vec<(usize, Ident)>,
+    /// The same types but the aliases of a namesake (`aliases_namesake`), which stand for the
+    /// type they name, as a `use` does: a name the module writes resolves to one of them before a
+    /// resource of another module.
+    own_types: Vec<(usize, Ident)>,
 }
 
 /// The names a module binds with `use` and `extern crate`, each with the path it stands for, and
@@ -786,6 +790,22 @@ fn check_seen(
     ))
 }
 
+/// Whether a type alias names a namesake, `pub type Token = super::sessions::Token;`: a path
+/// ending in the alias's own name, with generics on neither, which the alias stands for as
+/// `use super::sessions::Token;` would.
+fn aliases_namesake(alias: &syn::ItemType) -> bool {
+    let Type::Path(path) = &*alias.ty else {
+        return false;
+    };
+    alias.generics.params.is_empty()
+        && path.qself.is_none()
+        && path
+            .path
+            .segments
+            .last()
+            .is_some_and(|last| last.ident == alias.ident && last.arguments.is_none())
+}
+
 impl Scan {
     /// Read the items of one module: the marked ones are collected with their scope, the
     /// sub-modules are read in turn, and everything else is copied through.
@@ -804,6 +824,9 @@ impl Scan {
             };
             if let Some(ident) = declared_type {
                 self.types.push((scope, ident.clone()));
+                if !matches!(&item, Item::Type(alias) if aliases_namesake(alias)) {
+                    self.own_types.push((scope, ident.clone()));
+                }
             }
             match item {
                 Item::Mod(module) => {
@@ -1288,6 +1311,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         marked: Vec::new(),
         uses: vec![Uses::default()],
         types: Vec::new(),
+        own_types: Vec::new(),
     };
     let (items, children) = scan.scan(items, 0)?;
     let mut tree = Module {
@@ -1314,6 +1338,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         marked,
         uses,
         types: declared_types,
+        own_types,
         ..
     } = scan;
     // A service's methods are the pub fn of the impl blocks of its own module.
@@ -1739,6 +1764,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         candidates,
         &services,
         &wit_resources,
+        &own_types,
         &hook_inputs,
         &consumed_modules,
         &mut unreached,
@@ -1960,6 +1986,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &wit_resources,
         &declared,
         &shapes,
+        &own_types,
         &consumed_modules,
     )?;
     // An implemented interface is fixed by its WIT: the impl has exactly its functions, and each
@@ -3492,12 +3519,14 @@ fn own_or_only<T>(named: impl IntoIterator<Item = (usize, T)>, scope: usize) -> 
 /// name resolves by `own_or_only`: to the type of the module naming it, a resource included, else
 /// to the only resource of that name, else to the only type of that name in the Orb; two of other
 /// modules are ambiguous, a type the module does not declare is an error, and a resource is a type
-/// of its own. What a consumed interface's module names, a type or a handle, is no type of the
-/// module.
+/// of its own. A type of any shape the module declares, one of `types`, keeps the name from the
+/// resources of other modules. What a consumed interface's module names, a type or a handle, is no
+/// type of the module.
 fn reachable(
     candidates: Vec<Candidate>,
     services: &[Service],
     resources: &[WitResource],
+    types: &[(usize, Ident)],
     hook_inputs: &[(&Type, usize)],
     modules: &foreign::Modules,
     unreached: &mut Vec<Candidate>,
@@ -3531,9 +3560,9 @@ fn reachable(
         let indexes = declared
             .get(&ident.to_string())
             .map_or(&[][..], Vec::as_slice);
-        let declares = indexes
+        let declares = types
             .iter()
-            .any(|&index| candidates[index].scope == scope);
+            .any(|(module, name)| *module == scope && *name == ident);
         if resource_params::resource_named(&ident, scope, resources, declares).is_some() {
             continue;
         }

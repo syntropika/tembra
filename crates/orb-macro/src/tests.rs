@@ -5471,6 +5471,91 @@ fn a_name_resolves_in_the_module_that_writes_it_first() {
     }
 }
 
+/// A type of any shape takes its name in the module declaring it before a resource of another
+/// module: a tuple struct, a unit struct, a type alias or a union named like the resource is
+/// refused as a type of the module that cannot enter the WIT, whichever interface the resource
+/// belongs to. An alias whose path ends in its own name stands for that path, as a `use` of it
+/// does, so an alias of the resource is the resource.
+#[test]
+fn a_type_the_module_declares_takes_its_name_before_a_resource() {
+    let desk = |declared: &str, owner: &str| {
+        format!(
+            "mod desk {{
+                pub mod tickets {{
+                    {declared}
+                    #[service]
+                    pub struct Tickets;
+                    impl Tickets {{ pub fn check(token: Token) -> u32 {{ 0 }} }}
+                }}
+                pub mod sessions {{
+                    #[wit_resource(service = {owner})]
+                    pub struct Token;
+                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                    #[service]
+                    pub struct Sessions;
+                    impl Sessions {{ pub fn count() -> u32 {{ 0 }} }}
+                }}
+            }}"
+        )
+    };
+    for declared in [
+        "pub struct Token(pub u32);",
+        "pub struct Token;",
+        "pub type Token = u32;",
+        "pub union Token { pub id: u32 }",
+    ] {
+        for owner in ["Sessions", "Tickets"] {
+            let error = refused("example:desk@1.0.0", &desk(declared, owner));
+            assert!(
+                error.contains("`Token` is used by a service method or a hook but is not a struct or enum of this module"),
+                "{declared}, a resource of `{owner}`: {error}"
+            );
+        }
+    }
+    let alias = "pub type Token = super::sessions::Token;";
+    let error = refused("example:desk@1.0.0", &desk(alias, "Sessions"));
+    assert!(
+        error.contains("`Tickets::check` takes `Token`, a resource of the interface `sessions`"),
+        "{error}"
+    );
+    expanded("example:desk@1.0.0", &desk(alias, "Tickets"));
+}
+
+/// Two resources of one name in other modules are as ambiguous as two records: a function of a
+/// third module taking that name is refused, whichever of the two the module imports, and expands
+/// once one of them takes another name.
+#[test]
+fn two_resources_of_one_name_in_other_modules_are_ambiguous() {
+    let desk = |second: &str| {
+        format!(
+            "mod desk {{
+                pub mod a {{
+                    #[wit_resource(service = Tickets)]
+                    pub struct Token;
+                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                }}
+                pub mod b {{
+                    #[wit_resource(service = Tickets)]
+                    pub struct {second};
+                    impl {second} {{ pub fn id(&self) -> u32 {{ 1 }} }}
+                }}
+                pub mod c {{
+                    use super::a::Token;
+                    #[service]
+                    pub struct Tickets;
+                    impl Tickets {{ pub fn check(token: Token) -> u32 {{ token.id() }} }}
+                }}
+            }}"
+        )
+    };
+    let error = refused("example:desk@1.0.0", &desk("Token"));
+    assert!(
+        error.contains("`Token` is declared in several modules of the Orb; a module uses its own `Token`, or the types take different names"),
+        "{error}"
+    );
+    expanded("example:desk@1.0.0", &desk("Pass"));
+}
+
 /// Documentation over several lines, a block comment or a `#[doc]` string, is carried line by
 /// line into the WIT, each line after its own `///`, so no line of it becomes WIT; a character
 /// the WIT lexer refuses is an error on the attribute.

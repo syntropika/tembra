@@ -74,8 +74,8 @@ pub(crate) fn derived<'a>(
 }
 
 /// The resource a name written in the module `scope` resolves to, by `own_or_only`: that module's
-/// own resource of the name, none when that module declares another type of the name, as
-/// `declares` says, else the only resource of the name in the Orb.
+/// own resource of the name, none when that module declares another type of the name, of any
+/// shape, as `declares` says, else the only resource of the name in the Orb.
 pub(crate) fn resource_named<'a>(
     ident: &Ident,
     scope: usize,
@@ -102,12 +102,13 @@ pub(crate) fn check_reached(
     resources: &[WitResource],
     declared: &[Declared],
     shapes: &[Shape],
+    types: &[(usize, Ident)],
     modules: &Modules,
 ) -> syn::Result<()> {
     let functions = derived(services, resources);
     for function in &functions {
         for (_, ty, _) in function.params {
-            for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
+            for (resource, via) in held(ty, function.scope, shapes, resources, types, modules) {
                 if let Some(owner) = foreign_owner(services, resource, function.interface) {
                     return Err(taking_error(function, ty, resource, via, owner));
                 }
@@ -118,7 +119,7 @@ pub(crate) fn check_reached(
         let Some(ty) = function.result else {
             continue;
         };
-        for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
+        for (resource, via) in held(ty, function.scope, shapes, resources, types, modules) {
             let Some(owner) = foreign_owner(services, resource, function.interface) else {
                 continue;
             };
@@ -142,7 +143,7 @@ pub(crate) fn check_reached(
             continue;
         };
         if let Some((resource, via)) =
-            held(ty, declaration.scope, shapes, resources, modules).first()
+            held(ty, declaration.scope, shapes, resources, types, modules).first()
         {
             let holds = match via {
                 Some(via) => format!("`{via}`, which holds the resource `{}`", resource.ident),
@@ -222,12 +223,13 @@ fn taking_error(
 /// variant of the module that holds it, if one does: the resource itself or inside options,
 /// results, lists and tuples, or in the fields and cases of the records and variants the type
 /// reaches, followed by name as the WIT names them, each name resolved in the module that writes
-/// it first.
+/// it first, where a type of any shape among `types` keeps it from the resources of other modules.
 fn held<'a>(
     ty: &Type,
     scope: usize,
     shapes: &'a [Shape],
     resources: &'a [WitResource],
+    types: &[(usize, Ident)],
     modules: &Modules,
 ) -> Vec<(&'a WitResource, Option<&'a Ident>)> {
     let mut mentioned = Vec::new();
@@ -239,18 +241,18 @@ fn held<'a>(
     let mut seen = BTreeSet::new();
     let mut held = Vec::new();
     while let Some((ident, scope, via)) = pending.pop() {
-        let named = || {
-            shapes
-                .iter()
-                .filter(|shape| shape.ident == ident)
-                .map(|shape| (shape.scope, shape))
-        };
-        let declares = named().any(|(module, _)| module == scope);
+        let named = shapes
+            .iter()
+            .filter(|shape| shape.ident == ident)
+            .map(|shape| (shape.scope, shape));
+        let declares = types
+            .iter()
+            .any(|(module, name)| *module == scope && *name == ident);
         if let Some(resource) = resource_named(&ident, scope, resources, declares) {
             if seen.insert((ident.to_string(), resource.scope)) {
                 held.push((resource, via));
             }
-        } else if let Some(shape) = own_or_only(named(), scope)
+        } else if let Some(shape) = own_or_only(named, scope)
             && seen.insert((ident.to_string(), shape.scope))
         {
             let via = via.or(Some(&shape.ident));
