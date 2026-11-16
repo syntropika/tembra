@@ -39,7 +39,8 @@ pub(crate) fn resolve() -> syn::Result<Resolve> {
 /// from its `deps/`, is left out, since the bindings would read it twice; that copy must define
 /// what the bundled package defines, whatever its comments, or the error names its file. An
 /// import in the `wasi` namespace that names no interface of the bundled packages, another
-/// version or an unstable interface, is an error on its literal.
+/// version or an unstable interface, is an error on its literal, and so is an interface no host
+/// serves as an import, one a component exports instead.
 pub(crate) fn packages(imports: &[LitStr], dir: Option<&Path>) -> syn::Result<String> {
     let imported: Vec<&LitStr> = imports
         .iter()
@@ -52,20 +53,29 @@ pub(crate) fn packages(imports: &[LitStr], dir: Option<&Path>) -> syn::Result<St
     let mut pending = Vec::new();
     for import in imported {
         let identity = import.value();
-        let package = bundled
+        let interface = bundled
             .interfaces
             .iter()
             .find(|(id, _)| bundled.id_of(*id).as_deref() == Some(identity.as_str()))
-            .and_then(|(_, interface)| interface.package);
-        match package {
-            Some(package) => pending.push(package),
-            None => {
-                return Err(syn::Error::new(
-                    import.span(),
-                    unknown(&bundled, &sources, &identity),
-                ));
-            }
+            .map(|(_, interface)| interface);
+        let Some((interface, package)) =
+            interface.and_then(|interface| Some((interface, interface.package?)))
+        else {
+            return Err(syn::Error::new(
+                import.span(),
+                unknown(&bundled, &sources, &identity),
+            ));
+        };
+        // The installation binds an import with functions to the host's provider of its grant,
+        // and `tembra_contracts::host_serves` says which interfaces have one; an interface of
+        // types only asks nothing of a host.
+        if !interface.functions.is_empty() && !tembra_contracts::host_serves(&identity) {
+            return Err(syn::Error::new(
+                import.span(),
+                unserved(&bundled, package, &identity),
+            ));
         }
+        pending.push(package);
     }
     let mut needed = BTreeSet::new();
     while let Some(package) = pending.pop() {
@@ -140,6 +150,30 @@ fn unknown(bundled: &Resolve, sources: &[(PackageId, &str)], identity: &str) -> 
             names.join(", ")
         ),
     }
+}
+
+/// Why an interface of a bundled package is not imported: no host serves it as an import, since
+/// a component exports it instead; the interfaces of its package the hosts do serve, those with
+/// a grant and those of types only.
+fn unserved(bundled: &Resolve, package: PackageId, identity: &str) -> String {
+    let package = &bundled.packages[package];
+    let served: Vec<&str> = package
+        .interfaces
+        .iter()
+        .filter(|(_, id)| {
+            let interface = &bundled.interfaces[**id];
+            interface.functions.is_empty()
+                || bundled
+                    .id_of(**id)
+                    .is_some_and(|identity| tembra_contracts::host_serves(&identity))
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    format!(
+        "no host serves {identity} as an import: a component exports it instead; of {}, the hosts serve {}",
+        package.name,
+        served.join(", ")
+    )
 }
 
 fn error(message: impl std::fmt::Display) -> syn::Error {

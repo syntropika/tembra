@@ -48,7 +48,8 @@ pub use model::{
     ResourceIdentity, Ty,
 };
 pub use permissions::{
-    FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability, system_capability,
+    FilesystemGrant, Grants, HttpGrant, NetworkGrant, SystemCapability, host_serves,
+    system_capability,
 };
 pub use port::envelope;
 pub use references::ReferenceBinding;

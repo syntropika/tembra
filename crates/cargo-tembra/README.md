@@ -127,10 +127,10 @@ An interface imported by key is listed among the imports of other Orbs by its vi
 
 For an Orb that imports WASI, the last part names the grants an installer must give, for example
 `system: cli` and `system: clocks` for a std Orb that prints. Without it, those fourteen `wasi:cli`
-and `wasi:clocks` interfaces surface one at a time from `engine.load` errors. A `wasi:clocks`,
-`wasi:random` or `wasi:cli` interface that installation does not bind, such as
-`wasi:clocks/timezone` or one of another version than `0.3.0`, is listed as
-`NOT SUPPORTED by Tembra`.
+and `wasi:clocks` interfaces surface one at a time from `engine.load` errors. An interface that
+installation does not bind, such as `wasi:clocks/timezone`, `wasi:cli/run` or
+`wasi:http/handler`, which a component exports instead, or a `wasi:clocks`, `wasi:random` or
+`wasi:cli` interface of another version than `0.3.0`, is listed as `NOT SUPPORTED by Tembra`.
 
 A component exporting `wasi:http/handler@0.3.0` gets a line of its own for this incoming HTTP
 handler, which the host's ingress calls and which is never a service. Unless the component also

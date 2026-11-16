@@ -651,8 +651,11 @@ any compiled component, and refuses an installation that does not grant it: the 
 `dice` sets `install.grants.system` to `SystemCapability::Random` and `SystemCapability::Clocks`,
 and the methods then draw from the host's random source and wait on its monotonic clock. A
 filesystem, socket or HTTP import needs the `FilesystemGrant`, `NetworkGrant` or `HttpGrant` of a
-configured provider. An interface the host does not serve as an import, such as `wasi:cli/run`,
-which a command exports, compiles but does not install.
+configured provider. An interface no host serves as an import, such as `wasi:cli/run` or
+`wasi:http/handler`, which a component exports instead, is a compile error on the import naming
+the interfaces of its package the hosts do serve; `tembra_contracts::host_serves` is the rule,
+the one the installation's grant check applies. An interface of types only, `wasi:clocks/types`,
+asks nothing of a host and is imported as it is.
 
 ## The types of a consumed interface
 

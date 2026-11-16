@@ -416,12 +416,15 @@ enum Import {
     Ingress,
 }
 
-/// What installation asks for the import `id`, by the rules of `tembra_contracts`: a system
-/// grant only for the interfaces `system_capability` admits, and no grant for the HTTP types of
-/// a `handler_only` Orb, which planning binds to the ingress. With the HTTP client imported, the
-/// client's HTTP grant serves the types too.
+/// What installation asks for the import `id`, by the rules of `tembra_contracts`: a grant only
+/// for the interfaces `host_serves` names, a system grant only for those `system_capability`
+/// admits, and no grant for the HTTP types of a `handler_only` Orb, which planning binds to the
+/// ingress. With the HTTP client imported, the client's HTTP grant serves the types too.
 fn classify_import(id: &str, handler_only: bool) -> Import {
     let kind = match id.split('/').next().unwrap_or_default() {
+        package if package.starts_with("wasi:") && !tembra_contracts::host_serves(id) => {
+            "NOT SUPPORTED by Tembra"
+        }
         "wasi:filesystem" => "filesystem (FilesystemGrant)",
         "wasi:sockets" => "network (NetworkGrant)",
         "wasi:http" if handler_only && id.starts_with("wasi:http/types@") => {

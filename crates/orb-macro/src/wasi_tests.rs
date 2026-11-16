@@ -188,6 +188,41 @@ fn a_wasi_identity_names_an_interface_of_the_bundled_packages() {
     );
 }
 
+/// A WASI interface is imported when a host serves it as an import, by the rule the installation's
+/// grant check applies: `wasi:cli/run` and `wasi:http/handler`, which a component exports instead,
+/// are errors on the import naming what the hosts serve of their package; an interface of types
+/// only, `wasi:clocks/types`, asks nothing of a host.
+#[test]
+fn a_wasi_import_is_an_interface_the_hosts_serve() {
+    for (identity, served) in [
+        (
+            "wasi:cli/run@0.3.0",
+            "of wasi:cli@0.3.0, the hosts serve environment, exit, types, stdin, stdout, stderr, terminal-input, terminal-output, terminal-stdin, terminal-stdout, terminal-stderr",
+        ),
+        (
+            "wasi:http/handler@0.3.0",
+            "of wasi:http@0.3.0, the hosts serve types, client",
+        ),
+    ] {
+        let error = expanded(importing(&[identity], None), DICE)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "no host serves {identity} as an import: a component exports it instead"
+            )) && error.contains(served),
+            "{identity}: {error}"
+        );
+    }
+    let generated = expanded(importing(&["wasi:clocks/types@0.3.0"], None), DICE)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        generated.contains("import wasi:clocks/types@0.3.0;"),
+        "{generated}"
+    );
+}
+
 /// A contract `cargo tembra build` wrote for an Orb that imports WASI holds the WASI packages in
 /// `deps/`: an Orb consuming it reads each such package once, from there, the bundled copy left out
 /// of its inline WIT whatever the copy's comments say, and nests only the WASI packages the
