@@ -4337,6 +4337,24 @@ fn a_helper_attribute_the_bindings_module_cannot_read_is_refused() {
         "{}",
         tokens(&carried)
     );
+    // A type of the module that enters the WIT is declared in the bindings' module too, under the
+    // same name, where the owner's interface defines or uses it: an attribute naming it reads there.
+    let carried = expanded(
+        "example:walk@1.0.0",
+        &module(
+            "pub enum Mode { Fast, Slow }
+             #[derive(smart_default::SmartDefault)]
+             pub struct Page { #[default(Mode::Slow)] pub mode: Mode, pub size: u32 }",
+            "Page",
+        ),
+    );
+    assert!(
+        tokens(&carried).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/page.mode\" : [# [default (Mode :: Slow)]] } ,"
+        ),
+        "{}",
+        tokens(&carried)
+    );
     for (types, message) in [
         (
             "const PAGE: u32 = 20;

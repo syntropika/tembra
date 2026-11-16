@@ -4578,14 +4578,16 @@ fn bound(name: &Ident, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]) -> O
 /// The first path in a helper attribute's arguments that starts from the module `scope`, which
 /// the bindings' module does not reach, as written up to its first part that is not a name: one
 /// from `self::` or `super::`, or from a name the module binds. A name after `::`, `.` or `'`
-/// continues a path, reads a field or is a lifetime, a name before `=` is a key, and the name of
-/// a derive of the standard library, which the arguments give as a keyword or as a derive,
-/// reaches the prelude's from every module.
+/// continues a path, reads a field or is a lifetime, a name before `=` is a key, the name of a
+/// derive of the standard library, which the arguments give as a keyword or as a derive, reaches
+/// the prelude's from every module, and one of `defined`, a type of the module that the bindings'
+/// module declares under the same name, reaches that declaration.
 fn from_module(
     arguments: proc_macro2::TokenStream,
     scope: usize,
     uses: &[Uses],
     modules: &[Vec<Ident>],
+    defined: &BTreeSet<String>,
 ) -> Option<String> {
     use proc_macro2::{Spacing, TokenTree};
     let trees: Vec<TokenTree> = arguments.into_iter().collect();
@@ -4596,10 +4598,12 @@ fn from_module(
     let colons = |index: usize| punct(index, ':') && punct(index + 1, ':');
     for (index, tree) in trees.iter().enumerate() {
         let ident = match tree {
-            TokenTree::Group(group) => match from_module(group.stream(), scope, uses, modules) {
-                Some(path) => return Some(path),
-                None => continue,
-            },
+            TokenTree::Group(group) => {
+                match from_module(group.stream(), scope, uses, modules, defined) {
+                    Some(path) => return Some(path),
+                    None => continue,
+                }
+            }
             TokenTree::Ident(ident) => ident,
             TokenTree::Punct(_) | TokenTree::Literal(_) => continue,
         };
@@ -4613,7 +4617,11 @@ fn from_module(
             }
             _ => false,
         };
-        if continued || key || STANDARD_DERIVES.iter().any(|(name, _)| ident == name) {
+        if continued
+            || key
+            || STANDARD_DERIVES.iter().any(|(name, _)| ident == name)
+            || defined.contains(&ident.to_string())
+        {
             continue;
         }
         let relative = ident == "super" || (ident == "self" && colons(index + 1));
@@ -4661,12 +4669,14 @@ fn unread(carried: &Carried, others: &[Reads]) -> String {
 /// replacing `shape`, would not know: an attribute macro the type's module imports, which is no
 /// derive's helper attribute, an attribute none of the derives the generated type takes reads,
 /// by what each of them reads, `readers`, and one whose arguments name what the type's module
-/// declares or imports, or start from that module.
+/// declares or imports, or start from that module, but for the types of the module the bindings'
+/// module declares beside the generated type under the same name, `defined`.
 fn readable(
     shape: &Shape,
     readers: &[Reads],
     uses: &[Uses],
     modules: &[Vec<Ident>],
+    defined: &BTreeSet<String>,
 ) -> syn::Result<()> {
     let owner = &shape.ident;
     let carried = &shape.carried;
@@ -4696,7 +4706,7 @@ fn readable(
                 quote! { #value }
             }
         };
-        if let Some(path) = from_module(arguments, shape.scope, uses, modules) {
+        if let Some(path) = from_module(arguments, shape.scope, uses, modules, defined) {
             return refuse(format!(
                 "`{shown}` on `{owner}` names `{path}` from this module: `{owner}` enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach `{path}`; name it from `crate::` or from its crate, `::name::..`, or keep `{owner}` out of the WIT"
             ));
@@ -4817,7 +4827,25 @@ fn carried_attributes(
                 readers.push(reads[index]);
             }
         }
-        readable(shape, &readers, uses, modules)?;
+        // The types of the module the bindings' module declares beside the generated type, under
+        // the author's name: those the owner's interface defines, and those it `use`s for the
+        // owner's fields; a flags struct only where it is used, since `with` maps the defining
+        // interface's flags onto the author's struct without declaring it there.
+        let defined: BTreeSet<String> = shapes
+            .iter()
+            .filter(|other| {
+                let together =
+                    placement[&other.ident.to_string()] == placement[&shape.ident.to_string()];
+                let used = !together && shape.references.contains(&other.ident);
+                let declared = match other.kind {
+                    ShapeKind::Flags(_) => used,
+                    _ => together || used,
+                };
+                declared && type_ident(&wit::kebab(&other.ident)) == other.ident
+            })
+            .map(|other| other.ident.to_string())
+            .collect();
+        readable(shape, &readers, uses, modules, &defined)?;
         let derive = (!derives.is_empty()).then(|| quote! { #[derive(#(#derives),*)] });
         let helpers = &shape.carried.helpers;
         if derive.is_some() || !helpers.is_empty() {

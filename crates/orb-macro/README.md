@@ -1174,7 +1174,10 @@ the version whose rules the macro follows, and the generated code reaches it the
   as `Debug` is after `use derive_more::*;`; an attribute macro the type's module imports,
   `#[skip_serializing_none]`, which is no derive's helper; and arguments naming what the type's
   module declares or imports, or a path from `self::` or `super::`, which a path from `crate::`,
-  `#[default(crate::walk::PAGE)]`, or from a crate names from every module.
+  `#[default(crate::walk::PAGE)]`, or from a crate names from every module. A type of the module
+  that enters the WIT is the exception: the bindings' module declares the generated type replacing
+  it under the same name, where the type's interface defines or `use`s it, so `#[default(Mode::Slow)]`
+  on a field holding the module's `Mode` reads there as written.
 - What the replacement would drop without a word is refused on a type that enters the WIT: an
   explicit discriminant, which a WIT enum has no room for, a `#[serde(..)]` attribute, which would
   change a state's JSON, and a helper attribute on the payload of a case, which the bindings have
