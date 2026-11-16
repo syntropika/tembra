@@ -5212,21 +5212,104 @@ fn the_factory_of_its_service_declares_a_state_natively() {
     }
 }
 
+/// The resources of the Orb's root natively: `orb_named` builds a table of them for the Orb, which
+/// the Orb's create fills, declaring each with its version, `#[open]` and `#[close]` before the
+/// `#[root]` runs, and which every service takes, and hands the functions of its WIT resources;
+/// each method's future, local ones too, and each of those functions', runs in the scope of its
+/// Orb, where the resources' `with` reaches the table, in a sub-module through `super::`. The
+/// component's `with`, over its slot and the bindings' import, is a component build's only, and a
+/// native host gets its own in the component's `__tembra_resource`.
+#[test]
+fn the_orbs_create_declares_its_root_resources_natively() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            #[inputs]
+            pub struct Inputs { pub title: String }
+            #[root]
+            fn shelves(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<u32> { Ok(0) }
+            #[resource]
+            pub struct Counts { pub seen: u32 }
+            impl Counts {
+                #[open]
+                fn open() -> Self { Counts { seen: 0 } }
+                #[close]
+                fn close(self) {}
+            }
+            #[service]
+            pub struct Ledger;
+            impl Ledger {
+                pub fn count() -> u32 { Counts::with(|counts| counts.seen) }
+                #[local]
+                pub fn rewind() {}
+            }
+            #[wit_resource(service = Ledger)]
+            pub struct Ticket;
+            impl Ticket {
+                #[constructor]
+                pub fn new() -> Self { Ticket }
+                pub fn seen(&self) -> u32 { Counts::with(|counts| counts.seen) }
+            }
+            pub mod banner {
+                #[resource(version = 2)]
+                pub struct Banner { pub text: String }
+                impl Banner {
+                    #[open]
+                    pub fn open() -> Self { Banner { text: String::new() } }
+                }
+                #[service]
+                pub struct Shelf;
+                impl Shelf { pub fn size() -> u32 { 0 } }
+            }
+        }",
+    );
+    let root = native(&module, &[]);
+    for expected in [
+        "let resources = :: std :: rc :: Rc :: new (< self :: __tembra_resource :: Resources as :: core :: default :: Default > :: default () ,) ;",
+        ". create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; let resources = :: std :: rc :: Rc :: clone (& resources) ; move | declaration | { resources . declare (& declaration) ? ; self :: shelves (& inputs , & declaration) } })",
+        ". service (self :: __tembra_service_ledger (name , & resources)) . service (self :: banner :: __tembra_service_shelf (name , & resources))",
+        "pub (crate) fn __tembra_service_ledger (orb : & str , resources : & :: std :: rc :: Rc < self :: __tembra_resource :: Resources >) -> :: tembra :: Service < () >",
+        ". method_with (\"count\" , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | _ , __tembra_context : :: tembra :: Context , () : () | self :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }) } , __TEMBRA_CODEC_COUNT ,)",
+        ". local_method (\"rewind\" , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | _ , __tembra_context : :: tembra :: Context , () : () | self :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move { __tembra_context . check () ? ; Ledger :: rewind () ; :: core :: result :: Result :: Ok (()) }) } ,)",
+        ", resources)",
+        "pub (crate) fn __tembra_resource_ticket < E : 'static > (service : :: tembra :: Service < E > , resources : & :: std :: rc :: Rc < self :: __tembra_resource :: Resources >) -> :: tembra :: Service < E >",
+        ". payload_method (\"[method]ticket.seen\" , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | _ , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move {",
+    ] {
+        assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    let banner = native(&module, &["banner"]);
+    for expected in [
+        "resources : & :: std :: rc :: Rc < self :: super :: __tembra_resource :: Resources >",
+        "| self :: super :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) ,",
+    ] {
+        assert!(banner.contains(expected), "{expected}\n{banner}");
+    }
+    let generated = tokens(&module);
+    assert!(
+        generated.contains(":: tembra :: __guest ! { impl Counts { # [doc = \" Use the resource `counts` of this Orb's root, opened by the kernel at activation; the kernel confirms it is open, the value lives in this component.\"] pub fn with < R > (use_ : impl :: core :: ops :: FnOnce (& mut Self) -> R) -> R { let _handle = self :: tembra :: guest :: resources :: read (\"counts\") ;"),
+        "{generated}"
+    );
+    let resources = native(&module, &["__tembra_resource"]);
+    for expected in [
+        "pub struct Resources { counts : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: Counts >> > , banner : :: core :: cell :: OnceCell < :: tembra :: Resource < Slot < super :: banner :: Banner >> > , }",
+        "let resource = declaration . resource (\"counts\" , 1u32 , || { let slot = Slot :: new () ; slot . open (super :: Counts :: open ()) ; :: core :: result :: Result :: Ok (slot) } , | slot , _ | { if let :: core :: option :: Option :: Some (value) = slot . close () { value . close () ; } :: std :: boxed :: Box :: pin (async { :: core :: result :: Result :: Ok (()) }) } ,) ? ; let _ = self . counts . set (resource) ;",
+        "let resource = declaration . resource (\"banner\" , 2u32 , || { let slot = Slot :: new () ; slot . open (super :: banner :: Banner :: open ()) ; :: core :: result :: Result :: Ok (slot) } , | slot , _ | { slot . close () ; :: std :: boxed :: Box :: pin (async { :: core :: result :: Result :: Ok (()) }) } ,) ? ; let _ = self . banner . set (resource) ;",
+        "pub (crate) fn scoped < F : :: core :: future :: Future > (resources : :: std :: rc :: Rc < Resources > , future : F ,) -> impl :: core :: future :: Future < Output = F :: Output > {",
+        "impl super :: Counts {",
+        "pub fn with < R > (use_ : impl :: core :: ops :: FnOnce (& mut Self) -> R) -> R { let slot = current () . counts . get () . and_then (| resource | resource . value () . ok ()) . expect (\"the resource `counts` of the Orb's root is open\") ; slot . with (use_) }",
+    ] {
+        assert!(resources.contains(expected), "{expected}\n{resources}");
+    }
+}
+
 /// What the native side does not cover yet is a compile error inside the facade's wrapper, so a
-/// component build of the module is unaffected: a root resource, an import, and a hook contributed
-/// to or declared, each named.
+/// component build of the module is unaffected: an import, and a hook contributed to or declared,
+/// each named.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
     let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
     let dir = consumed("native-hook", ADMISSION_WIT);
     for (options, module, message) in [
-        (
-            options(PACKAGE, None),
-            format!(
-                "mod book {{ #[resource] pub struct Banner {{ pub text: String }} impl Banner {{ #[open] pub fn open() -> Self {{ Banner {{ text: String::new() }} }} }} {service} }}"
-            ),
-            "`Banner` is marked #[resource]; root resources are not supported natively yet",
-        ),
         (
             Options {
                 imports: vec![literal("wasi:random/random@0.3.0")],
@@ -6165,9 +6248,9 @@ fn the_analysis_lists_what_makes_a_module_native_only() {
 }
 
 /// A native-only module may export nothing when what it runs is its root or its root resources:
-/// the WIT is then an empty world, and `orb(..)` an Orb of no service whose create is the root.
-/// Root resources stay refused natively until the native side covers them. A module that is not
-/// native only, or has nothing to run, still exports something.
+/// the WIT is then an empty world, and `orb(..)` an Orb of no service whose create is the root, or
+/// declares the resources. A module that is not native only, or has nothing to run, still exports
+/// something.
 #[test]
 fn a_native_only_module_may_only_run_its_root() {
     const WORKER: &str = "example:worker@1.0.0";
@@ -6194,9 +6277,17 @@ fn a_native_only_module_may_only_run_its_root() {
         "{root}"
     );
     let module = expanded(WORKER, &format!("mod worker {{ {inputs} {counts} }}"));
-    assert_eq!(
-        native(&module, &[]),
-        ":: core :: compile_error ! (\"`Counts` is marked #[resource]; root resources are not supported natively yet\") ;"
+    let derived = wit(&module);
+    assert!(
+        derived.contains("world worker {\n  import tembra:guest/resources@1.0.0;\n  export tembra:guest/resources-init@1.0.0;\n}"),
+        "{derived}"
+    );
+    let root = native(&module, &[]);
+    assert!(
+        root.contains(
+            ":: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . create ({ let resources = :: std :: rc :: Rc :: clone (& resources) ; move | declaration | resources . declare (& declaration) })) }"
+        ),
+        "{root}"
     );
     assert_eq!(
         refused(WORKER, &format!("mod worker {{ {counts} }}")),
@@ -6204,7 +6295,7 @@ fn a_native_only_module_may_only_run_its_root() {
     );
     assert_eq!(
         refused(WORKER, &format!("mod worker {{ {inputs} }}")),
-        "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root]"
+        "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root] or a #[resource]"
     );
 }
 

@@ -4,7 +4,7 @@
 //! each value closing once. A compiled caller does the same in
 //! `crates/executor-wasm/tests/orb_macro_native.rs`.
 use futures::{FutureExt, executor::LocalPool};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::rc::Rc;
 use tembra::{
     Host, Reference,
@@ -135,6 +135,31 @@ fn a_function_handing_out_an_accumulator_has_no_local_entrypoint() {
             .expect("a local call is refused");
         assert_eq!(refused.code, Code::Invalid, "{refused}");
         assert_eq!(client.dropped(&context).await?, dropped);
+        Ok(())
+    });
+}
+
+/// A method of the resource runs on the object of the service that issued it, in the scopes of a
+/// method of the service, as the executor gives a component's: it adds to the calculator's
+/// memory, a resource of the Orb's root, and counts in that object's state, which the host reads.
+#[test]
+fn a_method_of_the_resource_reaches_its_objects_state_and_the_roots_resources() {
+    with_accumulators(async |reference, context| {
+        let accumulator: Owned = reference
+            .call_portable(&context, "[constructor]accumulator", (5_i64,))
+            .await?;
+        let stored: (i64, u32) = accumulator
+            .call_portable(&context, "[method]accumulator.store", ())
+            .await?;
+        assert_eq!(stored, (5, 1));
+        accumulator
+            .call_portable::<_, i64>(&context, "[method]accumulator.add", (2_i64,))
+            .await?;
+        let stored: (i64, u32) = accumulator
+            .call_portable(&context, "[method]accumulator.store", ())
+            .await?;
+        assert_eq!(stored, (12, 2));
+        assert_eq!(*reference.state::<Value>()?.value()?, json!({ "count": 2 }));
         Ok(())
     });
 }

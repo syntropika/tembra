@@ -1803,7 +1803,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
                 Span::call_site(),
                 cfg::under(
                     configuration.as_ref(),
-                    "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root]",
+                    "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root] or a #[resource]",
                 ),
             ));
         }
@@ -6116,7 +6116,9 @@ fn resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Resour
 }
 
 /// The Rust side of the resources: the kernel's `resources-init` callbacks listing, opening and
-/// closing them, one slot in the component's memory per resource, and `with` on each type.
+/// closing them, one slot in the component's memory per resource, and `with` on each type, which
+/// reaches the component's slot in a component build and the Orb's resource natively, where the
+/// native side declares each in the Orb's create and writes its own `with`.
 fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2::TokenStream {
     if resources.is_empty() {
         return quote! {};
@@ -6170,17 +6172,22 @@ fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2:
         let doc = format!(
             " Use the resource `{name}` of this Orb's root, opened by the kernel at activation; the kernel confirms it is open, the value lives in this component."
         );
+        // A native host gets `with` of its own, in `__tembra_resource`, over the Orb its method
+        // runs for.
         quote! {
             static #slot: __tembra_resource::Slot<#path> = __tembra_resource::Slot::new();
-            impl #path {
-                #[doc = #doc]
-                pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
-                    let _handle = self::tembra::guest::resources::read(#name);
-                    #slot.with(use_)
+            ::tembra::__guest! {
+                impl #path {
+                    #[doc = #doc]
+                    pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
+                        let _handle = self::tembra::guest::resources::read(#name);
+                        #slot.with(use_)
+                    }
                 }
             }
         }
     });
+    let native = native::resource_access(resources, modules);
     quote! {
         // The kernel lists the root's resources when it creates the root, then opens and closes
         // each of them in its own order through these callbacks.
@@ -6238,6 +6245,8 @@ fn resource_code(resources: &[Resource], modules: &[Vec<Ident>]) -> proc_macro2:
                     Self::new()
                 }
             }
+
+            #native
         }
     }
 }

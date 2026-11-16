@@ -1,12 +1,13 @@
 //! An Orb crate used natively. The module `calculator` is one `cargo tembra build` would compile
 //! into a component; the tests of this crate are a native host instead, which installs
 //! `calculator::orb()` and calls its services locally, with Rust values, and portably, with the
-//! boundary's JSON, and whose methods read their call through the kernel's `context`, as a
-//! component's do. The module `notebook` takes host values, which only a native host can lend,
-//! `library` shares its root's value among its objects, and `worker` only runs its root. The
-//! manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
+//! boundary's JSON, and whose methods read their call through the kernel's `context`, their
+//! object's state and the resources of the Orb's root, as a component's do. The module `notebook`
+//! takes host values, which only a native host can lend, `library` shares its root's value among
+//! its objects, and `worker` only runs its root and a resource of it. The manifest names every Orb
+//! of the crate `calculator` at API version 2, which `orb()` reports.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 std::thread_local! {
     /// How far from the origin, along each axis, the walkers of the Orbs this thread hosts may
@@ -18,6 +19,23 @@ std::thread_local! {
 /// stand: 1000 steps, unless a test narrows it.
 pub fn set_grid(steps: i64) {
     GRID.with(|grid| grid.set(steps));
+}
+
+std::thread_local! {
+    /// What the resources of the Orbs' roots went through on this thread, in order: the tests'
+    /// host opens and closes them on the thread that installs the Orbs.
+    static JOURNAL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Note what a resource went through.
+fn note(event: String) {
+    JOURNAL.with(|journal| journal.borrow_mut().push(event));
+}
+
+/// What the resources of the Orbs' roots went through on this thread since the last call, in
+/// order: each opened and closed, with what it held.
+pub fn journal() -> Vec<String> {
+    JOURNAL.with(RefCell::take)
 }
 
 #[tembra::orb(package = "example:calculator@1.0.0", context)]
@@ -313,6 +331,48 @@ pub mod calculator {
         }
     }
 
+    /// The calculator's memory, a resource of the Orb's root: the host opens it when it installs
+    /// the Orb and closes it when it removes the Orb, and every object of the Orb uses the one
+    /// value, natively as in a component.
+    #[resource]
+    pub struct Memory {
+        value: i64,
+    }
+
+    impl Memory {
+        /// Clear the memory, as the host opens it.
+        #[open]
+        fn open() -> Self {
+            super::note("memory open".to_owned());
+            Memory { value: 0 }
+        }
+
+        /// Note what the memory held, as the host closes it.
+        #[close]
+        fn close(self) {
+            super::note(format!("memory closed at {}", self.value));
+        }
+    }
+
+    /// The memory keys of the calculator, on the memory of the Orb's root.
+    #[service]
+    pub struct Register;
+
+    impl Register {
+        /// Add the value to the memory and return what it holds.
+        pub fn add(value: i64) -> i64 {
+            Memory::with(|memory| {
+                memory.value += value;
+                memory.value
+            })
+        }
+
+        /// What the memory holds.
+        pub fn recall() -> i64 {
+            Memory::with(|memory| memory.value)
+        }
+    }
+
     /// What the kernel tells a method of its call, through the functions of `context`: in a
     /// component as in a native host.
     #[service]
@@ -480,6 +540,19 @@ pub mod calculator {
                 super::context::principal()
             }
 
+            /// Add the total to the calculator's memory, a resource of the Orb's root, and count
+            /// it in the state of the accumulators object that issued it: what the memory holds,
+            /// and how many totals that object stored. A method of the resource reaches both, as
+            /// a method of the service does.
+            pub fn store(&self) -> (i64, u32) {
+                let memory = super::Memory::with(|memory| {
+                    memory.value += self.total.get();
+                    memory.value
+                });
+                let stored = Stored::update(|stored| stored.count += 1);
+                (memory, stored.count)
+            }
+
             /// An accumulator starting at zero: a static function of the resource.
             pub fn zero() -> Accumulator {
                 Accumulator::new(0)
@@ -490,6 +563,13 @@ pub mod calculator {
             fn drop(&mut self) {
                 DROPPED.with(|dropped| dropped.set(dropped.get() + 1));
             }
+        }
+
+        /// How many totals the accumulators an object of the service issued stored in the
+        /// calculator's memory, which the kernel keeps for the object.
+        #[state]
+        pub struct Stored {
+            pub count: u32,
         }
 
         /// Opens accumulators and counts the ones dropped.
@@ -866,13 +946,15 @@ pub mod library {
 }
 
 /// A worker the host runs while the Orb is installed: an Orb whose only content is its root, which
-/// declares the worker. It exports nothing, so its WIT is an empty world. Native only, as
-/// `notebook`.
+/// declares the worker, and a resource of the root, the worker's lamp. It exports nothing, so its
+/// WIT is an empty world. Native only, as `notebook`. The module holds the bindings of the
+/// kernel's `tembra:guest` package, for the lamp, under the name `tembra`, so it names the facade
+/// `::tembra`.
 #[cfg(not(target_arch = "wasm32"))]
 #[tembra::orb(package = "example:worker@1.0.0")]
 pub mod worker {
+    use ::tembra::Declaration;
     use std::{cell::RefCell, rc::Rc};
-    use tembra::Declaration;
 
     /// What the host lends the Orb.
     #[inputs]
@@ -880,13 +962,33 @@ pub mod worker {
         /// What the worker did, in order, for the host to read back.
         pub events: Rc<RefCell<Vec<String>>>,
         /// Why the worker cannot start, if it cannot: the root then fails with it.
-        pub failure: Option<tembra::Error>,
+        pub failure: Option<::tembra::Error>,
+    }
+
+    /// The worker's lamp, a resource of the Orb's root: the host lights it once the root has
+    /// declared the worker, and puts it out when it removes the Orb.
+    #[resource]
+    pub struct Lamp;
+
+    impl Lamp {
+        /// Light the lamp.
+        #[open]
+        fn open() -> Self {
+            super::note("lamp lit".to_owned());
+            Lamp
+        }
+
+        /// Put the lamp out.
+        #[close]
+        fn close(self) {
+            super::note("lamp out".to_owned());
+        }
     }
 
     /// Declare the worker: a task that runs once the Orb is active and stops when it is
     /// cancelled, as the host closes. Or fail, as the inputs say.
     #[root]
-    fn start(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<()> {
+    fn start(inputs: &Inputs, declaration: &Declaration) -> ::tembra::Result<()> {
         if let Some(failure) = &inputs.failure {
             return Err(failure.clone());
         }

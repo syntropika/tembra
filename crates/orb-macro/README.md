@@ -390,7 +390,8 @@ function during activation and the `#[close]` one at teardown; `with` asks the k
 first. The value lives in the component, one per instance, as the TypeScript guest's root
 resources do: a reload gives the Orb a fresh instance whose resources the kernel opens again. A
 resource struct enters the WIT only when a service method uses it; a resource may hold types the
-WIT has no spelling for, such as a client of some granted I/O.
+WIT has no spelling for, such as a client of some granted I/O. A native host opens the same
+resources, see [using the Orb natively](#using-the-orb-natively).
 
 ## The call's context
 
@@ -1194,6 +1195,19 @@ value the new code inherits as the state's type and runs the `#[validate]` funct
 adopts it. An object declares one state, so a `#[create]` of the owning service declares none of
 its own.
 
+A [`#[resource]`](#resources-of-the-orbs-root) of the Orb's root serves a native host as it serves
+a component. `orb(..)` gives each Orb it builds a table of its resources, which the Orb's create
+fills, declaring each with `Declaration::resource` before the `#[root]`, if any, runs: the host
+opens each with its `#[open]` function once the create returns, once for the Orb and before any
+object of it is built, and closes it, through its `#[close]` function, when it removes the Orb. The
+value lives in the host, one per Orb, so a crate installed twice under two names has two of each.
+`with` gives the open value to the methods of every service of the Orb and the functions of their
+WIT resources, which the native side runs with their Orb's table around each poll of their future,
+as for the `context` functions.
+Elsewhere, in the root, a `#[create]` or a task, and before the host opens the resource or after
+it closes it, `with` panics, as it traps a component. A root that fails fails the create, and no
+resource opens.
+
 The bindings of the kernel's `tembra:guest` package, which a module with a state, a root resource
 or the `context` option imports, are a module named `tembra` inside the Orb module, which hides the
 facade there: such a module names the facade `::tembra`, as in `::tembra::Result<Self>` and
@@ -1201,10 +1215,10 @@ facade there: such a module names the facade `::tembra`, as in `::tembra::Result
 
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, free JSON, records, enums, variants, flags, `Result`s, and `Vec`, `Option` and tuples of
-them, WIT resources as above, and states. A type of a consumed interface, `#[resource]`, an
-import and a hook are compile errors where the runtime is linked, naming the item, until the native
-side covers them, and so is an `Option` of an `Option`, which the boundary's JSON cannot tell from
-`None`; a component build of the same module is unaffected.
+them, WIT resources as above, states and the resources of the Orb's root. A type of a consumed
+interface, an import and a hook are compile errors where the runtime is linked, naming the item,
+until the native side covers them, and so is an `Option` of an `Option`, which the boundary's JSON
+cannot tell from `None`; a component build of the same module is unaffected.
 
 ## Items under `#[cfg]`
 
@@ -1325,10 +1339,14 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    `validate` callback, which reads the value a reload would adopt as the state type and runs the
    state's `#[validate]` function on it;
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
-   function and emptied by the `#[close]` one, and the `with` function on each resource type;
+   function and emptied by the `#[close]` one, and the `with` function on each resource type,
+   which reaches the slot in a component build, inside `tembra::__guest!`, and natively, inside
+   `tembra::__host!`, the resource of the Orb whose method runs, from a hidden table of the Orb's
+   resources that the Orb's create fills;
 10. inside `tembra::__host!`, so only where the facade links the runtime, `pub fn orb()`, or
     `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest through
-    `pub fn orb_named(name, api_version, ..)`, with its `#[root]` as the Orb's create, from one
+    `pub fn orb_named(name, api_version, ..)`, whose Orb's create declares the root's resources and
+    runs its `#[root]`, from one
     hidden function per service, written in the service's module and declaring the codec of each
     of its methods, and the state of its objects, if they own one, next to the service's typed
     client, `<Service>Client`, an `include_bytes!` of the manifest, and a hidden trait that each

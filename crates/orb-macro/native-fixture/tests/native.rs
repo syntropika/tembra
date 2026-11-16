@@ -15,6 +15,7 @@ use tembra_orb_native_fixture::calculator::{self, Heading, Move, Note, Pen, Poin
 const MATH: &str = "calculator::example:calculator/math@1.0.0";
 const PLOTTER: &str = "calculator::example:calculator/plotter@1.0.0";
 const WALKER: &str = "calculator::example:calculator/walker@1.0.0";
+const REGISTER: &str = "calculator::example:calculator/register@1.0.0";
 const CALLER: &str = "calculator::example:calculator/caller@1.0.0";
 const TALLY: &str = "calculator::example:calculator/tally@1.0.0";
 const MEMO: &str = "calculator::example:calculator/memo@1.0.0";
@@ -60,12 +61,13 @@ fn with_main(
 /// module's `WIT`: the Orb named by the manifest, `calculator` at API version 2, not the crate
 /// name at 1; each interface as a service, with its signature and its methods; and the ownership
 /// policy of each `#[service]` attribute, which the WIT does not carry and a component's manifest
-/// adds, so the expectation sets it the same way. The kernel's context and state interfaces, which
-/// the world imports, bind to the kernel, as an installer binds them, and ask nothing of the Orb.
+/// adds, so the expectation sets it the same way. The kernel's context, state and resources
+/// interfaces, which the world imports, bind to the kernel, as an installer binds them, and ask
+/// nothing of the Orb.
 #[test]
 fn the_declaration_is_the_plan_of_the_contract() {
     let orb = calculator::orb().unwrap();
-    let kernel = [guest::CONTEXT, guest::STATE]
+    let kernel = [guest::CONTEXT, guest::STATE, guest::RESOURCE]
         .map(|interface| (interface.to_owned(), Binding::Kernel))
         .into();
     let mut expected = Contract::from_source("calculator.wit", calculator::WIT, Some("calculator"))
@@ -88,7 +90,16 @@ fn the_declaration_is_the_plan_of_the_contract() {
         .collect();
     assert_eq!(
         names,
-        [MATH, PLOTTER, WALKER, CALLER, TALLY, MEMO, ACCUMULATORS]
+        [
+            MATH,
+            PLOTTER,
+            WALKER,
+            REGISTER,
+            CALLER,
+            TALLY,
+            MEMO,
+            ACCUMULATORS
+        ]
     );
     assert!(
         expected
@@ -123,6 +134,7 @@ fn the_declaration_is_the_plan_of_the_contract() {
             "[constructor]accumulator",
             "[method]accumulator.add",
             "[method]accumulator.reader",
+            "[method]accumulator.store",
             "[method]accumulator.total",
             "[static]accumulator.zero",
             "checked",

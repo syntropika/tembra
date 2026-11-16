@@ -16,10 +16,12 @@
 //! With the `context` option, the Orb module gets a native `context`, whose functions read the
 //! call each method's future runs for. A service whose objects own a `#[state]` declares it in its
 //! factory, and its methods run in the scope of their object, whose state the state's `read` and
-//! `update` reach natively. What the native side does not cover yet is a compile error inside the
+//! `update` reach natively. The Orb's create declares each `#[resource]` of its root, into a table
+//! `orb()` builds for the Orb, and every method runs in the scope of its Orb, whose resources their
+//! `with` reaches natively. What the native side does not cover yet is a compile error inside the
 //! same wrapper, naming the item; a component build of the module is unaffected.
 use crate::{
-    Analysis, Function, Payload, Service, Shape, ShapeKind, WitResource, camel_ident,
+    Analysis, Function, Payload, Resource, Service, Shape, ShapeKind, WitResource, camel_ident,
     metadata::Metadata, rust_ident, wit,
 };
 use heck::{ToShoutySnakeCase, ToSnakeCase};
@@ -61,12 +63,16 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
     };
     let mut by_scope: BTreeMap<usize, Vec<TokenStream>> = BTreeMap::new();
     let mut calls = Vec::new();
+    // The resources of the Orb's root, which `orb(..)` keeps for the Orb, for the methods of every
+    // service.
+    let resources = !analysis.resources.is_empty();
     for (service, items) in analysis.services.iter().zip(registrations) {
         let path = &analysis.modules[service.scope];
         let function = service_ident(service);
         // A service its create builds takes the inputs `orb(..)` shares.
         let inputs = service.create.is_some().then(|| quote! { , &inputs });
-        calls.push(quote! { self::#(#path::)* #function(name #inputs) });
+        let table = resources.then(|| quote! { , &resources });
+        calls.push(quote! { self::#(#path::)* #function(name #inputs #table) });
         by_scope
             .entry(service.scope)
             .or_default()
@@ -114,7 +120,14 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
             .services
             .iter()
             .any(|service| service.create.is_some());
-    let orb = orb(metadata, inputs.as_ref(), shared, create.as_ref(), &calls);
+    let orb = orb(
+        metadata,
+        inputs.as_ref(),
+        shared,
+        create.as_ref(),
+        resources,
+        &calls,
+    );
     let boundary = (!analysis.shapes.is_empty()).then(boundary_trait);
     Native {
         root: wrapped(quote! { #orb #boundary #(#root)* #context }),
@@ -137,7 +150,9 @@ fn wrapped(items: TokenStream) -> TokenStream {
 /// `orb(inputs)` and `orb_named(name, api_version, inputs)`, and when a service has a create or
 /// the Orb a `#[root]`, `shared`, the inputs go to each as one `Rc`. The root, `create` the path
 /// the Orb module names it by, is the Orb's create: `Orb::create` runs it with the inputs and the
-/// Orb's declaration.
+/// Orb's declaration. With root `resources`, `orb_named` builds the table of the Orb's resources,
+/// which the Orb's create fills, declaring each before the root runs, and which every service
+/// takes, as one `Rc`.
 ///
 /// Cargo does not rebuild a crate when only `[package.metadata.tembra]` changes, so the generated
 /// code includes the manifest, which makes the compiler track the file: the next build then reads
@@ -147,6 +162,7 @@ fn orb(
     inputs: Option<&TokenStream>,
     shared: bool,
     create: Option<&TokenStream>,
+    resources: bool,
     calls: &[TokenStream],
 ) -> TokenStream {
     let name = &metadata.name;
@@ -166,14 +182,38 @@ fn orb(
     let named_parameter = inputs.map(|path| quote! { , inputs: #path });
     let argument = inputs.map(|_| quote! { , inputs });
     let shared = shared.then(|| quote! { let inputs = ::std::rc::Rc::new(inputs); });
-    let create = create.map(|create| {
+    let table = resources.then(|| {
         quote! {
+            let resources = ::std::rc::Rc::new(
+                <self::__tembra_resource::Resources as ::core::default::Default>::default(),
+            );
+        }
+    });
+    let create = match (create, resources) {
+        (Some(create), false) => Some(quote! {
             .create({
                 let inputs = ::std::rc::Rc::clone(&inputs);
                 move |declaration| self::#create(&inputs, &declaration)
             })
-        }
-    });
+        }),
+        (Some(create), true) => Some(quote! {
+            .create({
+                let inputs = ::std::rc::Rc::clone(&inputs);
+                let resources = ::std::rc::Rc::clone(&resources);
+                move |declaration| {
+                    resources.declare(&declaration)?;
+                    self::#create(&inputs, &declaration)
+                }
+            })
+        }),
+        (None, true) => Some(quote! {
+            .create({
+                let resources = ::std::rc::Rc::clone(&resources);
+                move |declaration| resources.declare(&declaration)
+            })
+        }),
+        (None, false) => None,
+    };
     quote! {
         const _: &[u8] = ::core::include_bytes!(::core::concat!(
             ::core::env!("CARGO_MANIFEST_DIR"),
@@ -192,6 +232,7 @@ fn orb(
             #named_parameter
         ) -> ::tembra::Result<::tembra::Orb> {
             #shared
+            #table
             ::core::result::Result::Ok(
                 ::tembra::Orb::new(name, api_version) #create #(.service(#calls))*
             )
@@ -510,6 +551,155 @@ pub(crate) fn state_access() -> TokenStream {
     })
 }
 
+/// The resources of the Orb's root natively, in the component's `__tembra_resource`: the table of
+/// one Orb's resources, `Resources`, which `orb(..)` builds and the Orb's create fills, declaring
+/// each with `Declaration::resource` before the `#[root]` runs; the scope each method's future runs
+/// in, set around each of its polls with the table of its Orb; and `with` on each resource type, in
+/// place of the component's, which reaches the resource of the Orb whose method is running. The
+/// host opens each resource once the create returns, once for the Orb, and closes it when it
+/// removes the Orb; the value lives in a `Slot`, as in a component, filled by the `#[open]`
+/// function and emptied, through the `#[close]` one, if any, as the host closes it. Before the host
+/// opens it and once it has closed it, or outside a method of the Orb, `with` panics, as it traps a
+/// component.
+pub(crate) fn resource_access(resources: &[Resource], modules: &[Vec<Ident>]) -> TokenStream {
+    let fields: Vec<Ident> = resources
+        .iter()
+        .map(|resource| rust_ident(&wit::kebab(&resource.ident)))
+        .collect();
+    // The types as this module, one level below the Orb module, names them.
+    let paths: Vec<TokenStream> = resources
+        .iter()
+        .map(|resource| crate::relative(1, &modules[resource.scope], &resource.ident))
+        .collect();
+    let declarations =
+        resources
+            .iter()
+            .zip(&fields)
+            .zip(&paths)
+            .map(|((resource, field), path)| {
+                let name = wit::kebab(&resource.ident);
+                let version = resource.version;
+                let open = resource
+                    .open
+                    .as_ref()
+                    .expect("a resource has its #[open] function");
+                let close = match &resource.close {
+                    Some(close) => quote! {
+                        if let ::core::option::Option::Some(value) = slot.close() {
+                            value.#close();
+                        }
+                    },
+                    None => quote! { slot.close(); },
+                };
+                quote! {
+                    let resource = declaration.resource(
+                        #name,
+                        #version,
+                        || {
+                            let slot = Slot::new();
+                            slot.open(#path::#open());
+                            ::core::result::Result::Ok(slot)
+                        },
+                        |slot, _| {
+                            #close
+                            ::std::boxed::Box::pin(async { ::core::result::Result::Ok(()) })
+                        },
+                    )?;
+                    let _ = self.#field.set(resource);
+                }
+            });
+    let accessors = resources
+        .iter()
+        .zip(&fields)
+        .zip(&paths)
+        .map(|((resource, field), path)| {
+            let name = wit::kebab(&resource.ident);
+            let doc = format!(
+                " Use the resource `{name}` of this Orb's root, which the host opened with the root, in a method of the Orb: the closure gets the open value, which lives in the host."
+            );
+            let open = format!("the resource `{name}` of the Orb's root is open");
+            quote! {
+                impl #path {
+                    #[doc = #doc]
+                    pub fn with<R>(use_: impl ::core::ops::FnOnce(&mut Self) -> R) -> R {
+                        let slot = current()
+                            .#field
+                            .get()
+                            .and_then(|resource| resource.value().ok())
+                            .expect(#open);
+                        slot.with(use_)
+                    }
+                }
+            }
+        });
+    wrapped(quote! {
+        /// The resources of the root of one Orb `orb(..)` builds, which its create declares.
+        #[derive(Default)]
+        pub struct Resources {
+            #(#fields: ::core::cell::OnceCell<::tembra::Resource<Slot<#paths>>>,)*
+        }
+
+        impl Resources {
+            /// Declare each resource of the root, in the Orb's create: the host opens it with the
+            /// `#[open]` function once the create returns, and closes it when it removes the Orb.
+            pub(crate) fn declare(
+                &self,
+                declaration: &::tembra::Declaration,
+            ) -> ::tembra::Result<()> {
+                #(#declarations)*
+                ::core::result::Result::Ok(())
+            }
+        }
+
+        ::std::thread_local! {
+            static RESOURCES: ::core::cell::RefCell<
+                ::core::option::Option<::std::rc::Rc<Resources>>
+            > = const { ::core::cell::RefCell::new(::core::option::Option::None) };
+        }
+
+        /// Run a method's future for its Orb: while it is polled, `with` reaches the resources of
+        /// that Orb, and an outer poll's come back after.
+        pub(crate) fn scoped<F: ::core::future::Future>(
+            resources: ::std::rc::Rc<Resources>,
+            future: F,
+        ) -> impl ::core::future::Future<Output = F::Output> {
+            let mut future = ::std::boxed::Box::pin(future);
+            ::core::future::poll_fn(move |cx| {
+                let _entered = Entered::enter(resources.clone());
+                ::core::future::Future::poll(future.as_mut(), cx)
+            })
+        }
+
+        /// The resources set for one poll, which puts the previous ones back when dropped, also
+        /// when the poll panics.
+        struct Entered(::core::option::Option<::std::rc::Rc<Resources>>);
+
+        impl Entered {
+            fn enter(resources: ::std::rc::Rc<Resources>) -> Self {
+                Self(RESOURCES.with(|current| {
+                    current.replace(::core::option::Option::Some(resources))
+                }))
+            }
+        }
+
+        impl ::core::ops::Drop for Entered {
+            fn drop(&mut self) {
+                let previous = self.0.take();
+                RESOURCES.with(|current| current.replace(previous));
+            }
+        }
+
+        /// The resources of the Orb whose method is running, which only a method of the Orb has.
+        fn current() -> ::std::rc::Rc<Resources> {
+            RESOURCES
+                .with(|current| current.borrow().clone())
+                .expect("a resource of the Orb's root is used inside a method of the Orb")
+        }
+
+        #(#accessors)*
+    })
+}
+
 /// The trait of `boundary_trait`, as the module `scope` names it.
 fn boundary(scope: usize, analysis: &Analysis) -> TokenStream {
     let root = crate::supers(analysis.modules[scope].len());
@@ -529,15 +719,6 @@ fn refused(span: Span, message: &str) -> Refused {
 /// Whether the native side covers the module's features; the first it does not is refused. Each
 /// has its item of the plan, which lifts the refusal.
 fn covered(analysis: &Analysis) -> Result<(), Refused> {
-    if let Some(resource) = analysis.resources.first() {
-        return Err(refused(
-            resource.ident.span(),
-            &format!(
-                "`{}` is marked #[resource]; root resources are not supported natively yet",
-                resource.ident
-            ),
-        ));
-    }
     if let Some((import, identity)) = analysis
         .options
         .imports
@@ -608,7 +789,8 @@ fn codec_ident(function: &Function) -> Ident {
 /// `&self` is called on. The guard of the attribute, if any, runs first in the factory. A service
 /// whose objects own a `#[state]` declares it next, before its create runs, and keeps it beside the
 /// environment, for the scope each method's future runs in, where the state's `read` and `update`
-/// reach it.
+/// reach it. With root resources, the service takes the table of its Orb's too, which each
+/// method's future runs with, where their `with` reaches them.
 fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused> {
     let depth = analysis.modules[service.scope].len();
     let root = crate::supers(depth);
@@ -705,7 +887,14 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
             object: environment.clone(),
             state: quote! { __tembra_object.1.clone() },
         }),
+        resources: (!analysis.resources.is_empty())
+            .then(|| quote! { self::#root __tembra_resource::scoped }),
     };
+    // With root resources, the service takes the table of its Orb's, which each method's scope
+    // sets.
+    let table = scopes.resources.is_some().then(|| {
+        quote! { , resources: &::std::rc::Rc<self::#root __tembra_resource::Resources> }
+    });
     let mut codecs = Vec::new();
     let mut methods = Vec::new();
     for method in &service.functions {
@@ -731,19 +920,21 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
         #(#methods)*
     };
     // The functions of each WIT resource of the service's interface, registered from the
-    // resource's module, which reach the object's state through the function given them.
+    // resource's module, which reach the object's state through the function given them, and the
+    // Orb's resources through its table.
     let state_of = state.map(|_| quote! { , |object: &#environment| object.1.clone() });
+    let resources = scopes.resources.is_some().then(|| quote! { , resources });
     let built = owned_resources(service, analysis).fold(built, |built, resource| {
         let glue = crate::relative(
             depth,
             &analysis.modules[resource.scope],
             &glue_ident(resource),
         );
-        quote! { #glue(#built #state_of) }
+        quote! { #glue(#built #state_of #resources) }
     });
     Ok(quote! {
         #[doc = #doc]
-        pub(crate) fn #function(orb: &str #parameter) -> ::tembra::Service<#environment> {
+        pub(crate) fn #function(orb: &str #parameter #table) -> ::tembra::Service<#environment> {
             #(#codecs)*
 
             #shared
@@ -971,9 +1162,10 @@ fn glue_ident(resource: &WitResource) -> Ident {
 /// call as the value issued, through the `Receiver` the call pins; and each static function,
 /// `[static]<resource>.<name>`. A method borrows the value only while it runs, so an `async` one,
 /// whose future would hold the borrow across its awaits, is refused. Each runs on an object of the
-/// service, in the scopes its methods run in: that of its call, with the `context` option, and
-/// that of its object, when the service's objects own a state, which the function adding them is
-/// given the way to reach, as the object's environment is the service's.
+/// service, in the scopes its methods run in: that of its call, with the `context` option, that of
+/// its object, when the service's objects own a state, which the function adding them is given the
+/// way to reach, as the object's environment is the service's, and that of its Orb, with root
+/// resources, whose table that function is given too.
 fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStream, Refused> {
     let ident = &resource.ident;
     let name = wit::kebab(ident);
@@ -999,6 +1191,8 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
             object: quote! { E },
             state: quote! { __tembra_state_of(&__tembra_object) },
         }),
+        resources: (!analysis.resources.is_empty())
+            .then(|| quote! { self::#root __tembra_resource::scoped }),
     };
     let (environment, _) = scopes.environment(&service.ident, false);
     let mut functions = Vec::new();
@@ -1080,6 +1274,10 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
             , __tembra_state_of: fn(&E) -> ::tembra::State<::tembra::serde_json::Value>
         }
     });
+    // With root resources, the table of the Orb's, which each function's scope sets.
+    let resources = scopes.resources.is_some().then(|| {
+        quote! { , resources: &::std::rc::Rc<self::#root __tembra_resource::Resources> }
+    });
     Ok(quote! {
         impl ::tembra::portable::Issuable for #ident {
             fn nominal() -> ::tembra::portable::Nominal {
@@ -1094,6 +1292,7 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
         pub(crate) fn #glue<E: 'static>(
             service: ::tembra::Service<E>
             #state_of
+            #resources
         ) -> ::tembra::Service<E> {
             service #(#functions)*
         }
@@ -1144,6 +1343,10 @@ struct Scopes {
     /// The object's, whose state the native `read` and `update` reach, for a service whose objects
     /// own one.
     state: Option<ObjectState>,
+    /// The Orb's, whose root resources the native `with` reaches, for an Orb with some: the path of
+    /// `__tembra_resource::scoped`, which takes the table of the Orb's resources, `resources`, which
+    /// the function registering the handle takes.
+    resources: Option<TokenStream>,
 }
 
 /// How a handle reaches the state of its object: the path of `__tembra_state::scoped`, the type of
@@ -1179,13 +1382,17 @@ impl Scopes {
         }
     }
 
-    /// `future`, a handle's future over its `__tembra_context` and `__tembra_object`, run in each
-    /// scope.
+    /// `future`, a handle's future over its `__tembra_context`, `__tembra_object` and
+    /// `__tembra_resources`, run in each scope.
     fn around(&self, future: TokenStream) -> TokenStream {
         let future = match &self.state {
             Some(ObjectState { scoped, state, .. }) => {
                 quote! { #scoped(__tembra_context.clone(), #state, #future) }
             }
+            None => future,
+        };
+        let future = match &self.resources {
+            Some(scoped) => quote! { #scoped(::std::rc::Rc::clone(&__tembra_resources), #future) },
             None => future,
         };
         match &self.context {
@@ -1195,11 +1402,18 @@ impl Scopes {
     }
 
     /// `handle`, a closure, as one that owns what its scopes read: a handle that reaches its
-    /// object's state moves what it reads it with.
+    /// object's state moves what it reads it with, and one that reaches the Orb's resources keeps
+    /// the table of them.
     fn handle(&self, handle: TokenStream) -> TokenStream {
-        match &self.state {
-            Some(_) => quote! { move #handle },
-            None => handle,
+        match (&self.resources, &self.state) {
+            (Some(_), _) => quote! {
+                {
+                    let __tembra_resources = ::std::rc::Rc::clone(resources);
+                    move #handle
+                }
+            },
+            (None, Some(_)) => quote! { move #handle },
+            (None, None) => handle,
         }
     }
 }
@@ -1210,7 +1424,8 @@ impl Scopes {
 /// object's environment when it borrows `&self`, passing the context itself where the function
 /// takes `&Context`, and answering with its value, or with the `tembra::Result` it returns, whose
 /// failure is the call's error; its future runs in the `scopes` of the service: the scope of its
-/// call for the native `context`, and that of its object, for the object's state.
+/// call for the native `context`, that of its object, for the object's state, and that of its Orb,
+/// for the root's resources.
 fn method(
     service: &Service,
     function: &Function,

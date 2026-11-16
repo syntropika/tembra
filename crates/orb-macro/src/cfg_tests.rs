@@ -701,7 +701,7 @@ fn nothing_to_export_names_the_configuration() {
                     Ok(())
                 }
             }"#,
-            "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root]; the module's #[cfg]s leave none under #[cfg(all (not (feature = \"worker\")))], the configuration of this build",
+            "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root] or a #[resource]; the module's #[cfg]s leave none under #[cfg(all (not (feature = \"worker\")))], the configuration of this build",
         ),
     ] {
         let Ok([(_, without), (_, with)]) = <[(String, ItemMod); 2]>::try_from(copies(module))
