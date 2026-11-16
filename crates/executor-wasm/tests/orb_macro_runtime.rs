@@ -231,7 +231,9 @@ fn execute(engine: Engine) {
 
 /// The kernel refuses an installation of either guest that does not grant both WASI imports,
 /// naming the missing one, and a refused Orb runs nothing: the engine keeps the instances of the
-/// guests loaded before, and no other.
+/// guests loaded before, and no other. Nor does it compile anything: a refused load finds the
+/// component the loaded guest keeps in the engine's cache, where a new compilation would have
+/// replaced it with a copy that the refusal releases.
 fn refuse_ungranted(engine: &Engine, guests: &[Guest; 2]) {
     let running = engine.instances();
     for guest in guests {
@@ -256,6 +258,11 @@ fn refuse_ungranted(engine: &Engine, guests: &[Guest; 2]) {
         }
     }
     assert_eq!(engine.instances(), running, "a refused Orb runs nothing");
+    assert_eq!(
+        engine.components(),
+        guests.len(),
+        "a refused Orb compiles nothing"
+    );
 }
 
 /// Drive the greeting of the Orb `name`: a string crosses both ways through the runtime the guest
