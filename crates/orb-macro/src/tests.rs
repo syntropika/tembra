@@ -4295,6 +4295,137 @@ fn the_default_the_macro_writes_refuses_a_derive_of_default_under_cfg_attr() {
     expanded("example:ledger@1.0.0", &module(""));
 }
 
+/// The macro derives `serde`'s `Serialize` and `Deserialize` for a state kept out of the WIT, those
+/// the author does not derive, before the compiler evaluates `#[cfg_attr(..)]`: a derive of either
+/// under one, directly or through another `#[cfg_attr(..)]`, through any path the macro follows to
+/// `serde`, or a `Serialize` or `Deserialize` it cannot follow to a crate, brought by a glob import
+/// or from above the Orb module, which it takes for `serde`'s as on a type entering the WIT, would
+/// give the state a second implementation where the attribute applies, so it is refused, whoever
+/// gives the state its `Default`. Another crate's derive of either name, `rkyv::Serialize`, and a
+/// `#[cfg_attr(..)]` deriving another trait expand, and so does the same state without the
+/// attribute.
+#[test]
+fn a_serde_derive_under_cfg_attr_on_a_state_out_of_the_wit_is_refused() {
+    let module = |uses: &str, attributes: &str| {
+        format!(
+            "mod ledger {{
+                {uses}
+                #[state]
+                {attributes}
+                pub struct Balance {{ pub total: i64 }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
+            }}"
+        )
+    };
+    let named = "use serde::Serialize;";
+    for (uses, attributes, name) in [
+        (
+            named,
+            "#[cfg_attr(feature = \"audit\", derive(serde::Serialize))]",
+            "Serialize",
+        ),
+        (
+            named,
+            "#[cfg_attr(test, derive(Debug, serde::Deserialize))]",
+            "Deserialize",
+        ),
+        (
+            named,
+            "#[cfg_attr(test, cfg_attr(feature = \"audit\", derive(::serde::Serialize)))]",
+            "Serialize",
+        ),
+        (
+            named,
+            "#[cfg_attr(feature = \"audit\", derive(Serialize))]",
+            "Serialize",
+        ),
+        (
+            named,
+            "#[cfg_attr(feature = \"audit\", derive(serde_derive::Deserialize))]",
+            "Deserialize",
+        ),
+        (
+            named,
+            "#[cfg_attr(feature = \"audit\", derive(crate::prelude::Serialize))]",
+            "Serialize",
+        ),
+        (
+            named,
+            "#[derive(Default)] #[cfg_attr(feature = \"audit\", derive(serde::Serialize))]",
+            "Serialize",
+        ),
+        (
+            named,
+            "#[derive(serde::Serialize)] #[cfg_attr(feature = \"audit\", derive(serde::Deserialize))]",
+            "Deserialize",
+        ),
+        (
+            "use serde::*;",
+            "#[cfg_attr(feature = \"audit\", derive(Serialize))]",
+            "Serialize",
+        ),
+        (
+            "",
+            "#[cfg_attr(feature = \"audit\", derive(super::Deserialize))]",
+            "Deserialize",
+        ),
+    ] {
+        let error = refused("example:ledger@1.0.0", &module(uses, attributes));
+        assert!(
+            error.contains(&format!("`#[cfg_attr(..)]` deriving `{name}` on the state `Balance`: the macro derives `serde`'s `{name}` for the state `Balance` before the compiler evaluates the attribute, so `Balance` would implement `{name}` twice where the attribute applies; derive `{name}` without `#[cfg_attr(..)]`, or remove the derive, which the macro writes in every configuration")),
+            "{uses} {attributes}: {error}"
+        );
+    }
+    for attributes in [
+        "#[cfg_attr(feature = \"audit\", derive(rkyv::Serialize))]",
+        "#[cfg_attr(feature = \"audit\", derive(Debug))]",
+        "",
+    ] {
+        expanded("example:ledger@1.0.0", &module(named, attributes));
+    }
+}
+
+/// The macro derives `serde`'s traits as well for every type of the module that a state kept out
+/// of the WIT reaches through its fields, directly or through other types, and that stays out too:
+/// a derive of either under `#[cfg_attr(..)]` on such a struct or enum is refused as on the state.
+/// The same derive on a type no state reaches, which the macro gives no `serde`, expands, and so
+/// do the same types without the attribute.
+#[test]
+fn a_serde_derive_under_cfg_attr_on_a_type_a_state_reaches_is_refused() {
+    let module = |note: &str, mood: &str, other: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                pub struct Balance {{ pub total: i64, pub notes: Vec<Note> }}
+                {note}
+                pub struct Note {{ pub text: String, pub mood: Mood }}
+                {mood}
+                pub enum Mood {{ Calm, Loud }}
+                {other}
+                pub struct Other {{ pub n: u32 }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
+            }}"
+        )
+    };
+    let attribute = "#[cfg_attr(feature = \"note\", derive(serde::Serialize))]";
+    for (source, owner) in [
+        (module(attribute, "", ""), "Note"),
+        (module("", attribute, ""), "Mood"),
+    ] {
+        let error = refused("example:ledger@1.0.0", &source);
+        assert!(
+            error.contains(&format!("`#[cfg_attr(..)]` deriving `Serialize` on `{owner}`: the macro derives `serde`'s `Serialize` for `{owner}`, which a state's fields reach, before the compiler evaluates the attribute, so `{owner}` would implement `Serialize` twice where the attribute applies; derive `Serialize` without `#[cfg_attr(..)]`, or remove the derive, which the macro writes in every configuration")),
+            "{owner}: {error}"
+        );
+    }
+    expanded("example:ledger@1.0.0", &module("", "", attribute));
+    expanded("example:ledger@1.0.0", &module("", "", ""));
+}
+
 const GATE: &str = "mod gate {
     /// Each contributor may change the admission or block it.
     #[hook(composition = waterfall, input = Admission)]

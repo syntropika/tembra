@@ -1798,7 +1798,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let serialized = serialized(&unreached, &shapes, &states);
     for (index, candidate) in unreached.into_iter().enumerate() {
         let Candidate {
-            mut item, scope, ..
+            mut item,
+            ident,
+            scope,
+            ..
         } = candidate;
         let attrs = match &mut item {
             Item::Struct(item) => Some(&mut item.attrs),
@@ -1808,16 +1811,41 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         if let Some(attrs) = attrs
             && serialized.contains(&index)
         {
-            let missing: Vec<proc_macro2::TokenStream> = [
+            let missing: Vec<(&str, proc_macro2::TokenStream)> = [
                 ("Serialize", quote! { ::serde::Serialize }),
                 ("Deserialize", quote! { ::serde::Deserialize }),
             ]
             .into_iter()
             .filter(|(name, _)| !derives(attrs, name))
-            .map(|(_, path)| path)
             .collect();
+            // The macro reads the type's derives before the compiler evaluates `#[cfg_attr(..)]`:
+            // one of those it writes, derived under such an attribute as well, would be a second
+            // where the attribute applies.
+            let twice = attrs.iter().find_map(|attribute| {
+                let name = conditional_serde(&attribute.meta, scope, &uses, &modules, &ident)
+                    .into_iter()
+                    .find(|name| missing.iter().any(|(missing, _)| name == missing))?;
+                Some((attribute, name))
+            });
+            if let Some((attribute, name)) = twice {
+                let state = states
+                    .iter()
+                    .any(|state| state.ident == ident && state.scope == scope);
+                let (owner, reached) = if state {
+                    (format!("the state `{ident}`"), "")
+                } else {
+                    (format!("`{ident}`"), ", which a state's fields reach,")
+                };
+                return Err(syn::Error::new(
+                    attribute.span(),
+                    format!(
+                        "`#[cfg_attr(..)]` deriving `{name}` on {owner}: the macro derives `serde`'s `{name}` for {owner}{reached} before the compiler evaluates the attribute, so `{ident}` would implement `{name}` twice where the attribute applies; derive `{name}` without `#[cfg_attr(..)]`, or remove the derive, which the macro writes in every configuration"
+                    ),
+                ));
+            }
             if !missing.is_empty() {
-                attrs.push(syn::parse_quote!(#[derive(#(#missing),*)]));
+                let paths = missing.iter().map(|(_, path)| path);
+                attrs.push(syn::parse_quote!(#[derive(#(#paths),*)]));
             }
         }
         tree.at(&modules[scope]).items.push(item);
@@ -3695,6 +3723,43 @@ fn applied(meta: &syn::Meta) -> Vec<Attribute> {
             } else {
                 vec![syn::parse_quote!(#[#meta])]
             }
+        })
+        .collect()
+}
+
+/// The traits of `serde`, by name, that a `#[cfg_attr(..)]` derives where its configuration holds,
+/// directly or through another `#[cfg_attr(..)]`, on `owner` in the module `scope`: through a path
+/// the macro follows to `serde`, or through a `Serialize` or `Deserialize` it cannot follow to a
+/// crate, from a crate's glob import or from above the Orb module, which `carried_derive` takes
+/// for `serde`'s too. Another crate's derive of either name implements another trait.
+fn conditional_serde(
+    meta: &syn::Meta,
+    scope: usize,
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+    owner: &Ident,
+) -> Vec<String> {
+    applied(meta)
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("derive"))
+        .filter_map(|derive| {
+            derive
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Path, Token![,]>::parse_terminated,
+                )
+                .ok()
+        })
+        .flatten()
+        .filter_map(|path| {
+            let name = match followed(&path, scope, uses, modules, owner).ok()? {
+                Followed::Path(named) => match Derive::of(named) {
+                    Derive::Serde(named) => named.segments.last()?.to_string(),
+                    Derive::Standard(..) | Derive::Other(_) => return None,
+                },
+                Followed::Name { ident, globs: true } | Followed::Above(ident) => ident.to_string(),
+                Followed::Name { globs: false, .. } => return None,
+            };
+            serde_name(&name).then_some(name)
         })
         .collect()
 }

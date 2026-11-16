@@ -1076,9 +1076,15 @@ the version whose rules the macro follows, and the generated code reaches it the
 - A state is serialized by `serde`: the kernel sees the Rust field names and enum cases, not the
   camelCase spelling the executor gives WIT values on the portable boundary, a consumed type's
   included. The macro derives `Serialize` and `Deserialize` on a state that stays out of the WIT,
-  unless the author already does. JSON holds no NaN or infinite float, so a state holding one
-  cannot be stored, and the JavaScript hosts (Node, mobile, browser) parse JSON numbers as doubles,
-  so an integer beyond ±2^53 in a state loses precision there.
+  and on every type of the module its fields reach that stays out too, unless the author already
+  does, before the compiler evaluates `#[cfg_attr(..)]`: a derive of either under that attribute
+  is a compile error on it, since the type would implement the trait twice where it applies, so
+  derive it without the attribute, or leave it to the macro. Such a derive is `serde`'s when the
+  macro follows it to `serde`, and when it cannot follow it to a crate, through a glob import or
+  `super::`, as on a type that enters the WIT; another crate's, `rkyv::Serialize`, is that
+  crate's own. JSON holds no NaN or infinite float, so a state holding one cannot be stored, and
+  the JavaScript hosts (Node, mobile, browser) parse JSON numbers as doubles, so an integer beyond
+  ±2^53 in a state loses precision there.
 - Types: records, enums, variants, flags and the scalar, string, list, option, result and tuple
   types; 64-bit integers cross the boundary exactly. A flags is a `#[flags]` struct of one to 32
   `bool` fields; its functions `empty`, `bits` and `from_bits_retain` and its `BitOr` are the
