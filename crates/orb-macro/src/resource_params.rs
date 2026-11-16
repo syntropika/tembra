@@ -6,8 +6,8 @@
 //! that defines it; it refuses at installation an Orb whose function takes a borrowed one,
 //! `borrow<t>`, so a `&T` parameter stays refused, as every reference in a signature is.
 use crate::{
-    Constructor, Declared, Function, Handles, Service, Shape, WitResource, foreign::Modules,
-    handles_of, rebuild, wit, with_handles,
+    Candidate, Constructor, Declared, Function, Handles, Service, Shape, WitResource,
+    foreign::Modules, handles_of, rebuild, wit, with_handles,
 };
 use quote::quote;
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,23 +73,55 @@ pub(crate) fn derived<'a>(
     functions
 }
 
+/// The resource a name written in the module `scope` resolves to: that module's own resource of
+/// the name, none when that module declares another type of the name, as `declares` says, else a
+/// resource of the name in another module.
+pub(crate) fn resource_named<'a>(
+    ident: &Ident,
+    scope: usize,
+    resources: &'a [WitResource],
+    declares: bool,
+) -> Option<&'a WitResource> {
+    let named = || {
+        resources
+            .iter()
+            .filter(move |resource| resource.ident == *ident)
+    };
+    match named().find(|resource| resource.scope == scope) {
+        Some(own) => Some(own),
+        None if declares => None,
+        None => named().next(),
+    }
+}
+
 /// Refuse a resource of the module where the runtime cannot carry it, before the WIT is derived: a
 /// parameter of a derived function takes a resource of its own interface, owned, because the
 /// runtime moves an owned resource only into the interface that defines it, and the input of a
 /// derived hook holds no resource. A resource of an implemented interface is that interface's: a
-/// derived function takes none. What a consumed interface's module names, `foreign` checks.
+/// derived function takes none. What a consumed interface's module names, `foreign` checks. A name
+/// resolves as `reachable` resolves it: to a type of the module that writes it first, a resource
+/// or one of the `candidates`.
 pub(crate) fn check(
     services: &[Service],
     resources: &[WitResource],
     declared: &[Declared],
+    candidates: &[Candidate],
     modules: &Modules,
 ) -> syn::Result<()> {
-    let resource_named = |ident: &Ident| resources.iter().find(|resource| resource.ident == *ident);
+    let named = |ident: &Ident, scope: usize| {
+        let declares = candidates
+            .iter()
+            .any(|candidate| candidate.ident == *ident && candidate.scope == scope);
+        resource_named(ident, scope, resources, declares)
+    };
     for function in derived(services, resources) {
         for (_, ty, _) in function.params {
             let mut mentioned = Vec::new();
             modules.references(ty, function.scope, &mut mentioned);
-            for resource in mentioned.iter().filter_map(resource_named) {
+            for resource in mentioned
+                .iter()
+                .filter_map(|ident| named(ident, function.scope))
+            {
                 if let Some(owner) = foreign_owner(services, resource, function.interface) {
                     return Err(taking_error(&function, ty, resource, None, owner));
                 }
@@ -102,7 +134,10 @@ pub(crate) fn check(
         };
         let mut mentioned = Vec::new();
         modules.references(ty, declaration.scope, &mut mentioned);
-        if let Some(resource) = mentioned.iter().find_map(resource_named) {
+        if let Some(resource) = mentioned
+            .iter()
+            .find_map(|ident| named(ident, declaration.scope))
+        {
             return Err(syn::Error::new(
                 ty.span(),
                 format!(
@@ -239,7 +274,8 @@ fn taking_error(
 /// Each resource of the module a type written in the module `scope` holds, with the record or
 /// variant of the module that holds it, if one does: the resource itself or inside options,
 /// results, lists and tuples, or in the fields and cases of the records and variants the type
-/// reaches, followed by name as the WIT names them.
+/// reaches, followed by name as the WIT names them, each name resolved in the module that writes
+/// it first.
 fn held<'a>(
     ty: &Type,
     scope: usize,
@@ -249,23 +285,29 @@ fn held<'a>(
 ) -> Vec<(&'a WitResource, Option<&'a Ident>)> {
     let mut mentioned = Vec::new();
     modules.references(ty, scope, &mut mentioned);
-    let mut pending: Vec<(Ident, Option<&'a Ident>)> =
-        mentioned.into_iter().map(|ident| (ident, None)).collect();
+    let mut pending: Vec<(Ident, usize, Option<&'a Ident>)> = mentioned
+        .into_iter()
+        .map(|ident| (ident, scope, None))
+        .collect();
     let mut seen = BTreeSet::new();
     let mut held = Vec::new();
-    while let Some((ident, via)) = pending.pop() {
-        if !seen.insert(ident.to_string()) {
-            continue;
-        }
-        if let Some(resource) = resources.iter().find(|resource| resource.ident == ident) {
-            held.push((resource, via));
-        } else if let Some(shape) = shapes.iter().find(|shape| shape.ident == ident) {
+    while let Some((ident, scope, via)) = pending.pop() {
+        let own = shapes
+            .iter()
+            .find(|shape| shape.ident == ident && shape.scope == scope);
+        if let Some(resource) = resource_named(&ident, scope, resources, own.is_some()) {
+            if seen.insert((ident.to_string(), resource.scope)) {
+                held.push((resource, via));
+            }
+        } else if let Some(shape) = own.or_else(|| shapes.iter().find(|shape| shape.ident == ident))
+            && seen.insert((ident.to_string(), shape.scope))
+        {
             let via = via.or(Some(&shape.ident));
             pending.extend(
                 shape
                     .references
                     .iter()
-                    .map(|reference| (reference.clone(), via)),
+                    .map(|reference| (reference.clone(), shape.scope, via)),
             );
         }
     }

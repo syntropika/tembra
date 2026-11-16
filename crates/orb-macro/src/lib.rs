@@ -1415,7 +1415,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // A derived function takes a resource of its own interface, owned, and a derived hook's input
     // holds no resource. An implemented interface's functions take what its WIT says, in the
     // consumed package's types.
-    resource_params::check(&services, &wit_resources, &declared, &consumed_modules)?;
+    resource_params::check(
+        &services,
+        &wit_resources,
+        &declared,
+        &candidates,
+        &consumed_modules,
+    )?;
     // Consumed packages: the callback of every hook, contributed or declared, and every interface
     // implemented or imported are read from their WIT packages.
     let wit_dir = options.wit.as_deref().map(wit::absolute).transpose()?;
@@ -3014,9 +3020,10 @@ fn implemented_service(
 /// resource's function or a derived hook's input reaches; the others, with their shapes, go back
 /// to their modules as ordinary Rust. The resources of an implemented interface reach nothing:
 /// their functions speak the consumed package's types, whatever the module's own are called. A
-/// name resolves to the type of the module naming it, else to the one type of that name in the
-/// Orb; a type the module does not declare is an error, and a resource is a type of its own. What
-/// a consumed interface's module names, a type or a handle, is no type of the module.
+/// name resolves to the type of the module naming it, a resource included, else to a resource of
+/// that name, else to the one type of that name in the Orb; a type the module does not declare is
+/// an error, and a resource is a type of its own. What a consumed interface's module names, a type
+/// or a handle, is no type of the module.
 fn reachable(
     candidates: Vec<Candidate>,
     services: &[Service],
@@ -3075,10 +3082,17 @@ fn reachable(
     }
     let mut kept = BTreeSet::new();
     while let Some((ident, scope)) = pending.pop() {
-        if resources.iter().any(|resource| resource.ident == ident) {
+        let indexes = declared.get(&ident.to_string());
+        let own = indexes.and_then(|indexes| {
+            indexes
+                .iter()
+                .copied()
+                .find(|&index| candidates[index].scope == scope)
+        });
+        if resource_params::resource_named(&ident, scope, resources, own.is_some()).is_some() {
             continue;
         }
-        let Some(indexes) = declared.get(&ident.to_string()) else {
+        let Some(indexes) = indexes else {
             return Err(syn::Error::new(
                 ident.span(),
                 format!(
@@ -3086,11 +3100,8 @@ fn reachable(
                 ),
             ));
         };
-        let index = match indexes
-            .iter()
-            .find(|&&index| candidates[index].scope == scope)
-        {
-            Some(&index) => index,
+        let index = match own {
+            Some(index) => index,
             None if indexes.len() == 1 => indexes[0],
             None => {
                 return Err(syn::Error::new(

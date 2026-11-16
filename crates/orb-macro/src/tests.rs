@@ -3583,6 +3583,50 @@ fn sub_modules_are_refused_when_ill_formed() {
     );
 }
 
+/// A name resolves in the module that writes it first: a record named like a resource of another
+/// module is the record where its own module names it, in a parameter, a result or a hook's
+/// input, so the two are refused for sharing a name that enters the WIT, not read as the resource.
+#[test]
+fn a_name_resolves_in_the_module_that_writes_it_first() {
+    let desk = |record: &str, tickets: &str| {
+        format!(
+            "mod desk {{
+                pub mod tickets {{
+                    pub struct {record} {{ pub id: u32 }}
+                    #[service]
+                    pub struct Tickets;
+                    {tickets}
+                }}
+                pub mod sessions {{
+                    #[wit_resource]
+                    pub struct Token;
+                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                    #[service]
+                    pub struct Sessions;
+                    impl Sessions {{ pub fn open() -> Token {{ Token }} }}
+                }}
+            }}"
+        )
+    };
+    for tickets in [
+        "impl Tickets { pub fn check(token: Token) -> u32 { token.id } }",
+        "impl Tickets { pub fn issue() -> Token { Token { id: 1 } } }",
+        "#[hook(composition = series, input = Token)]
+        pub struct Guard;
+        impl Tickets { pub fn count() -> u32 { 0 } }",
+    ] {
+        let error = refused("example:desk@1.0.0", &desk("Token", tickets));
+        assert!(
+            error.contains("`Token` is declared in `tickets` and in `sessions`; a name that enters the WIT is one across the Orb module"),
+            "{tickets}: {error}"
+        );
+        expanded(
+            "example:desk@1.0.0",
+            &desk("Stamp", &tickets.replace("Token", "Stamp")),
+        );
+    }
+}
+
 /// Documentation over several lines, a block comment or a `#[doc]` string, is carried line by
 /// line into the WIT, each line after its own `///`, so no line of it becomes WIT; a character
 /// the WIT lexer refuses is an error on the attribute.
