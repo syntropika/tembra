@@ -1060,6 +1060,7 @@ impl Scan {
                         let names = format!("{self_ty}::{}", function.sig.ident);
                         unconditional_marked(&i.attrs, "`impl` block holding", &names, "calls it")?;
                         unconditional_marked(&function.attrs, "function", &names, "calls it")?;
+                        unconditional_params(&function.sig, "function", &names)?;
                         self.marked.push(Marked {
                             marker,
                             self_ty,
@@ -1131,6 +1132,7 @@ impl Scan {
                             &function.sig.ident,
                             "calls it",
                         )?;
+                        unconditional_params(&function.sig, "contribution", &function.sig.ident)?;
                         let mut contribution = contribution(&function, &attribute)?;
                         contribution.scope = scope;
                         self.contributions.push(contribution);
@@ -1362,6 +1364,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 let names = format!("{}::{}", service.ident, function.sig.ident);
                 unconditional_marked(&item.attrs, "`impl` block holding", &names, "calls it")?;
                 unconditional_marked(&function.attrs, "function", &names, "calls it")?;
+                unconditional_params(&function.sig, "function", &names)?;
                 let read = method(function)?;
                 // An implemented interface's names are fixed by its WIT, checked with it below.
                 if service.implements.is_none()
@@ -1444,6 +1447,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             let names = format!("{}::{}", resource.ident, function.sig.ident);
             unconditional_marked(&block.attrs, "`impl` block holding", &names, "calls it")?;
             unconditional_marked(&function.attrs, "function", &names, "calls it")?;
+            unconditional_params(&function.sig, "function", &names)?;
             if constructor.is_some_and(|marked| marked.function.sig.ident == function.sig.ident) {
                 continue;
             }
@@ -1905,6 +1909,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     }
     // A flags struct that enters the WIT stays the author's, with what the bindings call on it.
     flags::check_hooks(&shapes, &declared, &consumed_modules)?;
+    flags::check_modules(&shapes, &mut tree, &modules)?;
     let mut implemented_elsewhere = flags::emit(
         &shapes,
         &mut tree,
@@ -3854,6 +3859,42 @@ fn unconditional_marked(
             "{written} on the {what} `{names}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{names}` in every configuration; remove the attribute"
         ),
     ))
+}
+
+/// Refuse a `#[cfg(..)]`, written plainly or under `#[cfg_attr(..)]`, on a parameter, `self`
+/// included, of the function `names` the macro calls, which is `what`, for the error: the macro
+/// reads the parameters before the compiler evaluates the attribute, and the code calling the
+/// function passes each of them in every configuration, also where the attribute is off and the
+/// compiler drops the parameter.
+fn unconditional_params(
+    signature: &syn::Signature,
+    what: &str,
+    names: impl std::fmt::Display,
+) -> syn::Result<()> {
+    for input in &signature.inputs {
+        let (attrs, param) = match input {
+            FnArg::Receiver(receiver) => (&receiver.attrs, "self".to_owned()),
+            FnArg::Typed(typed) => {
+                let pat = &typed.pat;
+                (&typed.attrs, quote!(#pat).to_string())
+            }
+        };
+        let Some(attribute) = attrs.iter().find(|attribute| conditional(&attribute.meta)) else {
+            continue;
+        };
+        let written = if attribute.path().is_ident("cfg") {
+            "`#[cfg(..)]`"
+        } else {
+            "`#[cfg_attr(..)]` wrapping `#[cfg(..)]`"
+        };
+        return Err(syn::Error::new(
+            attribute.span(),
+            format!(
+                "{written} on the parameter `{param}` of the {what} `{names}`: the macro writes the code that calls it before the compiler evaluates the attribute, so that code would pass `{param}` in every configuration; remove the attribute"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether an attribute drops what it sits on where a configuration is off: a `#[cfg(..)]`, or a

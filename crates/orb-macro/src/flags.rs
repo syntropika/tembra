@@ -180,6 +180,33 @@ pub(crate) fn check_hooks(
     }
 }
 
+/// Refuse a `#[cfg(..)]`, written plainly, under `#[cfg_attr(..)]` or inside the module, on a
+/// sub-module holding a flags struct that enters the WIT, in itself or below it: `with` names the
+/// struct through every module of its path (`remapped`), in every configuration, also where the
+/// attribute is off and the compiler drops the module, and the struct with it. The module nearest
+/// the struct is checked first, as the scan checks one holding a struct the macro marks.
+pub(crate) fn check_modules(
+    shapes: &[Shape],
+    tree: &mut Module,
+    modules: &[Vec<Ident>],
+) -> syn::Result<()> {
+    for shape in shapes
+        .iter()
+        .filter(|shape| matches!(shape.kind, ShapeKind::Flags(_)))
+    {
+        let path = &modules[shape.scope];
+        for depth in (1..=path.len()).rev() {
+            crate::unconditional_marked(
+                &tree.at(&path[..depth]).attrs,
+                &format!("module `{}` holding the flags", path[depth - 1]),
+                &shape.ident,
+                "maps the WIT flags onto it",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// The entries of `wit-bindgen`'s `with` option mapping each flags type onto the author's struct:
 /// the type's full WIT name, `ns:name/interface@version/type`, and the struct's path from the
 /// export modules, four modules below the Orb module.

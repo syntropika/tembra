@@ -3188,6 +3188,245 @@ fn a_sub_module_under_cfg_holding_a_marked_item_is_refused() {
     }
 }
 
+/// The code the macro writes calling a function it reads passes each parameter it read, before
+/// the compiler evaluates `#[cfg(..)]`: where the attribute is off, the compiler drops the
+/// parameter and the call passes one too many. So a `#[cfg(..)]` on a parameter, `self` included,
+/// of a service's `pub fn`, derived or implemented, of a WIT resource's function or constructor,
+/// of a function marked `#[validate]`, `#[open]` or `#[close]`, or of a contribution, is refused,
+/// written plainly or under `#[cfg_attr(..)]`, and the same module without it expands. A function
+/// the macro does not read keeps its parameter's `#[cfg(..)]`, and so does a
+/// `#[cfg(test)] mod tests` holding only tests and impls.
+#[test]
+fn a_parameter_under_cfg_is_refused() {
+    let office = |items: &str| {
+        format!(
+            "mod office {{
+                {items}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+            }}"
+        )
+    };
+    let badge = |functions: &str| {
+        office(&format!(
+            "#[wit_resource] pub struct Badge {{ holder: String }}
+            impl Badge {{ {functions} }}"
+        ))
+    };
+    let keeper = consumed("cfg-param-keeper", LEDGER_WIT);
+    let blocker = consumed("cfg-param-blocker", ADMISSION_WIT);
+    let constructor = "#[constructor] pub fn new(holder: String) -> Self { Badge { holder } }";
+    for (package, dir, module, what, name, param) in [
+        (
+            "example:office@1.0.0",
+            None,
+            office("impl Permits { pub fn audit(level: u32, {cfg} extra: u32) -> u32 { level } }"),
+            "function",
+            "Permits::audit",
+            "extra",
+        ),
+        (
+            "example:keeper@1.0.0",
+            Some(&keeper),
+            KEEPER.replace("add(entry", "add({cfg} entry"),
+            "function",
+            "Keeper::add",
+            "entry",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            badge("#[constructor] pub fn new({cfg} holder: String) -> Self { Badge { holder } }"),
+            "function",
+            "Badge::new",
+            "holder",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            badge(&format!(
+                "{constructor} pub fn holder({{cfg}} &self) -> String {{ self.holder.clone() }}"
+            )),
+            "function",
+            "Badge::holder",
+            "self",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            badge(&format!(
+                "{constructor} pub fn signed(&self, {{cfg}} by: String) -> String {{ by }}"
+            )),
+            "function",
+            "Badge::signed",
+            "by",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[state] pub struct Tally { pub count: u32 }
+                impl Tally {
+                    #[validate]
+                    pub fn check({cfg} &self) -> Result<(), String> { Ok(()) }
+                }",
+            ),
+            "function",
+            "Tally::check",
+            "self",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[resource] pub struct Pool { pub size: u32 }
+                impl Pool {
+                    #[open] pub fn open() -> Self { Pool { size: 0 } }
+                    #[close] pub fn close({cfg} self) {}
+                }",
+            ),
+            "function",
+            "Pool::close",
+            "self",
+        ),
+        (
+            "example:blocker@1.0.0",
+            Some(&blocker),
+            "mod blocker {
+                #[hook(\"example:admission/guard@1.0.0\", priority = -7)]
+                pub fn block({cfg} input: guard::Admission) -> guard::Admission { input }
+            }"
+            .to_owned(),
+            "contribution",
+            "block",
+            "input",
+        ),
+    ] {
+        let with = || options(package, dir.map(std::path::PathBuf::as_path));
+        for (condition, written) in CONDITIONS {
+            let error = refused_with(with(), &module.replace("{cfg}", condition));
+            let message = format!(
+                "{written} on the parameter `{param}` of the {what} `{name}`: the macro writes the code that calls it before the compiler evaluates the attribute, so that code would pass `{param}` in every configuration; remove the attribute"
+            );
+            assert!(error.contains(&message), "{condition} {module}: {error}");
+        }
+        expanded_with(with(), &module.replace("{cfg}", ""));
+    }
+    let kept = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(
+            "impl Permits { fn helper(level: u32, #[cfg(test)] extra: u32) -> u32 { level } }
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+                impl Permits { pub fn probe(#[cfg(test)] extra: u32) -> u32 { extra } }
+                #[test]
+                fn one() {}
+            }",
+        ),
+    ));
+    for expected in [
+        "fn helper (level : u32 , # [cfg (test)] extra : u32)",
+        "# [cfg (test)] mod tests {",
+        "pub fn probe (# [cfg (test)] extra : u32)",
+    ] {
+        assert!(kept.contains(expected), "{expected}\n{kept}");
+    }
+}
+
+/// The bindings name a flags struct that enters the WIT through every module of its path, from the
+/// `with` the macro writes before the compiler evaluates `#[cfg(..)]`: where the attribute on one
+/// of those modules is off, the compiler drops the struct with the module, and that path names
+/// nothing. So a `#[cfg(..)]` on a sub-module holding such a struct, in the module itself or below
+/// it, is refused, written plainly, under `#[cfg_attr(..)]` or inside the module, and the same
+/// module without it expands. A sub-module holding a flags struct that stays out of the WIT keeps
+/// its `#[cfg(..)]`, and so does a `#[cfg(test)] mod tests` holding only tests and impls.
+#[test]
+fn a_sub_module_under_cfg_holding_a_flags_struct_is_refused() {
+    let office = |items: &str, path: &str| {
+        format!(
+            "mod office {{
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check(access: {path}::Access) -> bool {{ access.read }} }}
+                {items}
+            }}"
+        )
+    };
+    for (module, holding) in [
+        (
+            office(
+                "{cfg} pub mod rights { #[flags] pub struct Access { pub read: bool } }",
+                "rights",
+            ),
+            "rights",
+        ),
+        (
+            office(
+                "{cfg} pub mod grants {
+                    pub mod rights { #[flags] pub struct Access { pub read: bool } }
+                }",
+                "grants::rights",
+            ),
+            "grants",
+        ),
+        (
+            office(
+                "pub mod grants {
+                    {cfg} pub mod rights { #[flags] pub struct Access { pub read: bool } }
+                }",
+                "grants::rights",
+            ),
+            "rights",
+        ),
+    ] {
+        for (condition, written) in CONDITIONS {
+            let error = refused("example:office@1.0.0", &module.replace("{cfg}", condition));
+            let message = format!(
+                "{written} on the module `{holding}` holding the flags `Access`: the macro writes the code that maps the WIT flags onto it before the compiler evaluates the attribute, so that code would name `Access` in every configuration; remove the attribute"
+            );
+            assert!(error.contains(&message), "{condition} {module}: {error}");
+        }
+        expanded("example:office@1.0.0", &module.replace("{cfg}", ""));
+    }
+    let inner = office(
+        "pub mod rights {
+            #![cfg(feature = \"sharing\")]
+            #[flags]
+            pub struct Access { pub read: bool }
+        }",
+        "rights",
+    );
+    let error = refused("example:office@1.0.0", &inner);
+    assert!(
+        error.contains("`#[cfg(..)]` on the module `rights` holding the flags `Access`: the macro writes the code that maps the WIT flags onto it before the compiler evaluates the attribute, so that code would name `Access` in every configuration; remove the attribute"),
+        "{error}"
+    );
+    let kept = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(
+            "pub mod rights { #[flags] pub struct Access { pub read: bool } }
+            #[cfg(feature = \"sharing\")]
+            pub mod spare { #[flags] pub struct Spare { pub seen: bool } }
+            #[cfg(test)]
+            mod tests {
+                use super::rights::Access;
+                impl Access { fn none() -> Self { Access { read: false } } }
+                #[test]
+                fn one() {}
+            }",
+            "rights",
+        ),
+    ));
+    for expected in [
+        "# [cfg (feature = \"sharing\")] pub mod spare {",
+        "# [cfg (test)] mod tests {",
+    ] {
+        assert!(kept.contains(expected), "{expected}\n{kept}");
+    }
+}
+
 const NESTED_WIT: &str = "package example:ledger@1.0.0;
 interface book {
   resource entry {
