@@ -575,7 +575,9 @@ let router = engine.load(&artifact, install)?;
 ```
 
 The objects of a view carry data: an interface with a resource, or a function taking or
-returning a resource handle, a stream or a future, is not imported by key. A plain import of the
+returning a resource handle, a stream or a future, is not imported by key. Nor is an interface
+with a function `handle`, `take-handle` or `from-handle`, which every object's bindings define
+for its handle, or with a parameter `self`, which names a method's object. A plain import of the
 same interface may stand next to the keyed one, re-exported under the interface's name. An
 interface the module implements is not imported by key: the view `use`s the interface's types,
 so the world would import the interface it exports, which `cargo tembra build` and the kernel

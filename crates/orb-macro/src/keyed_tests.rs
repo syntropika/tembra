@@ -221,7 +221,7 @@ fn the_attribute_writes_a_keyed_import_in_parentheses() {
 /// What makes a keyed import impossible is an error naming the interface: a WASI interface, which
 /// the installation grants and no Orb provides, no directory to read it from, an interface that
 /// is not there, one with a resource, a function carrying something other than data, no function
-/// at all.
+/// at all, a function or a parameter named like what a method of the view already has.
 #[test]
 fn an_interface_without_a_view_is_refused() {
     let wasi = refused(options(None, &["wasi:random/random@0.3.0"]), ROUTER);
@@ -276,6 +276,33 @@ fn an_interface_without_a_view_is_refused() {
             "bare",
             "resource cursor; record tally { count: u32 } read: func() -> tally;",
             "has the resource `cursor`, and the objects of a view carry data, so an interface with a resource is not imported by key",
+        ),
+        // The bindings of every object have their own methods for its handle, and a method takes
+        // its object as `self`, which WIT does not tell from `SELF`.
+        (
+            "handle-method",
+            "handle: func() -> u32;",
+            "`handle` would be the method `handle` of the objects a keyed import reaches, which their bindings define already for the object's handle",
+        ),
+        (
+            "take-handle",
+            "take-handle: func() -> u32;",
+            "`take-handle` would be the method `take_handle` of the objects a keyed import reaches",
+        ),
+        (
+            "from-handle",
+            "from-handle: func(handle: u32) -> u32;",
+            "`from-handle` would be the method `from_handle` of the objects a keyed import reaches",
+        ),
+        (
+            "self",
+            "add: func(self: u32) -> u32;",
+            "`add` has a parameter `self`, and as a method of the objects a keyed import reaches it takes its object as `self`",
+        ),
+        (
+            "upper-self",
+            "add: func(amount: u32, SELF: u32) -> u32;",
+            "`add` has a parameter `SELF`, and as a method of the objects a keyed import reaches it takes its object as `self`",
         ),
     ] {
         let dir = consumed(
