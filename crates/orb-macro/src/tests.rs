@@ -175,6 +175,60 @@ fn the_context_option_imports_the_kernel_interface() {
     assert!(!wit(&plain).contains("context"));
 }
 
+/// The Orb module re-exports the kernel's context interface as `context` for the `context` option:
+/// an imported or an implemented interface named `context` beside it is an error naming both, an
+/// import of the kernel's interface itself is an error asking to remove it, and each expands
+/// without the option.
+#[test]
+fn an_interface_named_context_is_refused_beside_the_context_option() {
+    let dir = consumed(
+        "notes-context",
+        "package example:notes@1.0.0;\ninterface context {\n  topic: func() -> string;\n}\n",
+    );
+    // The kernel's package, as a contract's `deps/` holds it, for the import of its interface.
+    std::fs::create_dir_all(dir.join("deps")).unwrap();
+    std::fs::write(
+        dir.join("deps").join("tembra-guest.wit"),
+        tembra_contracts::guest::SOURCE,
+    )
+    .unwrap();
+    let kernel = "and that of the kernel's interface tembra:guest/context@1.0.0, which the `context` option imports; keep one of them";
+    let importing = |identity: &str, context: bool| Options {
+        imports: vec![literal(identity)],
+        context,
+        ..options(PACKAGE, Some(&dir))
+    };
+    for (identity, message) in [
+        (
+            "example:notes/context@1.0.0",
+            format!("the Orb module would re-export two modules as `context`: that of the imported interface example:notes/context@1.0.0, {kernel}"),
+        ),
+        (
+            "tembra:guest/context@1.0.0",
+            "the `context` option imports the kernel's interface tembra:guest/context@1.0.0 already, which the Orb module re-exports as `context`; remove this import".to_owned(),
+        ),
+    ] {
+        let error = refused_with(importing(identity, true), &ledger("#[service]"));
+        assert!(error.contains(&message), "{identity}: {error}");
+        expanded_with(importing(identity, false), &ledger("#[service]"));
+    }
+    let topics = "mod topics {
+        #[service(\"example:notes/context@1.0.0\")]
+        pub struct Topics;
+        impl Topics { pub fn topic() -> String { String::new() } }
+    }";
+    let implementing = |context| Options {
+        context,
+        ..options("example:topics@1.0.0", Some(&dir))
+    };
+    let error = refused_with(implementing(true), topics);
+    assert!(
+        error.contains(&format!("the Orb module would re-export two modules as `context`: that of the implemented interface example:notes/context@1.0.0, {kernel}")),
+        "{error}"
+    );
+    expanded_with(implementing(false), topics);
+}
+
 const COUNTER: &str = "mod tally {
     #[state]
     pub struct Count { pub total: i64 }

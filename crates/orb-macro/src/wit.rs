@@ -548,7 +548,7 @@ const GUEST_STATE: &str = "tembra:guest/state@1.0.0";
 const GUEST_STATE_INIT: &str = "tembra:guest/state-init@1.0.0";
 const GUEST_RESOURCES: &str = "tembra:guest/resources@1.0.0";
 const GUEST_RESOURCES_INIT: &str = "tembra:guest/resources-init@1.0.0";
-const GUEST_CONTEXT: &str = "tembra:guest/context@1.0.0";
+pub(crate) const GUEST_CONTEXT: &str = "tembra:guest/context@1.0.0";
 
 /// The kernel's `tembra:guest` package, as `tembra-contracts` bundles it for every host.
 const GUEST: &str = tembra_contracts::guest::SOURCE;

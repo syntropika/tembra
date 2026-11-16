@@ -46,6 +46,9 @@ pub(crate) enum Role {
     /// A hook the module declares from a consumed package, imported and exported: none of its
     /// names, since the Orb module re-exports the import.
     Declared,
+    /// The kernel's context interface, imported for the `context` option: it only keeps its name
+    /// from the consumed interfaces, and a path through its module reaches no consumed name.
+    Context,
 }
 
 /// A consumed interface the Orb module re-exports a module for: its identity and how the world
@@ -66,14 +69,18 @@ impl Reexported {
             Role::Implemented => format!("the implemented interface {identity}"),
             Role::Contributed => format!("the hook {identity}, which this module contributes to"),
             Role::Declared => format!("the hook {identity}, which this module declares"),
+            Role::Context => {
+                format!("the kernel's interface {identity}, which the `context` option imports")
+            }
         }
     }
 }
 
 /// The modules the Orb module re-exports for its consumed interfaces, by the name it re-exports
 /// each under, `greeting`: the imported interfaces, the views of those imported by key, the
-/// implemented ones, the hooks it contributes to and the hooks it declares from a consumed package.
-/// With them, the modules of the Orb itself, in which a path resolves first.
+/// implemented ones, the hooks it contributes to and the hooks it declares from a consumed package,
+/// and the kernel's context interface for the `context` option. With them, the modules of the Orb
+/// itself, in which a path resolves first.
 pub(crate) struct Modules {
     reexported: BTreeMap<String, Reexported>,
     /// The path of each module of the Orb from the Orb module, by scope; scope 0 is the Orb module.
@@ -99,10 +106,13 @@ enum Reached<'m, 't> {
 
 impl Modules {
     /// The consumed interfaces of the module, each under the name of its re-exported module: an
-    /// interface imported by key under its view's. `imports` are the attribute's literals, read as
+    /// interface imported by key under its view's, and with `context`, the attribute's option, the
+    /// kernel's context interface under `context`. `imports` are the attribute's literals, read as
     /// identities already; `paths` are the Orb's own modules, by scope. Another interface under a
-    /// name already taken is an error on it, naming both.
+    /// name already taken is an error on it, naming both, and so is an import of the kernel's
+    /// context interface beside the option.
     pub(crate) fn new(
+        context: bool,
         imports: &[LitStr],
         keyed: &[String],
         services: &[Service],
@@ -111,6 +121,27 @@ impl Modules {
         paths: &[Vec<Ident>],
     ) -> syn::Result<Self> {
         let mut modules = BTreeMap::new();
+        // The option keeps no span: its name is taken first, so the error falls on the interface
+        // re-exported under it, or on an import of the kernel's interface itself.
+        if context {
+            if let Some(import) = imports
+                .iter()
+                .find(|import| import.value() == wit::GUEST_CONTEXT)
+            {
+                return Err(syn::Error::new(
+                    import.span(),
+                    format!(
+                        "the `context` option imports the kernel's interface {} already, which the Orb module re-exports as `context`; remove this import",
+                        wit::GUEST_CONTEXT
+                    ),
+                ));
+            }
+            let kernel = Reexported {
+                identity: wit::GUEST_CONTEXT.to_owned(),
+                role: Role::Context,
+            };
+            modules.insert("context".to_owned(), kernel);
+        }
         // Two views of one name are the error of `keyed::views`, which names their interfaces.
         for identity in keyed {
             let view = crate::rust_ident(&keyed::view_name(identity));
@@ -180,7 +211,8 @@ impl Modules {
     /// The name a type reaches through a consumed interface's module, when it is such a path:
     /// `greeting::Entry`, or any path ending so, written in the module `scope`. A path that leads
     /// into a module of the Orb names a type of the module, whatever that module is called: the
-    /// author's `greeting::Banner` next to a `mod greeting` of their own resolves there first.
+    /// author's `greeting::Banner` next to a `mod greeting` of their own resolves there first. The
+    /// kernel's context module reaches none.
     pub(crate) fn named<'m, 't>(&'m self, ty: &'t Type, scope: usize) -> Option<Named<'m, 't>> {
         let Type::Path(path) = ty else {
             return None;
@@ -198,6 +230,9 @@ impl Modules {
             return None;
         }
         let (module, interface) = self.reexported.get_key_value(&module.ident.to_string())?;
+        if interface.role == Role::Context {
+            return None;
+        }
         Some(Named {
             interface,
             module,
@@ -640,6 +675,7 @@ fn checked<'a>(
     }
     match (interface.role, &definition.kind) {
         (Role::Wasi, _) => unreachable!("checked above"),
+        (Role::Context, _) => unreachable!("`Modules::named` reaches no name of the context"),
         (Role::Declared, _) => {
             let run = declared
                 .iter()

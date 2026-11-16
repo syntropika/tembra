@@ -1555,6 +1555,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .map(|import| wit_identity(import, "an interface imported by key", true))
         .collect::<syn::Result<Vec<String>>>()?;
     let consumed_modules = foreign::Modules::new(
+        options.context,
         &options.imports,
         &keyed_imports,
         &services,
