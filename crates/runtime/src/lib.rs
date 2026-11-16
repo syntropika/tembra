@@ -23,7 +23,7 @@ pub use host::{
     AcquisitionOptions, Cancellation, Context, Declaration, ForeignNotification, Host, IssuedCall,
     Reference, Resource, ResourceKey, ResourceSignal, TaskScope,
 };
-pub use orb::{Orb, Service};
+pub use orb::{Codec, Orb, Service};
 pub use state::State;
 pub use tembra_core as core;
 pub use tembra_core::{Code, Error, Result};
