@@ -655,6 +655,60 @@ fn an_interface_imported_only_for_its_types_stays_a_service() {
     );
 }
 
+/// A world importing by key the hook-shaped interface it implements: the view `use`s the record of
+/// its one callback, so elaboration imports the interface the world exports, for its types only.
+const GUARD_PROXY: &str = "package example:router@1.0.0;
+interface guard-ref {
+  use example:admission/guard@1.0.0.{admission};
+  resource guard { apply: func(input: admission) -> admission; }
+  get: async func(key: list<string>) -> result<guard, string>;
+}
+world proxy { import guard-ref; export example:admission/guard@1.0.0; }
+package example:admission@1.0.0 {
+  interface guard { record admission { value: s32, blocked: bool } apply: func(input: admission) -> admission; }
+}
+";
+
+/// A contribution passed beside the manifest, as the Node binding's `contributes` passes one,
+/// pairs the hook's export with the world's own import of it, which installation binds to the Orb
+/// declaring the hook. An interface the world imports only because a view `use`s its types pairs
+/// with nothing, and installation would find no provider to select for it: packaging refuses the
+/// contribution, as `embedded_roles` refuses it in a manifest, and so does decoding an artifact
+/// claiming it.
+#[test]
+fn a_contribution_to_an_interface_imported_only_for_its_types_is_refused() {
+    const GUARD: &str = "example:admission/guard@1.0.0";
+    const VIEW: &str = "example:router/guard-ref@1.0.0";
+    let contract = Contract::from_source("proxy.wit", GUARD_PROXY, Some("proxy")).unwrap();
+    let manifest = format!(r#"{{"references":{{"{VIEW}":"{GUARD}"}}}}"#);
+    let component = component_carrying(&contract, &[("tembra:manifest", manifest.as_bytes())]);
+    let mut roles = contract.embedded_roles(&component).unwrap();
+    contract
+        .component_artifact(&component, "proxy", 1, &roles)
+        .unwrap();
+    roles.contributions.insert(GUARD.into(), 0);
+    let refusal = format!("{GUARD}: a contribution must import its WIT callback interface");
+    assert_eq!(
+        contract
+            .component_artifact(&component, "proxy", 1, &roles)
+            .unwrap_err()
+            .0,
+        refusal
+    );
+    let identity = Identity {
+        name: "proxy".into(),
+        api_version: 1,
+        world: "proxy".into(),
+    };
+    let mut forged = component;
+    crate::artifact::append_section(
+        &mut forged,
+        "tembra:orb",
+        &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &roles),
+    );
+    assert_eq!(Artifact::decode(&forged).err().unwrap().0, refusal);
+}
+
 /// The manifest is the section of the first core module holding one, in the order of the binary,
 /// the modules of nested components included; a core module is no component.
 #[test]

@@ -116,7 +116,10 @@ impl PreparedContract {
         Ok(())
     }
 
-    /// Validate persisted contribution roles without relying on deployment provider names.
+    /// Validate persisted contribution roles without relying on deployment provider names. A
+    /// contribution pairs the hook's export with the world's own import of it, which installation
+    /// binds to the Orb declaring the hook: an interface the world imports only because another
+    /// import `use`s its types pairs with nothing, as in `embedded::roles`.
     pub(crate) fn check_contribution_roles(
         &self,
         contributions: &BTreeMap<String, i32>,
@@ -136,6 +139,15 @@ impl PreparedContract {
                     _ => None,
                 })
                 .ok_or_else(|| Error(format!("missing contribution callback {binding}")))?;
+            let imported = self.model().imports.iter().any(|entry| {
+                entry.key == *binding
+                    && matches!(&entry.item, Item::Interface(import) if import.explicit)
+            });
+            if !imported {
+                return Err(Error(format!(
+                    "{binding}: a contribution must import its WIT callback interface"
+                )));
+            }
             let function = &interface.functions[0];
             if self.function_signature(binding, &function.name, true)?
                 != self.function_signature(binding, &function.name, false)?
