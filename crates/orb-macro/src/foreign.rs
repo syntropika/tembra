@@ -90,6 +90,13 @@ pub(crate) struct Named<'m, 't> {
     pub ty: &'t Type,
 }
 
+/// What a walk through a type reaches: a name through a consumed interface's module, or the last
+/// name of another path, `Vec` and `Entry` in `Vec<Entry>`, which may name a type of the module.
+enum Reached<'m, 't> {
+    Consumed(Named<'m, 't>),
+    Module(&'t Ident),
+}
+
 impl Modules {
     /// The consumed interfaces of the module, each under the name of its re-exported module: an
     /// interface imported by key under its view's. `imports` are the attribute's literals, read as
@@ -199,6 +206,37 @@ impl Modules {
         })
     }
 
+    /// Walk a type written in the module `scope`: itself, then the type parameters of a path and
+    /// the elements of a tuple. Each name a consumed interface's module reaches is reported, and
+    /// not looked into; so is the last name of every other path, before its type parameters.
+    fn walk<'m, 't>(&'m self, ty: &'t Type, scope: usize, visit: &mut impl FnMut(Reached<'m, 't>)) {
+        if let Some(named) = self.named(ty, scope) {
+            visit(Reached::Consumed(named));
+            return;
+        }
+        match ty {
+            Type::Path(path) => {
+                let Some(segment) = path.path.segments.last() else {
+                    return;
+                };
+                visit(Reached::Module(&segment.ident));
+                if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                    for argument in &arguments.args {
+                        if let syn::GenericArgument::Type(ty) = argument {
+                            self.walk(ty, scope, visit);
+                        }
+                    }
+                }
+            }
+            Type::Tuple(tuple) => {
+                for element in &tuple.elems {
+                    self.walk(element, scope, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Each name a type written in the module `scope` reaches through a consumed interface's
     /// module: itself, or inside the type parameters of a path and the elements of a tuple.
     pub(crate) fn named_in<'m, 't>(
@@ -207,29 +245,11 @@ impl Modules {
         scope: usize,
         out: &mut Vec<Named<'m, 't>>,
     ) {
-        if let Some(named) = self.named(ty, scope) {
-            out.push(named);
-            return;
-        }
-        match ty {
-            Type::Path(path) => {
-                if let Some(syn::PathArguments::AngleBracketed(arguments)) =
-                    path.path.segments.last().map(|segment| &segment.arguments)
-                {
-                    for argument in &arguments.args {
-                        if let syn::GenericArgument::Type(ty) = argument {
-                            self.named_in(ty, scope, out);
-                        }
-                    }
-                }
+        self.walk(ty, scope, &mut |reached| {
+            if let Reached::Consumed(named) = reached {
+                out.push(named);
             }
-            Type::Tuple(tuple) => {
-                for element in &tuple.elems {
-                    self.named_in(element, scope, out);
-                }
-            }
-            _ => {}
-        }
+        });
     }
 
     /// The module types a type written in the module `scope` mentions: the last name of each path,
@@ -237,32 +257,13 @@ impl Modules {
     /// and none of the names a consumed interface's module reaches, which are no types of the
     /// module.
     pub(crate) fn references(&self, ty: &Type, scope: usize, out: &mut Vec<Ident>) {
-        if self.named(ty, scope).is_some() {
-            return;
-        }
-        match ty {
-            Type::Path(path) => {
-                let Some(segment) = path.path.segments.last() else {
-                    return;
-                };
-                if !wit::BUILTIN.contains(&segment.ident.to_string().as_str()) {
-                    out.push(segment.ident.clone());
-                }
-                if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
-                    for argument in &arguments.args {
-                        if let syn::GenericArgument::Type(ty) = argument {
-                            self.references(ty, scope, out);
-                        }
-                    }
-                }
+        self.walk(ty, scope, &mut |reached| {
+            if let Reached::Module(ident) = reached
+                && !wit::BUILTIN.contains(&ident.to_string().as_str())
+            {
+                out.push(ident.clone());
             }
-            Type::Tuple(tuple) => {
-                for element in &tuple.elems {
-                    self.references(element, scope, out);
-                }
-            }
-            _ => {}
-        }
+        });
     }
 
     /// The module types the fields of a struct or the payloads of an enum's cases mention, the
