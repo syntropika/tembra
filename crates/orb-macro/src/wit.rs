@@ -1325,16 +1325,15 @@ pub(crate) enum Held {
     /// generated type, or the author's flags struct, implements what the macro knows of it.
     Own(String),
     /// A record, a variant, an enum or a flags of a consumed package: the name the bindings give it,
-    /// its kind with an article, for the errors, the interface defining it, and the traits of the
-    /// standard library the bindings give it, as `wit-bindgen` 0.63 writes it: `Debug` for each;
-    /// for a record or a variant, `Clone` unless it holds a resource handle, and `Copy` unless it
-    /// also holds a string or a list; for an enum, `Clone`, `Copy` and the comparisons; for a
-    /// flags, a `bitflags!` type, every one but `Default`.
+    /// its kind with an article, for the errors, the interface defining it, and whether it holds a
+    /// string or a list, which no impl makes `Copy`. What else its bindings do not give it,
+    /// `PartialEq` for a record, `Default` for each, the author may implement for it by hand,
+    /// anywhere in the crate; one holding a resource handle is refused before any derive is read.
     Consumed {
         name: String,
         kind: &'static str,
         interface: String,
-        derives: BTreeSet<&'static str>,
+        list: bool,
     },
 }
 
@@ -1792,32 +1791,13 @@ fn held(
         parts.push(part(Held::Own(name.to_owned()), absent));
         return;
     }
-    let (list, resource) = holds(resolve, ty);
-    let comparisons = ["PartialEq", "Eq", "PartialOrd", "Ord"];
-    let derives: BTreeSet<&'static str> = match kind {
-        "an enum" => ["Debug", "Clone", "Copy"]
-            .into_iter()
-            .chain(comparisons)
-            .collect(),
-        "a flags" => ["Debug", "Clone", "Copy", "Hash"]
-            .into_iter()
-            .chain(comparisons)
-            .collect(),
-        _ => [
-            Some("Debug"),
-            (!resource).then_some("Clone"),
-            (!resource && !list).then_some("Copy"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
-    };
+    let (list, _) = holds(resolve, ty);
     parts.push(part(
         Held::Consumed {
             name: crate::type_ident(name).to_string(),
             kind,
             interface: resolve.id_of(owner).unwrap_or_default(),
-            derives,
+            list,
         },
         absent,
     ));

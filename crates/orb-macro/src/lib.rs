@@ -4380,9 +4380,12 @@ fn carried_derive(
     // the generated type to derive it, with `remove` saying how to take the derive off: the first
     // part of the fields (`wit::Held`) that lacks the trait, but for the parts of a member the
     // derive customizes and, for `Default`, which makes a value without them, the parts an option,
-    // a list or a variant's case holds. A type of the module that lacks the trait for a handle, a
-    // string or a list it holds names that, which the type holds through it. A trait the macro
-    // does not know the rules of, `Display`, is left to the derive.
+    // a list or a variant's case holds. A type of the module or a consumed type held in a field
+    // rules the trait out for a handle, a string or a list it holds, which the type holds through
+    // it, unless the macro sees the trait implemented for it; a trait it lacks otherwise is left to
+    // the author, who may implement it by hand where the macro does not read, outside the Orb
+    // module or through a `crate::` path. A trait the macro does not know the rules of, `Display`,
+    // is left to the derive.
     let ruled_out = |name: &str, remove: &str| -> Option<String> {
         if !STANDARD_DERIVES.iter().any(|(known, _)| *known == name) {
             return None;
@@ -4433,23 +4436,18 @@ fn carried_derive(
                     } else if name == "Copy" && inner.generated.list {
                         not_copy()
                     } else {
-                        let inner = &inner.ident;
-                        cannot(
-                            name,
-                            &format!("holds `{inner}`, which implements no `{name}`"),
-                            &format!("derive `{name}` on `{inner}` too, {remove}"),
-                        )
+                        continue;
                     }
                 }
                 wit::Held::Consumed {
                     name: inner,
                     kind,
                     interface,
-                    derives,
-                } if !derives.contains(name) => cannot(
+                    list,
+                } if name == "Copy" && *list => cannot(
                     name,
                     &format!(
-                        "holds `{inner}`, {kind} of {interface}, which the bindings generate without `{name}`"
+                        "holds `{inner}`, {kind} of {interface}, which holds a string or a list"
                     ),
                     remove,
                 ),
@@ -4707,12 +4705,11 @@ fn readable(
     Ok(())
 }
 
-/// A type of the module that enters the WIT, for the types holding it: its name as the author
-/// writes it, how the bindings generate it, and the traits its generated type, or the author's
-/// flags struct, implements: what the bindings implement for it, what its derives implement, and
-/// what it implements besides, as `carried_attributes` is told.
+/// A type of the module that enters the WIT, for the types holding it: how the bindings generate
+/// it, and the traits its generated type, or the author's flags struct, implements as far as the
+/// macro sees: what the bindings implement for it, what its derives implement, and what it
+/// implements besides, as `carried_attributes` is told.
 struct ModuleType {
-    ident: Ident,
     generated: wit::Generated,
     traits: BTreeSet<String>,
 }
@@ -4776,11 +4773,7 @@ fn carried_attributes(
                         .cloned(),
                 )
                 .collect();
-            let module_type = ModuleType {
-                ident: shape.ident.clone(),
-                generated,
-                traits,
-            };
+            let module_type = ModuleType { generated, traits };
             (wit::kebab(&shape.ident), module_type)
         })
         .collect();

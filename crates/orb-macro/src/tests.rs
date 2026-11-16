@@ -4056,24 +4056,14 @@ fn what_the_generated_type_cannot_take_is_refused() {
             "`Default` on `Page`: `Page` enters the WIT and holds a `Result`, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `Page` out of the WIT",
         ),
         (
-            "pub struct Spot { pub x: i32 } #[derive(PartialEq)] pub struct Point { pub at: Spot }",
-            "Point",
-            "`PartialEq` on `Point`: `Point` enters the WIT and holds `Spot`, which implements no `PartialEq`, so the generated type replacing it cannot derive `PartialEq`; derive `PartialEq` on `Spot` too, remove the derive, or keep `Point` out of the WIT",
-        ),
-        (
-            "pub enum Heading { North, East } #[derive(Hash)] pub struct Point { pub heading: Heading }",
-            "Point",
-            "`Hash` on `Point`: `Point` enters the WIT and holds `Heading`, which implements no `Hash`",
-        ),
-        (
-            "pub struct Spot { pub x: i32 } #[derive(Default)] pub struct Page { pub at: Spot }",
+            "pub struct Slot { pub pen: Pen } #[derive(PartialEq)] pub struct Page { pub slot: Slot }",
             "Page",
-            "`Default` on `Page`: `Page` enters the WIT and holds `Spot`, which implements no `Default`",
+            "`PartialEq` on `Page`: `Page` enters the WIT and holds a resource handle, which implements no `PartialEq`",
         ),
         (
-            "#[flags] pub struct Access { pub read: bool } #[derive(PartialEq)] pub struct Grant { pub access: Access }",
-            "Grant",
-            "`PartialEq` on `Grant`: `Grant` enters the WIT and holds `Access`, which implements no `PartialEq`, so the generated type replacing it cannot derive `PartialEq`; derive `PartialEq` on `Access` too",
+            "pub struct Note { pub text: String } #[derive(Copy)] pub struct Page { pub note: Note }",
+            "Page",
+            "`Copy` on `Page`: `Page` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`",
         ),
         (
             "#[derive(educe::Educe)] #[educe(Clone)] pub struct Lease { pub pen: Pen }",
@@ -4172,13 +4162,14 @@ interface book {
 ";
 
 /// A derive of the standard library is decided trait by trait from the type's fields, as the
-/// bindings would decide it inside their module: a consumed type has what its bindings give it, a
-/// record `Debug`, `Clone` and `Copy` as its contents allow, an enum the comparisons too, a flags
-/// everything but `Default`; a type of the module has what the bindings implement for it and what
-/// its derives, or a flags struct's impls, implement; and a trait every field has is carried, as is
-/// `Default` over options, lists and the cases of a variant, which `Default` leaves empty. A derive
-/// implementing a trait under another name follows the same rule, but for a member whose helper
-/// attributes it reads, which it may give its own value.
+/// bindings would decide it inside their module: a handle, a string or a list held through a
+/// consumed type or a type of the module rules out what it rules out in a field, unless the macro
+/// sees the trait implemented for that type, by the bindings, by its derives or by hand; a trait
+/// such a type lacks otherwise is left to the author, who may implement it by hand where the macro
+/// does not read; and a trait every field has is carried, as is `Default` over options, lists and
+/// the cases of a variant, which `Default` leaves empty. A derive implementing a trait under
+/// another name follows the same rule, but for a member whose helper attributes it reads, which it
+/// may give its own value.
 #[test]
 fn a_standard_derive_is_decided_from_the_fields() {
     let dir = consumed("notes", BOOK_KINDS_WIT);
@@ -4205,20 +4196,12 @@ fn a_standard_derive_is_decided_from_the_fields() {
     };
     for (types, message) in [
         (
-            "#[derive(PartialEq)] pub struct Note { pub entry: book::Entry }",
-            "`PartialEq` on `Note`: `Note` enters the WIT and holds `Entry`, a record of example:ledger/book@1.0.0, which the bindings generate without `PartialEq`, so the generated type replacing it cannot derive `PartialEq`; remove the derive, or keep `Note` out of the WIT",
+            "#[derive(Clone, Copy)] pub struct Note { pub entry: book::Entry }",
+            "`Copy` on `Note`: `Note` enters the WIT and holds `Entry`, a record of example:ledger/book@1.0.0, which holds a string or a list, so the generated type replacing it cannot derive `Copy`; remove the derive, or keep `Note` out of the WIT",
         ),
         (
-            "#[derive(Hash)] pub struct Note { pub side: book::Side }",
-            "`Hash` on `Note`: `Note` enters the WIT and holds `Side`, an enum of example:ledger/book@1.0.0, which the bindings generate without `Hash`",
-        ),
-        (
-            "#[derive(Default)] pub struct Note { pub marks: book::Marks }",
-            "`Default` on `Note`: `Note` enters the WIT and holds `Marks`, a flags of example:ledger/book@1.0.0, which the bindings generate without `Default`",
-        ),
-        (
-            "#[derive(PartialEq, Eq)] pub struct Note { pub entries: Vec<(book::Entry, u32)> }",
-            "`PartialEq` on `Note`: `Note` enters the WIT and holds `Entry`, a record of example:ledger/book@1.0.0, which the bindings generate without `PartialEq`",
+            "#[derive(Clone, Copy)] pub struct Note { pub entries: Option<(book::Entry, u32)> }",
+            "`Copy` on `Note`: `Note` enters the WIT and holds `Entry`, a record of example:ledger/book@1.0.0, which holds a string or a list",
         ),
     ] {
         let error = refused_with(importing(), &module(types, "Note"));
@@ -4268,6 +4251,24 @@ fn a_standard_derive_is_decided_from_the_fields() {
         (
             "#[state] pub struct Position { pub x: i32 } #[derive(Default)] pub struct Note { pub position: Position }",
             ":: core :: default :: Default",
+        ),
+        // A trait a type held in a field lacks may come from a hand impl the macro does not see:
+        // one written through `crate::`, one on a consumed type, or one outside the Orb module.
+        (
+            "impl PartialEq for crate::notes::Spot { fn eq(&self, other: &Self) -> bool { self.x == other.x } } #[derive(PartialEq)] pub struct Note { pub at: Spot }",
+            ":: core :: cmp :: PartialEq",
+        ),
+        (
+            "impl PartialEq for book::Entry { fn eq(&self, other: &Self) -> bool { self.label == other.label } } #[derive(Clone, PartialEq)] pub struct Note { pub entry: book::Entry, pub qty: u32 }",
+            ":: core :: cmp :: PartialEq",
+        ),
+        (
+            "#[derive(PartialEq)] pub struct Note { pub at: Spot }",
+            ":: core :: cmp :: PartialEq",
+        ),
+        (
+            "#[derive(Hash)] pub struct Note { pub side: book::Side }",
+            ":: core :: hash :: Hash",
         ),
     ] {
         let module = expanded_with(importing(), &module(types, "Note"));

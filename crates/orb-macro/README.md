@@ -751,7 +751,9 @@ consumed package, which `cargo tembra build` nests whole, as it does for the imp
 A consumed type implements what its bindings give it: a record or a variant `Clone`, `Copy` and
 `Debug` as its contents allow, an enum the comparisons too and a flags `Hash` as well, none of them
 `Default`. A derive of another trait on a type of the module holding one, `PartialEq` on
-`Archived`, is a compile error on the derive, naming the consumed type.
+`Archived`, needs the author's `impl PartialEq for greeting::Entry`, written anywhere in the crate,
+whose type the bindings' is; `Copy` on one holding a consumed type that holds a string or a list is
+a compile error on the derive, naming the consumed type.
 
 A state holds a consumed type too, in its fields or in the types of the module they reach. In an Orb
 with a state the bindings give the consumed packages' records, variants and enums `serde`'s
@@ -1135,13 +1137,17 @@ the version whose rules the macro follows, and the generated code reaches it the
   alone or in a consumed type, or, in an Orb without a state, where the bindings derive serde's
   traits on no type, any type of a consumed package, `Default` on a record no value of which is
   without one, a handle in a field, in a tuple or in such a record, `Copy` on one holding a string
-  or a list, `Eq`, `Ord` or `Hash` on one holding an `f32` or an `f64`, `Default` on a record
-  holding a `Result`, and a trait that a type held in a field lacks: a type of the module has what
-  the bindings implement for it, what its own derives implement and what the Orb's modules
-  implement for it by hand, a state its `Default` too, a flags struct the macro's derives as well,
-  and a consumed type what its bindings give it, as
-  [the types of a consumed interface](#the-types-of-a-consumed-interface) says. Both are compile
-  errors on the derive, the first naming the helper attributes no other derive of the type reads,
+  or a list, `Eq`, `Ord` or `Hash` on one holding an `f32` or an `f64`, and `Default` on a record
+  holding a `Result`. A handle, a string or a list held through a type of the module or a consumed
+  type counts the same, unless the macro sees the trait implemented for that type: by the bindings,
+  by its own derives, by an `impl` of the Orb's modules, by the macro for a state's `Default` or a
+  flags struct's derives. A trait such a type lacks otherwise, `PartialEq` on a record holding a
+  `Spot` that derives none, or holding a consumed record, which its bindings give `Debug`, `Clone`
+  and `Copy` only, as [the types of a consumed interface](#the-types-of-a-consumed-interface)
+  says, is left to the author, who may implement it for the type by hand anywhere in the crate,
+  outside the Orb module or through a `crate::` path, where the macro does not read; a missing one
+  is the compiler's error inside the bindings. Both refusals are compile errors on the derive, the
+  first naming the helper attributes no other derive of the type reads,
   which go with it, `#[error(..)]` for `thiserror::Error` on a function's error, or the entry of
   `#[educe(..)]` to remove, the second naming what the type holds. A handle in an option or a list
   leaves `Default` a value without it, as does any type held there, and a variant takes its unit
