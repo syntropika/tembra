@@ -1049,12 +1049,12 @@ impl Notes {
 
 What every object of the Orb shares comes from the free function marked `#[root]`,
 `fn(&Inputs, &Declaration) -> tembra::Result<T>`, the Orb's create: `orb(..)` hands it to
-`Orb::create`, so the host runs it once when it installs the Orb, before any object is built, and
-again for the new code when it reloads the Orb. Its `Declaration` declares what the Orb holds for
-its lifetime: its resources, with `resource_async` for an asynchronous open that depends on other
-resources or an asynchronous close, its background tasks, and the references it keeps. A
-`#[create]` reads the value as an `Rc<T>` with `declaration.orb::<T>()`, and may keep it for its
-methods. An Orb has at most one, visible to the Orb module.
+`Orb::create`, so the host runs it once when it installs the Orb, before any object is built. Its
+`Declaration` declares what the Orb holds for its lifetime: its resources, with `resource_async`
+for an asynchronous open that depends on other resources or an asynchronous close, its background
+tasks, and the references it keeps. A `#[create]` reads the value as an `Rc<T>` with
+`declaration.orb::<T>()`, and may keep it for its methods. An Orb has at most one, visible to the
+Orb module.
 
 ```rust,ignore
 pub struct Catalogue {
@@ -1073,6 +1073,13 @@ impl Shelf {
     }
 }
 ```
+
+`Host::install` commits the Orb before it runs the root, so a root that fails makes `install`
+return its error and leaves the Orb installed: installing it again is refused with the code
+`invalid` and the reason `orb_installed`. `Host::reload` runs the root and the creates again for
+the new code, but refuses with the code `unsupported` and the reason `task_restart` while a task
+that the root or an object declared is still running, such as the task of the native fixture's
+`worker`, which runs until the host closes.
 
 A native-only module, such as one with `#[inputs]`, may export nothing: an Orb whose only content is
 its `#[root]`, or root resources, runs what they declare while the host keeps it installed, such as

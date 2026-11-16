@@ -5544,6 +5544,49 @@ fn a_root_is_refused_when_ill_formed() {
     }
 }
 
+/// The analysis lists what makes a module native only, each marker as the module writes it, in
+/// the order the scan finds them; a module a component could serve has none.
+#[test]
+fn the_analysis_lists_what_makes_a_module_native_only() {
+    let markers = |module: &str| {
+        let module: ItemMod = syn::parse_str(module).unwrap();
+        let analysis = super::analyze(options(PACKAGE, None), module)
+            .unwrap_or_else(|error| panic!("{error}"));
+        analysis
+            .native_only
+            .iter()
+            .map(|marker| marker.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        markers(
+            "mod book {
+                #[inputs]
+                pub struct Inputs { pub base: u32 }
+                #[root]
+                fn shared(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<u32> { Ok(0) }
+                #[service(key = main, principal = \"host\")]
+                pub struct Ledger { base: u32 }
+                impl Ledger {
+                    #[create]
+                    fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                        Ok(Self { base: inputs.base })
+                    }
+                    pub fn count(&self) -> u32 { self.base }
+                }
+            }"
+        ),
+        [
+            "#[inputs]",
+            "#[root]",
+            "key = main",
+            "principal = \"host\"",
+            "#[create]"
+        ]
+    );
+    assert!(markers(&ledger("#[service]")).is_empty());
+}
+
 /// A native-only module may export nothing when what it runs is its root or its root resources:
 /// the WIT is then an empty world, and `orb(..)` an Orb of no service whose create is the root.
 /// Root resources stay refused natively until the native side covers them. A module that is not
@@ -5584,7 +5627,7 @@ fn a_native_only_module_may_only_run_its_root() {
     );
     assert_eq!(
         refused(WORKER, &format!("mod worker {{ {inputs} }}")),
-        "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root] or a #[resource]"
+        "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root]"
     );
 }
 

@@ -551,12 +551,17 @@ pub mod worker {
     pub struct Inputs {
         /// What the worker did, in order, for the host to read back.
         pub events: Rc<RefCell<Vec<String>>>,
+        /// Why the worker cannot start, if it cannot: the root then fails with it.
+        pub failure: Option<tembra::Error>,
     }
 
     /// Declare the worker: a task that runs once the Orb is active and stops when it is
-    /// cancelled, as the host closes.
+    /// cancelled, as the host closes. Or fail, as the inputs say.
     #[root]
     fn start(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<()> {
+        if let Some(failure) = &inputs.failure {
+            return Err(failure.clone());
+        }
         let events = inputs.events.clone();
         declaration.task(move |scope| {
             Box::pin(async move {

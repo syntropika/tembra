@@ -324,13 +324,29 @@ struct Service {
 }
 
 /// The address rules of a service's objects, from `#[service(key = main)]` and
-/// `#[service(principal = "name")]`: the native factory refuses an object at another address.
+/// `#[service(principal = "name")]`, each with where it is written: the native factory refuses an
+/// object at another address.
 #[derive(Default)]
 struct Guard {
     /// The object's key is `["main"]`.
-    main: bool,
+    main: Option<Span>,
     /// The object's principal is this one.
-    principal: Option<String>,
+    principal: Option<(String, Span)>,
+}
+
+impl Guard {
+    /// The rules, which make the module native only.
+    fn markers(&self) -> impl Iterator<Item = NativeOnly> + '_ {
+        let main = self.main.map(|span| NativeOnly {
+            name: "key = main".to_owned(),
+            span,
+        });
+        let principal = self.principal.as_ref().map(|(principal, span)| NativeOnly {
+            name: format!("principal = \"{principal}\""),
+            span: *span,
+        });
+        main.into_iter().chain(principal)
+    }
 }
 
 impl Service {
@@ -507,6 +523,19 @@ struct Root {
     scope: usize,
 }
 
+/// A marker that makes the module native only, where it is written: something only a native host
+/// gives an Orb, which a component could not serve.
+#[allow(
+    dead_code,
+    reason = "kept for the refusal of a component build of a native-only module, which names each marker"
+)]
+struct NativeOnly {
+    /// The marker as the module writes it: `#[inputs]`, `#[create]`, `#[root]`, `key = main` or
+    /// `principal = "name"`.
+    name: String,
+    span: Span,
+}
+
 /// A marker on a function of an `impl` block. The functions the generated code calls by role
 /// carry one, whatever their names and visibility; a function without one is ordinary Rust.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -665,6 +694,8 @@ struct Scan {
     wit_resources: Vec<WitResource>,
     inputs: Option<Inputs>,
     root: Option<Root>,
+    /// The markers that make the module native only, in the order the scan finds them.
+    native_only: Vec<NativeOnly>,
     impls: Vec<(usize, syn::ItemImpl)>,
     /// The type of each `impl Default for ..` of the Orb module, with the module it is written in.
     default_impls: Vec<(usize, Type)>,
@@ -866,6 +897,7 @@ impl Scan {
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "service") {
                         let (implements, policy, guard) = service_attribute(&attribute)?;
+                        self.native_only.extend(guard.markers());
                         self.services.push(Service {
                             ident: s.ident.clone(),
                             vis: s.vis.clone(),
@@ -950,6 +982,12 @@ impl Scan {
                                 ),
                             ));
                         };
+                        if marker == Marker::Create {
+                            self.native_only.push(NativeOnly {
+                                name: "#[create]".to_owned(),
+                                span,
+                            });
+                        }
                         self.marked.push(Marked {
                             marker,
                             self_ty,
@@ -1081,6 +1119,10 @@ impl Scan {
             ident: ident.clone(),
             scope,
         });
+        self.native_only.push(NativeOnly {
+            name: "#[inputs]".to_owned(),
+            span: attribute.span(),
+        });
         Ok(())
     }
 
@@ -1127,6 +1169,10 @@ impl Scan {
         self.root = Some(Root {
             ident: ident.clone(),
             scope,
+        });
+        self.native_only.push(NativeOnly {
+            name: "#[root]".to_owned(),
+            span: attribute.span(),
         });
         Ok(())
     }
@@ -1267,6 +1313,13 @@ struct Analysis {
     inputs: Option<Inputs>,
     /// The function marked `#[root]`, if any: the Orb's create, natively.
     root: Option<Root>,
+    /// The markers that make the module native only, in the order the scan finds them: its
+    /// `#[inputs]`, its creates and its root, which take the inputs, and the address guards.
+    #[allow(
+        dead_code,
+        reason = "kept for the refusal of a component build of a native-only module, which names each marker"
+    )]
+    native_only: Vec<NativeOnly>,
     /// The states, each resolved to the service whose objects own it.
     states: Vec<State>,
     /// The hook contributions, and the priority of each hook contributed to, by hook identity.
@@ -1407,6 +1460,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         wit_resources: Vec::new(),
         inputs: None,
         root: None,
+        native_only: Vec::new(),
         impls: Vec::new(),
         default_impls: Vec::new(),
         marked: Vec::new(),
@@ -1433,6 +1487,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         mut wit_resources,
         inputs,
         root,
+        native_only,
         impls,
         default_impls,
         marked,
@@ -1668,17 +1723,11 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             ),
         ));
     }
-    // A module is native only when it holds what only a native host gives it: inputs, which its
-    // creates and its root take, or an address guard.
-    let native_only = inputs.is_some()
-        || services
-            .iter()
-            .any(|service| service.guard.main || service.guard.principal.is_some());
     // An Orb exports services, declares hooks or contributes to them; a module doing none of
     // those would be an empty world. A native-only one may instead run only its root, or hold
     // only root resources, while the host keeps it installed: its world is then empty.
     if services.is_empty() && contributions.is_empty() && declared.is_empty() {
-        if !native_only {
+        if native_only.is_empty() {
             return Err(syn::Error::new(
                 Span::call_site(),
                 "nothing to export: mark a unit struct with #[service] and give it an impl block of pub fn, or mark a hook with #[hook]",
@@ -1687,7 +1736,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         if root.is_none() && resources.is_empty() {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root] or a #[resource]",
+                "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root]",
             ));
         }
     }
@@ -1699,7 +1748,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
     }) {
         return Err(syn::Error::new(
             service.ident.span(),
-            if native_only {
+            if !native_only.is_empty() {
                 "a service needs at least one pub fn in an impl block, or a function marked #[create] that declares what its objects run"
             } else {
                 "a service needs at least one pub fn in an impl block"
@@ -2271,6 +2320,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         resources,
         inputs,
         root,
+        native_only,
         states,
         contributions,
         hooks,
@@ -3023,9 +3073,9 @@ fn service_attribute(
                         "the key guard is `key = main`: an object's key is then [\"main\"]",
                     ));
                 }
-                guard.main = true;
+                guard.main = Some(key.span());
             } else if key == "principal" {
-                guard.principal = Some(input.parse::<LitStr>()?.value());
+                guard.principal = Some((input.parse::<LitStr>()?.value(), key.span()));
             } else if key == "lifetime" {
                 let value: Ident = input.parse()?;
                 host = match value.to_string().as_str() {
@@ -3061,7 +3111,7 @@ fn service_attribute(
         }
         // The host creates a host-lifetime object as `main` for itself when it installs the Orb.
         if host
-            && let Some(principal) = &guard.principal
+            && let Some((principal, _)) = &guard.principal
             && principal != "host"
         {
             return Err(syn::Error::new(

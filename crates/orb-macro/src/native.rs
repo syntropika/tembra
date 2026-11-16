@@ -415,11 +415,11 @@ fn guard(service: &Service, identity: &str) -> Option<TokenStream> {
             ));
         }
     };
-    let key = service.guard.main.then(|| {
+    let key = service.guard.main.map(|_| {
         let refused = refusal("key", format!("the objects of {identity} use the key main"));
         quote! { if address.key != ["main"] { #refused } }
     });
-    let principal = service.guard.principal.as_ref().map(|principal| {
+    let principal = service.guard.principal.as_ref().map(|(principal, _)| {
         let refused = refusal(
             "principal",
             format!("the objects of {identity} belong to the principal {principal}"),
