@@ -543,6 +543,118 @@ fn reference_views_the_contract_does_not_import_are_refused() {
     }
 }
 
+/// A world importing by key the interface it implements, as `#[orb]` derives one for a proxy: the
+/// view's `use` of the interface's types makes elaboration import the interface the world exports,
+/// for its types only, while the world itself imports the view alone.
+fn proxy() -> String {
+    format!(
+        "package example:router@1.0.0;
+interface counter-ref {{
+  use example:counters/counter@1.0.0.{{tally}};
+  resource counter {{ add: func(amount: u32) -> u32; read: async func() -> tally; }}
+  get: async func(key: list<string>) -> result<counter, string>;
+}}
+world proxy {{ import counter-ref; export example:counters/counter@1.0.0; }}
+package example:counters@1.0.0 {{ {COUNTER} }}
+"
+    )
+}
+
+/// An interface the world exports and imports only because a view `use`s its types is no hook: a
+/// world pairs an import with an export only when it imports the interface itself. The manifest's
+/// lifetime for the implemented interface is a service's, the view is read as a reference, both are
+/// packaged, and a hook role naming the interface is refused as for one the world never imports.
+/// The kernel binds the view alone: the type-only import needs no provider.
+#[test]
+fn an_interface_imported_only_for_its_types_stays_a_service() {
+    const COUNTER_ID: &str = "example:counters/counter@1.0.0";
+    const VIEW: &str = "example:router/counter-ref@1.0.0";
+    let contract = Contract::from_source("proxy.wit", &proxy(), Some("proxy")).unwrap();
+    let manifest =
+        |json: &str| component_carrying(&contract, &[("tembra:manifest", json.as_bytes())]);
+    let component = manifest(&format!(
+        r#"{{"services":{{"{COUNTER_ID}":{{"lifetime":"host"}}}},"references":{{"{VIEW}":"{COUNTER_ID}"}}}}"#
+    ));
+    let roles = contract.embedded_roles(&component).unwrap();
+    let host = ServicePolicy {
+        lifetime: Lifetime::Host,
+        linger_ms: 0,
+    };
+    assert_eq!(
+        roles,
+        ComponentRoles {
+            services: [(COUNTER_ID.into(), host)].into(),
+            references: [(VIEW.to_owned(), COUNTER_ID.to_owned())].into(),
+            ..Default::default()
+        }
+    );
+    let decoded = Artifact::decode(
+        &contract
+            .component_artifact(&component, "proxy", 1, &roles)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded.services, roles.services);
+    assert!(decoded.contributions.is_empty() && decoded.hooks.is_empty());
+    assert_eq!(decoded.contract.references()[VIEW].interface, COUNTER_ID);
+    for (json, refusal) in [
+        (
+            format!(r#"{{"declares":{{"{COUNTER_ID}":"series"}}}}"#),
+            format!(
+                "#[hook] declares {COUNTER_ID}, but the contract does not import and export it"
+            ),
+        ),
+        (
+            format!(r#"{{"contributes":{{"{COUNTER_ID}":1}}}}"#),
+            format!(
+                "#[hook] contributes to {COUNTER_ID}, but the contract does not import and export it as a contribution"
+            ),
+        ),
+    ] {
+        assert_eq!(
+            contract.embedded_roles(&manifest(&json)).unwrap_err().0,
+            refusal
+        );
+    }
+    let provider = crate::OrbProvider {
+        orb: "counters".into(),
+        api_version: 1,
+    };
+    let bindings = contract
+        .providers(
+            &[(VIEW.to_owned(), provider)].into(),
+            &crate::Grants::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        bindings,
+        BTreeMap::from([(
+            VIEW.to_owned(),
+            crate::Binding::Orb {
+                name: "counters".into(),
+                api_version: 1,
+            },
+        )])
+    );
+    let plan = contract.plan("proxy", 1, &bindings).unwrap();
+    assert_eq!(
+        plan.orb
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        [format!("proxy::{COUNTER_ID}").as_str()]
+    );
+    assert_eq!(
+        plan.orb
+            .requires
+            .iter()
+            .map(|requirement| requirement.orb.as_str())
+            .collect::<Vec<_>>(),
+        ["counters"]
+    );
+}
+
 /// The manifest is the section of the first core module holding one, in the order of the binary,
 /// the modules of nested components included; a core module is no component.
 #[test]

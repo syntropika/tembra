@@ -13,6 +13,7 @@ extern crate alloc;
         import = "example:counters/counter@1.0.0",
         import = "example:ledger/book@1.0.0",
         import = "example:texts/texts@1.0.0",
+        import("example:shelves/shelf@1.0.0", keyed),
         no_std
     )
 )]
@@ -26,7 +27,8 @@ extern crate alloc;
         import("example:counters/counter@1.0.0", keyed),
         import = "example:counters/counter@1.0.0",
         import = "example:ledger/book@1.0.0",
-        import = "example:texts/texts@1.0.0"
+        import = "example:texts/texts@1.0.0",
+        import("example:shelves/shelf@1.0.0", keyed)
     )
 )]
 mod guest {
@@ -296,11 +298,13 @@ mod guest {
     }
 
     /// Keeps a shelf of `example:shelves/shelf@1.0.0`, an interface of a consumed package this Orb
-    /// implements, and sorts its books in `library`, a derived interface that takes and returns
-    /// them as the shelf's export defines them.
+    /// implements, sorts its books in `library`, a derived interface that takes and returns them
+    /// as the shelf's export defines them, and lends them to the shelves of another keeper, which
+    /// `lending` reaches by key through the view the macro derives for the attribute's
+    /// `import("example:shelves/shelf@1.0.0", keyed)`: the interface this Orb implements.
     pub mod shelves {
-        use super::shelf;
-        use alloc::vec::Vec;
+        use super::{shelf, shelf_ref};
+        use alloc::{string::String, vec, vec::Vec};
         use core::sync::atomic::{AtomicU32, Ordering};
 
         /// How many books the shelf holds.
@@ -339,6 +343,42 @@ mod guest {
             /// The longest book, if any.
             pub fn longest(books: Vec<shelf::Book>) -> Option<shelf::Book> {
                 books.into_iter().max_by_key(|book| book.pages)
+            }
+        }
+
+        /// Lends books to the shelves of another keeper of `example:shelves/shelf@1.0.0`, the
+        /// interface this Orb implements, selected by key. The world imports the interface only for
+        /// the types the view `use`s, so the installation binds the view alone, and the shelf this
+        /// Orb exports stays a service.
+        #[service]
+        pub struct Lending;
+
+        impl Lending {
+            /// Put `books` on the shelf of `key` of the keeper the view reaches, one by one, and
+            /// return how many books that shelf holds. A key the keeper refuses is the error.
+            pub async fn lend(key: String, books: Vec<shelf::Book>) -> Result<u32, String> {
+                let shelf = shelf_ref::get(vec![key]).await?;
+                let mut held = 0;
+                for book in books {
+                    held = shelf.shelve(&lent(book));
+                }
+                Ok(held)
+            }
+        }
+
+        /// A book as the view takes it. A derived signature names the shelf's types through the
+        /// implemented interface's module, `shelf::Book`, the copy of the export; the view's methods
+        /// take the copy of the import, which the view's module names, `shelf_ref::Book`, and whose
+        /// `Topic` the bindings' import module of the interface defines.
+        fn lent(book: shelf::Book) -> shelf_ref::Book {
+            use super::example::shelves::shelf as imported;
+            shelf_ref::Book {
+                title: book.title,
+                pages: book.pages,
+                topic: match book.topic {
+                    shelf::Topic::Fiction => imported::Topic::Fiction,
+                    shelf::Topic::Science => imported::Topic::Science,
+                },
             }
         }
     }

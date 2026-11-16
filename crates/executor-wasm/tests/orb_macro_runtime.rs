@@ -14,36 +14,88 @@ use tembra::{
 use tembra_executor_wasm::{
     Binding, Contract, Deterministic, Engine, Install, Limits, SystemCapability,
 };
-use wit_component::{DecodedWasm, WitPrinter};
+use wit_component::WitPrinter;
+use wit_parser::Resolve;
 
 fn component(variable: &str) -> Vec<u8> {
     let path = std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} is required"));
     std::fs::read(path).unwrap_or_else(|error| panic!("reading {variable}: {error}"))
 }
 
+/// The contract of a macro guest as `cargo tembra build` packages it: the WIT the macro wrote into
+/// the component, whose world says which interfaces the Orb imports itself, with the packages it
+/// consumes nested whole. The world read from the component's types would import every interface a
+/// view `use`s the types of, the shelf the Orb implements included, which the contract then pairs
+/// with its export as a hook; the kernel's package, which the walker's state imports from, and the
+/// WASI packages chance imports from are bundled with the contracts.
 fn contract(bytes: &[u8]) -> (String, Contract) {
-    let DecodedWasm::Component(resolve, world) = wit_component::decode(bytes).unwrap() else {
-        panic!("the macro fixture must be a component");
-    };
-    let package = resolve.worlds[world].package.unwrap();
-    let mut printer = WitPrinter::default();
-    // The kernel's package, which the walker's state imports from, is bundled with the contracts,
-    // and so are the WASI packages chance imports from.
-    let nested: Vec<_> = resolve
-        .packages
-        .iter()
-        .filter(|(id, nested)| {
-            *id != package
-                && nested.name.namespace != "wasi"
-                && (nested.name.namespace != "tembra" || nested.name.name != "guest")
-        })
-        .map(|(id, _)| id)
-        .collect();
-    printer.print(&resolve, package, &nested).unwrap();
-    let text = String::from(printer.output);
-    let contract =
-        Contract::from_source("runtime.wit", &text, Some(&resolve.worlds[world].name)).unwrap();
+    let mut text = embedded_wit(bytes);
+    let mut consumed = Resolve::default();
+    consumed
+        .push_dir(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../orb-macro/runtime-fixture/consumed"
+        ))
+        .unwrap();
+    for (id, _) in consumed.packages.iter() {
+        let mut printer = WitPrinter::default();
+        printer.print_package(&consumed, id, false).unwrap();
+        text.push('\n');
+        text.push_str(&String::from(printer.output));
+    }
+    let world = text
+        .lines()
+        .find_map(|line| line.strip_prefix("world "))
+        .map(|rest| rest.trim_end_matches('{').trim())
+        .expect("the embedded WIT declares a world");
+    let contract = Contract::from_source("runtime.wit", &text, Some(world)).unwrap();
     (text, contract)
+}
+
+/// The `tembra:wit` custom section of the component's core module: a component is its 8-byte
+/// header and sections of an id byte, a LEB128 size and a payload; a core module, section 1, has
+/// the same layout, and its custom sections, 0, start with the LEB128 length of their name.
+fn embedded_wit(component: &[u8]) -> String {
+    fn size(bytes: &[u8], at: &mut usize) -> usize {
+        let (mut value, mut shift) = (0, 0);
+        loop {
+            let byte = bytes[*at];
+            *at += 1;
+            value |= usize::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+    fn sections(binary: &[u8]) -> Vec<(u8, &[u8])> {
+        let mut sections = Vec::new();
+        let mut at = 8;
+        while at < binary.len() {
+            let id = binary[at];
+            at += 1;
+            let length = size(binary, &mut at);
+            sections.push((id, &binary[at..at + length]));
+            at += length;
+        }
+        sections
+    }
+    for (id, module) in sections(component) {
+        if id != 1 {
+            continue;
+        }
+        for (id, payload) in sections(module) {
+            if id != 0 {
+                continue;
+            }
+            let mut at = 0;
+            let length = size(payload, &mut at);
+            if &payload[at..at + length] == b"tembra:wit" {
+                return String::from_utf8(payload[at + length..].to_vec()).unwrap();
+            }
+        }
+    }
+    panic!("the macro fixture carries no tembra:wit section");
 }
 
 /// The WASI interfaces chance imports, which an installation grants and the contract binds to the
@@ -67,7 +119,9 @@ fn host(import: &str, provider: &str) -> (String, Binding) {
 
 /// The bindings of the fixture's imports: the kernel serves the walker's state, the host chance's
 /// WASI imports, an Orb provider answers the keyed import's view and the plain import of the same
-/// interface, and another the texts import.
+/// interface, another the texts import, another keeper the view of the shelf the Orb implements,
+/// and a fourth the ledger the Orb imports and never calls; the shelf itself, imported for the
+/// types its view `use`s, binds to nothing.
 fn bindings() -> BTreeMap<String, Binding> {
     BTreeMap::from([
         ("tembra:guest/state@1.0.0".to_owned(), Binding::Kernel),
@@ -76,6 +130,8 @@ fn bindings() -> BTreeMap<String, Binding> {
         view(),
         provider(),
         texts(),
+        shelf_view(),
+        book(),
     ])
 }
 
@@ -91,12 +147,15 @@ struct Guest {
 /// Read both guests and check what needs no engine. Both share one WIT, one model and one plan.
 /// The contract depends on the bundled packages it imports from, which `cargo tembra build`
 /// writes into `contract/deps/`; it binds each WASI import to the host's provider of its grant,
-/// as for any compiled component, and requires two Orbs: the provider of the keyed import's view
-/// and of the plain import, and the provider of the texts import. The WIT holds the author's flags
-/// and `use`s the consumed packages' records as they define them: `readings` the tally of the
-/// imported interface, `library` the book and the topic of the shelf the Orb implements, `speller`
-/// the builder of the texts, in a record of the module. The roles the component carries pair the
-/// view with the interface it views, and the artifact keeps the pair.
+/// as for any compiled component, and requires four Orbs: the provider of the keyed import's view
+/// and of the plain import, the provider of the texts import, the keeper of the shelves the Orb
+/// reaches by key, and the keeper of the ledger it imports and never calls, whose interface has a
+/// resource and so a provider. The WIT holds the author's flags and `use`s the consumed packages'
+/// records as they define them: `readings` the tally of the imported interface, `library` and
+/// `lending` the book and the topic of the shelf the Orb implements, which its world imports only
+/// through the shelf view's `use`, `speller` the builder of the texts, in a record of the module.
+/// The roles the component carries pair each view with the interface it views, no hook with the
+/// shelf, and the artifact keeps the pairs.
 fn guests() -> [Guest; 2] {
     let guests = [
         ("standard", "TEMBRA_WASM_ORB_MACRO_STD"),
@@ -115,22 +174,18 @@ fn guests() -> [Guest; 2] {
             ["wasi-clocks.wit", "wasi-random.wit", "tembra-guest.wit"],
             "{name}"
         );
-        // The keyed import's view, the plain import and the texts import need their providers
-        // named; the WASI imports need their grants.
-        let orb = tembra_contracts::OrbProvider {
-            orb: COUNTERS.into(),
+        // The keyed imports' views and the plain imports need their providers named; the WASI
+        // imports need their grants; the shelf the Orb implements needs nothing.
+        let orb = |name: &str| tembra_contracts::OrbProvider {
+            orb: name.into(),
             api_version: 1,
         };
         let requires = BTreeMap::from([
-            (COUNTER_VIEW.to_owned(), orb.clone()),
-            (COUNTER.to_owned(), orb),
-            (
-                TEXTS.to_owned(),
-                tembra_contracts::OrbProvider {
-                    orb: BUILDERS.into(),
-                    api_version: 1,
-                },
-            ),
+            (COUNTER_VIEW.to_owned(), orb(COUNTERS)),
+            (COUNTER.to_owned(), orb(COUNTERS)),
+            (TEXTS.to_owned(), orb(BUILDERS)),
+            (SHELF_VIEW.to_owned(), orb(SHELVES)),
+            (BOOK.to_owned(), orb(LEDGER)),
         ]);
         assert_eq!(
             contract.providers(&requires, &granted().grants).unwrap(),
@@ -145,16 +200,17 @@ fn guests() -> [Guest; 2] {
             .collect();
         imports.sort();
         assert_eq!(imports, [(CLOCK, "clocks"), (RANDOM, "random")], "{name}");
-        // No WASI import requires an Orb: the provider of the view and of the plain import and
-        // the provider of the texts import are the only ones.
+        // No WASI import requires an Orb: the provider of the view and of the plain import, the
+        // provider of the texts import, the keeper of the shelf view and the keeper of the ledger
+        // are the only ones.
         let mut required: Vec<&str> = plan
             .orb
             .requires
             .iter()
             .map(|requirement| requirement.orb.as_str())
             .collect();
-        required.sort();
-        assert_eq!(required, [BUILDERS, COUNTERS], "{name}");
+        required.sort_unstable();
+        assert_eq!(required, [BUILDERS, COUNTERS, LEDGER, SHELVES], "{name}");
         let words: String = wit.split_whitespace().collect();
         for expected in [
             "flagsaccess{read,write,share,}",
@@ -162,24 +218,41 @@ fn guests() -> [Guest; 2] {
             "interfacelibrary{useexample:shelves/shelf@1.0.0.{book,topic};",
             "interfacespeller{useexample:texts/texts@1.0.0.{builder};",
             "recordjob{builder:builder,word:string,}",
+            "interfaceshelf-ref{useexample:shelves/shelf@1.0.0.{book};",
+            "interfacelending{useexample:shelves/shelf@1.0.0.{book};",
+            "importshelf-ref;",
+            "exportexample:shelves/shelf@1.0.0;",
         ] {
             assert!(words.contains(expected), "{name}: {expected}\n{wit}");
         }
+        assert!(
+            !words.contains("importexample:shelves/shelf@1.0.0;"),
+            "{name}: the world imports the shelf only through the view's `use`\n{wit}"
+        );
         let roles = contract.embedded_roles(&bytes).unwrap();
         assert_eq!(
             roles.references,
-            BTreeMap::from([(COUNTER_VIEW.to_owned(), COUNTER.to_owned())]),
+            BTreeMap::from([
+                (COUNTER_VIEW.to_owned(), COUNTER.to_owned()),
+                (SHELF_VIEW.to_owned(), SHELF.to_owned()),
+            ]),
             "{name}"
+        );
+        assert!(
+            roles.contributions.is_empty() && roles.hooks.is_empty(),
+            "{name}: {roles:?}"
         );
         let artifact = contract
             .component_artifact(&bytes, name, 1, &roles)
             .unwrap();
         let decoded = tembra_contracts::Artifact::decode(&artifact).unwrap();
-        assert_eq!(
-            decoded.contract.references()[COUNTER_VIEW].interface,
-            COUNTER,
-            "{name}"
-        );
+        for (view, interface) in [(COUNTER_VIEW, COUNTER), (SHELF_VIEW, SHELF)] {
+            assert_eq!(
+                decoded.contract.references()[view].interface,
+                interface,
+                "{name}"
+            );
+        }
         Guest {
             name,
             wit,
@@ -222,7 +295,15 @@ fn execute(engine: Engine) {
     refuse_ungranted(&engine, &guests);
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
-    let orbs = loaded.into_iter().chain([counters(), builders()]).collect();
+    let orbs = loaded
+        .into_iter()
+        .chain([
+            counters(),
+            builders(),
+            shelves(),
+            ledger(&guests[0].contract),
+        ])
+        .collect();
     host.install(orbs).unwrap();
     for (guest, counted) in guests.iter().zip([0, 7]) {
         let name = guest.name;
@@ -235,6 +316,7 @@ fn execute(engine: Engine) {
         permit(&mut pool, &host, name);
         read(&mut pool, &host, name, counted);
         shelve(&mut pool, &host, name);
+        lend(&mut pool, &host, name);
     }
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
@@ -436,13 +518,95 @@ fn texts() -> (String, Binding) {
 }
 
 /// An installation of the fixture that binds the keyed import's view and the plain import to the
-/// provider, and the texts import to its own; without them the kernel refuses the fixture, as for
-/// any import of another Orb.
+/// provider, the texts import to its own, the view of the shelf the fixture implements to another
+/// keeper and the ledger to its keeper; without them the kernel refuses the fixture, as for any
+/// import of another Orb.
 fn bound(install: Install) -> Install {
     install
         .requires(COUNTER_VIEW, COUNTERS, 1)
         .requires(COUNTER, COUNTERS, 1)
         .requires(TEXTS, BUILDERS, 1)
+        .requires(SHELF_VIEW, SHELVES, 1)
+        .requires(BOOK, LEDGER, 1)
+}
+
+/// The interface the fixture implements and imports by key, the view the macro derives for that
+/// import, which the installer binds, and the native Orb keeping the shelves it reaches.
+const SHELF: &str = "example:shelves/shelf@1.0.0";
+const SHELF_VIEW: &str = "example:runtime/shelf-ref@1.0.0";
+const SHELVES: &str = "shelves";
+
+/// The binding of the shelf view to the keeper it reaches.
+fn shelf_view() -> (String, Binding) {
+    let provider = Binding::Orb {
+        name: SHELVES.into(),
+        api_version: 1,
+    };
+    (SHELF_VIEW.to_owned(), provider)
+}
+
+/// The native keeper of the shelves the fixture reaches by key, read from the package the fixture
+/// consumes and implements: each shelf counts the books put on it, and the key `refused` is
+/// refused.
+fn shelves() -> Orb {
+    let wit = format!(
+        "{}\nworld keeper {{ export shelf; }}\n",
+        include_str!("../../orb-macro/runtime-fixture/consumed/deps/shelves.wit")
+    );
+    let service = Contract::from_source("shelves.wit", &wit, Some("keeper"))
+        .unwrap()
+        .plan(SHELVES, 1, &BTreeMap::new())
+        .unwrap()
+        .orb
+        .services
+        .remove(0);
+    Orb::new(SHELVES, 1).service(
+        Service::new(service.name, |declaration| {
+            if declaration.address()?.key == ["refused"] {
+                return Err(tembra::Error::new(Code::Forbidden, "key", "unapproved key"));
+            }
+            Ok(Cell::new(0_u32))
+        })
+        .signature(service.signature)
+        .method("shelve", |books, _, (_book,): (Value,)| async move {
+            books.set(books.get() + 1);
+            Ok(books.get())
+        }),
+    )
+}
+
+/// The interface the fixture imports plainly and never calls, whose `tally` shares the name of the
+/// counters' record, and the native Orb providing it.
+const BOOK: &str = "example:ledger/book@1.0.0";
+const LEDGER: &str = "ledger";
+
+/// The binding of the ledger import to its provider.
+fn book() -> (String, Binding) {
+    let provider = Binding::Orb {
+        name: LEDGER.into(),
+        api_version: 1,
+    };
+    (BOOK.to_owned(), provider)
+}
+
+/// The native keeper of the ledger: the interface has a resource and no function, so the contract
+/// requires a provider of it, while `plan` lists no service for an interface without functions. The
+/// keeper serves it under the name and with the signature the fixture's own plan requires of its
+/// provider, and answers no method, as the fixture calls none.
+fn ledger(contract: &Contract) -> Orb {
+    let plan = contract.plan("runtime", 1, &bindings()).unwrap();
+    let requirement = plan
+        .orb
+        .requires
+        .iter()
+        .find(|requirement| requirement.orb == LEDGER)
+        .expect("the fixture requires the ledger");
+    let mut keeper = Orb::new(LEDGER, 1);
+    for (name, signature) in &requirement.signatures {
+        keeper = keeper
+            .service(Service::new(name.clone(), |_| Ok(())).signature(Some(signature.clone())));
+    }
+    keeper
 }
 
 /// One object of the provider: the key it was acquired with, the principal that acquired it and
@@ -975,4 +1139,48 @@ fn spell(pool: &mut LocalPool, host: &Host, name: &str) {
     );
     builders.release().unwrap();
     speller.release().unwrap();
+}
+
+/// Drive the lending of the Orb `name`, which reaches the shelves of the native keeper through the
+/// view the macro derived for the fixture's keyed import of the interface the fixture implements:
+/// the installation binds the view alone, and a book of the shelf's export crosses the view as the
+/// import's. The books of one call go to one shelf, which counts them; a key the keeper refuses
+/// comes back as the error of the WIT result.
+fn lend(pool: &mut LocalPool, host: &Host, name: &str) {
+    let lending = Rc::new(
+        host.get(
+            &format!("{name}::example:runtime/lending@1.0.0"),
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(lending.ready()).unwrap();
+    let book = |title: &str, pages: u32, topic: &str| json!({"title": title, "pages": pages, "topic": topic});
+    let lend = |pool: &mut LocalPool, key: &str, books: Value| {
+        counting_call(pool, host, &lending, "alice", "lend", json!([key, books]))
+    };
+    assert_eq!(
+        lend(
+            pool,
+            "a",
+            json!([book("dune", 412, "fiction"), book("cosmos", 365, "science")])
+        ),
+        json!({"tag": "ok", "val": 2}),
+        "{name}"
+    );
+    assert_eq!(
+        lend(pool, "b", json!([book("emma", 474, "fiction")])),
+        json!({"tag": "ok", "val": 1}),
+        "{name}"
+    );
+    let refused = lend(pool, "refused", json!([book("dune", 412, "fiction")]));
+    assert_eq!(refused["tag"], "err", "{name}: {refused}");
+    assert!(
+        refused["val"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("unapproved key")),
+        "{name}: {refused}"
+    );
+    lending.release().unwrap();
 }

@@ -16,7 +16,8 @@
 //! the world exports, an implemented one or a hook, gets a copy of its types in its export module,
 //! and a derived interface, exported too, uses that copy: the Orb module re-exports the export
 //! module of an implemented interface and of a contributed hook, but the import module of a hook it
-//! declares, which `run` calls, so a derived interface names none of a declared hook's types. A
+//! declares, which `run` calls, so a derived interface names none of a declared hook's types, and
+//! none of an implemented interface's through the view of its keyed import, the import's copy. A
 //! WASI interface's names stay out of a derived interface, named through the WASI interface's
 //! module or through a consumed interface that `use`s them, and a consumed type crosses one when it
 //! carries data only. A state may hold a consumed type that `serde` can write, which the bindings
@@ -314,6 +315,18 @@ impl Modules {
                 out.push(ident.clone());
             }
         });
+    }
+
+    /// The module the Orb module re-exports for the interface `identity` when the module implements
+    /// it, `counter` for `example:counters/counter@1.0.0`: the export module, whose types a derived
+    /// interface takes.
+    fn implementing(&self, identity: &str) -> Option<&str> {
+        self.reexported
+            .iter()
+            .find(|(_, reexported)| {
+                reexported.role == Role::Implemented && reexported.identity == identity
+            })
+            .map(|(module, _)| module.as_str())
     }
 
     /// The module types the fields of a struct or the payloads of an enum's cases mention, the
@@ -635,7 +648,8 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         let dependency = exported
             .iter()
             .find(|interface| items.depends.contains(&interface.identity));
-        let Some(interface) = checked(named, definition, place, declared, dependency)? else {
+        let Some(interface) = checked(named, definition, place, declared, dependency, modules)?
+        else {
             continue;
         };
         let uses = foreign.entry(wit::kebab(interface)).or_default();
@@ -742,6 +756,7 @@ fn checked<'a>(
     place: &Place<'a>,
     declared: &[Declared],
     dependency: Option<&Reexported>,
+    modules: &Modules,
 ) -> syn::Result<Option<&'a Ident>> {
     let subject = place.subject();
     let ident = named.ident;
@@ -796,6 +811,17 @@ fn checked<'a>(
         Place::Field { interface, .. } => (*interface, false),
         Place::Input { .. } | Place::State { .. } => unreachable!("checked above"),
     };
+    // The view of an interface the module implements names the import's copy of the interface's
+    // types, while a derived interface, exported, takes the copy of its export, which the
+    // implemented interface's module names.
+    if interface.role == Role::Keyed
+        && let Some(module) = modules.implementing(&interface.identity)
+    {
+        let view = named.module;
+        return refuse(format!(
+            "{what} of {of} and implements: a derived interface takes the types of an implemented interface from its export, as `{module}::{ident}` names them; `{view}::{ident}` is the import's"
+        ));
+    }
     // A WASI interface's type or resource, named through the WASI interface's module or through
     // a consumed interface that `use`s it: the runtime carries neither between Orbs.
     if interface.role == Role::Wasi || definition.wasi.is_some() {

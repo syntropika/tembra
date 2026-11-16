@@ -1778,13 +1778,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     );
     // The view of each interface imported by key, derived from the interface's WIT: its module
     // re-exports the types the view uses, which a derived signature names.
-    let views = keyed::views(
-        &options.keyed,
-        wit_dir.as_deref(),
-        &world,
-        &interface_names,
-        &implemented,
-    )?;
+    let views = keyed::views(&options.keyed, wit_dir.as_deref(), &world, &interface_names)?;
     // What each derived interface `use`s from the consumed interfaces: the types its functions and
     // the types it defines name, and the handles its functions take, once each is checked where
     // it is named, a state's fields included.

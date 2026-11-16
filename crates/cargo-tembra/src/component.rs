@@ -271,27 +271,31 @@ fn interface(item: &WorldItem) -> Option<InterfaceId> {
 }
 
 /// The component roles of a contract. A hook interface is one the world both imports and
-/// exports: the component's manifest says which it declares, with their composition, which it
-/// contributes to, with their priorities, which of its services chose a lifetime or a linger, and
-/// which imports are the views of interfaces it imports by key, as `Contract::embedded_roles`
-/// reads and checks them. Every other hook interface is a contribution at priority 0, as for a
-/// component built without the macro, which carries no manifest.
+/// exports, importing it itself: an import elaboration added because a view `use`s its types, the
+/// view of the interface the Orb implements, pairs with no export. The component's manifest says
+/// which hooks it declares, with their composition, which it contributes to, with their
+/// priorities, which of its services chose a lifetime or a linger, and which imports are the views
+/// of interfaces it imports by key, as `Contract::embedded_roles` reads and checks them. Every
+/// other hook interface is a contribution at priority 0, as for a component built without the
+/// macro, which carries no manifest.
 pub fn roles(contract: &Contract, component: &[u8]) -> Result<ComponentRoles> {
     let mut roles = contract
         .embedded_roles(component)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let model = contract.prepared().model();
-    let identities = |entries: &[tembra_contracts::Entry]| -> BTreeSet<String> {
+    let identities = |entries: &[tembra_contracts::Entry], own: bool| -> BTreeSet<String> {
         entries
             .iter()
             .filter_map(|entry| match &entry.item {
-                tembra_contracts::Item::Interface(interface) => interface.contract.clone(),
+                tembra_contracts::Item::Interface(interface) if interface.explicit || !own => {
+                    interface.contract.clone()
+                }
                 _ => None,
             })
             .collect()
     };
-    let exported = identities(&model.exports);
-    for id in identities(&model.imports) {
+    let exported = identities(&model.exports, false);
+    for id in identities(&model.imports, true) {
         if exported.contains(&id) && !roles.hooks.contains_key(&id) {
             roles.contributions.entry(id).or_insert(0);
         }
@@ -445,7 +449,8 @@ fn classify_import(id: &str, handler_only: bool) -> Import {
 /// Exports as services and methods, with the lifetime a service chose, the incoming HTTP
 /// handler, hooks declared and contributed to, kernel-managed state and resources, and imports
 /// with the grant they will need at installation; an import by key with the interface whose
-/// objects it reaches.
+/// objects it reaches, and not the interface itself when the world imports it only for the types
+/// the view `use`s.
 pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &ComponentRoles) {
     let ComponentRoles {
         contributions,
@@ -550,6 +555,12 @@ pub fn summary(resolve: &Resolve, world: WorldId, orb_name: &str, roles: &Compon
             // Bound to the provider through the contribution, the entry to the Orb's own hook,
             // or served by the kernel.
             context |= id == guest::CONTEXT;
+            continue;
+        }
+        if world.exports.contains_key(key) {
+            // The roles name every hook, so an import of an interface the world exports besides
+            // is one elaboration added for the types a view `use`s, the view of the interface the
+            // Orb implements: the kernel binds the view alone.
             continue;
         }
         match classify_import(&id, handler_only) {

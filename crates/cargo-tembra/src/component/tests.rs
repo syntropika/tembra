@@ -177,6 +177,42 @@ fn a_consumed_package_brings_the_packages_it_builds_on() {
     );
 }
 
+/// The roles of a component without a manifest pair an import with an export, as a contribution at
+/// priority 0, only when the world imports the interface itself: an interface the world imports
+/// because a view `use`s its types, while exporting it, as a proxy importing by key the interface
+/// it implements does, stays a service.
+#[test]
+fn an_interface_imported_only_for_its_types_is_no_contribution() {
+    let roles = |source: &str, world: &str| {
+        let contract =
+            tembra_contracts::Contract::from_source("roles.wit", source, Some(world)).unwrap();
+        super::roles(&contract, EMPTY_COMPONENT).unwrap()
+    };
+    let hook = roles(
+        "package example:hooks@1.0.0; interface guard { apply: func(value: u32) -> u32; } world extension { import guard; export guard; }",
+        "extension",
+    );
+    assert_eq!(
+        hook.contributions,
+        [("example:hooks/guard@1.0.0".to_owned(), 0)].into()
+    );
+    let proxy = roles(
+        "package example:router@1.0.0;
+interface counter-ref {
+  use example:counters/counter@1.0.0.{tally};
+  resource counter { add: func(amount: u32) -> u32; read: async func() -> tally; }
+  get: async func(key: list<string>) -> result<counter, string>;
+}
+world proxy { import counter-ref; export example:counters/counter@1.0.0; }
+package example:counters@1.0.0 {
+  interface counter { record tally { key: list<string>, count: u32 } add: func(amount: u32) -> u32; read: async func() -> tally; }
+}
+",
+        "proxy",
+    );
+    assert_eq!(proxy, tembra_contracts::ComponentRoles::default());
+}
+
 #[test]
 fn inspect_fails_when_the_verifier_refuses_the_component() {
     let dir = scratch("inspect-verdict");

@@ -360,11 +360,14 @@ interface counter { use cursors.{cursor}; read: func() -> u32; }
     );
 }
 
-/// An interface the module implements is not imported by key: the view would `use` the
-/// interface's types, so the world would import the interface it exports, which `cargo tembra
-/// build` and the kernel read as a hook. The error is on the import.
+/// An interface the module implements is imported by key as well: a proxy serving the interface
+/// reaches another provider's objects through the view. The view `use`s the interface's types, so
+/// the elaborated world imports the interface it exports, for the types alone, which the contracts
+/// and `cargo tembra build` tell from a hook, an interface the world imports itself. A derived
+/// signature names the interface's types through the implemented interface's module, the export's
+/// copy, which the derived interface takes; the view's module names the import's.
 #[test]
-fn an_implemented_interface_is_not_imported_by_key() {
+fn an_implemented_interface_is_imported_by_key() {
     const PROXY: &str = "mod proxy {
         #[service(\"example:counters/counter@1.0.0\")]
         pub struct Counter;
@@ -382,14 +385,72 @@ fn an_implemented_interface_is_not_imported_by_key() {
         },
         PROXY,
     );
-    let refusal = refused(
+    // Or by key, through the view, from a derived service.
+    let relaying = PROXY.replace(
+        "\n    }",
+        "
+        #[service]
+        pub struct Relay;
+        impl Relay {
+            /// The tally of the object of `key` of the provider the view reaches.
+            pub async fn relayed(key: String) -> Result<counter::Tally, String> {
+                let tally = counter_ref::get(vec![key]).await?.read().await;
+                Ok(counter::Tally { key: tally.key, count: tally.count })
+            }
+        }
+    }",
+    );
+    let module = expanded(
         options(Some(&dir), &["example:counters/counter@1.0.0"]),
-        PROXY,
+        &relaying,
     );
+    let text = wit(&module);
+    for expected in [
+        "interface relay {\n  use example:counters/counter@1.0.0.{tally};\n  /// The tally of the object of `key` of the provider the view reaches.\n  relayed: async func(key: string) -> result<tally, string>;\n}\n".to_owned(),
+        format!("{VIEW}\nworld proxy {{\n  import counter-ref;\n  export example:counters/counter@1.0.0;\n  export relay;\n}}\n"),
+    ] {
+        assert!(text.contains(&expected), "{expected}\n{text}");
+    }
+    resolved(&dir, &text);
     assert!(
-        refusal.contains("example:counters/counter@1.0.0 is implemented by this module and imported by key: the view `use`s the interface's types, so the world imports example:counters/counter@1.0.0 while the Orb exports it, which `cargo tembra build` and the kernel read as a hook; an interface imported by key is one another Orb implements"),
-        "{refusal}"
+        manifest(&module).contains(
+            r#""references":{"example:router/counter-ref@1.0.0":"example:counters/counter@1.0.0"}"#
+        ),
+        "{}",
+        manifest(&module)
     );
+    let tokens = quote::quote!(#module).to_string();
+    for reexport in [
+        "pub use exports :: example :: counters :: counter ;",
+        "pub use self :: example :: router :: counter_ref ;",
+    ] {
+        assert!(tokens.contains(reexport), "{reexport}\n{tokens}");
+    }
+    // The view's module names the import's copy of the interface's types, which the derived
+    // interface's bindings do not take: the error points to the implemented interface's module.
+    for (written, named, subject) in [
+        (
+            "-> Result<counter::Tally, String>",
+            "-> Result<counter_ref::Tally, String>",
+            "returns",
+        ),
+        (
+            "relayed(key: String)",
+            "relayed(key: String, last: counter_ref::Tally)",
+            "takes",
+        ),
+    ] {
+        let refusal = refused(
+            options(Some(&dir), &["example:counters/counter@1.0.0"]),
+            &relaying.replace(written, named),
+        );
+        assert!(
+            refusal.contains(&format!(
+                "`Relay::relayed` {subject} `Tally`, a record of the interface example:counters/counter@1.0.0, which this module imports by key and implements: a derived interface takes the types of an implemented interface from its export, as `counter::Tally` names them; `counter_ref::Tally` is the import's"
+            )),
+            "{refusal}"
+        );
+    }
 }
 
 /// A view is an interface of the Orb's package named after the provider interface: an interface

@@ -588,11 +588,15 @@ fixed length. Nor is an interface with a function `handle`, `take-handle` or `fr
 every object's bindings define for its handle, or with a parameter `self`, which names a method's
 object. A plain import of the
 same interface may stand next to the keyed one, re-exported under the interface's name. An
-interface the module implements is not imported by key: the view `use`s the interface's types,
-so the world would import the interface it exports, which `cargo tembra build` and the kernel
-read as a hook; a proxy of an interface reaches the other provider's `main` object through a
-plain import. The `counting` service of the [runtime fixture](runtime-fixture/src/lib.rs) imports
-by key.
+interface the module implements may be imported by key too: a proxy serving the interface
+reaches the objects of other providers through the view. The view `use`s the interface's types,
+so the elaborated world imports the interface it exports, for the types alone, which `cargo tembra
+build` and the kernel tell from a hook, an interface the world imports itself. A derived signature
+names such an interface's types through the implemented interface's module, `counter::Tally`, the
+copy of the export the derived interface takes; the view's `counter_ref::Tally` is the import's,
+which the view's methods take and return, and the macro refuses it in a derived signature. The
+`counting` and `lending` services of the [runtime fixture](runtime-fixture/src/lib.rs) import by
+key, `lending` the interface the fixture implements.
 
 ## Importing WASI interfaces
 

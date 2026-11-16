@@ -59,25 +59,30 @@ impl EmbeddedManifest {
 /// The roles the manifest of `component` gives, checked against the contract. A hook the
 /// component declares or contributes to is an interface the world both imports and exports, and
 /// takes one of the two roles; a service policy names an interface the world exports and does
-/// not import; a reference view names an interface the world imports and does not export. The
-/// contract checks the roles themselves, a view's shape included, when the component is packaged.
+/// not import; a reference view names an interface the world imports and does not export. An
+/// import pairs with an export only when the world imports the interface itself: one elaboration
+/// added because a view `use`s its types, the view of the interface the component implements, is
+/// no hook, and the kernel binds it to nothing. The contract checks the roles themselves, a view's
+/// shape included, when the component is packaged.
 #[cfg(feature = "authoring")]
 pub(crate) fn roles(
     contract: &PreparedContract,
     component: &[u8],
 ) -> Result<ComponentRoles, Error> {
     let manifest = EmbeddedManifest::read(component)?;
-    let interfaces = |entries: &[Entry]| -> BTreeSet<String> {
+    let interfaces = |entries: &[Entry], own: bool| -> BTreeSet<String> {
         entries
             .iter()
             .filter_map(|entry| match &entry.item {
-                Item::Interface(interface) => interface.contract.clone(),
+                Item::Interface(interface) if interface.explicit || !own => {
+                    interface.contract.clone()
+                }
                 _ => None,
             })
             .collect()
     };
-    let exported = interfaces(&contract.model().exports);
-    let imported = interfaces(&contract.model().imports);
+    let exported = interfaces(&contract.model().exports, false);
+    let imported = interfaces(&contract.model().imports, true);
     let paired: BTreeSet<String> = imported
         .iter()
         .filter(|identity| exported.contains(*identity))
