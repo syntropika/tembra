@@ -7,7 +7,7 @@
 //! interface. The macro derives the view from the provider's WIT in the consumed directory, names
 //! it after the provider interface followed by `-ref`, imports it in the world, re-exports its
 //! generated module under that name and writes the role in the manifest's `references`.
-use crate::wit::{escaped, unsupported};
+use crate::wit::{anywhere, escaped, unsupported};
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::{
@@ -356,12 +356,12 @@ impl Spelling<'_> {
                             self.target
                         )));
                     }
-                    if let Some(problem) = no_data(self.resolve, ty, &mut BTreeSet::new()) {
+                    if let Some(problem) = no_data(self.resolve, ty) {
                         return Err(Carried::NoData(format!(
                             "{problem} in the type `{type_name}`"
                         )));
                     }
-                    if let Some(problem) = unsupported(self.resolve, ty, &mut BTreeSet::new()) {
+                    if let Some(problem) = unsupported(self.resolve, ty) {
                         return Err(Carried::Unsupported(format!(
                             "{problem} in the type `{type_name}`"
                         )));
@@ -391,9 +391,9 @@ impl Spelling<'_> {
                     ),
                     TypeDefKind::Type(inner) => self.spell(*inner)?,
                     _ => {
-                        return Err(match no_data(self.resolve, ty, &mut BTreeSet::new()) {
+                        return Err(match no_data(self.resolve, ty) {
                             Some(problem) => Carried::NoData(problem.to_owned()),
-                            None => match unsupported(self.resolve, ty, &mut BTreeSet::new()) {
+                            None => match unsupported(self.resolve, ty) {
                                 Some(problem) => Carried::Unsupported(problem.to_owned()),
                                 None => Carried::NoData("a type without a name".to_owned()),
                             },
@@ -402,7 +402,7 @@ impl Spelling<'_> {
                 };
                 // What the runtime refuses of the type itself, its parts spelled: an option of an
                 // option.
-                if let Some(problem) = unsupported(self.resolve, ty, &mut BTreeSet::new()) {
+                if let Some(problem) = unsupported(self.resolve, ty) {
                     return Err(Carried::Unsupported(problem.to_owned()));
                 }
                 spelled
@@ -411,42 +411,26 @@ impl Spelling<'_> {
     }
 }
 
-/// What a type holds anywhere that is no data, if anything: a resource or a handle to one, a
-/// future, a stream or an error context.
-pub(crate) fn no_data(
-    resolve: &Resolve,
-    ty: Type,
-    seen: &mut BTreeSet<wit_parser::TypeId>,
-) -> Option<&'static str> {
+/// What a type holds anywhere that is no data, if anything, as `no_data_itself` finds it in each
+/// type.
+pub(crate) fn no_data(resolve: &Resolve, ty: Type) -> Option<&'static str> {
+    anywhere(resolve, ty, |ty| no_data_itself(resolve, ty))
+}
+
+/// Whether a type is itself no data, and what: a resource or a handle to one, a future, a stream
+/// or an error context.
+pub(crate) fn no_data_itself(resolve: &Resolve, ty: Type) -> Option<&'static str> {
     let id = match ty {
         Type::Id(id) => id,
         Type::ErrorContext => return Some("an error context"),
         _ => return None,
     };
-    // A type already looked at answered no, or the walk would have stopped there.
-    if !seen.insert(id) {
-        return None;
-    }
-    let mut holds = |ty: Type| no_data(resolve, ty, seen);
     match &resolve.types[id].kind {
         TypeDefKind::Resource => Some("a resource"),
         TypeDefKind::Handle(_) => Some("a resource handle"),
         TypeDefKind::Future(_) => Some("a future"),
         TypeDefKind::Stream(_) => Some("a stream"),
-        TypeDefKind::Record(record) => record.fields.iter().find_map(|field| holds(field.ty)),
-        TypeDefKind::Variant(variant) => variant
-            .cases
-            .iter()
-            .filter_map(|case| case.ty)
-            .find_map(holds),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().find_map(holds),
-        TypeDefKind::Option(inner)
-        | TypeDefKind::List(inner)
-        | TypeDefKind::FixedLengthList(inner, _)
-        | TypeDefKind::Type(inner) => holds(*inner),
-        TypeDefKind::Map(key, value) => holds(*key).or_else(|| holds(*value)),
-        TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).find_map(holds),
-        TypeDefKind::Flags(_) | TypeDefKind::Enum(_) | TypeDefKind::Unknown => None,
+        _ => None,
     }
 }
 

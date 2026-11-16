@@ -988,10 +988,10 @@ pub(crate) fn defined<'a>(
                             TypeDefKind::Flags(_) => "a flags",
                             _ => "a type",
                         },
-                        carries: crate::keyed::no_data(resolve, ty, &mut BTreeSet::new()),
-                        unsupported: unsupported(resolve, ty, &mut BTreeSet::new()),
+                        carries: crate::keyed::no_data(resolve, ty),
+                        unsupported: unsupported(resolve, ty),
                         option: optional(resolve, ty),
-                        unwritable: unwritable(resolve, ty, &mut BTreeSet::new()),
+                        unwritable: unwritable(resolve, ty),
                     },
                 };
                 let definition = Definition {
@@ -1039,40 +1039,78 @@ fn wasi_origin(resolve: &Resolve, mut ty: wit_parser::Type) -> Option<String> {
     None
 }
 
-/// What a WIT type of a consumed package holds anywhere that its bindings give no `serde`
-/// implementation, if anything: a flags, which they generate as a bitflags type without the
-/// derives a state asks for, or a list of a fixed length beyond those `serde` implements.
-fn unwritable(
+/// What a WIT type holds anywhere that `test` finds, if anything: the first answer of `test`,
+/// asked about the type itself, then about each type it holds, in order, through records,
+/// variants, tuples, options, lists, maps, results and aliases. `test` is asked about the types
+/// without an id as well, such as an error context. The walk does not look into what a handle
+/// refers to or what a future or a stream carries, and a resource, a flags and an enum hold no
+/// type.
+pub(crate) fn anywhere<T>(
     resolve: &Resolve,
     ty: wit_parser::Type,
-    seen: &mut BTreeSet<wit_parser::TypeId>,
-) -> Option<&'static str> {
+    test: impl Fn(wit_parser::Type) -> Option<T>,
+) -> Option<T> {
+    fn walk<T>(
+        resolve: &Resolve,
+        ty: wit_parser::Type,
+        test: &dyn Fn(wit_parser::Type) -> Option<T>,
+        seen: &mut BTreeSet<wit_parser::TypeId>,
+    ) -> Option<T> {
+        let wit_parser::Type::Id(id) = ty else {
+            return test(ty);
+        };
+        // A type already looked at answered no, or the walk would have stopped there.
+        if !seen.insert(id) {
+            return None;
+        }
+        if let Some(found) = test(ty) {
+            return Some(found);
+        }
+        let mut holds = |ty: wit_parser::Type| walk(resolve, ty, test, seen);
+        match &resolve.types[id].kind {
+            TypeDefKind::Record(record) => record.fields.iter().find_map(|field| holds(field.ty)),
+            TypeDefKind::Variant(variant) => variant
+                .cases
+                .iter()
+                .filter_map(|case| case.ty)
+                .find_map(holds),
+            TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().find_map(holds),
+            TypeDefKind::Option(inner)
+            | TypeDefKind::List(inner)
+            | TypeDefKind::FixedLengthList(inner, _)
+            | TypeDefKind::Type(inner) => holds(*inner),
+            TypeDefKind::Map(key, value) => holds(*key).or_else(|| holds(*value)),
+            TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).find_map(holds),
+            TypeDefKind::Handle(_)
+            | TypeDefKind::Future(_)
+            | TypeDefKind::Stream(_)
+            | TypeDefKind::Resource
+            | TypeDefKind::Flags(_)
+            | TypeDefKind::Enum(_)
+            | TypeDefKind::Unknown => None,
+        }
+    }
+    walk(resolve, ty, &test, &mut BTreeSet::new())
+}
+
+/// What a WIT type of a consumed package holds anywhere that its bindings give no `serde`
+/// implementation, if anything, as `unwritable_itself` finds it in each type.
+fn unwritable(resolve: &Resolve, ty: wit_parser::Type) -> Option<&'static str> {
+    anywhere(resolve, ty, |ty| unwritable_itself(resolve, ty))
+}
+
+/// Whether a WIT type of a consumed package is itself one its bindings give no `serde`
+/// implementation, and what: a flags, which they generate as a bitflags type without the derives
+/// a state asks for, or a list of a fixed length beyond those `serde` implements.
+fn unwritable_itself(resolve: &Resolve, ty: wit_parser::Type) -> Option<&'static str> {
     let wit_parser::Type::Id(id) = ty else {
         return None;
     };
-    // A type already looked at answered no, or the walk would have stopped there.
-    if !seen.insert(id) {
-        return None;
-    }
-    let mut holds = |ty: wit_parser::Type| unwritable(resolve, ty, seen);
     match &resolve.types[id].kind {
         TypeDefKind::Flags(_) => Some("a flags"),
         TypeDefKind::FixedLengthList(_, length) if *length > 32 => {
             Some("a list of a fixed length above 32")
         }
-        TypeDefKind::Record(record) => record.fields.iter().find_map(|field| holds(field.ty)),
-        TypeDefKind::Variant(variant) => variant
-            .cases
-            .iter()
-            .filter_map(|case| case.ty)
-            .find_map(holds),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().find_map(holds),
-        TypeDefKind::Option(inner)
-        | TypeDefKind::List(inner)
-        | TypeDefKind::FixedLengthList(inner, _)
-        | TypeDefKind::Type(inner) => holds(*inner),
-        TypeDefKind::Map(key, value) => holds(*key).or_else(|| holds(*value)),
-        TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).find_map(holds),
         _ => None,
     }
 }
@@ -1083,42 +1121,20 @@ fn unwritable(
 /// a value adapter of their own. What is no data, which `supported` refuses too, is
 /// `keyed::no_data`'s to find. An option a Rust type spells around an option is `wit_type`'s,
 /// `Option<Option<T>>`, or the consumed-type check's, `Option<catalog::Opt>` for an option `opt`.
-pub(crate) fn unsupported(
-    resolve: &Resolve,
-    ty: wit_parser::Type,
-    seen: &mut BTreeSet<wit_parser::TypeId>,
-) -> Option<&'static str> {
-    let wit_parser::Type::Id(id) = ty else {
-        return None;
-    };
-    // A type already looked at answered no, or the walk would have stopped there.
-    if !seen.insert(id) {
-        return None;
-    }
-    let mut holds = |ty: wit_parser::Type| unsupported(resolve, ty, seen);
-    match &resolve.types[id].kind {
-        TypeDefKind::Option(inner) if optional(resolve, *inner) => Some("an option of an option"),
-        TypeDefKind::Map(..) => Some("a map"),
-        TypeDefKind::FixedLengthList(..) => Some("a list of a fixed length"),
-        TypeDefKind::Record(record) => record.fields.iter().find_map(|field| holds(field.ty)),
-        TypeDefKind::Variant(variant) => variant
-            .cases
-            .iter()
-            .filter_map(|case| case.ty)
-            .find_map(holds),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().find_map(holds),
-        TypeDefKind::Option(inner) | TypeDefKind::List(inner) | TypeDefKind::Type(inner) => {
-            holds(*inner)
+pub(crate) fn unsupported(resolve: &Resolve, ty: wit_parser::Type) -> Option<&'static str> {
+    anywhere(resolve, ty, |ty| {
+        let wit_parser::Type::Id(id) = ty else {
+            return None;
+        };
+        match &resolve.types[id].kind {
+            TypeDefKind::Option(inner) if optional(resolve, *inner) => {
+                Some("an option of an option")
+            }
+            TypeDefKind::Map(..) => Some("a map"),
+            TypeDefKind::FixedLengthList(..) => Some("a list of a fixed length"),
+            _ => None,
         }
-        TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).find_map(holds),
-        TypeDefKind::Resource
-        | TypeDefKind::Handle(_)
-        | TypeDefKind::Future(_)
-        | TypeDefKind::Stream(_)
-        | TypeDefKind::Flags(_)
-        | TypeDefKind::Enum(_)
-        | TypeDefKind::Unknown => None,
-    }
+    })
 }
 
 /// Where a WIT type holds owned resource handles, as the bindings name the resources: a handle
@@ -1226,15 +1242,7 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str, serde: bool) -> Binding
                 TypeDefKind::Record(_) | TypeDefKind::Variant(_)
             ) && in_world(definition.owner)
         })
-        .filter(|(id, _)| {
-            holds_unserializable(
-                &resolve,
-                wit_parser::Type::Id(*id),
-                &mut BTreeSet::new(),
-                own,
-                false,
-            )
-        })
+        .filter(|(id, _)| holds_unserializable(&resolve, wit_parser::Type::Id(*id), own, false))
         .filter_map(|(_, definition)| definition.name.as_deref())
         .map(ignored_name)
         .collect();
@@ -1268,15 +1276,7 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str, serde: bool) -> Binding
                     .as_deref()
                     .is_some_and(|name| unserializable.contains(&ignored_name(name)))
         })
-        .filter(|(id, _)| {
-            !holds_unserializable(
-                &resolve,
-                wit_parser::Type::Id(*id),
-                &mut BTreeSet::new(),
-                own,
-                false,
-            )
-        })
+        .filter(|(id, _)| !holds_unserializable(&resolve, wit_parser::Type::Id(*id), own, false))
         .filter_map(|(id, _)| full_name(id))
         .collect();
     let mut types: BTreeMap<String, Generated> = resolve
@@ -1292,13 +1292,7 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str, serde: bool) -> Binding
             let name = full_name(id)?;
             let (list, resource) = holds(&resolve, wit_parser::Type::Id(id));
             let unserializable = |stateless: bool| {
-                holds_unserializable(
-                    &resolve,
-                    wit_parser::Type::Id(id),
-                    &mut BTreeSet::new(),
-                    own,
-                    stateless,
-                )
+                holds_unserializable(&resolve, wit_parser::Type::Id(id), own, stateless)
             };
             let generated = Generated {
                 list,
@@ -1356,52 +1350,39 @@ pub(crate) fn ignored_name(name: &str) -> String {
     name.to_upper_camel_case().to_kebab_case()
 }
 
-/// Whether a WIT type holds, anywhere, a value the bindings give no `serde` implementation: a
-/// flags type of another package than `own`, the Orb's, whose flags types are the author's
-/// structs, a resource handle, a stream, a future, an error context, or an array longer than
-/// `serde`'s; and, `stateless`, in an Orb without a state, where the bindings derive serde's
-/// traits on no type, a record, a variant or an enum of another package too.
+/// Whether a WIT type holds, anywhere, a value the bindings give no `serde` implementation: what
+/// is no data, as `keyed::no_data_itself` finds it, a resource handle, a stream, a future or an
+/// error context, and what `unwritable_itself` finds, an array longer than `serde`'s or a flags
+/// type, but a flags type of `own`, the Orb's package, whose flags types are the author's structs;
+/// and, `stateless`, in an Orb without a state, where the bindings derive serde's traits on no
+/// type, a record, a variant or an enum of another package too.
 fn holds_unserializable(
     resolve: &Resolve,
     ty: wit_parser::Type,
-    seen: &mut BTreeSet<wit_parser::TypeId>,
     own: wit_parser::PackageId,
     stateless: bool,
 ) -> bool {
-    let id = match ty {
-        wit_parser::Type::Id(id) => id,
-        wit_parser::Type::ErrorContext => return true,
-        _ => return false,
+    let foreign = |id: wit_parser::TypeId| match resolve.types[id].owner {
+        wit_parser::TypeOwner::Interface(owner) => resolve.interfaces[owner].package != Some(own),
+        _ => true,
     };
-    // A type already looked at answered no, or the walk would have stopped there.
-    if !seen.insert(id) {
-        return false;
-    }
-    let mut holds = |ty: wit_parser::Type| holds_unserializable(resolve, ty, seen, own, stateless);
-    let foreign = !matches!(resolve.types[id].owner,
-        wit_parser::TypeOwner::Interface(owner) if resolve.interfaces[owner].package == Some(own));
-    match &resolve.types[id].kind {
-        TypeDefKind::Flags(_) => foreign,
-        TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
-            if stateless && foreign =>
-        {
-            true
+    anywhere(resolve, ty, |ty| {
+        if let wit_parser::Type::Id(id) = ty {
+            match &resolve.types[id].kind {
+                TypeDefKind::Flags(_) if !foreign(id) => return None,
+                TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
+                    if stateless && foreign(id) =>
+                {
+                    return Some(());
+                }
+                _ => {}
+            }
         }
-        TypeDefKind::Handle(_)
-        | TypeDefKind::Resource
-        | TypeDefKind::Future(_)
-        | TypeDefKind::Stream(_) => true,
-        TypeDefKind::Record(record) => record.fields.iter().any(|field| holds(field.ty)),
-        TypeDefKind::Variant(variant) => variant.cases.iter().filter_map(|case| case.ty).any(holds),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().any(holds),
-        TypeDefKind::Option(inner) | TypeDefKind::List(inner) | TypeDefKind::Type(inner) => {
-            holds(*inner)
-        }
-        TypeDefKind::FixedLengthList(inner, length) => *length > 32 || holds(*inner),
-        TypeDefKind::Map(key, value) => holds(*key) || holds(*value),
-        TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).any(holds),
-        TypeDefKind::Enum(_) | TypeDefKind::Unknown => false,
-    }
+        crate::keyed::no_data_itself(resolve, ty)
+            .or_else(|| unwritable_itself(resolve, ty))
+            .map(|_| ())
+    })
+    .is_some()
 }
 
 /// The callback of every hook: the single function of its interface in the consumed packages.
