@@ -72,7 +72,12 @@ impl Reexported {
 /// The modules the Orb module re-exports for its consumed interfaces, by the name it re-exports
 /// each under, `greeting`: the imported interfaces, the views of those imported by key, the
 /// implemented ones, the hooks it contributes to and the hooks it declares from a consumed package.
-pub(crate) struct Modules(BTreeMap<String, Reexported>);
+/// With them, the modules of the Orb itself, in which a path resolves first.
+pub(crate) struct Modules {
+    reexported: BTreeMap<String, Reexported>,
+    /// The path of each module of the Orb from the Orb module, by scope; scope 0 is the Orb module.
+    paths: Vec<Vec<Ident>>,
+}
 
 /// A name a type path reaches through a consumed interface's module, `greeting::Entry`: the
 /// interface, the module's name, the name and the path itself, for the errors.
@@ -86,13 +91,14 @@ pub(crate) struct Named<'m, 't> {
 
 impl Modules {
     /// The consumed interfaces of the module, each under the name of its re-exported module: an
-    /// interface imported by key under its view's.
+    /// interface imported by key under its view's. `paths` are the Orb's own modules, by scope.
     pub(crate) fn new(
         imports: &[String],
         keyed: &[String],
         services: &[Service],
         contributions: &[Contribution],
         declared: &[Declared],
+        paths: &[Vec<Ident>],
     ) -> Self {
         let mut modules = BTreeMap::new();
         for identity in keyed {
@@ -140,12 +146,17 @@ impl Modules {
                     role,
                 });
         }
-        Self(modules)
+        Self {
+            reexported: modules,
+            paths: paths.to_vec(),
+        }
     }
 
     /// The name a type reaches through a consumed interface's module, when it is such a path:
-    /// `greeting::Entry`, or any path ending so.
-    pub(crate) fn named<'m, 't>(&'m self, ty: &'t Type) -> Option<Named<'m, 't>> {
+    /// `greeting::Entry`, or any path ending so, written in the module `scope`. A path that leads
+    /// into a module of the Orb names a type of the module, whatever that module is called: the
+    /// author's `greeting::Banner` next to a `mod greeting` of their own resolves there first.
+    pub(crate) fn named<'m, 't>(&'m self, ty: &'t Type, scope: usize) -> Option<Named<'m, 't>> {
         let Type::Path(path) = ty else {
             return None;
         };
@@ -156,7 +167,12 @@ impl Modules {
         if path.qself.is_some() || !matches!(item.arguments, syn::PathArguments::None) {
             return None;
         }
-        let (module, interface) = self.0.get_key_value(&module.ident.to_string())?;
+        if let Some(own) = crate::module_of(&path.path, &self.paths[scope])
+            && self.paths.contains(&own)
+        {
+            return None;
+        }
+        let (module, interface) = self.reexported.get_key_value(&module.ident.to_string())?;
         Some(Named {
             interface,
             module,
@@ -165,10 +181,15 @@ impl Modules {
         })
     }
 
-    /// Each name a type reaches through a consumed interface's module: itself, or inside the type
-    /// parameters of a path and the elements of a tuple.
-    pub(crate) fn named_in<'m, 't>(&'m self, ty: &'t Type, out: &mut Vec<Named<'m, 't>>) {
-        if let Some(named) = self.named(ty) {
+    /// Each name a type written in the module `scope` reaches through a consumed interface's
+    /// module: itself, or inside the type parameters of a path and the elements of a tuple.
+    pub(crate) fn named_in<'m, 't>(
+        &'m self,
+        ty: &'t Type,
+        scope: usize,
+        out: &mut Vec<Named<'m, 't>>,
+    ) {
+        if let Some(named) = self.named(ty, scope) {
             out.push(named);
             return;
         }
@@ -179,25 +200,26 @@ impl Modules {
                 {
                     for argument in &arguments.args {
                         if let syn::GenericArgument::Type(ty) = argument {
-                            self.named_in(ty, out);
+                            self.named_in(ty, scope, out);
                         }
                     }
                 }
             }
             Type::Tuple(tuple) => {
                 for element in &tuple.elems {
-                    self.named_in(element, out);
+                    self.named_in(element, scope, out);
                 }
             }
             _ => {}
         }
     }
 
-    /// The module types a type mentions: the last name of each path, but the types with a WIT
-    /// spelling of their own, looking through type parameters and tuples, and none of the names a
-    /// consumed interface's module reaches, which are no types of the module.
-    pub(crate) fn references(&self, ty: &Type, out: &mut Vec<Ident>) {
-        if self.named(ty).is_some() {
+    /// The module types a type written in the module `scope` mentions: the last name of each path,
+    /// but the types with a WIT spelling of their own, looking through type parameters and tuples,
+    /// and none of the names a consumed interface's module reaches, which are no types of the
+    /// module.
+    pub(crate) fn references(&self, ty: &Type, scope: usize, out: &mut Vec<Ident>) {
+        if self.named(ty, scope).is_some() {
             return;
         }
         match ty {
@@ -211,25 +233,26 @@ impl Modules {
                 if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
                     for argument in &arguments.args {
                         if let syn::GenericArgument::Type(ty) = argument {
-                            self.references(ty, out);
+                            self.references(ty, scope, out);
                         }
                     }
                 }
             }
             Type::Tuple(tuple) => {
                 for element in &tuple.elems {
-                    self.references(element, out);
+                    self.references(element, scope, out);
                 }
             }
             _ => {}
         }
     }
 
-    /// The module types the fields of a struct or the payloads of an enum's cases mention.
-    pub(crate) fn item_references(&self, item: &Item) -> Vec<Ident> {
+    /// The module types the fields of a struct or the payloads of an enum's cases mention, the
+    /// item declared in the module `scope`.
+    pub(crate) fn item_references(&self, item: &Item, scope: usize) -> Vec<Ident> {
         let mut references = Vec::new();
         for ty in item_types(item) {
-            self.references(ty, &mut references);
+            self.references(ty, scope, &mut references);
         }
         references
     }
@@ -384,14 +407,14 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
                 function: name,
                 interface,
             };
-            found_in(modules, ty, place, &mut found);
+            found_in(modules, ty, function.scope, place, &mut found);
         }
         if let Some(ty) = function.result {
             let place = Place::Result {
                 function: name,
                 interface,
             };
-            found_in(modules, ty, place, &mut found);
+            found_in(modules, ty, function.scope, place, &mut found);
         }
     }
     let hooks: Vec<&Declared> = declared
@@ -414,7 +437,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             },
         };
         for ty in shape_types(shape) {
-            found_in(modules, ty, place.clone(), &mut found);
+            found_in(modules, ty, shape.scope, place.clone(), &mut found);
         }
     }
     for hook in &hooks {
@@ -423,15 +446,15 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             hook: &hook.ident,
             via: None,
         };
-        found_in(modules, input, place, &mut found);
+        found_in(modules, input, hook.scope, place, &mut found);
     }
     for state in states {
-        for (ty, via) in state_types(state, shapes, unreached, modules) {
+        for (ty, via, scope) in state_types(state, shapes, unreached, modules) {
             let place = Place::State {
                 state: &state.ident,
                 via: via.cloned(),
             };
-            found_in(modules, ty, place, &mut found);
+            found_in(modules, ty, scope, place, &mut found);
         }
     }
     if found.is_empty() {
@@ -503,15 +526,17 @@ fn view_object(identity: &str) -> Ident {
     crate::type_ident(interface.split('@').next().unwrap_or(interface))
 }
 
-/// Each item `ty` names through a consumed interface's module, named at `place`.
+/// Each item `ty`, written in the module `scope`, names through a consumed interface's module,
+/// named at `place`.
 fn found_in<'a, 'p>(
     modules: &'a Modules,
     ty: &'a Type,
+    scope: usize,
     place: Place<'p>,
     found: &mut Vec<(Named<'a, 'a>, Place<'p>)>,
 ) {
     let mut named = Vec::new();
-    modules.named_in(ty, &mut named);
+    modules.named_in(ty, scope, &mut named);
     found.extend(named.into_iter().map(|named| (named, place.clone())));
 }
 
@@ -628,14 +653,15 @@ fn checked<'a>(
 }
 
 /// The types of a state's fields and of the module types they reach, each once, with the module
-/// type that holds it, `None` for the state's own fields. A name resolves as `serialized` resolves
-/// it: to the type of the module naming it, else to the one type of that name in the Orb.
+/// type that holds it, `None` for the state's own fields, and the module the holder is declared
+/// in. A name resolves as `serialized` resolves it: to the type of the module naming it, else to
+/// the one type of that name in the Orb.
 fn state_types<'a>(
     state: &State,
     shapes: &'a [Shape],
     unreached: &'a [Candidate],
     modules: &Modules,
-) -> Vec<(&'a Type, Option<&'a Ident>)> {
+) -> Vec<(&'a Type, Option<&'a Ident>, usize)> {
     // Each type of the module, by its name and its module, with the types it holds.
     let declared: Vec<(&'a Ident, usize, Vec<&'a Type>)> = shapes
         .iter()
@@ -671,9 +697,9 @@ fn state_types<'a>(
         }
         let via = (!own).then_some(*ident);
         for ty in held {
-            types.push((*ty, via));
+            types.push((*ty, via, *scope));
             let mut references = Vec::new();
-            modules.references(ty, &mut references);
+            modules.references(ty, *scope, &mut references);
             pending.extend(
                 references
                     .into_iter()

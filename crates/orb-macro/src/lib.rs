@@ -1404,9 +1404,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &services,
         &contributions,
         &declared,
+        &modules,
     );
     for candidate in &mut candidates {
-        candidate.references = consumed_modules.item_references(&candidate.item);
+        candidate.references = consumed_modules.item_references(&candidate.item, candidate.scope);
     }
     // A derived function takes a resource of its own interface, owned, and a derived hook's input
     // holds no resource. An implemented interface's functions take what its WIT says, in the
@@ -1839,6 +1840,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             let generated = rust_ident(&wit::kebab(ident));
             let (params, names) = resource_params::bridged(
                 &function.params,
+                service.scope,
                 &module,
                 &handle_types,
                 &consumed_modules,
@@ -1847,6 +1849,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             let call = quote! { #target::#ident(#(#names),*) #await_ };
             let (result, body) = derived_result(
                 &function.result,
+                service.scope,
                 &module,
                 &handle_types,
                 &consumed_modules,
@@ -2507,12 +2510,13 @@ fn check_async(function: &Function, expected: &wit::ConsumedFunction) -> syn::Re
     ))
 }
 
-/// The result of a derived function's bridge: each resource the value holds, itself or inside
-/// options, results, lists and tuples, is wrapped into the bindings' handle type of the
-/// interface's module, which `resources` names by the author's name of the struct; a value
-/// holding none is returned as it is.
+/// The result of a derived function's bridge, the function written in the module `scope`: each
+/// resource the value holds, itself or inside options, results, lists and tuples, is wrapped into
+/// the bindings' handle type of the interface's module, which `resources` names by the author's
+/// name of the struct; a value holding none is returned as it is.
 fn derived_result(
     result: &Option<(Type, String)>,
+    scope: usize,
     module: &proc_macro2::TokenStream,
     resources: &BTreeMap<String, Ident>,
     modules: &foreign::Modules,
@@ -2521,9 +2525,9 @@ fn derived_result(
     let Some((ty, _)) = result else {
         return (quote! {}, call);
     };
-    match handles_of(ty, resources, modules) {
+    match handles_of(ty, scope, resources, modules) {
         Some(handles) => {
-            let spelled = with_handles(ty, resources, module, modules);
+            let spelled = with_handles(ty, scope, resources, module, modules);
             (quote! { -> #spelled }, wrap(&handles, call, module))
         }
         None => (quote! { -> #ty }, call),
@@ -2568,16 +2572,18 @@ impl Handles {
     }
 }
 
-/// Where an author's type holds a resource of the module, read by the names `wit_type` reads:
-/// `Option`, `Vec`, `Result` and tuples around a type whose last segment is the name of a
-/// resource's struct, which `resources` maps to the bindings' handle type. A name a consumed
-/// interface's module reaches, `counter::Tally`, is that interface's, whatever its last segment.
+/// Where an author's type, written in the module `scope`, holds a resource of the module, read by
+/// the names `wit_type` reads: `Option`, `Vec`, `Result` and tuples around a type whose last
+/// segment is the name of a resource's struct, which `resources` maps to the bindings' handle
+/// type. A name a consumed interface's module reaches, `counter::Tally`, is that interface's,
+/// whatever its last segment.
 fn handles_of(
     ty: &Type,
+    scope: usize,
     resources: &BTreeMap<String, Ident>,
     modules: &foreign::Modules,
 ) -> Option<Handles> {
-    if modules.named(ty).is_some() {
+    if modules.named(ty, scope).is_some() {
         return None;
     }
     match ty {
@@ -2599,11 +2605,13 @@ fn handles_of(
                 (name, []) if resources.contains_key(name) => {
                     Some(Handles::Resource(resources[name].clone()))
                 }
-                ("Option", [inner]) => Handles::option(handles_of(inner, resources, modules)),
-                ("Vec", [inner]) => Handles::list(handles_of(inner, resources, modules)),
+                ("Option", [inner]) => {
+                    Handles::option(handles_of(inner, scope, resources, modules))
+                }
+                ("Vec", [inner]) => Handles::list(handles_of(inner, scope, resources, modules)),
                 ("Result", [ok, err]) => Handles::result(
-                    handles_of(ok, resources, modules),
-                    handles_of(err, resources, modules),
+                    handles_of(ok, scope, resources, modules),
+                    handles_of(err, scope, resources, modules),
                 ),
                 _ => None,
             }
@@ -2612,23 +2620,24 @@ fn handles_of(
             tuple
                 .elems
                 .iter()
-                .map(|ty| handles_of(ty, resources, modules))
+                .map(|ty| handles_of(ty, scope, resources, modules))
                 .collect(),
         ),
         _ => None,
     }
 }
 
-/// The author's type as the bindings spell it in `module`: each resource of the module is the
-/// handle type there, everything else keeps the author's spelling, a name a consumed interface's
-/// module reaches included.
+/// The author's type, written in the module `scope`, as the bindings spell it in `module`: each
+/// resource of the module is the handle type there, everything else keeps the author's spelling,
+/// a name a consumed interface's module reaches included.
 fn with_handles(
     ty: &Type,
+    scope: usize,
     resources: &BTreeMap<String, Ident>,
     module: &proc_macro2::TokenStream,
     modules: &foreign::Modules,
 ) -> proc_macro2::TokenStream {
-    if modules.named(ty).is_some() {
+    if modules.named(ty, scope).is_some() {
         return quote! { #ty };
     }
     match ty {
@@ -2652,7 +2661,7 @@ fn with_handles(
                         .map(|segment| quote! { #segment:: });
                     let arguments = arguments.args.iter().map(|argument| match argument {
                         syn::GenericArgument::Type(ty) => {
-                            with_handles(ty, resources, module, modules)
+                            with_handles(ty, scope, resources, module, modules)
                         }
                         other => quote! { #other },
                     });
@@ -2665,7 +2674,7 @@ fn with_handles(
             let elements = tuple
                 .elems
                 .iter()
-                .map(|ty| with_handles(ty, resources, module, modules));
+                .map(|ty| with_handles(ty, scope, resources, module, modules));
             quote! { (#(#elements,)*) }
         }
         _ => quote! { #ty },
@@ -2740,10 +2749,11 @@ fn derived_resource(
     modules: &foreign::Modules,
 ) -> proc_macro2::TokenStream {
     let ident = &resource.ident;
+    let scope = resource.scope;
     let guest = format_ident!("Guest{}", camel_ident(&wit::kebab(ident)));
     let constructor = resource.constructor.as_ref().map(|constructor| {
         let (params, names) =
-            resource_params::bridged(&constructor.params, module, resources, modules);
+            resource_params::bridged(&constructor.params, scope, module, resources, modules);
         let function = &constructor.ident;
         quote! { fn new(#(#params),*) -> Self { #ident::#function(#(#names),*) } }
     });
@@ -2751,20 +2761,22 @@ fn derived_resource(
         let name = &function.ident;
         let generated = rust_ident(&wit::kebab(name));
         let (params, names) =
-            resource_params::bridged(&function.params, module, resources, modules);
+            resource_params::bridged(&function.params, scope, module, resources, modules);
         let (asynchronous, await_) = async_bridge(function.asynchronous);
         let call = quote! { #ident::#name(self, #(#names),*) #await_ };
-        let (result, body) = derived_result(&function.result, module, resources, modules, call);
+        let (result, body) =
+            derived_result(&function.result, scope, module, resources, modules, call);
         quote! { #asynchronous fn #generated(&self, #(#params),*) #result { #body } }
     });
     let statics = resource.statics.iter().map(|function| {
         let name = &function.ident;
         let generated = rust_ident(&wit::kebab(name));
         let (params, names) =
-            resource_params::bridged(&function.params, module, resources, modules);
+            resource_params::bridged(&function.params, scope, module, resources, modules);
         let (asynchronous, await_) = async_bridge(function.asynchronous);
         let call = quote! { #ident::#name(#(#names),*) #await_ };
-        let (result, body) = derived_result(&function.result, module, resources, modules, call);
+        let (result, body) =
+            derived_result(&function.result, scope, module, resources, modules, call);
         quote! { #asynchronous fn #generated(#(#params),*) #result { #body } }
     });
     quote! {
@@ -3014,7 +3026,7 @@ fn reachable(
     let mut pending: Vec<(Ident, usize)> = Vec::new();
     let mention = |ty: &Type, scope: usize, pending: &mut Vec<(Ident, usize)>| {
         let mut idents = Vec::new();
-        modules.references(ty, &mut idents);
+        modules.references(ty, scope, &mut idents);
         pending.extend(idents.into_iter().map(|ident| (ident, scope)));
     };
     let mention_function =

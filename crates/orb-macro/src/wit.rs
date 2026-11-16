@@ -141,11 +141,10 @@ pub(crate) fn hook_shapes(
         .map(|shape| (shape.ident.to_string(), shape))
         .collect();
     let mut pending: Vec<Ident> = Vec::new();
-    for (input, _) in declared
-        .iter()
-        .filter_map(|declaration| declaration.input.as_ref())
-    {
-        modules.references(input, &mut pending);
+    for declaration in declared {
+        if let Some((input, _)) = &declaration.input {
+            modules.references(input, declaration.scope, &mut pending);
+        }
     }
     let mut reached = BTreeSet::new();
     while let Some(ident) = pending.pop() {
@@ -167,25 +166,33 @@ fn service_mentions(service: &Service, resources: &[WitResource], modules: &Modu
         .iter()
         .filter(|resource| resource.service.as_ref() == Some(&service.ident))
         .collect();
-    let functions = service.functions.iter().chain(
-        owned
-            .iter()
-            .flat_map(|resource| resource.methods.iter().chain(&resource.statics)),
-    );
-    for function in functions {
+    // Each function with the module it is written in, the service's or its resource's.
+    let functions = service
+        .functions
+        .iter()
+        .map(|function| (function, service.scope))
+        .chain(owned.iter().flat_map(|resource| {
+            resource
+                .methods
+                .iter()
+                .chain(&resource.statics)
+                .map(|function| (function, resource.scope))
+        }));
+    for (function, scope) in functions {
         for (_, ty, _) in &function.params {
-            modules.references(ty, &mut mentioned);
+            modules.references(ty, scope, &mut mentioned);
         }
         if let Some((ty, _)) = &function.result {
-            modules.references(ty, &mut mentioned);
+            modules.references(ty, scope, &mut mentioned);
         }
     }
-    for constructor in owned
-        .iter()
-        .filter_map(|resource| resource.constructor.as_ref())
-    {
-        for (_, ty, _) in &constructor.params {
-            modules.references(ty, &mut mentioned);
+    for resource in &owned {
+        for (_, ty, _) in resource
+            .constructor
+            .iter()
+            .flat_map(|constructor| &constructor.params)
+        {
+            modules.references(ty, resource.scope, &mut mentioned);
         }
     }
     mentioned
@@ -316,7 +323,7 @@ pub(crate) fn render<'a>(
             Some(hook) => {
                 let mut mentioned = Vec::new();
                 let (input, _) = hook.input.as_ref().expect("a derived hook");
-                modules.references(input, &mut mentioned);
+                modules.references(input, hook.scope, &mut mentioned);
                 mentioned
             }
             None => {

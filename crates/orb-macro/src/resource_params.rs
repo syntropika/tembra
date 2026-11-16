@@ -14,12 +14,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::{Ident, Type, spanned::Spanned};
 
 /// A function or a constructor of a derived interface, for the checks: what it is called in the
-/// errors, the service whose interface holds it, its parameters and its result.
+/// errors, the service whose interface holds it, its parameters and its result, and the module
+/// it is written in, by scope.
 pub(crate) struct Derived<'a> {
     pub name: String,
     pub interface: &'a Ident,
     pub params: &'a [(Ident, Type, String)],
     pub result: Option<&'a Type>,
+    pub scope: usize,
 }
 
 /// The functions and constructors of the derived interfaces: each derived service's functions, and
@@ -29,18 +31,25 @@ pub(crate) fn derived<'a>(
     resources: &'a [WitResource],
 ) -> Vec<Derived<'a>> {
     let mut functions = Vec::new();
-    let entry = |owner: &Ident, interface: &'a Ident, function: &'a Function| Derived {
-        name: format!("{owner}::{}", function.ident),
-        interface,
-        params: &function.params,
-        result: function.result.as_ref().map(|(ty, _)| ty),
-    };
+    let entry =
+        |owner: &Ident, interface: &'a Ident, function: &'a Function, scope: usize| Derived {
+            name: format!("{owner}::{}", function.ident),
+            interface,
+            params: &function.params,
+            result: function.result.as_ref().map(|(ty, _)| ty),
+            scope,
+        };
     for service in services
         .iter()
         .filter(|service| service.implements.is_none())
     {
         for function in &service.functions {
-            functions.push(entry(&service.ident, &service.ident, function));
+            functions.push(entry(
+                &service.ident,
+                &service.ident,
+                function,
+                service.scope,
+            ));
         }
     }
     for resource in resources
@@ -49,7 +58,7 @@ pub(crate) fn derived<'a>(
     {
         let interface = resource.service.as_ref().expect("resolved owner");
         for function in resource.methods.iter().chain(&resource.statics) {
-            functions.push(entry(&resource.ident, interface, function));
+            functions.push(entry(&resource.ident, interface, function, resource.scope));
         }
         if let Some(Constructor { ident, params }) = &resource.constructor {
             functions.push(Derived {
@@ -57,6 +66,7 @@ pub(crate) fn derived<'a>(
                 interface,
                 params,
                 result: None,
+                scope: resource.scope,
             });
         }
     }
@@ -78,7 +88,7 @@ pub(crate) fn check(
     for function in derived(services, resources) {
         for (_, ty, _) in function.params {
             let mut mentioned = Vec::new();
-            modules.references(ty, &mut mentioned);
+            modules.references(ty, function.scope, &mut mentioned);
             for resource in mentioned.iter().filter_map(resource_named) {
                 if let Some(owner) = foreign_owner(services, resource, function.interface) {
                     return Err(taking_error(&function, ty, resource, None, owner));
@@ -91,7 +101,7 @@ pub(crate) fn check(
             continue;
         };
         let mut mentioned = Vec::new();
-        modules.references(ty, &mut mentioned);
+        modules.references(ty, declaration.scope, &mut mentioned);
         if let Some(resource) = mentioned.iter().find_map(resource_named) {
             return Err(syn::Error::new(
                 ty.span(),
@@ -121,7 +131,7 @@ pub(crate) fn check_reached(
 ) -> syn::Result<()> {
     for function in derived(services, resources) {
         for (_, ty, _) in function.params {
-            for (resource, via) in held(ty, shapes, resources, modules) {
+            for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
                 if let Some(owner) = foreign_owner(services, resource, function.interface) {
                     return Err(taking_error(&function, ty, resource, via, owner));
                 }
@@ -130,7 +140,7 @@ pub(crate) fn check_reached(
         let Some(ty) = function.result else {
             continue;
         };
-        for (resource, via) in held(ty, shapes, resources, modules) {
+        for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
             let Some(owner) = foreign_owner(services, resource, function.interface) else {
                 continue;
             };
@@ -153,7 +163,9 @@ pub(crate) fn check_reached(
         let Some((ty, _)) = &declaration.input else {
             continue;
         };
-        if let Some((resource, Some(via))) = held(ty, shapes, resources, modules).first() {
+        if let Some((resource, Some(via))) =
+            held(ty, declaration.scope, shapes, resources, modules).first()
+        {
             return Err(syn::Error::new(
                 ty.span(),
                 format!(
@@ -224,18 +236,19 @@ fn taking_error(
     syn::Error::new(ty.span(), message)
 }
 
-/// Each resource of the module a type holds, with the record or variant of the module that holds
-/// it, if one does: the resource itself or inside options, results, lists and tuples, or in the
-/// fields and cases of the records and variants the type reaches, followed by name as the WIT
-/// names them.
+/// Each resource of the module a type written in the module `scope` holds, with the record or
+/// variant of the module that holds it, if one does: the resource itself or inside options,
+/// results, lists and tuples, or in the fields and cases of the records and variants the type
+/// reaches, followed by name as the WIT names them.
 fn held<'a>(
     ty: &Type,
+    scope: usize,
     shapes: &'a [Shape],
     resources: &'a [WitResource],
     modules: &Modules,
 ) -> Vec<(&'a WitResource, Option<&'a Ident>)> {
     let mut mentioned = Vec::new();
-    modules.references(ty, &mut mentioned);
+    modules.references(ty, scope, &mut mentioned);
     let mut pending: Vec<(Ident, Option<&'a Ident>)> =
         mentioned.into_iter().map(|ident| (ident, None)).collect();
     let mut seen = BTreeSet::new();
@@ -260,27 +273,31 @@ fn held<'a>(
 }
 
 /// The parameters of a derived function's bridge and the arguments it calls the author's function
-/// with: a parameter holding a resource of the module is the bindings' handle type there, and each
-/// handle is taken back into the author's value, which consumes it; any other parameter, one a
-/// consumed interface's module names included, crosses as it is.
+/// with, the function written in the module `scope`: a parameter holding a resource of the module
+/// is the bindings' handle type there, and each handle is taken back into the author's value,
+/// which consumes it; any other parameter, one a consumed interface's module names included,
+/// crosses as it is.
 pub(crate) fn bridged(
     params: &[(Ident, Type, String)],
+    scope: usize,
     module: &proc_macro2::TokenStream,
     resources: &BTreeMap<String, Ident>,
     modules: &Modules,
 ) -> (Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>) {
     params
         .iter()
-        .map(|(ident, ty, _)| match handles_of(ty, resources, modules) {
-            Some(handles) => {
-                let spelled = with_handles(ty, resources, module, modules);
-                (
-                    quote! { #ident: #spelled },
-                    taken(&handles, quote! { #ident }),
-                )
-            }
-            None => (quote! { #ident: #ty }, quote! { #ident }),
-        })
+        .map(
+            |(ident, ty, _)| match handles_of(ty, scope, resources, modules) {
+                Some(handles) => {
+                    let spelled = with_handles(ty, scope, resources, module, modules);
+                    (
+                        quote! { #ident: #spelled },
+                        taken(&handles, quote! { #ident }),
+                    )
+                }
+                None => (quote! { #ident: #ty }, quote! { #ident }),
+            },
+        )
         .unzip()
 }
 

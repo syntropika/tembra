@@ -206,6 +206,76 @@ fn the_interface_defining_a_type_uses_what_its_fields_name() {
     }
 }
 
+/// The greeter's greeting, imported by an Orb with a sub-module of the same name.
+const GREETER: &str = "package example:greeter@1.0.0;
+
+interface greeting {
+  record entry { text: string }
+  greet: func(entry: entry) -> string;
+}
+";
+
+/// A path resolves in the module that writes it before the consumed interfaces: `greeting::Banner`
+/// written next to the Orb's own `mod greeting` is that module's type, whether or not the imported
+/// `greeting` defines a `banner`, while `greeting::Entry` written where `greeting` is the imported
+/// interface's module, and `super::greeting::Entry` from a sub-module, is the imported record.
+#[test]
+fn a_path_resolves_in_the_module_that_writes_it_before_the_consumed_interfaces() {
+    const ARCHIVIST: &str = "mod archivist {
+        pub mod front {
+            pub mod greeting {
+                pub struct Banner { pub text: String }
+            }
+            #[service]
+            pub struct Front;
+            impl Front {
+                pub fn headline() -> greeting::Banner { greeting::Banner { text: String::new() } }
+                pub fn keep(entry: super::greeting::Entry) -> u32 { 0 }
+            }
+        }
+        #[service]
+        pub struct Archive;
+        impl Archive {
+            pub fn latest(entries: Vec<greeting::Entry>) -> Option<greeting::Entry> { None }
+        }
+    }";
+    let with_banner = GREETER.replace(
+        "record entry",
+        "record banner { text: string }\n  record entry",
+    );
+    for (name, greeter) in [("front", GREETER), ("front-banner", with_banner.as_str())] {
+        let dir = consumed(name, greeter);
+        let module = expanded(
+            options(
+                "example:archivist@1.0.0",
+                Some(&dir),
+                &["example:greeter/greeting@1.0.0"],
+            ),
+            ARCHIVIST,
+        );
+        let text = resolved(&module, &dir);
+        for expected in [
+            "interface front {\n  use example:greeter/greeting@1.0.0.{entry};\n  record banner {\n    text: string,\n  }\n  headline: func() -> banner;\n  keep: func(entry: entry) -> u32;\n}\n",
+            "interface archive {\n  use example:greeter/greeting@1.0.0.{entry};\n  latest: func(entries: list<entry>) -> option<entry>;\n}\n",
+        ] {
+            assert!(text.contains(expected), "{name}: {expected}\n{text}");
+        }
+        assert!(!text.contains("{entry, banner}"), "{name}: {text}");
+        let generated = tokens(&module);
+        for expected in [
+            "pub mod greeting { pub use super :: super :: exports :: example :: archivist :: front :: { Banner } ; }",
+            "fn headline () -> greeting :: Banner { Front :: headline () }",
+            "fn keep (entry : super :: greeting :: Entry) -> u32 { Front :: keep (entry) }",
+            "fn latest (entries : Vec < greeting :: Entry >) -> Option < greeting :: Entry > { Archive :: latest (entries) }",
+        ] {
+            assert!(
+                generated.contains(expected),
+                "{name}: {expected}\n{generated}"
+            );
+        }
+    }
+}
+
 /// The interface a module imports by key, whose view `use`s its record.
 const COUNTERS: &str = "package example:counters@1.0.0;
 
