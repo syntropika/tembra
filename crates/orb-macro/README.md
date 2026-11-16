@@ -1065,10 +1065,14 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   the derive.
 - The bindings read a derive's path in their own module, so the macro names each derive from its
   crate, `::strum::EnumIter` for `EnumIter` after `use strum::EnumIter;`, following the `use` and
-  `extern crate` declarations of the type's module, `self::`, `super::` and the Orb's sub-modules;
-  a derive of the standard library is named from `core`. A single name the module does not import
-  by name, other than a derive of the standard library, which only a glob import could bring, or a
-  path leaving the Orb module through `super::`, is a compile error saying what to write instead.
+  `extern crate` declarations of the type's module, `self::`, `super::`, the Orb's sub-modules and
+  the glob imports from them, `use super::*;` in a sub-module; a derive of the standard library is
+  named from `core`. A single name the module does not import by name, other than a derive of the
+  standard library, which only a crate's glob import could bring, or a path leaving the Orb module
+  through `super::`, is a compile error saying what to write instead. `serde`'s derives are the
+  exception where the bindings derive them, in an Orb with a state: a `Serialize` or `Deserialize`
+  the macro cannot follow to a crate, through such a glob, through `super::` or through a re-export
+  of this crate, `crate::prelude::Serialize`, is left to the bindings as `serde`'s own is.
 - What the replacement would drop without a word is refused on a type that enters the WIT: an
   explicit discriminant, which a WIT enum has no room for, a `#[serde(..)]` attribute, which would
   change a state's JSON, a `#[cfg_attr(..)]`, under which a derive or its helper would come and go,

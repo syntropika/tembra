@@ -2519,6 +2519,164 @@ fn serde_derives_go_where_the_bindings_derive_none() {
     );
 }
 
+/// A name a module imports by glob from another module of the Orb, `use super::*;` in a
+/// sub-module or `use derives::*;` at the root, is followed into that module's `use` lines and
+/// through its own globs, as the standard derives are left to the prelude. A glob of a module the
+/// macro does not read, a crate's, may bring any name: one nothing else binds stays refused.
+#[test]
+fn a_glob_import_from_a_module_of_the_orb_is_followed() {
+    let module = expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            use strum::EnumIter;
+            use self::derives::*;
+            pub mod derives {
+                pub use strum::Display;
+            }
+            pub mod shapes {
+                use super::*;
+                #[derive(EnumIter, Display, Hash)]
+                pub enum Heading { North, East }
+                pub mod deeper {
+                    use super::*;
+                    #[derive(Display)]
+                    pub struct Point { pub x: i32 }
+                }
+            }
+            #[service]
+            pub struct Walker;
+            impl Walker {
+                pub fn walk(heading: shapes::Heading) -> shapes::deeper::Point { todo!() }
+            }
+        }",
+    );
+    assert_eq!(
+        type_attributes(&module).as_deref(),
+        Some(concat!(
+            "additional_type_attributes : { ",
+            "\"example:walk/walker@1.0.0/heading\" : [# [derive (:: strum :: EnumIter , :: strum :: Display , :: core :: hash :: Hash)]] , ",
+            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: strum :: Display)]] } ,",
+        )),
+        "{}",
+        tokens(&module)
+    );
+    let error = refused(
+        "example:walk@1.0.0",
+        "mod walk {
+            use strum::*;
+            pub mod shapes {
+                use super::*;
+                #[derive(EnumIter)]
+                pub enum Heading { North, East }
+            }
+            #[service]
+            pub struct Walker;
+            impl Walker { pub fn walk(heading: shapes::Heading) { todo!() } }
+        }",
+    );
+    assert!(
+        error.contains("this module imports no `EnumIter` by name, unless a glob import brings it"),
+        "{error}"
+    );
+}
+
+/// serde's derives are `Serialize` and `Deserialize`, which a module names by any path: where the
+/// bindings derive them, the author's is left to them under a path the macro cannot follow to a
+/// crate as well, `super::Serialize` from the Orb module, `crate::prelude::Serialize` or a name a
+/// crate's glob may bring, as on a path from `serde`. Where the bindings derive none, such a path
+/// is carried when it names the derive from the bindings' module and refused as any other when it
+/// does not.
+#[test]
+fn a_serde_derive_the_bindings_cover_is_theirs_under_any_path() {
+    let module = |imports: &str, state: &str| {
+        format!(
+            "mod walk {{
+                {imports}
+                {state}
+                #[derive(Serialize, Deserialize, Hash)]
+                pub struct Point {{ pub x: i32, pub y: i32 }}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> Point {{ todo!() }} }}
+            }}"
+        )
+    };
+    let state = "#[state] pub struct Count { pub steps: u32 }";
+    let hash_only = "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: core :: hash :: Hash)]] } ,";
+    for imports in [
+        "use super::{Deserialize, Serialize};",
+        "use crate::prelude::{Deserialize, Serialize};",
+        "use serde::*;",
+    ] {
+        let stateful = expanded("example:walk@1.0.0", &module(imports, state));
+        assert_eq!(
+            type_attributes(&stateful).as_deref(),
+            Some(hash_only),
+            "{imports}: {}",
+            tokens(&stateful)
+        );
+    }
+    let stateless = expanded(
+        "example:walk@1.0.0",
+        &module("use crate::prelude::{Deserialize, Serialize};", ""),
+    );
+    assert_eq!(
+        type_attributes(&stateless).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (crate :: prelude :: Serialize , crate :: prelude :: Deserialize , :: core :: hash :: Hash)]] } ,"
+        ),
+        "{}",
+        tokens(&stateless)
+    );
+    for (imports, message) in [
+        (
+            "use super::{Deserialize, Serialize};",
+            "`Serialize` on `Point` leaves the Orb module, where the macro cannot follow it",
+        ),
+        (
+            "use serde::*;",
+            "this module imports no `Serialize` by name, unless a glob import brings it",
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &module(imports, ""));
+        assert!(error.contains(message), "{imports}: {error}");
+    }
+    // A sub-module reaches the Orb module's `use serde::..` through `use super::*;`, which the
+    // macro follows to `serde`: the derive is the bindings' with a state and carried without.
+    let nested = |state: &str| {
+        format!(
+            "mod walk {{
+                use serde::{{Deserialize, Serialize}};
+                {state}
+                pub mod shapes {{
+                    use super::*;
+                    #[derive(Serialize, Deserialize, Hash)]
+                    pub struct Point {{ pub x: i32, pub y: i32 }}
+                }}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> shapes::Point {{ todo!() }} }}
+            }}"
+        )
+    };
+    let stateful = expanded("example:walk@1.0.0", &nested(state));
+    assert_eq!(
+        type_attributes(&stateful).as_deref(),
+        Some(hash_only),
+        "{}",
+        tokens(&stateful)
+    );
+    let stateless = expanded("example:walk@1.0.0", &nested(""));
+    assert_eq!(
+        type_attributes(&stateless).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: serde :: Serialize , :: serde :: Deserialize , :: core :: hash :: Hash)]] } ,"
+        ),
+        "{}",
+        tokens(&stateless)
+    );
+}
+
 /// The types a derived hook reaches are defined in its interface, which the world imports and
 /// exports: the bindings generate each twice, and both take the author's derives.
 #[test]

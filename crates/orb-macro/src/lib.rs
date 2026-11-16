@@ -568,12 +568,12 @@ struct Scan {
 }
 
 /// The names a module binds with `use` and `extern crate`, each with the path it stands for, and
-/// whether the module also imports by glob: what the macro follows to name a derive the author
-/// writes in that module from another module, the bindings'.
+/// the paths it imports by glob, `use path::*;`: what the macro follows to name a derive the
+/// author writes in that module from another module, the bindings'.
 #[derive(Default)]
 struct Uses {
     names: BTreeMap<String, Named>,
-    globs: bool,
+    globs: Vec<Named>,
 }
 
 /// A path as a list of names, from the crates when `global`, as `::serde::Serialize` is, and
@@ -601,7 +601,10 @@ impl Uses {
             syn::UseTree::Rename(rename) => {
                 self.bind(&rename.ident, &rename.rename, global, prefix);
             }
-            syn::UseTree::Glob(_) => self.globs = true,
+            syn::UseTree::Glob(_) => self.globs.push(Named {
+                global,
+                segments: prefix.clone(),
+            }),
             syn::UseTree::Group(group) => {
                 for tree in &group.items {
                     self.add_tree(tree, global, prefix);
@@ -3342,15 +3345,18 @@ enum Followed {
     /// which names the same item in every module of the crate.
     Path(Named),
     /// A single name the module neither declares nor imports by name, `Hash`: one a prelude
-    /// brings, or a glob import when the module has one.
+    /// brings, or, when `globs` is set, a glob import from a module the macro does not read.
     Name { ident: Ident, globs: bool },
+    /// An item of a module above the Orb module, `super::Serialize` written in the Orb module, by
+    /// its name: the macro does not read that module.
+    Above(Ident),
 }
 
 /// Follow a derive's path, written in the module `scope`, to what it names: through the module's
-/// `use` and `extern crate` declarations, `self::`, `super::` and the sub-modules of the Orb, to a
-/// path from the crates or from this crate, where a first name nothing in the Orb declares is a
-/// crate's, or to a single name nothing in the module binds. `owner` is the type the derive is
-/// written on, for the errors.
+/// `use` and `extern crate` declarations, `self::`, `super::`, the sub-modules of the Orb and the
+/// glob imports from its modules, to a path from the crates or from this crate, where a first
+/// name nothing in the Orb declares is a crate's, to a single name nothing in the module binds, or
+/// to an item above the Orb module. `owner` is the type the derive is written on, for the errors.
 fn followed(
     path: &syn::Path,
     scope: usize,
@@ -3383,18 +3389,10 @@ fn followed(
         }
         if first == "self" || first == "super" {
             if first == "super" {
-                let Some((_, parent)) = modules[scope].split_last() else {
-                    return Err(syn::Error::new(
-                        path.span(),
-                        format!(
-                            "`{written}` on `{owner}` leaves the Orb module, where the macro cannot follow it; the generated type replacing `{owner}` is declared in the bindings' module, so name the derive from its crate, such as `::name::Derive`, or from `crate::`"
-                        ),
-                    ));
+                let Some(parent) = parent(scope, modules) else {
+                    return Ok(Followed::Above(rest.last().unwrap_or(&first).clone()));
                 };
-                scope = modules
-                    .iter()
-                    .position(|module| module == parent)
-                    .expect("the parent of a scanned module");
+                scope = parent;
             }
             if rest.is_empty() {
                 break;
@@ -3416,21 +3414,32 @@ fn followed(
             };
             continue;
         }
+        if !rest.is_empty() {
+            let mut child = modules[scope].clone();
+            child.push(first.clone());
+            if let Some(index) = modules.iter().position(|module| *module == child) {
+                scope = index;
+                named.segments = rest;
+                continue;
+            }
+        }
+        // A name the module neither binds nor declares: a glob import may bring it from another
+        // module of the Orb, where it resolves next, or from a module the macro does not read.
+        let outside = match through_globs(&first, scope, uses, modules) {
+            Globbed::In(module) => {
+                scope = module;
+                continue;
+            }
+            Globbed::Outside => true,
+            Globbed::Nowhere => false,
+        };
         if rest.is_empty() {
             return Ok(Followed::Name {
                 ident: first,
-                globs: uses[scope].globs,
+                globs: outside,
             });
         }
-        let mut child = modules[scope].clone();
-        child.push(first);
-        match modules.iter().position(|module| *module == child) {
-            Some(index) => {
-                scope = index;
-                named.segments = rest;
-            }
-            None => named.global = true,
-        }
+        named.global = true;
     }
     Err(syn::Error::new(
         path.span(),
@@ -3438,6 +3447,100 @@ fn followed(
             "the macro cannot follow `{written}` on `{owner}` to the item it names; the generated type replacing `{owner}` is declared in the bindings' module, so name the derive from its crate, such as `::name::Derive`, or from `crate::`"
         ),
     ))
+}
+
+/// The module enclosing the module `scope`, by scope, unless that is the Orb module.
+fn parent(scope: usize, modules: &[Vec<Ident>]) -> Option<usize> {
+    let (_, parent) = modules[scope].split_last()?;
+    Some(
+        modules
+            .iter()
+            .position(|module| module == parent)
+            .expect("the parent of a scanned module"),
+    )
+}
+
+/// What the glob imports of a module make of a name it neither binds nor declares.
+enum Globbed {
+    /// A module of the Orb that a glob imports from binds or declares it: the name resolves there.
+    In(usize),
+    /// None does, and a glob imports from a module the macro does not read, which may bring it.
+    Outside,
+    /// None does, and every glob imports from a module of the Orb.
+    Nowhere,
+}
+
+/// Where the glob imports of the module `scope` bring `name` from: the first module of the Orb,
+/// through the module's globs and those of the modules they import from, that binds the name with
+/// `use` or declares a sub-module of that name.
+fn through_globs(name: &Ident, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]) -> Globbed {
+    let mut outside = false;
+    let mut seen = BTreeSet::from([scope]);
+    let mut pending = vec![scope];
+    while let Some(scope) = pending.pop() {
+        for glob in &uses[scope].globs {
+            let Some(module) = glob_module(glob, scope, uses, modules) else {
+                outside = true;
+                continue;
+            };
+            let mut child = modules[module].clone();
+            child.push(name.clone());
+            if uses[module].names.contains_key(&name.to_string()) || modules.contains(&child) {
+                return Globbed::In(module);
+            }
+            if seen.insert(module) {
+                pending.push(module);
+            }
+        }
+    }
+    if outside {
+        Globbed::Outside
+    } else {
+        Globbed::Nowhere
+    }
+}
+
+/// The module of the Orb that a glob import written in the module `scope` imports from, by scope:
+/// `self`, `super`, a sub-module by name, or what a `use` of the module binds one of those to;
+/// `None` for a module the macro does not read, one of a crate, under `crate::` or above the Orb
+/// module.
+fn glob_module(glob: &Named, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]) -> Option<usize> {
+    if glob.global {
+        return None;
+    }
+    let mut scope = scope;
+    let mut segments = glob.segments.clone();
+    // Each step consumes a name or replaces one by what a declaration binds it to.
+    for _ in 0..64 {
+        let Some((first, rest)) = segments.split_first() else {
+            return Some(scope);
+        };
+        let (first, rest) = (first.clone(), rest.to_vec());
+        if first == "crate" {
+            return None;
+        }
+        if first == "super" {
+            scope = parent(scope, modules)?;
+        }
+        if first == "self" || first == "super" {
+            segments = rest;
+            continue;
+        }
+        if let Some(bound) = uses[scope].names.get(&first.to_string()) {
+            // `use name;` brings the crate `name` into scope.
+            if bound.global || (bound.segments.len() == 1 && bound.segments[0] == first) {
+                return None;
+            }
+            segments = bound.segments.clone();
+            segments.extend(rest);
+            continue;
+        }
+        let mut child = modules[scope].clone();
+        child.push(first);
+        scope = modules.iter().position(|module| *module == child)?;
+        segments = rest;
+    }
+    None
 }
 
 /// A path as the author writes it, for the errors: `derive_more::Debug`.
@@ -3497,8 +3600,9 @@ enum Derive {
 
 impl Derive {
     /// What a followed path names: a derive of the standard library when it leads from `core`,
-    /// `std` or `alloc` to one of their derives, `serde`'s when it leads from `serde` to one of its
-    /// two, another derive otherwise.
+    /// `std` or `alloc` to one of their derives, `serde`'s when it leads from `serde` or
+    /// `serde_derive` to one of its two, or from `crate::` to the name of one, a re-export of this
+    /// crate whose source the macro does not read, another derive otherwise.
     fn of(named: Named) -> Self {
         let first = named.segments.first().map(Ident::to_string);
         let last = named.segments.last().map(Ident::to_string);
@@ -3515,13 +3619,19 @@ impl Derive {
         {
             return Self::Standard(name, module);
         }
-        if from(&["serde", "serde_derive"])
-            && matches!(last.as_deref(), Some("Serialize" | "Deserialize"))
+        let re_exported = !named.global && first.as_deref() == Some("crate");
+        if (from(&["serde", "serde_derive"]) || re_exported)
+            && last.as_deref().is_some_and(serde_name)
         {
             return Self::Serde(named);
         }
         Self::Other(named)
     }
+}
+
+/// Whether a derive of this name is one of `serde`'s two, where no path says otherwise.
+fn serde_name(name: &str) -> bool {
+    matches!(name, "Serialize" | "Deserialize")
 }
 
 impl quote::ToTokens for Named {
@@ -3549,6 +3659,9 @@ fn carried_derive(
     let owner = &shape.ident;
     let written = written(path);
     let refuse = |message: String| Err(syn::Error::new(path.span(), message));
+    // Where the bindings derive serde's traits, the author's `Serialize` or `Deserialize` is
+    // theirs under a path the macro cannot follow to a crate as well: the module calls it so.
+    let covered = |ident: &Ident| serialized && serde_name(&ident.to_string());
     let derive = match followed(path, shape.scope, uses, modules, owner)? {
         Followed::Path(named) => Derive::of(named),
         // A single name no declaration of the module binds is a prelude's, which brings the
@@ -3556,6 +3669,7 @@ fn carried_derive(
         Followed::Name { ident, globs } => {
             match STANDARD_DERIVES.iter().find(|(name, _)| ident == name) {
                 Some(&(name, module)) => Derive::Standard(name, module),
+                None if globs && covered(&ident) => return Ok(None),
                 None => {
                     let glob = if globs {
                         ", unless a glob import brings it"
@@ -3567,6 +3681,12 @@ fn carried_derive(
                     ));
                 }
             }
+        }
+        Followed::Above(ident) if covered(&ident) => return Ok(None),
+        Followed::Above(_) => {
+            return refuse(format!(
+                "`{written}` on `{owner}` leaves the Orb module, where the macro cannot follow it; the generated type replacing `{owner}` is declared in the bindings' module, so name the derive from its crate, such as `::name::Derive`, or from `crate::`"
+            ));
         }
     };
     let own = implemented(&shape.kind, generated);
