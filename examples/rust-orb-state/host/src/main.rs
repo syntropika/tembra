@@ -7,8 +7,8 @@
 use futures::executor::LocalPool;
 use serde_json::{Value, json};
 use std::rc::Rc;
+use tembra::wasm::{Engine, Install, Limits};
 use tembra::{Host, Reference};
-use tembra_executor_wasm::{Engine, Install, Limits};
 
 /// The service of the Orb `counter`, named after its exported interface.
 const COUNTER: &str = "counter::example:counter/counter@1.0.0";

@@ -5,7 +5,7 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 
-#[tembra_orb_macro::orb(
+#[tembra::orb(
     no_std,
     package = "example:welcomer@1.0.0",
     wit = "../greeter/contract",

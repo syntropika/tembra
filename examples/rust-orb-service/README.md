@@ -56,7 +56,9 @@ cargo +"$(just --evaluate nightly)" rustc --manifest-path examples/rust-orb-serv
 
 ## Limits
 
-WASI imports are not expressed by the macro yet; see
+Importing a WASI interface is shown in
+[the macro's guide](../../crates/orb-macro/README.md#importing-wasi-interfaces); for what it does
+not express, see
 [the macro's limits](../../crates/orb-macro/README.md#limits). Contributing to another Orb's hook is
 shown in [rust-orb-hook-contribution](../rust-orb-hook-contribution/README.md), declaring one in
 [rust-orb-hook-declaration](../rust-orb-hook-declaration/README.md), implementing a shared

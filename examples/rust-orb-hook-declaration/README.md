@@ -79,7 +79,7 @@ asking the installer for a provider.
 ## Contributing from the gate's contract
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:blocker@1.0.0", wit = "../gate/contract")]
+#[tembra::orb(package = "example:blocker@1.0.0", wit = "../gate/contract")]
 mod blocker {
     /// Block negative values; let the others continue down the hook unchanged.
     #[hook("example:gate/guard@1.0.0", priority = -7)]

@@ -17,7 +17,7 @@ installer decides which Orb keeps a book, the contract stays the WIT package.
 ## Implementing instead of deriving
 
 ```rust
-#[tembra_orb_macro::orb(package = "example:keeper@1.0.0", wit = "../wit")]
+#[tembra::orb(package = "example:keeper@1.0.0", wit = "../wit")]
 mod keeper {
     /// Implements `book` of the shared package: every function of the interface.
     #[service("example:ledger/book@1.0.0")]
@@ -52,9 +52,18 @@ world keeper {
 ```
 
 followed by the shared package, nested, as `cargo tembra build` writes every consumed package. The
-entries are a `#[state]` of the keeper's objects, so a keeper remembers across reloads; a state is
-not part of the contract unless a method of a derived service mentions it, so `Entries` is an
-ordinary struct of the module, with `serde` derives the macro adds.
+entries are a `#[state]` of the keeper's objects, so a keeper remembers across reloads:
+
+```rust
+#[state]
+pub struct Entries { pub entries: Vec<book::Entry> }
+```
+
+The state holds the shared package's own record, `book::Entry`, as the functions take and return
+it, with no copy into a type of the module: in an Orb with a state the bindings give the package's
+records `serde`'s derives, so the kernel keeps the entries as the JSON `serde` writes for them. A
+state is not part of the contract unless a method of a derived service mentions it, so `Entries` is
+an ordinary struct of the module, with `serde` derives the macro adds.
 
 ## Build
 

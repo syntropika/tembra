@@ -22,7 +22,7 @@ Guest crates use the same facade with host execution disabled:
 ```toml
 [dependencies]
 tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
-wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }
+wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc", "async"] }
 ```
 
 ```rust,ignore

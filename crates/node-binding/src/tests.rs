@@ -2,7 +2,7 @@
 //! `build()` takes for a `.wasm` entry, with the roles a component built with `#[orb]` carries.
 use super::NodeContract;
 use napi::bindgen_prelude::Uint8Array;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tembra_contracts::{Artifact, Contract, HookComposition, Lifetime, ServicePolicy};
 
 /// A world declaring or contributing to a hook, `guard`, next to a service, `ledger`.
@@ -99,4 +99,43 @@ fn contributions_come_from_the_component_and_the_caller_alike() {
     // A hook the component declares takes no contribution from the caller.
     let declared = format!(r#"{{"declares":{{"{GUARD}":"waterfall"}}}}"#);
     assert!(package(&declared, &[(GUARD, 1.0)]).is_err());
+}
+
+/// A world importing a reference view, as `#[orb]` derives it for an interface imported by key.
+const KEYED: &str = "package test:router@1.0.0; interface counter-ref { resource counter { add: func(amount: u32) -> u32; } get: async func(key: list<string>) -> result<counter, string>; } interface routing { route: func() -> u32; } world router { import counter-ref; export routing; }";
+const VIEW: &str = "test:router/counter-ref@1.0.0";
+const COUNTER: &str = "test:counters/counter@1.0.0";
+
+/// Reference views come from the component and from the caller; a view both name keeps the
+/// interface they agree on, and two different interfaces are refused with both named.
+#[test]
+fn reference_views_come_from_the_component_and_the_caller_alike() {
+    let contract = Contract::from_source("router.wit", KEYED, Some("router")).unwrap();
+    let roles = |manifest: &str, references: &[(&str, &str)]| {
+        super::component_roles(
+            &contract,
+            &component(manifest),
+            BTreeMap::new(),
+            references
+                .iter()
+                .map(|(view, target)| ((*view).to_owned(), (*target).to_owned()))
+                .collect(),
+        )
+    };
+    let carried = format!(r#"{{"references":{{"{VIEW}":"{COUNTER}"}}}}"#);
+    let expected = BTreeMap::from([(VIEW.to_owned(), COUNTER.to_owned())]);
+    for references in [&[][..], &[(VIEW, COUNTER)]] {
+        assert_eq!(roles(&carried, references).unwrap().references, expected);
+    }
+    assert_eq!(
+        roles("{}", &[(VIEW, COUNTER)]).unwrap().references,
+        expected
+    );
+    let refusal = roles(&carried, &[(VIEW, "test:counters/other@1.0.0")]).unwrap_err();
+    assert_eq!(
+        refusal.0,
+        format!(
+            "{VIEW}: the component imports {COUNTER} by key through it, `references` maps it to test:counters/other@1.0.0"
+        )
+    );
 }

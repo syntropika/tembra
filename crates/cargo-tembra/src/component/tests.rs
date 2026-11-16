@@ -41,8 +41,10 @@ fn imports_are_classified_by_the_rules_of_installation() {
     );
     assert_eq!(classify("wasi:clocks/timezone@0.3.0"), UNSUPPORTED);
     assert_eq!(classify("wasi:clocks/monotonic-clock@0.2.0"), UNSUPPORTED);
-    assert_eq!(classify("wasi:cli/run@0.3.0"), UNSUPPORTED);
     assert_eq!(classify("wasi:keyvalue/store@0.2.0"), UNSUPPORTED);
+    // What a component exports instead, no host serves as an import, whatever its package's grant.
+    assert_eq!(classify("wasi:cli/run@0.3.0"), UNSUPPORTED);
+    assert_eq!(classify("wasi:http/handler@0.3.0"), UNSUPPORTED);
     // The HTTP types need the client's grant, unless the Orb only serves incoming HTTP.
     let http = Import::Wasi("http (HttpGrant)");
     assert_eq!(classify("wasi:http/types@0.3.0"), http);
