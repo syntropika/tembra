@@ -6,8 +6,8 @@
 //! that defines it; it refuses at installation an Orb whose function takes a borrowed one,
 //! `borrow<t>`, so a `&T` parameter stays refused, as every reference in a signature is.
 use crate::{
-    Candidate, Constructor, Declared, Function, Handles, Service, Shape, WitResource,
-    foreign::Modules, handles_of, own_or_only, rebuild, wit, with_handles,
+    Constructor, Declared, Function, Handles, Service, Shape, WitResource, foreign::Modules,
+    handles_of, own_or_only, rebuild, wit, with_handles,
 };
 use quote::quote;
 use std::collections::{BTreeMap, BTreeSet};
@@ -89,69 +89,14 @@ pub(crate) fn resource_named<'a>(
     own_or_only(named, scope).filter(|resource| resource.scope == scope || !declares)
 }
 
-/// Refuse a resource of the module where the runtime cannot carry it, before the WIT is derived: a
-/// parameter of a derived function takes a resource of its own interface, owned, because the
-/// runtime moves an owned resource only into the interface that defines it, and the input of a
-/// derived hook holds no resource. A resource of an implemented interface is that interface's: a
-/// derived function takes none. What a consumed interface's module names, `foreign` checks. A name
-/// resolves as `reachable` resolves it: to a type of the module that writes it first, a resource
-/// or one of the `candidates`.
-pub(crate) fn check(
-    services: &[Service],
-    resources: &[WitResource],
-    declared: &[Declared],
-    candidates: &[Candidate],
-    modules: &Modules,
-) -> syn::Result<()> {
-    let named = |ident: &Ident, scope: usize| {
-        let declares = candidates
-            .iter()
-            .any(|candidate| candidate.ident == *ident && candidate.scope == scope);
-        resource_named(ident, scope, resources, declares)
-    };
-    for function in derived(services, resources) {
-        for (_, ty, _) in function.params {
-            let mut mentioned = Vec::new();
-            modules.references(ty, function.scope, &mut mentioned);
-            for resource in mentioned
-                .iter()
-                .filter_map(|ident| named(ident, function.scope))
-            {
-                if let Some(owner) = foreign_owner(services, resource, function.interface) {
-                    return Err(taking_error(&function, ty, resource, None, owner));
-                }
-            }
-        }
-    }
-    for declaration in declared {
-        let Some((ty, _)) = &declaration.input else {
-            continue;
-        };
-        let mut mentioned = Vec::new();
-        modules.references(ty, declaration.scope, &mut mentioned);
-        if let Some(resource) = mentioned
-            .iter()
-            .find_map(|ident| named(ident, declaration.scope))
-        {
-            return Err(syn::Error::new(
-                ty.span(),
-                format!(
-                    "the input of the hook `{}` holds the resource `{}`: a hook's input holds no resource",
-                    declaration.ident, resource.ident
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Refuse, once the types that enter the WIT are known, a resource the runtime would not carry
-/// through a derived function: its result holds, anywhere, only resources of its own interface,
-/// itself or in the records and variants of the module it reaches, because the runtime returns a
-/// resource only from the interface that defines it; the records and variants a parameter takes
-/// hold none of another interface either, which the runtime would not move in; and those of a
-/// derived hook's input hold no resource. What a parameter or a hook's input names itself `check`
-/// has refused already.
+/// Refuse, once the types that enter the WIT are known, a resource of the module the runtime would
+/// not carry through a derived function, itself or in the records and variants of the module a
+/// type reaches: a parameter takes only resources of its own interface, owned, because the runtime
+/// moves an owned resource only into the interface that defines it; a result holds only those
+/// too, because the runtime returns a resource only from the interface that defines it; and the
+/// input of a derived hook holds no resource. A resource of an implemented interface is that
+/// interface's: a derived function takes none. What a consumed interface's module names, `foreign`
+/// checks. Every parameter is read before the results.
 pub(crate) fn check_reached(
     services: &[Service],
     resources: &[WitResource],
@@ -159,14 +104,17 @@ pub(crate) fn check_reached(
     shapes: &[Shape],
     modules: &Modules,
 ) -> syn::Result<()> {
-    for function in derived(services, resources) {
+    let functions = derived(services, resources);
+    for function in &functions {
         for (_, ty, _) in function.params {
             for (resource, via) in held(ty, function.scope, shapes, resources, modules) {
                 if let Some(owner) = foreign_owner(services, resource, function.interface) {
-                    return Err(taking_error(&function, ty, resource, via, owner));
+                    return Err(taking_error(function, ty, resource, via, owner));
                 }
             }
         }
+    }
+    for function in &functions {
         let Some(ty) = function.result else {
             continue;
         };
@@ -193,14 +141,18 @@ pub(crate) fn check_reached(
         let Some((ty, _)) = &declaration.input else {
             continue;
         };
-        if let Some((resource, Some(via))) =
+        if let Some((resource, via)) =
             held(ty, declaration.scope, shapes, resources, modules).first()
         {
+            let holds = match via {
+                Some(via) => format!("`{via}`, which holds the resource `{}`", resource.ident),
+                None => format!("the resource `{}`", resource.ident),
+            };
             return Err(syn::Error::new(
                 ty.span(),
                 format!(
-                    "the input of the hook `{}` holds `{via}`, which holds the resource `{}`: a hook's input holds no resource",
-                    declaration.ident, resource.ident
+                    "the input of the hook `{}` holds {holds}: a hook's input holds no resource",
+                    declaration.ident
                 ),
             ));
         }

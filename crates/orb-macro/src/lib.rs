@@ -1564,16 +1564,6 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     for candidate in &mut candidates {
         candidate.references = consumed_modules.item_references(&candidate.item, candidate.scope);
     }
-    // A derived function takes a resource of its own interface, owned, and a derived hook's input
-    // holds no resource. An implemented interface's functions take what its WIT says, in the
-    // consumed package's types.
-    resource_params::check(
-        &services,
-        &wit_resources,
-        &declared,
-        &candidates,
-        &consumed_modules,
-    )?;
     // Consumed packages: the callback of every hook, contributed or declared, and every interface
     // implemented or imported are read from their WIT packages.
     let wit_dir = options.wit.as_deref().map(wit::absolute).transpose()?;
@@ -1760,8 +1750,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             }
         }
     }
-    // A derived function returns only its own interface's resources, through the records and
-    // variants it reaches too, and takes none of another interface's through them.
+    // A derived function takes and returns only its own interface's resources, owned, itself or
+    // through the records and variants it reaches, and a derived hook's input holds no resource. An
+    // implemented interface's functions take what its WIT says, in the consumed package's types.
     resource_params::check_reached(
         &services,
         &wit_resources,
