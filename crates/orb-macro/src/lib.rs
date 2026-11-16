@@ -808,13 +808,18 @@ impl Scan {
                 }
                 Item::Struct(mut s) => {
                     if let Some(attribute) = take(&mut s.attrs, "hook") {
-                        unconditional_marked(&s, "hook", "runs it")?;
+                        unconditional_marked(&s.attrs, "hook", &s.ident, "runs it")?;
                         let mut declaration = declaration(&s, &attribute, &self.package)?;
                         declaration.scope = scope;
                         self.declared.push(declaration);
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "wit_resource") {
-                        unconditional_marked(&s, "resource", "calls its functions")?;
+                        unconditional_marked(
+                            &s.attrs,
+                            "resource",
+                            &s.ident,
+                            "calls its functions",
+                        )?;
                         // The Orb module's exports take the struct as a type of theirs; the
                         // modules of its path are checked from its service's module, which names
                         // it through them, once the service is known.
@@ -833,7 +838,12 @@ impl Scan {
                         self.wit_resources.push(resource);
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "resource") {
-                        unconditional_marked(&s, "resource", "opens and closes it")?;
+                        unconditional_marked(
+                            &s.attrs,
+                            "resource",
+                            &s.ident,
+                            "opens and closes it",
+                        )?;
                         let why = "which opens and closes it";
                         if !reaches_root(&s.vis, depth) {
                             return Err(syn::Error::new(
@@ -863,7 +873,7 @@ impl Scan {
                             passthrough.push(Item::Struct(s));
                         }
                     } else if let Some(attribute) = take(&mut s.attrs, "state") {
-                        unconditional_marked(&s, "state", "builds and reads it")?;
+                        unconditional_marked(&s.attrs, "state", &s.ident, "builds and reads it")?;
                         let why = "which builds and reads it";
                         let fields_visible = match &s.fields {
                             Fields::Named(fields) => fields
@@ -895,7 +905,7 @@ impl Scan {
                         self.states.push(state);
                         self.candidates.push(Candidate::record(s, scope));
                     } else if let Some(attribute) = take(&mut s.attrs, "service") {
-                        unconditional_marked(&s, "service", "calls its functions")?;
+                        unconditional_marked(&s.attrs, "service", &s.ident, "calls its functions")?;
                         if !matches!(s.fields, Fields::Unit) {
                             return Err(syn::Error::new(
                                 attribute.span(),
@@ -987,6 +997,10 @@ impl Scan {
                                 ),
                             ));
                         };
+                        // The code the macro writes calls the marked function.
+                        let names = format!("{self_ty}::{}", function.sig.ident);
+                        unconditional_marked(&i.attrs, "`impl` block holding", &names, "calls it")?;
+                        unconditional_marked(&function.attrs, "function", &names, "calls it")?;
                         self.marked.push(Marked {
                             marker,
                             self_ty,
@@ -1052,6 +1066,12 @@ impl Scan {
                         }
                     }
                     if let Some(attribute) = take(&mut function.attrs, "hook") {
+                        unconditional_marked(
+                            &function.attrs,
+                            "contribution",
+                            &function.sig.ident,
+                            "calls it",
+                        )?;
                         let mut contribution = contribution(&function, &attribute)?;
                         contribution.scope = scope;
                         self.contributions.push(contribution);
@@ -1251,6 +1271,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 continue;
             };
             if matches!(function.vis, Visibility::Public(_)) {
+                let names = format!("{}::{}", service.ident, function.sig.ident);
+                unconditional_marked(&item.attrs, "`impl` block holding", &names, "calls it")?;
+                unconditional_marked(&function.attrs, "function", &names, "calls it")?;
                 let read = method(function)?;
                 // An implemented interface's names are fixed by its WIT, checked with it below.
                 if service.implements.is_none()
@@ -1329,7 +1352,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 params: typed_params(function)?,
             });
         }
-        for function in public_functions(&impls, &resource.ident, resource.scope) {
+        for (block, function) in public_functions(&impls, &resource.ident, resource.scope) {
+            let names = format!("{}::{}", resource.ident, function.sig.ident);
+            unconditional_marked(&block.attrs, "`impl` block holding", &names, "calls it")?;
+            unconditional_marked(&function.attrs, "function", &names, "calls it")?;
             if constructor.is_some_and(|marked| marked.function.sig.ident == function.sig.ident) {
                 continue;
             }
@@ -1660,6 +1686,36 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &consumed_modules,
         &mut unreached,
     )?;
+    // The `Default` the macro writes for a state kept out of the WIT names each field, before the
+    // compiler evaluates `#[cfg_attr(..)]`, and carries only a plain `#[cfg(..)]` onto a field's
+    // initializer: a field under a `#[cfg_attr(..)]` wrapping one would be named in every
+    // configuration. A state entering the WIT has had the attribute refused already.
+    for state in states.iter().filter(|state| !state.authored_default) {
+        let fields = unreached
+            .iter()
+            .find_map(|candidate| match &candidate.item {
+                Item::Struct(item)
+                    if candidate.scope == state.scope && item.ident == state.ident =>
+                {
+                    Some(&item.fields)
+                }
+                _ => None,
+            });
+        for field in fields.into_iter().flatten() {
+            let condition = field.attrs.iter().find(|attribute| {
+                attribute.path().is_ident("cfg_attr") && conditional(&attribute.meta)
+            });
+            if let (Some(name), Some(attribute)) = (&field.ident, condition) {
+                let state = &state.ident;
+                return Err(syn::Error::new(
+                    attribute.span(),
+                    format!(
+                        "`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the field `{state}::{name}`: the macro writes the `Default` of the state `{state}` before the compiler evaluates the attribute, so that `Default` would name `{state}::{name}` in every configuration; write the condition as a plain `#[cfg(..)]`, which the macro carries onto the field's initializer, or derive or implement `Default`"
+                    ),
+                ));
+            }
+        }
+    }
     // Where each type is defined, computed once for the WIT and for the re-exports below.
     let placement = wit::placement(
         &shapes,
@@ -2612,22 +2668,22 @@ fn wit_resource(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<Wi
     })
 }
 
-/// The `pub fn` of a type's `impl` blocks, in the module `scope`.
+/// The `pub fn` of a type's `impl` blocks, in the module `scope`, each with the block holding it.
 fn public_functions<'a>(
     impls: &'a [(usize, syn::ItemImpl)],
     ident: &Ident,
     scope: usize,
-) -> Vec<&'a syn::ImplItemFn> {
+) -> Vec<(&'a syn::ItemImpl, &'a syn::ImplItemFn)> {
     impls
         .iter()
         .filter(|(module, item)| {
             *module == scope
                 && matches!(&*item.self_ty, Type::Path(path) if path.path.is_ident(ident))
         })
-        .flat_map(|(_, item)| &item.items)
-        .filter_map(|item| match item {
+        .flat_map(|(_, block)| block.items.iter().map(move |item| (block, item)))
+        .filter_map(|(block, item)| match item {
             syn::ImplItem::Fn(function) if matches!(function.vis, Visibility::Public(_)) => {
-                Some(function)
+                Some((block, function))
             }
             _ => None,
         })
@@ -3529,25 +3585,48 @@ fn unconditional(item: &Item, flags: bool) -> syn::Result<()> {
     Ok(())
 }
 
-/// Refuse a `#[cfg(..)]` on a struct the macro marks, with `what` the marker makes it and what the
-/// code the macro writes for it `does`, for the error: the macro reads the struct before the
-/// compiler evaluates the attribute, and that code names the struct in every configuration, also
-/// where the attribute is off and the compiler drops the struct.
-fn unconditional_marked(item: &syn::ItemStruct, what: &str, does: &str) -> syn::Result<()> {
-    let Some(attribute) = item
-        .attrs
-        .iter()
-        .find(|attribute| attribute.path().is_ident("cfg"))
-    else {
+/// Refuse a `#[cfg(..)]`, written plainly or under `#[cfg_attr(..)]`, among the attributes of an
+/// item the macro writes code for: a struct it marks, a function it calls, or the `impl` block
+/// holding one. `what` the item is, the struct or function the code `names` and what that code
+/// `does`, for the error: the macro reads the item before the compiler evaluates the attribute,
+/// and that code names the struct or the function in every configuration, also where the
+/// attribute is off and the compiler drops the item.
+fn unconditional_marked(
+    attrs: &[Attribute],
+    what: &str,
+    names: impl std::fmt::Display,
+    does: &str,
+) -> syn::Result<()> {
+    let Some(attribute) = attrs.iter().find(|attribute| conditional(&attribute.meta)) else {
         return Ok(());
     };
-    let ident = &item.ident;
+    let written = if attribute.path().is_ident("cfg") {
+        "`#[cfg(..)]`"
+    } else {
+        "`#[cfg_attr(..)]` wrapping `#[cfg(..)]`"
+    };
     Err(syn::Error::new(
         attribute.span(),
         format!(
-            "`#[cfg(..)]` on the {what} `{ident}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{ident}` in every configuration; remove the attribute"
+            "{written} on the {what} `{names}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{names}` in every configuration; remove the attribute"
         ),
     ))
+}
+
+/// Whether an attribute drops what it sits on where a configuration is off: a `#[cfg(..)]`, or a
+/// `#[cfg_attr(..)]` wrapping one, directly or through another `#[cfg_attr(..)]`.
+fn conditional(meta: &syn::Meta) -> bool {
+    if meta.path().is_ident("cfg") {
+        return true;
+    }
+    if !meta.path().is_ident("cfg_attr") {
+        return false;
+    }
+    let wrapped = meta.require_list().and_then(|list| {
+        list.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated)
+    });
+    // The first is the configuration predicate.
+    wrapped.is_ok_and(|wrapped| wrapped.iter().skip(1).any(conditional))
 }
 
 /// Whether an attribute is a `#[cfg_attr(..)]` hiding from the macro, until the compiler evaluates

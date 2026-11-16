@@ -2654,12 +2654,23 @@ fn a_type_entering_the_wit_under_cfg_is_refused() {
     }
 }
 
+/// A `#[cfg(..)]` as an author writes it on an item, plainly or under `#[cfg_attr(..)]`, which
+/// keeps the item in some configurations only, with how the errors name it.
+const CONDITIONS: [(&str, &str); 2] = [
+    ("#[cfg(feature = \"audit\")]", "`#[cfg(..)]`"),
+    (
+        "#[cfg_attr(test, cfg(feature = \"audit\"))]",
+        "`#[cfg_attr(..)]` wrapping `#[cfg(..)]`",
+    ),
+];
+
 /// The macro writes the code serving a struct it marks before the compiler evaluates
 /// `#[cfg(..)]`, and that code names the struct in every configuration: the kernel's callbacks
 /// build and read a state and open and close a resource of the root, a bridge calls the functions
 /// of a service and of a WIT resource, and a declared hook's export and `run` serve its struct.
 /// Where the attribute is off, the compiler would find the struct gone, so a `#[cfg(..)]` on a
-/// marked struct is refused, before or after the marker, and the same module without it expands.
+/// marked struct is refused, before or after the marker, written plainly or under
+/// `#[cfg_attr(..)]`, and the same module without it expands.
 #[test]
 fn a_marked_struct_under_cfg_is_refused() {
     let module = |items: &str| {
@@ -2712,13 +2723,171 @@ fn a_marked_struct_under_cfg_is_refused() {
             "runs it",
         ),
     ] {
-        let conditional = module(&items.replace("{cfg}", "#[cfg(feature = \"audit\")]"));
-        let error = refused("example:office@1.0.0", &conditional);
-        let message = format!(
-            "`#[cfg(..)]` on the {what} `{name}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{name}` in every configuration; remove the attribute"
-        );
-        assert!(error.contains(&message), "{items}: {error}");
+        for (condition, written) in CONDITIONS {
+            let conditional = module(&items.replace("{cfg}", condition));
+            let error = refused("example:office@1.0.0", &conditional);
+            let message = format!(
+                "{written} on the {what} `{name}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{name}` in every configuration; remove the attribute"
+            );
+            assert!(error.contains(&message), "{condition} {items}: {error}");
+        }
         expanded("example:office@1.0.0", &module(&items.replace("{cfg}", "")));
+    }
+}
+
+/// The macro writes the code calling a function it reads before the compiler evaluates
+/// `#[cfg(..)]`, and that code names the function in every configuration: a bridge calls the
+/// `pub fn` of a service, derived or implemented, and of a WIT resource, and its constructor, the
+/// kernel's callbacks a function marked `#[validate]`, `#[open]` or `#[close]`, and a hook's
+/// export a contribution. Where the attribute is off, the compiler would find the function gone,
+/// or a WIT resource's bridge calling itself, so a `#[cfg(..)]` on such a function, or on the
+/// `impl` block holding it, is refused, written plainly or under `#[cfg_attr(..)]`, and the same
+/// module without it expands. A function the macro does not read keeps its `#[cfg(..)]`.
+#[test]
+fn a_function_under_cfg_is_refused() {
+    let office = |items: &str| {
+        format!(
+            "mod office {{
+                {items}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+            }}"
+        )
+    };
+    let keeper = consumed("cfg-keeper", LEDGER_WIT);
+    let blocker = consumed("cfg-blocker", ADMISSION_WIT);
+    for (package, dir, module, what, name) in [
+        (
+            "example:office@1.0.0",
+            None,
+            office("impl Permits { {cfg} pub fn audit() -> u32 { 1 } }"),
+            "function",
+            "Permits::audit",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office("{cfg} impl Permits { fn helper() {} pub fn audit() -> u32 { 1 } }"),
+            "`impl` block holding",
+            "Permits::audit",
+        ),
+        (
+            "example:keeper@1.0.0",
+            Some(&keeper),
+            KEEPER.replace("pub fn total", "{cfg} pub fn total"),
+            "function",
+            "Keeper::total",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[wit_resource] pub struct Badge { holder: String }
+                impl Badge {
+                    #[constructor]
+                    pub fn new(holder: String) -> Self { Badge { holder } }
+                    {cfg} pub fn holder(&self) -> String { self.holder.clone() }
+                }",
+            ),
+            "function",
+            "Badge::holder",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[wit_resource] pub struct Badge { holder: String }
+                impl Badge { #[constructor] pub fn new(holder: String) -> Self { Badge { holder } } }
+                {cfg} impl Badge { pub fn holder(&self) -> String { self.holder.clone() } }",
+            ),
+            "`impl` block holding",
+            "Badge::holder",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[wit_resource] pub struct Badge { holder: String }
+                impl Badge {
+                    {cfg} #[constructor]
+                    pub fn new(holder: String) -> Self { Badge { holder } }
+                }",
+            ),
+            "function",
+            "Badge::new",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[state] pub struct Tally { pub count: u32 }
+                impl Tally {
+                    #[validate] {cfg}
+                    pub fn check(&self) -> Result<(), String> { Ok(()) }
+                }",
+            ),
+            "function",
+            "Tally::check",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[resource] pub struct Pool { pub size: u32 }
+                impl Pool { {cfg} #[open] pub fn open() -> Self { Pool { size: 0 } } }",
+            ),
+            "function",
+            "Pool::open",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[resource] pub struct Pool { pub size: u32 }
+                {cfg} impl Pool {
+                    #[open] pub fn open() -> Self { Pool { size: 0 } }
+                    #[close] pub fn close(self) {}
+                }",
+            ),
+            "`impl` block holding",
+            "Pool::open",
+        ),
+        (
+            "example:blocker@1.0.0",
+            Some(&blocker),
+            "mod blocker {
+                {cfg}
+                #[hook(\"example:admission/guard@1.0.0\", priority = -7)]
+                pub fn block(input: guard::Admission) -> guard::Admission { input }
+            }"
+            .to_owned(),
+            "contribution",
+            "block",
+        ),
+    ] {
+        let with = || options(package, dir.map(std::path::PathBuf::as_path));
+        for (condition, written) in CONDITIONS {
+            let error = refused_with(with(), &module.replace("{cfg}", condition));
+            let message = format!(
+                "{written} on the {what} `{name}`: the macro writes the code that calls it before the compiler evaluates the attribute, so that code would name `{name}` in every configuration; remove the attribute"
+            );
+            assert!(error.contains(&message), "{condition} {module}: {error}");
+        }
+        expanded_with(with(), &module.replace("{cfg}", ""));
+    }
+    let kept = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(
+            "impl Permits { #[cfg(test)] fn helper() -> u32 { 2 } }
+            #[cfg(test)] impl Permits { fn other() {} }",
+        ),
+    ));
+    for expected in [
+        "# [cfg (test)] fn helper () -> u32 { 2 }",
+        "# [cfg (test)] impl Permits { fn other () { } }",
+    ] {
+        assert!(kept.contains(expected), "{expected}\n{kept}");
     }
 }
 
@@ -3877,6 +4046,48 @@ fn the_default_the_macro_writes_follows_the_fields_cfg() {
         generated.contains("impl :: core :: default :: Default for Balance { fn default () -> Self { Self { total : :: core :: default :: Default :: default () , # [cfg (feature = \"audit\")] audited : :: core :: default :: Default :: default () } } }"),
         "{generated}"
     );
+}
+
+/// The `Default` the macro writes for a state is written before the compiler evaluates
+/// `#[cfg_attr(..)]`, and follows only a plain `#[cfg(..)]` on a field: a field under
+/// `#[cfg_attr(.., cfg(..))]` would be named in every configuration, so it is refused there. A
+/// `Default` the author derives or implements follows the attribute, and the same state without it
+/// expands.
+#[test]
+fn the_default_the_macro_writes_refuses_a_field_under_cfg_attr_cfg() {
+    let module = |default: &str, condition: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                {default}
+                pub struct Balance {{
+                    pub total: i64,
+                    {condition}
+                    pub audited: u32,
+                }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
+            }}"
+        )
+    };
+    let condition = "#[cfg_attr(test, cfg(feature = \"audit\"))]";
+    let error = refused("example:ledger@1.0.0", &module("", condition));
+    assert!(
+        error.contains("`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the field `Balance::audited`: the macro writes the `Default` of the state `Balance` before the compiler evaluates the attribute, so that `Default` would name `Balance::audited` in every configuration; write the condition as a plain `#[cfg(..)]`, which the macro carries onto the field's initializer, or derive or implement `Default`"),
+        "{error}"
+    );
+    expanded(
+        "example:ledger@1.0.0",
+        &module("#[derive(Default)]", condition),
+    );
+    let authored = module("", condition).replace(
+        "#[service]",
+        "impl Default for Balance { fn default() -> Self { todo!() } }
+        #[service]",
+    );
+    expanded("example:ledger@1.0.0", &authored);
+    expanded("example:ledger@1.0.0", &module("", ""));
 }
 
 const GATE: &str = "mod gate {
