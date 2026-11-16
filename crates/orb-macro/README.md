@@ -621,7 +621,7 @@ The bindings' own path names it too, `wasi::random::random`, and every interface
 on, such as `wasi::filesystem::types`, which `wasi:filesystem/preopens` brings: an Orb importing
 `wasi:filesystem/preopens` and `wasi:sockets/types` reaches the filesystem's types by that path,
 since two imports of one interface name, both `types`, would be re-exported under one name, which
-Rust refuses.
+the macro refuses, naming both, as any two modules it would re-export under one name.
 
 The WASI packages are bundled with `tembra-contracts`, so a WASI import needs no `wit = "dir"`:
 the macro reads the interface from its bundled package and nests that package, with the bundled

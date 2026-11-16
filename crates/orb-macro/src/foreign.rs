@@ -26,7 +26,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
 };
-use syn::{Ident, Item, Type, spanned::Spanned};
+use syn::{Ident, Item, LitStr, Type, spanned::Spanned};
 
 /// How the world holds a consumed interface, which decides what a derived interface names through
 /// the interface's module.
@@ -92,16 +92,19 @@ pub(crate) struct Named<'m, 't> {
 
 impl Modules {
     /// The consumed interfaces of the module, each under the name of its re-exported module: an
-    /// interface imported by key under its view's. `paths` are the Orb's own modules, by scope.
+    /// interface imported by key under its view's. `imports` are the attribute's literals, read as
+    /// identities already; `paths` are the Orb's own modules, by scope. Another interface under a
+    /// name already taken is an error on it, naming both.
     pub(crate) fn new(
-        imports: &[String],
+        imports: &[LitStr],
         keyed: &[String],
         services: &[Service],
         contributions: &[Contribution],
         declared: &[Declared],
         paths: &[Vec<Ident>],
-    ) -> Self {
+    ) -> syn::Result<Self> {
         let mut modules = BTreeMap::new();
+        // Two views of one name are the error of `keyed::views`, which names their interfaces.
         for identity in keyed {
             let view = crate::rust_ident(&keyed::view_name(identity));
             modules
@@ -113,44 +116,58 @@ impl Modules {
         }
         let roles = imports
             .iter()
-            .map(|identity| {
-                let role = if wasi::is_wasi(identity) {
+            .map(|literal| {
+                let identity = literal.value();
+                let role = if wasi::is_wasi(&identity) {
                     Role::Wasi
                 } else {
                     Role::Imported
                 };
-                (identity, role)
+                (identity, role, literal.span())
             })
-            .chain(
-                services
-                    .iter()
-                    .filter_map(|service| service.implements.as_ref())
-                    .map(|identity| (identity, Role::Implemented)),
-            )
-            .chain(
-                contributions
-                    .iter()
-                    .map(|contribution| (&contribution.hook, Role::Contributed)),
-            )
+            .chain(services.iter().filter_map(|service| {
+                let identity = service.implements.clone()?;
+                Some((identity, Role::Implemented, service.ident.span()))
+            }))
+            .chain(contributions.iter().map(|contribution| {
+                let identity = contribution.hook.clone();
+                (identity, Role::Contributed, contribution.ident.span())
+            }))
             .chain(
                 declared
                     .iter()
                     .filter(|declaration| declaration.input.is_none())
-                    .map(|declaration| (&declaration.hook, Role::Declared)),
+                    .map(|declaration| {
+                        let identity = declaration.hook.clone();
+                        (identity, Role::Declared, declaration.ident.span())
+                    }),
             );
-        for (identity, role) in roles {
-            let [_, _, interface] = hook_path(identity);
-            modules
-                .entry(interface.to_string())
-                .or_insert_with(|| Reexported {
-                    identity: identity.clone(),
-                    role,
-                });
+        for (identity, role, span) in roles {
+            let [_, _, interface] = hook_path(&identity);
+            let name = interface.to_string();
+            let second = Reexported { identity, role };
+            match modules.get(&name) {
+                // One interface in two roles keeps the first.
+                Some(first) if first.identity == second.identity => {}
+                Some(first) => {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "the Orb module would re-export two modules as `{name}`: that of {}, and that of {}; keep one of them",
+                            second.described(),
+                            first.described()
+                        ),
+                    ));
+                }
+                None => {
+                    modules.insert(name, second);
+                }
+            }
         }
-        Self {
+        Ok(Self {
             reexported: modules,
             paths: paths.to_vec(),
-        }
+        })
     }
 
     /// The name a type reaches through a consumed interface's module, when it is such a path:

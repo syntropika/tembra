@@ -220,6 +220,26 @@ fn a_wasi_import_is_an_interface_the_hosts_serve() {
     );
 }
 
+/// The Orb module re-exports each imported interface's module under the interface's name: two
+/// WASI interfaces of one name, `wasi:clocks/types` and `wasi:http/types`, are an error naming
+/// both, and either alone expands.
+#[test]
+fn two_imports_of_one_interface_name_are_refused() {
+    let both = ["wasi:clocks/types@0.3.0", "wasi:http/types@0.3.0"];
+    let error = expanded(importing(&both, None), DICE)
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("the Orb module would re-export two modules as `types`: that of the WASI interface wasi:http/types@0.3.0, and that of the WASI interface wasi:clocks/types@0.3.0; keep one of them"),
+        "{error}"
+    );
+    for identity in both {
+        expanded(importing(&[identity], None), DICE)
+            .unwrap_or_else(|error| panic!("{identity}: {error}"));
+    }
+}
+
 /// A contract `cargo tembra build` wrote for an Orb that imports WASI holds the WASI packages in
 /// `deps/`: an Orb consuming it reads each such package once, from there, the bundled copy left out
 /// of its inline WIT, and nests only the WASI packages the directory lacks. A copy is the bundled

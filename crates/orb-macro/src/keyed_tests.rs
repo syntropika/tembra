@@ -429,3 +429,43 @@ package example:other@1.0.0 {{
         assert!(refusal.contains(message), "{message}\n{refusal}");
     }
 }
+
+/// The Orb module re-exports a view's module under the view's name, and an imported interface's
+/// under the interface's: an import of an interface named like a view is an error naming both,
+/// and either import alone expands.
+#[test]
+fn an_import_named_like_a_view_is_refused() {
+    let dir = consumed(
+        "reexported",
+        &format!(
+            "{COUNTERS}
+package example:other@1.0.0 {{
+  interface counter-ref {{ read: func() -> u32; }}
+}}
+"
+        ),
+    );
+    let plain = || vec![literal("example:other/counter-ref@1.0.0")];
+    let refusal = refused(
+        Options {
+            imports: plain(),
+            ..options(Some(&dir), &["example:counters/counter@1.0.0"])
+        },
+        ROUTER,
+    );
+    assert!(
+        refusal.contains("the Orb module would re-export two modules as `counter_ref`: that of the imported interface example:other/counter-ref@1.0.0, and that of the interface example:counters/counter@1.0.0, which this module imports by key; keep one of them"),
+        "{refusal}"
+    );
+    expanded(
+        options(Some(&dir), &["example:counters/counter@1.0.0"]),
+        ROUTER,
+    );
+    expanded(
+        Options {
+            imports: plain(),
+            ..options(Some(&dir), &[])
+        },
+        ROUTER,
+    );
+}
