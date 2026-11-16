@@ -60,13 +60,15 @@ pub(crate) fn option(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<LitSt
 
 /// The views of the interfaces the attribute imports by key, in the order it names them. Each is
 /// a WIT identity of another Orb's interface, not of WASI, which the installation grants instead,
-/// imported by key once, read from the consumed packages of `dir`, and its view takes a name that
-/// neither the world nor another interface of the package, `taken`, has.
+/// and not one the module implements, `implemented`, imported by key once, read from the consumed
+/// packages of `dir`, and its view takes a name that neither the world nor another interface of
+/// the package, `taken`, has.
 pub(crate) fn views(
     imports: &[LitStr],
     dir: Option<&Path>,
     world: &str,
     taken: &BTreeMap<String, &Ident>,
+    implemented: &[String],
 ) -> syn::Result<Vec<View>> {
     if imports.is_empty() {
         return Ok(Vec::new());
@@ -80,6 +82,18 @@ pub(crate) fn views(
                 literal.span(),
                 format!(
                     "{target} is a WASI interface, which the installation grants and no Orb provides: import it with import = \"{target}\""
+                ),
+            ));
+        }
+        // The view `use`s the interface's types, which imports the interface into the elaborated
+        // world; an interface the world imports and exports is a hook to `cargo tembra build`
+        // and the kernel, so a service's lifetime is refused and its functions are read as a
+        // hook's callback.
+        if implemented.contains(&target) {
+            return Err(syn::Error::new(
+                literal.span(),
+                format!(
+                    "{target} is implemented by this module and imported by key: the view `use`s the interface's types, so the world imports {target} while the Orb exports it, which `cargo tembra build` and the kernel read as a hook; an interface imported by key is one another Orb implements"
                 ),
             ));
         }

@@ -343,6 +343,38 @@ fn an_interface_without_a_view_is_refused() {
     }
 }
 
+/// An interface the module implements is not imported by key: the view would `use` the
+/// interface's types, so the world would import the interface it exports, which `cargo tembra
+/// build` and the kernel read as a hook. The error is on the import.
+#[test]
+fn an_implemented_interface_is_not_imported_by_key() {
+    const PROXY: &str = "mod proxy {
+        #[service(\"example:counters/counter@1.0.0\")]
+        pub struct Counter;
+        impl Counter {
+            pub fn add(amount: u32) -> u32 { amount }
+            pub async fn read() -> counter::Tally { counter::Tally { key: vec![], count: 0 } }
+        }
+    }";
+    let dir = consumed("implemented", COUNTERS);
+    // The proxy implements the interface and reaches another provider's objects plainly.
+    expanded(
+        Options {
+            imports: vec![literal("example:counters/counter@1.0.0")],
+            ..options(Some(&dir), &[])
+        },
+        PROXY,
+    );
+    let refusal = refused(
+        options(Some(&dir), &["example:counters/counter@1.0.0"]),
+        PROXY,
+    );
+    assert!(
+        refusal.contains("example:counters/counter@1.0.0 is implemented by this module and imported by key: the view `use`s the interface's types, so the world imports example:counters/counter@1.0.0 while the Orb exports it, which `cargo tembra build` and the kernel read as a hook; an interface imported by key is one another Orb implements"),
+        "{refusal}"
+    );
+}
+
 /// A view is an interface of the Orb's package named after the provider interface: an interface
 /// imported by key twice, two interfaces of one name, a view named like the world or a service's
 /// interface, and a provider type named like the view's resource or `get`, are errors.

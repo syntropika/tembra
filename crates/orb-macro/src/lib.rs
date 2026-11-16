@@ -1602,7 +1602,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &consumed_modules,
     )?;
     // The view of each interface imported by key, derived from the interface's WIT.
-    let views = keyed::views(&options.keyed, wit_dir.as_deref(), &world, &interface_names)?;
+    let views = keyed::views(
+        &options.keyed,
+        wit_dir.as_deref(),
+        &world,
+        &interface_names,
+        &implemented,
+    )?;
     // An implemented interface is fixed by its WIT: the impl has exactly its functions, and each
     // of its resources is a #[wit_resource] struct of the same name with the resource's functions.
     for service in services
