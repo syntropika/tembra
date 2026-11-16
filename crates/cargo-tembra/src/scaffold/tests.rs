@@ -72,6 +72,23 @@ fn the_facade_repository_and_commit_are_written_as_a_git_dependency() {
 }
 
 #[test]
+fn wit_bindgen_is_written_with_the_async_feature() {
+    // `async` for a `pub async fn` and an import by key, whose `get` is an `async func`: without
+    // it, the code the macro generates for them does not compile.
+    let facade = Facade::Path("/home/ada/tembra/crates/tembra".to_owned());
+    let manifest: toml::Value = toml::from_str(&manifest("greeter", &facade)).unwrap();
+    let bindgen = &manifest["dependencies"]["wit-bindgen"];
+    assert_eq!(bindgen["default-features"].as_bool(), Some(false));
+    let features: Vec<&str> = bindgen["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|feature| feature.as_str().unwrap())
+        .collect();
+    assert_eq!(features, ["macros", "realloc", "async"]);
+}
+
+#[test]
 fn a_checkout_is_found_from_any_directory_inside_it() {
     let dir = scratch("checkout-above");
     let checkout = dir.join("tembra");
