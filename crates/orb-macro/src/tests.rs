@@ -4767,6 +4767,166 @@ fn inputs_are_refused_when_ill_formed() {
     }
 }
 
+/// A service with a function marked `#[create]` is built by it, once per object: `orb(..)` shares
+/// the inputs as one `Rc`, the registration takes them, and the factory calls the create with them
+/// and the object's `Declaration`. What it returns is the service's environment: a method
+/// borrowing `&self` is called on it, any other as before; a service without a create takes no
+/// inputs. The receiver stays out of the WIT, and the component has no bridge for such a service,
+/// whose objects only the native side builds.
+#[test]
+fn a_service_with_a_create_is_built_by_it() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            #[inputs]
+            pub struct Inputs { pub base: u32 }
+            #[service]
+            pub struct Ledger { base: u32 }
+            impl Ledger {
+                #[create]
+                fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                    Ok(Self { base: inputs.base })
+                }
+                pub fn count(&self) -> u32 { self.base }
+                pub async fn total(&self, extra: u32) -> u32 { self.base + extra }
+                pub fn zero() -> u32 { 0 }
+            }
+            #[service]
+            pub struct Plain;
+            impl Plain { pub fn one() -> u32 { 1 } }
+        }",
+    );
+    let root = native(&module, &[]);
+    for expected in [
+        "pub fn orb (inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { let name = \"book\" ; let inputs = :: std :: rc :: Rc :: new (inputs) ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , 1u32) . service (self :: __tembra_service_ledger (name , & inputs)) . service (self :: __tembra_service_plain (name))) }",
+        "pub (crate) fn __tembra_service_ledger (orb : & str , inputs : & :: std :: rc :: Rc < Inputs >) -> :: tembra :: Service < Ledger > { let inputs = :: std :: rc :: Rc :: clone (inputs) ; :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , move | declaration | Ledger :: create (& inputs , & declaration))",
+        ". method_with (\"count\" , | __tembra_self : :: std :: rc :: Rc < Ledger > , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (__tembra_self . count ()) } , __TEMBRA_CODEC_LEDGER_COUNT ,)",
+        ":: core :: result :: Result :: Ok (__tembra_self . total (extra) . await)",
+        ". method_with (\"zero\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: zero ()) } , __TEMBRA_CODEC_LEDGER_ZERO ,)",
+        "pub (crate) fn __tembra_service_plain (orb : & str) -> :: tembra :: Service < () > { :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/plain@1.0.0\") , | _ | { :: core :: result :: Result :: Ok (()) })",
+    ] {
+        assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    let derived = wit(&module);
+    assert!(
+        derived.contains("interface ledger {\n  count: func() -> u32;\n  total: async func(extra: u32) -> u32;\n  zero: func() -> u32;\n}"),
+        "{derived}"
+    );
+    let tokens = tokens(&module);
+    assert!(
+        tokens.contains("impl exports :: example :: book :: plain :: Guest for __TembraExports"),
+        "{tokens}"
+    );
+    assert!(!tokens.contains(":: ledger :: Guest for"), "{tokens}");
+    // A service of a sub-module takes the inputs by their path from its module; a create that is
+    // `pub` is no method.
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            #[inputs]
+            pub struct Inputs { pub base: u32 }
+            pub mod shelf {
+                #[service]
+                pub struct Shelf { base: u32 }
+                impl Shelf {
+                    #[create]
+                    pub fn create(inputs: &super::Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                        Ok(Self { base: inputs.base })
+                    }
+                    pub fn count(&self) -> u32 { self.base }
+                }
+            }
+        }",
+    );
+    let derived = wit(&module);
+    assert!(
+        derived.contains("interface shelf {\n  count: func() -> u32;\n}"),
+        "{derived}"
+    );
+    let root = native(&module, &[]);
+    assert!(
+        root.contains(". service (self :: shelf :: __tembra_service_shelf (name , & inputs))"),
+        "{root}"
+    );
+    let shelf = native(&module, &["shelf"]);
+    assert!(
+        shelf.contains(
+            "pub (crate) fn __tembra_service_shelf (orb : & str , inputs : & :: std :: rc :: Rc < super :: Inputs >) -> :: tembra :: Service < Shelf >"
+        ),
+        "{shelf}"
+    );
+}
+
+/// A `#[create]` is a function of a `#[service]` struct's impl block, one per service, that takes
+/// the Orb's inputs and the object's `Declaration` by reference and returns the service; the Orb
+/// has `#[inputs]`. A service with fields needs one, and so does a method borrowing `&self`, the
+/// only way a method borrows the service.
+#[test]
+fn a_create_is_refused_when_ill_formed() {
+    let inputs = "#[inputs] pub struct Inputs { pub base: u32 }";
+    let create = "#[create] fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> { todo!() }";
+    for (items, message) in [
+        (
+            format!(
+                "#[service] pub struct Ledger; impl Ledger {{ {create} pub fn count() -> u32 {{ 0 }} }}"
+            ),
+            "`Ledger::create` is marked #[create], which takes the Orb's inputs: mark the struct `orb(..)` takes #[inputs]",
+        ),
+        (
+            format!(
+                "{inputs} #[service] pub struct Ledger; impl Ledger {{ #[create] async fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {{ todo!() }} pub fn count() -> u32 {{ 0 }} }}"
+            ),
+            "#[create] marks `fn(&Inputs, &Declaration) -> tembra::Result<Self>` of a #[service] struct",
+        ),
+        (
+            format!(
+                "{inputs} #[service] pub struct Ledger; impl Ledger {{ #[create] fn create(inputs: Inputs, declaration: &Declaration) -> tembra::Result<Self> {{ todo!() }} pub fn count() -> u32 {{ 0 }} }}"
+            ),
+            "#[create] marks `fn(&Inputs, &Declaration) -> tembra::Result<Self>` of a #[service] struct",
+        ),
+        (
+            format!(
+                "{inputs} #[service] pub struct Ledger; impl Ledger {{ #[create] fn create(&self, declaration: &Declaration) -> tembra::Result<Self> {{ todo!() }} pub fn count() -> u32 {{ 0 }} }}"
+            ),
+            "#[create] marks `fn(&Inputs, &Declaration) -> tembra::Result<Self>` of a #[service] struct",
+        ),
+        (
+            format!(
+                "{inputs} #[service] pub struct Ledger; impl Ledger {{ {create} {} pub fn count() -> u32 {{ 0 }} }}",
+                create.replace("fn create", "fn build")
+            ),
+            "`Ledger` has two functions marked #[create]",
+        ),
+        (
+            format!(
+                "{inputs} pub struct Other; impl Other {{ {create} }} #[service] pub struct Ledger; impl Ledger {{ pub fn count() -> u32 {{ 0 }} }}"
+            ),
+            "#[create] marks a function of a #[service] struct; `Other` is not one",
+        ),
+        (
+            format!(
+                "{inputs} #[service] pub struct Ledger {{ base: u32 }} impl Ledger {{ pub fn count() -> u32 {{ 0 }} }}"
+            ),
+            "`Ledger` has fields, which a #[create] builds: give it a function marked #[create], `fn(&Inputs, &Declaration) -> tembra::Result<Self>`, or make it a unit struct",
+        ),
+        (
+            format!(
+                "{inputs} #[service] pub struct Ledger; impl Ledger {{ pub fn count(&self) -> u32 {{ 0 }} }}"
+            ),
+            "`Ledger::count` borrows `&self`, which a #[create] builds: give `Ledger` a function marked #[create], or remove self",
+        ),
+        (
+            format!(
+                "{inputs} #[service] pub struct Ledger; impl Ledger {{ {create} pub fn count(&mut self) -> u32 {{ 0 }} }}"
+            ),
+            "a method borrows `&self`; change the service through Cell or RefCell",
+        ),
+    ] {
+        let error = refused(PACKAGE, &format!("mod book {{ {items} }}"));
+        assert_eq!(error, message, "{items}");
+    }
+}
+
 /// The contract an Orb crate carries, written as `cargo tembra build` writes it: only when the
 /// macro is given the crate's directory, which `primary_crate_dir` takes from Cargo's variables
 /// as `expansion` reads them, so a dependency's is never written and the token tests write nothing.

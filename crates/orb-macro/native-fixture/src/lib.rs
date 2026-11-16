@@ -93,12 +93,12 @@ pub mod calculator {
 }
 
 /// Notes kept for the host, with what the host lends the Orb: the argument of `notebook::orb(..)`.
-/// Native only, as host values are.
+/// Native only, as host values and the objects a create builds are.
 #[cfg(not(target_arch = "wasm32"))]
 #[tembra::orb(package = "example:notes@1.0.0")]
 pub mod notebook {
     use std::{cell::RefCell, rc::Rc};
-    use tembra::core::Address;
+    use tembra::{Declaration, Resource, core::Address};
 
     /// What the host lends every service of the Orb.
     #[inputs]
@@ -109,14 +109,70 @@ pub mod notebook {
         pub title: Box<dyn Fn(&Address) -> String>,
     }
 
-    /// Notes, as they are given.
+    /// The notes of one object, which its create builds once per key and principal.
     #[service]
-    pub struct Notes;
+    pub struct Notes {
+        title: String,
+        notes: RefCell<Vec<String>>,
+        journal: Resource<String>,
+    }
 
     impl Notes {
-        /// The text, as given.
-        pub fn echo(text: String) -> String {
-            text
+        /// Build an object: its title, which the host resolves from its address, and what it
+        /// declares, each reported to the host: its state, the object's own label; its journal, a
+        /// resource opened once this returns and closed with the object; and a task, run once the
+        /// object is active.
+        #[create]
+        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+            let address = declaration.address()?;
+            let object = format!("{}/{}", address.key.join("/"), address.principal);
+            inputs.events.borrow_mut().push(format!("create {object}"));
+            declaration.state(object.clone(), 1, |_| Ok(()))?;
+            let (opened, closed) = (inputs.events.clone(), inputs.events.clone());
+            let label = object.clone();
+            let journal = declaration.resource(
+                "journal",
+                1,
+                move || {
+                    opened.borrow_mut().push(format!("open {label}"));
+                    Ok(format!("journal of {label}"))
+                },
+                move |journal, _| {
+                    Box::pin(async move {
+                        closed.borrow_mut().push(format!("close {journal}"));
+                        Ok(())
+                    })
+                },
+            )?;
+            let ran = inputs.events.clone();
+            declaration.task(move |_| {
+                Box::pin(async move {
+                    ran.borrow_mut().push(format!("task {object}"));
+                    Ok(())
+                })
+            })?;
+            Ok(Self {
+                title: (inputs.title)(&address),
+                notes: RefCell::default(),
+                journal,
+            })
+        }
+
+        /// Add a note to the object's notes and return how many it holds.
+        pub fn add(&self, text: String) -> u32 {
+            let mut notes = self.notes.borrow_mut();
+            notes.push(text);
+            notes.len() as u32
+        }
+
+        /// The title of the object's notes.
+        pub fn title(&self) -> String {
+            self.title.clone()
+        }
+
+        /// The object's journal: the value its resource opened with.
+        pub fn journal(&self) -> Option<String> {
+            self.journal.value().ok().map(|journal| journal.to_string())
         }
     }
 }

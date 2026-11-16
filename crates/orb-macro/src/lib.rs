@@ -299,10 +299,11 @@ impl Payload {
     }
 }
 
-/// An exported interface: a unit struct marked `#[service]` with an `impl` block of `pub fn`, and
+/// An exported interface: a struct marked `#[service]` with an `impl` block of `pub fn`, and
 /// the ownership policy of its objects when the attribute names one. A plain `#[service]`
 /// derives the interface from the `impl`; `#[service("ns:name/interface@version")]` implements an
-/// interface of a consumed WIT package.
+/// interface of a consumed WIT package. The struct is a unit struct, unless its function marked
+/// `#[create]` builds it, once per object.
 struct Service {
     ident: Ident,
     docs: Vec<String>,
@@ -311,6 +312,11 @@ struct Service {
     implements: Option<String>,
     /// The module declaring the service, by scope; 0 is the Orb module.
     scope: usize,
+    /// The struct has no fields.
+    unit: bool,
+    /// The function marked `#[create]`, `fn(&Inputs, &Declaration) -> tembra::Result<Self>`, once
+    /// found: the native factory of the service's objects, whose methods may borrow `&self`.
+    create: Option<Ident>,
 }
 
 impl Service {
@@ -368,6 +374,8 @@ struct Policy {
 struct Function {
     ident: Ident,
     asynchronous: bool,
+    /// The function borrows `&self`, a receiver the WIT leaves out.
+    receiver: bool,
     docs: Vec<String>,
     params: Vec<(Ident, Type, String)>,
     result: Option<(Type, String)>,
@@ -478,14 +486,17 @@ enum Marker {
     Close,
     /// `#[constructor]`: a WIT resource's constructor, `fn(..) -> Self` without `self`.
     Constructor,
+    /// `#[create]`: a service's native factory, `fn(&Inputs, &Declaration) -> tembra::Result<Self>`.
+    Create,
 }
 
 impl Marker {
-    const ALL: [Marker; 4] = [
+    const ALL: [Marker; 5] = [
         Marker::Validate,
         Marker::Open,
         Marker::Close,
         Marker::Constructor,
+        Marker::Create,
     ];
 
     fn name(self) -> &'static str {
@@ -494,6 +505,7 @@ impl Marker {
             Self::Open => "open",
             Self::Close => "close",
             Self::Constructor => "constructor",
+            Self::Create => "create",
         }
     }
 
@@ -504,6 +516,9 @@ impl Marker {
             Self::Open => "`fn() -> Self` of a #[resource] struct",
             Self::Close => "`fn(self)` of a #[resource] struct",
             Self::Constructor => "`fn(..) -> Self`, without self, of a #[wit_resource] struct",
+            Self::Create => {
+                "`fn(&Inputs, &Declaration) -> tembra::Result<Self>` of a #[service] struct"
+            }
         }
     }
 
@@ -513,6 +528,7 @@ impl Marker {
             Self::Validate => "#[state]",
             Self::Open | Self::Close => "#[resource]",
             Self::Constructor => "#[wit_resource]",
+            Self::Create => "#[service]",
         }
     }
 }
@@ -815,12 +831,6 @@ impl Scan {
                         self.inputs(&s, &attribute, scope)?;
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "service") {
-                        if !matches!(s.fields, Fields::Unit) {
-                            return Err(syn::Error::new(
-                                attribute.span(),
-                                "a service is a unit struct: its methods are the pub fn of its impl blocks",
-                            ));
-                        }
                         let (implements, policy) = service_attribute(&attribute)?;
                         self.services.push(Service {
                             ident: s.ident.clone(),
@@ -829,6 +839,8 @@ impl Scan {
                             policy,
                             implements,
                             scope,
+                            unit: matches!(s.fields, Fields::Unit),
+                            create: None,
                         });
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "flags") {
@@ -873,8 +885,12 @@ impl Scan {
                             continue;
                         };
                         // The Orb module calls a state's rule and a root resource's functions; a
-                        // WIT resource's constructor is called from its own module's bridge.
-                        if nested && marker != Marker::Constructor && !reaches_root(&function.vis) {
+                        // WIT resource's constructor is called from its own module's bridge, and a
+                        // service's create from its own module's registration.
+                        if nested
+                            && !matches!(marker, Marker::Constructor | Marker::Create)
+                            && !reaches_root(&function.vis)
+                        {
                             return Err(syn::Error::new(
                                 span,
                                 format!(
@@ -1317,7 +1333,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         uses,
         ..
     } = scan;
-    // A service's methods are the pub fn of the impl blocks of its own module.
+    // A service's methods are the pub fn of the impl blocks of its own module, but its create.
     for (scope, item) in &impls {
         let Type::Path(path) = &*item.self_ty else {
             continue;
@@ -1332,7 +1348,13 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             let syn::ImplItem::Fn(function) = impl_item else {
                 continue;
             };
-            if matches!(function.vis, Visibility::Public(_)) {
+            let create = marked.iter().any(|marked| {
+                marked.marker == Marker::Create
+                    && marked.scope == *scope
+                    && marked.self_ty == service.ident
+                    && marked.function.sig.ident == function.sig.ident
+            });
+            if matches!(function.vis, Visibility::Public(_)) && !create {
                 let read = method(function)?;
                 // An implemented interface's names are fixed by its WIT, checked with it below.
                 if service.implements.is_none()
@@ -1365,6 +1387,9 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             Marker::Constructor => wit_resources
                 .iter()
                 .any(|resource| resource.ident == marked.self_ty && resource.scope == marked.scope),
+            Marker::Create => services
+                .iter()
+                .any(|service| service.ident == marked.self_ty && service.scope == marked.scope),
         };
         if !fits {
             return Err(syn::Error::new(
@@ -1472,6 +1497,58 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             }
             state.validator = Some(signature.ident.clone());
         }
+    }
+    // A service's create builds each of its objects natively, from the Orb's inputs and the
+    // object's declaration, both borrowed. Only a service with one has fields, or a method
+    // borrowing `&self`.
+    for service in &mut services {
+        let Some(create) = marked_function(&marked, Marker::Create, &service.ident, service.scope)?
+        else {
+            if !service.unit {
+                return Err(syn::Error::new(
+                    service.ident.span(),
+                    format!(
+                        "`{}` has fields, which a #[create] builds: give it a function marked #[create], `fn(&Inputs, &Declaration) -> tembra::Result<Self>`, or make it a unit struct",
+                        service.ident
+                    ),
+                ));
+            }
+            if let Some(function) = service.functions.iter().find(|function| function.receiver) {
+                return Err(syn::Error::new(
+                    function.ident.span(),
+                    format!(
+                        "`{0}::{1}` borrows `&self`, which a #[create] builds: give `{0}` a function marked #[create], or remove self",
+                        service.ident, function.ident
+                    ),
+                ));
+            }
+            continue;
+        };
+        let signature = &create.function.sig;
+        let borrowed = |input: &FnArg| {
+            matches!(input, FnArg::Typed(typed)
+                if matches!(&*typed.ty, Type::Reference(reference) if reference.mutability.is_none()))
+        };
+        if signature.asyncness.is_some()
+            || signature.inputs.len() != 2
+            || !signature.inputs.iter().all(borrowed)
+            || matches!(signature.output, ReturnType::Default)
+        {
+            return Err(syn::Error::new(
+                create.span,
+                format!("#[create] marks {}", Marker::Create.shape()),
+            ));
+        }
+        if inputs.is_none() {
+            return Err(syn::Error::new(
+                create.span,
+                format!(
+                    "`{}::{}` is marked #[create], which takes the Orb's inputs: mark the struct `orb(..)` takes #[inputs]",
+                    service.ident, signature.ident
+                ),
+            ));
+        }
+        service.create = Some(signature.ident.clone());
     }
     // An Orb exports services, declares hooks or contributes to them; a module doing none of
     // those would be an empty world.
@@ -2178,10 +2255,11 @@ fn component(
     // A derived service's bridge forwards each function, named as the bindings name it, to the
     // author's; a resource a parameter holds is taken back from the bindings' handle type, one the
     // result holds is wrapped into it, and the resources of the service's interface are the
-    // author's structs, each bridged in its own module.
+    // author's structs, each bridged in its own module. A service its `#[create]` builds has no
+    // bridge: only the native side builds its objects, which its methods may borrow.
     for service in services
         .iter()
-        .filter(|service| service.implements.is_none())
+        .filter(|service| service.implements.is_none() && service.create.is_none())
     {
         let depth = modules[service.scope].len();
         let root = supers(depth);
@@ -2246,10 +2324,10 @@ fn component(
     }
     // An implemented interface's bridge takes its signatures from the WIT: the functions forward
     // to the author's of the same WIT names, and each resource of the interface is the author's
-    // struct of its WIT name.
+    // struct of its WIT name. A service its `#[create]` builds has none, as above.
     for service in services
         .iter()
-        .filter(|service| service.implements.is_some())
+        .filter(|service| service.implements.is_some() && service.create.is_none())
     {
         let identity = service.implements.as_deref().unwrap_or_default();
         let (bridge, implementations) = implemented_service(
@@ -2865,6 +2943,7 @@ fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction
     let read = Function {
         ident: function.sig.ident.clone(),
         asynchronous: function.sig.asyncness.is_some(),
+        receiver: receiver.is_some(),
         docs: wit::docs(&function.attrs)?,
         params: typed_params(function)?,
         result: match result(&function.sig.output) {
@@ -4273,15 +4352,24 @@ fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> B
     serialized
 }
 
-/// Read one public function of a service: a plain name for each owned parameter, no receiver.
+/// Read one public function of a service: a plain name for each owned parameter, and `&self`
+/// when the service's create builds it.
 fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
     let mut params = Vec::new();
+    let mut receiver = false;
     for input in &function.sig.inputs {
         match input {
-            FnArg::Receiver(receiver) => {
+            FnArg::Receiver(borrowed)
+                if borrowed.reference.is_some()
+                    && borrowed.mutability.is_none()
+                    && borrowed.colon_token.is_none() =>
+            {
+                receiver = true;
+            }
+            FnArg::Receiver(other) => {
                 return Err(syn::Error::new(
-                    receiver.span(),
-                    "WIT functions have no receiver; remove self",
+                    other.span(),
+                    "a method borrows `&self`; change the service through Cell or RefCell",
                 ));
             }
             FnArg::Typed(typed) => {
@@ -4302,6 +4390,7 @@ fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
     Ok(Function {
         ident: function.sig.ident.clone(),
         asynchronous: function.sig.asyncness.is_some(),
+        receiver,
         docs: wit::docs(&function.attrs)?,
         params,
         result: match result(&function.sig.output) {

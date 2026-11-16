@@ -47,7 +47,9 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
     for (service, items) in analysis.services.iter().zip(registrations) {
         let path = &analysis.modules[service.scope];
         let function = service_ident(service);
-        calls.push(quote! { self::#(#path::)* #function(name) });
+        // A service its create builds takes the inputs `orb(..)` shares.
+        let inputs = service.create.is_some().then(|| quote! { , &inputs });
+        calls.push(quote! { self::#(#path::)* #function(name #inputs) });
         by_scope.entry(service.scope).or_default().push(items);
     }
     let root = by_scope.remove(&0).unwrap_or_default();
@@ -55,7 +57,11 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         .inputs
         .as_ref()
         .map(|inputs| crate::from_root(&analysis.modules[inputs.scope], &inputs.ident));
-    let orb = orb(metadata, inputs.as_ref(), &calls);
+    let shared = analysis
+        .services
+        .iter()
+        .any(|service| service.create.is_some());
+    let orb = orb(metadata, inputs.as_ref(), shared, &calls);
     Native {
         root: wrapped(quote! { #orb #(#root)* }),
         nested: by_scope
@@ -72,12 +78,18 @@ fn wrapped(items: TokenStream) -> TokenStream {
 }
 
 /// `orb()`: the Orb named and versioned by the manifest, with every service registered. With an
-/// `#[inputs]` struct, `inputs` the path the Orb module names it by, it is `orb(inputs)`.
+/// `#[inputs]` struct, `inputs` the path the Orb module names it by, it is `orb(inputs)`, and when
+/// a service has a create, `shared`, the inputs go to each such service as one `Rc`.
 ///
 /// Cargo does not rebuild a crate when only `[package.metadata.tembra]` changes, so the generated
 /// code includes the manifest, which makes the compiler track the file: the next build then reads
 /// the table again.
-fn orb(metadata: &Metadata, inputs: Option<&TokenStream>, calls: &[TokenStream]) -> TokenStream {
+fn orb(
+    metadata: &Metadata,
+    inputs: Option<&TokenStream>,
+    shared: bool,
+    calls: &[TokenStream],
+) -> TokenStream {
     let name = &metadata.name;
     let version = metadata.api_version;
     let mut doc = format!(
@@ -87,6 +99,7 @@ fn orb(metadata: &Metadata, inputs: Option<&TokenStream>, calls: &[TokenStream])
         doc.push_str(" `inputs` are what the host lends every service of the Orb.");
         quote! { inputs: #path }
     });
+    let shared = shared.then(|| quote! { let inputs = ::std::rc::Rc::new(inputs); });
     quote! {
         const _: &[u8] = ::core::include_bytes!(::core::concat!(
             ::core::env!("CARGO_MANIFEST_DIR"),
@@ -96,6 +109,7 @@ fn orb(metadata: &Metadata, inputs: Option<&TokenStream>, calls: &[TokenStream])
         #[doc = #doc]
         pub fn orb(#parameter) -> ::tembra::Result<::tembra::Orb> {
             let name = #name;
+            #shared
             ::core::result::Result::Ok(::tembra::Orb::new(name, #version) #(.service(#calls))*)
         }
     }
@@ -209,12 +223,34 @@ fn codec_ident(service: &Service, function: &Function) -> Ident {
 /// `orb()` calls, which builds the `Service` named `{orb}::{identity}` with the signature of its
 /// interface, the ownership policy of its attribute and one method per `pub fn`, under its WIT
 /// name. The method runs `context.check()` first and then the author's function, awaited when it
-/// is `async`, with the arguments as a tuple in WIT order.
+/// is `async`, with the arguments as a tuple in WIT order. A service with a create takes the
+/// inputs `orb(..)` shares, and its factory calls the create with them and the object's
+/// declaration: the service it returns is the object's environment, which a method borrowing
+/// `&self` is called on.
 fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused> {
-    let root = crate::supers(analysis.modules[service.scope].len());
+    let depth = analysis.modules[service.scope].len();
+    let root = crate::supers(depth);
     let signature = crate::signature_ident(service);
     let identity = service.identity(&analysis.package);
     let function = service_ident(service);
+    let target = &service.ident;
+    let (parameter, environment, shared, factory) = match (&service.create, &analysis.inputs) {
+        (Some(create), Some(inputs)) => {
+            let inputs = crate::relative(depth, &analysis.modules[inputs.scope], &inputs.ident);
+            (
+                quote! { , inputs: &::std::rc::Rc<#inputs> },
+                quote! { #target },
+                quote! { let inputs = ::std::rc::Rc::clone(inputs); },
+                quote! { move |declaration| #target::#create(&inputs, &declaration) },
+            )
+        }
+        _ => (
+            quote! {},
+            quote! { () },
+            quote! {},
+            quote! { |_| { ::core::result::Result::Ok(()) } },
+        ),
+    };
     let lifetime = service.policy.as_ref().map(|policy| {
         let lifetime = if policy.host {
             quote! { Host }
@@ -239,10 +275,9 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
         #(#codecs)*
 
         #[doc = #doc]
-        pub(crate) fn #function(orb: &str) -> ::tembra::Service<()> {
-            ::tembra::Service::new(::std::format!("{}::{}", orb, #identity), |_| {
-                ::core::result::Result::Ok(())
-            })
+        pub(crate) fn #function(orb: &str #parameter) -> ::tembra::Service<#environment> {
+            #shared
+            ::tembra::Service::new(::std::format!("{}::{}", orb, #identity), #factory)
             .signature(::core::option::Option::Some(::std::string::String::from(#root #signature)))
             #lifetime
             #(#methods)*
@@ -251,7 +286,8 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
 }
 
 /// The `method_with` call binding one method: the handle takes the arguments as a tuple of the
-/// author's parameter types, checks the context and calls the author's function.
+/// author's parameter types, checks the context and calls the author's function, on the object's
+/// environment when it borrows `&self`.
 fn method(service: &Service, function: &Function, codec: &Ident) -> TokenStream {
     let name = wit::kebab(&function.ident);
     let target = &service.ident;
@@ -259,7 +295,17 @@ fn method(service: &Service, function: &Function, codec: &Ident) -> TokenStream 
     let params: Vec<&Ident> = function.params.iter().map(|(name, _, _)| name).collect();
     let types: Vec<&Type> = function.params.iter().map(|(_, ty, _)| ty).collect();
     let awaited = function.asynchronous.then(|| quote! { .await });
-    let call = quote! { #target::#ident(#(#params),*) #awaited };
+    let (environment, call) = if function.receiver {
+        (
+            quote! { __tembra_self: ::std::rc::Rc<#target> },
+            quote! { __tembra_self.#ident(#(#params),*) #awaited },
+        )
+    } else {
+        (
+            quote! { _ },
+            quote! { #target::#ident(#(#params),*) #awaited },
+        )
+    };
     let body = match &function.result {
         Some(_) => quote! { ::core::result::Result::Ok(#call) },
         None => quote! { #call; ::core::result::Result::Ok(()) },
@@ -267,7 +313,7 @@ fn method(service: &Service, function: &Function, codec: &Ident) -> TokenStream 
     quote! {
         .method_with(
             #name,
-            |_, __tembra_context: ::tembra::Context, (#(#params,)*): (#(#types,)*)| async move {
+            |#environment, __tembra_context: ::tembra::Context, (#(#params,)*): (#(#types,)*)| async move {
                 __tembra_context.check()?;
                 #body
             },

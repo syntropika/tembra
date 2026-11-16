@@ -1003,6 +1003,34 @@ is the argument of `orb(..)`, one value for every service of the Orb, which the 
 fields may hold anything, such as `Rc` handles or closures. An Orb has at most one, visible to the
 Orb module, without generic parameters.
 
+A service reads them in its function marked `#[create]`,
+`fn(&Inputs, &Declaration) -> tembra::Result<Self>`, which builds each object of the service, a
+key and a principal, once, before its first call. The `Declaration` gives the object's address and
+declares its state, its resources and its tasks. What the create returns is the object's
+environment: the service struct may then have fields, and its methods borrow them through
+`&self`, a receiver the WIT leaves out. Without a `#[create]`, a service stays a unit struct whose
+methods take no `self`. Only a native host builds such objects, so the component has no bridge for
+the service.
+
+```rust,ignore
+#[service]
+pub struct Notes {
+    title: String,
+}
+
+impl Notes {
+    #[create]
+    fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+        let address = declaration.address()?;
+        Ok(Self { title: (inputs.title)(&address) })
+    }
+
+    pub fn title(&self) -> String {
+        self.title.clone()
+    }
+}
+```
+
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, and `Vec`, `Option` and tuples of them. A record, an enum, a variant, a flags, a `Result`,
 a resource, the `context` option, `#[state]`, `#[resource]`, `#[wit_resource]`, an import and a hook
@@ -1054,7 +1082,8 @@ The macro rewrites the module with:
    it lacks, `Clone`, `Copy`, `Debug` and, with a state, serde's, and the functions its bindings
    call on it, `empty`, `bits`, `from_bits_retain` and `BitOr`;
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
-   by forwarding to the author's functions, hook callbacks and the kernel's `state-init` and
+   but that of a service its `#[create]` builds, by forwarding to the author's functions, hook
+   callbacks and the kernel's `state-init` and
    `resources-init` callbacks included, with a trapping callback for each declared hook, and
    `export!` under `#[cfg(target_arch = "wasm32")]`, so that a native build defines none of the
    component's export symbols; the resource trait of each `#[wit_resource]` struct on the struct
@@ -1085,10 +1114,11 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   hook, and passes the interface's data types on as they are. A view takes the name of the
   interface imported by key, so two interfaces of one name are not both imported by key.
 - A hook declared from a consumed package keeps the types of its import, which `run` takes and returns, while a derived interface takes the types of its export: a method that reports its record returns a record of the module, converted from it. A hook derived from `input = Type` shares the module's types, defined in the hook's interface; its input is a record, an enum, a variant, a scalar, a string or a list, of the module's own types. `run` hands the import a string, a list, or a record or variant holding one by reference, as the bindings take them, and lends an option, a result or a tuple over them piece by piece, as the bindings borrow it, copying its other parts.
-- A service's functions are associated functions without `self`; only the methods of a
-  `#[wit_resource]` struct take `&self`, never `&mut self`. Besides a service's state, a
-  resource's fields and the root's resources, data lives in `static`s, as in the compiled
-  fixtures of `executor-wasm`.
+- A service's functions are associated functions without `self`, unless the service's
+  `#[create]` builds its objects, natively; the methods of a `#[wit_resource]` struct take
+  `&self`, and none takes `&mut self`. Besides a service's state, a resource's fields, the root's
+  resources and the fields of a service its `#[create]` builds, data lives in `static`s, as in
+  the compiled fixtures of `executor-wasm`.
 - Root resources, `#[resource]`, belong to the root, declare no dependencies on one another, and
   are opened in the order the kernel chooses; the `#[open]` and `#[close]` functions take no
   arguments besides the value.
