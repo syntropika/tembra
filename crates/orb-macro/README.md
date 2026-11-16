@@ -1008,7 +1008,9 @@ host that depends on the Orb crate and on `tembra` with `host`, the default, get
 component build enables only `macros`, gets none of it, and the component stays the same. The
 generated code names the facade as `::tembra`, so an Orb crate depends on it under that name and
 needs no dependency of its own for the runtime or its JSON; a host whose `tembra` lacks `host` finds
-no `orb()`. The crate is rebuilt when its manifest changes, so `orb()` follows the table.
+no `orb()`. The crate is rebuilt when its manifest changes, so `orb()` follows the table. See
+[rust-orb-native](../../examples/rust-orb-native/README.md), where one host links two Orb crates
+that export the same interface.
 
 A native host can lend the Orb values a component cannot be given. The struct marked `#[inputs]`
 is the argument of `orb(..)`, and of `orb_named(..)` after the name and API version, one value for
