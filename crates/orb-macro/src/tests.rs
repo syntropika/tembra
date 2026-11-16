@@ -63,10 +63,15 @@ fn items(module: &ItemMod) -> &[Item] {
 
 /// The derived WIT, from the generated `WIT` constant.
 fn wit(module: &ItemMod) -> String {
+    constant(module, "WIT")
+}
+
+/// The text of a generated string constant of the module.
+fn constant(module: &ItemMod, name: &str) -> String {
     items(module)
         .iter()
         .find_map(|item| match item {
-            Item::Const(constant) if constant.ident == "WIT" => match &*constant.expr {
+            Item::Const(constant) if constant.ident == name => match &*constant.expr {
                 Expr::Lit(literal) => match &literal.lit {
                     Lit::Str(text) => Some(text.value()),
                     _ => None,
@@ -75,7 +80,7 @@ fn wit(module: &ItemMod) -> String {
             },
             _ => None,
         })
-        .expect("the WIT constant")
+        .unwrap_or_else(|| panic!("the {name} constant"))
 }
 
 /// The JSON of the `tembra:manifest` section, if the module embeds one.
@@ -698,6 +703,52 @@ fn a_service_may_implement_a_consumed_interface() {
     assert!(error.contains("is not a function of"), "{error}");
     let error = refused("example:keeper@1.0.0", KEEPER);
     assert!(error.contains("needs wit ="), "{error}");
+}
+
+/// Each service gets the signature of its interface as a hidden constant: the digest the kernel
+/// computes when it installs a provider, which `plan` gives the service for the derived WIT, so a
+/// native Orb of the module declares it and installs. The implemented interface of a consumed
+/// package keeps the signature its own contract gives it, with the consumed types shaping it.
+#[test]
+fn a_service_signature_is_the_one_the_kernel_computes() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            pub struct Entry { pub label: String, pub amount: i64 }
+            pub enum Refusal { Closed, Over(u32) }
+            #[service]
+            pub struct Ledger;
+            impl Ledger {
+                pub fn add(entry: Entry) -> Result<u32, Refusal> { Ok(0) }
+            }
+        }",
+    );
+    let plan = tembra_contracts::Contract::from_source("book.wit", &wit(&module), Some("book"))
+        .unwrap()
+        .plan("book", 1, &Default::default())
+        .unwrap();
+    assert_eq!(plan.orb.services[0].name, "book::example:book/ledger@1.0.0");
+    assert_eq!(
+        constant(&module, "__TEMBRA_SIGNATURE_LEDGER"),
+        plan.orb.services[0].signature.clone().unwrap()
+    );
+    let generated = tokens(&module);
+    assert!(
+        generated.contains("# [doc (hidden)] pub const __TEMBRA_SIGNATURE_LEDGER : & str ="),
+        "{generated}"
+    );
+
+    let dir = consumed("signature", LEDGER_WIT);
+    let module = orb_with(options("example:keeper@1.0.0", Some(&dir)), KEEPER)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let provider = tembra_contracts::Contract::from_dir(&dir, Some("keeper"))
+        .unwrap()
+        .plan("ledger", 1, &Default::default())
+        .unwrap();
+    assert_eq!(
+        constant(&module, "__TEMBRA_SIGNATURE_KEEPER"),
+        provider.orb.services[0].signature.clone().unwrap()
+    );
 }
 
 /// Every reference to a service object has the members `then`, `release`, `state`, `ready`,

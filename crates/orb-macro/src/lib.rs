@@ -1114,6 +1114,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let analysis = analyze(options, module)?;
     let component = component(&analysis)?;
     let native = native(&analysis);
+    // Last, once both sides accepted the module: the signature of each service, from the WIT.
+    let signatures = signatures(&analysis)?;
     let (outer_attrs, inner_attrs) = placed(&analysis.attrs);
     let vis = &analysis.vis;
     let ident = &analysis.ident;
@@ -1125,6 +1127,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
 
             /// The WIT derived from this module.
             pub const WIT: &str = #wit_literal;
+
+            #(#signatures)*
 
             #component
             #native
@@ -2427,6 +2431,60 @@ fn component(analysis: &Analysis) -> syn::Result<proc_macro2::TokenStream> {
 /// caller needs. Nothing yet.
 fn native(_analysis: &Analysis) -> proc_macro2::TokenStream {
     proc_macro2::TokenStream::new()
+}
+
+/// The signature of each service's interface, as the kernel computes it when it installs a
+/// provider: the derived WIT, resolved as a contract with the consumed packages the way
+/// `cargo tembra build` reads it, gives a service of the interface the digest `plan` gives it. A
+/// native Orb of the module declares it on its `Service`. Each goes in the module, beside the
+/// `WIT` both sides share, as a hidden constant named after the service, `__TEMBRA_SIGNATURE_LEDGER`
+/// for `Ledger`.
+fn signatures(analysis: &Analysis) -> syn::Result<Vec<proc_macro2::TokenStream>> {
+    let Analysis {
+        package,
+        world,
+        services,
+        wit_dir,
+        wit,
+        ..
+    } = analysis;
+    if services.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The world as the WIT text names it, escaped when the module's name is a WIT keyword.
+    let file = format!("{world}.wit");
+    let world = wit::escaped(world);
+    let signatures = match wit_dir {
+        Some(dir) => tembra_contracts::Contract::from_source_in(dir, &file, wit, Some(&world)),
+        None => tembra_contracts::Contract::from_source(&file, wit, Some(&world)),
+    }
+    .and_then(|contract| contract.service_signatures())
+    .map_err(|error| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("the derived WIT does not resolve as a contract: {error}"),
+        )
+    })?;
+    services
+        .iter()
+        .map(|service| {
+            let identity = service.identity(package);
+            let digest = signatures.get(&identity).ok_or_else(|| {
+                syn::Error::new(
+                    service.ident.span(),
+                    format!("{identity} is no service of the derived contract"),
+                )
+            })?;
+            let ident = format_ident!(
+                "__TEMBRA_SIGNATURE_{}",
+                service.ident.to_string().to_shouty_snake_case()
+            );
+            Ok(quote! {
+                #[doc(hidden)]
+                pub const #ident: &str = #digest;
+            })
+        })
+        .collect()
 }
 
 /// The members every reference to a service object has, which the kernel refuses as method names

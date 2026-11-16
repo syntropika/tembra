@@ -6,7 +6,10 @@ use crate::{
     Artifact, Error, PreparedContract,
     artifact::{ComponentRoles, Container, Identity, append_section, encode_orb_roles},
 };
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 use wit_parser::{
     PackageId, PackageName, Resolve, UnresolvedPackage, UnresolvedPackageGroup, WorldId,
 };
@@ -79,6 +82,59 @@ fn redefined(
     Ok(())
 }
 
+/// The dependency packages of a `deps/` directory, as `Resolve::push_dir` finds them, each with
+/// its path: a subdirectory or a text file is parsed, for the checks and the provenance to come;
+/// an encoded package (`*.wasm`, `*.wat`, or a `*.wit` whose content is binary) is merged into
+/// the Resolve at once and carries no provenance; an exact copy of a bundled standard contract
+/// adds nothing. A directory that does not exist holds none.
+fn dependencies(
+    resolve: &mut Resolve,
+    deps: &Path,
+) -> Result<Vec<(PathBuf, UnresolvedPackageGroup)>, Error> {
+    let mut dependencies = Vec::new();
+    if !deps.exists() {
+        return Ok(dependencies);
+    }
+    let mut entries = std::fs::read_dir(deps)
+        .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
+        .map_err(|error| package(deps, error))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let dependency = entry.path();
+        if dependency.is_dir() {
+            let group = UnresolvedPackageGroup::parse_dir(&dependency)
+                .map_err(|error| package(&dependency, error))?;
+            dependencies.push((dependency, group));
+            continue;
+        }
+        let extension = dependency
+            .extension()
+            .and_then(|extension| extension.to_str());
+        if !matches!(extension, Some("wit" | "wasm" | "wat")) {
+            continue;
+        }
+        let bytes = std::fs::read(&dependency).map_err(|error| package(&dependency, error))?;
+        if extension == Some("wat") || bytes.starts_with(b"\0asm") {
+            // Encoded packages carry no import provenance; worlds that include them
+            // conservatively treat every import as explicit.
+            resolve
+                .push_file(&dependency)
+                .map_err(|error| package(&dependency, error))?;
+            continue;
+        }
+        let source = String::from_utf8(bytes).map_err(|error| package(&dependency, error))?;
+        // A copy of a bundled standard contract, there so that the directory resolves with
+        // `Resolve::push_dir` alone too, adds nothing to the bundled package.
+        if crate::standard::bundled(&source) {
+            continue;
+        }
+        let group =
+            parse_source(&dependency, &source).map_err(|error| package(&dependency, error))?;
+        dependencies.push((dependency, group));
+    }
+    Ok(dependencies)
+}
+
 impl Contract {
     /// Prepare the compact runtime contract once for a resolved world. `explicit` lists the
     /// world's own imports; `None` (unknown provenance) treats every import as explicit.
@@ -106,56 +162,59 @@ impl Contract {
     /// of a bundled package is refused.
     pub fn from_dir(path: impl AsRef<Path>, world: Option<&str>) -> Result<Self, Error> {
         let path = path.as_ref();
-        let (mut resolve, mut known) = crate::standard::resolve()?;
+        let (mut resolve, known) = crate::standard::resolve()?;
         let standard: BTreeSet<_> = resolve.package_names.keys().cloned().collect();
         let main = UnresolvedPackageGroup::parse_dir(path).map_err(|error| package(path, error))?;
-        let mut dependencies = Vec::new();
-        let deps = path.join("deps");
-        if deps.exists() {
-            let mut entries = std::fs::read_dir(&deps)
-                .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
-                .map_err(|error| package(&deps, error))?;
-            entries.sort_by_key(|entry| entry.file_name());
-            for entry in entries {
-                let dependency = entry.path();
-                if dependency.is_dir() {
-                    let group = UnresolvedPackageGroup::parse_dir(&dependency)
-                        .map_err(|error| package(&dependency, error))?;
-                    dependencies.push((dependency, group));
-                    continue;
-                }
-                let extension = dependency
-                    .extension()
-                    .and_then(|extension| extension.to_str());
-                if !matches!(extension, Some("wit" | "wasm" | "wat")) {
-                    continue;
-                }
-                let bytes =
-                    std::fs::read(&dependency).map_err(|error| package(&dependency, error))?;
-                if extension == Some("wat") || bytes.starts_with(b"\0asm") {
-                    // Encoded packages carry no import provenance; worlds that include them
-                    // conservatively treat every import as explicit.
-                    resolve
-                        .push_file(&dependency)
-                        .map_err(|error| package(&dependency, error))?;
-                    continue;
-                }
-                let source =
-                    String::from_utf8(bytes).map_err(|error| package(&dependency, error))?;
-                // A copy of a bundled standard contract, there so that the directory resolves
-                // with `Resolve::push_dir` alone too, adds nothing to the bundled package.
-                if crate::standard::bundled(&source) {
-                    continue;
-                }
-                let group = parse_source(&dependency, &source)
-                    .map_err(|error| package(&dependency, error))?;
-                dependencies.push((dependency, group));
-            }
-        }
+        let dependencies = dependencies(&mut resolve, &path.join("deps"))?;
+        Self::elaborate(resolve, standard, known, (path, main), dependencies, world)
+    }
+
+    /// Resolve a world's own WIT source with the packages of a directory, as the bindings of an
+    /// Orb module read `path` and `inline` together: the packages the source names and does not
+    /// define come from the directory and its `deps/`, read as [`Self::from_dir`] reads them. The
+    /// bundled standard packages are resolved already and answer for the directory's copies of
+    /// them, whatever their text, as they do when `cargo tembra build` nests the packages a module
+    /// consumes into its contract.
+    pub fn from_source_in(
+        dir: impl AsRef<Path>,
+        name: &str,
+        source: &str,
+        world: Option<&str>,
+    ) -> Result<Self, Error> {
+        let dir = dir.as_ref();
+        let (mut resolve, known) = crate::standard::resolve()?;
+        let standard: BTreeSet<_> = resolve.package_names.keys().cloned().collect();
+        let main = parse_source(name, source)?;
+        let consumed =
+            UnresolvedPackageGroup::parse_dir(dir).map_err(|error| package(dir, error))?;
+        let mut dependencies = vec![(dir.to_path_buf(), consumed)];
+        dependencies.extend(self::dependencies(&mut resolve, &dir.join("deps"))?);
+        dependencies.retain(|(_, group)| !standard.contains(&group.main.name));
+        Self::elaborate(
+            resolve,
+            standard,
+            known,
+            (Path::new(name), main),
+            dependencies,
+            world,
+        )
+    }
+
+    /// Refuse a package the bundled ones or the encoded dependencies define already, add the
+    /// parsed packages to the Resolve, dependencies first, and prepare the selected world of the
+    /// main package with the provenance of every package read.
+    fn elaborate(
+        mut resolve: Resolve,
+        standard: BTreeSet<PackageName>,
+        mut known: Vec<UnresolvedPackage>,
+        (origin, main): (&Path, UnresolvedPackageGroup),
+        dependencies: Vec<(PathBuf, UnresolvedPackageGroup)>,
+        world: Option<&str>,
+    ) -> Result<Self, Error> {
         for (origin, group) in dependencies
             .iter()
             .map(|(origin, group)| (origin.as_path(), group))
-            .chain([(path, &main)])
+            .chain([(origin, &main)])
         {
             redefined(&resolve, &standard, origin, group)?;
             known.push(group.main.clone());
