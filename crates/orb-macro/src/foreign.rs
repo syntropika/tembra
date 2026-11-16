@@ -29,7 +29,7 @@ use crate::{
 };
 use quote::ToTokens;
 use std::collections::{BTreeMap, BTreeSet};
-use syn::{Ident, Item, LitStr, Type, spanned::Spanned};
+use syn::{Ident, Item, LitStr, Type, ext::IdentExt, spanned::Spanned};
 
 /// How the world holds a consumed interface, which decides what a derived interface names through
 /// the interface's module.
@@ -118,11 +118,14 @@ impl Modules {
     /// The consumed interfaces of the module, each under the name of its re-exported module: an
     /// interface imported by key under its view's, and with `context`, the attribute's option, the
     /// kernel's context interface under `context`. `imports` are the attribute's literals, read as
-    /// identities already; `paths` are the Orb's own modules, by scope. Another interface under a
-    /// name already taken is an error on it, naming both, and so is a second role of an interface,
-    /// or one role twice, which the world cannot hold, an import of the kernel's context interface
-    /// beside the option, and a plain import of an interface the module implements, which would
-    /// make the world a hook's.
+    /// identities already; `paths` are the Orb's own modules, by scope; `own` are the names the
+    /// Orb module's items take where a module takes its name (`own_names`). Another interface
+    /// under a name already taken is an error on it, naming both, and so is a second role of an
+    /// interface, or one role twice, which the world cannot hold, an import of the kernel's context
+    /// interface beside the option, and a plain import of an interface the module implements, which
+    /// would make the world a hook's. An item of the Orb module under the name of a re-exported
+    /// module is an error on the item, naming both.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         context: bool,
         imports: &[LitStr],
@@ -131,6 +134,7 @@ impl Modules {
         contributions: &[Contribution],
         declared: &[Declared],
         paths: &[Vec<Ident>],
+        own: &[(Ident, &str)],
     ) -> syn::Result<Self> {
         let mut modules = BTreeMap::new();
         // The option keeps no span: its name is taken first, so the error falls on the interface
@@ -247,6 +251,20 @@ impl Modules {
                 ),
             };
             return Err(syn::Error::new(span, message));
+        }
+        // The Orb module holds its items beside the modules it re-exports: one of its own names
+        // taken by a re-exported module would be defined twice, `r#ledger` as `ledger`. The option
+        // keeps no span, so the error falls on the item for every re-export.
+        for (ident, kind) in own {
+            if let Some(reexported) = modules.get(&ident.unraw().to_string()) {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!(
+                        "`{ident}` is the name of the Orb module's own {kind} and of the module it re-exports for {}; rename its own {kind}",
+                        reexported.described()
+                    ),
+                ));
+            }
         }
         Ok(Self {
             reexported: modules,
@@ -392,6 +410,65 @@ impl Modules {
             self.references(ty, scope, &mut references);
         }
         references
+    }
+}
+
+/// The names the items of the Orb module take in the type namespace, where a module the Orb module
+/// re-exports takes its own, each with what the item is, for the errors: its sub-modules, types and
+/// traits, its `extern crate`s, and what a `use` imports with `self` (`self_imports`). A plain
+/// `use` may import a function, which takes its name in the value namespace and compiles beside
+/// such a module, and an item under `#[cfg(..)]` is gone where its configuration is off: the
+/// compiler judges those.
+pub(crate) fn own_names(items: &[Item]) -> Vec<(Ident, &'static str)> {
+    let mut names = Vec::new();
+    for item in items {
+        let (attrs, bound) = match item {
+            Item::Mod(item) => (&item.attrs, vec![(item.ident.clone(), "module")]),
+            Item::Struct(item) => (&item.attrs, vec![(item.ident.clone(), "struct")]),
+            Item::Enum(item) => (&item.attrs, vec![(item.ident.clone(), "enum")]),
+            Item::Union(item) => (&item.attrs, vec![(item.ident.clone(), "union")]),
+            Item::Type(item) => (&item.attrs, vec![(item.ident.clone(), "type alias")]),
+            Item::Trait(item) => (&item.attrs, vec![(item.ident.clone(), "trait")]),
+            Item::TraitAlias(item) => (&item.attrs, vec![(item.ident.clone(), "trait alias")]),
+            Item::ExternCrate(item) => {
+                let ident = item
+                    .rename
+                    .as_ref()
+                    .map_or(&item.ident, |(_, rename)| rename);
+                (&item.attrs, vec![(ident.clone(), "`extern crate`")])
+            }
+            Item::Use(item) => {
+                let mut imported = Vec::new();
+                self_imports(&item.tree, None, &mut imported);
+                let bound = imported.into_iter().map(|ident| (ident, "import"));
+                (&item.attrs, bound.collect())
+            }
+            _ => continue,
+        };
+        if !attrs
+            .iter()
+            .any(|attribute| crate::conditional(&attribute.meta))
+        {
+            names.extend(bound.into_iter().filter(|(ident, _)| ident != "_"));
+        }
+    }
+    names
+}
+
+/// Each name a `use` tree binds with `self`, `crate::util::ledger::{self}` or `{self as ledger}`,
+/// which imports from the type namespace alone, whatever the path leads to. `parent` is the name
+/// before the tree in the path.
+fn self_imports(tree: &syn::UseTree, parent: Option<&Ident>, out: &mut Vec<Ident>) {
+    match tree {
+        syn::UseTree::Path(path) => self_imports(&path.tree, Some(&path.ident), out),
+        syn::UseTree::Name(name) if name.ident == "self" => out.extend(parent.cloned()),
+        syn::UseTree::Rename(rename) if rename.ident == "self" => out.push(rename.rename.clone()),
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                self_imports(tree, parent, out);
+            }
+        }
+        _ => {}
     }
 }
 

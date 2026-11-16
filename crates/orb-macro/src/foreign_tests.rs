@@ -957,6 +957,97 @@ fn one_interface_in_two_roles_is_refused() {
     }
 }
 
+/// The Orb module re-exports a module for each consumed interface beside its own items, and a
+/// module takes its name in the type namespace: an item of the Orb module there under the same
+/// name, raw or not, a module, a type, an `extern crate` or what a `use` imports with `self`, is an
+/// error on it naming both, beside the `context` option too. A plain `use` may import a function,
+/// which takes its name in the value namespace, and an item under `#[cfg(..)]` is gone where its
+/// configuration is off: the compiler judges those, so they expand, as does a function of that
+/// name and each module without the item.
+#[test]
+fn an_item_named_like_a_reexported_module_is_refused() {
+    let dir = consumed("own-names", LEDGER);
+    let orb = |context: bool, imports: &[&str], items: &str| {
+        let module = format!(
+            "mod keeping {{
+                #[service]
+                pub struct Report;
+                impl Report {{ pub fn count() -> u32 {{ 0 }} }}
+                {items}
+            }}"
+        );
+        let options = Options {
+            context,
+            ..options("example:keeping@1.0.0", Some(&dir), imports)
+        };
+        (options, module)
+    };
+    let book = ["example:ledger/book@1.0.0"];
+    let imported = "the module it re-exports for the imported interface example:ledger/book@1.0.0";
+    let contribution = "#[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
+        pub fn admit(input: guard::Admission) -> guard::Admission { input }";
+    // The option, the imports, the items besides the one named like a re-export, that one, and
+    // the error on it.
+    for (context, imports, items, item, message) in [
+        (
+            true,
+            &[][..],
+            "",
+            "mod context {}",
+            "`context` is the name of the Orb module's own module and of the module it re-exports for the kernel's interface tembra:guest/context@1.0.0, which the `context` option imports; rename its own module".to_owned(),
+        ),
+        (
+            false,
+            &book[..],
+            "",
+            "mod book {}",
+            format!("`book` is the name of the Orb module's own module and of {imported}; rename its own module"),
+        ),
+        (
+            false,
+            &book[..],
+            "",
+            "mod r#book {}",
+            format!("`r#book` is the name of the Orb module's own module and of {imported}; rename its own module"),
+        ),
+        (
+            false,
+            &book[..],
+            "",
+            "use crate::util::book::{self, Entry};",
+            format!("`book` is the name of the Orb module's own import and of {imported}; rename its own import"),
+        ),
+        (
+            false,
+            &book[..],
+            "",
+            "extern crate book;",
+            format!("`book` is the name of the Orb module's own `extern crate` and of {imported}; rename its own `extern crate`"),
+        ),
+        (
+            false,
+            &[][..],
+            contribution,
+            "pub struct guard;",
+            "`guard` is the name of the Orb module's own struct and of the module it re-exports for the hook example:ledger/guard@1.0.0, which this module contributes to; rename its own struct".to_owned(),
+        ),
+    ] {
+        let (options, module) = orb(context, imports, &format!("{items}\n{item}"));
+        let error = refused(options, &module);
+        assert!(error.contains(&message), "{item}\n{error}");
+        let (options, module) = orb(context, imports, items);
+        expanded(options, &module);
+    }
+    for item in [
+        "use crate::util::book;",
+        "#[cfg(test)] mod book {}",
+        "pub fn book() -> u32 { 0 }",
+    ] {
+        let (options, module) = orb(false, &book, item);
+        expanded(options, &module);
+    }
+}
+
 /// What a derived interface does not take from a consumed interface is refused where it is named:
 /// a name the interface does not define, a WASI type, a consumed type holding a resource handle,
 /// an imported handle in a type of the module, a consumed type in a derived hook's input, and a

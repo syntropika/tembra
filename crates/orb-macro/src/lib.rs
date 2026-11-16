@@ -1292,6 +1292,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             "the module needs a body { ... }",
         ));
     };
+    // The names the Orb module's own items take beside the modules it re-exports.
+    let own_names = foreign::own_names(&items);
 
     // Read the module and its sub-modules: marked services, hooks, states and resources,
     // candidate types, and everything else to copy through unchanged.
@@ -1684,6 +1686,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &contributions,
         &declared,
         &modules,
+        &own_names,
     )?;
     for candidate in &mut candidates {
         candidate.references = consumed_modules.item_references(&candidate.item, candidate.scope);
