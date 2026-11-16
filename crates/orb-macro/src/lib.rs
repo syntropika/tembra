@@ -17,8 +17,9 @@
 //!
 //! The macro derives the WIT contract from those items and generates what a WIT-first crate
 //! writes by hand: the `wit_bindgen::generate!` invocation with the WIT inline, the `Guest`
-//! implementations forwarding to the author's functions and `export!`. The module uses the
-//! standard library by default; `no_std` on the attribute adds the freestanding Wasm prelude.
+//! implementations forwarding to the author's functions and, for the Wasm target, `export!`. The
+//! module uses the standard library by default; `no_std` on the attribute adds the freestanding
+//! Wasm prelude.
 //! The hook interfaces come from the provider's WIT, found in the
 //! directory named by `wit = "dir"` on the attribute, relative to the crate manifest; their
 //! generated modules are re-exported under their own names, so the author writes
@@ -2194,6 +2195,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             #conversions
             #state_code
             #resource_code
+            // The exports are symbols, which two Orb crates linked into one native binary would
+            // both define. A host build keeps the bridges above, so `cargo check` still checks
+            // them.
+            #[cfg(target_arch = "wasm32")]
             export!(__TembraExports);
         }
     })

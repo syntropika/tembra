@@ -999,8 +999,9 @@ The macro rewrites the module with:
 7. a private struct implementing the `Guest` trait of every interface, derived or implemented,
    by forwarding to the author's functions, hook callbacks and the kernel's `state-init` and
    `resources-init` callbacks included, with a trapping callback for each declared hook, and
-   `export!`; the resource trait of each `#[wit_resource]` struct on the struct itself, its
-   constructor and methods forwarded and the handles wrapped, or taken back, at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
+   `export!` under `#[cfg(target_arch = "wasm32")]`, so that a native build defines none of the
+   component's export symbols; the resource trait of each `#[wit_resource]` struct on the struct
+   itself, its constructor and methods forwarded and the handles wrapped, or taken back, at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
 8. with a state, `Default`, field by field unless the author provides it, and the `read`/`update`
    functions on each state type, over a hidden module that maps the kernel's JSON to the type with
    `serde_json` and holds back a value whose JSON would not read back as the type, and the

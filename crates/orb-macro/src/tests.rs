@@ -140,6 +140,41 @@ fn a_service_lifetime_goes_to_the_manifest_and_leaves_the_wit_alone() {
     );
 }
 
+/// wit-bindgen's `export!` defines the component's exports as symbols, the kernel's `state-init`
+/// and `resources-init` callbacks included, which two Orb crates linked into one native binary
+/// would both define: only a component build invokes it.
+#[test]
+fn only_a_component_build_exports() {
+    let module = expanded(
+        "example:vault@1.0.0",
+        "mod safe {
+            #[state]
+            pub struct Sealed { pub count: u32 }
+            #[resource]
+            pub struct Banner { pub text: String }
+            impl Banner { #[open] pub fn open() -> Self { Banner { text: String::new() } } }
+            #[service]
+            pub struct Vault;
+            impl Vault { pub fn get() -> u32 { 0 } }
+        }",
+    );
+    let exports: Vec<&syn::ItemMacro> = items(&module)
+        .iter()
+        .filter_map(|item| match item {
+            Item::Macro(invocation) if invocation.mac.path.is_ident("export") => Some(invocation),
+            _ => None,
+        })
+        .collect();
+    let generated = tokens(&module);
+    assert_eq!(exports.len(), 1, "{generated}");
+    assert_eq!(generated.matches("export !").count(), 1, "{generated}");
+    let gate = &exports[0].attrs;
+    assert_eq!(
+        quote::quote!(#(#gate)*).to_string(),
+        "# [cfg (target_arch = \"wasm32\")]"
+    );
+}
+
 /// `context` on the attribute imports the kernel's context interface, alone, and re-exports its
 /// generated module under its own name.
 #[test]
