@@ -1,5 +1,6 @@
 //! The WIT text derived from the module items, and the consumed packages it refers to.
 use crate::foreign::{Foreign, Modules};
+use crate::resource_params::{self, Derived};
 use crate::{Composition, Declared, Function, Handles, Service, Shape, ShapeKind, WitResource};
 use heck::{ToKebabCase, ToUpperCamelCase};
 use proc_macro2::Span;
@@ -158,41 +159,20 @@ pub(crate) fn hook_shapes(
     reached
 }
 
-/// The module types a derived service's interface mentions in its own text: its functions, and
-/// the constructors, methods and static functions of the resources it owns.
-fn service_mentions(service: &Service, resources: &[WitResource], modules: &Modules) -> Vec<Ident> {
+/// The module types the interface of the derived service `service` mentions in its own text: those
+/// of its `functions` among the derived ones, its own functions and the constructors, methods and
+/// static functions of the resources it owns.
+fn service_mentions(service: &Ident, functions: &[Derived<'_>], modules: &Modules) -> Vec<Ident> {
     let mut mentioned = Vec::new();
-    let owned: Vec<&WitResource> = resources
+    for function in functions
         .iter()
-        .filter(|resource| resource.service.as_ref() == Some(&service.ident))
-        .collect();
-    // Each function with the module it is written in, the service's or its resource's.
-    let functions = service
-        .functions
-        .iter()
-        .map(|function| (function, service.scope))
-        .chain(owned.iter().flat_map(|resource| {
-            resource
-                .methods
-                .iter()
-                .chain(&resource.statics)
-                .map(|function| (function, resource.scope))
-        }));
-    for (function, scope) in functions {
-        for (_, ty, _) in &function.params {
-            modules.references(ty, scope, &mut mentioned);
+        .filter(|function| function.interface == service)
+    {
+        for (_, ty, _) in function.params {
+            modules.references(ty, function.scope, &mut mentioned);
         }
-        if let Some((ty, _)) = &function.result {
-            modules.references(ty, scope, &mut mentioned);
-        }
-    }
-    for resource in &owned {
-        for (_, ty, _) in resource
-            .constructor
-            .iter()
-            .flat_map(|constructor| &constructor.params)
-        {
-            modules.references(ty, resource.scope, &mut mentioned);
+        if let Some(ty) = function.result {
+            modules.references(ty, function.scope, &mut mentioned);
         }
     }
     mentioned
@@ -230,8 +210,9 @@ pub(crate) fn placement(
         .iter()
         .filter(|service| service.implements.is_none())
         .collect();
+    let functions = resource_params::derived(services, resources);
     for service in &derived {
-        let mut pending = service_mentions(service, resources, modules);
+        let mut pending = service_mentions(&service.ident, &functions, modules);
         let mut seen = BTreeSet::new();
         while let Some(ident) = pending.pop() {
             let name = ident.to_string();
@@ -297,6 +278,7 @@ pub(crate) fn render<'a>(
         .iter()
         .filter(|service| service.implements.is_none())
         .collect();
+    let functions = resource_params::derived(services, resources);
     let owner_of =
         |resource: &WitResource| kebab(resource.service.as_ref().expect("resolved owner"));
     // The interfaces in the order the package lists them: the derived hooks, then the services.
@@ -326,13 +308,7 @@ pub(crate) fn render<'a>(
                 modules.references(input, hook.scope, &mut mentioned);
                 mentioned
             }
-            None => {
-                let service = derived
-                    .iter()
-                    .find(|service| &service.ident == *ident)
-                    .expect("a derived service");
-                service_mentions(service, resources, modules)
-            }
+            None => service_mentions(ident, &functions, modules),
         };
         for shape in &defined {
             mentioned.extend(shape.references.iter().cloned());

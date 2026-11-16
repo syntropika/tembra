@@ -3239,36 +3239,12 @@ fn reachable(
         modules.references(ty, scope, &mut idents);
         pending.extend(idents.into_iter().map(|ident| (ident, scope)));
     };
-    let mention_function =
-        |function: &Function, scope: usize, pending: &mut Vec<(Ident, usize)>| {
-            for (_, ty, _) in &function.params {
-                mention(ty, scope, pending);
-            }
-            if let Some((ty, _)) = &function.result {
-                mention(ty, scope, pending);
-            }
-        };
-    for service in services
-        .iter()
-        .filter(|service| service.implements.is_none())
-    {
-        for function in &service.functions {
-            mention_function(function, service.scope, &mut pending);
+    for function in resource_params::derived(services, resources) {
+        for (_, ty, _) in function.params {
+            mention(ty, function.scope, &mut pending);
         }
-    }
-    for resource in resources
-        .iter()
-        .filter(|resource| !resource.implemented(services))
-    {
-        for (_, ty, _) in resource
-            .constructor
-            .iter()
-            .flat_map(|constructor| &constructor.params)
-        {
-            mention(ty, resource.scope, &mut pending);
-        }
-        for function in resource.methods.iter().chain(&resource.statics) {
-            mention_function(function, resource.scope, &mut pending);
+        if let Some(ty) = function.result {
+            mention(ty, function.scope, &mut pending);
         }
     }
     for (input, scope) in hook_inputs {
