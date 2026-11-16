@@ -310,9 +310,12 @@ impl Default for Count {
 The macro's `Default`, like a derived one, gives each field its type's `Default`, and follows a
 field's `#[cfg(..)]` written plainly: one under `#[cfg_attr(..)]` is a compile error on the field,
 since the macro writes the `Default` before the compiler evaluates the attribute, so derive or
-implement `Default` for such a state. A field whose type has none, an enum of the module for
-instance, is a compile error on that field: implement `Default` for the state, as above, or give
-the field's type one, by hand or by a derive, which for an enum marks the case it starts from:
+implement `Default` for such a state. For the same reason, a derive of `Default` under
+`#[cfg_attr(..)]` is a compile error on the attribute, since the macro's `Default` would be a
+second one where it applies: derive `Default` without the attribute, or implement it. A field
+whose type has none, an enum of the module for instance, is a compile error on that field:
+implement `Default` for the state, as above, or give the field's type one, by hand or by a
+derive, which for an enum marks the case it starts from:
 
 ```rust
 #[derive(Default)]
@@ -1144,8 +1147,9 @@ the version whose rules the macro follows, and the generated code reaches it the
   `#[wit_resource]` or `#[hook(..)]`, and the code calling the `pub fn` of a service or a WIT
   resource, a function marked `#[constructor]`, `#[validate]`, `#[open]` or `#[close]` and a
   contribution, before the compiler evaluates `#[cfg(..)]`, and that code names the struct or the
-  function in every configuration: such a struct, such a function or the `impl` block holding it
-  under `#[cfg(..)]`, written plainly or under `#[cfg_attr(..)]`, is a compile error.
+  function in every configuration: such a struct, such a function, the `impl` block holding it or
+  a sub-module holding either under `#[cfg(..)]`, written plainly or under `#[cfg_attr(..)]`, is a
+  compile error.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.
 

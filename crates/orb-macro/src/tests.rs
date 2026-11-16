@@ -2891,6 +2891,164 @@ fn a_function_under_cfg_is_refused() {
     }
 }
 
+/// A `#[cfg(..)]` on a sub-module drops every item of the module where it is off, while the code
+/// the macro writes for a struct it marks or a contribution counts on the item in every
+/// configuration, as under a `#[cfg(..)]` of the item's own: the export of a service, a hook or a
+/// contribution, which the bindings require, is written in the item's module and goes with it,
+/// and the code written elsewhere names a state, a resource or a WIT resource through the module.
+/// So a `#[cfg(..)]` on a sub-module holding such an item, in the module itself or below it, is
+/// refused, written plainly, under `#[cfg_attr(..)]` or inside the module, and the same module
+/// without it expands. A sub-module holding nothing the macro marks keeps its `#[cfg(..)]`.
+#[test]
+fn a_sub_module_under_cfg_holding_a_marked_item_is_refused() {
+    let office = |items: &str| {
+        format!(
+            "mod office {{
+                #[service]
+                pub struct Desk;
+                impl Desk {{ pub fn open() -> u32 {{ 1 }} }}
+                {items}
+            }}"
+        )
+    };
+    let blocker = consumed("cfg-module-blocker", ADMISSION_WIT);
+    for (package, dir, module, what, name, does) in [
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "{cfg} pub mod audit {
+                    #[service]
+                    pub struct Permits;
+                    impl Permits { pub fn check() -> u32 { 0 } }
+                }",
+            ),
+            "module `audit` holding the service",
+            "Permits",
+            "calls its functions",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "{cfg} pub mod audit {
+                    pub mod checks {
+                        #[service]
+                        pub struct Permits;
+                        impl Permits { pub fn check() -> u32 { 0 } }
+                    }
+                }",
+            ),
+            "module `audit` holding the service",
+            "Permits",
+            "calls its functions",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office("{cfg} pub mod kept { #[state] pub struct Tally { pub count: u32 } }"),
+            "module `kept` holding the state",
+            "Tally",
+            "builds and reads it",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "{cfg} pub mod pools {
+                    #[resource] pub struct Pool { pub size: u32 }
+                    impl Pool { #[open] pub fn open() -> Self { Pool { size: 0 } } }
+                }",
+            ),
+            "module `pools` holding the resource",
+            "Pool",
+            "opens and closes it",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "{cfg} pub mod badges {
+                    #[wit_resource(service = Desk)] pub struct Badge { holder: String }
+                    impl Badge {
+                        #[constructor]
+                        pub fn new(holder: String) -> Self { Badge { holder } }
+                        pub fn holder(&self) -> String { self.holder.clone() }
+                    }
+                }",
+            ),
+            "module `badges` holding the resource",
+            "Badge",
+            "calls its functions",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "{cfg} pub mod grants {
+                    #[hook(composition = series, input = Grant)] pub struct Granted;
+                    pub struct Grant { pub who: String }
+                }",
+            ),
+            "module `grants` holding the hook",
+            "Granted",
+            "runs it",
+        ),
+        (
+            "example:blocker@1.0.0",
+            Some(&blocker),
+            office(
+                "{cfg} pub mod blocks {
+                    #[hook(\"example:admission/guard@1.0.0\", priority = -7)]
+                    pub fn block(input: super::guard::Admission) -> super::guard::Admission { input }
+                }",
+            ),
+            "module `blocks` holding the contribution",
+            "block",
+            "calls it",
+        ),
+    ] {
+        let with = || options(package, dir.map(std::path::PathBuf::as_path));
+        for (condition, written) in CONDITIONS {
+            let error = refused_with(with(), &module.replace("{cfg}", condition));
+            let message = format!(
+                "{written} on the {what} `{name}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{name}` in every configuration; remove the attribute"
+            );
+            assert!(error.contains(&message), "{condition} {module}: {error}");
+        }
+        expanded_with(with(), &module.replace("{cfg}", ""));
+    }
+    let inner = office(
+        "pub mod audit {
+            #![cfg(feature = \"audit\")]
+            #[service]
+            pub struct Permits;
+            impl Permits { pub fn check() -> u32 { 0 } }
+        }",
+    );
+    let error = refused("example:office@1.0.0", &inner);
+    assert!(
+        error.contains("`#[cfg(..)]` on the module `audit` holding the service `Permits`: the macro writes the code that calls its functions before the compiler evaluates the attribute, so that code would name `Permits` in every configuration; remove the attribute"),
+        "{error}"
+    );
+    let kept = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(
+            "#[cfg(feature = \"audit\")] pub mod extra {
+                pub struct Note { pub text: String }
+                pub fn two() -> u32 { 2 }
+            }
+            #[cfg(test)] mod tests { #[test] fn one() {} }",
+        ),
+    ));
+    for expected in [
+        "# [cfg (feature = \"audit\")] pub mod extra {",
+        "# [cfg (test)] mod tests {",
+    ] {
+        assert!(kept.contains(expected), "{expected}\n{kept}");
+    }
+}
+
 const NESTED_WIT: &str = "package example:ledger@1.0.0;
 interface book {
   resource entry {
@@ -4088,6 +4246,53 @@ fn the_default_the_macro_writes_refuses_a_field_under_cfg_attr_cfg() {
     );
     expanded("example:ledger@1.0.0", &authored);
     expanded("example:ledger@1.0.0", &module("", ""));
+}
+
+/// The macro writes the `Default` of a state whose `Default` the author neither derives nor
+/// implements, before the compiler evaluates `#[cfg_attr(..)]`: a derive of `Default` under one,
+/// directly, under another name or through another `#[cfg_attr(..)]`, would give the state a
+/// second `Default` where the attribute applies, so it is refused. A `#[cfg_attr(..)]` deriving
+/// another trait expands, and so do a derive under one beside an `impl Default` the author writes
+/// for the other configurations, and the same state without the attribute.
+#[test]
+fn the_default_the_macro_writes_refuses_a_derive_of_default_under_cfg_attr() {
+    let module = |attributes: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                {attributes}
+                pub struct Balance {{ pub total: i64 }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
+            }}"
+        )
+    };
+    for attributes in [
+        "#[cfg_attr(feature = \"audit\", derive(Default))]",
+        "#[cfg_attr(test, derive(Debug, Default))]",
+        "#[cfg_attr(test, cfg_attr(feature = \"audit\", derive(Default)))]",
+        "#[cfg_attr(feature = \"audit\", derive(smart_default::SmartDefault))]",
+        "#[cfg_attr(feature = \"audit\", derive(educe::Educe), educe(Debug, Default))]",
+    ] {
+        let error = refused("example:ledger@1.0.0", &module(attributes));
+        assert!(
+            error.contains("`#[cfg_attr(..)]` deriving `Default` on the state `Balance`: the macro writes the `Default` of the state `Balance` before the compiler evaluates the attribute, so `Balance` would implement `Default` twice where the attribute applies; derive `Default` without `#[cfg_attr(..)]`, or implement it"),
+            "{attributes}: {error}"
+        );
+    }
+    expanded(
+        "example:ledger@1.0.0",
+        &module("#[cfg_attr(feature = \"audit\", derive(Debug))]"),
+    );
+    let paired = module("#[cfg_attr(feature = \"audit\", derive(Default))]").replace(
+        "#[service]",
+        "#[cfg(not(feature = \"audit\"))]
+        impl Default for Balance { fn default() -> Self { Balance { total: 7 } } }
+        #[service]",
+    );
+    expanded("example:ledger@1.0.0", &paired);
+    expanded("example:ledger@1.0.0", &module(""));
 }
 
 const GATE: &str = "mod gate {

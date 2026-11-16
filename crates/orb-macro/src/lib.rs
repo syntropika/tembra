@@ -796,6 +796,16 @@ impl Scan {
                     self.seen_from.push(seen_from);
                     self.uses.push(Uses::default());
                     let (items, grandchildren) = self.scan(inner, child)?;
+                    // The code the macro writes for an item it marks names the item in every
+                    // configuration, also where the module's own `#[cfg(..)]` drops it.
+                    if let Some((what, ident, does)) = self.marked_from(child) {
+                        unconditional_marked(
+                            &module.attrs,
+                            &format!("module `{}` holding the {what}", module.ident),
+                            ident,
+                            does,
+                        )?;
+                    }
                     children.push(Module {
                         ident: Some(module.ident),
                         attrs: module.attrs,
@@ -1090,6 +1100,29 @@ impl Scan {
             }
         }
         Ok((passthrough, children))
+    }
+
+    /// The first item the scan has marked in the module `scope` or below it, which are the modules
+    /// scanned since that one, with what it is and what the code the macro writes for it does, for
+    /// the errors: a struct marked `#[service]`, `#[state]`, `#[resource]`, `#[wit_resource]` or
+    /// `#[hook(..)]`, or a contribution. The functions the code calls by role are those of a
+    /// marked struct's `impl` blocks, in the struct's module.
+    fn marked_from(&self, scope: usize) -> Option<(&'static str, &Ident, &'static str)> {
+        let below = |of: usize| of >= scope;
+        let services = self.services.iter().filter(|item| below(item.scope));
+        let states = self.states.iter().filter(|item| below(item.scope));
+        let resources = self.resources.iter().filter(|item| below(item.scope));
+        let wit_resources = self.wit_resources.iter().filter(|item| below(item.scope));
+        let declared = self.declared.iter().filter(|item| below(item.scope));
+        let contributions = self.contributions.iter().filter(|item| below(item.scope));
+        services
+            .map(|item| ("service", &item.ident, "calls its functions"))
+            .chain(states.map(|item| ("state", &item.ident, "builds and reads it")))
+            .chain(resources.map(|item| ("resource", &item.ident, "opens and closes it")))
+            .chain(wit_resources.map(|item| ("resource", &item.ident, "calls its functions")))
+            .chain(declared.map(|item| ("hook", &item.ident, "runs it")))
+            .chain(contributions.map(|item| ("contribution", &item.ident, "calls it")))
+            .next()
     }
 }
 
@@ -1689,19 +1722,38 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // The `Default` the macro writes for a state kept out of the WIT names each field, before the
     // compiler evaluates `#[cfg_attr(..)]`, and carries only a plain `#[cfg(..)]` onto a field's
     // initializer: a field under a `#[cfg_attr(..)]` wrapping one would be named in every
-    // configuration. A state entering the WIT has had the attribute refused already.
+    // configuration, and a derive of `Default` under one would add a second `Default` where it
+    // applies. A state entering the WIT has had the attribute refused already.
     for state in states.iter().filter(|state| !state.authored_default) {
-        let fields = unreached
+        let Some(item) = unreached
             .iter()
             .find_map(|candidate| match &candidate.item {
                 Item::Struct(item)
                     if candidate.scope == state.scope && item.ident == state.ident =>
                 {
-                    Some(&item.fields)
+                    Some(item)
                 }
                 _ => None,
-            });
-        for field in fields.into_iter().flatten() {
+            })
+        else {
+            continue;
+        };
+        // A `#[cfg_attr(..)]` whose attributes, applied, make the struct derive `Default`: without
+        // them it derives none, or the state's `Default` would be the author's.
+        let derived = item.attrs.iter().find(|attribute| {
+            let applied = applied(&attribute.meta);
+            !applied.is_empty() && derives(&[item.attrs.as_slice(), &applied].concat(), "Default")
+        });
+        if let Some(attribute) = derived {
+            let state = &state.ident;
+            return Err(syn::Error::new(
+                attribute.span(),
+                format!(
+                    "`#[cfg_attr(..)]` deriving `Default` on the state `{state}`: the macro writes the `Default` of the state `{state}` before the compiler evaluates the attribute, so `{state}` would implement `Default` twice where the attribute applies; derive `Default` without `#[cfg_attr(..)]`, or implement it"
+                ),
+            ));
+        }
+        for field in &item.fields {
             let condition = field.attrs.iter().find(|attribute| {
                 attribute.path().is_ident("cfg_attr") && conditional(&attribute.meta)
             });
@@ -3586,11 +3638,11 @@ fn unconditional(item: &Item, flags: bool) -> syn::Result<()> {
 }
 
 /// Refuse a `#[cfg(..)]`, written plainly or under `#[cfg_attr(..)]`, among the attributes of an
-/// item the macro writes code for: a struct it marks, a function it calls, or the `impl` block
-/// holding one. `what` the item is, the struct or function the code `names` and what that code
-/// `does`, for the error: the macro reads the item before the compiler evaluates the attribute,
-/// and that code names the struct or the function in every configuration, also where the
-/// attribute is off and the compiler drops the item.
+/// item the macro writes code for: a struct it marks, a function it calls, or the `impl` block or
+/// the sub-module holding one. `what` the item is, the struct or function the code `names` and
+/// what that code `does`, for the error: the macro reads the item before the compiler evaluates
+/// the attribute, and that code names the struct or the function in every configuration, also
+/// where the attribute is off and the compiler drops the item.
 fn unconditional_marked(
     attrs: &[Attribute],
     what: &str,
@@ -3627,6 +3679,30 @@ fn conditional(meta: &syn::Meta) -> bool {
     });
     // The first is the configuration predicate.
     wrapped.is_ok_and(|wrapped| wrapped.iter().skip(1).any(conditional))
+}
+
+/// The attributes a `#[cfg_attr(..)]` applies where its configuration holds, directly or through
+/// another `#[cfg_attr(..)]`: none for another attribute, or for one that does not parse.
+fn applied(meta: &syn::Meta) -> Vec<Attribute> {
+    if !meta.path().is_ident("cfg_attr") {
+        return Vec::new();
+    }
+    let wrapped = meta.require_list().and_then(|list| {
+        list.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated)
+    });
+    // The first is the configuration predicate.
+    wrapped
+        .into_iter()
+        .flatten()
+        .skip(1)
+        .flat_map(|meta| {
+            if meta.path().is_ident("cfg_attr") {
+                applied(&meta)
+            } else {
+                vec![syn::parse_quote!(#[#meta])]
+            }
+        })
+        .collect()
 }
 
 /// Whether an attribute is a `#[cfg_attr(..)]` hiding from the macro, until the compiler evaluates
