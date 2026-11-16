@@ -5612,6 +5612,204 @@ fn free_json_is_a_string_that_holds_its_text() {
     }
 }
 
+/// A newtype, a tuple struct of one field, is spelled in the WIT as its field's type wherever a
+/// type that enters the WIT names it, and stays the author's struct. In a component, each newtype
+/// implements a hidden trait next to it, whose type is the bindings' type of its field: a bridge
+/// spells the newtype as that type, reads it into the newtype through `From` of the field's type,
+/// by a second hidden trait whose diagnostic names a newtype only `TryFrom` makes, and writes the
+/// field back; a host build, whose bridges never run, reads it through `TryFrom`. A record holding
+/// a newtype stays the author's, converted field by field. The native codec reads the field's JSON
+/// into the newtype through `TryFrom`, whose refusal fails the call, and writes the field.
+#[test]
+fn a_newtype_is_spelled_as_its_field() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            pub mod ids {
+                pub struct Code(String);
+                impl TryFrom<String> for Code {
+                    type Error = String;
+                    fn try_from(code: String) -> Result<Self, String> { Ok(Self(code)) }
+                }
+            }
+            pub struct Entry { pub code: ids::Code, pub amount: Amount }
+            pub struct Amount(u64);
+            impl From<u64> for Amount { fn from(amount: u64) -> Self { Self(amount) } }
+            pub struct Tagged(Entry);
+            impl From<Entry> for Tagged { fn from(entry: Entry) -> Self { Self(entry) } }
+            pub struct Total(Amount);
+            impl From<Amount> for Total { fn from(amount: Amount) -> Self { Self(amount) } }
+            pub mod documents {
+                pub struct Document(serde_json::Value);
+                impl From<serde_json::Value> for Document {
+                    fn from(value: serde_json::Value) -> Self { Self(value) }
+                }
+            }
+            #[service]
+            pub struct Ledger;
+            impl Ledger {
+                pub fn add(entry: Entry, codes: Vec<ids::Code>) -> Option<Amount> { todo!() }
+                pub fn tagged(tag: Tagged) -> (ids::Code, u32) { todo!() }
+                pub fn total(document: documents::Document) -> Total { todo!() }
+            }
+        }",
+    );
+    let wit = wit(&module);
+    for expected in [
+        "record entry {\n    code: string,\n    amount: u64,\n  }",
+        "add: func(entry: entry, codes: list<string>) -> option<u64>;",
+        "tagged: func(tag: entry) -> tuple<string, u32>;",
+        "total: func(document: string) -> u64;",
+    ] {
+        assert!(wit.contains(expected), "{expected}\n{wit}");
+    }
+    let generated = tokens(&module);
+    for expected in [
+        "# [allow (dead_code)] trait __TembraNewtype : :: core :: marker :: Sized {",
+        // A component reads a newtype through `From`, by a trait whose diagnostic names one that
+        // implements no `From`.
+        "# [diagnostic :: on_unimplemented (message = \"`{Self}` is native only: a component reads it from its field through `From<{Field}>`, which `{Self}` does not implement\" , label = \"a newtype a component takes, which only `TryFrom` makes\" , note = \"a component has no error channel for an argument refused before its method runs, only a trap, which would retire its revision for every caller until a reload: implement `From<{Field}>` for `{Self}`, or take it natively only, where a value its `TryFrom` refuses fails that call alone\")] # [allow (dead_code)] trait __TembraFromField < Field > : :: core :: marker :: Sized {",
+        "impl < Field , Newtype : :: core :: convert :: From < Field > > __TembraFromField < Field > for Newtype { fn __tembra_from_field (field : Field) -> Self { :: core :: convert :: From :: from (field) } }",
+        // Each newtype in its own module, where its field and the field's type are the author's:
+        // through `From` in a component, through `TryFrom` in a host build.
+        "impl super :: __TembraNewtype for Code { type Bindings = String ; fn __tembra_from_bindings (value : Self :: Bindings) -> Self { # [cfg (target_arch = \"wasm32\")] { < Self as super :: __TembraFromField < String > > :: __tembra_from_field (:: core :: convert :: Into :: into (value)) } # [cfg (not (target_arch = \"wasm32\"))] { match < Self as :: core :: convert :: TryFrom < String > > :: try_from (:: core :: convert :: Into :: into (value)) { :: core :: result :: Result :: Ok (value) => value , :: core :: result :: Result :: Err (error) => :: core :: panic ! (\"{}\" , error) , } } } fn __tembra_into_bindings (self) -> Self :: Bindings { :: core :: convert :: Into :: into (self . 0) } }",
+        "impl __TembraNewtype for Amount { type Bindings = u64 ;",
+        // A newtype of a type the macro converts holds the bindings' type, from an interface
+        // that names it, a newtype of a newtype that one's, and a newtype of free JSON a string,
+        // from the `alloc` of its module.
+        "impl __TembraNewtype for Tagged { type Bindings = exports :: example :: book :: ledger :: Entry ;",
+        "impl __TembraNewtype for Total { type Bindings = < Amount as __TembraNewtype > :: Bindings ; fn __tembra_from_bindings (value : Self :: Bindings) -> Self { # [cfg (target_arch = \"wasm32\")] { < Self as __TembraFromField < Amount > > :: __tembra_from_field (< Amount as __TembraNewtype > :: __tembra_from_bindings (value)) }",
+        "impl super :: __TembraNewtype for Document { type Bindings = __tembra_alloc :: string :: String ;",
+        // The bridges spell a newtype as the bindings' type of its field and convert it.
+        "fn add (entry : exports :: example :: book :: ledger :: Entry , codes : Vec < < ids :: Code as __TembraNewtype > :: Bindings >) -> Option < < Amount as __TembraNewtype > :: Bindings > {",
+        "codes . into_iter () . map (| item | < ids :: Code as __TembraNewtype > :: __tembra_from_bindings (item)) . collect ()",
+        "fn tagged (tag : < Tagged as __TembraNewtype > :: Bindings) -> (< ids :: Code as __TembraNewtype > :: Bindings , u32 ,) {",
+        // A record holding a newtype stays the author's, converted field by field.
+        "code : < ids :: Code as __TembraNewtype > :: __tembra_into_bindings (value . code)",
+        "code : < ids :: Code as __TembraNewtype > :: __tembra_from_bindings (value . code)",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let root = native(&module, &[]);
+    for expected in [
+        "impl __TembraBoundary for Amount { fn decode (value : :: tembra :: serde_json :: Value ,) -> :: core :: result :: Result < Self , :: std :: string :: String > { < Self as :: core :: convert :: TryFrom < u64 >> :: try_from (:: tembra :: serde_json :: from_value :: < u64 > (value) . map_err (| error | error . to_string ()) ?) . map_err (| error | :: std :: string :: ToString :: to_string (& error)) }",
+        "impl __TembraBoundary for Tagged {",
+        "< Self as :: core :: convert :: TryFrom < Entry >> :: try_from (< Entry as __TembraBoundary > :: decode (value) ?)",
+        "< Entry as __TembraBoundary > :: encode (self . 0)",
+        "< ids :: Code as __TembraBoundary > :: decode (item)",
+    ] {
+        assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    let ids = native(&module, &["ids"]);
+    assert!(
+        ids.contains("impl super :: __TembraBoundary for Code {"),
+        "{ids}"
+    );
+    let documents = items(&module)
+        .iter()
+        .find_map(|item| match item {
+            Item::Mod(inner) if inner.ident == "documents" => {
+                Some(quote::quote!(#inner).to_string())
+            }
+            _ => None,
+        })
+        .expect("the module `documents`");
+    assert!(
+        documents.contains("extern crate alloc as __tembra_alloc ;"),
+        "{documents}"
+    );
+    // A tuple struct no type that enters the WIT names, or of a name another type takes, stays
+    // ordinary Rust, with no conversion of its own.
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            struct Dropped(core::cell::Cell<u32>);
+            #[service]
+            pub struct Ledger;
+            impl Ledger { pub fn count() -> u32 { 0 } }
+        }",
+    );
+    assert!(!tokens(&module).contains("__TembraNewtype"));
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            pub mod a { pub struct Code(pub String); }
+            pub mod b { pub struct Code { pub text: String } }
+            pub use b::Code;
+            #[service]
+            pub struct Ledger;
+            impl Ledger { pub fn add(code: Code) {} }
+        }",
+    );
+    let wit = self::wit(&module);
+    assert!(
+        wit.contains("record code {\n    text: string,\n  }\n  add: func(code: code);"),
+        "{wit}"
+    );
+    assert!(!tokens(&module).contains("__TembraNewtype"));
+}
+
+/// What a newtype cannot be is refused: a newtype holding a resource, which the conversions do
+/// not carry, a newtype beside a resource in one parameter or result, a newtype in a derived
+/// hook's input, which has two types in the bindings, and a newtype holding itself, which WIT
+/// cannot spell.
+#[test]
+fn what_a_newtype_cannot_be_is_refused() {
+    let resource = "#[wit_resource]
+        pub struct Ticket;
+        impl Ticket { #[constructor] pub fn new() -> Self { Ticket } }";
+    for (items, function, message) in [
+        (
+            "pub struct Held(Ticket);",
+            "pub fn issue() -> Held { todo!() }",
+            "the newtype `Held` holds the resource `Ticket`",
+        ),
+        (
+            "pub struct Code(String);",
+            "pub fn issue() -> (Ticket, Code) { todo!() }",
+            "`Ledger::issue` returns `(Ticket , Code)`, which holds the resource `Ticket` and the newtype `Code`",
+        ),
+        (
+            "pub struct Chain(Vec<Link>); pub struct Link(Chain);",
+            "pub fn chain() -> Chain { todo!() }",
+            "`Chain` holds itself through its field, which WIT cannot spell",
+        ),
+    ] {
+        let error = refused(
+            PACKAGE,
+            &format!(
+                "mod book {{ {resource} {items} #[service] pub struct Ledger; impl Ledger {{ {function} }} }}"
+            ),
+        );
+        assert!(error.contains(message), "{message}\n{error}");
+    }
+    for module in [
+        "mod book {
+            pub struct Code(String);
+            #[hook(composition = series, input = Code)]
+            pub struct Audit;
+            #[service]
+            pub struct Ledger;
+            impl Ledger { pub fn count() -> u32 { 0 } }
+        }",
+        "mod book {
+            pub struct Code(String);
+            pub struct Event { pub code: Code }
+            #[hook(composition = series, input = Event)]
+            pub struct Audit;
+            #[service]
+            pub struct Ledger;
+            impl Ledger { pub fn count() -> u32 { 0 } }
+        }",
+    ] {
+        let error = refused(PACKAGE, module);
+        assert!(
+            error.contains("a derived hook's input holds the newtype `Code`"),
+            "{error}"
+        );
+    }
+}
+
 /// Each codec is declared inside the function registering its service, so two services whose
 /// names and methods meet in one name, `Ledger::count_words` and `LedgerCount::words`, each keep
 /// their own: the module's functions and constants are only `orb()`, `orb_named`, the manifest's

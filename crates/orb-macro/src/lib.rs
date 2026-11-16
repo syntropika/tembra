@@ -49,7 +49,7 @@ mod wit;
 use heck::{ToLowerCamelCase, ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 use proc_macro::TokenStream;
 use proc_macro2::Span;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -253,18 +253,20 @@ impl Candidate {
         }
     }
 
-    /// The type's WIT definition, once it enters the WIT. Whether the generated type replaces it,
-    /// and then what it would drop and what it takes of the author's attributes, is settled once
-    /// every shape is known, by `converted`.
-    fn translate(&self) -> syn::Result<Shape> {
+    /// The type's WIT definition, once it enters the WIT, with the newtypes `modules` reads spelled
+    /// as their fields. Whether the generated type replaces it, and then what it would drop and
+    /// what it takes of the author's attributes, is settled once every shape is known, by
+    /// `converted`.
+    fn translate(&self, modules: &foreign::Modules) -> syn::Result<Shape> {
         if let (true, Item::Struct(item)) = (self.flags, &self.item) {
             let mut shape = flags::shape(item)?;
             shape.scope = self.scope;
             return Ok(shape);
         }
+        let spelled = |ty: &Type| modules.spelled(ty, self.scope);
         let mut shape = match &self.item {
-            Item::Struct(item) => wit::record(item)?,
-            Item::Enum(item) => wit::enumeration(item)?,
+            Item::Struct(item) => wit::record(item, &spelled)?,
+            Item::Enum(item) => wit::enumeration(item, &spelled)?,
             other => {
                 return Err(syn::Error::new(
                     other.span(),
@@ -533,6 +535,35 @@ struct Inputs {
     scope: usize,
 }
 
+/// A newtype of the module: a tuple struct of one field, without generic parameters or a marker,
+/// `struct Id(String)`. It stays the author's struct, and the WIT spells it as its field's type
+/// wherever a type that enters the WIT names it: a value crosses as its field, written from it and
+/// read back natively through `TryFrom` of the field's type, which may refuse it, and in a
+/// component through `From`, which refuses none.
+#[derive(Clone)]
+struct Newtype {
+    ident: Ident,
+    /// The field's type, as the newtype's module names it.
+    inner: Type,
+    /// The module declaring the struct, by scope; 0 is the Orb module.
+    scope: usize,
+}
+
+/// The newtype a struct is, if it is one: a tuple struct of one field, without generic parameters.
+fn newtype(item: &syn::ItemStruct, scope: usize) -> Option<Newtype> {
+    let Fields::Unnamed(fields) = &item.fields else {
+        return None;
+    };
+    let [field] = fields.unnamed.iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    item.generics.params.is_empty().then(|| Newtype {
+        ident: item.ident.clone(),
+        inner: field.ty.clone(),
+        scope,
+    })
+}
+
 /// The free function marked `#[root]`, `fn(&Inputs, &Declaration) -> tembra::Result<T>`: the
 /// Orb's create, which the native `orb(..)` hands `Orb::create`, and whose value every object of
 /// the Orb shares. It stays the author's function, out of the WIT.
@@ -720,6 +751,8 @@ struct Scan {
     root: Option<Root>,
     /// The markers that make the module native only, in the order the scan finds them.
     native_only: Vec<NativeOnly>,
+    /// The tuple structs of one field, which the WIT spells as their field's type.
+    newtypes: Vec<Newtype>,
     impls: Vec<(usize, syn::ItemImpl)>,
     /// The type of each `impl Default for ..` of the Orb module, with the module it is written in.
     default_impls: Vec<(usize, Type)>,
@@ -942,6 +975,9 @@ impl Scan {
                     } else if matches!(s.fields, Fields::Named(_)) {
                         self.candidates.push(Candidate::record(s, scope));
                     } else {
+                        // A newtype stays the author's, whether a type that enters the WIT names
+                        // it or not.
+                        self.newtypes.extend(newtype(&s, scope));
                         passthrough.push(Item::Struct(s));
                     }
                 }
@@ -1372,8 +1408,12 @@ struct Analysis {
     placement: BTreeMap<String, Ident>,
     /// The types that enter the WIT and stay the author's, in `tree`, converted to and from the
     /// bindings' types at the boundary: every enum with a case with named fields and every type
-    /// holding one, by name, each with the bindings' name of its type.
+    /// holding one, free JSON or a newtype, by name, each with the bindings' name of its type.
     converted: BTreeMap<String, Ident>,
+    /// The newtypes a type that enters the WIT names, which the WIT spells as their fields, each
+    /// with the service whose interface names it, through which the bindings name what its field
+    /// holds.
+    newtypes: Vec<(Newtype, Ident)>,
     /// The names each module binds with `use` and `extern crate`, by scope.
     uses: Vec<Uses>,
     /// The WIT derived from the module.
@@ -1491,6 +1531,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         inputs: None,
         root: None,
         native_only: Vec::new(),
+        newtypes: Vec::new(),
         impls: Vec::new(),
         default_impls: Vec::new(),
         marked: Vec::new(),
@@ -1518,6 +1559,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         inputs,
         root,
         native_only,
+        newtypes,
         impls,
         default_impls,
         marked,
@@ -1993,6 +2035,25 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         .iter()
         .map(|import| wit_identity(import, "an interface imported by key", true))
         .collect::<syn::Result<Vec<String>>>()?;
+    // A newtype is read through to its field, as the WIT spells it, by its name, as the types of
+    // the module are: one whose name another type of the Orb takes stays ordinary Rust.
+    let newtypes: Vec<Newtype> = newtypes
+        .iter()
+        .filter(|newtype| {
+            let ident = &newtype.ident;
+            newtypes
+                .iter()
+                .filter(|other| other.ident == *ident)
+                .count()
+                == 1
+                && !candidates.iter().any(|candidate| candidate.ident == *ident)
+                && !wit_resources
+                    .iter()
+                    .any(|resource| resource.ident == *ident)
+                && !resources.iter().any(|resource| resource.ident == *ident)
+        })
+        .cloned()
+        .collect();
     let consumed_modules = foreign::Modules::new(
         &imports,
         &keyed_imports,
@@ -2000,7 +2061,8 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &contributions,
         &declared,
         &modules,
-    );
+    )
+    .with_newtypes(&newtypes);
     for candidate in &mut candidates {
         candidate.references = consumed_modules.item_references(&candidate.item, candidate.scope);
     }
@@ -2093,10 +2155,10 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &mut unreached,
     )?;
     // An enum with a case with named fields stays the author's, converted to and from the
-    // bindings' type at the boundary, and so does every type holding one; any other type that
-    // enters the WIT is replaced by the generated type, which takes what it can of the author's
-    // attributes and drops the rest, refused.
-    let converted = converted(&shapes);
+    // bindings' type at the boundary, and so does every type holding one, free JSON or a newtype;
+    // any other type that enters the WIT is replaced by the generated type, which takes what it
+    // can of the author's attributes and drops the rest, refused.
+    let converted = converted(&shapes, &consumed_modules);
     for shape in shapes
         .iter_mut()
         .filter(|shape| !matches!(shape.kind, ShapeKind::Flags(_)))
@@ -2116,6 +2178,33 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &declared,
         &consumed_modules,
     );
+    // The newtypes the WIT spells as their fields, which cross as their fields, converted in both
+    // targets: a field holding a resource has no conversion.
+    let newtypes = named_newtypes(
+        &newtypes,
+        &services,
+        &wit_resources,
+        &shapes,
+        &placement,
+        &consumed_modules,
+    );
+    for (newtype, _) in &newtypes {
+        let mut held = Vec::new();
+        consumed_modules.references(&newtype.inner, newtype.scope, &mut held);
+        if let Some(resource) = held.iter().find_map(|name| {
+            wit_resources
+                .iter()
+                .find(|resource| resource.ident == *name)
+        }) {
+            return Err(syn::Error::new(
+                newtype.inner.span(),
+                format!(
+                    "the newtype `{}` holds the resource `{}`: the macro converts a newtype to and from the type of its field the bindings hold, and converts no resource; take or return the resource itself",
+                    newtype.ident, resource.ident
+                ),
+            ));
+        }
+    }
     // What each derived interface `use`s from the consumed interfaces: the types its functions and
     // the types it defines name, and the handles its functions take, once each is checked where
     // it is named, a state's fields included.
@@ -2375,6 +2464,27 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             ));
         }
     }
+    // The functions were spelled before the newtypes were known: one naming a newtype is spelled
+    // again, with the newtype as its field's type.
+    for service in &mut services {
+        for function in &mut service.functions {
+            spell_newtypes(function, service.scope, &consumed_modules)?;
+        }
+    }
+    for resource in &mut wit_resources {
+        for function in resource.methods.iter_mut().chain(&mut resource.statics) {
+            spell_newtypes(function, resource.scope, &consumed_modules)?;
+        }
+        for (_, ty, spelling) in resource
+            .constructor
+            .iter_mut()
+            .flat_map(|constructor| &mut constructor.params)
+        {
+            if consumed_modules.holds_newtype(ty, resource.scope) {
+                *spelling = consumed_modules.spelled(ty, resource.scope)?;
+            }
+        }
+    }
     let wit = wit::render(
         &package,
         &world,
@@ -2424,6 +2534,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         shapes,
         placement,
         converted,
+        newtypes,
         uses,
         wit,
     })
@@ -2459,6 +2570,7 @@ fn component(
         shapes,
         placement,
         converted,
+        newtypes,
         uses,
         wit,
         ..
@@ -2523,8 +2635,24 @@ fn component(
         placement,
         (&ns_ident, &name_ident),
         &mut tree,
-        modules,
+        (modules, consumed_modules),
     );
+    // A newtype the WIT spells as its field crosses as that field, through the trait `NEWTYPE`,
+    // implemented next to it, where the field is visible.
+    for (newtype, interface) in newtypes {
+        let interface = interface_module(interface);
+        let root = supers(modules[newtype.scope].len());
+        let module = quote! { #root exports::#ns_ident::#name_ident::#interface };
+        tree.at(&modules[newtype.scope])
+            .generated
+            .push(newtype_conversions(
+                newtype,
+                &module,
+                converted,
+                consumed_modules,
+            ));
+    }
+    let newtype_trait = (!newtypes.is_empty()).then(newtype_trait);
     // The bindings' handle type of each WIT resource, by the author's name of its struct.
     let handle_types: BTreeMap<String, Ident> = wit_resources
         .iter()
@@ -2805,6 +2933,12 @@ fn component(
                 })
                 .map(|resource| resource.scope),
         )
+        .chain(
+            newtypes
+                .iter()
+                .filter(|(newtype, _)| wit::holds_free_json(&newtype.inner))
+                .map(|(newtype, _)| newtype.scope),
+        )
         .collect();
     for scope in &alloc_scopes {
         tree.at(&modules[*scope])
@@ -2938,6 +3072,7 @@ fn component(
         // and lets it be.
         #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
         struct __TembraExports;
+        #newtype_trait
         #conversions
         #state_code
         #resource_code
@@ -3334,6 +3469,29 @@ fn typed_params(function: &syn::ImplItemFn) -> syn::Result<Vec<(Ident, Type, Str
     Ok(params)
 }
 
+/// Spell again each parameter and the result of a function written in the module `scope` that
+/// names a newtype `modules` reads, which the WIT spells as its field's type.
+fn spell_newtypes(
+    function: &mut Function,
+    scope: usize,
+    modules: &foreign::Modules,
+) -> syn::Result<()> {
+    let result = function
+        .result
+        .iter_mut()
+        .map(|(ty, spelling)| (ty, spelling));
+    let params = function
+        .params
+        .iter_mut()
+        .map(|(_, ty, spelling)| (ty, spelling));
+    for (ty, spelling) in params.chain(result) {
+        if modules.holds_newtype(ty, scope) {
+            *spelling = modules.spelled(ty, scope)?;
+        }
+    }
+    Ok(())
+}
+
 /// The call of an author's service method as a bridge answers it: the value of a method returning
 /// `tembra::Result<T>`, which only a native host links. Such a module builds no component, so the
 /// bridge, which a host build still type-checks, never runs.
@@ -3413,7 +3571,10 @@ fn derived_result(
     // holds no resource, as `resource_params::check_converted` makes sure.
     if mentions(ty, scope, converted, modules) {
         let spelled = with_handles(ty, scope, converted, module, modules);
-        return (quote! { -> #spelled }, convert(ty, call, Towards::Bindings));
+        return (
+            quote! { -> #spelled },
+            convert(ty, call, Towards::Bindings, Some((modules, scope))),
+        );
     }
     match handles_of(ty, scope, resources, modules) {
         Some(handles) => {
@@ -3518,8 +3679,9 @@ fn handles_of(
 }
 
 /// The author's type, written in the module `scope`, as the bindings spell it in `module`: each
-/// resource of the module is the handle type there, free JSON a string, everything else keeps the
-/// author's spelling, a name a consumed interface's module reaches included.
+/// resource of the module is the handle type there, free JSON a string, a newtype the bindings'
+/// type of its field, everything else keeps the author's spelling, a name a consumed interface's
+/// module reaches included.
 fn with_handles(
     ty: &Type,
     scope: usize,
@@ -3533,6 +3695,11 @@ fn with_handles(
     // Free JSON is the bindings' string of its text, from the `alloc` of the scopes holding it.
     if wit::free_json(ty) {
         return quote! { __tembra_alloc::string::String };
+    }
+    // A newtype is the bindings' type of its field, which its trait names.
+    if modules.newtype(ty, scope).is_some() {
+        let newtype = modules.newtype_trait(scope);
+        return quote! { <#ty as #newtype>::Bindings };
     }
     match ty {
         Type::Path(path) => {
@@ -4026,12 +4193,69 @@ fn reachable(
     let mut shapes = Vec::new();
     for (index, candidate) in candidates.into_iter().enumerate() {
         if kept.contains(&index) {
-            shapes.push(candidate.translate()?);
+            shapes.push(candidate.translate(modules)?);
         } else {
             unreached.push(candidate);
         }
     }
     Ok(shapes)
+}
+
+/// The newtypes a type that enters the WIT names, in module order, each with the service whose
+/// interface names it: in its functions or its resources' functions, through the fields of a type
+/// the interface defines, or through the field of another newtype the interface names. That
+/// interface defines or `use`s every type of the module the newtype's field holds, so its bindings
+/// name each of them.
+fn named_newtypes(
+    newtypes: &[Newtype],
+    services: &[Service],
+    resources: &[WitResource],
+    shapes: &[Shape],
+    placement: &BTreeMap<String, Ident>,
+    modules: &foreign::Modules,
+) -> Vec<(Newtype, Ident)> {
+    let mut pending: Vec<(&Newtype, &Ident)> = Vec::new();
+    for function in resource_params::derived(services, resources) {
+        for ty in function
+            .params
+            .iter()
+            .map(|(_, ty, _)| ty)
+            .chain(function.result)
+        {
+            for newtype in modules.newtypes_in(ty, function.scope) {
+                pending.push((newtype, function.interface));
+            }
+        }
+    }
+    for shape in shapes {
+        let Some(interface) = placement.get(&shape.ident.to_string()) else {
+            continue;
+        };
+        for ty in foreign::shape_types(shape) {
+            for newtype in modules.newtypes_in(ty, shape.scope) {
+                pending.push((newtype, interface));
+            }
+        }
+    }
+    let mut named: BTreeMap<String, &Ident> = BTreeMap::new();
+    let mut next = 0;
+    while let Some(&(newtype, interface)) = pending.get(next) {
+        next += 1;
+        if named.contains_key(&newtype.ident.to_string()) {
+            continue;
+        }
+        named.insert(newtype.ident.to_string(), interface);
+        for inner in modules.newtypes_in(&newtype.inner, newtype.scope) {
+            pending.push((inner, interface));
+        }
+    }
+    newtypes
+        .iter()
+        .filter_map(|newtype| {
+            let interface = named.get(&newtype.ident.to_string())?;
+            Some((newtype.clone(), (*interface).clone()))
+        })
+        .collect()
 }
 
 /// Refuse what a type that enters the WIT carries but the generated type replacing it would drop
@@ -5186,10 +5410,10 @@ fn derived_hook_code(
         Composition::Series => (quote! {}, None),
         Composition::Waterfall => (
             quote! { -> #input },
-            Some(convert(input, quote! { answer }, Towards::Author)),
+            Some(convert(input, quote! { answer }, Towards::Author, None)),
         ),
         Composition::Bail => {
-            let item = convert(input, quote! { item }, Towards::Author);
+            let item = convert(input, quote! { item }, Towards::Author, None);
             (
                 quote! { -> ::core::option::Option<#input> },
                 Some(quote! { answer.map(|item| #item) }),
@@ -5204,7 +5428,7 @@ fn derived_hook_code(
         " Run the hook `{}`: the kernel calls its contributions in plan order and returns the composed result.",
         declaration.hook
     );
-    let converted = convert(input, quote! { input }, Towards::Bindings);
+    let converted = convert(input, quote! { input }, Towards::Bindings, None);
     // A string, a list, or a module type that holds one anywhere crosses to an import by
     // reference, as the bindings take them.
     let by_reference = holds_list(input, holding);
@@ -5298,7 +5522,7 @@ fn conversions(
             let body = |from: &proc_macro2::TokenStream| match &shape.kind {
                 ShapeKind::Record(fields) => {
                     let fields = fields.iter().map(|(field, ty)| {
-                        let value = convert(ty, quote! { value.#field }, Towards::Bindings);
+                        let value = convert(ty, quote! { value.#field }, Towards::Bindings, None);
                         quote! { #field: #value }
                     });
                     quote! { Self { #(#fields),* } }
@@ -5312,7 +5536,7 @@ fn conversions(
                 ShapeKind::Variant(cases) => {
                     let arms = cases.iter().map(|(case, payload)| match payload {
                         Payload::Unnamed(ty) => {
-                            let item = convert(ty, quote! { item }, Towards::Bindings);
+                            let item = convert(ty, quote! { item }, Towards::Bindings, None);
                             quote! { #from::#ident::#case(item) => Self::#case(#item) }
                         }
                         Payload::None => quote! { #from::#ident::#case => Self::#case },
@@ -5350,14 +5574,27 @@ enum Towards {
 
 /// An expression converting `value`, of the author's type `ty` on one side of the bindings, to the
 /// other side, `towards`: containers are rebuilt element by element, free JSON is written as its
-/// text or read from it, and everything else goes through `Into`, the identity for scalars and
-/// strings, the generated `From` for the module's types. A text that holds no JSON traps, as a
-/// component does when it cannot answer: only a native Orb has an error channel for it.
+/// text or read from it, a newtype goes through the trait it implements, `NEWTYPE`, and everything
+/// else goes through `Into`, the identity for scalars and strings, the generated `From` for the
+/// module's types. A text that holds no JSON traps, as a component does when it cannot answer:
+/// only a native Orb has an error channel for it; a component reads a newtype through `From`, which
+/// refuses no value. `at` is where the conversion is written, the modules and the module's scope,
+/// for the newtypes, which a hook's types never hold.
 fn convert(
     ty: &Type,
     value: proc_macro2::TokenStream,
     towards: Towards,
+    at: Option<(&foreign::Modules, usize)>,
 ) -> proc_macro2::TokenStream {
+    if let Some((modules, scope)) = at
+        && modules.newtype(ty, scope).is_some()
+    {
+        let newtype = modules.newtype_trait(scope);
+        return match towards {
+            Towards::Bindings => quote! { <#ty as #newtype>::__tembra_into_bindings(#value) },
+            Towards::Author => quote! { <#ty as #newtype>::__tembra_from_bindings(#value) },
+        };
+    }
     if let (true, Type::Path(path)) = (wit::free_json(ty), ty) {
         // The crate as the author's path names it, `serde_json` or `::serde_json`.
         let leading = &path.path.leading_colon;
@@ -5392,16 +5629,16 @@ fn convert(
             };
             match (segment.ident.to_string().as_str(), arguments.as_slice()) {
                 ("Vec", [item]) => {
-                    let item = convert(item, quote! { item }, towards);
+                    let item = convert(item, quote! { item }, towards, at);
                     quote! { #value.into_iter().map(|item| #item).collect() }
                 }
                 ("Option", [item]) => {
-                    let item = convert(item, quote! { item }, towards);
+                    let item = convert(item, quote! { item }, towards, at);
                     quote! { #value.map(|item| #item) }
                 }
                 ("Result", [ok, err]) => {
-                    let ok = convert(ok, quote! { item }, towards);
-                    let err = convert(err, quote! { item }, towards);
+                    let ok = convert(ok, quote! { item }, towards, at);
+                    let err = convert(err, quote! { item }, towards, at);
                     quote! {
                         match #value {
                             ::core::result::Result::Ok(item) => ::core::result::Result::Ok(#ok),
@@ -5421,7 +5658,7 @@ fn convert(
                 .elems
                 .iter()
                 .zip(&names)
-                .map(|(ty, name)| convert(ty, quote! { #name }, towards));
+                .map(|(ty, name)| convert(ty, quote! { #name }, towards, at));
             quote! { { let (#(#names,)*) = #value; (#(#converted,)*) } }
         }
         _ => quote! { ::core::convert::Into::into(#value) },
@@ -5472,12 +5709,13 @@ fn respell(
 /// at the boundary, by name, each with the bindings' name of its type: every enum with a case with
 /// named fields, whose case the bindings give a tuple payload, the record of the case, where the
 /// author writes the fields, every type holding free JSON, which the bindings hold as its text,
-/// and every type holding one of those, directly or through other types of the module, which the
-/// author builds from the author's type.
-fn converted(shapes: &[Shape]) -> BTreeMap<String, Ident> {
+/// every type holding a newtype `modules` reads, which the bindings hold as its field, and every
+/// type holding one of those, directly or through other types of the module, which the author
+/// builds from the author's type.
+fn converted(shapes: &[Shape], modules: &foreign::Modules) -> BTreeMap<String, Ident> {
     let mut converted: BTreeSet<String> = shapes
         .iter()
-        .filter(|shape| has_named_case(shape) || holds_json(shape))
+        .filter(|shape| has_named_case(shape) || holds_json(shape) || holds_newtype(shape, modules))
         .map(|shape| shape.ident.to_string())
         .collect();
     loop {
@@ -5522,15 +5760,23 @@ fn holds_json(shape: &Shape) -> bool {
     }
 }
 
+/// Whether a record's fields or a variant's payloads name a newtype `modules` reads.
+fn holds_newtype(shape: &Shape, modules: &foreign::Modules) -> bool {
+    foreign::shape_types(shape)
+        .into_iter()
+        .any(|ty| modules.holds_newtype(ty, shape.scope))
+}
+
 /// Why a type is one the macro converts, for the errors, after the type's name and a comma: it is
-/// an enum with a case with named fields, or it holds one, or free JSON, itself or through the
-/// other types of the module, `shapes`, it names.
+/// an enum with a case with named fields, or it holds one, free JSON or a newtype, itself or
+/// through the other types of the module, `shapes`, it names.
 pub(crate) fn converted_reason(shape: &Shape, shapes: &[Shape]) -> &'static str {
     if has_named_case(shape) {
         return "an enum with a case with named fields";
     }
     let mut pending = vec![shape];
     let mut seen = BTreeSet::new();
+    let mut json = false;
     while let Some(held) = pending.pop() {
         if !seen.insert(held.ident.to_string()) {
             continue;
@@ -5538,24 +5784,29 @@ pub(crate) fn converted_reason(shape: &Shape, shapes: &[Shape]) -> &'static str 
         if has_named_case(held) {
             return "which holds an enum with a case with named fields";
         }
+        json |= holds_json(held);
         pending.extend(
             held.references
                 .iter()
                 .filter_map(|name| shapes.iter().find(|shape| shape.ident == *name)),
         );
     }
-    "which holds free JSON, `serde_json::Value`"
+    if json {
+        "which holds free JSON, `serde_json::Value`"
+    } else {
+        "which holds a newtype, a tuple struct of one field"
+    }
 }
 
-/// Whether a type written in the module `scope` names a type the macro converts, or free JSON,
-/// itself or inside its type parameters and tuples.
+/// Whether a type written in the module `scope` names a type the macro converts, free JSON or a
+/// newtype, itself or inside its type parameters and tuples.
 pub(crate) fn mentions(
     ty: &Type,
     scope: usize,
     converted: &BTreeMap<String, Ident>,
     modules: &foreign::Modules,
 ) -> bool {
-    if wit::holds_free_json(ty) {
+    if wit::holds_free_json(ty) || modules.holds_newtype(ty, scope) {
         return true;
     }
     let mut names = Vec::new();
@@ -5639,10 +5890,37 @@ fn check_converted_hooks(
         let name = shape.ident.to_string();
         converted.contains_key(&name) && holds_json(shape) && reached.contains(&name)
     });
-    match input.or(holder.map(|shape| shape.ident.span())) {
-        Some(span) => Err(syn::Error::new(
+    if let Some(span) = input.or(holder.map(|shape| shape.ident.span())) {
+        return Err(syn::Error::new(
             span,
             "a derived hook's input holds free JSON, `serde_json::Value`: the macro converts free JSON, and every type holding it, to the text the bindings of a service's interface hold, and a hook's input has two types in the bindings, its export's and its import's; keep the JSON out of the hook's input",
+        ));
+    }
+    // And a newtype, in the input itself or in a type it reaches.
+    let input = declared.iter().find_map(|declaration| {
+        let (ty, _) = declaration.input.as_ref()?;
+        let newtype = modules
+            .newtypes_in(ty, declaration.scope)
+            .into_iter()
+            .next()?;
+        Some((ty.span(), newtype))
+    });
+    let holder = shapes.iter().find_map(|shape| {
+        if !reached.contains(&shape.ident.to_string()) {
+            return None;
+        }
+        let newtype = foreign::shape_types(shape)
+            .into_iter()
+            .find_map(|ty| modules.newtypes_in(ty, shape.scope).into_iter().next())?;
+        Some((shape.ident.span(), newtype))
+    });
+    match input.or(holder) {
+        Some((span, newtype)) => Err(syn::Error::new(
+            span,
+            format!(
+                "a derived hook's input holds the newtype `{}`: the macro converts a newtype, and every type holding it, to the type of its field the bindings of a service's interface hold, and a hook's input has two types in the bindings, its export's and its import's; keep the newtype out of the hook's input",
+                newtype.ident
+            ),
         )),
         None => Ok(()),
     }
@@ -5726,15 +6004,16 @@ fn keep_converted(
 /// a variant case by case, a case with named fields into the bindings' tuple case around the
 /// record of the case; each part goes through `Into`, the identity for a scalar, a string, a
 /// generated type and a consumed package's type, and the generated `From` for a type the macro
-/// converts, inside lists, options, results and tuples too. The bindings name a field or a case
-/// from its WIT name, so each side keeps its own names.
+/// converts, inside lists, options, results and tuples too, and a newtype `consumed` reads through
+/// its trait. The bindings name a field or a case from its WIT name, so each side keeps its own
+/// names.
 fn converted_conversions(
     shapes: &[Shape],
     converted: &BTreeMap<String, Ident>,
     placement: &BTreeMap<String, Ident>,
     (ns, package): (&Ident, &Ident),
     tree: &mut Module,
-    modules: &[Vec<Ident>],
+    (modules, consumed): (&[Vec<Ident>], &foreign::Modules),
 ) {
     for shape in shapes
         .iter()
@@ -5742,6 +6021,7 @@ fn converted_conversions(
     {
         let ident = &shape.ident;
         let name = ident.to_string();
+        let at = Some((consumed, shape.scope));
         let module = tree.at(&modules[shape.scope]);
         let root = supers(modules[shape.scope].len());
         let interface = rust_ident(&wit::kebab(&placement[&name]));
@@ -5751,12 +6031,12 @@ fn converted_conversions(
             ShapeKind::Record(fields) => {
                 let outward = fields.iter().map(|(field, ty)| {
                     let named = rust_ident(&wit::kebab(field));
-                    let value = convert(ty, quote! { value.#field }, Towards::Bindings);
+                    let value = convert(ty, quote! { value.#field }, Towards::Bindings, at);
                     quote! { #named: #value }
                 });
                 let inward = fields.iter().map(|(field, ty)| {
                     let named = rust_ident(&wit::kebab(field));
-                    let value = convert(ty, quote! { value.#named }, Towards::Author);
+                    let value = convert(ty, quote! { value.#named }, Towards::Author, at);
                     quote! { #field: #value }
                 });
                 (
@@ -5770,7 +6050,7 @@ fn converted_conversions(
                     match payload {
                         Payload::None => quote! { #ident::#case => Self::#named },
                         Payload::Unnamed(ty) => {
-                            let item = convert(ty, quote! { item }, Towards::Bindings);
+                            let item = convert(ty, quote! { item }, Towards::Bindings, at);
                             quote! { #ident::#case(item) => Self::#named(#item) }
                         }
                         Payload::Named(fields) => {
@@ -5778,7 +6058,7 @@ fn converted_conversions(
                             let names = fields.iter().map(|(field, _)| field);
                             let values = fields.iter().map(|(field, ty)| {
                                 let named = rust_ident(&wit::kebab(field));
-                                let value = convert(ty, quote! { #field }, Towards::Bindings);
+                                let value = convert(ty, quote! { #field }, Towards::Bindings, at);
                                 quote! { #named: #value }
                             });
                             quote! {
@@ -5792,13 +6072,14 @@ fn converted_conversions(
                     match payload {
                         Payload::None => quote! { #bindings::#generated::#named => Self::#case },
                         Payload::Unnamed(ty) => {
-                            let item = convert(ty, quote! { item }, Towards::Author);
+                            let item = convert(ty, quote! { item }, Towards::Author, at);
                             quote! { #bindings::#generated::#named(item) => Self::#case(#item) }
                         }
                         Payload::Named(fields) => {
                             let values = fields.iter().map(|(field, ty)| {
                                 let named = rust_ident(&wit::kebab(field));
-                                let value = convert(ty, quote! { item.#named }, Towards::Author);
+                                let value =
+                                    convert(ty, quote! { item.#named }, Towards::Author, at);
                                 quote! { #field: #value }
                             });
                             quote! {
@@ -5824,6 +6105,116 @@ fn converted_conversions(
                 fn from(value: #bindings::#generated) -> Self { #inward }
             }
         });
+    }
+}
+
+/// The name of the trait through which a newtype of the module crosses the bindings, declared in
+/// the Orb module.
+const NEWTYPE: &str = "__TembraNewtype";
+
+/// The name of the trait through which a component reads a newtype from its field, declared in
+/// the Orb module.
+const FROM_FIELD: &str = "__TembraFromField";
+
+/// The trait through which a newtype of the module crosses the bindings, as its field, and the one
+/// through which a component reads it from its field: private to the Orb module, so its
+/// sub-modules implement them and every bridge names them, and no other crate sees them. A module
+/// whose services a `#[create]` builds has no bridge to call them.
+///
+/// A component reads a newtype through `From`, which refuses no value: it has no error channel for
+/// an argument refused before its method runs, only a trap, which would retire its revision for
+/// every caller until a reload. The second trait holds every newtype that `From` makes of its
+/// field, and its diagnostic names one that only a refusing `TryFrom` makes, which a component
+/// build then refuses: such a newtype is native only.
+fn newtype_trait() -> proc_macro2::TokenStream {
+    let name = format_ident!("{NEWTYPE}");
+    let from_field = format_ident!("{FROM_FIELD}");
+    quote! {
+        /// How a newtype of the module crosses the bindings: as the bindings' type of its field.
+        #[allow(dead_code)]
+        trait #name: ::core::marker::Sized {
+            /// The bindings' type of the field.
+            type Bindings;
+
+            /// The newtype of the field's value: through `From` of the field's type in a
+            /// component, through `TryFrom` in a host build, whose bridges never run.
+            fn __tembra_from_bindings(value: Self::Bindings) -> Self;
+
+            /// The field's value, as the bindings' type.
+            fn __tembra_into_bindings(self) -> Self::Bindings;
+        }
+
+        /// A newtype a component reads from its field: one `From` makes of every value of it.
+        #[diagnostic::on_unimplemented(
+            message = "`{Self}` is native only: a component reads it from its field through `From<{Field}>`, which `{Self}` does not implement",
+            label = "a newtype a component takes, which only `TryFrom` makes",
+            note = "a component has no error channel for an argument refused before its method runs, only a trap, which would retire its revision for every caller until a reload: implement `From<{Field}>` for `{Self}`, or take it natively only, where a value its `TryFrom` refuses fails that call alone"
+        )]
+        #[allow(dead_code)]
+        trait #from_field<Field>: ::core::marker::Sized {
+            /// The newtype of the field's value.
+            fn __tembra_from_field(field: Field) -> Self;
+        }
+
+        impl<Field, Newtype: ::core::convert::From<Field>> #from_field<Field> for Newtype {
+            fn __tembra_from_field(field: Field) -> Self {
+                ::core::convert::From::from(field)
+            }
+        }
+    }
+}
+
+/// The conversions of a newtype between the author's struct and the bindings' type of its field,
+/// as its impl of the trait `NEWTYPE`, in its own module, where the field and its type are named
+/// as the author wrote them: `module` is the bindings' module of an interface that names the
+/// newtype, which names every type of the module the field holds. The bindings' value is read
+/// into the field's type, then into the newtype: in a component through `From`, by the trait
+/// `FROM_FIELD`, whose diagnostic, at the newtype, names one that implements no `From`; in a host
+/// build, whose bridges never run, through `TryFrom`, which a `From` implements too. The field is
+/// written back as it is.
+fn newtype_conversions(
+    newtype: &Newtype,
+    module: &proc_macro2::TokenStream,
+    converted: &BTreeMap<String, Ident>,
+    modules: &foreign::Modules,
+) -> proc_macro2::TokenStream {
+    let Newtype {
+        ident,
+        inner,
+        scope,
+    } = newtype;
+    let at = Some((modules, *scope));
+    let bindings = with_handles(inner, *scope, converted, module, modules);
+    let read = convert(inner, quote! { value }, Towards::Author, at);
+    let written = convert(inner, quote! { self.0 }, Towards::Bindings, at);
+    let newtype_trait = modules.newtype_trait(*scope);
+    let root = supers(modules.depth(*scope));
+    let from_field = format_ident!("{FROM_FIELD}", span = ident.span());
+    let component = quote_spanned! { ident.span() =>
+        <Self as #root #from_field<#inner>>::__tembra_from_field(#read)
+    };
+    quote! {
+        impl #newtype_trait for #ident {
+            type Bindings = #bindings;
+
+            fn __tembra_from_bindings(value: Self::Bindings) -> Self {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    #component
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    match <Self as ::core::convert::TryFrom<#inner>>::try_from(#read) {
+                        ::core::result::Result::Ok(value) => value,
+                        ::core::result::Result::Err(error) => ::core::panic!("{}", error),
+                    }
+                }
+            }
+
+            fn __tembra_into_bindings(self) -> Self::Bindings {
+                #written
+            }
+        }
     }
 }
 

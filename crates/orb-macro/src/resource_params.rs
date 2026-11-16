@@ -274,9 +274,10 @@ fn held<'a>(
 
 /// Refuse, once the types that enter the WIT are known, a parameter or a result of a derived
 /// function that holds both a resource and a type the macro converts, the enum with a case with
-/// named fields, free JSON or a type holding one: the bridge converts such a type between the
-/// author's and the bindings', through `From` or as JSON text, which carries no handle, and wraps
-/// or takes back a resource where the author's type is the bindings' own.
+/// named fields, free JSON, a newtype or a type holding one: the bridge converts such a type
+/// between the author's and the bindings', through `From`, as JSON text or as the newtype's field,
+/// which carries no handle, and wraps or takes back a resource where the author's type is the
+/// bindings' own.
 pub(crate) fn check_converted(
     services: &[Service],
     resources: &[WitResource],
@@ -298,6 +299,21 @@ pub(crate) fn check_converted(
                         function.name,
                         quote!(#ty),
                         resource.ident,
+                    ),
+                ));
+            }
+            if let Some(newtype) = modules.newtypes_in(ty, function.scope).first()
+                && let Some((resource, _)) =
+                    held(ty, function.scope, shapes, resources, modules).first()
+            {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    format!(
+                        "`{}` {verb} `{}`, which holds the resource `{}` and the newtype `{}`: the macro converts a newtype between the author's struct and the bindings' type of its field, and converts no resource; keep the resource apart from the newtype",
+                        function.name,
+                        quote!(#ty),
+                        resource.ident,
+                        newtype.ident,
                     ),
                 ));
             }
@@ -351,7 +367,12 @@ pub(crate) fn bridged(
                 let spelled = with_handles(ty, scope, converted, module, modules);
                 return (
                     quote! { #ident: #spelled },
-                    convert(ty, quote! { #ident }, Towards::Author),
+                    convert(
+                        ty,
+                        quote! { #ident },
+                        Towards::Author,
+                        Some((modules, scope)),
+                    ),
                 );
             }
             match handles_of(ty, scope, resources, modules) {

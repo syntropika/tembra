@@ -1,7 +1,7 @@
 //! Real macro guests link either std or the explicitly selected freestanding runtime.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
-use std::{cell::Cell, collections::BTreeMap, rc::Rc};
+use std::{cell::Cell, collections::BTreeMap, path::Path, rc::Rc};
 use tembra::{
     Context, Host, Orb, Reference, Service,
     core::Code,
@@ -1381,4 +1381,132 @@ fn document(pool: &mut LocalPool, host: &Host, name: &str) {
         "{name}"
     );
     documents.release().unwrap();
+}
+
+/// A newtype is the WIT type of its field: on both guests and both engines, each crosses as its
+/// field, alone, in a list, in a tuple and in a record of the module, which the macro keeps the
+/// author's, and comes back from the newtype's `TryFrom` the same.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD and TEMBRA_WASM_ORB_MACRO_NO_STD"]
+fn a_newtype_crosses_as_its_field() {
+    let guests = [
+        ("standard", component("TEMBRA_WASM_ORB_MACRO_STD")),
+        ("freestanding", component("TEMBRA_WASM_ORB_MACRO_NO_STD")),
+    ];
+    for interpreted in [false, true] {
+        let engine = if interpreted {
+            Engine::interpreted(Limits::default())
+        } else {
+            Engine::new(Limits::default())
+        }
+        .unwrap();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let orbs = guests
+            .iter()
+            .map(|(name, bytes)| {
+                let (wit, contract) = contract(bytes);
+                let words: String = wit.split_whitespace().collect();
+                for expected in [
+                    "recordmeasure{amount:f64,unit:string,}",
+                    "measured:func(amount:f64,unit:string)->measure;",
+                    "tally:func(measures:list<measure>,unit:string)->tuple<u32,list<string>>;",
+                ] {
+                    assert!(words.contains(expected), "{expected}\n{wit}");
+                }
+                let roles = contract.embedded_roles(bytes).unwrap();
+                let artifact = contract.component_artifact(bytes, name, 1, &roles).unwrap();
+                engine.load(&artifact, bound(granted())).unwrap()
+            })
+            .chain([counters()])
+            .collect();
+        host.install(orbs).unwrap();
+        for (name, _) in &guests {
+            let units = Rc::new(
+                host.get(
+                    &format!("{name}::example:runtime/units@1.0.0"),
+                    vec!["main".into()],
+                    "alice",
+                )
+                .unwrap(),
+            );
+            pool.run_until(units.ready()).unwrap();
+            for (method, arguments, result) in [
+                (
+                    "measured",
+                    json!([2.5, "m"]),
+                    json!({"amount": 2.5, "unit": "m"}),
+                ),
+                (
+                    "tally",
+                    json!([
+                        [{"amount": 1.0, "unit": "m"}, {"amount": 2.0, "unit": "s"}],
+                        "m"
+                    ]),
+                    json!([1, ["s"]]),
+                ),
+            ] {
+                let called = units.clone();
+                let answer = pool
+                    .run_until(host.root("alice", move |context| {
+                        async move {
+                            called
+                                .call_portable::<_, Value>(&context, method, arguments)
+                                .await
+                        }
+                        .boxed_local()
+                    }))
+                    .unwrap();
+                assert_eq!(answer, result, "{name} {method}");
+            }
+            units.release().unwrap();
+        }
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(engine.instances(), 0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+    }
+}
+
+/// A newtype that only a refusing `TryFrom` makes is native only: a component has no error channel
+/// for an argument refused before its method runs, only a trap, which would retire its revision for
+/// every caller until a reload, so it reads a newtype through `From`. A component build of a module
+/// taking such a newtype fails, and the error names the newtype, at its declaration, and says why.
+/// The runtime fixture's `native-only-newtype` feature adds such a module; the build shares the
+/// fixture's target directory, where `just test-orb-macro` built its components.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_component_build_refuses_a_newtype_only_try_from_makes() {
+    let built = std::env::var_os("TEMBRA_WASM_ORB_MACRO_STD")
+        .unwrap_or_else(|| panic!("TEMBRA_WASM_ORB_MACRO_STD is required"));
+    let target = Path::new(&built)
+        .parent()
+        .expect("the fixture's target directory");
+    let manifest =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../orb-macro/runtime-fixture/Cargo.toml");
+    let output = std::process::Command::new(env!("CARGO"))
+        .args([
+            "build",
+            "--locked",
+            "--release",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--features",
+            "native-only-newtype",
+        ])
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(target)
+        .output()
+        .unwrap();
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{errors}");
+    for expected in [
+        "error[E0277]: `Symbol` is native only: a component reads it from its field through `From<std::string::String>`, which `Symbol` does not implement",
+        "pub struct Symbol(String);",
+        "a newtype a component takes, which only `TryFrom` makes",
+        "a component has no error channel for an argument refused before its method runs, only a trap, which would retire its revision for every caller until a reload",
+    ] {
+        assert!(errors.contains(expected), "{expected}\n{errors}");
+    }
 }

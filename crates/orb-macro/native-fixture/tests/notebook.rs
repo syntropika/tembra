@@ -545,3 +545,62 @@ fn orb_stays_an_ordinary_builder() {
     notes.release().unwrap();
     pool.run_until(host.close()).unwrap();
 }
+
+/// A newtype whose `TryFrom` refuses some values of its field is native only, as the notebook is: a
+/// local caller passes the author's struct, which only its `TryFrom` builds, and a portable caller
+/// the field, which the contract accepts, read back through the same `TryFrom`. A value it refuses
+/// fails that call alone, as its arguments, with its message, before the method runs, and the next
+/// call is served.
+#[test]
+fn a_value_a_newtype_refuses_fails_only_its_call() {
+    assert!(
+        notebook::WIT.contains("tagged: func(tag: string) -> string;"),
+        "{}",
+        notebook::WIT
+    );
+    let contract = Contract::from_source("notebook.wit", notebook::WIT, Some("notebook")).unwrap();
+    let slot = contract
+        .bind("example:notes/session@1.0.0", "tagged", true)
+        .unwrap();
+    let events = Events::default();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![notebook::orb(inputs(&events)).unwrap()])
+        .unwrap();
+    let session = Rc::new(host.get(SESSION, vec!["main".into()], "host").unwrap());
+    let called = session.clone();
+    pool.run_until(host.root("host", move |context| {
+        async move {
+            let urgent = notebook::Tag::try_from("urgent".to_string()).unwrap();
+            assert_eq!(
+                called
+                    .call::<_, String>(&context, "tagged", (urgent,))
+                    .await?,
+                "#urgent"
+            );
+            for (tag, message) in [("", "`` is no tag"), ("two words", "`two words` is no tag")] {
+                let arguments = json!([tag]);
+                assert!(contract.validate_slot(slot, true, &arguments).is_ok());
+                let error = called
+                    .call_portable::<_, Value>(&context, "tagged", arguments)
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    (error.reason.as_str(), error.message.as_str()),
+                    ("arguments", message)
+                );
+                assert_eq!(
+                    called
+                        .call_portable::<_, Value>(&context, "tagged", json!(["later"]))
+                        .await?,
+                    json!("#later")
+                );
+            }
+            Ok(())
+        }
+        .boxed_local()
+    }))
+    .unwrap();
+    session.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}

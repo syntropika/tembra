@@ -10,7 +10,9 @@ use tembra::{
     contracts::{Binding, Contract, guest},
     core::{Code, Lifetime},
 };
-use tembra_orb_native_fixture::calculator::{self, Heading, Move, Note, Pen, Point, Shape, Stroke};
+use tembra_orb_native_fixture::calculator::{
+    self, Count, Heading, Measure, Move, Note, Pen, Point, Shape, Stroke, Unit,
+};
 
 const MATH: &str = "calculator::example:calculator/math@1.0.0";
 const PLOTTER: &str = "calculator::example:calculator/plotter@1.0.0";
@@ -20,6 +22,7 @@ const CALLER: &str = "calculator::example:calculator/caller@1.0.0";
 const TALLY: &str = "calculator::example:calculator/tally@1.0.0";
 const MEMO: &str = "calculator::example:calculator/memo@1.0.0";
 const ACCUMULATORS: &str = "calculator::example:calculator/accumulators@1.0.0";
+const UNITS: &str = "calculator::example:calculator/units@1.0.0";
 
 /// The module's contract, read from its `WIT`, as a compiled or TypeScript caller validates what
 /// it sends to the Orb and what it receives.
@@ -98,7 +101,8 @@ fn the_declaration_is_the_plan_of_the_contract() {
             CALLER,
             TALLY,
             MEMO,
-            ACCUMULATORS
+            ACCUMULATORS,
+            UNITS
         ]
     );
     assert!(
@@ -1071,6 +1075,76 @@ fn free_json_crosses_as_its_text() {
                     .unwrap_err();
                 assert_eq!(error.reason, "arguments", "{error}");
                 assert_eq!(error.message, message);
+            }
+            Ok(())
+        }
+        .boxed_local()
+    });
+}
+
+/// A newtype is the WIT type of its field: a local caller passes and gets the author's structs,
+/// alone, in a list, in a tuple and in a record of the module, which the macro keeps the author's.
+/// A portable caller sends and receives the field's JSON, which the contract accepts, read back
+/// into the newtype through its `From`. A newtype whose `TryFrom` refuses a value is the
+/// notebook's, which only a native host takes.
+#[test]
+fn a_newtype_crosses_as_its_field() {
+    for function in [
+        "measured: func(amount: f64, unit: string) -> measure;",
+        "tally: func(measures: list<measure>, unit: string) -> tuple<u32, list<string>>;",
+    ] {
+        assert!(calculator::WIT.contains(function), "{function}");
+    }
+    let unit = |symbol: &str| Unit::from(symbol.to_string());
+    with_main(UNITS, move |units, context| {
+        async move {
+            assert_eq!(
+                units
+                    .call::<_, Measure>(&context, "measured", (2.5f64, unit("m")))
+                    .await?,
+                Measure {
+                    amount: 2.5,
+                    unit: unit("m"),
+                }
+            );
+            let measures = vec![
+                Measure {
+                    amount: 1.0,
+                    unit: unit("m"),
+                },
+                Measure {
+                    amount: 2.0,
+                    unit: unit("s"),
+                },
+            ];
+            let client = calculator::UnitsClient::new(units.clone());
+            assert_eq!(
+                client.tally(&context, measures, unit("m")).await?,
+                (Count::from(1), vec![unit("s")])
+            );
+            let contract = contract();
+            let interface = "example:calculator/units@1.0.0";
+            for (method, arguments, result) in [
+                (
+                    "measured",
+                    json!([2.5, "m"]),
+                    json!({ "amount": 2.5, "unit": "m" }),
+                ),
+                (
+                    "tally",
+                    json!([
+                        [{ "amount": 1.0, "unit": "m" }, { "amount": 2.0, "unit": "s" }],
+                        "m"
+                    ]),
+                    json!([1, ["s"]]),
+                ),
+            ] {
+                assert!(accepted(&contract, interface, method, true, &arguments));
+                let answer = units
+                    .call_portable::<_, Value>(&context, method, arguments)
+                    .await?;
+                assert_eq!(answer, result, "{method}");
+                assert!(accepted(&contract, interface, method, false, &answer));
             }
             Ok(())
         }

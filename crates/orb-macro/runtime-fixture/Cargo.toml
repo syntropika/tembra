@@ -11,6 +11,9 @@ crate-type = ["cdylib"]
 
 [features]
 no-std = ["dep:dlmalloc"]
+# Adds the module `refusing`, whose newtype only a refusing `TryFrom` makes: a component build of
+# the crate then fails, naming it, which `executor-wasm/tests/orb_macro_runtime.rs` checks.
+native-only-newtype = []
 
 [dependencies]
 tembra = { path = "../../tembra", default-features = false, features = ["macros"] }

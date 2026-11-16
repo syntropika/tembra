@@ -1684,9 +1684,12 @@ fn error(message: impl std::fmt::Display) -> syn::Error {
     syn::Error::new(Span::call_site(), message.to_string())
 }
 
-/// A struct with named fields becomes a `record`; the module types its fields name are the
-/// caller's to give it.
-pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
+/// A struct with named fields becomes a `record`, each field's type spelled by `spelled`; the
+/// module types its fields name are the caller's to give it.
+pub(crate) fn record(
+    item: &ItemStruct,
+    spelled: &dyn Fn(&Type) -> syn::Result<String>,
+) -> syn::Result<Shape> {
     let Fields::Named(fields) = &item.fields else {
         return Err(syn::Error::new(item.span(), "a record needs named fields"));
     };
@@ -1703,7 +1706,7 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
         wit.push_str(&format!(
             "    {}: {},\n",
             escaped(&kebab(ident)),
-            wit_type(&field.ty)?
+            spelled(&field.ty)?
         ));
         named.push((ident.clone(), field.ty.clone()));
     }
@@ -1725,9 +1728,13 @@ pub(crate) fn case_record(enumeration: &Ident, case: &Ident) -> String {
 }
 
 /// An enum becomes an `enum` when every variant is empty, otherwise a `variant` with one payload
-/// per case; the module types the payloads name are the caller's to give it. A case with named
-/// fields carries a record of its own, `<enum>-<case>`, defined before the variant.
-pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
+/// per case, each type spelled by `spelled`; the module types the payloads name are the caller's
+/// to give it. A case with named fields carries a record of its own, `<enum>-<case>`, defined
+/// before the variant.
+pub(crate) fn enumeration(
+    item: &ItemEnum,
+    spelled: &dyn Fn(&Type) -> syn::Result<String>,
+) -> syn::Result<Shape> {
     let plain = item
         .variants
         .iter()
@@ -1753,7 +1760,7 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 wit.push_str(&format!(
                     "    {case}({}),\n",
-                    wit_type(&fields.unnamed[0].ty)?
+                    spelled(&fields.unnamed[0].ty)?
                 ));
                 cases.push((
                     variant.ident.clone(),
@@ -1771,7 +1778,7 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
                     records.push_str(&format!(
                         "    {}: {},\n",
                         escaped(&kebab(ident)),
-                        wit_type(&field.ty)?
+                        spelled(&field.ty)?
                     ));
                     named.push((ident.clone(), field.ty.clone()));
                 }
@@ -1863,9 +1870,19 @@ pub(crate) fn holds_free_json(ty: &Type) -> bool {
 
 /// Translate an owned Rust type into its WIT spelling.
 pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
+    wit_type_with(ty, &|_| Ok(None))
+}
+
+/// Translate an owned Rust type into its WIT spelling, where `newtype` spells a path that names a
+/// newtype of the module, as its field's type, and answers `None` for any other type of the module.
+pub(crate) fn wit_type_with(
+    ty: &Type,
+    newtype: &dyn Fn(&Type) -> syn::Result<Option<String>>,
+) -> syn::Result<String> {
     if free_json(ty) {
         return Ok("string".into());
     }
+    let wit_type = |ty: &Type| wit_type_with(ty, newtype);
     match ty {
         Type::Path(path) => {
             let segment = path
@@ -1942,8 +1959,12 @@ pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
                         (false, false) => format!("result<{}, {}>", wit_type(ok)?, wit_type(err)?),
                     }
                 }
-                // A type of the module, by its WIT name.
-                _ => escaped(&kebab(&segment.ident)),
+                // A newtype of the module as its field's type, any other type of the module by
+                // its WIT name.
+                _ => match newtype(ty)? {
+                    Some(spelling) => spelling,
+                    None => escaped(&kebab(&segment.ident)),
+                },
             })
         }
         Type::Tuple(tuple) if tuple.elems.is_empty() => Err(syn::Error::new(

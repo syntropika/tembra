@@ -600,6 +600,54 @@ pub mod calculator {
             }
         }
     }
+
+    /// A unit of measure, by its symbol: a newtype, which the WIT spells as a `string`, and which
+    /// every symbol makes, through `From`, as a module a component build takes needs.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Unit(String);
+
+    impl From<String> for Unit {
+        fn from(symbol: String) -> Self {
+            Self(symbol)
+        }
+    }
+
+    /// How many there are: a newtype every `u32` makes, through `From`.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Count(u32);
+
+    impl From<u32> for Count {
+        fn from(count: u32) -> Self {
+            Self(count)
+        }
+    }
+
+    /// An amount in a unit: a record holding a newtype, which the macro keeps the author's.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Measure {
+        pub amount: f64,
+        pub unit: Unit,
+    }
+
+    /// Measures in units: each newtype crosses as its field, read back through its `From`.
+    #[service]
+    pub struct Units;
+
+    impl Units {
+        /// The amount in the unit.
+        pub fn measured(amount: f64, unit: Unit) -> Measure {
+            Measure { amount, unit }
+        }
+
+        /// How many of the measures are in the unit, and the units of the others, in order.
+        pub fn tally(measures: Vec<Measure>, unit: Unit) -> (Count, Vec<Unit>) {
+            let (same, others): (Vec<Measure>, Vec<Measure>) = measures
+                .into_iter()
+                .partition(|measure| measure.unit == unit);
+            let others = others.into_iter().map(|measure| measure.unit).collect();
+            (Count::from(same.len() as u32), others)
+        }
+    }
 }
 
 /// Notes kept for the host, with what the host lends the Orb: the argument of `notebook::orb(..)`.
@@ -804,6 +852,29 @@ pub mod notebook {
         #[local]
         pub fn apply(value: u32, operation: Rc<dyn Fn(u32) -> u32>) -> u32 {
             operation(value)
+        }
+
+        /// The tag, marked as one.
+        pub fn tagged(tag: Tag) -> String {
+            format!("#{}", tag.0)
+        }
+    }
+
+    /// A tag of notes: a newtype, which the WIT spells as a `string`, whose `TryFrom` refuses a tag
+    /// that is empty or holds whitespace. Only a native host takes such a newtype, where a value it
+    /// refuses fails that call alone: a component would have to trap.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Tag(String);
+
+    impl TryFrom<String> for Tag {
+        type Error = String;
+
+        fn try_from(tag: String) -> Result<Self, String> {
+            if tag.is_empty() || tag.contains(char::is_whitespace) {
+                Err(format!("`{tag}` is no tag"))
+            } else {
+                Ok(Self(tag))
+            }
         }
     }
 

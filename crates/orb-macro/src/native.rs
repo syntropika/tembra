@@ -21,8 +21,8 @@
 //! `with` reaches natively. What the native side does not cover yet is a compile error inside the
 //! same wrapper, naming the item; a component build of the module is unaffected.
 use crate::{
-    Analysis, Function, Payload, Resource, Service, Shape, ShapeKind, WitResource, camel_ident,
-    metadata::Metadata, rust_ident, wit,
+    Analysis, Function, Newtype, Payload, Resource, Service, Shape, ShapeKind, WitResource,
+    camel_ident, metadata::Metadata, rust_ident, wit,
 };
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Span, TokenStream};
@@ -78,13 +78,19 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
             .or_default()
             .extend([items, client(service, analysis)]);
     }
-    // The JSON of each type of the module that enters the WIT, in the type's module, once the
-    // methods that take or return it are covered, and the functions of each WIT resource, in the
-    // resource's module.
+    // The JSON of each type of the module that enters the WIT, and of each newtype the WIT spells
+    // as its field, in the type's module, once the methods that take or return it are covered, and
+    // the functions of each WIT resource, in the resource's module.
     let codecs = analysis
         .shapes
         .iter()
         .map(|shape| Ok((shape.scope, shape_codec(shape, analysis)?)))
+        .chain(
+            analysis
+                .newtypes
+                .iter()
+                .map(|(newtype, _)| Ok((newtype.scope, newtype_codec(newtype, analysis)?))),
+        )
         .chain(
             analysis
                 .wit_resources
@@ -128,7 +134,8 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         resources,
         &calls,
     );
-    let boundary = (!analysis.shapes.is_empty()).then(boundary_trait);
+    let boundary =
+        (!analysis.shapes.is_empty() || !analysis.newtypes.is_empty()).then(boundary_trait);
     Native {
         root: wrapped(quote! { #orb #boundary #(#root)* #context }),
         nested: by_scope
@@ -1623,8 +1630,8 @@ enum Kind<'a> {
     Tuple(Vec<Kind<'a>>),
     /// `result<ok, err>`: `{"tag": "ok" | "err", "val": ..}`, without `val` for a side `()`.
     Result(Option<Box<Kind<'a>>>, Option<Box<Kind<'a>>>),
-    /// A record, an enum, a variant or a flags of the module: its own JSON, through the boundary
-    /// trait it implements.
+    /// A record, an enum, a variant, a flags or a newtype of the module: its own JSON, through the
+    /// boundary trait it implements.
     Named(&'a Type),
     /// Free JSON, `serde_json::Value`: a WIT `string` that holds its JSON text.
     Json(&'a Type),
@@ -1769,7 +1776,9 @@ fn named<'a>(
             "a type of the consumed interface {}; consumed types are not supported natively yet",
             named.interface.identity
         )
-    } else if analysis.shapes.iter().any(|shape| shape.ident == *ident) {
+    } else if analysis.shapes.iter().any(|shape| shape.ident == *ident)
+        || analysis.consumed_modules.newtype(ty, scope).is_some()
+    {
         return Ok(Kind::Named(ty));
     } else if analysis
         .wit_resources
@@ -2281,6 +2290,48 @@ fn members<'a>(
             })
         })
         .collect()
+}
+
+/// The JSON of a newtype the WIT spells as its field, as its impl of the boundary trait, in its own
+/// module, where the field and its type are named as the author wrote them: the field's JSON, read
+/// into the newtype through `TryFrom` of the field's type, which a `From` implements too, whose
+/// refusal fails the call with its message, and written from the field. A field the codec does not
+/// cover is refused, naming it.
+fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, Refused> {
+    let Newtype {
+        ident,
+        inner,
+        scope,
+    } = newtype;
+    let boundary = boundary(*scope, analysis);
+    let kind = kind(inner, *scope, analysis).map_err(|uncovered| {
+        refused(
+            inner.span(),
+            &format!(
+                "the field of `{ident}` is `{}`{}",
+                spelled(inner),
+                uncovered.described(inner)
+            ),
+        )
+    })?;
+    let read = decode(&kind, quote! { value }, &boundary);
+    let written = encode(&kind, quote! { self.0 }, &boundary);
+    Ok(quote! {
+        impl #boundary for #ident {
+            fn decode(
+                value: ::tembra::serde_json::Value,
+            ) -> ::core::result::Result<Self, ::std::string::String> {
+                <Self as ::core::convert::TryFrom<#inner>>::try_from(#read?)
+                    .map_err(|error| ::std::string::ToString::to_string(&error))
+            }
+
+            fn encode(
+                self,
+            ) -> ::core::result::Result<::tembra::serde_json::Value, ::std::string::String> {
+                #written
+            }
+        }
+    })
 }
 
 /// The JSON of a type of the module that enters the WIT, as its impl of the boundary trait, in its

@@ -35,6 +35,13 @@ Its `documents` service takes and returns free JSON, `serde_json::Value`, which 
 keeps the author's, converted to and from the bindings' record of the text. Both builds read and
 write the text with `serde_json`, the `no-std` one through its `alloc` feature.
 
+Its `units` service takes and returns newtypes, `Unit(String)` and `Count(u32)`, which cross as
+their fields, a WIT `string` and `u32`: alone, in a list, in a tuple and in the `measure` record,
+which the macro keeps the author's. Each comes back through the newtype's `From`. The
+`native-only-newtype` feature adds the module `refusing`, whose newtype only a refusing `TryFrom`
+makes: a component build of the crate then fails, with an error that names the newtype, which the
+test checks.
+
 Run `just test-orb-macro` from the repository root to build both real components and execute
 `executor-wasm/tests/orb_macro_runtime.rs` on Cranelift and Pulley. The test decodes both component
 contracts, compares their WIT and typed metadata, calls each guest, observes the walker's state,

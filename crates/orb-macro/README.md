@@ -108,6 +108,7 @@ starts with this explicit freestanding mode.
 | a struct of `bool` fields with `#[flags]`, when a service method uses it    | a `flags`, a flag per field in kebab-case; the struct stays the author's, which the bindings take as it is                                                           |
 | `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                                                                         |
 | free JSON, `serde_json::Value`, by that path                                | a `string` that holds its JSON text, written and read at the boundary; a type holding it stays the author's, converted to and from the bindings' type                |
+| a newtype, a tuple struct of one field, `struct Id(String)`                 | its field's type, `string`: the struct stays the author's, written as its field, read back through `From`, natively `TryFrom`; a type holding it stays the author's  |
 | a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`        | `import` and `export` of that hook interface in the world: a contribution                                                                                            |
 | a unit struct with `#[hook("ns:name/hook@version", composition = c)]`       | `import` and `export` of that hook interface in the world: a declaration                                                                                             |
 | a unit struct with `#[hook(composition = c, input = Type)]`                 | a hook `interface` of the package under the struct's name, its callback `apply` and the types the input reaches, imported and exported by the world: a declaration   |
@@ -152,6 +153,34 @@ a root resource's opening and closing and a WIT resource's constructor, carry a 
 `#[validate]`, `#[open]`, `#[close]` or `#[constructor]`, whatever their names and visibility; a
 function without a marker is ordinary Rust, and a marker on a function of the wrong shape, or of
 a struct of another kind, is a compile error.
+
+A newtype, a tuple struct of one field without generic parameters, has no WIT type of its own:
+wherever a type that enters the WIT names it, the WIT spells its field's type, so `struct
+Code(String)` is a `string` and `struct Tagged(Entry)` is an `entry`. The struct stays the
+author's, and so does a record or a variant holding one. A value crosses as its field, and comes
+back through `From` of the field's type, which the author implements:
+
+```rust
+/// A unit of measure, by its symbol.
+pub struct Unit(String);
+
+impl From<String> for Unit {
+    fn from(symbol: String) -> Self {
+        Self(symbol)
+    }
+}
+```
+
+Natively, `TryFrom` of the field's type reads it instead, which a `From` implements too, so a
+newtype may refuse a value there: a refused value fails that call alone, as its arguments, with
+the error's message (see [Using the Orb natively](#using-the-orb-natively)). A component has no
+such channel: it could refuse an argument before its method runs only by trapping, which would
+retire its revision for every caller until a reload. So a component reads a newtype through
+`From`, and a newtype that only a refusing `TryFrom` makes is native only: a component build of
+the module fails, with an error that names the newtype and says why. A tuple struct of a name
+another type of the Orb takes stays ordinary Rust, read by that name as before. A newtype holding a
+resource, a newtype beside a resource in one parameter or result, and a newtype in a derived hook's
+input are compile errors.
 
 ## Contributing to a hook
 
@@ -1149,8 +1178,12 @@ as a string that holds its text. Natively, a text that holds no JSON fails only 
 reason `arguments`. A component has no error channel for it: its method panics and traps, as any
 panic in a component method does, and the trap takes the revision down for every caller, each
 later call and every other object failing as `unavailable`, until a reload installs the Orb again.
-Each type of the module that enters the WIT reads and writes its JSON in its own module, through a
-hidden trait of the Orb module.
+A newtype crosses as its field, read back through its `TryFrom`, which a `From` implements too: a
+value it refuses fails only that call, with the error's message and the reason `arguments`. A
+component reads a newtype through `From` instead, as it has no channel for that refusal but a trap,
+so a newtype only a refusing `TryFrom` makes is native only: a component build of the module fails,
+naming it. Each type of the module that enters the WIT, and each newtype, reads and writes its
+JSON in its own module, through a hidden trait of the Orb module.
 
 With `context` on the attribute, a native host gets a `context` of its own, with the functions and
 types of the component's: `principal()`, `cancelled()`, `cancel()`, `object()` and `log(..)` read
@@ -1214,11 +1247,11 @@ facade there: such a module names the facade `::tembra`, as in `::tembra::Result
 `use ::tembra::Declaration;`.
 
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
-`char`, free JSON, records, enums, variants, flags, `Result`s, and `Vec`, `Option` and tuples of
-them, WIT resources as above, states and the resources of the Orb's root. A type of a consumed
-interface, an import and a hook are compile errors where the runtime is linked, naming the item,
-until the native side covers them, and so is an `Option` of an `Option`, which the boundary's JSON
-cannot tell from `None`; a component build of the same module is unaffected.
+`char`, free JSON, records, enums, variants, flags, newtypes, `Result`s, and `Vec`, `Option` and
+tuples of them, WIT resources as above, states and the resources of the Orb's root. A type of a
+consumed interface, an import and a hook are compile errors where the runtime is linked, naming the
+item, until the native side covers them, and so is an `Option` of an `Option`, which the boundary's
+JSON cannot tell from `None`; a component build of the same module is unaffected.
 
 ## Items under `#[cfg]`
 

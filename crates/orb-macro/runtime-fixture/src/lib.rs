@@ -529,4 +529,89 @@ mod guest {
             note.body.is_object().then_some(note.body)
         }
     }
+
+    /// A unit of measure, by its symbol: a newtype, which the WIT spells as a `string`, and which
+    /// every symbol makes, through `From`, as a component reads a newtype.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Unit(String);
+
+    impl From<String> for Unit {
+        fn from(symbol: String) -> Self {
+            Self(symbol)
+        }
+    }
+
+    /// How many there are: a newtype every `u32` makes, through `From`.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Count(u32);
+
+    impl From<u32> for Count {
+        fn from(count: u32) -> Self {
+            Self(count)
+        }
+    }
+
+    /// An amount in a unit: a record holding a newtype, which the macro keeps the author's,
+    /// converted to and from the bindings' record of the unit's symbol.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Measure {
+        pub amount: f64,
+        pub unit: Unit,
+    }
+
+    /// A newtype crosses as its field, read back through its `From`: alone, in a list, in a tuple
+    /// and in a record of the module.
+    #[service]
+    pub struct Units;
+
+    impl Units {
+        /// The amount in the unit.
+        pub fn measured(amount: f64, unit: Unit) -> Measure {
+            Measure { amount, unit }
+        }
+
+        /// How many of the measures are in the unit, and the units of the others, in order.
+        pub fn tally(measures: Vec<Measure>, unit: Unit) -> (Count, Vec<Unit>) {
+            let (same, others): (Vec<Measure>, Vec<Measure>) = measures
+                .into_iter()
+                .partition(|measure| measure.unit == unit);
+            let others = others.into_iter().map(|measure| measure.unit).collect();
+            (Count::from(same.len() as u32), others)
+        }
+    }
+}
+
+/// A module whose newtype only a refusing `TryFrom` makes, which a component cannot take: it has no
+/// error channel for an argument refused before its method runs, only a trap. The
+/// `native-only-newtype` feature adds it, and a component build of the crate then fails, naming the
+/// newtype, as `executor-wasm/tests/orb_macro_runtime.rs` checks.
+#[cfg(feature = "native-only-newtype")]
+#[tembra::orb(package = "example:refusing@1.0.0")]
+mod refusing {
+    use alloc::string::String;
+
+    /// A symbol, which is never empty.
+    pub struct Symbol(String);
+
+    impl TryFrom<String> for Symbol {
+        type Error = String;
+
+        fn try_from(symbol: String) -> Result<Self, String> {
+            if symbol.is_empty() {
+                Err(String::from("a symbol is never empty"))
+            } else {
+                Ok(Self(symbol))
+            }
+        }
+    }
+
+    #[service]
+    pub struct Symbols;
+
+    impl Symbols {
+        /// The symbol, as given.
+        pub fn echo(symbol: Symbol) -> Symbol {
+            symbol
+        }
+    }
 }
