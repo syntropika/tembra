@@ -1,8 +1,8 @@
-//! An Orb crate used natively. The module is one `cargo tembra build` would compile into a
-//! component; the tests of this crate are a native host instead, which installs
+//! An Orb crate used natively. The module `calculator` is one `cargo tembra build` would compile
+//! into a component; the tests of this crate are a native host instead, which installs
 //! `calculator::orb()` and calls its services locally, with Rust values, and portably, with the
-//! boundary's JSON. The manifest names the Orb `calculator` at API version 2, which `orb()`
-//! reports.
+//! boundary's JSON. The module `notebook` takes host values, which only a native host can lend.
+//! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 
 #[tembra::orb(package = "example:calculator@1.0.0")]
 pub mod calculator {
@@ -88,6 +88,35 @@ pub mod calculator {
             pub fn echo(text: String) -> String {
                 text
             }
+        }
+    }
+}
+
+/// Notes kept for the host, with what the host lends the Orb: the argument of `notebook::orb(..)`.
+/// Native only, as host values are.
+#[cfg(not(target_arch = "wasm32"))]
+#[tembra::orb(package = "example:notes@1.0.0")]
+pub mod notebook {
+    use std::{cell::RefCell, rc::Rc};
+    use tembra::core::Address;
+
+    /// What the host lends every service of the Orb.
+    #[inputs]
+    pub struct Inputs {
+        /// What happened, in order, for the host to read back.
+        pub events: Rc<RefCell<Vec<String>>>,
+        /// The title of an object's notes, resolved from its address.
+        pub title: Box<dyn Fn(&Address) -> String>,
+    }
+
+    /// Notes, as they are given.
+    #[service]
+    pub struct Notes;
+
+    impl Notes {
+        /// The text, as given.
+        pub fn echo(text: String) -> String {
+            text
         }
     }
 }

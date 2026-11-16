@@ -51,7 +51,11 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         by_scope.entry(service.scope).or_default().push(items);
     }
     let root = by_scope.remove(&0).unwrap_or_default();
-    let orb = orb(metadata, &calls);
+    let inputs = analysis
+        .inputs
+        .as_ref()
+        .map(|inputs| crate::from_root(&analysis.modules[inputs.scope], &inputs.ident));
+    let orb = orb(metadata, inputs.as_ref(), &calls);
     Native {
         root: wrapped(quote! { #orb #(#root)* }),
         nested: by_scope
@@ -67,17 +71,22 @@ fn wrapped(items: TokenStream) -> TokenStream {
     quote! { ::tembra::__host! { #items } }
 }
 
-/// `orb()`: the Orb named and versioned by the manifest, with every service registered.
+/// `orb()`: the Orb named and versioned by the manifest, with every service registered. With an
+/// `#[inputs]` struct, `inputs` the path the Orb module names it by, it is `orb(inputs)`.
 ///
 /// Cargo does not rebuild a crate when only `[package.metadata.tembra]` changes, so the generated
 /// code includes the manifest, which makes the compiler track the file: the next build then reads
 /// the table again.
-fn orb(metadata: &Metadata, calls: &[TokenStream]) -> TokenStream {
+fn orb(metadata: &Metadata, inputs: Option<&TokenStream>, calls: &[TokenStream]) -> TokenStream {
     let name = &metadata.name;
     let version = metadata.api_version;
-    let doc = format!(
+    let mut doc = format!(
         " The Orb for a native host: `{name}` at API version {version}, as the crate manifest names it. Install it with `Host::install`; its services are named `{name}::<interface identity>`."
     );
+    let parameter = inputs.map(|path| {
+        doc.push_str(" `inputs` are what the host lends every service of the Orb.");
+        quote! { inputs: #path }
+    });
     quote! {
         const _: &[u8] = ::core::include_bytes!(::core::concat!(
             ::core::env!("CARGO_MANIFEST_DIR"),
@@ -85,7 +94,7 @@ fn orb(metadata: &Metadata, calls: &[TokenStream]) -> TokenStream {
         ));
 
         #[doc = #doc]
-        pub fn orb() -> ::tembra::Result<::tembra::Orb> {
+        pub fn orb(#parameter) -> ::tembra::Result<::tembra::Orb> {
             let name = #name;
             ::core::result::Result::Ok(::tembra::Orb::new(name, #version) #(.service(#calls))*)
         }

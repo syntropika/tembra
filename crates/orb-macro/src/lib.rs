@@ -458,6 +458,14 @@ struct Resource {
     scope: usize,
 }
 
+/// The struct marked `#[inputs]`: the argument of the native `orb(..)`, the values a host lends
+/// every service of the Orb. It stays the author's struct, out of the WIT.
+struct Inputs {
+    ident: Ident,
+    /// The module declaring the struct, by scope; 0 is the Orb module.
+    scope: usize,
+}
+
 /// A marker on a function of an `impl` block. The functions the generated code calls by role
 /// carry one, whatever their names and visibility; a function without one is ordinary Rust.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -606,6 +614,7 @@ struct Scan {
     states: Vec<State>,
     resources: Vec<Resource>,
     wit_resources: Vec<WitResource>,
+    inputs: Option<Inputs>,
     impls: Vec<(usize, syn::ItemImpl)>,
     /// The type of each `impl Default for ..` of the Orb module, with the module it is written in.
     default_impls: Vec<(usize, Type)>,
@@ -802,6 +811,9 @@ impl Scan {
                         state.scope = scope;
                         self.states.push(state);
                         self.candidates.push(Candidate::record(s, scope));
+                    } else if let Some(attribute) = take(&mut s.attrs, "inputs") {
+                        self.inputs(&s, &attribute, scope)?;
+                        passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "service") {
                         if !matches!(s.fields, Fields::Unit) {
                             return Err(syn::Error::new(
@@ -969,6 +981,51 @@ impl Scan {
         }
         Ok((passthrough, children))
     }
+
+    /// Read the struct marked `#[inputs]`, the module's one, which the Orb module's `orb(..)`
+    /// takes as it is.
+    fn inputs(
+        &mut self,
+        item: &syn::ItemStruct,
+        attribute: &Attribute,
+        scope: usize,
+    ) -> syn::Result<()> {
+        let ident = &item.ident;
+        if !matches!(attribute.meta, syn::Meta::Path(_)) {
+            return Err(syn::Error::new(
+                attribute.span(),
+                "#[inputs] takes no options",
+            ));
+        }
+        if let Some(first) = &self.inputs {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{}` and `{ident}` are both marked #[inputs]; an Orb has one, the argument of `orb(..)`",
+                    first.ident
+                ),
+            ));
+        }
+        if !item.generics.params.is_empty() {
+            return Err(syn::Error::new(
+                item.generics.span(),
+                format!("`{ident}` is the argument of `orb(..)`: it takes no generic parameter"),
+            ));
+        }
+        if scope != 0 && !reaches_root(&item.vis) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{ident}` is the inputs of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, whose `orb(..)` takes it"
+                ),
+            ));
+        }
+        self.inputs = Some(Inputs {
+            ident: ident.clone(),
+            scope,
+        });
+        Ok(())
+    }
 }
 
 /// `super::` once per level below the Orb module: how a sub-module's code names the root.
@@ -1088,6 +1145,8 @@ struct Analysis {
     wit_resources: Vec<WitResource>,
     /// The resources of the Orb's root, with their `#[open]` and `#[close]` functions.
     resources: Vec<Resource>,
+    /// The struct marked `#[inputs]`, if any: the argument of the native `orb(..)`.
+    inputs: Option<Inputs>,
     /// The states, each resolved to the service whose objects own it.
     states: Vec<State>,
     /// The hook contributions, and the priority of each hook contributed to, by hook identity.
@@ -1226,6 +1285,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         states: Vec::new(),
         resources: Vec::new(),
         wit_resources: Vec::new(),
+        inputs: None,
         impls: Vec::new(),
         default_impls: Vec::new(),
         marked: Vec::new(),
@@ -1250,6 +1310,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         mut states,
         mut resources,
         mut wit_resources,
+        inputs,
         impls,
         default_impls,
         marked,
@@ -1992,6 +2053,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         services,
         wit_resources,
         resources,
+        inputs,
         states,
         contributions,
         hooks,

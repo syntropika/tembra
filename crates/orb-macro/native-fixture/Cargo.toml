@@ -22,6 +22,11 @@ wit-bindgen = { version = "=0.63.0", default-features = false, features = [
   "async",
 ] }
 
+# The module `notebook` takes host values, so it is compiled only natively, and names the runtime:
+# there the crate links it itself.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tembra = { path = "../../tembra", default-features = false, features = ["macros", "host"] }
+
 [dev-dependencies]
 # The tests are a native host: Cargo unifies the features, so the crate's `tembra` links the
 # runtime there and `orb()` exists; `authoring` reads the module's `WIT` as a contract.

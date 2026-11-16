@@ -997,6 +997,12 @@ generated code names the facade as `::tembra`, so an Orb crate depends on it und
 needs no dependency of its own for the runtime or its JSON; a host whose `tembra` lacks `host` finds
 no `orb()`. The crate is rebuilt when its manifest changes, so `orb()` follows the table.
 
+A native host can lend the Orb values a component cannot be given. The struct marked `#[inputs]`
+is the argument of `orb(..)`, one value for every service of the Orb, which the host builds:
+`notebook::orb(notebook::Inputs { .. })`. It stays the author's struct, out of the WIT, so its
+fields may hold anything, such as `Rc` handles or closures. An Orb has at most one, visible to the
+Orb module, without generic parameters.
+
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, and `Vec`, `Option` and tuples of them. A record, an enum, a variant, a flags, a `Result`,
 a resource, the `context` option, `#[state]`, `#[resource]`, `#[wit_resource]`, an import and a hook
@@ -1060,10 +1066,11 @@ The macro rewrites the module with:
    runs the state's `#[validate]` function on it;
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
    function and emptied by the `#[close]` one, and the `with` function on each resource type;
-10. inside `tembra::__host!`, so only where the facade links the runtime, `pub fn orb()`, which
-    builds the Orb named by the manifest from one hidden function per service, written in the
-    service's module with the codec constant of each of its methods, and an `include_bytes!` of
-    the manifest, see [using the Orb natively](#using-the-orb-natively).
+10. inside `tembra::__host!`, so only where the facade links the runtime, `pub fn orb()`, or
+    `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest from one
+    hidden function per service, written in the service's module with the codec constant of each
+    of its methods, and an `include_bytes!` of the manifest, see
+    [using the Orb natively](#using-the-orb-natively).
 
 The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) among its dependencies,
 `dlmalloc` (feature `global`) only with `no_std`, and `serde` (features `derive`, `alloc`) and

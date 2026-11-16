@@ -4695,6 +4695,78 @@ fn the_native_side_refuses_the_types_its_codecs_do_not_cover_yet() {
     );
 }
 
+/// A struct marked `#[inputs]` is the argument of `orb(..)`: the author's struct, as written but
+/// for the marker, whatever its fields hold, and no type of the WIT. In a sub-module, the Orb
+/// module names it by its path.
+#[test]
+fn the_inputs_are_the_argument_of_orb() {
+    let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
+    let module = expanded(
+        PACKAGE,
+        &format!(
+            "mod book {{
+                use std::rc::Rc;
+                #[inputs]
+                pub struct Inputs {{ pub label: String, pub scale: Rc<dyn Fn(u32) -> u32> }}
+                {service}
+            }}"
+        ),
+    );
+    let root = native(&module, &[]);
+    assert!(
+        root.contains("pub fn orb (inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb >"),
+        "{root}"
+    );
+    let tokens = tokens(&module);
+    assert!(
+        tokens.contains(
+            "pub struct Inputs { pub label : String , pub scale : Rc < dyn Fn (u32) -> u32 > }"
+        ),
+        "{tokens}"
+    );
+    assert!(!tokens.contains("inputs ]"), "{tokens}");
+    assert!(!wit(&module).contains("record"), "{}", wit(&module));
+    let module = expanded(
+        PACKAGE,
+        &format!(
+            "mod book {{ pub mod host {{ #[inputs] pub struct Lent {{ pub label: String }} }} {service} }}"
+        ),
+    );
+    let root = native(&module, &[]);
+    assert!(
+        root.contains("pub fn orb (inputs : host :: Lent)"),
+        "{root}"
+    );
+}
+
+/// An Orb has one `#[inputs]` struct, without options or generic parameters, which the Orb
+/// module can name.
+#[test]
+fn inputs_are_refused_when_ill_formed() {
+    let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
+    for (items, message) in [
+        (
+            "#[inputs] pub struct Lent { pub a: u32 } #[inputs] pub struct Borrowed { pub b: u32 }",
+            "`Lent` and `Borrowed` are both marked #[inputs]; an Orb has one, the argument of `orb(..)`",
+        ),
+        (
+            "#[inputs(shared)] pub struct Lent { pub a: u32 }",
+            "#[inputs] takes no options",
+        ),
+        (
+            "#[inputs] pub struct Lent<T> { pub a: T }",
+            "`Lent` is the argument of `orb(..)`: it takes no generic parameter",
+        ),
+        (
+            "mod host { #[inputs] struct Lent { pub a: u32 } }",
+            "`Lent` is the inputs of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, whose `orb(..)` takes it",
+        ),
+    ] {
+        let error = refused(PACKAGE, &format!("mod book {{ {items} {service} }}"));
+        assert_eq!(error, message, "{items}");
+    }
+}
+
 /// The contract an Orb crate carries, written as `cargo tembra build` writes it: only when the
 /// macro is given the crate's directory, which `primary_crate_dir` takes from Cargo's variables
 /// as `expansion` reads them, so a dependency's is never written and the token tests write nothing.
