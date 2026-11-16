@@ -797,6 +797,100 @@ fn a_declared_hooks_types_stay_out_of_a_derived_signature() {
     );
 }
 
+/// The world holds a consumed interface in one role, and the Orb module re-exports one module for
+/// it: an interface imported plainly beside a hook the module contributes to or declares,
+/// implemented beside such a hook, or imported or implemented twice is an error on the second
+/// import literal or item, naming both roles. Each role alone expands.
+#[test]
+fn one_interface_in_two_roles_is_refused() {
+    let dir = consumed("roles", LEDGER);
+    let orb = |imports: &[&str], items: &str| {
+        let module = format!(
+            "mod roles {{
+                #[service]
+                pub struct Report;
+                impl Report {{ pub fn count() -> u32 {{ 0 }} }}
+                {items}
+            }}"
+        );
+        (options("example:roles@1.0.0", Some(&dir), imports), module)
+    };
+    let contribution = "#[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
+        pub fn admit(input: guard::Admission) -> guard::Admission { input }";
+    let declaration = "#[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
+        pub struct Gate;";
+    let guarding = "#[service(\"example:ledger/guard@1.0.0\")]
+        pub struct Guarding;
+        impl Guarding { pub fn apply(input: guard::Admission) -> guard::Admission { input } }";
+    let gating = |service: &str| {
+        format!(
+            "#[service(\"example:ledger/gate@1.0.0\")]
+            pub struct {service};
+            impl {service} {{ pub fn apply(input: gate::Ticket) -> gate::Ticket {{ input }} }}"
+        )
+    };
+    // A role as the attribute's imports and the module's items.
+    let import = |identity| (vec![identity], String::new());
+    let item = |text: &str| (Vec::new(), text.to_owned());
+    let hooked = "the world imports and exports the hook already, and the Orb module re-exports the hook's module";
+    let exported = "the world exports the interface once, for the service or for the hook";
+    // The first role, the second, and the error on the second.
+    for (first, second, message) in [
+        (
+            import("example:ledger/guard@1.0.0"),
+            item(contribution),
+            format!(
+                "example:ledger/guard@1.0.0 is imported plainly and a hook this module contributes to: {hooked} as `guard`; remove the import"
+            ),
+        ),
+        (
+            import("example:ledger/gate@1.0.0"),
+            item(declaration),
+            format!(
+                "example:ledger/gate@1.0.0 is imported plainly and a hook this module declares: {hooked} as `gate`; remove the import"
+            ),
+        ),
+        (
+            item(guarding),
+            item(contribution),
+            format!(
+                "example:ledger/guard@1.0.0 is implemented by this module and a hook it contributes to: {exported}; an Orb implements an interface or contributes to it as a hook, not both"
+            ),
+        ),
+        (
+            item(&gating("Gating")),
+            item(declaration),
+            format!(
+                "example:ledger/gate@1.0.0 is implemented by this module and a hook it declares: {exported}; an Orb implements an interface or declares it as a hook, not both"
+            ),
+        ),
+        (
+            import("example:ledger/book@1.0.0"),
+            import("example:ledger/book@1.0.0"),
+            "example:ledger/book@1.0.0 is imported twice: the world imports an interface once; remove this import".to_owned(),
+        ),
+        (
+            import("wasi:random/random@0.3.0"),
+            import("wasi:random/random@0.3.0"),
+            "wasi:random/random@0.3.0 is imported twice: the world imports an interface once; remove this import".to_owned(),
+        ),
+        (
+            item(&gating("Gating")),
+            item(&gating("Other")),
+            "example:ledger/gate@1.0.0 is implemented twice by this module: the world exports the interface once; implement it with one service".to_owned(),
+        ),
+    ] {
+        let imports = [first.0.clone(), second.0.clone()].concat();
+        let (both, module) = orb(&imports, &format!("{}\n{}", first.1, second.1));
+        let error = refused(both, &module);
+        assert!(error.contains(&message), "{message}\n{error}");
+        for (imports, items) in [first, second] {
+            let (alone, module) = orb(&imports, &items);
+            expanded(alone, &module);
+        }
+    }
+}
+
 /// What a derived interface does not take from a consumed interface is refused where it is named:
 /// a name the interface does not define, a WASI type, a consumed type holding a resource handle,
 /// an imported handle in a type of the module, a consumed type in a derived hook's input, and a

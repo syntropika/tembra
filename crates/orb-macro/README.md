@@ -230,7 +230,9 @@ types the export holds, another Rust type, so a service's function does not name
 `guard::Admission`: it reports the hook's value in a type of the module, converted from it. A state
 holds the import's types as they are. Which role an interface plays travels in the
 `tembra:manifest` section next to the contribution priorities, and `cargo tembra build` packages
-it; an Orb declares a hook or contributes to it, never both.
+it; an Orb declares a hook or contributes to it, never both. The world holds an interface in one
+role: the macro refuses a hook's interface the module also implements or imports plainly, and an
+interface imported or implemented twice, at the second import or item, naming both.
 
 ## The lifetime of a service's objects
 

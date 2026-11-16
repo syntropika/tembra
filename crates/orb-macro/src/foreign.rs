@@ -116,9 +116,10 @@ impl Modules {
     /// interface imported by key under its view's, and with `context`, the attribute's option, the
     /// kernel's context interface under `context`. `imports` are the attribute's literals, read as
     /// identities already; `paths` are the Orb's own modules, by scope. Another interface under a
-    /// name already taken is an error on it, naming both, and so is an import of the kernel's
-    /// context interface beside the option, and a plain import of an interface the module
-    /// implements, which would make the world a hook's.
+    /// name already taken is an error on it, naming both, and so is a second role of an interface,
+    /// or one role twice, which the world cannot hold, an import of the kernel's context interface
+    /// beside the option, and a plain import of an interface the module implements, which would
+    /// make the world a hook's.
     pub(crate) fn new(
         context: bool,
         imports: &[LitStr],
@@ -207,23 +208,42 @@ impl Modules {
             let [_, _, interface] = hook_path(&identity);
             let name = interface.to_string();
             let second = Reexported { identity, role };
-            match modules.get(&name) {
-                // One interface in two roles keeps the first.
-                Some(first) if first.identity == second.identity => {}
-                Some(first) => {
-                    return Err(syn::Error::new(
-                        span,
-                        format!(
-                            "the Orb module would re-export two modules as `{name}`: that of {}, and that of {}; keep one of them",
-                            second.described(),
-                            first.described()
-                        ),
-                    ));
+            let Some(first) = modules.get(&name) else {
+                modules.insert(name, second);
+                continue;
+            };
+            // The world holds an interface in one role, which the Orb module re-exports once: a
+            // second role, or one role twice, would import or export the interface twice. Any
+            // other pair of one name is two modules the Orb module cannot both re-export.
+            let identity = &second.identity;
+            let verb = |role| match role {
+                Role::Contributed => "contributes to",
+                _ => "declares",
+            };
+            let message = match (first.identity == *identity, first.role, second.role) {
+                (true, Role::Imported, Role::Imported) | (true, Role::Wasi, Role::Wasi) => format!(
+                    "{identity} is imported twice: the world imports an interface once; remove this import"
+                ),
+                (true, Role::Imported, Role::Contributed | Role::Declared) => format!(
+                    "{identity} is imported plainly and a hook this module {}: the world imports and exports the hook already, and the Orb module re-exports the hook's module as `{name}`; remove the import",
+                    verb(second.role)
+                ),
+                (true, Role::Implemented, Role::Contributed | Role::Declared) => {
+                    let verb = verb(second.role);
+                    format!(
+                        "{identity} is implemented by this module and a hook it {verb}: the world exports the interface once, for the service or for the hook; an Orb implements an interface or {verb} it as a hook, not both"
+                    )
                 }
-                None => {
-                    modules.insert(name, second);
-                }
-            }
+                (true, Role::Implemented, Role::Implemented) => format!(
+                    "{identity} is implemented twice by this module: the world exports the interface once; implement it with one service"
+                ),
+                _ => format!(
+                    "the Orb module would re-export two modules as `{name}`: that of {}, and that of {}; keep one of them",
+                    second.described(),
+                    first.described()
+                ),
+            };
+            return Err(syn::Error::new(span, message));
         }
         Ok(Self {
             reexported: modules,
