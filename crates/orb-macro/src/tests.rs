@@ -4927,6 +4927,67 @@ fn a_create_is_refused_when_ill_formed() {
     }
 }
 
+/// `#[service(key = main)]` and `#[service(principal = "..")]` guard the address of the service's
+/// objects: the native factory refuses another key, or another principal, as forbidden, before it
+/// builds the object, with its create when it has one. The guards are no part of the WIT or of
+/// the manifest.
+#[test]
+fn an_address_guard_refuses_another_key_or_principal() {
+    let key = "if address . key != [\"main\"] { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: Code :: Forbidden , :: tembra :: core :: Reason :: Address , \"the objects of example:book/ledger@1.0.0 use the key main\")) ; }";
+    let principal = "if address . principal != \"host\" { return :: core :: result :: Result :: Err (:: tembra :: Error :: new (:: tembra :: Code :: Forbidden , :: tembra :: core :: Reason :: Address , \"the objects of example:book/ledger@1.0.0 belong to the principal host\")) ; }";
+    let module = expanded(PACKAGE, &ledger("#[service(key = main)]"));
+    let generated = native(&module, &[]);
+    assert!(
+        generated.contains(&format!(
+            ":: tembra :: Service :: new (:: std :: format ! (\"{{}}::{{}}\" , orb , \"example:book/ledger@1.0.0\") , | declaration | {{ let address = declaration . address () ? ; {key} :: core :: result :: Result :: Ok (()) }})"
+        )),
+        "{generated}"
+    );
+    assert!(!generated.contains("address . principal"), "{generated}");
+    assert_eq!(wit(&module), wit(&expanded(PACKAGE, &ledger("#[service]"))));
+    assert_eq!(manifest(&module), None);
+    let module = expanded(PACKAGE, &ledger("#[service(principal = \"host\")]"));
+    let generated = native(&module, &[]);
+    assert!(
+        generated.contains(&format!(
+            "| declaration | {{ let address = declaration . address () ? ; {principal} :: core :: result :: Result :: Ok (()) }}"
+        )),
+        "{generated}"
+    );
+    assert!(!generated.contains("address . key"), "{generated}");
+    // Both, with the ownership policy, and before a create.
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            #[inputs]
+            pub struct Inputs { pub base: u32 }
+            #[service(key = main, principal = \"host\", lifetime = host)]
+            pub struct Ledger { base: u32 }
+            impl Ledger {
+                #[create]
+                fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                    Ok(Self { base: inputs.base })
+                }
+                pub fn count(&self) -> u32 { self.base }
+            }
+        }",
+    );
+    let generated = native(&module, &[]);
+    for expected in [
+        format!(
+            "move | declaration | {{ let address = declaration . address () ? ; {key} {principal} Ledger :: create (& inputs , & declaration) }}"
+        ),
+        ". lifetime (:: tembra :: core :: Lifetime :: Host , 0u32)".to_owned(),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+    let error = refused(PACKAGE, &ledger("#[service(key = owner)]"));
+    assert_eq!(
+        error,
+        "the key guard is `key = main`: an object's key is then [\"main\"]"
+    );
+}
+
 /// The contract an Orb crate carries, written as `cargo tembra build` writes it: only when the
 /// macro is given the crate's directory, which `primary_crate_dir` takes from Cargo's variables
 /// as `expansion` reads them, so a dependency's is never written and the token tests write nothing.

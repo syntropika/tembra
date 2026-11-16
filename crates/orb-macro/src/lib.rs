@@ -317,6 +317,18 @@ struct Service {
     /// The function marked `#[create]`, `fn(&Inputs, &Declaration) -> tembra::Result<Self>`, once
     /// found: the native factory of the service's objects, whose methods may borrow `&self`.
     create: Option<Ident>,
+    /// The address its objects are refused at, natively.
+    guard: Guard,
+}
+
+/// The address rules of a service's objects, from `#[service(key = main)]` and
+/// `#[service(principal = "name")]`: the native factory refuses an object at another address.
+#[derive(Default)]
+struct Guard {
+    /// The object's key is `["main"]`.
+    main: bool,
+    /// The object's principal is this one.
+    principal: Option<String>,
 }
 
 impl Service {
@@ -831,7 +843,7 @@ impl Scan {
                         self.inputs(&s, &attribute, scope)?;
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "service") {
-                        let (implements, policy) = service_attribute(&attribute)?;
+                        let (implements, policy, guard) = service_attribute(&attribute)?;
                         self.services.push(Service {
                             ident: s.ident.clone(),
                             docs: wit::docs(&s.attrs)?,
@@ -841,6 +853,7 @@ impl Scan {
                             scope,
                             unit: matches!(s.fields, Fields::Unit),
                             create: None,
+                            guard,
                         });
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "flags") {
@@ -2817,10 +2830,14 @@ fn identity(package: &str, interface: &str) -> String {
 /// Read a `#[service]` attribute: the identity of an interface the service implements, if it
 /// names one first, then the ownership policy of its objects, if any: `lifetime = host` pins
 /// the objects until the host closes, `linger_ms = n` keeps an unreferenced object for `n`
-/// milliseconds; a host-lifetime object cannot linger, as the kernel rules.
-fn service_attribute(attribute: &Attribute) -> syn::Result<(Option<String>, Option<Policy>)> {
+/// milliseconds; a host-lifetime object cannot linger, as the kernel rules. Then the guard of
+/// their address, if any: `key = main` admits the key `["main"]` alone, `principal = "name"` that
+/// principal alone.
+fn service_attribute(
+    attribute: &Attribute,
+) -> syn::Result<(Option<String>, Option<Policy>, Guard)> {
     if matches!(attribute.meta, syn::Meta::Path(_)) {
-        return Ok((None, None));
+        return Ok((None, None, Guard::default()));
     }
     let span = attribute.span();
     attribute.parse_args_with(|input: syn::parse::ParseStream| {
@@ -2833,10 +2850,22 @@ fn service_attribute(attribute: &Attribute) -> syn::Result<(Option<String>, Opti
             }
         }
         let (mut host, mut linger_ms, mut chosen) = (false, 0, false);
+        let mut guard = Guard::default();
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
-            if key == "lifetime" {
+            if key == "key" {
+                let value: Ident = input.parse()?;
+                if value != "main" {
+                    return Err(syn::Error::new(
+                        value.span(),
+                        "the key guard is `key = main`: an object's key is then [\"main\"]",
+                    ));
+                }
+                guard.main = true;
+            } else if key == "principal" {
+                guard.principal = Some(input.parse::<LitStr>()?.value());
+            } else if key == "lifetime" {
                 let value: Ident = input.parse()?;
                 host = match value.to_string().as_str() {
                     "host" => true,
@@ -2856,7 +2885,7 @@ fn service_attribute(attribute: &Attribute) -> syn::Result<(Option<String>, Opti
             } else {
                 return Err(syn::Error::new(
                     key.span(),
-                    "unknown option; use #[service(\"ns:name/interface@version\", lifetime = host, linger_ms = n)]",
+                    "unknown option; use #[service(\"ns:name/interface@version\", lifetime = host, linger_ms = n, key = main, principal = \"name\")]",
                 ));
             }
             if !input.is_empty() {
@@ -2869,7 +2898,7 @@ fn service_attribute(attribute: &Attribute) -> syn::Result<(Option<String>, Opti
                 "host-lifetime objects cannot linger: they live until the host closes",
             ));
         }
-        Ok((implements, chosen.then_some(Policy { host, linger_ms })))
+        Ok((implements, chosen.then_some(Policy { host, linger_ms }), guard))
     })
 }
 

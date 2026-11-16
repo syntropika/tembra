@@ -175,4 +175,32 @@ pub mod notebook {
             self.journal.value().ok().map(|journal| journal.to_string())
         }
     }
+
+    /// The board the host pins notes on: one object, of key `main` and principal `host`, which
+    /// its factory guards.
+    #[service(key = main, principal = "host")]
+    pub struct Board {
+        events: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Board {
+        /// Report the board built: an address the guard refuses never gets here.
+        #[create]
+        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+            let address = declaration.address()?;
+            inputs.events.borrow_mut().push(format!(
+                "board {}/{}",
+                address.key.join("/"),
+                address.principal
+            ));
+            Ok(Self {
+                events: inputs.events.clone(),
+            })
+        }
+
+        /// Pin a note on the board.
+        pub fn pin(&self, text: String) {
+            self.events.borrow_mut().push(format!("pin {text}"));
+        }
+    }
 }

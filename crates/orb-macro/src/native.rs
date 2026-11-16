@@ -226,7 +226,7 @@ fn codec_ident(service: &Service, function: &Function) -> Ident {
 /// is `async`, with the arguments as a tuple in WIT order. A service with a create takes the
 /// inputs `orb(..)` shares, and its factory calls the create with them and the object's
 /// declaration: the service it returns is the object's environment, which a method borrowing
-/// `&self` is called on.
+/// `&self` is called on. The guard of the attribute, if any, runs first in the factory.
 fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused> {
     let depth = analysis.modules[service.scope].len();
     let root = crate::supers(depth);
@@ -234,22 +234,28 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
     let identity = service.identity(&analysis.package);
     let function = service_ident(service);
     let target = &service.ident;
-    let (parameter, environment, shared, factory) = match (&service.create, &analysis.inputs) {
+    let (parameter, environment, shared, build) = match (&service.create, &analysis.inputs) {
         (Some(create), Some(inputs)) => {
             let inputs = crate::relative(depth, &analysis.modules[inputs.scope], &inputs.ident);
             (
                 quote! { , inputs: &::std::rc::Rc<#inputs> },
                 quote! { #target },
                 quote! { let inputs = ::std::rc::Rc::clone(inputs); },
-                quote! { move |declaration| #target::#create(&inputs, &declaration) },
+                quote! { #target::#create(&inputs, &declaration) },
             )
         }
         _ => (
             quote! {},
             quote! { () },
             quote! {},
-            quote! { |_| { ::core::result::Result::Ok(()) } },
+            quote! { ::core::result::Result::Ok(()) },
         ),
+    };
+    let factory = match (&service.create, guard(service, &identity)) {
+        (Some(_), None) => quote! { move |declaration| #build },
+        (Some(_), Some(guard)) => quote! { move |declaration| { #guard #build } },
+        (None, None) => quote! { |_| { #build } },
+        (None, Some(guard)) => quote! { |declaration| { #guard #build } },
     };
     let lifetime = service.policy.as_ref().map(|policy| {
         let lifetime = if policy.host {
@@ -281,6 +287,38 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
             .signature(::core::option::Option::Some(::std::string::String::from(#root #signature)))
             #lifetime
             #(#methods)*
+        }
+    })
+}
+
+/// The guard of a service's objects, first in its factory, if its attribute has one: an object at
+/// another key than `main`, or of another principal, is refused as forbidden, before the create
+/// runs. `identity` names the service's interface in the errors.
+fn guard(service: &Service, identity: &str) -> Option<TokenStream> {
+    let refusal = |message: String| {
+        quote! {
+            return ::core::result::Result::Err(::tembra::Error::new(
+                ::tembra::Code::Forbidden,
+                ::tembra::core::Reason::Address,
+                #message
+            ));
+        }
+    };
+    let key = service.guard.main.then(|| {
+        let refused = refusal(format!("the objects of {identity} use the key main"));
+        quote! { if address.key != ["main"] { #refused } }
+    });
+    let principal = service.guard.principal.as_ref().map(|principal| {
+        let refused = refusal(format!(
+            "the objects of {identity} belong to the principal {principal}"
+        ));
+        quote! { if address.principal != #principal { #refused } }
+    });
+    (key.is_some() || principal.is_some()).then(|| {
+        quote! {
+            let address = declaration.address()?;
+            #key
+            #principal
         }
     })
 }

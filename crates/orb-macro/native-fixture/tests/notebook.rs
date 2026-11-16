@@ -1,11 +1,12 @@
-//! `notebook::orb(..)` in a native host: the Orb takes the host's inputs, and the create of
-//! `Notes` builds each of its objects from them.
+//! `notebook::orb(..)` in a native host: the Orb takes the host's inputs, the create of `Notes`
+//! builds each of its objects from them, and `Board` admits only the address its guard names.
 use futures::{FutureExt, executor::LocalPool};
 use std::{cell::RefCell, rc::Rc};
-use tembra::{Host, contracts::Contract};
+use tembra::{Code, Host, contracts::Contract};
 use tembra_orb_native_fixture::notebook;
 
 const NOTES: &str = "calculator::example:notes/notes@1.0.0";
+const BOARD: &str = "calculator::example:notes/board@1.0.0";
 
 /// What happened in the Orb, in order, as its objects report it to the host.
 type Events = Rc<RefCell<Vec<String>>>;
@@ -135,4 +136,51 @@ fn each_object_is_built_once_by_its_create() {
         ]
     );
     assert_eq!(reported(&events, "create ").len(), 3);
+}
+
+/// `Board`'s guard, `key = main` and `principal = "host"`: acquiring another key or another
+/// principal is forbidden, and its create never runs for them; the address the guard names is
+/// built and answers.
+#[test]
+fn the_guard_admits_only_its_address() {
+    let events = Events::default();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![notebook::orb(inputs(&events)).unwrap()])
+        .unwrap();
+    for (key, principal, message) in [
+        (
+            "other",
+            "host",
+            "the objects of example:notes/board@1.0.0 use the key main",
+        ),
+        (
+            "main",
+            "alice",
+            "the objects of example:notes/board@1.0.0 belong to the principal host",
+        ),
+    ] {
+        let error = host
+            .get(BOARD, vec![key.into()], principal)
+            .err()
+            .unwrap_or_else(|| panic!("{key}/{principal} was admitted"));
+        assert_eq!(error.code, Code::Forbidden, "{error}");
+        assert_eq!(error.reason, "address", "{error}");
+        assert_eq!(error.message, message);
+    }
+    assert!(events.borrow().is_empty(), "{:?}", events.borrow());
+    let board = Rc::new(host.get(BOARD, vec!["main".into()], "host").unwrap());
+    let pinned = board.clone();
+    pool.run_until(host.root("host", move |context| {
+        async move {
+            pinned
+                .call::<_, ()>(&context, "pin", ("hello".to_string(),))
+                .await
+        }
+        .boxed_local()
+    }))
+    .unwrap();
+    assert_eq!(*events.borrow(), ["board main/host", "pin hello"]);
+    board.release().unwrap();
+    pool.run_until(host.close()).unwrap();
 }

@@ -1031,6 +1031,11 @@ impl Notes {
 }
 ```
 
+`#[service(key = main)]` and `#[service(principal = "name")]`, alone or together, guard the
+address of the service's objects: the native factory refuses an object at another key than
+`["main"]`, or of another principal, with the code `forbidden` and the reason `address`, before the
+create runs. A component does not check them.
+
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, and `Vec`, `Option` and tuples of them. A record, an enum, a variant, a flags, a `Result`,
 a resource, the `context` option, `#[state]`, `#[resource]`, `#[wit_resource]`, an import and a hook
