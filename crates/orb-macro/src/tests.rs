@@ -859,7 +859,8 @@ interface book {
 
 /// The resource of an implemented interface is bridged in its struct's own module, as a derived
 /// one is: there the author's constructor, methods and static functions are visible whatever
-/// their visibility, so the bridge calls them, never the trait's function of the same name.
+/// their visibility, so the bridge calls them, never the trait's function of the same name. Its
+/// native side is there too, which the service's registration calls by its path.
 #[test]
 fn an_implemented_resource_is_bridged_in_its_own_module() {
     let dir = consumed("entries", ENTRIES_WIT);
@@ -891,7 +892,9 @@ fn an_implemented_resource_is_bridged_in_its_own_module() {
         "impl exports :: example :: ledger :: book :: Guest for __TembraExports { type Entry = model :: entries :: Entry ;",
         "pub mod entries { pub struct Entry",
         "} impl super :: super :: exports :: example :: ledger :: book :: GuestEntry for Entry {",
-        "extern crate alloc as __tembra_alloc ; } } # [cfg_attr (not (target_arch = \"wasm32\") , allow (dead_code))] struct __TembraExports ;",
+        "extern crate alloc as __tembra_alloc ; :: tembra :: __host ! { impl :: tembra :: portable :: Issuable for Entry {",
+        "} } # [cfg_attr (not (target_arch = \"wasm32\") , allow (dead_code))] struct __TembraExports ;",
+        "model :: entries :: __tembra_resource_entry (:: tembra :: Service :: new (",
         "fn new (label : __tembra_alloc :: string :: String) -> Self { Entry :: new (label) }",
         "fn label (& self ,) -> __tembra_alloc :: string :: String { Entry :: label (self ,) }",
         "fn blank () -> super :: super :: exports :: example :: ledger :: book :: Entry { super :: super :: exports :: example :: ledger :: book :: Entry :: new (Entry :: blank ()) }",
@@ -4929,9 +4932,192 @@ fn the_native_context_reads_the_call_each_method_runs_for() {
     assert!(refused.contains("pub mod context {"), "{refused}");
 }
 
+/// A `#[wit_resource]` struct is `Issuable` as the resource of its service's interface, and its
+/// functions are portable methods its module adds to the service: the constructor issues the value
+/// it builds into the call's result, whose data is its index there, a method reads its `self` from
+/// the call through a `Receiver`, and a static function or a service function whose result holds
+/// the resource issues what it returns, also inside a container. Such a function has no local
+/// entrypoint, so the service's client has no method for it.
+#[test]
+fn a_wit_resource_is_issued_natively_and_read_as_self() {
+    let module = expanded(
+        "example:desk@1.0.0",
+        &DESK.replace(
+            "pub fn open(n: u32) -> Session { Session::new(n) }",
+            "pub fn open(n: u32) -> Session { Session::new(n) }
+            pub fn many(n: u32) -> Vec<Session> { Vec::new() }
+            pub fn count() -> u32 { 0 }",
+        ),
+    );
+    let native = native(&module, &[]);
+    let issued = "< u32 as :: core :: convert :: From < :: tembra :: portable :: Slot >> :: from (__tembra_result . issue";
+    let written = "-> :: core :: result :: Result < :: tembra :: serde_json :: Value , :: std :: string :: String >";
+    let issuing = format!("__tembra_result : & mut :: tembra :: portable :: Payload | {written}");
+    for expected in [
+        "impl :: tembra :: portable :: Issuable for Session { fn nominal () -> :: tembra :: portable :: Nominal { :: tembra :: portable :: Nominal { interface : :: std :: string :: String :: from (\"example:desk/sessions@1.0.0\") , name : :: std :: string :: String :: from (\"session\") , } } }",
+        "pub (crate) fn __tembra_service_sessions (orb : & str) -> :: tembra :: Service < () > { const __TEMBRA_CODEC_COUNT",
+        "__tembra_resource_session (:: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:desk/sessions@1.0.0\")",
+        "pub (crate) fn __tembra_resource_session < E : 'static > (service : :: tembra :: Service < E >) -> :: tembra :: Service < E > { service . payload_method (\"[constructor]session\" ,",
+        &format!(
+            "let (n ,) : (u32 ,) = decode (__tembra_payload . into_data () ?) . map_err (| message | {{ :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , message) }}) ? ; let value = Session :: new (n) ; let encode = | value : Session , {issuing}"
+        ),
+        &format!(
+            "{issued} (value)))) }} ; let mut __tembra_result = :: tembra :: portable :: Payload :: data (:: tembra :: serde_json :: Value :: Null ,) ; let written = encode (value , & mut __tembra_result) . map_err (| message | :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Result , message)) ? ; __tembra_result . map_value (| _ | :: core :: result :: Result :: Ok (written))"
+        ),
+        ". payload_method (\"[method]session.get\" , | _ , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | async move { __tembra_context . check () ? ; let __tembra_receiver = __tembra_payload . receiver :: < Session > () ? ;",
+        &format!(
+            "let value = __tembra_receiver . with (| __tembra_value | Session :: get (__tembra_value ,)) ? ; let encode = | value : u32 | {written} {{ :: tembra :: serde_json :: to_value (value)"
+        ),
+        &format!(
+            "let value = __tembra_receiver . with (| __tembra_value | Session :: twin (__tembra_value ,)) ? ; let encode = | value : Session , {issuing}"
+        ),
+        ". payload_method (\"[static]session.make\" ,",
+        &format!("let value = Session :: make () ; let encode = | value : Session , {issuing}"),
+        ". payload_method (\"open\" , | _ , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | async move {",
+        &format!("let value = Sessions :: open (n) ; let encode = | value : Session , {issuing}"),
+        &format!(
+            "let value = Sessions :: many (n) ; let encode = | value : Vec < Session > , {issuing}"
+        ),
+        &format!(
+            "value . into_iter () . map (| item | :: core :: result :: Result :: < :: tembra :: serde_json :: Value , :: std :: string :: String > :: Ok (:: tembra :: serde_json :: Value :: from ({issued} (item)))))"
+        ),
+        ". method_with (\"count\" ,",
+        "pub async fn count (& self , context : & :: tembra :: Context) -> :: tembra :: Result < u32 >",
+    ] {
+        assert!(native.contains(expected), "{expected}\n{native}");
+    }
+    // A function handing out a resource has no local entrypoint, and no method of the client.
+    for absent in ["pub async fn open", "pub async fn many", "\"open\" , (n ,)"] {
+        assert!(!native.contains(absent), "{absent}\n{native}");
+    }
+    // With the `context` option, the resource's functions and a function handing it out run in
+    // the scope of their call, as a service's methods do.
+    let module = orb_with(
+        Options {
+            context: true,
+            ..options("example:desk@1.0.0", None)
+        },
+        DESK,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let in_context = self::native(&module, &[]);
+    let scoped = "| self :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ;";
+    for function in ["open", "[constructor]session", "[method]session.get"] {
+        let receiver = if function.starts_with("[method]") {
+            "mut __tembra_payload"
+        } else {
+            "__tembra_payload"
+        };
+        let expected = format!(
+            ". payload_method (\"{function}\" , | _ , __tembra_context : :: tembra :: Context , {receiver} : :: tembra :: portable :: Payload {scoped}"
+        );
+        assert!(in_context.contains(&expected), "{expected}\n{in_context}");
+    }
+}
+
+/// A native-only service whose create builds its objects may have no method of its own; a WIT
+/// resource of its interface still makes that interface one a contract plans, so the service has
+/// a signature, as one with methods does.
+#[test]
+fn a_service_with_only_a_resource_has_a_signature() {
+    let module = orb_with(
+        options("example:desk@1.0.0", None),
+        "mod desk {
+            use tembra::Declaration;
+            #[inputs]
+            pub struct Inputs { pub n: u32 }
+            #[wit_resource(service = Sessions)]
+            pub struct Session { n: u32 }
+            impl Session {
+                #[constructor]
+                pub fn new(n: u32) -> Session { Session { n } }
+                pub fn get(&self) -> u32 { self.n }
+            }
+            #[service]
+            pub struct Sessions { n: u32 }
+            impl Sessions {
+                #[create]
+                fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                    Ok(Self { n: inputs.n })
+                }
+            }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let generated = tokens(&module);
+    assert!(
+        generated.contains("pub const __TEMBRA_SIGNATURE_SESSIONS : & str ="),
+        "{generated}"
+    );
+    let native = native(&module, &[]);
+    assert!(
+        native.contains("__tembra_resource_session (:: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:desk/sessions@1.0.0\") , move | declaration | Sessions :: create (& inputs , & declaration)) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (__TEMBRA_SIGNATURE_SESSIONS))))"),
+        "{native}"
+    );
+}
+
+/// Natively a resource is only returned, or borrowed as a method's `self`: a function of a service
+/// or of a resource taking one, itself or inside a container, is refused, and so is a record or a
+/// variant holding one, which the bindings replace with a type holding their handle, which only a
+/// component creates, and an `async` method of a resource, whose future would hold its `self`
+/// beyond the borrow the call lends it.
+#[test]
+fn the_native_side_refuses_a_resource_it_cannot_carry() {
+    let taken =
+        "a resource; natively a resource is only returned, or borrowed as a method's `self`";
+    for (from, to, message) in [
+        (
+            "pub fn open(n: u32) -> Session { Session::new(n) }",
+            "pub fn open(n: u32) -> Session { Session::new(n) }
+            pub fn close(session: Session) -> u32 { session.n }",
+            format!("`Sessions::close` takes `Session`, {taken}"),
+        ),
+        (
+            "pub fn open(n: u32) -> Session { Session::new(n) }",
+            "pub fn open(n: u32) -> Session { Session::new(n) }
+            pub fn close_all(sessions: Vec<Session>) {}",
+            format!("`Sessions::close_all` takes `Vec<Session>`, which holds `Session`, {taken}"),
+        ),
+        (
+            "pub fn get(&self) -> u32 { self.n }",
+            "pub fn get(&self) -> u32 { self.n }
+            pub fn merge(&self, other: Session) -> u32 { self.n + other.n }",
+            format!("`Session::merge` takes `Session`, {taken}"),
+        ),
+        (
+            "pub fn new(n: u32) -> Session { Session { n } }",
+            "pub fn new(n: u32, from: Option<Session>) -> Session { Session { n } }",
+            format!("`Session::new` takes `Option<Session>`, which holds `Session`, {taken}"),
+        ),
+        (
+            "pub fn open(n: u32) -> Session { Session::new(n) }",
+            "pub fn open(n: u32) -> Session { Session::new(n) }
+            pub fn lend(n: u32) -> Lease { todo!() }
+        }
+        pub struct Lease { pub session: Session, pub count: u32 }
+        impl Sessions {",
+            "the field `session` of `Lease` is `Session`, a resource; a record or a variant holding one is the bindings' type, whose handle only a component creates, so it is not supported natively".to_owned(),
+        ),
+        (
+            "pub fn get(&self) -> u32 { self.n }",
+            "pub async fn get(&self) -> u32 { self.n }",
+            "`Session::get` is an async method of a WIT resource; such methods are not supported natively yet".to_owned(),
+        ),
+    ] {
+        let module = orb_with(options("example:desk@1.0.0", None), &DESK.replace(from, to))
+            .unwrap_or_else(|error| panic!("{message}: {error}"));
+        assert_eq!(
+            native(&module, &[]),
+            format!(":: core :: compile_error ! (\"{message}\") ;"),
+            "{message}"
+        );
+        assert!(wit(&module).starts_with("package "), "{message}");
+    }
+}
+
 /// What the native side does not cover yet is a compile error inside the facade's wrapper, so a
-/// component build of the module is unaffected: a state, a root resource, an import, a hook
-/// contributed to or declared, and a WIT resource, each named.
+/// component build of the module is unaffected: a state, a root resource, an import, and a hook
+/// contributed to or declared, each named.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
     let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
@@ -4970,23 +5156,6 @@ fn the_native_side_refuses_what_it_does_not_cover_yet() {
                 "mod book {{ #[hook(composition = series, input = Admission)] pub struct Guard; pub struct Admission {{ pub value: i32 }} {service} }}"
             ),
             "the declaration of the hook example:book/guard@1.0.0 is not supported natively yet",
-        ),
-        (
-            options(PACKAGE, None),
-            "mod book {
-                #[wit_resource]
-                pub struct Ticket;
-                impl Ticket {
-                    #[constructor]
-                    pub fn new() -> Self { Ticket }
-                    pub fn id(&self) -> u32 { 0 }
-                }
-                #[service]
-                pub struct Admissions;
-                impl Admissions { pub fn issue() -> Ticket { Ticket } }
-            }"
-            .to_owned(),
-            "`Ticket` is marked #[wit_resource]; WIT resources are not supported natively yet",
         ),
     ] {
         let module =

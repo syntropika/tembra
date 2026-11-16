@@ -347,6 +347,92 @@ pub mod calculator {
     }
 
     pub use memo::Note;
+
+    /// Running totals their callers own, in a module of their own: `Accumulator` is a WIT resource
+    /// of the module's only service, which a caller constructs or opens, adds to through its handle,
+    /// and drops.
+    pub mod accumulators {
+        use std::cell::Cell;
+
+        thread_local! {
+            /// How many accumulators were dropped on this thread: a test's host runs on its own.
+            static DROPPED: Cell<u32> = const { Cell::new(0) };
+        }
+
+        /// A running total: its caller holds a handle, and the value stays with the Orb's object
+        /// that issued it.
+        #[wit_resource]
+        pub struct Accumulator {
+            total: Cell<i64>,
+        }
+
+        impl Accumulator {
+            /// An accumulator starting at `start`: the resource's constructor.
+            #[constructor]
+            pub fn new(start: i64) -> Accumulator {
+                Accumulator {
+                    total: Cell::new(start),
+                }
+            }
+
+            /// Add to the total and return it.
+            pub fn add(&self, value: i64) -> i64 {
+                let total = self.total.get() + value;
+                self.total.set(total);
+                total
+            }
+
+            /// The total so far.
+            pub fn total(&self) -> i64 {
+                self.total.get()
+            }
+
+            /// The principal of the call reading it: a method of the resource reads its call
+            /// through the kernel's `context`, as a service's methods do.
+            pub fn reader(&self) -> String {
+                super::context::principal()
+            }
+
+            /// An accumulator starting at zero: a static function of the resource.
+            pub fn zero() -> Accumulator {
+                Accumulator::new(0)
+            }
+        }
+
+        impl Drop for Accumulator {
+            fn drop(&mut self) {
+                DROPPED.with(|dropped| dropped.set(dropped.get() + 1));
+            }
+        }
+
+        /// Opens accumulators and counts the ones dropped.
+        #[service]
+        pub struct Accumulators;
+
+        impl Accumulators {
+            /// An accumulator for each start, and how many there are: owned results in a list and
+            /// a tuple.
+            pub fn open(starts: Vec<i64>) -> (Vec<Accumulator>, u32) {
+                let count = starts.len() as u32;
+                (starts.into_iter().map(Accumulator::new).collect(), count)
+            }
+
+            /// An accumulator when the start is not negative, or why not: an owned result in a
+            /// `Result`.
+            pub fn checked(start: i64) -> Result<Accumulator, String> {
+                if start < 0 {
+                    Err(format!("{start} is negative"))
+                } else {
+                    Ok(Accumulator::new(start))
+                }
+            }
+
+            /// How many accumulators were dropped.
+            pub fn dropped() -> u32 {
+                DROPPED.with(Cell::get)
+            }
+        }
+    }
 }
 
 /// Notes kept for the host, with what the host lends the Orb: the argument of `notebook::orb(..)`.

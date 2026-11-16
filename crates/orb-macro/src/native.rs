@@ -9,13 +9,16 @@
 //! arguments and result cross as the boundary's JSON, the form `tembra_contracts` validates,
 //! through a codec written from the WIT types, kind by kind: each type of the module that enters
 //! the WIT reads and writes its own JSON through a hidden trait of the Orb module, implemented in
-//! the type's module, where its members are visible. With the `context` option, the Orb module
-//! gets a native `context`, whose functions read the call each method's future runs for. What the
-//! native side does not cover yet is a compile error inside the same wrapper, naming the item; a
-//! component build of the module is unaffected.
+//! the type's module, where its members are visible. A `#[wit_resource]` struct is issued as a
+//! capability of its resource type: a function whose result holds one issues it into the call's
+//! result, as a portable method without a local entrypoint, and each method of the resource reads
+//! its `self` back from the call; the resource's functions are registered from its own module.
+//! With the `context` option, the Orb module gets a native `context`, whose functions read the
+//! call each method's future runs for. What the native side does not cover yet is a compile error
+//! inside the same wrapper, naming the item; a component build of the module is unaffected.
 use crate::{
-    Analysis, Function, Payload, Service, Shape, ShapeKind, camel_ident, metadata::Metadata,
-    rust_ident, wit,
+    Analysis, Function, Payload, Service, Shape, ShapeKind, WitResource, camel_ident,
+    metadata::Metadata, rust_ident, wit,
 };
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Span, TokenStream};
@@ -65,14 +68,21 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         by_scope
             .entry(service.scope)
             .or_default()
-            .extend([items, client(service)]);
+            .extend([items, client(service, analysis)]);
     }
     // The JSON of each type of the module that enters the WIT, in the type's module, once the
-    // methods that take or return it are covered.
+    // methods that take or return it are covered, and the functions of each WIT resource, in the
+    // resource's module.
     let codecs = analysis
         .shapes
         .iter()
         .map(|shape| Ok((shape.scope, shape_codec(shape, analysis)?)))
+        .chain(
+            analysis
+                .wit_resources
+                .iter()
+                .map(|resource| Ok((resource.scope, resource_glue(resource, analysis)?))),
+        )
         .collect::<Result<Vec<_>, Refused>>();
     match codecs {
         Ok(codecs) => {
@@ -407,15 +417,6 @@ fn covered(analysis: &Analysis) -> Result<(), Refused> {
             ),
         ));
     }
-    if let Some(resource) = analysis.wit_resources.first() {
-        return Err(refused(
-            resource.ident.span(),
-            &format!(
-                "`{}` is marked #[wit_resource]; WIT resources are not supported natively yet",
-                resource.ident
-            ),
-        ));
-    }
     Ok(())
 }
 
@@ -484,9 +485,9 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
         let linger = policy.linger_ms;
         quote! { .lifetime(::tembra::core::Lifetime::#lifetime, #linger) }
     });
-    // A service without methods exports an empty interface, of which a contract plans no
-    // service: it has no signature.
-    let signed = service.planned().then(|| {
+    // A service without methods or resources exports an empty interface, of which a contract
+    // plans no service: it has no signature.
+    let signed = service.planned(&analysis.wit_resources).then(|| {
         quote! {
             .signature(::core::option::Option::Some(::std::string::String::from(#root #signature)))
         }
@@ -499,6 +500,10 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
     let mut codecs = Vec::new();
     let mut methods = Vec::new();
     for method in &service.functions {
+        if issues(method, service.scope, analysis) {
+            methods.push(issuing(service, method, analysis, scoped.as_ref())?);
+            continue;
+        }
         let codec = codec_ident(method);
         codecs.push(self::codec(service, method, &codec, analysis)?);
         methods.push(self::method(service, method, Some(&codec), scoped.as_ref()));
@@ -510,16 +515,359 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
         " The service `{}` of the native Orb named `orb`, as `orb()` registers it.",
         service.ident
     );
+    let built = quote! {
+        ::tembra::Service::new(::std::format!("{}::{}", orb, #identity), #factory)
+        #signed
+        #lifetime
+        #(#methods)*
+    };
+    // The functions of each WIT resource of the service's interface, registered from the
+    // resource's module.
+    let built = owned_resources(service, analysis).fold(built, |built, resource| {
+        let glue = crate::relative(
+            depth,
+            &analysis.modules[resource.scope],
+            &glue_ident(resource),
+        );
+        quote! { #glue(#built) }
+    });
     Ok(quote! {
         #[doc = #doc]
         pub(crate) fn #function(orb: &str #parameter) -> ::tembra::Service<#environment> {
             #(#codecs)*
 
             #shared
-            ::tembra::Service::new(::std::format!("{}::{}", orb, #identity), #factory)
-            #signed
-            #lifetime
-            #(#methods)*
+            #built
+        }
+    })
+}
+
+/// The WIT resources of a service's interface.
+fn owned_resources<'a>(
+    service: &'a Service,
+    analysis: &'a Analysis,
+) -> impl Iterator<Item = &'a WitResource> {
+    analysis
+        .wit_resources
+        .iter()
+        .filter(|resource| resource.service.as_ref() == Some(&service.ident))
+}
+
+/// Whether a function's result holds a resource, which the call issues: the function is then
+/// bound with `payload_method`, without a local entrypoint.
+fn issues(function: &Function, scope: usize, analysis: &Analysis) -> bool {
+    function.result.as_ref().is_some_and(|(ty, _)| {
+        kind(ty, scope, analysis).is_ok_and(|kind| kind.resource().is_some())
+    })
+}
+
+/// The `payload_method` call binding a function of a service whose result holds a resource, under
+/// its WIT name: the call issues each resource of the value into its result, passing the context
+/// itself where the function takes `&Context`; with `scoped`, the path of the native `context`'s
+/// scope, its future runs in the scope of its call. The function has no local entrypoint, so a
+/// native caller calls it with `call_portable`, holding the resources as `Owned` handles, and the
+/// service's client has no method for it.
+fn issuing(
+    service: &Service,
+    function: &Function,
+    analysis: &Analysis,
+    scoped: Option<&TokenStream>,
+) -> Result<TokenStream, Refused> {
+    let owner = format!("{}::{}", service.ident, function.ident);
+    let result = function.result.as_ref().map(|(ty, _)| ty);
+    let (kinds, result) = signature(&owner, &function.params, result, service.scope, analysis)?;
+    let target = &service.ident;
+    let ident = &function.ident;
+    let mut arguments: Vec<TokenStream> = function
+        .params
+        .iter()
+        .map(|(name, _, _)| quote! { #name })
+        .collect();
+    if let Some(index) = function.context {
+        arguments.insert(index, quote! { &__tembra_context });
+    }
+    let awaited = function.asynchronous.then(|| quote! { .await });
+    let (environment, call) = if function.receiver {
+        (
+            quote! { __tembra_self: ::std::rc::Rc<#target> },
+            quote! { __tembra_self.#ident(#(#arguments),*) #awaited },
+        )
+    } else {
+        (
+            quote! { _ },
+            quote! { #target::#ident(#(#arguments),*) #awaited },
+        )
+    };
+    // A method returning `tembra::Result<T>` answers with it: its failure is the call's error.
+    let call = if function.fallible {
+        quote! { #call? }
+    } else {
+        call
+    };
+    Ok(payload_method(
+        &wit::kebab(ident),
+        environment,
+        None,
+        &function.params,
+        &kinds,
+        result.as_ref().map(|(ty, kind)| (*ty, kind)),
+        call,
+        &boundary(service.scope, analysis),
+        scoped,
+    ))
+}
+
+/// The kinds of a function's parameters, and its result's type with its kind, written in the module
+/// `scope`, or the refusal of what the codec does not cover, naming it and where `owner`, the
+/// function, `Ledger::add`, takes or returns it.
+#[allow(clippy::type_complexity)]
+fn signature<'a>(
+    owner: &str,
+    params: &'a [(Ident, Type, String)],
+    result: Option<&'a Type>,
+    scope: usize,
+    analysis: &Analysis,
+) -> Result<(Vec<Kind<'a>>, Option<(&'a Type, Kind<'a>)>), Refused> {
+    let place = |role: &str, ty: &Type, uncovered: Uncovered| {
+        refused(
+            ty.span(),
+            &format!(
+                "`{owner}` {role} `{}`{}",
+                spelled(ty),
+                uncovered.described(ty)
+            ),
+        )
+    };
+    let mut kinds = Vec::new();
+    for (_, ty, _) in params {
+        kinds.push(
+            argument(ty, scope, analysis).map_err(|uncovered| place("takes", ty, uncovered))?,
+        );
+    }
+    let result = result
+        .map(|ty| {
+            kind(ty, scope, analysis)
+                .map(|kind| (ty, kind))
+                .map_err(|uncovered| place("returns", ty, uncovered))
+        })
+        .transpose()?;
+    Ok((kinds, result))
+}
+
+/// A function bound with `payload_method` under its WIT name, `name`, its handle taking the
+/// object's environment as `environment` binds it: the call checks its context, takes its `self`
+/// as the `Receiver` of `receiver`, the resource's type, for a method, reads the arguments with the
+/// codec into the parameters, and writes the value of `call`, an expression over them of the
+/// result's type and kind, as the result's data, issuing each resource it holds into the result.
+/// An argument the codec refuses fails the call as its arguments, before the function runs, and a
+/// value it cannot write fails it as its result, which closes what was issued. With `scoped`, the
+/// path of the native `context`'s scope, the call's future runs in the scope of its call.
+#[allow(clippy::too_many_arguments)]
+fn payload_method(
+    name: &str,
+    environment: TokenStream,
+    receiver: Option<&TokenStream>,
+    params: &[(Ident, Type, String)],
+    kinds: &[Kind<'_>],
+    result: Option<(&Type, &Kind<'_>)>,
+    call: TokenStream,
+    boundary: &TokenStream,
+    scoped: Option<&TokenStream>,
+) -> TokenStream {
+    let names: Vec<&Ident> = params.iter().map(|(name, _, _)| name).collect();
+    let types: Vec<&Type> = params.iter().map(|(_, ty, _)| ty).collect();
+    let decode = decode_arguments(kinds, boundary);
+    let (payload, receiver) = match receiver {
+        Some(resource) => (
+            quote! { mut __tembra_payload },
+            quote! { let __tembra_receiver = __tembra_payload.receiver::<#resource>()?; },
+        ),
+        None => (quote! { __tembra_payload }, quote! {}),
+    };
+    let write = match result {
+        None => quote! {
+            #call;
+            ::core::result::Result::Ok(::tembra::portable::Payload::data(
+                ::tembra::serde_json::Value::Null,
+            ))
+        },
+        // The value is written by a closure returning the codec's `Result<Value, String>`, the
+        // error type the `?` of its parts converts to.
+        Some((ty, kind)) => {
+            let encode = encode(kind, quote! { value }, boundary);
+            let written = quote! {
+                ::core::result::Result<::tembra::serde_json::Value, ::std::string::String>
+            };
+            let failed = quote! {
+                |message| ::tembra::Error::invalid(::tembra::core::Reason::Result, message)
+            };
+            if kind.resource().is_some() {
+                let result = result_payload();
+                quote! {
+                    let value = #call;
+                    let encode = |value: #ty, #result: &mut ::tembra::portable::Payload| -> #written {
+                        #encode
+                    };
+                    let mut #result = ::tembra::portable::Payload::data(
+                        ::tembra::serde_json::Value::Null,
+                    );
+                    let written = encode(value, &mut #result).map_err(#failed)?;
+                    #result.map_value(|_| ::core::result::Result::Ok(written))
+                }
+            } else {
+                quote! {
+                    let value = #call;
+                    let encode = |value: #ty| -> #written { #encode };
+                    let written = encode(value).map_err(#failed)?;
+                    ::core::result::Result::Ok(::tembra::portable::Payload::data(written))
+                }
+            }
+        }
+    };
+    let future = quote! {
+        async move {
+            __tembra_context.check()?;
+            #receiver
+            let decode = |value: ::tembra::serde_json::Value| -> ::core::result::Result<
+                (#(#types,)*),
+                ::std::string::String,
+            > { #decode };
+            let (#(#names,)*): (#(#types,)*) = decode(__tembra_payload.into_data()?)
+                .map_err(|message| {
+                    ::tembra::Error::invalid(::tembra::core::Reason::Arguments, message)
+                })?;
+            #write
+        }
+    };
+    let future = match scoped {
+        Some(scoped) => quote! { #scoped(__tembra_context.clone(), #future) },
+        None => future,
+    };
+    quote! {
+        .payload_method(
+            #name,
+            |#environment, __tembra_context: ::tembra::Context, #payload: ::tembra::portable::Payload| #future,
+        )
+    }
+}
+
+/// The function registering a WIT resource's functions on its service, `__tembra_resource_cursor`
+/// for `Cursor`.
+fn glue_ident(resource: &WitResource) -> Ident {
+    format_ident!(
+        "__tembra_resource_{}",
+        resource.ident.to_string().to_snake_case()
+    )
+}
+
+/// The native side of a WIT resource, in its own module: its struct is `Issuable` as the resource
+/// of its service's interface, and a function adds its functions to the service, each bound with
+/// `payload_method` under its WIT name: the constructor, `[constructor]<resource>`, which issues
+/// the value it builds; each method, `[method]<resource>.<name>`, which reads its `self` from the
+/// call as the value issued, through the `Receiver` the call pins; and each static function,
+/// `[static]<resource>.<name>`. A method borrows the value only while it runs, so an `async` one,
+/// whose future would hold the borrow across its awaits, is refused. With the `context` option,
+/// each runs in the scope of its call, as a service's methods do.
+fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStream, Refused> {
+    let ident = &resource.ident;
+    let name = wit::kebab(ident);
+    let service = analysis
+        .services
+        .iter()
+        .find(|service| resource.service.as_ref() == Some(&service.ident))
+        .expect("a WIT resource's service is resolved");
+    let identity = service.identity(&analysis.package);
+    let boundary = boundary(resource.scope, analysis);
+    let root = crate::supers(analysis.modules[resource.scope].len());
+    let scoped = analysis
+        .options
+        .context
+        .then(|| quote! { self::#root context::__scoped });
+    let mut functions = Vec::new();
+    if let Some(constructor) = &resource.constructor {
+        let owner = format!("{ident}::{}", constructor.ident);
+        let (kinds, _) = signature(&owner, &constructor.params, None, resource.scope, analysis)?;
+        let function = &constructor.ident;
+        let params: Vec<&Ident> = constructor.params.iter().map(|(name, _, _)| name).collect();
+        let built: Type = syn::parse_quote!(#ident);
+        functions.push(payload_method(
+            &format!("[constructor]{name}"),
+            quote! { _ },
+            None,
+            &constructor.params,
+            &kinds,
+            Some((&built, &Kind::Resource(&built))),
+            quote! { #ident::#function(#(#params),*) },
+            &boundary,
+            scoped.as_ref(),
+        ));
+    }
+    for method in &resource.methods {
+        let function = &method.ident;
+        if method.asynchronous {
+            return Err(refused(
+                function.span(),
+                &format!(
+                    "`{ident}::{function}` is an async method of a WIT resource; such methods are not supported natively yet"
+                ),
+            ));
+        }
+        let owner = format!("{ident}::{function}");
+        let result = method.result.as_ref().map(|(ty, _)| ty);
+        let (kinds, result) = signature(&owner, &method.params, result, resource.scope, analysis)?;
+        let params: Vec<&Ident> = method.params.iter().map(|(name, _, _)| name).collect();
+        functions.push(payload_method(
+            &format!("[method]{name}.{}", wit::kebab(function)),
+            quote! { _ },
+            Some(&quote! { #ident }),
+            &method.params,
+            &kinds,
+            result.as_ref().map(|(ty, kind)| (*ty, kind)),
+            quote! {
+                __tembra_receiver.with(|__tembra_value| #ident::#function(__tembra_value, #(#params),*))?
+            },
+            &boundary,
+            scoped.as_ref(),
+        ));
+    }
+    for function in &resource.statics {
+        let owner = format!("{ident}::{}", function.ident);
+        let result = function.result.as_ref().map(|(ty, _)| ty);
+        let (kinds, result) =
+            signature(&owner, &function.params, result, resource.scope, analysis)?;
+        let static_ident = &function.ident;
+        let params: Vec<&Ident> = function.params.iter().map(|(name, _, _)| name).collect();
+        let awaited = function.asynchronous.then(|| quote! { .await });
+        functions.push(payload_method(
+            &format!("[static]{name}.{}", wit::kebab(static_ident)),
+            quote! { _ },
+            None,
+            &function.params,
+            &kinds,
+            result.as_ref().map(|(ty, kind)| (*ty, kind)),
+            quote! { #ident::#static_ident(#(#params),*) #awaited },
+            &boundary,
+            scoped.as_ref(),
+        ));
+    }
+    let glue = glue_ident(resource);
+    let doc = format!(
+        " The functions of the WIT resource `{ident}`, added to the service `{}` of the native Orb.",
+        service.ident
+    );
+    Ok(quote! {
+        impl ::tembra::portable::Issuable for #ident {
+            fn nominal() -> ::tembra::portable::Nominal {
+                ::tembra::portable::Nominal {
+                    interface: ::std::string::String::from(#identity),
+                    name: ::std::string::String::from(#name),
+                }
+            }
+        }
+
+        #[doc = #doc]
+        pub(crate) fn #glue<E: 'static>(service: ::tembra::Service<E>) -> ::tembra::Service<E> {
+            service #(#functions)*
         }
     })
 }
@@ -627,15 +975,19 @@ fn method(
 /// and then the function's parameters, and calls the method's local entrypoint with them as a tuple
 /// in WIT order, `()` without parameters, so the compiler checks the types `Reference::call` checks
 /// at run time. A function named `new` is `new_` on the client, since `new` builds the client; its
-/// WIT name stays `new`. The context's name is hygienic: a parameter of the same name stays the
-/// author's.
-fn client(service: &Service) -> TokenStream {
+/// WIT name stays `new`. A function whose result holds a resource has no local entrypoint, and no
+/// method here: a native caller calls it with `call_portable`. The context's name is hygienic: a
+/// parameter of the same name stays the author's.
+fn client(service: &Service, analysis: &Analysis) -> TokenStream {
     let vis = &service.vis;
     let ident = format_ident!("{}Client", service.ident);
     let context = Ident::new("context", Span::mixed_site());
+    let issuing = |function: &&Function| issues(function, service.scope, analysis);
+    let handing_out = service.functions.iter().any(|function| issuing(&function));
     let methods = service
         .functions
         .iter()
+        .filter(|function| !issuing(function))
         .chain(&service.locals)
         .map(|function| {
             let name = wit::kebab(&function.ident);
@@ -664,10 +1016,13 @@ fn client(service: &Service) -> TokenStream {
                 }
             }
         });
-    let doc = format!(
+    let mut doc = format!(
         " A typed client of the service `{}`: one async method per function of its interface and per `#[local]` method, which takes the call's context first and then the function's parameters.",
         service.ident
     );
+    if handing_out {
+        doc.push_str(" A function handing out a resource has none: a native caller calls it with `Reference::call_portable` and holds the resource as an `Owned` handle.");
+    }
     quote! {
         #[doc = #doc]
         #vis struct #ident {
@@ -711,7 +1066,8 @@ fn codec(
     let mut kinds = Vec::new();
     for (_, ty, _) in &function.params {
         kinds.push(
-            kind(ty, service.scope, analysis).map_err(|uncovered| place("takes", ty, uncovered))?,
+            argument(ty, service.scope, analysis)
+                .map_err(|uncovered| place("takes", ty, uncovered))?,
         );
     }
     let types: Vec<&Type> = function.params.iter().map(|(_, ty, _)| ty).collect();
@@ -766,6 +1122,22 @@ enum Kind<'a> {
     Named(&'a Type),
     /// Free JSON, `serde_json::Value`: a WIT `string` that holds its JSON text.
     Json(&'a Type),
+    /// A `#[wit_resource]` struct of the module, only returned: the value is issued into the
+    /// call's result, whose data names it by its index there.
+    Resource(&'a Type),
+}
+
+impl<'a> Kind<'a> {
+    /// The first resource the kind holds, itself or in a container, if any.
+    fn resource(&self) -> Option<&'a Type> {
+        match self {
+            Kind::Resource(ty) => Some(ty),
+            Kind::List(_, inner) | Kind::Option(inner) => inner.resource(),
+            Kind::Tuple(kinds) => kinds.iter().find_map(Kind::resource),
+            Kind::Result(ok, err) => ok.iter().chain(err).find_map(|side| side.resource()),
+            _ => None,
+        }
+    }
 }
 
 /// A type the codec does not cover: the type, and what it is and why it is refused, after the
@@ -858,8 +1230,28 @@ fn kind<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>,
     }
 }
 
+/// The kind of a type a function takes, written in the module `scope`: one holding a resource is
+/// refused, since natively a resource is only returned, or borrowed as a method's `self`.
+fn argument<'a>(
+    ty: &'a Type,
+    scope: usize,
+    analysis: &Analysis,
+) -> Result<Kind<'a>, Uncovered<'a>> {
+    let kind = kind(ty, scope, analysis)?;
+    match kind.resource() {
+        Some(resource) => Err(Uncovered {
+            ty: resource,
+            reason:
+                "a resource; natively a resource is only returned, or borrowed as a method's `self`"
+                    .to_owned(),
+        }),
+        None => Ok(kind),
+    }
+}
+
 /// The kind of a type of the module or of a consumed interface: a type that enters the WIT from
-/// the module reads and writes its own JSON; the others are refused, saying what they are.
+/// the module reads and writes its own JSON, and a resource is issued; the others are refused,
+/// saying what they are.
 fn named<'a>(
     ty: &'a Type,
     ident: &Ident,
@@ -878,7 +1270,7 @@ fn named<'a>(
         .iter()
         .any(|resource| resource.ident == *ident)
     {
-        "a resource; resources are not supported natively yet".to_owned()
+        return Ok(Kind::Resource(ty));
     } else {
         "a type without a native codec; such types are not supported natively yet".to_owned()
     };
@@ -1064,6 +1456,7 @@ fn decode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
                 )),
             }
         },
+        Kind::Resource(_) => unreachable!("a resource is refused where it would be read"),
     }
 }
 
@@ -1152,6 +1545,27 @@ fn encode(kind: &Kind<'_>, value: TokenStream, boundary: &TokenStream) -> TokenS
                 .map(::tembra::serde_json::Value::String)
                 .map_err(|error| error.to_string())
         },
+        Kind::Resource(_) => {
+            let issued = issued(value);
+            let written = written();
+            quote! { #written(#issued) }
+        }
+    }
+}
+
+/// The call's result while it is written: the payload a resource of the value is issued into.
+fn result_payload() -> Ident {
+    format_ident!("__tembra_result")
+}
+
+/// Issue `value`, a resource, into the call's result: the JSON of its index there, which names it
+/// in the result's data.
+fn issued(value: TokenStream) -> TokenStream {
+    let result = result_payload();
+    quote! {
+        ::tembra::serde_json::Value::from(
+            <u32 as ::core::convert::From<::tembra::portable::Slot>>::from(#result.issue(#value))
+        )
     }
 }
 
@@ -1306,19 +1720,29 @@ fn record_encode(bound: &[Ident], members: &[Member<'_>], boundary: &TokenStream
 }
 
 /// The kind of a member of the type of the module `shape`, written in its module, or its refusal,
-/// after `place`, which names the member: "the field `count` of `Entry` is".
+/// after `place`, which names the member: "the field `count` of `Entry` is". A member holding a
+/// resource is refused: the bindings generate such a type, with their handle in the resource's
+/// place, which only a component can create.
 fn member<'a>(
     ty: &'a Type,
     place: &str,
     shape: &Shape,
     analysis: &Analysis,
 ) -> Result<Kind<'a>, Refused> {
-    kind(ty, shape.scope, analysis).map_err(|uncovered| {
+    let refusal = |uncovered: Uncovered| {
         refused(
             ty.span(),
             &format!("{place} `{}`{}", spelled(ty), uncovered.described(ty)),
         )
-    })
+    };
+    let kind = kind(ty, shape.scope, analysis).map_err(refusal)?;
+    match kind.resource() {
+        Some(resource) => Err(refusal(Uncovered {
+            ty: resource,
+            reason: "a resource; a record or a variant holding one is the bindings' type, whose handle only a component creates, so it is not supported natively".to_owned(),
+        })),
+        None => Ok(kind),
+    }
 }
 
 /// The members of a record of `shape`, or of the record of one of its cases, `owner` for the

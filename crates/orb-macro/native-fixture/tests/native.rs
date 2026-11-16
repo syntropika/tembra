@@ -17,6 +17,7 @@ const PLOTTER: &str = "calculator::example:calculator/plotter@1.0.0";
 const CALLER: &str = "calculator::example:calculator/caller@1.0.0";
 const TALLY: &str = "calculator::example:calculator/tally@1.0.0";
 const MEMO: &str = "calculator::example:calculator/memo@1.0.0";
+const ACCUMULATORS: &str = "calculator::example:calculator/accumulators@1.0.0";
 
 /// The module's contract, read from its `WIT`, as a compiled or TypeScript caller validates what
 /// it sends to the Orb and what it receives.
@@ -82,7 +83,7 @@ fn the_declaration_is_the_plan_of_the_contract() {
         .iter()
         .map(|service| service.name.as_str())
         .collect();
-    assert_eq!(names, [MATH, PLOTTER, CALLER, TALLY, MEMO]);
+    assert_eq!(names, [MATH, PLOTTER, CALLER, TALLY, MEMO, ACCUMULATORS]);
     assert!(
         expected
             .services
@@ -103,6 +104,22 @@ fn the_declaration_is_the_plan_of_the_contract() {
         ["area", "redrawn", "settled", "sorted", "step", "walk"]
             .map(String::from)
             .into()
+    );
+    // A WIT resource's functions are its service's methods.
+    assert_eq!(
+        expected.services[5].methods,
+        [
+            "[constructor]accumulator",
+            "[method]accumulator.add",
+            "[method]accumulator.reader",
+            "[method]accumulator.total",
+            "[static]accumulator.zero",
+            "checked",
+            "dropped",
+            "open"
+        ]
+        .map(String::from)
+        .into()
     );
 }
 

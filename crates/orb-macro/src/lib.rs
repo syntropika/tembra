@@ -368,10 +368,15 @@ impl Service {
     }
 
     /// Whether a contract plans a service for the interface, which then has a signature: its
-    /// methods, or the implemented interface's, which its WIT gives. A contract plans none for an
-    /// empty interface, which a native-only service without methods exports.
-    fn planned(&self) -> bool {
-        self.implements.is_some() || !self.functions.is_empty()
+    /// methods, the implemented interface's, which its WIT gives, or the functions of a WIT
+    /// resource of its own, among `resources`. A contract plans none for an empty interface, which
+    /// a native-only service without methods or resources exports.
+    fn planned(&self, resources: &[WitResource]) -> bool {
+        self.implements.is_some()
+            || !self.functions.is_empty()
+            || resources
+                .iter()
+                .any(|resource| resource.service.as_ref() == Some(&self.ident))
     }
 }
 
@@ -2955,6 +2960,7 @@ fn signatures(analysis: &Analysis) -> syn::Result<Vec<proc_macro2::TokenStream>>
         package,
         world,
         services,
+        wit_resources,
         wit_dir,
         wit,
         ..
@@ -2978,7 +2984,7 @@ fn signatures(analysis: &Analysis) -> syn::Result<Vec<proc_macro2::TokenStream>>
     })?;
     services
         .iter()
-        .filter(|service| service.planned())
+        .filter(|service| service.planned(wit_resources))
         .map(|service| {
             let identity = service.identity(package);
             let digest = signatures.get(&identity).ok_or_else(|| {

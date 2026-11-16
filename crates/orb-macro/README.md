@@ -1164,9 +1164,22 @@ read: they panic there, and the host's executor does not catch the panic. A crea
 object's address with `declaration.address()` instead, and a method reads what a future it spawns
 needs before handing it over.
 
+A `#[wit_resource]` struct is natively a value the Orb issues as a capability of its resource type,
+as `tembra::portable::Issuable` names it: the resource's constructor and static functions, and a
+function whose result holds the struct, alone or in an `Option`, a `Result`, a `Vec` or a tuple,
+issue what they return into the call's result, and each method reads its `self` from the call. The
+value belongs to the object that issued it, as a compiled exporter's belongs to its Store: it
+closes, running its `Drop`, with its last owner, or when that object is reloaded or released or the
+host closes. Such a function has no local entrypoint, so a native caller calls it with
+`call_portable` and holds the resource as an `Owned` handle, and the service's client has no method
+for it; see [owned WIT resources](../../docs/rust.md#owned-wit-resources). Natively a resource is
+only returned, or borrowed as a method's `self`: a function taking one, a record or a variant
+holding one, which the bindings replace with a type holding their handle, which only a component
+creates, and an `async` method of a resource, are compile errors where the runtime is linked.
+
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, free JSON, records, enums, variants, flags, `Result`s, and `Vec`, `Option` and tuples of
-them. A type of a consumed interface, a resource, `#[state]`, `#[resource]`, `#[wit_resource]`, an
+them, and WIT resources as above. A type of a consumed interface, `#[state]`, `#[resource]`, an
 import and a hook are compile errors where the runtime is linked, naming the item, until the native
 side covers them, and so is an `Option` of an `Option`, which the boundary's JSON cannot tell from
 `None`; a component build of the same module is unaffected.

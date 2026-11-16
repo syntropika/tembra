@@ -186,6 +186,13 @@ impl Serialize for Slot {
     }
 }
 
+/// The payload-local index, for a result whose data is written without serde.
+impl From<Slot> for u32 {
+    fn from(slot: Slot) -> Self {
+        slot.0
+    }
+}
+
 /// The implicit `self` of one call. The managed call holds its physical owner separately;
 /// retaining this weak loan cannot extend the resource's lifetime.
 pub struct Loan(Weak<dyn Capability>);

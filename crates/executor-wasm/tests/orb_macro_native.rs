@@ -1,21 +1,25 @@
 //! A compiled consumer calls the native Orb that `#[tembra::orb]` generates: its values cross the
-//! consumer's canonical ABI and the provider's codec both ways, as the boundary's JSON.
+//! consumer's canonical ABI and the provider's codec both ways, as the boundary's JSON, and it
+//! holds the Orb's WIT resources through ordinary handles.
 //!
-//! The consumer is a real component encoded from a small core module, so it runs without a guest
+//! Each consumer is a real component encoded from a small core module, so it runs without a guest
 //! toolchain: each function of its `relay` interface forwards its flat arguments to the same
-//! function of the provider's `plotter` and returns what that one returns.
+//! function of the provider's `plotter` and returns what that one returns, and its `holder`
+//! constructs, calls and drops one of the provider's accumulators.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
 use tembra::Host;
 use tembra_executor_wasm::{Engine, Install, Limits};
-use tembra_orb_native_fixture::calculator;
+use tembra_orb_native_fixture::calculator::{self, accumulators::Accumulators};
 
 #[path = "support/components.rs"]
 mod components;
 
 const PLOTTER: &str = "example:calculator/plotter@1.0.0";
 const RELAY: &str = "relay::example:calculator/relay@1.0.0";
+const ACCUMULATORS: &str = "example:calculator/accumulators@1.0.0";
+const HOLDER: &str = "holder::example:calculator/holder@1.0.0";
 
 /// The consumer's WIT: the provider's package, as the module derives it, with an interface that
 /// relays the plotter's functions and a world that imports the plotter and exports the relay.
@@ -171,6 +175,97 @@ fn a_compiled_consumer_calls_the_native_orb_of_the_macro() {
     }
     relay.release().unwrap();
     pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// The holder's WIT: the provider's package, with an interface whose function holds one of the
+/// provider's accumulators, and a world that imports the accumulators and exports the holder.
+fn holder_wit() -> String {
+    format!(
+        "{}
+interface holder {{
+  run: func(start: s64, value: s64) -> s64;
+}}
+
+world holder-consumer {{
+  import accumulators;
+  export holder;
+}}
+",
+        calculator::WIT
+    )
+}
+
+/// `run` constructs an accumulator at its start, adds its value through the handle, drops the
+/// handle and returns the total `add` answered.
+const HOLDER_MODULE: &str = r#"(module
+  (import "example:calculator/accumulators@1.0.0" "[constructor]accumulator"
+    (func $new (param i64) (result i32)))
+  (import "example:calculator/accumulators@1.0.0" "[method]accumulator.add"
+    (func $add (param i32 i64) (result i64)))
+  (import "example:calculator/accumulators@1.0.0" "[resource-drop]accumulator"
+    (func $drop (param i32)))
+  (memory (export "memory") 1)
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 1024)
+  (func (export "example:calculator/holder@1.0.0#run") (param $start i64) (param $value i64)
+    (result i64)
+    (local $accumulator i32)
+    (local $total i64)
+    local.get $start
+    call $new
+    local.set $accumulator
+    local.get $accumulator
+    local.get $value
+    call $add
+    local.set $total
+    local.get $accumulator
+    call $drop
+    local.get $total))"#;
+
+/// A compiled consumer constructs a WIT resource of the native Orb, calls its method through the
+/// handle and drops it: the method reads as its `self` the value the constructor issued, and the
+/// value closes once the consumer's call has settled.
+#[test]
+fn a_compiled_consumer_constructs_calls_and_drops_a_native_resource() {
+    let engine = Engine::new(Limits::default()).unwrap();
+    let artifact = components::encode(
+        &holder_wit(),
+        "holder-consumer",
+        HOLDER_MODULE,
+        "holder",
+        &Default::default(),
+    );
+    let consumer = engine
+        .load(
+            &artifact,
+            Install::default().requires(ACCUMULATORS, "calculator", 2),
+        )
+        .unwrap();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![calculator::orb().unwrap(), consumer])
+        .unwrap();
+    let holder = Rc::new(host.get(HOLDER, vec!["main".into()], "alice").unwrap());
+    pool.run_until(holder.ready()).unwrap();
+    let dropped = Accumulators::dropped();
+    let called = holder.clone();
+    let total = pool
+        .run_until(host.root("alice", move |context| {
+            async move {
+                called
+                    .call_portable::<_, i64>(&context, "run", (5_i64, 2_i64))
+                    .await
+            }
+            .boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(total, 7);
+    pool.run_until(host.settled());
+    assert_eq!(Accumulators::dropped(), dropped + 1, "dropped once");
+    holder.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(Accumulators::dropped(), dropped + 1);
     assert_eq!(engine.instances(), 0);
     assert!(host.errors().is_empty(), "{:?}", host.errors());
 }
