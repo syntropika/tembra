@@ -57,7 +57,7 @@ pub use resource_profile::ResourceSignature;
 pub use roles::ServicePolicy;
 pub use selection::OrbProvider;
 #[doc(hidden)]
-pub use standard_sources::WASI_SOURCES;
+pub use standard_sources::{WASI_SOURCES, bundled};
 pub use validate::javascript_name;
 
 /// A diagnostic produced before an Orb enters the kernel.

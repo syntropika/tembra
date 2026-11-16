@@ -3977,8 +3977,9 @@ world first {
 
 /// A contract `cargo tembra build` wrote for an Orb with kernel state holds the kernel's package in
 /// `deps/`: an Orb with a state of its own consuming it reads that package once, the bundled copy
-/// left out of its inline WIT, whatever the copy's comments say; a copy defining the package
-/// otherwise is an error naming its file.
+/// left out of its inline WIT. The copy is the bundled file line for line, whatever its line
+/// endings, as `Contract::from_dir` reads it; a copy that differs, if only in its comments, is an
+/// error naming its file.
 #[test]
 fn a_consumed_contract_may_bring_the_kernel_package() {
     const GUEST: &str = tembra_contracts::guest::SOURCE;
@@ -4001,12 +4002,10 @@ fn a_consumed_contract_may_bring_the_kernel_package() {
             fourth,
         )
     };
-    let commented = GUEST
-        .replace("/// ", "/// (another text) ")
-        .replace('\n', "\r\n");
+    let checked_out = GUEST.replace('\n', "\r\n");
     for (name, guest) in [
         ("first-deps", GUEST),
-        ("first-comments", commented.as_str()),
+        ("first-line-endings", checked_out.as_str()),
     ] {
         let module = with_deps(name, guest).unwrap_or_else(|error| panic!("{name}: {error}"));
         let generated = tokens(&module);
@@ -4019,18 +4018,23 @@ fn a_consumed_contract_may_bring_the_kernel_package() {
             "{name}: {generated}"
         );
     }
-    let error = with_deps(
-        "first-different",
-        &GUEST.replacen("read: func() -> string;", "read: func() -> u32;", 1),
-    )
-    .map(|_| ())
-    .unwrap_err()
-    .to_string();
-    assert!(
-        error.contains("deps/tembra-guest.wit:")
-            && error.contains("this copy of tembra:guest@1.0.0, the kernel's package, defines it otherwise than the one bundled with this macro"),
-        "{error}"
-    );
+    for (name, guest) in [
+        (
+            "first-comments",
+            GUEST.replace("/// ", "/// (another text) "),
+        ),
+        (
+            "first-different",
+            GUEST.replacen("read: func() -> string;", "read: func() -> u32;", 1),
+        ),
+    ] {
+        let error = with_deps(name, &guest).map(|_| ()).unwrap_err().to_string();
+        assert!(
+            error.contains("deps/tembra-guest.wit:")
+                && error.contains("this copy of tembra:guest@1.0.0, the kernel's package, differs from the one bundled with this macro"),
+            "{name}: {error}"
+        );
+    }
     // Without the package in the consumed directory, the inline WIT brings the bundled one.
     let dir = consumed("first-alone", LEDGER_WIT);
     let module = orb_with(

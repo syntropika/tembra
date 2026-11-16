@@ -36,11 +36,11 @@ pub(crate) fn resolve() -> syn::Result<Resolve> {
 /// The WASI packages the Orb's imports need, nested for the inline WIT: the package of each
 /// imported WASI interface and the bundled packages it builds on, in dependency order. A package
 /// the consumed directory `dir` resolves already, as a contract `cargo tembra build` wrote does
-/// from its `deps/`, is left out, since the bindings would read it twice; that copy must define
-/// what the bundled package defines, whatever its comments, or the error names its file. An
-/// import in the `wasi` namespace that names no interface of the bundled packages, another
-/// version or an unstable interface, is an error on its literal, and so is an interface no host
-/// serves as an import, one a component exports instead.
+/// from its `deps/`, is left out, since the bindings would read it twice; that copy must be the
+/// bundled file line for line, whatever its line endings (`wit::bundled_copy`), or the error
+/// names its file. An import in the `wasi` namespace that names no interface of the bundled
+/// packages, another version or an unstable interface, is an error on its literal, and so is an
+/// interface no host serves as an import, one a component exports instead.
 pub(crate) fn packages(imports: &[LitStr], dir: Option<&Path>) -> syn::Result<String> {
     let imported: Vec<&LitStr> = imports
         .iter()
@@ -91,20 +91,12 @@ pub(crate) fn packages(imports: &[LitStr], dir: Option<&Path>) -> syn::Result<St
             .as_ref()
             .and_then(|consumed| Some((consumed, consumed.package_names.get(name)?)))
         {
-            if crate::wit::definitions(consumed, copy) != crate::wit::definitions(&bundled, *id) {
-                let place = consumed.packages[copy]
-                    .interfaces
-                    .values()
-                    .next()
-                    .map(|interface| {
-                        consumed
-                            .source_map
-                            .render_location(consumed.interfaces[*interface].span)
-                    })
+            if let Err(file) = crate::wit::bundled_copy(consumed, copy) {
+                let place = file
                     .or_else(|| dir.map(|dir| dir.display().to_string()))
                     .unwrap_or_default();
                 return Err(error(format!(
-                    "{place}: this copy of {name}, a WASI package Tembra serves, defines it otherwise than the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version"
+                    "{place}: this copy of {name}, a WASI package Tembra serves, differs from the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version"
                 )));
             }
             continue;

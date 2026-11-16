@@ -222,8 +222,9 @@ fn a_wasi_import_is_an_interface_the_hosts_serve() {
 
 /// A contract `cargo tembra build` wrote for an Orb that imports WASI holds the WASI packages in
 /// `deps/`: an Orb consuming it reads each such package once, from there, the bundled copy left out
-/// of its inline WIT whatever the copy's comments say, and nests only the WASI packages the
-/// directory lacks; a copy defining a package otherwise is an error naming its file.
+/// of its inline WIT, and nests only the WASI packages the directory lacks. A copy is the bundled
+/// file line for line, whatever its line endings, as `Contract::from_dir` reads it; a copy that
+/// differs, if only in its comments, is an error naming its file.
 #[test]
 fn a_consumed_contract_may_bring_the_wasi_packages() {
     let clocks = bundled("wasi-clocks.wit");
@@ -232,10 +233,8 @@ fn a_consumed_contract_may_bring_the_wasi_packages() {
         "wasi:clocks/monotonic-clock@0.3.0",
         "wasi:random/random@0.3.0",
     ];
-    let commented = clocks
-        .replace("/// ", "/// (another text) ")
-        .replace('\n', "\r\n");
-    for (name, copy) in [("deps", clocks), ("comments", commented.as_str())] {
+    let checked_out = clocks.replace('\n', "\r\n");
+    for (name, copy) in [("deps", clocks), ("line-endings", checked_out.as_str())] {
         let dir = contract(name, &[("wasi-clocks.wit", copy)]);
         let generated = expanded(importing(&imports, Some(&dir)), DICE)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -255,20 +254,23 @@ fn a_consumed_contract_may_bring_the_wasi_packages() {
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
+    let commented = clocks.replace("/// ", "/// (another text) ");
     let different = clocks.replacen(
         "get-resolution: func() -> duration;",
         "get-resolution: func() -> u32;",
         1,
     );
-    let dir = contract("different", &[("wasi-clocks.wit", &different)]);
-    let error = expanded(importing(&imports, Some(&dir)), DICE)
-        .map(|_| ())
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("deps/wasi-clocks.wit:")
-            && error.contains("this copy of wasi:clocks@0.3.0, a WASI package Tembra serves, defines it otherwise than the one bundled with this macro"),
-        "{error}"
-    );
-    std::fs::remove_dir_all(dir).unwrap();
+    for (name, copy) in [("comments", &commented), ("different", &different)] {
+        let dir = contract(name, &[("wasi-clocks.wit", copy)]);
+        let error = expanded(importing(&imports, Some(&dir)), DICE)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("deps/wasi-clocks.wit:")
+                && error.contains("this copy of wasi:clocks@0.3.0, a WASI package Tembra serves, differs from the one bundled with this macro"),
+            "{name}: {error}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
