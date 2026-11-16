@@ -570,11 +570,13 @@ struct Scan {
 
 /// The names a module binds with `use` and `extern crate`, each with the path it stands for, and
 /// the paths it imports by glob, `use path::*;`: what the macro follows to name a derive the
-/// author writes in that module from another module, the bindings'.
+/// author writes in that module from another module, the bindings'. With the names of the items
+/// the module declares, which the bindings' module does not reach.
 #[derive(Default)]
 struct Uses {
     names: BTreeMap<String, Named>,
     globs: Vec<Named>,
+    items: BTreeSet<String>,
 }
 
 /// A path as a list of names, from the crates when `global`, as `::serde::Serialize` is, and
@@ -656,6 +658,27 @@ impl Uses {
         };
         self.names.insert(name.to_string(), named);
     }
+
+    /// Record the name of an item the module declares.
+    fn add_item(&mut self, item: &Item) {
+        let ident = match item {
+            Item::Const(item) => &item.ident,
+            Item::Enum(item) => &item.ident,
+            Item::Fn(item) => &item.sig.ident,
+            Item::Macro(syn::ItemMacro {
+                ident: Some(ident), ..
+            }) => ident,
+            Item::Mod(item) => &item.ident,
+            Item::Static(item) => &item.ident,
+            Item::Struct(item) => &item.ident,
+            Item::Trait(item) => &item.ident,
+            Item::TraitAlias(item) => &item.ident,
+            Item::Type(item) => &item.ident,
+            Item::Union(item) => &item.ident,
+            _ => return,
+        };
+        self.items.insert(ident.to_string());
+    }
 }
 
 /// Whether an item of a sub-module is visible to the Orb module: `pub`, or `pub(..)`.
@@ -671,6 +694,7 @@ impl Scan {
         let mut children = Vec::new();
         let nested = scope != 0;
         for item in items {
+            self.uses[scope].add_item(&item);
             match item {
                 Item::Mod(module) => {
                     let Some((_, inner)) = module.content else {
@@ -3839,12 +3863,207 @@ fn carried_derive(
     }
 }
 
+/// What a derive written on a type reads of the helper attributes, as far as the macro knows.
+#[derive(Clone, Copy)]
+enum Reads {
+    /// Those of one name: `#[default]` for the standard library's `Default`, `#[serde]` for
+    /// serde's derives.
+    Named(&'static str),
+    /// None, as the other derives of the standard library.
+    Nothing,
+    /// Any: a derive of another crate, or one the macro cannot follow, whose helper attributes
+    /// the macro does not know.
+    Any,
+}
+
+impl Reads {
+    /// What the derive `path` written on `shape` reads, by what it names, followed as
+    /// `carried_derive` follows it.
+    fn of(shape: &Shape, path: &syn::Path, uses: &[Uses], modules: &[Vec<Ident>]) -> Self {
+        let derive = match followed(path, shape.scope, uses, modules, &shape.ident) {
+            Ok(Followed::Path(named)) => Derive::of(named),
+            Ok(Followed::Name { ident, .. }) => {
+                match STANDARD_DERIVES.iter().find(|(name, _)| ident == name) {
+                    Some(&(name, module)) => Derive::Standard(name, module),
+                    None => return Self::Any,
+                }
+            }
+            Ok(Followed::Above(_)) | Err(_) => return Self::Any,
+        };
+        match derive {
+            Derive::Standard("Default", _) => Self::Named("default"),
+            Derive::Standard(..) => Self::Nothing,
+            Derive::Serde(_) => Self::Named("serde"),
+            Derive::Other(_) => Self::Any,
+        }
+    }
+
+    /// Whether it reads a helper attribute of this name.
+    fn reads(self, name: &str) -> bool {
+        match self {
+            Self::Named(known) => known == name,
+            Self::Nothing => false,
+            Self::Any => true,
+        }
+    }
+}
+
+/// How a module binds a name that the bindings' module does not reach.
+enum Bound {
+    /// By an item it declares.
+    Declared,
+    /// By `use` or `extern crate`.
+    Imported,
+}
+
+/// How the module `scope` binds `name`, itself or through its glob imports from the Orb's
+/// modules: `None` for a name it does not bind, and for a crate imported under its own name,
+/// `use serde;`, which every module reaches.
+fn bound(name: &Ident, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]) -> Option<Bound> {
+    let name = name.to_string();
+    let mut seen = BTreeSet::from([scope]);
+    let mut pending = vec![scope];
+    while let Some(scope) = pending.pop() {
+        if uses[scope].items.contains(&name) {
+            return Some(Bound::Declared);
+        }
+        if let Some(named) = uses[scope].names.get(&name) {
+            let itself = named.segments.len() == 1 && named.segments[0] == name;
+            return (!itself).then_some(Bound::Imported);
+        }
+        for glob in &uses[scope].globs {
+            if let Some(module) = glob_module(glob, scope, uses, modules)
+                && seen.insert(module)
+            {
+                pending.push(module);
+            }
+        }
+    }
+    None
+}
+
+/// The first path in a helper attribute's arguments that starts from the module `scope`, which
+/// the bindings' module does not reach, as written up to its first part that is not a name: one
+/// from `self::` or `super::`, or from a name the module binds. A name after `::`, `.` or `'`
+/// continues a path, reads a field or is a lifetime, a name before `=` is a key, and the name of
+/// a derive of the standard library, which the arguments give as a keyword or as a derive,
+/// reaches the prelude's from every module.
+fn from_module(
+    arguments: proc_macro2::TokenStream,
+    scope: usize,
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+) -> Option<String> {
+    use proc_macro2::{Spacing, TokenTree};
+    let trees: Vec<TokenTree> = arguments.into_iter().collect();
+    let punct = |index: usize, char: char| match trees.get(index) {
+        Some(TokenTree::Punct(punct)) => punct.as_char() == char,
+        _ => false,
+    };
+    let colons = |index: usize| punct(index, ':') && punct(index + 1, ':');
+    for (index, tree) in trees.iter().enumerate() {
+        let ident = match tree {
+            TokenTree::Group(group) => match from_module(group.stream(), scope, uses, modules) {
+                Some(path) => return Some(path),
+                None => continue,
+            },
+            TokenTree::Ident(ident) => ident,
+            TokenTree::Punct(_) | TokenTree::Literal(_) => continue,
+        };
+        let continued = index > 0
+            && (punct(index - 1, '.')
+                || punct(index - 1, '\'')
+                || (index > 1 && colons(index - 2)));
+        let key = match trees.get(index + 1) {
+            Some(TokenTree::Punct(punct)) => {
+                punct.as_char() == '=' && punct.spacing() == Spacing::Alone
+            }
+            _ => false,
+        };
+        if continued || key || STANDARD_DERIVES.iter().any(|(name, _)| ident == name) {
+            continue;
+        }
+        let relative = ident == "super" || (ident == "self" && colons(index + 1));
+        if relative || bound(ident, scope, uses, modules).is_some() {
+            let mut path = ident.to_string();
+            let mut next = index + 1;
+            while colons(next)
+                && let Some(TokenTree::Ident(segment)) = trees.get(next + 2)
+            {
+                path.push_str(&format!("::{segment}"));
+                next += 3;
+            }
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// A helper attribute as the errors show it: `#[strum(..)]`, `#[default = ..]` or `#[default]`.
+fn shown(attribute: &Attribute) -> String {
+    let name = written(attribute.path());
+    match &attribute.meta {
+        syn::Meta::Path(_) => format!("#[{name}]"),
+        syn::Meta::List(_) => format!("#[{name}(..)]"),
+        syn::Meta::NameValue(_) => format!("#[{name} = ..]"),
+    }
+}
+
+/// Refuse a helper attribute that the bindings' module, which reads it on the generated type
+/// replacing `shape`, would not know: an attribute macro the type's module imports, which is no
+/// derive's helper attribute, an attribute none of the derives the generated type takes reads,
+/// by what each of them reads, `readers`, and one whose arguments name what the type's module
+/// declares or imports, or start from that module.
+fn readable(
+    shape: &Shape,
+    readers: &[Reads],
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+) -> syn::Result<()> {
+    let owner = &shape.ident;
+    let carried = &shape.carried;
+    let members = carried.members.iter().flat_map(|(_, helpers)| helpers);
+    for attribute in carried.helpers.iter().chain(members) {
+        let shown = shown(attribute);
+        let refuse = |message: String| Err(syn::Error::new(attribute.span(), message));
+        let name = attribute
+            .path()
+            .get_ident()
+            .expect("a helper attribute is a single name");
+        if let Some(Bound::Imported) = bound(name, shape.scope, uses, modules) {
+            return refuse(format!(
+                "`{shown}` on `{owner}`: `{owner}` enters the WIT and the generated type replacing it takes its derives and the helper attributes they read, which come with the derives, while this module imports `{name}`, an attribute macro, which the generated type cannot take; remove it, or keep `{owner}` out of the WIT"
+            ));
+        }
+        if !readers.iter().any(|reads| reads.reads(&name.to_string())) {
+            return refuse(format!(
+                "`{shown}` on `{owner}`: `{owner}` enters the WIT and the generated type replacing it takes no derive that reads this attribute: a derive of the standard library reads none but `#[default]`, for `Default`, and a derive of what the bindings implement themselves is left to them; remove the attribute, or keep `{owner}` out of the WIT"
+            ));
+        }
+        let arguments = match &attribute.meta {
+            syn::Meta::Path(_) => continue,
+            syn::Meta::List(list) => list.tokens.clone(),
+            syn::Meta::NameValue(pair) => {
+                let value = &pair.value;
+                quote! { #value }
+            }
+        };
+        if let Some(path) = from_module(arguments, shape.scope, uses, modules) {
+            return refuse(format!(
+                "`{shown}` on `{owner}` names `{path}` from this module: `{owner}` enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach `{path}`; name it from `crate::` or from its crate, `::name::..`, or keep `{owner}` out of the WIT"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The attributes the bindings put on the generated types replacing the author's, as the options
 /// `additional_type_attributes` and `additional_member_attributes` of `wit-bindgen` select them,
 /// by the type's full WIT name, `ns:name/interface@version/type`, and the member's after a `.`:
 /// for each type that enters the WIT, its derives, less those the bindings implement themselves,
-/// and the helper attributes they read, on the type and on each field or case. `serde` tells
-/// whether a state makes the bindings derive serde's traits on the types that can carry them.
+/// and the helper attributes they read, on the type and on each field or case, each of which the
+/// bindings' module must know (`readable`). `serde` tells whether a state makes the bindings
+/// derive serde's traits on the types that can carry them.
 fn carried_attributes(
     shapes: &[Shape],
     placement: &BTreeMap<String, Ident>,
@@ -3863,12 +4082,15 @@ fn carried_attributes(
         let generated = bindings.types.get(&selector).copied().unwrap_or_default();
         let serialized = serde && !bindings.unserializable.contains(&wit::ignored_name(&name));
         let mut derives = Vec::new();
+        let mut readers = Vec::new();
         for path in &shape.carried.derives {
             if let Some(derive) = carried_derive(shape, path, generated, serialized, uses, modules)?
             {
                 derives.push(derive);
+                readers.push(Reads::of(shape, path, uses, modules));
             }
         }
+        readable(shape, &readers, uses, modules)?;
         let derive = (!derives.is_empty()).then(|| quote! { #[derive(#(#derives),*)] });
         let helpers = &shape.carried.helpers;
         if derive.is_some() || !helpers.is_empty() {

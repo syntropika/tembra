@@ -3001,6 +3001,73 @@ fn what_the_generated_type_cannot_take_is_refused() {
     }
 }
 
+/// The bindings' module reads the helper attributes the generated type takes, so one it would not
+/// know there is refused on the author's type: one whose arguments name what the type's module
+/// declares or imports, which a path from `crate::` names from anywhere; an attribute macro the
+/// module imports, which no derive reads; and one no derive the generated type takes reads, as
+/// when a glob import's `Debug` is read as the standard library's, which the bindings implement.
+/// Kept out of the WIT, the same type is the author's, as written.
+#[test]
+fn a_helper_attribute_the_bindings_module_cannot_read_is_refused() {
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod walk {{
+                {types}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    let carried = expanded(
+        "example:walk@1.0.0",
+        &module(
+            "const PAGE: u32 = 20;
+             #[derive(smart_default::SmartDefault)]
+             pub struct Page { #[default(crate::walk::PAGE)] pub size: u32 }",
+            "Page",
+        ),
+    );
+    assert!(
+        tokens(&carried).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/page.size\" : [# [default (crate :: walk :: PAGE)]] } ,"
+        ),
+        "{}",
+        tokens(&carried)
+    );
+    for (types, message) in [
+        (
+            "const PAGE: u32 = 20;
+             #[derive(smart_default::SmartDefault)]
+             pub struct Page { #[default(PAGE)] pub size: u32 }",
+            "`#[default(..)]` on `Page` names `PAGE` from this module: `Page` enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach `PAGE`; name it from `crate::` or from its crate, `::name::..`, or keep `Page` out of the WIT",
+        ),
+        (
+            "use crate::limits::PAGE;
+             #[derive(smart_default::SmartDefault)]
+             pub struct Page { #[default(PAGE)] pub size: u32 }",
+            "`#[default(..)]` on `Page` names `PAGE` from this module",
+        ),
+        (
+            "use serde_with::skip_serializing_none;
+             #[skip_serializing_none]
+             #[derive(serde::Serialize)]
+             pub struct Page { pub size: Option<u32> }",
+            "`#[skip_serializing_none]` on `Page`: `Page` enters the WIT and the generated type replacing it takes its derives and the helper attributes they read, which come with the derives, while this module imports `skip_serializing_none`, an attribute macro, which the generated type cannot take; remove it, or keep `Page` out of the WIT",
+        ),
+        (
+            "use derive_more::*;
+             #[derive(Debug)]
+             pub struct Page { #[debug(skip)] pub size: u32 }",
+            "`#[debug(..)]` on `Page`: `Page` enters the WIT and the generated type replacing it takes no derive that reads this attribute: a derive of the standard library reads none but `#[default]`, for `Default`, and a derive of what the bindings implement themselves is left to them; remove the attribute, or keep `Page` out of the WIT",
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &module(types, "Page"));
+        assert!(error.contains(message), "{types}: {error}");
+        expanded("example:walk@1.0.0", &module(types, "u32"));
+    }
+}
+
 /// A state starts from its `Default`: the macro implements it field by field unless the author
 /// gives it, by an `impl Default` anywhere in the Orb module or by a derive, which stays on a
 /// state out of the WIT and goes to the generated type replacing a state that enters it; the serde

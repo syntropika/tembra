@@ -1078,6 +1078,13 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   exception where the bindings derive them, in an Orb with a state: a `Serialize` or `Deserialize`
   the macro cannot follow to a crate, through such a glob, through `super::` or through a re-export
   of this crate, `crate::prelude::Serialize`, is left to the bindings as `serde`'s own is.
+- The bindings' module reads the helper attributes too, as written, so one it would not know is a
+  compile error on the attribute: one no derive the generated type takes reads, since a derive of
+  the standard library reads none but `#[default]` and a derive the bindings implement is theirs,
+  as `Debug` is after `use derive_more::*;`; an attribute macro the type's module imports,
+  `#[skip_serializing_none]`, which is no derive's helper; and arguments naming what the type's
+  module declares or imports, or a path from `self::` or `super::`, which a path from `crate::`,
+  `#[default(crate::walk::PAGE)]`, or from a crate names from every module.
 - What the replacement would drop without a word is refused on a type that enters the WIT: an
   explicit discriminant, which a WIT enum has no room for, a `#[serde(..)]` attribute, which would
   change a state's JSON, and a helper attribute on the payload of a case, which the bindings have
