@@ -139,7 +139,8 @@ order.
 
 ## Limits
 
-A function takes a resource back only owned, in the interface that defines it, as
+A function takes a resource only owned, either one its own interface defines or an imported
+interface's handle, such as a `texts::Builder` taken by a function of the speller, as
 [the macro's README](../../crates/orb-macro/README.md#taking-a-resource) shows; a borrowed
 parameter is not expressed by the macro. Methods borrow `self`; a `&mut self` method is a compile
 error. A resource belongs to one service's interface, the one named by `#[wit_resource(service =
