@@ -1183,7 +1183,10 @@ value it refuses fails only that call, with the error's message and the reason `
 component reads a newtype through `From` instead, as it has no channel for that refusal but a trap,
 so a newtype only a refusing `TryFrom` makes is native only: a component build of the module fails,
 naming it. Each type of the module that enters the WIT, and each newtype, reads and writes its
-JSON in its own module, through a hidden trait of the Orb module.
+JSON in its own module, through a hidden trait of the Orb module. A record, a variant, an enum or a
+flags of an interface the module implements is the bindings' type, which implements the same trait
+in the Orb module, written from the interface's WIT, wherever the WIT defines it: in that
+interface, or in one it `use`s from, which the world imports.
 
 With `context` on the attribute, a native host gets a `context` of its own, with the functions and
 types of the component's: `principal()`, `cancelled()`, `cancel()`, `object()` and `log(..)` read
@@ -1248,10 +1251,11 @@ facade there: such a module names the facade `::tembra`, as in `::tembra::Result
 
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, free JSON, records, enums, variants, flags, newtypes, `Result`s, and `Vec`, `Option` and
-tuples of them, WIT resources as above, states and the resources of the Orb's root. A type of a
-consumed interface, an import and a hook are compile errors where the runtime is linked, naming the
-item, until the native side covers them, and so is an `Option` of an `Option`, which the boundary's
-JSON cannot tell from `None`; a component build of the same module is unaffected.
+tuples of them, the types of an implemented interface among them, WIT resources as above, states
+and the resources of the Orb's root. A type of an implemented interface that holds a resource, a
+type of an imported interface, an import and a hook are compile errors where the runtime is linked,
+naming the item, until the native side covers them, and so is an `Option` of an `Option`, which the
+boundary's JSON cannot tell from `None`; a component build of the same module is unaffected.
 
 ## Items under `#[cfg]`
 

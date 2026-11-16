@@ -9,27 +9,30 @@
 //! arguments and result cross as the boundary's JSON, the form `tembra_contracts` validates,
 //! through a codec written from the WIT types, kind by kind: each type of the module that enters
 //! the WIT reads and writes its own JSON through a hidden trait of the Orb module, implemented in
-//! the type's module, where its members are visible. A `#[wit_resource]` struct is issued as a
-//! capability of its resource type: a function whose result holds one issues it into the call's
-//! result, as a portable method without a local entrypoint, and each method of the resource reads
-//! its `self` back from the call; the resource's functions are registered from its own module.
-//! With the `context` option, the Orb module gets a native `context`, whose functions read the
-//! call each method's future runs for. A service whose objects own a `#[state]` declares it in its
-//! factory, and its methods run in the scope of their object, whose state the state's `read` and
-//! `update` reach natively. The Orb's create declares each `#[resource]` of its root, into a table
-//! `orb()` builds for the Orb, and every method runs in the scope of its Orb, whose resources their
-//! `with` reaches natively. What the native side does not cover yet is a compile error inside the
-//! same wrapper, naming the item; a component build of the module is unaffected.
+//! the type's module, where its members are visible, and each data type of an interface the module
+//! implements through the same trait, implemented in the Orb module from the interface's WIT for
+//! the bindings' type. A `#[wit_resource]` struct is issued as a capability of its resource type:
+//! a function whose result holds one issues it into the call's result, as a portable method
+//! without a local entrypoint, and each method of the resource reads its `self` back from the
+//! call; the resource's functions are registered from its own module. With the `context` option,
+//! the Orb module gets a native `context`, whose functions read the call each method's future runs
+//! for. A service whose objects own a `#[state]` declares it in its factory, and its methods run in
+//! the scope of their object, whose state the state's `read` and `update` reach natively. The Orb's
+//! create declares each `#[resource]` of its root, into a table `orb()` builds for the Orb, and
+//! every method runs in the scope of its Orb, whose resources their `with` reaches natively. What
+//! the native side does not cover yet is a compile error inside the same wrapper, naming the item;
+//! a component build of the module is unaffected.
 use crate::{
     Analysis, Function, Newtype, Payload, Resource, Service, Shape, ShapeKind, WitResource,
-    camel_ident, metadata::Metadata, rust_ident, wit,
+    camel_ident, foreign::Role, metadata::Metadata, rust_ident, wit,
 };
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 use syn::{Ident, LitStr, Type, spanned::Spanned};
 use tembra_contracts::javascript_name;
+use wit_parser::{TypeDefKind, TypeId};
 
 /// The native output, by the module each part goes in: the Orb module's items, and the items of
 /// each sub-module declaring a service or a type that enters the WIT, by scope, which the
@@ -112,6 +115,13 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         }
     }
     let root = by_scope.remove(&0).unwrap_or_default();
+    // The JSON of each data type of an implemented interface, in the Orb module, from its WIT.
+    let consumed: Vec<TokenStream> = analysis
+        .consumed_types
+        .data_types()
+        .into_iter()
+        .filter_map(|id| consumed_codec(id, &analysis.consumed_types))
+        .collect();
     let inputs = analysis
         .inputs
         .as_ref()
@@ -135,9 +145,10 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         &calls,
     );
     let boundary =
-        (!analysis.shapes.is_empty() || !analysis.newtypes.is_empty()).then(boundary_trait);
+        (!analysis.shapes.is_empty() || !analysis.newtypes.is_empty() || !consumed.is_empty())
+            .then(boundary_trait);
     Native {
-        root: wrapped(quote! { #orb #boundary #(#root)* #context }),
+        root: wrapped(quote! { #orb #boundary #(#root)* #(#consumed)* #context }),
         nested: by_scope
             .into_iter()
             .map(|(scope, items)| (scope, wrapped(quote! { #(#items)* })))
@@ -1610,31 +1621,33 @@ fn spelled(ty: &Type) -> String {
     quote!(#ty).to_string().replace(' ', "").replace(',', ", ")
 }
 
-/// A WIT type as the codec reads and writes it, over the author's Rust type, in the JSON form of
-/// the boundary.
+/// A WIT type as the codec reads and writes it, over its Rust type, in the JSON form of the
+/// boundary: the author's type, borrowed, or the bindings' type of a consumed interface, spelled
+/// from its WIT.
 enum Kind<'a> {
     /// An unsigned integer, `bool`, `string` or `char`: serde's JSON, 64-bit integers as exact
     /// numbers.
-    Plain(&'a Type),
+    Plain(Cow<'a, Type>),
     /// A signed integer: serde's JSON, but `-0`, which the boundary refuses as an integer.
-    Signed(&'a Type),
+    Signed(Cow<'a, Type>),
     /// `f32` when `single`, else `f64`: a finite number other than `-0`, which an `f32` reads only
     /// when it narrows to such a number too, and writes as the `f64` it widens to, as a component
     /// writes it.
-    Float { ty: &'a Type, single: bool },
-    /// `list<t>`: a JSON array, read into the author's list type.
-    List(&'a Type, Box<Kind<'a>>),
+    Float { ty: Cow<'a, Type>, single: bool },
+    /// `list<t>`: a JSON array, read into the list type.
+    List(Cow<'a, Type>, Box<Kind<'a>>),
     /// `option<t>`: `null` or the value; `t` is no option.
     Option(Box<Kind<'a>>),
     /// `tuple<..>`: a JSON array of the elements.
     Tuple(Vec<Kind<'a>>),
     /// `result<ok, err>`: `{"tag": "ok" | "err", "val": ..}`, without `val` for a side `()`.
     Result(Option<Box<Kind<'a>>>, Option<Box<Kind<'a>>>),
-    /// A record, an enum, a variant, a flags or a newtype of the module: its own JSON, through the
-    /// boundary trait it implements.
-    Named(&'a Type),
+    /// A record, an enum, a variant, a flags or a newtype of the module, or a record, a variant,
+    /// an enum or a flags of a consumed interface: its own JSON, through the boundary trait it
+    /// implements.
+    Named(Cow<'a, Type>),
     /// Free JSON, `serde_json::Value`: a WIT `string` that holds its JSON text.
-    Json(&'a Type),
+    Json(Cow<'a, Type>),
     /// A `#[wit_resource]` struct of the module, only returned: the value is issued into the
     /// call's result, whose data names it by its index there.
     Resource(&'a Type),
@@ -1682,7 +1695,7 @@ fn kind<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>,
         reason: reason.to_owned(),
     };
     if wit::free_json(ty) {
-        return Ok(Kind::Json(ty));
+        return Ok(Kind::Json(Cow::Borrowed(ty)));
     }
     match ty {
         Type::Tuple(tuple) => Ok(Kind::Tuple(
@@ -1718,12 +1731,21 @@ fn kind<'a>(ty: &'a Type, scope: usize, analysis: &Analysis) -> Result<Kind<'a>,
             };
             match (segment.ident.to_string().as_str(), parameters.as_slice()) {
                 ("u8" | "u16" | "u32" | "u64" | "bool" | "char" | "String", _) => {
-                    Ok(Kind::Plain(ty))
+                    Ok(Kind::Plain(Cow::Borrowed(ty)))
                 }
-                ("i8" | "i16" | "i32" | "i64", _) => Ok(Kind::Signed(ty)),
-                ("f32", _) => Ok(Kind::Float { ty, single: true }),
-                ("f64", _) => Ok(Kind::Float { ty, single: false }),
-                ("Vec", [element]) => Ok(Kind::List(ty, Box::new(kind(element, scope, analysis)?))),
+                ("i8" | "i16" | "i32" | "i64", _) => Ok(Kind::Signed(Cow::Borrowed(ty))),
+                ("f32", _) => Ok(Kind::Float {
+                    ty: Cow::Borrowed(ty),
+                    single: true,
+                }),
+                ("f64", _) => Ok(Kind::Float {
+                    ty: Cow::Borrowed(ty),
+                    single: false,
+                }),
+                ("Vec", [element]) => Ok(Kind::List(
+                    Cow::Borrowed(ty),
+                    Box::new(kind(element, scope, analysis)?),
+                )),
                 ("Option", [inner]) => match kind(inner, scope, analysis)? {
                     Kind::Option(_) => Err(uncovered(
                         "a nested option, which the boundary's JSON cannot carry: it writes `None` and `Some(None)` alike, as `null`, so the portable profile refuses it, as `cargo tembra build` does",
@@ -1763,8 +1785,8 @@ fn argument<'a>(
 }
 
 /// The kind of a type of the module or of a consumed interface: a type that enters the WIT from
-/// the module reads and writes its own JSON, and a resource is issued; the others are refused,
-/// saying what they are.
+/// the module, a newtype and a type of an interface the module implements read and write their
+/// own JSON, and a resource is issued; the others are refused, saying what they are.
 fn named<'a>(
     ty: &'a Type,
     ident: &Ident,
@@ -1772,14 +1794,30 @@ fn named<'a>(
     analysis: &Analysis,
 ) -> Result<Kind<'a>, Uncovered<'a>> {
     let reason = if let Some(named) = analysis.consumed_modules.named(ty, scope) {
-        format!(
-            "a type of the consumed interface {}; consumed types are not supported natively yet",
-            named.interface.identity
-        )
+        let identity = &named.interface.identity;
+        // A type of an interface the module implements is the bindings' type, which the codec
+        // reads from the interface's WIT.
+        let defined = (named.interface.role == Role::Implemented)
+            .then(|| analysis.consumed_types.named(identity, named.ident))
+            .flatten();
+        match defined {
+            Some(defined) => {
+                let depth = analysis.modules[scope].len();
+                match wit_kind(defined, &analysis.consumed_types, depth) {
+                    Ok(kind) => return Ok(kind),
+                    Err(what) => format!(
+                        "a type of the implemented interface {identity} that is or holds {what}, which the native side does not cover yet"
+                    ),
+                }
+            }
+            None => format!(
+                "a type of the consumed interface {identity}; consumed types are not supported natively yet"
+            ),
+        }
     } else if analysis.shapes.iter().any(|shape| shape.ident == *ident)
         || analysis.consumed_modules.newtype(ty, scope).is_some()
     {
-        return Ok(Kind::Named(ty));
+        return Ok(Kind::Named(Cow::Borrowed(ty)));
     } else if analysis
         .wit_resources
         .iter()
@@ -2316,22 +2354,11 @@ fn newtype_codec(newtype: &Newtype, analysis: &Analysis) -> Result<TokenStream, 
     })?;
     let read = decode(&kind, quote! { value }, &boundary);
     let written = encode(&kind, quote! { self.0 }, &boundary);
-    Ok(quote! {
-        impl #boundary for #ident {
-            fn decode(
-                value: ::tembra::serde_json::Value,
-            ) -> ::core::result::Result<Self, ::std::string::String> {
-                <Self as ::core::convert::TryFrom<#inner>>::try_from(#read?)
-                    .map_err(|error| ::std::string::ToString::to_string(&error))
-            }
-
-            fn encode(
-                self,
-            ) -> ::core::result::Result<::tembra::serde_json::Value, ::std::string::String> {
-                #written
-            }
-        }
-    })
+    let decode = quote! {
+        <Self as ::core::convert::TryFrom<#inner>>::try_from(#read?)
+            .map_err(|error| ::std::string::ToString::to_string(&error))
+    };
+    Ok(boundary_impl(&boundary, quote! { #ident }, decode, written))
 }
 
 /// The JSON of a type of the module that enters the WIT, as its impl of the boundary trait, in its
@@ -2363,26 +2390,7 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
         }
         ShapeKind::Enum(cases) => {
             let tags: Vec<String> = cases.iter().map(wit::kebab).collect();
-            let cases: Vec<Ident> = tags.iter().map(|tag| camel_ident(tag)).collect();
-            let decode = quote! {
-                match value {
-                    ::tembra::serde_json::Value::String(case) => match case.as_str() {
-                        #(#tags => ::core::result::Result::Ok(Self::#cases),)*
-                        other => ::core::result::Result::Err(
-                            ::std::format!("unknown case `{}`", other)
-                        ),
-                    },
-                    _ => ::core::result::Result::Err(::std::string::String::from(
-                        "expected an enum case as a string",
-                    )),
-                }
-            };
-            let encode = quote! {
-                ::core::result::Result::Ok(::tembra::serde_json::Value::String(
-                    ::std::string::String::from(match self { #(Self::#cases => #tags,)* })
-                ))
-            };
-            (decode, encode)
+            enum_codec(&tags)
         }
         ShapeKind::Variant(cases) => {
             let mut reads = Vec::new();
@@ -2396,21 +2404,15 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
                 };
                 match payload {
                     Payload::None => {
-                        let read = quote! { ::core::result::Result::Ok(Self::#named) };
-                        reads.push((tag.clone(), Read::Bare(read)));
-                        let written = tagged_encode(&tag, None);
-                        writes.push(quote! { Self::#named => #written });
+                        let (read, written) = variant_case(&tag, &named, None, &boundary);
+                        reads.push(read);
+                        writes.push(written);
                     }
                     Payload::Unnamed(ty) => {
                         let kind = member(ty, format!("the case `{ident}::{case}` carries"))?;
-                        let read = decode(&kind, quote! { item }, &boundary);
-                        reads.push((
-                            tag.clone(),
-                            Read::Carried(quote! { #read.map(Self::#named) }),
-                        ));
-                        let written = encode(&kind, quote! { item }, &boundary);
-                        let written = tagged_encode(&tag, Some(quote! { #written? }));
-                        writes.push(quote! { Self::#named(item) => #written });
+                        let (read, written) = variant_case(&tag, &named, Some(&kind), &boundary);
+                        reads.push(read);
+                        writes.push(written);
                     }
                     // Only in an enum the macro converts: the author's case, with its fields.
                     Payload::Named(fields) => {
@@ -2488,8 +2490,19 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
             (decode, encode)
         }
     };
-    Ok(quote! {
-        impl #boundary for #ident {
+    Ok(boundary_impl(&boundary, quote! { #ident }, decode, encode))
+}
+
+/// The impl of the boundary trait, as `boundary` names it, for `target`, with `decode`, which
+/// reads `value`, and `encode`, which writes `self`.
+fn boundary_impl(
+    boundary: &TokenStream,
+    target: TokenStream,
+    decode: TokenStream,
+    encode: TokenStream,
+) -> TokenStream {
+    quote! {
+        impl #boundary for #target {
             fn decode(
                 value: ::tembra::serde_json::Value,
             ) -> ::core::result::Result<Self, ::std::string::String> {
@@ -2502,5 +2515,266 @@ fn shape_codec(shape: &Shape, analysis: &Analysis) -> Result<TokenStream, Refuse
                 #encode
             }
         }
-    })
+    }
+}
+
+/// The JSON of an enum whose cases' WIT names are `tags`, which the bindings name in
+/// UpperCamelCase: the WIT name of its case, read from `value` and written from `self`.
+fn enum_codec(tags: &[String]) -> (TokenStream, TokenStream) {
+    let cases: Vec<Ident> = tags.iter().map(|tag| camel_ident(tag)).collect();
+    let decode = quote! {
+        match value {
+            ::tembra::serde_json::Value::String(case) => match case.as_str() {
+                #(#tags => ::core::result::Result::Ok(Self::#cases),)*
+                other => ::core::result::Result::Err(
+                    ::std::format!("unknown case `{}`", other)
+                ),
+            },
+            _ => ::core::result::Result::Err(::std::string::String::from(
+                "expected an enum case as a string",
+            )),
+        }
+    };
+    let encode = quote! {
+        ::core::result::Result::Ok(::tembra::serde_json::Value::String(
+            ::std::string::String::from(match self { #(Self::#cases => #tags,)* })
+        ))
+    };
+    (decode, encode)
+}
+
+/// How the case `named` of a variant, `tag` in the WIT, crosses: the case read for
+/// `tagged_decode`, and the arm writing it, with its payload of the kind given, if it carries one.
+fn variant_case(
+    tag: &str,
+    named: &Ident,
+    payload: Option<&Kind<'_>>,
+    boundary: &TokenStream,
+) -> ((String, Read), TokenStream) {
+    match payload {
+        None => {
+            let read = quote! { ::core::result::Result::Ok(Self::#named) };
+            let written = tagged_encode(tag, None);
+            (
+                (tag.to_owned(), Read::Bare(read)),
+                quote! { Self::#named => #written },
+            )
+        }
+        Some(kind) => {
+            let read = decode(kind, quote! { item }, boundary);
+            let written = encode(kind, quote! { item }, boundary);
+            let written = tagged_encode(tag, Some(quote! { #written? }));
+            (
+                (
+                    tag.to_owned(),
+                    Read::Carried(quote! { #read.map(Self::#named) }),
+                ),
+                quote! { Self::#named(item) => #written },
+            )
+        }
+    }
+}
+
+/// The JSON of a record, a variant, an enum or a flags of a consumed interface, by its id in
+/// `types`, as its bindings' type's impl of the boundary trait, in the Orb module, written from
+/// its WIT as the codec writes the module's own types: a record as an object of its fields, keyed
+/// by the lowerCamelCase form of their WIT names; an enum as the WIT name of its case; a variant as
+/// an object of its case's `tag` and payload, `val`; a flags, which the bindings generate with
+/// `bitflags`, as an object of the flags set, each `true`, which reads a flag left out as unset.
+/// The members are named as the bindings generate them. None for a type holding what the codec
+/// does not cover, which a method that takes or returns it refuses.
+fn consumed_codec(id: TypeId, types: &wit::ConsumedTypes) -> Option<TokenStream> {
+    let boundary = format_ident!("{BOUNDARY}");
+    let boundary = quote! { #boundary };
+    let kind = |ty: wit_parser::Type| wit_kind(ty, types, 0).ok();
+    let Ok((_, definition)) = types.definition(wit_parser::Type::Id(id)) else {
+        return None;
+    };
+    let (decode, encode) = match definition {
+        TypeDefKind::Record(record) => {
+            let members = record
+                .fields
+                .iter()
+                .map(|field| {
+                    Some(Member {
+                        field: rust_ident(&field.name),
+                        key: javascript_name(&field.name),
+                        kind: kind(field.ty)?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let bound = elements(members.len());
+            let fields = members.iter().map(|member| &member.field);
+            let decode = record_decode(quote! { value }, quote! { Self }, &members, &boundary);
+            let encode = record_encode(&bound, &members, &boundary);
+            (
+                decode,
+                quote! { let Self { #(#fields: #bound),* } = self; #encode },
+            )
+        }
+        TypeDefKind::Enum(enumeration) => {
+            let tags: Vec<String> = enumeration
+                .cases
+                .iter()
+                .map(|case| case.name.clone())
+                .collect();
+            enum_codec(&tags)
+        }
+        TypeDefKind::Variant(variant) => {
+            let mut reads = Vec::new();
+            let mut writes = Vec::new();
+            for case in &variant.cases {
+                let payload = match case.ty {
+                    Some(ty) => Some(kind(ty)?),
+                    None => None,
+                };
+                let named = camel_ident(&case.name);
+                let (read, written) = variant_case(&case.name, &named, payload.as_ref(), &boundary);
+                reads.push(read);
+                writes.push(written);
+            }
+            let decode = tagged_decode(quote! { value }, "a variant", reads);
+            (decode, quote! { match self { #(#writes,)* } })
+        }
+        TypeDefKind::Flags(flags) => {
+            let names: Vec<Ident> = flags
+                .flags
+                .iter()
+                .map(|flag| format_ident!("{}", flag.name.to_shouty_snake_case()))
+                .collect();
+            let keys: Vec<String> = flags
+                .flags
+                .iter()
+                .map(|flag| javascript_name(&flag.name))
+                .collect();
+            let decode = quote! {
+                match value {
+                    ::tembra::serde_json::Value::Object(object) => {
+                        let mut flags = Self::empty();
+                        for (key, set) in object {
+                            let flag = match key.as_str() {
+                                #(#keys => Self::#names,)*
+                                _ => {
+                                    return ::core::result::Result::Err(
+                                        ::std::format!("unknown flag `{}`", key)
+                                    );
+                                }
+                            };
+                            match set {
+                                ::tembra::serde_json::Value::Bool(set) => flags.set(flag, set),
+                                _ => {
+                                    return ::core::result::Result::Err(::std::format!(
+                                        "expected the flag `{}` as a boolean",
+                                        key
+                                    ));
+                                }
+                            }
+                        }
+                        ::core::result::Result::Ok(flags)
+                    }
+                    _ => ::core::result::Result::Err(::std::string::String::from(
+                        "expected flags as an object of booleans",
+                    )),
+                }
+            };
+            let encode = quote! {
+                let mut flags = ::tembra::serde_json::Map::new();
+                #(
+                    if self.contains(Self::#names) {
+                        flags.insert(
+                            ::std::string::String::from(#keys),
+                            ::tembra::serde_json::Value::Bool(true),
+                        );
+                    }
+                )*
+                ::core::result::Result::Ok(::tembra::serde_json::Value::Object(flags))
+            };
+            (decode, encode)
+        }
+        _ => return None,
+    };
+    Some(boundary_impl(&boundary, types.path(id, 0), decode, encode))
+}
+
+/// The kind of a WIT type of a consumed interface, as its bindings generate it, read in a module
+/// `depth` levels below the Orb module: a record, a variant, an enum or a flags through the
+/// boundary trait its bindings' type implements, by its path from there, which only one the codec
+/// covers whole implements; anything else by its structure, a list read into a `Vec`. Or what the
+/// type is or holds that the codec does not cover.
+fn wit_kind(
+    ty: wit_parser::Type,
+    types: &wit::ConsumedTypes,
+    depth: usize,
+) -> Result<Kind<'static>, &'static str> {
+    use wit_parser::Type as Wit;
+    let owned = |ty: TokenStream| Cow::Owned(syn::parse2::<Type>(ty).expect("a Rust type"));
+    let (id, definition) = match types.definition(ty) {
+        Ok(defined) => defined,
+        Err(primitive) => {
+            return Ok(match primitive {
+                Wit::Bool => Kind::Plain(owned(quote! { bool })),
+                Wit::U8 => Kind::Plain(owned(quote! { u8 })),
+                Wit::U16 => Kind::Plain(owned(quote! { u16 })),
+                Wit::U32 => Kind::Plain(owned(quote! { u32 })),
+                Wit::U64 => Kind::Plain(owned(quote! { u64 })),
+                Wit::Char => Kind::Plain(owned(quote! { char })),
+                Wit::String => Kind::Plain(owned(quote! { ::std::string::String })),
+                Wit::S8 => Kind::Signed(owned(quote! { i8 })),
+                Wit::S16 => Kind::Signed(owned(quote! { i16 })),
+                Wit::S32 => Kind::Signed(owned(quote! { i32 })),
+                Wit::S64 => Kind::Signed(owned(quote! { i64 })),
+                Wit::F32 => Kind::Float {
+                    ty: owned(quote! { f32 }),
+                    single: true,
+                },
+                Wit::F64 => Kind::Float {
+                    ty: owned(quote! { f64 }),
+                    single: false,
+                },
+                Wit::ErrorContext => return Err("an error context"),
+                Wit::Id(_) => unreachable!("a type through its aliases is a definition"),
+            });
+        }
+    };
+    let kind = |ty: Wit| wit_kind(ty, types, depth);
+    let side = |ty: Option<Wit>| ty.map(|ty| kind(ty).map(Box::new)).transpose();
+    match definition {
+        TypeDefKind::Record(record) => {
+            for field in &record.fields {
+                kind(field.ty)?;
+            }
+            Ok(Kind::Named(owned(types.path(id, depth))))
+        }
+        TypeDefKind::Variant(variant) => {
+            for payload in variant.cases.iter().filter_map(|case| case.ty) {
+                kind(payload)?;
+            }
+            Ok(Kind::Named(owned(types.path(id, depth))))
+        }
+        TypeDefKind::Enum(_) | TypeDefKind::Flags(_) => {
+            Ok(Kind::Named(owned(types.path(id, depth))))
+        }
+        TypeDefKind::Option(inner) => match kind(*inner)? {
+            Kind::Option(_) => Err("a nested option, which the boundary's JSON cannot carry"),
+            inner => Ok(Kind::Option(Box::new(inner))),
+        },
+        TypeDefKind::List(inner) => Ok(Kind::List(
+            owned(quote! { ::std::vec::Vec<_> }),
+            Box::new(kind(*inner)?),
+        )),
+        TypeDefKind::Tuple(tuple) => Ok(Kind::Tuple(
+            tuple
+                .types
+                .iter()
+                .map(|ty| kind(*ty))
+                .collect::<Result<_, _>>()?,
+        )),
+        TypeDefKind::Result(result) => Ok(Kind::Result(side(result.ok)?, side(result.err)?)),
+        TypeDefKind::Resource | TypeDefKind::Handle(_) => Err("a resource"),
+        TypeDefKind::Future(_) => Err("a future"),
+        TypeDefKind::Stream(_) => Err("a stream"),
+        TypeDefKind::Map(..) => Err("a map"),
+        TypeDefKind::FixedLengthList(..) => Err("a list of a fixed length"),
+        TypeDefKind::Type(_) | TypeDefKind::Unknown => Err("a type the macro does not know"),
+    }
 }

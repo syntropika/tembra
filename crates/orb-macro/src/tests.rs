@@ -5430,24 +5430,93 @@ fn a_tembra_result_is_the_error_channel_of_a_native_method() {
     );
 }
 
-/// A type of a consumed interface has no native codec yet: a method taking or returning one is
-/// refused the same way, naming the method, the type and its interface, and so is a type of the
-/// module holding one, naming the field.
+/// A type of an interface the module implements is the bindings' type, which reads and writes its
+/// JSON through the boundary trait, implemented in the Orb module from the interface's WIT: a
+/// record by the bindings' fields, keyed by the lowerCamelCase form of their WIT names, an enum by
+/// the WIT names of its cases, a variant as `{tag, val}`, a flags, which the bindings generate with
+/// `bitflags`, as an object of the flags set. Each is named from the module of the interface that
+/// defines it, under `exports` for the implemented one and at the root for one it `use`s, which the
+/// world imports; an alias of a list reads as the list. A method of a sub-module and a record of
+/// the module name them as the author does, through the implemented interface's module, and a type
+/// holding a resource is refused, naming what it holds.
 #[test]
-fn the_native_side_refuses_consumed_types_yet() {
-    let dir = consumed("native-consumed", LEDGER_WIT);
-    let module = orb_with(options("example:keeper@1.0.0", Some(&dir)), KEEPER)
-        .unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(
-        native(&module, &[]),
-        ":: core :: compile_error ! (\"`Keeper::add` takes `book::Entry`, a type of the consumed interface example:ledger/book@1.0.0; consumed types are not supported natively yet\") ;"
-    );
+fn a_type_of_an_implemented_interface_gets_its_codec_from_the_wit() {
     let dir = consumed(
-        "native-consumed-field",
+        "native-implemented-types",
         "package example:ledger@1.0.0;
+        interface money {
+          enum currency { eur, usd }
+        }
         interface book {
-          record entry { label: string, amount: s64 }
-          total: func() -> s64;
+          use money.{currency};
+          flags marks { audited, disputed-once }
+          record entry { label: string, amount: s64, currency: currency, marks: marks }
+          variant outcome { recorded(u32), refused(string), empty }
+          type entries = list<entry>;
+          add: func(entry: entry) -> outcome;
+          all: func() -> entries;
+        }
+        world keeper { export book; }",
+    );
+    let module = orb_with(
+        options("example:keeper@1.0.0", Some(&dir)),
+        "mod keeper {
+            pub mod books {
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper {
+                    pub fn add(entry: super::book::Entry) -> super::book::Outcome { todo!() }
+                    pub fn all() -> super::book::Entries { todo!() }
+                }
+            }
+            pub struct Order { pub entry: book::Entry, pub count: u32 }
+            #[service]
+            pub struct Orders;
+            impl Orders { pub fn place(order: Order) -> u32 { 0 } }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let root = native(&module, &[]);
+    for expected in [
+        "impl __TembraBoundary for exports :: example :: ledger :: book :: Entry {",
+        "label : match object . remove (\"label\") { :: core :: option :: Option :: Some (item) => :: tembra :: serde_json :: from_value :: < :: std :: string :: String > (item)",
+        "currency : match object . remove (\"currency\") { :: core :: option :: Option :: Some (item) => < self :: example :: ledger :: money :: Currency as __TembraBoundary > :: decode (item) ?",
+        "let Self { label : __tembra_0 , amount : __tembra_1 , currency : __tembra_2 , marks : __tembra_3 } = self ;",
+        "impl __TembraBoundary for self :: example :: ledger :: money :: Currency {",
+        "\"usd\" => :: core :: result :: Result :: Ok (Self :: Usd) ,",
+        "impl __TembraBoundary for exports :: example :: ledger :: book :: Marks {",
+        "let mut flags = Self :: empty () ;",
+        "\"disputedOnce\" => Self :: DISPUTED_ONCE ,",
+        ":: tembra :: serde_json :: Value :: Bool (set) => flags . set (flag , set) ,",
+        "if self . contains (Self :: DISPUTED_ONCE) { flags . insert (:: std :: string :: String :: from (\"disputedOnce\") , :: tembra :: serde_json :: Value :: Bool (true) ,) ; }",
+        "impl __TembraBoundary for exports :: example :: ledger :: book :: Outcome {",
+        "(\"recorded\" , :: core :: option :: Option :: Some (item)) => :: tembra :: serde_json :: from_value :: < u32 > (item) . map_err (| error | error . to_string ()) . map (Self :: Recorded) ,",
+        "(\"empty\" , :: core :: option :: Option :: None) => :: core :: result :: Result :: Ok (Self :: Empty) ,",
+        // A record of the module holding one names it as the author does.
+        "impl __TembraBoundary for Order {",
+        "entry : match object . remove (\"entry\") { :: core :: option :: Option :: Some (item) => < exports :: example :: ledger :: book :: Entry as __TembraBoundary > :: decode (item) ?",
+    ] {
+        assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    let books = native(&module, &["books"]);
+    for expected in [
+        "const __TEMBRA_CODEC_ADD : :: tembra :: Codec < (super :: book :: Entry ,) , super :: book :: Outcome >",
+        "< super :: exports :: example :: ledger :: book :: Entry as super :: __TembraBoundary > :: decode (__tembra_0) ?",
+        "< super :: exports :: example :: ledger :: book :: Outcome as super :: __TembraBoundary > :: encode (value)",
+        "value . into_iter () . map (| item | < super :: exports :: example :: ledger :: book :: Entry as super :: __TembraBoundary > :: encode (item))",
+    ] {
+        assert!(books.contains(expected), "{expected}\n{books}");
+    }
+    let dir = consumed(
+        "native-implemented-resource",
+        "package example:ledger@1.0.0;
+        interface texts {
+          resource builder;
+        }
+        interface book {
+          use texts.{builder};
+          record entry { label: string, builder: builder }
+          add: func(entry: entry) -> u32;
         }
         world keeper { export book; }",
     );
@@ -5456,17 +5525,13 @@ fn the_native_side_refuses_consumed_types_yet() {
         "mod keeper {
             #[service(\"example:ledger/book@1.0.0\")]
             pub struct Keeper;
-            impl Keeper { pub fn total() -> i64 { 0 } }
-            pub struct Order { pub entry: book::Entry, pub count: u32 }
-            #[service]
-            pub struct Orders;
-            impl Orders { pub fn place(order: Order) -> u32 { 0 } }
+            impl Keeper { pub fn add(entry: book::Entry) -> u32 { 0 } }
         }",
     )
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         native(&module, &[]),
-        ":: core :: compile_error ! (\"the field `entry` of `Order` is `book::Entry`, a type of the consumed interface example:ledger/book@1.0.0; consumed types are not supported natively yet\") ;"
+        ":: core :: compile_error ! (\"`Keeper::add` takes `book::Entry`, a type of the implemented interface example:ledger/book@1.0.0 that is or holds a resource, which the native side does not cover yet\") ;"
     );
 }
 

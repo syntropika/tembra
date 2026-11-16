@@ -2,10 +2,11 @@
 //! into a component; the tests of this crate are a native host instead, which installs
 //! `calculator::orb()` and calls its services locally, with Rust values, and portably, with the
 //! boundary's JSON, and whose methods read their call through the kernel's `context`, their
-//! object's state and the resources of the Orb's root, as a component's do. The module `notebook`
-//! takes host values, which only a native host can lend, `library` shares its root's value among
-//! its objects, and `worker` only runs its root and a resource of it. The manifest names every Orb
-//! of the crate `calculator` at API version 2, which `orb()` reports.
+//! object's state and the resources of the Orb's root, as a component's do. The module `keeper`
+//! implements an interface of the package in `wit/`, whose types are the bindings'. The module
+//! `notebook` takes host values, which only a native host can lend, `library` shares its root's
+//! value among its objects, and `worker` only runs its root and a resource of it. The manifest names
+//! every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 
 use std::cell::{Cell, RefCell};
 
@@ -646,6 +647,68 @@ pub mod calculator {
                 .partition(|measure| measure.unit == unit);
             let others = others.into_iter().map(|measure| measure.unit).collect();
             (Count::from(same.len() as u32), others)
+        }
+    }
+}
+
+/// Keeps a book of `example:ledger/book@1.0.0`, an interface of the package in `wit/` this Orb
+/// implements: its record, variant, enums and flags are the types the bindings generate from that
+/// WIT, which a native caller passes as they are and a portable one as the boundary's JSON.
+#[tembra::orb(package = "example:keeper@1.0.0", wit = "wit")]
+pub mod keeper {
+    use std::cell::RefCell;
+
+    std::thread_local! {
+        /// The entries recorded so far, in order: a service's data lives outside its objects, as
+        /// in the compiled fixtures.
+        static ENTRIES: RefCell<Vec<book::Entry>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[service("example:ledger/book@1.0.0")]
+    pub struct Keeper;
+
+    impl Keeper {
+        /// Record the entry, unless it moves no amount, and answer the balance after it.
+        pub fn add(entry: book::Entry) -> book::Outcome {
+            if entry.amount == 0 {
+                return book::Outcome::Refused(format!("`{}` moves no amount", entry.label));
+            }
+            ENTRIES.with(|entries| {
+                let mut entries = entries.borrow_mut();
+                entries.push(entry);
+                book::Outcome::Recorded(entries.iter().map(signed).sum())
+            })
+        }
+
+        /// The entries recorded in the direction, or all of them, in order.
+        pub fn entries(direction: Option<book::Direction>) -> Vec<book::Entry> {
+            ENTRIES.with(|entries| {
+                entries
+                    .borrow()
+                    .iter()
+                    .filter(|entry| direction.is_none_or(|direction| entry.direction == direction))
+                    .cloned()
+                    .collect()
+            })
+        }
+
+        /// The last entries recorded, at most `count` of them, in order: the interface's alias of
+        /// a list of entries, which the bindings name `book::Journal`.
+        pub fn recent(count: u32) -> book::Journal {
+            ENTRIES.with(|entries| {
+                let entries = entries.borrow();
+                let from = entries.len().saturating_sub(count as usize);
+                entries[from..].to_vec()
+            })
+        }
+    }
+
+    /// The amount an entry adds to the balance: its amount for a credit, the opposite for a debit.
+    fn signed(entry: &book::Entry) -> i64 {
+        let amount = entry.amount as i64;
+        match entry.direction {
+            book::Direction::Credit => amount,
+            book::Direction::Debit => -amount,
         }
     }
 }

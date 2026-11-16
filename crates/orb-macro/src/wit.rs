@@ -974,6 +974,138 @@ pub(crate) fn consumed<'a>(
         .collect()
 }
 
+/// The data types of consumed interfaces as their bindings generate them, which a native codec
+/// reads and writes: the interfaces read from the consumed packages, by identity, with those the
+/// world exports, whose types the bindings generate under `exports`; they generate the types of
+/// every other interface at the root, where the world imports it. An interface the module
+/// implements is read as exported, one it imports would be read as imported.
+#[derive(Default)]
+pub(crate) struct ConsumedTypes {
+    resolve: Resolve,
+    interfaces: BTreeMap<String, wit_parser::InterfaceId>,
+    exported: BTreeSet<String>,
+}
+
+impl ConsumedTypes {
+    /// Read the interfaces `interfaces` of the packages of `dir`, each with whether the world
+    /// exports it.
+    pub(crate) fn read<'a>(
+        dir: &Path,
+        interfaces: impl IntoIterator<Item = (&'a str, bool)>,
+    ) -> syn::Result<Self> {
+        let resolve = resolve(dir)?;
+        let mut read = BTreeMap::new();
+        let mut exported = BTreeSet::new();
+        for (identity, exports) in interfaces {
+            let id = resolve
+                .interfaces
+                .iter()
+                .find(|(id, _)| resolve.id_of(*id).as_deref() == Some(identity))
+                .map(|(id, _)| id)
+                .ok_or_else(|| {
+                    error(format!(
+                        "{identity} is not an interface of the WIT packages in {}",
+                        dir.display()
+                    ))
+                })?;
+            read.insert(identity.to_owned(), id);
+            if exports {
+                exported.insert(identity.to_owned());
+            }
+        }
+        Ok(Self {
+            resolve,
+            interfaces: read,
+            exported,
+        })
+    }
+
+    /// The type of the interface `identity` the bindings name `ident`, `Entry` in the author's
+    /// `book::Entry`: one the interface defines or `use`s.
+    pub(crate) fn named(&self, identity: &str, ident: &Ident) -> Option<wit_parser::Type> {
+        let interface = &self.resolve.interfaces[*self.interfaces.get(identity)?];
+        interface
+            .types
+            .iter()
+            .find(|(name, _)| crate::type_ident(name) == *ident)
+            .map(|(_, id)| wit_parser::Type::Id(*id))
+    }
+
+    /// What a type is, through its aliases: a primitive, or the definition of a type.
+    pub(crate) fn definition(
+        &self,
+        ty: wit_parser::Type,
+    ) -> Result<(wit_parser::TypeId, &TypeDefKind), wit_parser::Type> {
+        match dealias(&self.resolve, ty) {
+            wit_parser::Type::Id(id) => Ok((id, &self.resolve.types[id].kind)),
+            primitive => Err(primitive),
+        }
+    }
+
+    /// The bindings' type of a record, a variant, an enum or a flags, as a module `depth` levels
+    /// below the Orb module names it: the module of the interface that defines it, under `exports`
+    /// when the world exports that interface and at the root when it imports it, then its name.
+    pub(crate) fn path(&self, id: wit_parser::TypeId, depth: usize) -> proc_macro2::TokenStream {
+        let definition = &self.resolve.types[id];
+        let identity = match definition.owner {
+            wit_parser::TypeOwner::Interface(owner) => self.resolve.id_of(owner),
+            _ => None,
+        }
+        .unwrap_or_default();
+        let ident = crate::type_ident(definition.name.as_deref().unwrap_or_default());
+        let path = crate::hook_path(&identity);
+        let module = if self.exported.contains(&identity) {
+            crate::export_module(depth, &path)
+        } else {
+            crate::import_module(depth, &path)
+        };
+        quote::quote! { #module::#ident }
+    }
+
+    /// Every record, variant, enum and flags the interfaces read define or `use`, and every one
+    /// those hold, each once, in the order the interfaces list them.
+    pub(crate) fn data_types(&self) -> Vec<wit_parser::TypeId> {
+        let mut found = Vec::new();
+        let mut pending: Vec<wit_parser::Type> = self
+            .interfaces
+            .values()
+            .flat_map(|id| self.resolve.interfaces[*id].types.values())
+            .map(|id| wit_parser::Type::Id(*id))
+            .rev()
+            .collect();
+        let mut seen = BTreeSet::new();
+        while let Some(ty) = pending.pop() {
+            let Ok((id, kind)) = self.definition(ty) else {
+                continue;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            if matches!(
+                kind,
+                TypeDefKind::Record(_)
+                    | TypeDefKind::Variant(_)
+                    | TypeDefKind::Enum(_)
+                    | TypeDefKind::Flags(_)
+            ) {
+                found.push(id);
+            }
+            let held: Vec<wit_parser::Type> = match kind {
+                TypeDefKind::Record(record) => record.fields.iter().map(|field| field.ty).collect(),
+                TypeDefKind::Variant(variant) => {
+                    variant.cases.iter().filter_map(|case| case.ty).collect()
+                }
+                TypeDefKind::Tuple(tuple) => tuple.types.clone(),
+                TypeDefKind::Option(inner) | TypeDefKind::List(inner) => vec![*inner],
+                TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).collect(),
+                _ => Vec::new(),
+            };
+            pending.extend(held.into_iter().rev());
+        }
+        found
+    }
+}
+
 /// What a consumed interface defines, as the bindings name it: each of its types and resources, in
 /// the order of the interface's text, by the name the bindings give it.
 pub(crate) struct Defined {

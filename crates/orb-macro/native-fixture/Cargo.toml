@@ -20,11 +20,13 @@ archive = []
 [dependencies]
 # What an Orb crate depends on: the facade's authoring entry point, without the host runtime.
 tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
-# The component side the macro generates names wit-bindgen; `async` for the async method.
+# The component side the macro generates names wit-bindgen; `async` for the async method, and
+# `bitflags` for the flags of the ledger's interface, which the bindings generate with it.
 wit-bindgen = { version = "=0.63.0", default-features = false, features = [
   "macros",
   "realloc",
   "async",
+  "bitflags",
 ] }
 # The free JSON the memo's methods take and return, `serde_json::Value`; the code the macro
 # generates for a state names it too, with serde.

@@ -1398,6 +1398,9 @@ struct Analysis {
     consumed: BTreeMap<String, wit::Consumed>,
     /// The modules the Orb module re-exports for the consumed interfaces.
     consumed_modules: foreign::Modules,
+    /// The data types of the implemented interfaces, as their bindings generate them, which the
+    /// native codecs read and write.
+    consumed_types: wit::ConsumedTypes,
     /// The view of each interface imported by key.
     views: Vec<keyed::View>,
     /// The directory of the consumed WIT packages, absolute, when the attribute names one.
@@ -2092,6 +2095,15 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
             ));
         }
     };
+    // The data types of the implemented interfaces, for the native codecs: the world exports
+    // those interfaces, so the bindings generate their types under `exports`.
+    let consumed_types = match &wit_dir {
+        Some(dir) if !implemented.is_empty() => wit::ConsumedTypes::read(
+            dir,
+            implemented.iter().map(|identity| (identity.as_str(), true)),
+        )?,
+        _ => wit::ConsumedTypes::default(),
+    };
     // The callback of a contributed hook, or of a declared one named from a consumed package, is
     // read from that package; a hook derived from `input = Type` needs no directory.
     let consumed_hooks: Vec<&String> = hooks
@@ -2529,6 +2541,7 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         callbacks,
         consumed,
         consumed_modules,
+        consumed_types,
         views,
         wit_dir,
         shapes,
