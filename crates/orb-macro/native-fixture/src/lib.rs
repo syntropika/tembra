@@ -6,6 +6,20 @@
 //! `library` shares its root's value among its objects, and `worker` only runs its root. The
 //! manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 
+use std::cell::Cell;
+
+std::thread_local! {
+    /// How far from the origin, along each axis, the walkers of the Orbs this thread hosts may
+    /// stand: the rule of the walker's state reads it, so a test narrows it before a reload.
+    static GRID: Cell<i64> = const { Cell::new(1000) };
+}
+
+/// Set how far from the origin, along each axis, the walkers of the Orbs this thread hosts may
+/// stand: 1000 steps, unless a test narrows it.
+pub fn set_grid(steps: i64) {
+    GRID.with(|grid| grid.set(steps));
+}
+
 #[tembra::orb(package = "example:calculator@1.0.0", context)]
 pub mod calculator {
     /// Arithmetic over plain values: numbers, strings, characters, lists, options and tuples.
@@ -223,6 +237,79 @@ pub mod calculator {
             let off = headings.iter().filter(|heading| heading.is_none()).count() as u32;
             let result = if off == 0 { Ok(()) } else { Err(off) };
             (headings, result)
+        }
+    }
+
+    /// Where a walker stands, which the kernel keeps for each walker object: a method reads and
+    /// updates it through the kernel, natively as in a component. The kernel keeps it as the JSON
+    /// serde writes, the same in both, which is that of the runtime fixture's walker: `{"at": {"x":
+    /// 0, "y": 0}, "facing": "North", "moves": 0}` to start with.
+    #[state(service = Walker)]
+    #[derive(Debug, PartialEq)]
+    pub struct Position {
+        pub at: Point,
+        pub facing: Heading,
+        pub moves: u32,
+    }
+
+    /// A walker starts at the origin, facing north, without a move.
+    impl Default for Position {
+        fn default() -> Self {
+            Position {
+                at: Point { x: 0, y: 0 },
+                facing: Heading::North,
+                moves: 0,
+            }
+        }
+    }
+
+    impl Position {
+        /// The rule of the state: a walker stays on the grid, at most 1000 steps from the origin
+        /// along each axis, or as many as `set_grid` says. The kernel keeps where it stood when an
+        /// update breaks it, and the running code when a reload inherits a walker it breaks.
+        #[validate]
+        pub fn on_grid(&self) -> Result<(), String> {
+            let steps = super::GRID.with(std::cell::Cell::get);
+            if self.at.x.abs() > steps || self.at.y.abs() > steps {
+                return Err(format!("({}, {}) is off the grid", self.at.x, self.at.y));
+            }
+            Ok(())
+        }
+    }
+
+    /// Walks the plotter's grid: the kernel keeps where each walker object stands.
+    #[service]
+    pub struct Walker;
+
+    impl Walker {
+        /// Make the moves from where the walker stands, heading as it faces, and return where it
+        /// ends, or why the kernel keeps it where it stood.
+        pub fn walk(path: Vec<moves::Move>) -> Result<Position, String> {
+            Position::update(|position| {
+                for step in &path {
+                    match *step {
+                        moves::Move::Turn(heading) => position.facing = heading,
+                        moves::Move::Step(count) => {
+                            position.at =
+                                Plotter::step(position.at, Some(position.facing), u64::from(count));
+                        }
+                        moves::Move::Stay => {}
+                    }
+                    position.moves += 1;
+                }
+            })
+        }
+
+        /// Where the walker stands.
+        pub fn here() -> Position {
+            Position::read()
+        }
+
+        /// Cancel the call, then make the moves: the kernel refuses the value of a cancelled call
+        /// and keeps where the walker stood, which `update` answers with, as in a component.
+        pub fn stumble(path: Vec<moves::Move>) -> Result<Position, String> {
+            context::cancel();
+            Self::walk(path)
         }
     }
 
@@ -672,16 +759,18 @@ pub mod notebook {
 }
 
 /// Shelves of books, with what every shelf shares: the catalogue the Orb's root creates once, which
-/// each shelf's create and methods read; and porters, objects without methods that run a task.
-/// Native only, as `notebook`.
+/// each shelf's create and methods read; what each shelf holds, which the kernel keeps for it; and
+/// porters, objects without methods that run a task. Native only, as `notebook`. The module holds
+/// the bindings of the kernel's `tembra:guest` package, for the shelves' state, under the name
+/// `tembra`, so it names the facade `::tembra`.
 #[cfg(not(target_arch = "wasm32"))]
 #[tembra::orb(package = "example:library@1.0.0")]
 pub mod library {
+    use ::tembra::{Context, Declaration};
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
     };
-    use tembra::{Context, Declaration};
 
     /// What the host lends the Orb.
     #[inputs]
@@ -697,7 +786,7 @@ pub mod library {
 
     /// Create the catalogue, once for the Orb, and report it to the host.
     #[root]
-    fn catalogue(inputs: &Inputs, _declaration: &Declaration) -> tembra::Result<Catalogue> {
+    fn catalogue(inputs: &Inputs, _declaration: &Declaration) -> ::tembra::Result<Catalogue> {
         inputs.events.borrow_mut().push("root".to_string());
         Ok(Catalogue {
             books: Cell::new(0),
@@ -710,11 +799,17 @@ pub mod library {
         catalogue: Rc<Catalogue>,
     }
 
+    /// How many books one shelf holds, which the kernel keeps for each shelf.
+    #[state(service = Shelf)]
+    pub struct Shelved {
+        pub books: u32,
+    }
+
     impl Shelf {
         /// Build a shelf on the catalogue the root created, and report how many books the
         /// library held then.
         #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+        fn create(inputs: &Inputs, declaration: &Declaration) -> ::tembra::Result<Self> {
             let catalogue = declaration.orb::<Catalogue>()?;
             let address = declaration.address()?;
             inputs.events.borrow_mut().push(format!(
@@ -726,8 +821,10 @@ pub mod library {
             Ok(Self { catalogue })
         }
 
-        /// Shelve a book, and return how many books the library holds, across its shelves.
+        /// Shelve a book, count it on this shelf, and return how many books the library holds,
+        /// across its shelves.
         pub fn shelve(&self) -> u32 {
+            Shelved::update(|shelved| shelved.books += 1);
             let books = self.catalogue.books.get() + 1;
             self.catalogue.books.set(books);
             books
@@ -751,7 +848,7 @@ pub mod library {
         /// Declare the porter's round: a task reported when it starts, once the object is active,
         /// and when it is cancelled, as the object goes.
         #[create]
-        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+        fn create(inputs: &Inputs, declaration: &Declaration) -> ::tembra::Result<Self> {
             let address = declaration.address()?;
             let porter = format!("{}/{}", address.key.join("/"), address.principal);
             let events = inputs.events.clone();

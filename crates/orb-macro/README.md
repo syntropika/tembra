@@ -328,7 +328,8 @@ Behind them, the world imports the kernel's `tembra:guest/state` interface and e
 `tembra:guest/state-init`: when the kernel creates a service object it asks the component for the
 declaration of that service's state, as JSON with its version, and binds it to the state it
 retains for the object. The executor serves both interfaces itself; the installer requires and
-grants nothing for them.
+grants nothing for them. A native host keeps the same state, with the same JSON, see
+[using the Orb natively](#using-the-orb-natively).
 
 A state may carry its own rule: a function of its `impl` block marked `#[validate]`, of the shape
 `fn(&self) -> Result<(), String>`, under any name. Then `Count::update` returns
@@ -1177,9 +1178,30 @@ only returned, or borrowed as a method's `self`: a function taking one, a record
 holding one, which the bindings replace with a type holding their handle, which only a component
 creates, and an `async` method of a resource, are compile errors where the runtime is linked.
 
+A [`#[state]`](#kernel-managed-state) serves a native host as it serves a component. The factory of
+the service that owns it declares it with `Declaration::state`, from the state's `Default` at its
+version, before the service's `#[create]` runs, and keeps it beside the object's environment; the
+state's `read` and `update` reach the state of the object whose method is running, which the native
+side sets around each poll of the method's future, as for the `context` functions. They serve the
+methods of the owning service and the functions of its WIT resources only, which run on its
+objects, and panic elsewhere, in a `#[create]` or a task for instance. The
+kernel keeps the JSON it keeps for a component of the same module, the text `serde_json` writes,
+with the Rust names of the fields and cases, so a host reads the state of either with
+`reference.state::<serde_json::Value>()`. As in a component, a value the `#[validate]` function
+refuses never reaches the kernel, and `update` returns the refusal; the kernel refuses the value of
+a call cancelled since it started, and `update` returns the value it kept; and a reload reads the
+value the new code inherits as the state's type and runs the `#[validate]` function on it before it
+adopts it. An object declares one state, so a `#[create]` of the owning service declares none of
+its own.
+
+The bindings of the kernel's `tembra:guest` package, which a module with a state, a root resource
+or the `context` option imports, are a module named `tembra` inside the Orb module, which hides the
+facade there: such a module names the facade `::tembra`, as in `::tembra::Result<Self>` and
+`use ::tembra::Declaration;`.
+
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, free JSON, records, enums, variants, flags, `Result`s, and `Vec`, `Option` and tuples of
-them, and WIT resources as above. A type of a consumed interface, `#[state]`, `#[resource]`, an
+them, WIT resources as above, and states. A type of a consumed interface, `#[resource]`, an
 import and a hook are compile errors where the runtime is linked, naming the item, until the native
 side covers them, and so is an `Option` of an `Option`, which the boundary's JSON cannot tell from
 `None`; a component build of the same module is unaffected.
@@ -1297,20 +1319,22 @@ The macro rewrites the module, or each copy of it under `#[cfg]`, see
    itself, its constructor and methods forwarded and the handles wrapped, or taken back, at the boundary; with a declared hook, `run` on its struct, calling the hook's import, and, for a hook derived from `input = Type`, `From` in both directions between the two sides of the bindings for the types it reaches;
 8. with a state, `Default`, field by field unless the author provides it, and the `read`/`update`
    functions on each state type, over a hidden module that maps the kernel's JSON to the type with
-   `serde_json` and holds back a value whose JSON would not read back as the type, and the
-   kernel's `validate` callback, which reads the value a reload would adopt as the state type and
-   runs the state's `#[validate]` function on it;
+   `serde_json` and holds back a value whose JSON would not read back as the type, and reaches the
+   kernel through the bindings' import in a component build, inside `tembra::__guest!`, and through
+   the state each method's object declared natively, inside `tembra::__host!`; and the kernel's
+   `validate` callback, which reads the value a reload would adopt as the state type and runs the
+   state's `#[validate]` function on it;
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
    function and emptied by the `#[close]` one, and the `with` function on each resource type;
 10. inside `tembra::__host!`, so only where the facade links the runtime, `pub fn orb()`, or
     `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest through
     `pub fn orb_named(name, api_version, ..)`, with its `#[root]` as the Orb's create, from one
     hidden function per service, written in the service's module and declaring the codec of each
-    of its methods, next to the service's typed client, `<Service>Client`, an `include_bytes!` of
-    the manifest, and a hidden trait that each type of the module entering the WIT implements in
-    its own module, reading and writing its JSON; with the `context` option, the native `context`,
-    whose functions read the call each method's future runs for, see
-    [using the Orb natively](#using-the-orb-natively).
+    of its methods, and the state of its objects, if they own one, next to the service's typed
+    client, `<Service>Client`, an `include_bytes!` of the manifest, and a hidden trait that each
+    type of the module entering the WIT implements in its own module, reading and writing its JSON;
+    with the `context` option, the native `context`, whose functions read the call each method's
+    future runs for, see [using the Orb natively](#using-the-orb-natively).
 
 The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) among its dependencies,
 `dlmalloc` (feature `global`) only with `no_std`, and `serde` (features `derive`, `alloc`) and

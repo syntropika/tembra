@@ -14,8 +14,10 @@
 //! result, as a portable method without a local entrypoint, and each method of the resource reads
 //! its `self` back from the call; the resource's functions are registered from its own module.
 //! With the `context` option, the Orb module gets a native `context`, whose functions read the
-//! call each method's future runs for. What the native side does not cover yet is a compile error
-//! inside the same wrapper, naming the item; a component build of the module is unaffected.
+//! call each method's future runs for. A service whose objects own a `#[state]` declares it in its
+//! factory, and its methods run in the scope of their object, whose state the state's `read` and
+//! `update` reach natively. What the native side does not cover yet is a compile error inside the
+//! same wrapper, naming the item; a component build of the module is unaffected.
 use crate::{
     Analysis, Function, Payload, Service, Shape, ShapeKind, WitResource, camel_ident,
     metadata::Metadata, rust_ident, wit,
@@ -341,6 +343,173 @@ fn context_module() -> TokenStream {
     }
 }
 
+/// The kernel's state natively: `read` and `update` of the component's `__tembra_state`, in place
+/// of those the bindings' import serves, which the state types' accessors call in both builds.
+/// Each reaches the state of the object whose method is being polled, which the method's scope
+/// sets around each poll of its future from the object's environment, where the service's factory
+/// keeps the state it declared. The state keeps the JSON a component's keeps for the same value:
+/// the text `serde_json` writes, which the module's own `storable` checks reads back, read as the
+/// executor reads a component's, every negative zero written as zero. As in a component, a value
+/// the rule refuses never reaches the kernel, `update` answers a call cancelled before the kernel
+/// stored its value with the value kept, and a reload reads the value it inherits as the state's
+/// type and runs the rule on it.
+pub(crate) fn state_access() -> TokenStream {
+    wrapped(quote! {
+        /// The object a method runs on, for its state: the state its factory declared, and the
+        /// call, which the kernel checks before it stores a value.
+        struct Object {
+            context: ::tembra::Context,
+            state: ::tembra::State<::tembra::serde_json::Value>,
+        }
+
+        ::std::thread_local! {
+            static OBJECT: ::core::cell::RefCell<::core::option::Option<::std::rc::Rc<Object>>> =
+                const { ::core::cell::RefCell::new(::core::option::Option::None) };
+        }
+
+        /// Run a method's future on its object: while it is polled, `read` and `update` reach the
+        /// object's state, and an outer poll's object comes back after.
+        pub(crate) fn scoped<F: ::core::future::Future>(
+            context: ::tembra::Context,
+            state: ::tembra::State<::tembra::serde_json::Value>,
+            future: F,
+        ) -> impl ::core::future::Future<Output = F::Output> {
+            let object = ::std::rc::Rc::new(Object { context, state });
+            let mut future = ::std::boxed::Box::pin(future);
+            ::core::future::poll_fn(move |cx| {
+                let _entered = Entered::enter(object.clone());
+                ::core::future::Future::poll(future.as_mut(), cx)
+            })
+        }
+
+        /// The object set for one poll, which puts the previous one back when dropped, also when
+        /// the poll panics.
+        struct Entered(::core::option::Option<::std::rc::Rc<Object>>);
+
+        impl Entered {
+            fn enter(object: ::std::rc::Rc<Object>) -> Self {
+                Self(OBJECT.with(|current| current.replace(::core::option::Option::Some(object))))
+            }
+        }
+
+        impl ::core::ops::Drop for Entered {
+            fn drop(&mut self) {
+                let previous = self.0.take();
+                OBJECT.with(|current| current.replace(previous));
+            }
+        }
+
+        /// The object of the method running, which only a method of a service that owns a state
+        /// has.
+        fn current() -> ::std::rc::Rc<Object> {
+            OBJECT
+                .with(|current| current.borrow().clone())
+                .expect("a state is read and updated inside a method of the service that owns it")
+        }
+
+        /// The state of the object running the current call.
+        pub fn read<T: ::serde::de::DeserializeOwned>() -> T {
+            let value = current()
+                .state
+                .value()
+                .expect("the kernel keeps the state of an object running a call");
+            parse(&value.to_string())
+        }
+
+        /// Store a value and return the stored one, or the refusal of a value whose JSON would
+        /// not read back, which never reaches the kernel. The kernel refuses the value of a call
+        /// cancelled since it started and keeps the previous one, which is then the answer; any
+        /// other refusal panics, as it traps a component.
+        pub fn update<T: ::serde::Serialize + ::serde::de::DeserializeOwned>(
+            value: &T,
+            name: &str,
+        ) -> ::core::result::Result<T, String> {
+            let json = storable(value, name)?;
+            let object = current();
+            let stored = match object
+                .state
+                .update(&object.context, |_| ::core::result::Result::Ok(kept(&json)))
+            {
+                ::core::result::Result::Ok(stored) => stored,
+                ::core::result::Result::Err(_) if object.context.signal().is_cancelled() => object
+                    .state
+                    .value()
+                    .expect("the kernel keeps the state of an object running a call"),
+                ::core::result::Result::Err(error) => {
+                    ::core::panic!("the kernel refused the `{}` state: {}", name, error)
+                }
+            };
+            ::core::result::Result::Ok(parse(&stored.to_string()))
+        }
+
+        /// Declare the state of an object of the service that owns it, for its factory: the JSON
+        /// of the state's `Default`, at the state's version, which a reload checks is a `T` the
+        /// rule accepts before it adopts it. A `Default` whose JSON would not read back fails the
+        /// object's creation.
+        pub(crate) fn declare<T>(
+            declaration: &::tembra::Declaration,
+            version: u32,
+            name: &'static str,
+            rule: impl ::core::ops::Fn(&T) -> ::core::result::Result<(), String> + 'static,
+        ) -> ::tembra::Result<::tembra::State<::tembra::serde_json::Value>>
+        where
+            T: ::core::default::Default
+                + ::serde::Serialize
+                + ::serde::de::DeserializeOwned
+                + 'static,
+        {
+            let json = storable(&T::default(), name)
+                .map_err(|refusal| ::tembra::Error::invalid("state", refusal))?;
+            let state = declaration.state(kept(&json), version, |_| ::core::result::Result::Ok(()))?;
+            let retained = state.clone();
+            declaration.validate_on_reload(move || {
+                let value = retained.value()?;
+                let accepted = match ::serde_json::from_str::<T>(&value.to_string()) {
+                    ::core::result::Result::Ok(state) => rule(&state),
+                    ::core::result::Result::Err(error) => ::core::result::Result::Err(
+                        format!("the retained state is not a `{}`: {}", name, error),
+                    ),
+                };
+                accepted.map_err(|refusal| {
+                    ::tembra::Error::invalid("state", format!("the state was refused: {}", refusal))
+                })
+            })?;
+            ::core::result::Result::Ok(state)
+        }
+
+        /// The value the kernel keeps for a state's JSON, every negative zero written as zero, as
+        /// the executor keeps a component's: the platform hosts' value profile has none.
+        fn kept(json: &str) -> ::tembra::serde_json::Value {
+            let mut value = ::tembra::serde_json::from_str(json)
+                .expect("the JSON of a state reads back as JSON");
+            unsigned_zeros(&mut value);
+            value
+        }
+
+        fn unsigned_zeros(value: &mut ::tembra::serde_json::Value) {
+            match value {
+                ::tembra::serde_json::Value::Number(number) => {
+                    if number
+                        .as_f64()
+                        .is_some_and(|float| float == 0.0 && float.is_sign_negative())
+                    {
+                        *value = ::tembra::serde_json::Value::from(0);
+                    }
+                }
+                ::tembra::serde_json::Value::Array(items) => {
+                    items.iter_mut().for_each(unsigned_zeros);
+                }
+                ::tembra::serde_json::Value::Object(fields) => {
+                    fields.values_mut().for_each(unsigned_zeros);
+                }
+                ::tembra::serde_json::Value::Null
+                | ::tembra::serde_json::Value::Bool(_)
+                | ::tembra::serde_json::Value::String(_) => {}
+            }
+        }
+    })
+}
+
 /// The trait of `boundary_trait`, as the module `scope` names it.
 fn boundary(scope: usize, analysis: &Analysis) -> TokenStream {
     let root = crate::supers(analysis.modules[scope].len());
@@ -360,15 +529,6 @@ fn refused(span: Span, message: &str) -> Refused {
 /// Whether the native side covers the module's features; the first it does not is refused. Each
 /// has its item of the plan, which lifts the refusal.
 fn covered(analysis: &Analysis) -> Result<(), Refused> {
-    if let Some(state) = analysis.states.first() {
-        return Err(refused(
-            state.ident.span(),
-            &format!(
-                "`{}` is marked #[state]; states are not supported natively yet",
-                state.ident
-            ),
-        ));
-    }
     if let Some(resource) = analysis.resources.first() {
         return Err(refused(
             resource.ident.span(),
@@ -445,7 +605,10 @@ fn codec_ident(function: &Function) -> Ident {
 /// awaited when it is `async`, with the arguments as a tuple in WIT order. A service with a create
 /// takes the inputs `orb(..)` shares, and its factory calls the create with them and the object's
 /// declaration: the service it returns is the object's environment, which a method borrowing
-/// `&self` is called on. The guard of the attribute, if any, runs first in the factory.
+/// `&self` is called on. The guard of the attribute, if any, runs first in the factory. A service
+/// whose objects own a `#[state]` declares it next, before its create runs, and keeps it beside the
+/// environment, for the scope each method's future runs in, where the state's `read` and `update`
+/// reach it.
 fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused> {
     let depth = analysis.modules[service.scope].len();
     let root = crate::supers(depth);
@@ -470,11 +633,49 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
             quote! { ::core::result::Result::Ok(()) },
         ),
     };
-    let factory = match (&service.create, guard(service, &identity)) {
-        (Some(_), None) => quote! { move |declaration| #build },
-        (Some(_), Some(guard)) => quote! { move |declaration| { #guard #build } },
-        (None, None) => quote! { |_| { #build } },
-        (None, Some(guard)) => quote! { |declaration| { #guard #build } },
+    let guard = guard(service, &identity);
+    let state = analysis
+        .states
+        .iter()
+        .find(|state| state.identity == identity);
+    let (environment, factory) = match state {
+        None => (
+            environment,
+            match (&service.create, guard) {
+                (Some(_), None) => quote! { move |declaration| #build },
+                (Some(_), Some(guard)) => quote! { move |declaration| { #guard #build } },
+                (None, None) => quote! { |_| { #build } },
+                (None, Some(guard)) => quote! { |declaration| { #guard #build } },
+            },
+        ),
+        Some(state) => {
+            let path = crate::relative(depth, &analysis.modules[state.scope], &state.ident);
+            let version = state.version;
+            let name = state.ident.to_string();
+            let rule = match &state.validator {
+                Some(validator) => quote! { |state: &#path| state.#validator() },
+                None => quote! { |_: &#path| ::core::result::Result::Ok(()) },
+            };
+            let (capture, built) = match &service.create {
+                Some(_) => (quote! { move }, quote! { #build? }),
+                None => (quote! {}, quote! { () }),
+            };
+            (
+                quote! { (#environment, ::tembra::State<::tembra::serde_json::Value>) },
+                quote! {
+                    #capture |declaration| {
+                        #guard
+                        let state = self::#root __tembra_state::declare::<#path>(
+                            &declaration,
+                            #version,
+                            #name,
+                            #rule,
+                        )?;
+                        ::core::result::Result::Ok((#built, state))
+                    }
+                },
+            )
+        }
     };
     let lifetime = service.policy.as_ref().map(|policy| {
         let lifetime = if policy.host {
@@ -492,24 +693,32 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
             .signature(::core::option::Option::Some(::std::string::String::from(#root #signature)))
         }
     });
-    // With the `context` option, each method runs in the scope of its call, which `context` reads.
-    let scoped = analysis
-        .options
-        .context
-        .then(|| quote! { self::#root context::__scoped });
+    // Each method runs in the scope of its call, which the native `context` reads, with the
+    // `context` option, and in that of its object, when the service's objects own a state.
+    let scopes = Scopes {
+        context: analysis
+            .options
+            .context
+            .then(|| quote! { self::#root context::__scoped }),
+        state: state.map(|_| ObjectState {
+            scoped: quote! { self::#root __tembra_state::scoped },
+            object: environment.clone(),
+            state: quote! { __tembra_object.1.clone() },
+        }),
+    };
     let mut codecs = Vec::new();
     let mut methods = Vec::new();
     for method in &service.functions {
         if issues(method, service.scope, analysis) {
-            methods.push(issuing(service, method, analysis, scoped.as_ref())?);
+            methods.push(issuing(service, method, analysis, &scopes)?);
             continue;
         }
         let codec = codec_ident(method);
         codecs.push(self::codec(service, method, &codec, analysis)?);
-        methods.push(self::method(service, method, Some(&codec), scoped.as_ref()));
+        methods.push(self::method(service, method, Some(&codec), &scopes));
     }
     for local in &service.locals {
-        methods.push(self::method(service, local, None, scoped.as_ref()));
+        methods.push(self::method(service, local, None, &scopes));
     }
     let doc = format!(
         " The service `{}` of the native Orb named `orb`, as `orb()` registers it.",
@@ -522,14 +731,15 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
         #(#methods)*
     };
     // The functions of each WIT resource of the service's interface, registered from the
-    // resource's module.
+    // resource's module, which reach the object's state through the function given them.
+    let state_of = state.map(|_| quote! { , |object: &#environment| object.1.clone() });
     let built = owned_resources(service, analysis).fold(built, |built, resource| {
         let glue = crate::relative(
             depth,
             &analysis.modules[resource.scope],
             &glue_ident(resource),
         );
-        quote! { #glue(#built) }
+        quote! { #glue(#built #state_of) }
     });
     Ok(quote! {
         #[doc = #doc]
@@ -563,15 +773,15 @@ fn issues(function: &Function, scope: usize, analysis: &Analysis) -> bool {
 
 /// The `payload_method` call binding a function of a service whose result holds a resource, under
 /// its WIT name: the call issues each resource of the value into its result, passing the context
-/// itself where the function takes `&Context`; with `scoped`, the path of the native `context`'s
-/// scope, its future runs in the scope of its call. The function has no local entrypoint, so a
-/// native caller calls it with `call_portable`, holding the resources as `Owned` handles, and the
-/// service's client has no method for it.
+/// itself where the function takes `&Context`; its future runs in the `scopes` of the service, as
+/// a method's does. The function has no local entrypoint, so a native caller calls it with
+/// `call_portable`, holding the resources as `Owned` handles, and the service's client has no
+/// method for it.
 fn issuing(
     service: &Service,
     function: &Function,
     analysis: &Analysis,
-    scoped: Option<&TokenStream>,
+    scopes: &Scopes,
 ) -> Result<TokenStream, Refused> {
     let owner = format!("{}::{}", service.ident, function.ident);
     let result = function.result.as_ref().map(|(ty, _)| ty);
@@ -587,16 +797,10 @@ fn issuing(
         arguments.insert(index, quote! { &__tembra_context });
     }
     let awaited = function.asynchronous.then(|| quote! { .await });
-    let (environment, call) = if function.receiver {
-        (
-            quote! { __tembra_self: ::std::rc::Rc<#target> },
-            quote! { __tembra_self.#ident(#(#arguments),*) #awaited },
-        )
-    } else {
-        (
-            quote! { _ },
-            quote! { #target::#ident(#(#arguments),*) #awaited },
-        )
+    let (environment, receiver) = scopes.environment(target, function.receiver);
+    let call = match receiver {
+        Some(receiver) => quote! { #receiver.#ident(#(#arguments),*) #awaited },
+        None => quote! { #target::#ident(#(#arguments),*) #awaited },
     };
     // A method returning `tembra::Result<T>` answers with it: its failure is the call's error.
     let call = if function.fallible {
@@ -613,7 +817,7 @@ fn issuing(
         result.as_ref().map(|(ty, kind)| (*ty, kind)),
         call,
         &boundary(service.scope, analysis),
-        scoped,
+        scopes,
     ))
 }
 
@@ -660,8 +864,8 @@ fn signature<'a>(
 /// codec into the parameters, and writes the value of `call`, an expression over them of the
 /// result's type and kind, as the result's data, issuing each resource it holds into the result.
 /// An argument the codec refuses fails the call as its arguments, before the function runs, and a
-/// value it cannot write fails it as its result, which closes what was issued. With `scoped`, the
-/// path of the native `context`'s scope, the call's future runs in the scope of its call.
+/// value it cannot write fails it as its result, which closes what was issued. The call's future
+/// runs in the `scopes` of the service whose objects answer it.
 #[allow(clippy::too_many_arguments)]
 fn payload_method(
     name: &str,
@@ -672,7 +876,7 @@ fn payload_method(
     result: Option<(&Type, &Kind<'_>)>,
     call: TokenStream,
     boundary: &TokenStream,
-    scoped: Option<&TokenStream>,
+    scopes: &Scopes,
 ) -> TokenStream {
     let names: Vec<&Ident> = params.iter().map(|(name, _, _)| name).collect();
     let types: Vec<&Type> = params.iter().map(|(_, ty, _)| ty).collect();
@@ -739,14 +943,14 @@ fn payload_method(
             #write
         }
     };
-    let future = match scoped {
-        Some(scoped) => quote! { #scoped(__tembra_context.clone(), #future) },
-        None => future,
-    };
+    let future = scopes.around(future);
+    let handle = scopes.handle(quote! {
+        |#environment, __tembra_context: ::tembra::Context, #payload: ::tembra::portable::Payload| #future
+    });
     quote! {
         .payload_method(
             #name,
-            |#environment, __tembra_context: ::tembra::Context, #payload: ::tembra::portable::Payload| #future,
+            #handle,
         )
     }
 }
@@ -766,8 +970,10 @@ fn glue_ident(resource: &WitResource) -> Ident {
 /// the value it builds; each method, `[method]<resource>.<name>`, which reads its `self` from the
 /// call as the value issued, through the `Receiver` the call pins; and each static function,
 /// `[static]<resource>.<name>`. A method borrows the value only while it runs, so an `async` one,
-/// whose future would hold the borrow across its awaits, is refused. With the `context` option,
-/// each runs in the scope of its call, as a service's methods do.
+/// whose future would hold the borrow across its awaits, is refused. Each runs on an object of the
+/// service, in the scopes its methods run in: that of its call, with the `context` option, and
+/// that of its object, when the service's objects own a state, which the function adding them is
+/// given the way to reach, as the object's environment is the service's.
 fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStream, Refused> {
     let ident = &resource.ident;
     let name = wit::kebab(ident);
@@ -779,10 +985,22 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
     let identity = service.identity(&analysis.package);
     let boundary = boundary(resource.scope, analysis);
     let root = crate::supers(analysis.modules[resource.scope].len());
-    let scoped = analysis
-        .options
-        .context
-        .then(|| quote! { self::#root context::__scoped });
+    let stated = analysis
+        .states
+        .iter()
+        .any(|state| state.identity == identity);
+    let scopes = Scopes {
+        context: analysis
+            .options
+            .context
+            .then(|| quote! { self::#root context::__scoped }),
+        state: stated.then(|| ObjectState {
+            scoped: quote! { self::#root __tembra_state::scoped },
+            object: quote! { E },
+            state: quote! { __tembra_state_of(&__tembra_object) },
+        }),
+    };
+    let (environment, _) = scopes.environment(&service.ident, false);
     let mut functions = Vec::new();
     if let Some(constructor) = &resource.constructor {
         let owner = format!("{ident}::{}", constructor.ident);
@@ -792,14 +1010,14 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
         let built: Type = syn::parse_quote!(#ident);
         functions.push(payload_method(
             &format!("[constructor]{name}"),
-            quote! { _ },
+            environment.clone(),
             None,
             &constructor.params,
             &kinds,
             Some((&built, &Kind::Resource(&built))),
             quote! { #ident::#function(#(#params),*) },
             &boundary,
-            scoped.as_ref(),
+            &scopes,
         ));
     }
     for method in &resource.methods {
@@ -818,7 +1036,7 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
         let params: Vec<&Ident> = method.params.iter().map(|(name, _, _)| name).collect();
         functions.push(payload_method(
             &format!("[method]{name}.{}", wit::kebab(function)),
-            quote! { _ },
+            environment.clone(),
             Some(&quote! { #ident }),
             &method.params,
             &kinds,
@@ -827,7 +1045,7 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
                 __tembra_receiver.with(|__tembra_value| #ident::#function(__tembra_value, #(#params),*))?
             },
             &boundary,
-            scoped.as_ref(),
+            &scopes,
         ));
     }
     for function in &resource.statics {
@@ -840,14 +1058,14 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
         let awaited = function.asynchronous.then(|| quote! { .await });
         functions.push(payload_method(
             &format!("[static]{name}.{}", wit::kebab(static_ident)),
-            quote! { _ },
+            environment.clone(),
             None,
             &function.params,
             &kinds,
             result.as_ref().map(|(ty, kind)| (*ty, kind)),
             quote! { #ident::#static_ident(#(#params),*) #awaited },
             &boundary,
-            scoped.as_ref(),
+            &scopes,
         ));
     }
     let glue = glue_ident(resource);
@@ -855,6 +1073,13 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
         " The functions of the WIT resource `{ident}`, added to the service `{}` of the native Orb.",
         service.ident
     );
+    // The object of a service whose objects own a state is its environment and its state, which
+    // the service's registration gives the way to reach.
+    let state_of = stated.then(|| {
+        quote! {
+            , __tembra_state_of: fn(&E) -> ::tembra::State<::tembra::serde_json::Value>
+        }
+    });
     Ok(quote! {
         impl ::tembra::portable::Issuable for #ident {
             fn nominal() -> ::tembra::portable::Nominal {
@@ -866,7 +1091,10 @@ fn resource_glue(resource: &WitResource, analysis: &Analysis) -> Result<TokenStr
         }
 
         #[doc = #doc]
-        pub(crate) fn #glue<E: 'static>(service: ::tembra::Service<E>) -> ::tembra::Service<E> {
+        pub(crate) fn #glue<E: 'static>(
+            service: ::tembra::Service<E>
+            #state_of
+        ) -> ::tembra::Service<E> {
             service #(#functions)*
         }
     })
@@ -906,18 +1134,88 @@ fn guard(service: &Service, identity: &str) -> Option<TokenStream> {
     })
 }
 
+/// The scopes the future of each function a service's objects answer runs in, set around each of
+/// its polls, as the executor gives a component's call its authority: a method's, a function's whose
+/// result holds a WIT resource, and the functions of the service's WIT resources.
+struct Scopes {
+    /// The call's, which the native `context` reads, with the `context` option: the path of its
+    /// `__scoped`.
+    context: Option<TokenStream>,
+    /// The object's, whose state the native `read` and `update` reach, for a service whose objects
+    /// own one.
+    state: Option<ObjectState>,
+}
+
+/// How a handle reaches the state of its object: the path of `__tembra_state::scoped`, the type of
+/// the object, its environment and its state, which the handle takes as `__tembra_object`, an `Rc`
+/// of it, and the expression of the object's state over `__tembra_object`.
+struct ObjectState {
+    scoped: TokenStream,
+    object: TokenStream,
+    state: TokenStream,
+}
+
+impl Scopes {
+    /// How a handle takes the object's environment, and the expression a function borrowing
+    /// `&self` is called on, if it does: the service's environment, or the object of a service
+    /// whose objects own a state, which holds the environment beside the state.
+    fn environment(&self, target: &Ident, receiver: bool) -> (TokenStream, Option<TokenStream>) {
+        // The index is a token of its own: `0.` written before an interpolation would lex as a
+        // float.
+        let environment_field = syn::Index::from(0);
+        match (&self.state, receiver) {
+            (None, true) => (
+                quote! { __tembra_self: ::std::rc::Rc<#target> },
+                Some(quote! { __tembra_self }),
+            ),
+            (None, false) => (quote! { _ }, None),
+            (Some(state), receiver) => {
+                let object = &state.object;
+                (
+                    quote! { __tembra_object: ::std::rc::Rc<#object> },
+                    receiver.then(|| quote! { __tembra_object.#environment_field }),
+                )
+            }
+        }
+    }
+
+    /// `future`, a handle's future over its `__tembra_context` and `__tembra_object`, run in each
+    /// scope.
+    fn around(&self, future: TokenStream) -> TokenStream {
+        let future = match &self.state {
+            Some(ObjectState { scoped, state, .. }) => {
+                quote! { #scoped(__tembra_context.clone(), #state, #future) }
+            }
+            None => future,
+        };
+        match &self.context {
+            Some(scoped) => quote! { #scoped(__tembra_context.clone(), #future) },
+            None => future,
+        }
+    }
+
+    /// `handle`, a closure, as one that owns what its scopes read: a handle that reaches its
+    /// object's state moves what it reads it with.
+    fn handle(&self, handle: TokenStream) -> TokenStream {
+        match &self.state {
+            Some(_) => quote! { move #handle },
+            None => handle,
+        }
+    }
+}
+
 /// The call binding one method: `method_with` and its codec, or `local_method` for a `#[local]`
 /// one, without a codec, which refuses portable callers. The handle takes the arguments as a tuple
 /// of the author's parameter types, checks the context and calls the author's function, on the
 /// object's environment when it borrows `&self`, passing the context itself where the function
 /// takes `&Context`, and answering with its value, or with the `tembra::Result` it returns, whose
-/// failure is the call's error; with `scoped`, the path of the native `context`'s scope, its future
-/// runs in the scope of its call.
+/// failure is the call's error; its future runs in the `scopes` of the service: the scope of its
+/// call for the native `context`, and that of its object, for the object's state.
 fn method(
     service: &Service,
     function: &Function,
     codec: Option<&Ident>,
-    scoped: Option<&TokenStream>,
+    scopes: &Scopes,
 ) -> TokenStream {
     let name = wit::kebab(&function.ident);
     let target = &service.ident;
@@ -929,16 +1227,10 @@ fn method(
         arguments.insert(index, quote! { &__tembra_context });
     }
     let awaited = function.asynchronous.then(|| quote! { .await });
-    let (environment, call) = if function.receiver {
-        (
-            quote! { __tembra_self: ::std::rc::Rc<#target> },
-            quote! { __tembra_self.#ident(#(#arguments),*) #awaited },
-        )
-    } else {
-        (
-            quote! { _ },
-            quote! { #target::#ident(#(#arguments),*) #awaited },
-        )
+    let (environment, receiver) = scopes.environment(target, function.receiver);
+    let call = match receiver {
+        Some(receiver) => quote! { #receiver.#ident(#(#arguments),*) #awaited },
+        None => quote! { #target::#ident(#(#arguments),*) #awaited },
     };
     // A method returning `tembra::Result<T>` answers with it: its failure is the call's error.
     let body = match (&function.result, function.fallible) {
@@ -946,24 +1238,23 @@ fn method(
         (Some(_), false) => quote! { ::core::result::Result::Ok(#call) },
         (None, false) => quote! { #call; ::core::result::Result::Ok(()) },
     };
-    let future = quote! {
+    let future = scopes.around(quote! {
         async move {
             __tembra_context.check()?;
             #body
         }
-    };
-    let future = match scoped {
-        Some(scoped) => quote! { #scoped(__tembra_context.clone(), #future) },
-        None => future,
-    };
+    });
     let (register, codec) = match codec {
         Some(codec) => (quote! { method_with }, quote! { #codec, }),
         None => (quote! { local_method }, quote! {}),
     };
+    let handle = scopes.handle(quote! {
+        |#environment, __tembra_context: ::tembra::Context, (#(#params,)*): (#(#types,)*)| #future
+    });
     quote! {
         .#register(
             #name,
-            |#environment, __tembra_context: ::tembra::Context, (#(#params,)*): (#(#types,)*)| #future,
+            #handle,
             #codec
         )
     }

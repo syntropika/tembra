@@ -4911,11 +4911,10 @@ fn the_native_context_reads_the_call_each_method_runs_for() {
     let refused = orb_with(
         Options {
             context: true,
+            imports: vec![literal("wasi:random/random@0.3.0")],
             ..options(PACKAGE, None)
         },
         "mod book {
-            #[state]
-            pub struct Sealed { pub count: u32 }
             #[service]
             pub struct Ledger;
             impl Ledger { pub fn count() -> u32 { 0 } }
@@ -4925,7 +4924,7 @@ fn the_native_context_reads_the_call_each_method_runs_for() {
     let refused = native(&refused, &[]);
     assert!(
         refused.starts_with(
-            ":: core :: compile_error ! (\"`Sealed` is marked #[state]; states are not supported natively yet\") ;"
+            ":: core :: compile_error ! (\"the import of wasi:random/random@0.3.0 is not supported natively yet\") ;"
         ),
         "{refused}"
     );
@@ -5115,19 +5114,112 @@ fn the_native_side_refuses_a_resource_it_cannot_carry() {
     }
 }
 
+/// A state natively: the factory of the service that owns it declares it, with the version and the
+/// rule of the state, before the create runs, and keeps it beside the object's environment, a unit
+/// or what the create builds; each method's future, local ones too, runs in the scope of its
+/// object, where the state's `read` and `update` reach it, in a sub-module through `super::`, and
+/// so do the futures of a function issuing a WIT resource of the service and of that resource's
+/// functions, which the service's registration hands the way to the object's state. The
+/// component's `read` and `update`, over the bindings' import, are a component build's only, and a
+/// native host gets its own in the same module, which the state's accessors call in both. A service
+/// that owns no state is registered as without one.
+#[test]
+fn the_factory_of_its_service_declares_a_state_natively() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            #[inputs]
+            pub struct Inputs { pub title: String }
+            #[state(service = Notes, version = 2)]
+            pub struct Kept { pub count: u32 }
+            impl Kept {
+                #[validate]
+                fn bounded(&self) -> Result<(), String> { Ok(()) }
+            }
+            #[state(service = Ledger)]
+            pub struct Total { pub sum: u32 }
+            #[service]
+            pub struct Ledger;
+            impl Ledger {
+                pub fn count() -> u32 { Total::read().sum }
+                pub fn issue() -> Ticket { Ticket }
+            }
+            #[wit_resource(service = Ledger)]
+            pub struct Ticket;
+            impl Ticket {
+                #[constructor]
+                pub fn new() -> Self { Ticket }
+                pub fn sum(&self) -> u32 { Total::read().sum }
+            }
+            #[service]
+            pub struct Shelf;
+            impl Shelf { pub fn size() -> u32 { 0 } }
+            pub mod notes {
+                #[service]
+                pub struct Notes { title: String }
+                impl Notes {
+                    #[create]
+                    fn create(inputs: &super::Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                        Ok(Self { title: inputs.title.clone() })
+                    }
+                    pub fn title(&self) -> String { self.title.clone() }
+                    #[local]
+                    pub fn kept() -> u32 { super::Kept::read().count }
+                }
+            }
+        }",
+    );
+    let stated = ":: tembra :: State < :: tembra :: serde_json :: Value >";
+    let root = native(&module, &[]);
+    for expected in [
+        format!("pub (crate) fn __tembra_service_ledger (orb : & str) -> :: tembra :: Service < (() , {stated}) >"),
+        "| declaration | { let state = self :: __tembra_state :: declare :: < Total > (& declaration , 1u32 , \"Total\" , | _ : & Total | :: core :: result :: Result :: Ok (()) ,) ? ; :: core :: result :: Result :: Ok ((() , state)) }".to_owned(),
+        format!(". method_with (\"count\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , () : () | self :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{ __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }}) , __TEMBRA_CODEC_COUNT ,)"),
+        format!(". payload_method (\"issue\" , move | __tembra_object : :: std :: rc :: Rc < (() , {stated}) > , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | self :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{"),
+        format!(", | object : & (() , {stated}) | object . 1 . clone ())"),
+        format!("pub (crate) fn __tembra_resource_ticket < E : 'static > (service : :: tembra :: Service < E > , __tembra_state_of : fn (& E) -> {stated}) -> :: tembra :: Service < E >"),
+        ". payload_method (\"[constructor]ticket\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , __tembra_payload : :: tembra :: portable :: Payload | self :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
+        ". payload_method (\"[method]ticket.sum\" , move | __tembra_object : :: std :: rc :: Rc < E > , __tembra_context : :: tembra :: Context , mut __tembra_payload : :: tembra :: portable :: Payload | self :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_state_of (& __tembra_object) , async move {".to_owned(),
+        "pub (crate) fn __tembra_service_shelf (orb : & str) -> :: tembra :: Service < () >".to_owned(),
+        ". method_with (\"size\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Shelf :: size ()) } , __TEMBRA_CODEC_SIZE ,)".to_owned(),
+    ] {
+        assert!(root.contains(&expected), "{expected}\n{root}");
+    }
+    let notes = native(&module, &["notes"]);
+    for expected in [
+        format!("-> :: tembra :: Service < (Notes , {stated}) >"),
+        "move | declaration | { let state = self :: super :: __tembra_state :: declare :: < super :: Kept > (& declaration , 2u32 , \"Kept\" , | state : & super :: Kept | state . bounded () ,) ? ; :: core :: result :: Result :: Ok ((Notes :: create (& inputs , & declaration) ? , state)) }".to_owned(),
+        format!(". method_with (\"title\" , move | __tembra_object : :: std :: rc :: Rc < (Notes , {stated}) > , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{ __tembra_context . check () ? ; :: core :: result :: Result :: Ok (__tembra_object . 0 . title ()) }}) , __TEMBRA_CODEC_TITLE ,)"),
+        format!(". local_method (\"kept\" , move | __tembra_object : :: std :: rc :: Rc < (Notes , {stated}) > , __tembra_context : :: tembra :: Context , () : () | self :: super :: __tembra_state :: scoped (__tembra_context . clone () , __tembra_object . 1 . clone () , async move {{ __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Notes :: kept ()) }}) ,)"),
+    ] {
+        assert!(notes.contains(&expected), "{expected}\n{notes}");
+    }
+    let generated = tokens(&module);
+    assert!(
+        generated.contains(":: tembra :: __guest ! { pub fn read < T : :: serde :: de :: DeserializeOwned > () -> T { parse (& super :: tembra :: guest :: state :: read ()) }"),
+        "{generated}"
+    );
+    let state = native(&module, &["__tembra_state"]);
+    for expected in [
+        "pub (crate) fn scoped < F : :: core :: future :: Future > (context : :: tembra :: Context , state : :: tembra :: State < :: tembra :: serde_json :: Value > , future : F ,) -> impl :: core :: future :: Future < Output = F :: Output > {",
+        "pub fn read < T : :: serde :: de :: DeserializeOwned > () -> T {",
+        "pub fn update < T : :: serde :: Serialize + :: serde :: de :: DeserializeOwned > (value : & T , name : & str ,) -> :: core :: result :: Result < T , String > {",
+        "let json = storable (value , name) ? ;",
+        "let state = declaration . state (kept (& json) , version , | _ | :: core :: result :: Result :: Ok (())) ? ;",
+        "declaration . validate_on_reload (move || {",
+    ] {
+        assert!(state.contains(expected), "{expected}\n{state}");
+    }
+}
+
 /// What the native side does not cover yet is a compile error inside the facade's wrapper, so a
-/// component build of the module is unaffected: a state, a root resource, an import, and a hook
-/// contributed to or declared, each named.
+/// component build of the module is unaffected: a root resource, an import, and a hook contributed
+/// to or declared, each named.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
     let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
     let dir = consumed("native-hook", ADMISSION_WIT);
     for (options, module, message) in [
-        (
-            options(PACKAGE, None),
-            format!("mod book {{ #[state] pub struct Sealed {{ pub count: u32 }} {service} }}"),
-            "`Sealed` is marked #[state]; states are not supported natively yet",
-        ),
         (
             options(PACKAGE, None),
             format!(

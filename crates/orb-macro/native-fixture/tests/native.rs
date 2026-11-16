@@ -14,6 +14,7 @@ use tembra_orb_native_fixture::calculator::{self, Heading, Move, Note, Pen, Poin
 
 const MATH: &str = "calculator::example:calculator/math@1.0.0";
 const PLOTTER: &str = "calculator::example:calculator/plotter@1.0.0";
+const WALKER: &str = "calculator::example:calculator/walker@1.0.0";
 const CALLER: &str = "calculator::example:calculator/caller@1.0.0";
 const TALLY: &str = "calculator::example:calculator/tally@1.0.0";
 const MEMO: &str = "calculator::example:calculator/memo@1.0.0";
@@ -59,12 +60,14 @@ fn with_main(
 /// module's `WIT`: the Orb named by the manifest, `calculator` at API version 2, not the crate
 /// name at 1; each interface as a service, with its signature and its methods; and the ownership
 /// policy of each `#[service]` attribute, which the WIT does not carry and a component's manifest
-/// adds, so the expectation sets it the same way. The kernel's context interface, which the world
-/// imports, binds to the kernel, as an installer binds it, and asks nothing of the Orb.
+/// adds, so the expectation sets it the same way. The kernel's context and state interfaces, which
+/// the world imports, bind to the kernel, as an installer binds them, and ask nothing of the Orb.
 #[test]
 fn the_declaration_is_the_plan_of_the_contract() {
     let orb = calculator::orb().unwrap();
-    let kernel = [(guest::CONTEXT.to_owned(), Binding::Kernel)].into();
+    let kernel = [guest::CONTEXT, guest::STATE]
+        .map(|interface| (interface.to_owned(), Binding::Kernel))
+        .into();
     let mut expected = Contract::from_source("calculator.wit", calculator::WIT, Some("calculator"))
         .unwrap()
         .plan("calculator", 2, &kernel)
@@ -83,7 +86,10 @@ fn the_declaration_is_the_plan_of_the_contract() {
         .iter()
         .map(|service| service.name.as_str())
         .collect();
-    assert_eq!(names, [MATH, PLOTTER, CALLER, TALLY, MEMO, ACCUMULATORS]);
+    assert_eq!(
+        names,
+        [MATH, PLOTTER, WALKER, CALLER, TALLY, MEMO, ACCUMULATORS]
+    );
     assert!(
         expected
             .services
@@ -106,8 +112,13 @@ fn the_declaration_is_the_plan_of_the_contract() {
             .into()
     );
     // A WIT resource's functions are its service's methods.
+    let accumulators = expected
+        .services
+        .iter()
+        .find(|service| service.name == ACCUMULATORS)
+        .unwrap();
     assert_eq!(
-        expected.services[5].methods,
+        accumulators.methods,
         [
             "[constructor]accumulator",
             "[method]accumulator.add",

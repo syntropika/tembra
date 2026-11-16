@@ -26,8 +26,10 @@ wit-bindgen = { version = "=0.63.0", default-features = false, features = [
   "realloc",
   "async",
 ] }
-# The free JSON the memo's methods take and return, `serde_json::Value`.
+# The free JSON the memo's methods take and return, `serde_json::Value`; the code the macro
+# generates for a state names it too, with serde.
 serde_json.workspace = true
+serde.workspace = true
 
 # The module `notebook` takes host values, so it is compiled only natively, and names the runtime:
 # there the crate links it itself.
@@ -41,7 +43,7 @@ tembra = { path = "../../tembra", features = ["authoring"] }
 futures.workspace = true
 
 [package.metadata.cargo-machete]
-ignored = ["wit-bindgen"]
+ignored = ["wit-bindgen", "serde"]
 
 [lints]
 workspace = true

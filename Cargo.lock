@@ -1955,6 +1955,7 @@ name = "tembra-orb-native-fixture"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "serde",
  "serde_json",
  "tembra",
  "wit-bindgen",

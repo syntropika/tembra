@@ -1,8 +1,12 @@
 //! `library::orb(..)` in a native host: the Orb's `#[root]` creates the catalogue once, when the
 //! host installs the Orb, and every shelf reads that one value, in its create and in its methods.
 use futures::{FutureExt, executor::LocalPool};
+use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
-use tembra::{Host, Reference, contracts::Contract};
+use tembra::{
+    Host, Reference,
+    contracts::{Binding, Contract, guest},
+};
 use tembra_orb_native_fixture::library;
 
 const SHELF: &str = "calculator::example:library/shelf@1.0.0";
@@ -29,9 +33,11 @@ fn shelve(pool: &mut LocalPool, host: &Host, shelves: &[Rc<Reference>]) -> Vec<u
 }
 
 /// The root runs once, when the host installs the Orb, and not when `orb(..)` builds it, which
-/// declares the plan of the module's contract, but for the porter. Each shelf's create reads the
-/// catalogue the root created, and so does each shelf's method: the books shelved on two shelves
-/// are what a third shelf's create finds and its method counts on.
+/// declares the plan of the module's contract, but for the porter; the kernel's state interface,
+/// which the world imports, binds to the kernel. Each shelf's create reads the catalogue the root
+/// created, and so does each shelf's method: the books shelved on two shelves are what a third
+/// shelf's create finds and its method counts on. The method, on the shelf its create built,
+/// counts the book in the shelf's own state too.
 #[test]
 fn the_root_runs_once_and_every_object_reads_its_value() {
     let events = Events::default();
@@ -39,9 +45,10 @@ fn the_root_runs_once_and_every_object_reads_its_value() {
         events: events.clone(),
     })
     .unwrap();
+    let kernel = [(guest::STATE.to_owned(), Binding::Kernel)].into();
     let expected = Contract::from_source("library.wit", library::WIT, Some("library"))
         .unwrap()
-        .plan("calculator", 2, &Default::default())
+        .plan("calculator", 2, &kernel)
         .unwrap()
         .orb;
     // A contract plans no service for an empty interface: the porter, which has no method, is
@@ -72,6 +79,10 @@ fn the_root_runs_once_and_every_object_reads_its_value() {
         ]
     );
     for shelf in first.iter().chain([&third]) {
+        assert_eq!(
+            *shelf.state::<Value>().unwrap().value().unwrap(),
+            json!({ "books": 1 })
+        );
         shelf.release().unwrap();
     }
     pool.run_until(host.close()).unwrap();

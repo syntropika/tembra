@@ -5892,11 +5892,14 @@ fn state(item: &syn::ItemStruct, attribute: &Attribute) -> syn::Result<State> {
 }
 
 /// The Rust side of the states: the kernel's `state-init` callback answering one declaration per
-/// owning service, the accessors on each state type, and the JSON helpers they share.
+/// owning service, the accessors on each state type, and the JSON helpers they share, with the
+/// kernel's `read` and `update` of a component, and the native side's in their place where the
+/// facade links the runtime, which the accessors call in both.
 fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStream {
     if states.is_empty() {
         return quote! {};
     }
+    let native = native::state_access();
     // Every state is validated: the value a reload hands the new instance must at least read as
     // the state's type, or the first `read` would trap. The initial value is held to the same
     // rule before the kernel keeps it.
@@ -6029,19 +6032,25 @@ fn state_code(states: &[State], modules: &[Vec<Ident>]) -> proc_macro2::TokenStr
             extern crate alloc;
             pub use alloc::{format, string::String};
 
-            pub fn read<T: ::serde::de::DeserializeOwned>() -> T {
-                parse(&super::tembra::guest::state::read())
+            // A component reaches the kernel through the bindings' import; a native host gets
+            // `read` and `update` of its own, below, over the state of each method's object.
+            ::tembra::__guest! {
+                pub fn read<T: ::serde::de::DeserializeOwned>() -> T {
+                    parse(&super::tembra::guest::state::read())
+                }
+
+                /// Store a value and return the stored one, or the refusal of a value whose JSON
+                /// would not read back, which never reaches the kernel.
+                pub fn update<T: ::serde::Serialize + ::serde::de::DeserializeOwned>(
+                    value: &T,
+                    name: &str,
+                ) -> Result<T, String> {
+                    let json = storable(value, name)?;
+                    Ok(parse(&super::tembra::guest::state::update(&json)))
+                }
             }
 
-            /// Store a value and return the stored one, or the refusal of a value whose JSON
-            /// would not read back, which never reaches the kernel.
-            pub fn update<T: ::serde::Serialize + ::serde::de::DeserializeOwned>(
-                value: &T,
-                name: &str,
-            ) -> Result<T, String> {
-                let json = storable(value, name)?;
-                Ok(parse(&super::tembra::guest::state::update(&json)))
-            }
+            #native
 
             /// The JSON of an initial value for the declaration, which has no refusal to answer
             /// with: a value whose JSON would not read back traps the object's creation.

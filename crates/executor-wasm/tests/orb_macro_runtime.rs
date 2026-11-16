@@ -10,6 +10,7 @@ use tembra::{
 use tembra_executor_wasm::{
     Binding, Contract, Deterministic, Engine, Install, Limits, SystemCapability,
 };
+use tembra_orb_native_fixture::calculator;
 use wit_component::{DecodedWasm, WitPrinter};
 
 fn component(variable: &str) -> Vec<u8> {
@@ -212,6 +213,90 @@ fn walk(pool: &mut LocalPool, host: &Host, name: &str) {
         "{name}"
     );
     walker.release().unwrap();
+}
+
+/// A native Orb of the macro keeps a `#[state]` as the JSON a component of the macro keeps for the
+/// same value: the text serde writes, as the kernel reads it. The native fixture's walker keeps a
+/// `Position` with the fields and case names of the runtime fixture's, so the two states start
+/// alike, and two walks that end in the same place, each with its fixture's moves, leave the same
+/// JSON, which a host reads from either object the same way.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD"]
+fn a_native_state_keeps_the_json_of_a_component() {
+    let bytes = component("TEMBRA_WASM_ORB_MACRO_STD");
+    let (_, contract) = contract(&bytes);
+    let roles = contract.embedded_roles(&bytes).unwrap();
+    let artifact = contract
+        .component_artifact(&bytes, "standard", 1, &roles)
+        .unwrap();
+    let engine = Engine::new(Limits::default()).unwrap();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![
+        engine.load(&artifact, bound(granted())).unwrap(),
+        counters(),
+        calculator::orb().unwrap(),
+    ])
+    .unwrap();
+    let mut walker = |service: &str| {
+        let walker = Rc::new(host.get(service, vec!["main".into()], "alice").unwrap());
+        pool.run_until(walker.ready()).unwrap();
+        walker
+    };
+    let compiled = walker("standard::example:runtime/walker@1.0.0");
+    let native = walker("calculator::example:calculator/walker@1.0.0");
+    let (compiled_state, native_state) = (
+        compiled.state::<Value>().unwrap(),
+        native.state::<Value>().unwrap(),
+    );
+    assert_eq!(
+        *native_state.value().unwrap(),
+        *compiled_state.value().unwrap()
+    );
+    let walk = |pool: &mut LocalPool, walker: &Rc<Reference>, moves: Value| {
+        let walker = walker.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move {
+                walker
+                    .call_portable::<_, Value>(&context, "walk", json!([moves]))
+                    .await
+            }
+            .boxed_local()
+        }))
+        .unwrap()
+    };
+    walk(
+        &mut pool,
+        &compiled,
+        json!([
+            {"tag": "turn", "val": "east"},
+            {"tag": "step", "val": 3},
+            {"tag": "jump", "val": {"x": -1, "y": 2}},
+            {"tag": "rest"},
+        ]),
+    );
+    walk(
+        &mut pool,
+        &native,
+        json!([
+            {"tag": "step", "val": 2},
+            {"tag": "turn", "val": "west"},
+            {"tag": "step", "val": 1},
+            {"tag": "turn", "val": "east"},
+        ]),
+    );
+    let walked = json!({"at": {"x": -1, "y": 2}, "facing": "East", "moves": 4});
+    assert_eq!(*compiled_state.value().unwrap(), walked);
+    assert_eq!(*native_state.value().unwrap(), walked);
+    assert_eq!(
+        compiled.state_snapshot().unwrap().1,
+        native.state_snapshot().unwrap().1
+    );
+    compiled.release().unwrap();
+    native.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
 }
 
 /// Chance calls WASI through the interfaces its attribute imports, with std and without: the
