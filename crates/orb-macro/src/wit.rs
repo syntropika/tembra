@@ -13,7 +13,7 @@ use syn::{
     Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, Meta, Type, ext::IdentExt,
     spanned::Spanned,
 };
-use wit_parser::{PackageName, Resolve, TypeDefKind};
+use wit_parser::{PackageName, PackageSourceMap, Resolve, TypeDefKind};
 
 /// WIT names are kebab-case; Rust identifiers map to them one by one, a raw identifier without
 /// its `r#`.
@@ -563,29 +563,38 @@ pub(crate) fn guest_package() -> syn::Result<String> {
 
 /// Whether the inline WIT needs the kernel's bundled package nested in it: not when the consumed
 /// directory holds a copy already, one of its bundled `copies` (`bundled_copies`).
-pub(crate) fn guest_package_needed(copies: &BTreeSet<PackageName>) -> syn::Result<bool> {
+pub(crate) fn guest_package_needed(copies: &Copies) -> syn::Result<bool> {
     let mut bundled = Resolve::default();
     let bundled_id = bundled
         .push_str("guest.wit", GUEST)
         .map_err(|cause| error(format!("the bundled tembra:guest package: {cause:#}")))?;
-    Ok(!copies.contains(&bundled.packages[bundled_id].name))
+    Ok(!copies.contains_key(&bundled.packages[bundled_id].name))
 }
+
+/// The bundled packages the consumed directory holds copies of, each with the encoded files of
+/// `deps/` it was decoded from, which hold only the parts of the package they use: none for a copy
+/// read from its file, which is whole.
+pub(crate) type Copies = BTreeMap<PackageName, Vec<PathBuf>>;
 
 /// The bundled packages the consumed packages, read from the consumed directory, hold copies of,
 /// as a contract `cargo tembra build` wrote holds them in its `deps/`: the inline WIT leaves those
 /// out, since the bindings would read them twice. Every consumed package named as a bundled one, a
 /// WASI package Tembra serves or the kernel's, is checked as `Contract::from_dir` checks it,
-/// whether the Orb uses it or not. Its file, found by its first interface, must be in `deps/`
-/// itself: a copy in a directory of `deps/` or in the directory itself, even line for line, is
-/// `from_dir`'s error naming that directory. And it must be the bundled file line for line,
-/// whatever its line endings (`tembra_contracts::bundled`), so a copy differing only in its
-/// comments is not: another copy is an error naming its file, else the directory, and the package
-/// and what it is.
-pub(crate) fn bundled_copies(parsed: &Parsed) -> syn::Result<BTreeSet<PackageName>> {
+/// whether the Orb uses it or not. One decoded from an encoded file of `deps/` has no source to
+/// compare: it is a copy, with the files it was decoded from, once `from_dir`'s merge of the
+/// encoded files accepts it (`merged`), but for the kernel's package, which the macro brings
+/// itself: a copy of it decoded so is an error asking to remove it. Any other must be read from a
+/// file of `deps/` itself: a copy in a directory of `deps/` or in the directory itself, even line
+/// for line, is `from_dir`'s error naming that directory. And that file must be the bundled file
+/// line for line, whatever its line endings (`tembra_contracts::bundled`): a copy nested in a
+/// file of another package, even line for line, is `from_dir`'s error naming that file, and a
+/// file of the package that differs, if only in its comments, is an error naming the file, the
+/// package and what it is.
+pub(crate) fn bundled_copies(parsed: &Parsed) -> syn::Result<Copies> {
     let Some(dir) = parsed.dir() else {
-        return Ok(BTreeSet::new());
+        return Ok(Copies::new());
     };
-    let (dir, consumed) = (dir.path(), dir.packages()?);
+    let (consumed, sources) = (dir.packages()?, dir.sources()?);
     // The bundled packages by the names their sources declare: resolved together with the
     // consumed ones, each would be found as its own copy.
     let bundled: Vec<&str> = tembra_contracts::WASI_SOURCES
@@ -594,49 +603,123 @@ pub(crate) fn bundled_copies(parsed: &Parsed) -> syn::Result<BTreeSet<PackageNam
         .chain([GUEST])
         .filter_map(|source| source.lines().find_map(declared))
         .collect();
-    let deps = dir.join("deps");
-    let mut copies = BTreeSet::new();
-    for (name, &package) in &consumed.package_names {
-        if !bundled.contains(&name.to_string().as_str()) {
+    let deps = dir.path().join("deps");
+    // Each consumed package named as a bundled one, with a file it was read from: none when it was
+    // decoded from an encoded file.
+    let named: Vec<(&PackageName, Option<&Path>)> = consumed
+        .package_names
+        .iter()
+        .filter(|(name, _)| bundled.contains(&name.to_string().as_str()))
+        .map(|(name, &package)| {
+            let file = sources
+                .package_paths(package)
+                .and_then(|mut files| files.next());
+            (name, file)
+        })
+        .collect();
+    let decoded = if named.iter().any(|(_, file)| file.is_none()) {
+        merged(parsed, &deps)?
+    } else {
+        BTreeMap::new()
+    };
+    let duplicate = |name: &PackageName, place: &Path| {
+        error(format!(
+            "WIT package {name} in {} is already provided by the standard contracts bundled with Tembra; remove the duplicate",
+            place.display()
+        ))
+    };
+    let mut copies = Copies::new();
+    for (name, file) in named {
+        let Some(file) = file else {
+            let files = decoded.get(name).cloned().unwrap_or_default();
+            if name.namespace != "wasi" {
+                let files: Vec<String> = files
+                    .iter()
+                    .map(|file| file.display().to_string())
+                    .collect();
+                return Err(error(format!(
+                    "{}: this copy of {name}, the kernel's package, is encoded; remove it, since the macro brings the kernel's package",
+                    files.join(", ")
+                )));
+            }
+            copies.insert(name.clone(), files);
+            continue;
+        };
+        if let Some(place) = file.parent().filter(|place| *place != deps.as_path()) {
+            return Err(duplicate(name, place));
+        }
+        let source = std::fs::read_to_string(file).ok();
+        if source.as_deref().is_some_and(tembra_contracts::bundled) {
+            copies.insert(name.clone(), Vec::new());
             continue;
         }
-        let file = consumed.packages[package]
-            .interfaces
-            .values()
-            .next()
-            .and_then(|id| {
-                consumed
-                    .source_map
-                    .resolve_span(consumed.interfaces[*id].span)
-            })
-            .map(|location| location.path.to_owned());
-        if let Some(place) = file
+        if source
             .as_deref()
-            .and_then(|file| Path::new(file).parent())
-            .filter(|place| *place != deps.as_path())
+            .and_then(|source| source.lines().find_map(declared))
+            .is_some_and(|package| package != name.to_string())
         {
-            return Err(error(format!(
-                "WIT package {name} in {} is already provided by the standard contracts bundled with Tembra; remove the duplicate",
-                place.display()
-            )));
-        }
-        if let Some(file) = &file
-            && std::fs::read_to_string(file).is_ok_and(|source| tembra_contracts::bundled(&source))
-        {
-            copies.insert(name.clone());
-            continue;
+            return Err(duplicate(name, file));
         }
         let what = if name.namespace == "wasi" {
             "a WASI package Tembra serves"
         } else {
             "the kernel's package"
         };
-        let place = file.unwrap_or_else(|| dir.display().to_string());
         return Err(error(format!(
-            "{place}: this copy of {name}, {what}, differs from the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version"
+            "{}: this copy of {name}, {what}, differs from the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version",
+            file.display()
         )));
     }
     Ok(copies)
+}
+
+/// Check the encoded WIT packages of `deps/` as `Contract::from_dir` checks them: each `.wat` file,
+/// and each `.wit` or `.wasm` file that starts with the wasm magic `\0asm`, is merged, in the order
+/// of the file names, into the bundled packages. The merge refuses a package that disagrees with
+/// the bundled one of its name, and the error is `from_dir`'s, naming the file. Each package the
+/// files hold comes with the files that hold it.
+fn merged(parsed: &Parsed, deps: &Path) -> syn::Result<BTreeMap<PackageName, Vec<PathBuf>>> {
+    let failed = |path: &Path, cause: &dyn std::fmt::Display| {
+        error(format!(
+            "failed to parse WIT package {}: {cause:#}",
+            path.display()
+        ))
+    };
+    let mut standard = parsed.bundled()?.0.clone();
+    standard
+        .push_str("guest.wit", GUEST)
+        .map_err(|cause| error(format!("the bundled tembra:guest package: {cause:#}")))?;
+    let mut files = std::fs::read_dir(deps)
+        .and_then(|entries| {
+            entries
+                .map(|entry| Ok(entry?.path()))
+                .collect::<std::io::Result<Vec<_>>>()
+        })
+        .map_err(|cause| failed(deps, &cause))?;
+    files.sort();
+    let mut decoded: BTreeMap<PackageName, Vec<PathBuf>> = BTreeMap::new();
+    for file in files {
+        let extension = file.extension().and_then(|extension| extension.to_str());
+        if file.is_dir() || !matches!(extension, Some("wit" | "wasm" | "wat")) {
+            continue;
+        }
+        let bytes = std::fs::read(&file).map_err(|cause| failed(&file, &cause))?;
+        if extension == Some("wat") || bytes.starts_with(b"\0asm") {
+            // `Resolve::push_file` decodes the file and merges what it holds; decoded apart first,
+            // its packages are known.
+            let mut packages = Resolve::default();
+            packages
+                .push_file(&file)
+                .map_err(|cause| failed(&file, &cause))?;
+            for name in packages.package_names.keys() {
+                decoded.entry(name.clone()).or_default().push(file.clone());
+            }
+            standard
+                .merge(packages)
+                .map_err(|cause| failed(&file, &cause))?;
+        }
+    }
+    Ok(decoded)
 }
 
 /// The package a line of a WIT package file declares: `ns:name@version` for the line
@@ -737,18 +820,19 @@ thread_local! {
     pub(crate) static DIRECTORY_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Read the WIT packages of a directory.
-fn resolve(dir: &Path) -> syn::Result<Resolve> {
+/// Read the WIT packages of a directory, with the files each was read from
+/// (`Directory::sources`).
+fn resolve(dir: &Path) -> syn::Result<(Resolve, PackageSourceMap)> {
     #[cfg(test)]
     DIRECTORY_PARSES.set(DIRECTORY_PARSES.get() + 1);
     let mut resolve = Resolve::default();
-    resolve.push_dir(dir).map_err(|cause| {
+    let (_, sources) = resolve.push_dir(dir).map_err(|cause| {
         error(format!(
             "cannot read the WIT packages in {}: {cause:#}",
             dir.display()
         ))
     })?;
-    Ok(resolve)
+    Ok((resolve, sources))
 }
 
 /// The WIT packages an expansion parses, each set once, the first time something asks for it: the
@@ -760,11 +844,11 @@ pub(crate) struct Parsed {
     bundled: OnceCell<syn::Result<crate::wasi::Bundled>>,
 }
 
-/// The consumed directory, `wit = "<dir>"`, and its packages, parsed once, the first time
-/// something asks for them.
+/// The consumed directory, `wit = "<dir>"`, and its packages with the files they were read from,
+/// parsed once, the first time something asks for them.
 pub(crate) struct Directory {
     path: PathBuf,
-    packages: OnceCell<syn::Result<Resolve>>,
+    packages: OnceCell<syn::Result<(Resolve, PackageSourceMap)>>,
 }
 
 impl Parsed {
@@ -797,9 +881,10 @@ impl Parsed {
     /// parsed now if nothing asked for them yet, or none without a directory.
     pub(crate) fn into_consumed(self) -> syn::Result<Resolve> {
         match self.dir {
-            Some(Directory { path, packages }) => {
-                packages.into_inner().unwrap_or_else(|| resolve(&path))
-            }
+            Some(Directory { path, packages }) => packages
+                .into_inner()
+                .unwrap_or_else(|| resolve(&path))
+                .map(|(packages, _)| packages),
             None => Ok(Resolve::default()),
         }
     }
@@ -813,6 +898,18 @@ impl Directory {
 
     /// The directory's packages, parsed the first time.
     pub(crate) fn packages(&self) -> syn::Result<&Resolve> {
+        self.parsed().map(|(packages, _)| packages)
+    }
+
+    /// The files each of the directory's packages was read from, parsed the first time: the files
+    /// of the directory that holds it, or its file of `deps/`, and none for a package decoded from
+    /// an encoded file of `deps/`.
+    pub(crate) fn sources(&self) -> syn::Result<&PackageSourceMap> {
+        self.parsed().map(|(_, sources)| sources)
+    }
+
+    /// The directory's packages and their files, parsed the first time.
+    fn parsed(&self) -> syn::Result<&(Resolve, PackageSourceMap)> {
         self.packages
             .get_or_init(|| resolve(&self.path))
             .as_ref()

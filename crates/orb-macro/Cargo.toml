@@ -19,5 +19,8 @@ serde_json.workspace = true
 syn = { version = "2", features = ["full"] }
 wit-parser = "=0.261.0"
 
+[dev-dependencies]
+wit-component = "=0.261.0"
+
 [lints]
 workspace = true

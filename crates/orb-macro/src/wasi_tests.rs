@@ -302,10 +302,11 @@ fn a_consumed_contract_may_bring_the_wasi_packages() {
 /// Every copy of a bundled package a consumed directory holds is checked as `Contract::from_dir`
 /// checks it, whether the imports need the package or not: an edited copy in `deps/` of
 /// `wasi:random` or of the kernel's package, in an Orb that imports `wasi:clocks` or no WASI
-/// interface and has no state, is an error naming its file and what the package is, and a copy in
-/// a directory of `deps/`, even line for line, or nested in a file of the directory itself, is
-/// `from_dir`'s error naming that directory. The same copies, line for line in `deps/` itself,
-/// expand.
+/// interface and has no state, is an error naming its file and what the package is, a copy in a
+/// directory of `deps/`, even line for line, or nested in a file of the directory itself, is
+/// `from_dir`'s error naming that directory, and a copy nested in a file of `deps/` that holds
+/// another package, even line for line, is `from_dir`'s error naming that file. The same copies,
+/// line for line in `deps/` itself, expand, and so does that file without the nested copy.
 #[test]
 fn every_copy_of_a_bundled_package_is_checked() {
     let clocks = bundled("wasi-clocks.wit");
@@ -408,4 +409,182 @@ fn every_copy_of_a_bundled_package_is_checked() {
         assert!(error.contains(&message), "{imports:?}: {error}");
     }
     std::fs::remove_dir_all(dir).unwrap();
+    let ledger = "package example:ledger@1.0.0;\n\ninterface book {\n  total: func() -> u32;\n}\n";
+    for (name, copy) in [("identical", random), ("edited", edited_random.as_str())] {
+        let dir = contract(
+            &format!("nested-random-{name}"),
+            &[("wasi-clocks.wit", clocks), ("ledger.wit", ledger)],
+        );
+        for imports in imports {
+            expanded(importing(imports, Some(&dir)), DICE)
+                .unwrap_or_else(|error| panic!("{name}, {imports:?}: {error}"));
+        }
+        let file = dir.join("deps").join("ledger.wit");
+        let nested = crate::wit::nested(copy).unwrap();
+        std::fs::write(&file, format!("{ledger}\n{nested}")).unwrap();
+        let message = provided("wasi:random@0.3.0", &file);
+        for imports in imports {
+            let error = refused(imports, &dir);
+            assert!(error.contains(&message), "{name}, {imports:?}: {error}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// A bundled package in `deps/` encoded as a WIT package, as `wit_component::encode` writes it,
+/// has no source to compare line for line: `Contract::from_dir` merges each encoded file into the
+/// bundled packages. An exact copy merges, so it is a copy whether the Orb imports its package or
+/// not: the inline WIT leaves the bundled one out and resolves after the consumed directory, as
+/// the bindings read them. A copy the merge refuses is `from_dir`'s error naming its file. The
+/// kernel's package the macro brings itself: a copy of it decoded from an encoded file, an exact
+/// one or the part another encoded package uses, is an error asking to remove it.
+#[test]
+fn an_encoded_copy_of_a_bundled_package_is_merged_as_from_dir_merges_it() {
+    let clocks = bundled("wasi-clocks.wit");
+    // The last of the sources, encoded with the packages before it that it uses.
+    let encoded = |sources: &[&str]| {
+        let mut resolve = wit_parser::Resolve::default();
+        let mut package = None;
+        for source in sources {
+            package = Some(resolve.push_str("encoded.wit", source).unwrap());
+        }
+        wit_component::encode(&resolve, package.unwrap(), false).unwrap()
+    };
+    let imports: [&[&str]; 2] = [
+        &[
+            "example:timer/timer@1.0.0",
+            "wasi:clocks/monotonic-clock@0.3.0",
+        ],
+        &["example:timer/timer@1.0.0"],
+    ];
+    let dir = contract("encoded", &[]);
+    std::fs::write(
+        dir.join("deps").join("wasi-clocks.wasm"),
+        encoded(&[clocks]),
+    )
+    .unwrap();
+    for imports in imports {
+        let generated = expanded(importing(imports, Some(&dir)), DICE)
+            .unwrap_or_else(|error| panic!("{imports:?}: {error}"));
+        let inline = inline(&generated);
+        assert!(
+            !inline.contains("package wasi:clocks@0.3.0"),
+            "{imports:?}: {inline}"
+        );
+        assert!(
+            generated.contains("pub use self :: example :: timer :: timer ;"),
+            "{generated}"
+        );
+        let mut consumed = wit_parser::Resolve::default();
+        consumed.push_dir(&dir).unwrap();
+        super::tests::resolved_with(consumed, &inline);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+    let different = clocks.replacen(
+        "get-resolution: func() -> duration;",
+        "get-resolution: func() -> u32;",
+        1,
+    );
+    let dir = contract("encoded-different", &[]);
+    let file = dir.join("deps").join("wasi-clocks.wasm");
+    std::fs::write(&file, encoded(&[different.as_str()])).unwrap();
+    let message = format!(
+        "failed to parse WIT package {}: failed to merge package `wasi:clocks@0.3.0` into existing copy",
+        file.display()
+    );
+    for imports in imports {
+        let error = expanded(importing(imports, Some(&dir)), DICE)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&message), "{imports:?}: {error}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+    let guest = tembra_contracts::guest::SOURCE;
+    let span = "package example:span@1.0.0;\n\ninterface span {\n  use tembra:guest/context@1.0.0.{level};\n  type width = level;\n}\n";
+    for (name, sources) in [("tembra-guest", vec![guest]), ("span", vec![guest, span])] {
+        let dir = contract(&format!("encoded-{name}"), &[("wasi-clocks.wit", clocks)]);
+        for imports in imports {
+            expanded(importing(imports, Some(&dir)), DICE)
+                .unwrap_or_else(|error| panic!("{name}, {imports:?}: {error}"));
+        }
+        let file = dir.join("deps").join(format!("{name}.wasm"));
+        std::fs::write(&file, encoded(&sources)).unwrap();
+        let message = format!(
+            "{}: this copy of tembra:guest@1.0.0, the kernel's package, is encoded; remove it, since the macro brings the kernel's package",
+            file.display()
+        );
+        for imports in imports {
+            let error = expanded(importing(imports, Some(&dir)), DICE)
+                .map(|_| ())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&message), "{name}, {imports:?}: {error}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// An encoded package holds only the parts of the bundled packages it uses, and the bindings read
+/// those packages from the consumed directory: `deps/span.wasm`, whose `span` uses a type of
+/// `wasi:clocks`, brings a copy of `wasi:clocks` holding that type and what it builds on. A WASI
+/// import that needs a part the copy lacks is refused on its literal, naming the copy, the file it
+/// was decoded from and what it lacks: the imported interface, a function of it, or an interface a
+/// bundled package nested for the import uses. The same directory expands without the import.
+#[test]
+fn an_encoded_copy_must_hold_what_a_wasi_import_needs() {
+    let clocks = bundled("wasi-clocks.wit");
+    let timer = "package example:timer@1.0.0;\n\ninterface timer {\n  use example:span/span@1.0.0.{width};\n  now: func() -> width;\n}\n\nworld timer-world {\n  export timer;\n}\n";
+    for (name, used, import, lack) in [
+        (
+            "interface",
+            "types@0.3.0.{duration}",
+            "wasi:clocks/monotonic-clock@0.3.0",
+            "wasi:clocks/monotonic-clock@0.3.0",
+        ),
+        (
+            "function",
+            "monotonic-clock@0.3.0.{mark}",
+            "wasi:clocks/monotonic-clock@0.3.0",
+            "the function now of wasi:clocks/monotonic-clock@0.3.0",
+        ),
+        (
+            "nested",
+            "types@0.3.0.{duration}",
+            "wasi:filesystem/preopens@0.3.0",
+            "wasi:clocks/system-clock@0.3.0, which wasi:filesystem@0.3.0 uses",
+        ),
+    ] {
+        let ty = used.split(['{', '}']).nth(1).unwrap();
+        let span = format!(
+            "package example:span@1.0.0;\n\ninterface span {{\n  use wasi:clocks/{used};\n  type width = {ty};\n}}\n"
+        );
+        let mut resolve = wit_parser::Resolve::default();
+        resolve.push_str("wasi-clocks.wit", clocks).unwrap();
+        let package = resolve.push_str("span.wit", &span).unwrap();
+        let dir = contract(&format!("partial-{name}"), &[]);
+        std::fs::write(dir.join("timer.wit"), timer).unwrap();
+        let file = dir.join("deps").join("span.wasm");
+        std::fs::write(
+            &file,
+            wit_component::encode(&resolve, package, false).unwrap(),
+        )
+        .unwrap();
+        let alone: &[&str] = &["example:timer/timer@1.0.0"];
+        let generated = expanded(importing(alone, Some(&dir)), DICE)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let mut consumed = wit_parser::Resolve::default();
+        consumed.push_dir(&dir).unwrap();
+        super::tests::resolved_with(consumed, &inline(&generated));
+        let error = expanded(importing(&[alone[0], import], Some(&dir)), DICE)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        let message = format!(
+            "the consumed directory holds wasi:clocks@0.3.0 only in part, decoded from {}, without {lack}; the bindings read wasi:clocks@0.3.0 from there",
+            file.display()
+        );
+        assert!(error.contains(&message), "{name}: {error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
