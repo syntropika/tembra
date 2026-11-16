@@ -2413,6 +2413,47 @@ fn what_the_macro_cannot_evaluate_is_refused() {
     }
 }
 
+/// The macro writes the WIT and the bindings' `with` before the compiler evaluates `#[cfg(..)]`,
+/// and a flags struct stays the author's: under `#[cfg(..)]`, the WIT would hold the flags and the
+/// bindings name the struct where the compiler drops it, so a `#[flags]` struct under `#[cfg(..)]`
+/// that enters the WIT is refused. The same struct without the attribute enters the WIT, and kept
+/// out of the WIT, the struct is the author's, as written.
+#[test]
+fn a_flags_struct_under_cfg_is_refused() {
+    let module = |cfg: &str, returned: &str| {
+        format!(
+            "mod office {{
+                {cfg}
+                #[flags]
+                pub struct Access {{ pub read: bool, pub share: bool }}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    let cfg = "#[cfg(feature = \"sharing\")]";
+    let error = refused("example:office@1.0.0", &module(cfg, "Access"));
+    assert!(
+        error.contains("`#[cfg(..)]` on the flags `Access`: `Access` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the flags and the bindings would name the struct in every configuration; remove the attribute, or keep `Access` out of the WIT"),
+        "{error}"
+    );
+    let entered = tokens(&expanded("example:office@1.0.0", &module("", "Access")));
+    assert!(
+        entered.contains(
+            "\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: Access"
+        ),
+        "{entered}"
+    );
+    let kept = tokens(&expanded("example:office@1.0.0", &module(cfg, "u32")));
+    assert!(
+        kept.contains(
+            "# [cfg (feature = \"sharing\")] pub struct Access { pub read : bool , pub share : bool }"
+        ),
+        "{kept}"
+    );
+}
+
 /// A `#[cfg_attr(..)]` wrapping only Rust's own attributes that the generated type never takes,
 /// such as `allow`, `doc` or `deprecated`, changes nothing the macro writes: it may sit on a type
 /// that enters the WIT, its fields and its cases, and a flags struct keeps it as written.

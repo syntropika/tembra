@@ -921,9 +921,9 @@ parameter; a flags struct of a sub-module is visible to the Orb module, as are t
 them, since the bindings name it from there through each, as the next section says. A derived
 hook's input holds no flags: the bindings name a hook's types from its import module and from its
 export module, at two depths, and the macro maps a flags onto the author's struct through one path.
-The macro reads the struct before the compiler evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`: a
-field under `#[cfg(..)]` and a derive under `#[cfg_attr(..)]` are compile errors. A struct marked
-`#[flags]` that no function uses stays ordinary Rust.
+The macro reads the struct before the compiler evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`: the
+struct or a field under `#[cfg(..)]` and a derive under `#[cfg_attr(..)]` are compile errors. A
+struct marked `#[flags]` that no function uses stays ordinary Rust.
 
 ## Organizing the module in sub-modules
 

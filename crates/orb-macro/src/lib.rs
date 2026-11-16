@@ -3402,9 +3402,11 @@ fn replaceable(item: &Item) -> syn::Result<()> {
 }
 
 /// Refuse what the macro cannot evaluate in a type that enters the WIT, as it reads the type before
-/// the compiler evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`: a field, a case or a case's payload
-/// under `#[cfg(..)]`, which the WIT would hold in every configuration, and a `#[cfg_attr(..)]` on
-/// the type or a member hiding what the macro reads, which would come and go on the generated type
+/// the compiler evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`: a flags struct under `#[cfg(..)]`,
+/// which stays the author's, gone where the attribute is off, while the WIT would hold it and the
+/// bindings name it in every configuration, a field, a case or a case's payload under
+/// `#[cfg(..)]`, which the WIT would hold in every configuration, and a `#[cfg_attr(..)]` on the
+/// type or a member hiding what the macro reads, which would come and go on the generated type
 /// replacing the type, or beside the derives the macro adds to a flags struct.
 fn unconditional(item: &Item, flags: bool) -> syn::Result<()> {
     // Each member, by what it is and its name as the errors say them.
@@ -3438,6 +3440,18 @@ fn unconditional(item: &Item, flags: bool) -> syn::Result<()> {
         ),
         _ => return Ok(()),
     };
+    if flags
+        && let Some(attribute) = attrs
+            .iter()
+            .find(|attribute| attribute.path().is_ident("cfg"))
+    {
+        return Err(syn::Error::new(
+            attribute.span(),
+            format!(
+                "`#[cfg(..)]` on the flags `{owner}`: `{owner}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the flags and the bindings would name the struct in every configuration; remove the attribute, or keep `{owner}` out of the WIT"
+            ),
+        ));
+    }
     for (kind, name, attrs) in &members {
         if let Some(attribute) = attrs
             .iter()
