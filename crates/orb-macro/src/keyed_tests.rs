@@ -360,12 +360,14 @@ interface counter { use cursors.{cursor}; read: func() -> u32; }
     );
 }
 
-/// An interface the module implements is imported by key as well: a proxy serving the interface
-/// reaches another provider's objects through the view. The view `use`s the interface's types, so
-/// the elaborated world imports the interface it exports, for the types alone, which the contracts
-/// and `cargo tembra build` tell from a hook, an interface the world imports itself. A derived
-/// signature names the interface's types through the implemented interface's module, the export's
-/// copy, which the derived interface takes; the view's module names the import's.
+/// An interface the module implements is imported by key, not plainly: a proxy serving the
+/// interface reaches another provider's objects through the view, while a world that imports the
+/// interface itself and exports it is a hook, so a plain import is an error on the import. The view
+/// `use`s the interface's types, so the elaborated world imports the interface it exports, for the
+/// types alone, which the contracts and `cargo tembra build` tell from a hook, an interface the
+/// world imports itself. A derived signature names the interface's types through the implemented
+/// interface's module, the export's copy, which the derived interface takes; the view's module
+/// names the import's.
 #[test]
 fn an_implemented_interface_is_imported_by_key() {
     const PROXY: &str = "mod proxy {
@@ -377,15 +379,25 @@ fn an_implemented_interface_is_imported_by_key() {
         }
     }";
     let dir = consumed("implemented", COUNTERS);
-    // The proxy implements the interface and reaches another provider's objects plainly.
-    expanded(
+    // Imported plainly, the interface would be both the import and the export the Orb module
+    // re-exports as `counter`, in a world that pairs them as a hook.
+    let plain = refused(
         Options {
             imports: vec![literal("example:counters/counter@1.0.0")],
             ..options(Some(&dir), &[])
         },
         PROXY,
     );
-    // Or by key, through the view, from a derived service.
+    assert!(
+        plain.contains("example:counters/counter@1.0.0 is implemented by this module and imported plainly: a world that imports and exports one interface is a hook; reach another provider's objects with import(\"example:counters/counter@1.0.0\", keyed), or contribute to or declare the hook with #[hook(\"example:counters/counter@1.0.0\", ..)]"),
+        "{plain}"
+    );
+    // The proxy implements the interface and reaches another provider's objects by key.
+    expanded(
+        options(Some(&dir), &["example:counters/counter@1.0.0"]),
+        PROXY,
+    );
+    // Through the view, from a derived service.
     let relaying = PROXY.replace(
         "\n    }",
         "

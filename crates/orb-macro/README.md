@@ -588,8 +588,10 @@ fixed length. Nor is an interface with a function `handle`, `take-handle` or `fr
 every object's bindings define for its handle, or with a parameter `self`, which names a method's
 object. A plain import of the
 same interface may stand next to the keyed one, re-exported under the interface's name. An
-interface the module implements may be imported by key too: a proxy serving the interface
-reaches the objects of other providers through the view. The view `use`s the interface's types,
+interface the module implements may be imported by key, and only so: a proxy serving the interface
+reaches the objects of other providers through the view, and a plain import of it is an error on
+the import, since a world that imports the interface itself and exports it is a hook, which
+`#[hook(..)]` contributes to or declares. The view `use`s the interface's types,
 so the elaborated world imports the interface it exports, for the types alone, which `cargo tembra
 build` and the kernel tell from a hook, an interface the world imports itself. A derived signature
 names such an interface's types through the implemented interface's module, `counter::Tally`, the

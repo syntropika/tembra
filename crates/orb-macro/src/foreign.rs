@@ -117,7 +117,8 @@ impl Modules {
     /// kernel's context interface under `context`. `imports` are the attribute's literals, read as
     /// identities already; `paths` are the Orb's own modules, by scope. Another interface under a
     /// name already taken is an error on it, naming both, and so is an import of the kernel's
-    /// context interface beside the option.
+    /// context interface beside the option, and a plain import of an interface the module
+    /// implements, which would make the world a hook's.
     pub(crate) fn new(
         context: bool,
         imports: &[LitStr],
@@ -188,6 +189,21 @@ impl Modules {
                     }),
             );
         for (identity, role, span) in roles {
+            // A world that imports an interface itself and exports it is a hook to `cargo tembra
+            // build` and the kernel, and the Orb module would re-export both the import and the
+            // export under the interface's name.
+            if role == Role::Imported
+                && services
+                    .iter()
+                    .any(|service| service.implements.as_ref() == Some(&identity))
+            {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "{identity} is implemented by this module and imported plainly: a world that imports and exports one interface is a hook; reach another provider's objects with import(\"{identity}\", keyed), or contribute to or declare the hook with #[hook(\"{identity}\", ..)]"
+                    ),
+                ));
+            }
             let [_, _, interface] = hook_path(&identity);
             let name = interface.to_string();
             let second = Reexported { identity, role };
