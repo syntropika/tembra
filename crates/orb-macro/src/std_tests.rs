@@ -1,5 +1,5 @@
 //! Runtime ownership is explicit: std supplies its runtime unless `no_std` is selected.
-use super::{Options, expand};
+use super::{Options, expand, metadata::Metadata};
 
 fn guest(no_std: bool) -> syn::ItemMod {
     syn::parse2(
@@ -21,6 +21,7 @@ fn guest(no_std: bool) -> syn::ItemMod {
                     }
                 }
             },
+            Metadata::named("runtime"),
         )
         .expect("a valid guest"),
     )

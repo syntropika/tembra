@@ -11,6 +11,7 @@ members = [
   "crates/executor-wasm",
   "crates/mobile",
   "crates/orb-macro",
+  "crates/orb-macro/native-fixture",
   "crates/cargo-tembra",
 ]
 resolver = "2"

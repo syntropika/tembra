@@ -957,6 +957,52 @@ mentions it. The modules the macro re-exports in the Orb module, `context`, an i
 hook declared from a consumed package, are reached from a sub-module through `super::`. See
 [rust-orb-service-lifetime](../../examples/rust-orb-service-lifetime/README.md).
 
+## Using the Orb natively
+
+The same module serves a native host: the macro also generates
+`orb() -> tembra::Result<tembra::Orb>`, the Orb a host installs with `Host::install`, from the same
+reading of the module as the component. Each `#[service]` is a `Service` named
+`<orb>::<interface identity>`, with the signature of its interface, the lifetime and linger of its
+attribute, and one method per `pub fn` under its WIT name. A local caller passes the arguments as a
+tuple in WIT order, `()` without arguments, and gets the Rust value back; a portable caller's JSON
+array of arguments goes through a codec the macro writes from the WIT, so the author's types need
+no serde. The Orb's name and API version come from `[package.metadata.tembra]` of the crate
+manifest, with the defaults of `cargo tembra build`: the crate name and 1.
+
+```rust,ignore
+#[tembra::orb(package = "example:calculator@1.0.0")]
+pub mod calculator {
+    #[service]
+    pub struct Math;
+
+    impl Math {
+        pub fn add(a: u32, b: u32) -> u32 {
+            a + b
+        }
+    }
+}
+
+// In a native host, under a root context.
+host.install(vec![calculator::orb()?])?;
+let math = host.get("calculator::example:calculator/math@1.0.0", vec!["main".into()], "host")?;
+let sum: u32 = math.call(&context, "add", (1u32, 2u32)).await?;
+let sum: Value = math.call_portable(&context, "add", json!([1, 2])).await?;
+```
+
+The native items sit inside `tembra::__host!`, a hidden macro of the facade that expands its input
+only where the facade's `host` feature is on, and Cargo unifies features across a build: a native
+host that depends on the Orb crate and on `tembra` with `host`, the default, gets `orb()`; a
+component build enables only `macros`, gets none of it, and the component stays the same. The
+generated code names the facade as `::tembra`, so an Orb crate depends on it under that name and
+needs no dependency of its own for the runtime or its JSON; a host whose `tembra` lacks `host` finds
+no `orb()`. The crate is rebuilt when its manifest changes, so `orb()` follows the table.
+
+Today the native side covers services whose functions take and return numbers, `bool`, `String`,
+`char`, and `Vec`, `Option` and tuples of them. A record, an enum, a variant, a flags, a `Result`,
+a resource, the `context` option, `#[state]`, `#[resource]`, `#[wit_resource]`, an import and a hook
+are compile errors where the runtime is linked, naming the item, until the native side covers them;
+a component build of the same module is unaffected.
+
 ## What it generates
 
 The macro rewrites the module with:
@@ -1009,7 +1055,11 @@ The macro rewrites the module with:
    kernel's `validate` callback, which reads the value a reload would adopt as the state type and
    runs the state's `#[validate]` function on it;
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
-   function and emptied by the `#[close]` one, and the `with` function on each resource type.
+   function and emptied by the `#[close]` one, and the `with` function on each resource type;
+10. inside `tembra::__host!`, so only where the facade links the runtime, `pub fn orb()`, which
+    builds the Orb named by the manifest from one hidden function per service, written in the
+    service's module with the codec constant of each of its methods, and an `include_bytes!` of
+    the manifest, see [using the Orb natively](#using-the-orb-natively).
 
 The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) among its dependencies,
 `dlmalloc` (feature `global`) only with `no_std`, and `serde` (features `derive`, `alloc`) and

@@ -1,0 +1,36 @@
+[package]
+name = "tembra-orb-native-fixture"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "An Orb crate the macro's tests use natively: its tests are a host that installs orb()"
+
+# Read by `#[tembra::orb]` for `orb()`, as `cargo tembra build` reads it for a component: the Orb
+# name and API version, which the WIT does not carry.
+[package.metadata.tembra]
+name = "calculator"
+api-version = 2
+
+[dependencies]
+# What an Orb crate depends on: the facade's authoring entry point, without the host runtime.
+tembra = { path = "../../tembra", default-features = false, features = ["macros"] }
+# The component side the macro generates names wit-bindgen; `async` for the async method.
+wit-bindgen = { version = "=0.63.0", default-features = false, features = [
+  "macros",
+  "realloc",
+  "async",
+] }
+
+[dev-dependencies]
+# The tests are a native host: Cargo unifies the features, so the crate's `tembra` links the
+# runtime there and `orb()` exists; `authoring` reads the module's `WIT` as a contract.
+tembra = { path = "../../tembra", features = ["authoring"] }
+futures.workspace = true
+serde_json.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["wit-bindgen"]
+
+[lints]
+workspace = true

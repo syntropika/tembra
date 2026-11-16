@@ -57,6 +57,18 @@ impl Metadata {
     }
 }
 
+#[cfg(test)]
+impl Metadata {
+    /// The table of a crate whose Orb is `name` at API version 1, for the tests of the expansion,
+    /// which read no manifest.
+    pub(crate) fn named(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            api_version: 1,
+        }
+    }
+}
+
 fn error(message: impl std::fmt::Display) -> syn::Error {
     syn::Error::new(Span::call_site(), message.to_string())
 }

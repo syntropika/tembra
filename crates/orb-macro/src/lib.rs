@@ -39,9 +39,8 @@
 mod flags;
 mod foreign;
 mod keyed;
-// No expansion reads the manifest's table yet.
-#[cfg_attr(not(test), allow(dead_code))]
 mod metadata;
+mod native;
 mod resource_params;
 mod wasi;
 mod wit;
@@ -76,7 +75,7 @@ fn expansion(
         .any(|token| matches!(&token, proc_macro2::TokenTree::Ident(ident) if ident == "no_std"));
     let expanded = options(attribute)
         .and_then(|options| Ok((options, syn::parse2::<ItemMod>(item)?)))
-        .and_then(|(options, module)| expand(options, module));
+        .and_then(|(options, module)| expand(options, module, metadata::Metadata::read()?));
     match expanded {
         Ok(tokens) => tokens,
         Err(error) => {
@@ -1109,11 +1108,17 @@ impl Analysis {
 }
 
 /// The module's expansion: one analysis of the module, then each side of the output written from
-/// it into the author's module, after the WIT both sides share.
-fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenStream> {
+/// it into the author's module, after the WIT both sides share. The native side names the Orb
+/// after the crate manifest's `[package.metadata.tembra]`, read by the caller.
+fn expand(
+    options: Options,
+    module: ItemMod,
+    metadata: metadata::Metadata,
+) -> syn::Result<proc_macro2::TokenStream> {
     let analysis = analyze(options, module)?;
-    let component = component(&analysis)?;
-    let native = native(&analysis);
+    let native = native::emit(&analysis, &metadata);
+    let component = component(&analysis, &native.nested)?;
+    let native = native.root;
     // Last, once both sides accepted the module: the signature of each service, from the WIT.
     let signatures = signatures(&analysis)?;
     let (outer_attrs, inner_attrs) = placed(&analysis.attrs);
@@ -1965,8 +1970,12 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
 /// The component side of the module: the bindings from the inline WIT, the author's types
 /// replaced by the generated ones, the bridges to the author's functions, each in the module of
 /// the item it serves, the sections `cargo tembra build` reads and the optional freestanding
-/// runtime prelude.
-fn component(analysis: &Analysis) -> syn::Result<proc_macro2::TokenStream> {
+/// runtime prelude. The sub-modules are rendered here, so the native side's items that go in one,
+/// `nested` by scope, are placed in it on the way.
+fn component(
+    analysis: &Analysis,
+    nested: &[(usize, proc_macro2::TokenStream)],
+) -> syn::Result<proc_macro2::TokenStream> {
     let Analysis {
         options,
         package,
@@ -2326,6 +2335,11 @@ fn component(analysis: &Analysis) -> syn::Result<proc_macro2::TokenStream> {
     });
     let state_code = state_code(states, modules);
     let resource_code = resource_code(resources, modules);
+    // The native side's items of each sub-module, after the component's, with the service they
+    // register; a component build expands them to nothing.
+    for (scope, items) in nested {
+        tree.at(&modules[*scope]).generated.push(items.clone());
+    }
     let body = tree.tokens();
     let wit_bytes = LitByteStr::new(wit.as_bytes(), Span::call_site());
     let wit_len = proc_macro2::Literal::usize_unsuffixed(wit.len());
@@ -2415,6 +2429,9 @@ fn component(analysis: &Analysis) -> syn::Result<proc_macro2::TokenStream> {
 
         #body
 
+        // Only `export!` constructs it, in a component build; a native build keeps the bridges
+        // and lets it be.
+        #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
         struct __TembraExports;
         #conversions
         #state_code
@@ -2425,12 +2442,6 @@ fn component(analysis: &Analysis) -> syn::Result<proc_macro2::TokenStream> {
         #[cfg(target_arch = "wasm32")]
         export!(__TembraExports);
     })
-}
-
-/// The native side of the module: the Orb's constructor for a native host and what a native
-/// caller needs. Nothing yet.
-fn native(_analysis: &Analysis) -> proc_macro2::TokenStream {
-    proc_macro2::TokenStream::new()
 }
 
 /// The signature of each service's interface, as the kernel computes it when it installs a
@@ -2475,16 +2486,22 @@ fn signatures(analysis: &Analysis) -> syn::Result<Vec<proc_macro2::TokenStream>>
                     format!("{identity} is no service of the derived contract"),
                 )
             })?;
-            let ident = format_ident!(
-                "__TEMBRA_SIGNATURE_{}",
-                service.ident.to_string().to_shouty_snake_case()
-            );
+            let ident = signature_ident(service);
             Ok(quote! {
                 #[doc(hidden)]
                 pub const #ident: &str = #digest;
             })
         })
         .collect()
+}
+
+/// The constant holding a service's signature, `__TEMBRA_SIGNATURE_LEDGER` for `Ledger`: written
+/// by `signatures` in the Orb module and read by the native side.
+fn signature_ident(service: &Service) -> Ident {
+    format_ident!(
+        "__TEMBRA_SIGNATURE_{}",
+        service.ident.to_string().to_shouty_snake_case()
+    )
 }
 
 /// The members every reference to a service object has, which the kernel refuses as method names

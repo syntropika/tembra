@@ -1,6 +1,6 @@
 //! Keyed imports: the view the macro derives from the provider's WIT, the role it embeds, the
 //! module it re-exports and the imports it refuses.
-use super::{Options, expand, expansion};
+use super::{Options, expand, expansion, metadata::Metadata};
 use std::path::{Path, PathBuf};
 use syn::{Expr, Item, ItemMod, Lit, LitStr, UnOp};
 
@@ -75,11 +75,19 @@ fn options(dir: Option<&Path>, keyed: &[&str]) -> Options {
 
 fn expanded(options: Options, module: &str) -> ItemMod {
     let module = syn::parse_str(module).expect("a module");
-    syn::parse2(expand(options, module).unwrap_or_else(|error| panic!("{error}"))).unwrap()
+    syn::parse2(
+        expand(options, module, Metadata::named("router"))
+            .unwrap_or_else(|error| panic!("{error}")),
+    )
+    .unwrap()
 }
 
 fn refused(options: Options, module: &str) -> String {
-    match expand(options, syn::parse_str(module).expect("a module")) {
+    match expand(
+        options,
+        syn::parse_str(module).expect("a module"),
+        Metadata::named("router"),
+    ) {
         Err(error) => error.to_string(),
         Ok(_) => panic!("the module was accepted"),
     }
@@ -256,7 +264,15 @@ fn the_attribute_writes_a_keyed_import_in_parentheses() {
         syn::parse_str(ROUTER).unwrap(),
     )
     .to_string();
-    assert!(!accepted.contains("compile_error"), "{accepted}");
+    // The macro accepts the module; its native side alone, inside the facade's wrapper, refuses
+    // the keyed import until its item lands.
+    assert_eq!(accepted.matches("compile_error").count(), 1, "{accepted}");
+    assert!(
+        accepted.contains(
+            ":: tembra :: __host ! { :: core :: compile_error ! (\"the import of example:counters/counter@1.0.0 by key is not supported natively yet\") ; }"
+        ),
+        "{accepted}"
+    );
     assert!(accepted.contains("import counter-ref;"), "{accepted}");
     for written in [
         quote::quote!(import("example:counters/counter@1.0.0")),

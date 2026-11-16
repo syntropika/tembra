@@ -1,7 +1,7 @@
 //! The types of the consumed interfaces in derived signatures: the `use` lines the derived WIT
 //! gains, the bridges that pass the author's values as they are, the states that hold them, and
 //! what is refused where.
-use super::{Options, expand};
+use super::{Options, expand, metadata::Metadata};
 use std::path::{Path, PathBuf};
 use syn::{Expr, Item, ItemMod, Lit};
 
@@ -71,11 +71,19 @@ fn shopping(dir: &Path) -> Options {
 
 fn expanded(options: Options, module: &str) -> ItemMod {
     let module = syn::parse_str(module).expect("a module");
-    syn::parse2(expand(options, module).unwrap_or_else(|error| panic!("{error}"))).unwrap()
+    syn::parse2(
+        expand(options, module, Metadata::named("keeper"))
+            .unwrap_or_else(|error| panic!("{error}")),
+    )
+    .unwrap()
 }
 
 fn refused(options: Options, module: &str) -> String {
-    match expand(options, syn::parse_str(module).expect("a module")) {
+    match expand(
+        options,
+        syn::parse_str(module).expect("a module"),
+        Metadata::named("keeper"),
+    ) {
         Err(error) => error.to_string(),
         Ok(_) => panic!("the module was accepted"),
     }

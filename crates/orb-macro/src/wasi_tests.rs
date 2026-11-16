@@ -1,6 +1,6 @@
 //! WASI imports: `import = "wasi:..."` names an interface of the WASI packages bundled with
 //! `tembra-contracts`, which the inline WIT nests unless the consumed directory holds them.
-use super::{Options, expand};
+use super::{Options, expand, metadata::Metadata};
 use std::path::{Path, PathBuf};
 
 const DICE: &str = "mod dice {
@@ -26,7 +26,12 @@ fn importing(imports: &[&str], wit: Option<&Path>) -> Options {
 
 /// The generated module as one token string, or the macro's error.
 fn expanded(options: Options, module: &str) -> syn::Result<String> {
-    expand(options, syn::parse_str(module).expect("a module")).map(|tokens| tokens.to_string())
+    expand(
+        options,
+        syn::parse_str(module).expect("a module"),
+        Metadata::named("dice"),
+    )
+    .map(|tokens| tokens.to_string())
 }
 
 /// The inline WIT the bindings read, from the generated tokens.

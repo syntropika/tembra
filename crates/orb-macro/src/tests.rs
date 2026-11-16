@@ -1,6 +1,6 @@
 //! The macro's reading of a module, checked on its output: the WIT it derives, the manifest it
 //! embeds and the errors it reports. The generated bindings themselves compile in the examples.
-use super::{Options, expand, expansion};
+use super::{Options, expand, expansion, metadata::Metadata};
 use syn::{Expr, Item, ItemMod, Lit, UnOp};
 
 /// Expand a module under `#[orb(package = ...)]` and parse the generated module back.
@@ -38,8 +38,13 @@ fn tokens(module: &ItemMod) -> String {
 }
 
 fn orb_with(options: Options, module: &str) -> syn::Result<ItemMod> {
+    orb_as(options, Metadata::named("book"), module)
+}
+
+/// Expand a module with the given options and manifest table, and parse the generated module back.
+fn orb_as(options: Options, metadata: Metadata, module: &str) -> syn::Result<ItemMod> {
     let module: ItemMod = syn::parse_str(module).expect("a module");
-    syn::parse2(expand(options, module)?)
+    syn::parse2(expand(options, module, metadata)?)
 }
 
 fn expanded(package: &str, module: &str) -> ItemMod {
@@ -98,6 +103,41 @@ fn manifest(module: &ItemMod) -> Option<String> {
         },
         _ => None,
     })
+}
+
+/// The items the module's native side wraps in `::tembra::__host!`, in the module itself, for an
+/// empty `path`, or in the sub-module at `path`, as one token string, once they parse as items;
+/// empty where the module has none.
+fn native(module: &ItemMod, path: &[&str]) -> String {
+    let mut items = items(module);
+    for segment in path {
+        items = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Mod(inner) if inner.ident == segment => {
+                    Some(&inner.content.as_ref().expect("a body").1[..])
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the sub-module `{segment}`"));
+    }
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Macro(invocation) => {
+                let path = &invocation.mac.path;
+                (quote::quote!(#path).to_string() == ":: tembra :: __host").then(|| {
+                    let tokens = &invocation.mac.tokens;
+                    syn::parse2::<syn::File>(tokens.clone()).unwrap_or_else(|error| {
+                        panic!("the native items do not parse: {error}\n{tokens}")
+                    });
+                    tokens.to_string()
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 const PACKAGE: &str = "example:book@1.0.0";
@@ -843,7 +883,7 @@ fn an_implemented_resource_is_bridged_in_its_own_module() {
         "impl exports :: example :: ledger :: book :: Guest for __TembraExports { type Entry = model :: entries :: Entry ;",
         "pub mod entries { pub struct Entry",
         "} impl super :: super :: exports :: example :: ledger :: book :: GuestEntry for Entry {",
-        "extern crate alloc as __tembra_alloc ; } } struct __TembraExports ;",
+        "extern crate alloc as __tembra_alloc ; } } # [cfg_attr (not (target_arch = \"wasm32\") , allow (dead_code))] struct __TembraExports ;",
         "fn new (label : __tembra_alloc :: string :: String) -> Self { Entry :: new (label) }",
         "fn label (& self ,) -> __tembra_alloc :: string :: String { Entry :: label (self ,) }",
         "fn blank () -> super :: super :: exports :: example :: ledger :: book :: Entry { super :: super :: exports :: example :: ledger :: book :: Entry :: new (Entry :: blank ()) }",
@@ -4331,4 +4371,326 @@ fn generated_code_names_prelude_items_by_their_paths() {
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
+}
+
+/// The native side generates `orb()`, inside the facade's wrapper: the Orb named and versioned by
+/// the manifest's table, with one `Service` per `#[service]`, built by a hidden function of the
+/// service's module and named `{orb}::{identity}`, with the signature constant and one
+/// `method_with` per `pub fn` under its WIT name, whose handle checks the context first. The
+/// manifest is included, so Cargo rebuilds the crate when only the table changes.
+#[test]
+fn the_native_side_generates_orb_from_the_manifest_and_the_services() {
+    let module = orb_as(
+        options(PACKAGE, None),
+        Metadata {
+            name: "ledgers".into(),
+            api_version: 3,
+        },
+        &ledger("#[service]"),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let native = native(&module, &[]);
+    for expected in [
+        "const _ : & [u8] = :: core :: include_bytes ! (:: core :: concat ! (:: core :: env ! (\"CARGO_MANIFEST_DIR\") , \"/Cargo.toml\")) ;",
+        "pub fn orb () -> :: tembra :: Result < :: tembra :: Orb > { let name = \"ledgers\" ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , 3u32) . service (self :: __tembra_service_ledger (name))) }",
+        "pub (crate) fn __tembra_service_ledger (orb : & str) -> :: tembra :: Service < () > { :: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/ledger@1.0.0\") , | _ | { :: core :: result :: Result :: Ok (()) }) . signature (:: core :: option :: Option :: Some (:: std :: string :: String :: from (__TEMBRA_SIGNATURE_LEDGER))) . method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) } , __TEMBRA_CODEC_LEDGER_COUNT ,) }",
+        "const __TEMBRA_CODEC_LEDGER_COUNT : :: tembra :: Codec < () , u32 > = :: tembra :: Codec { decode : | value | {",
+    ] {
+        assert!(native.contains(expected), "{expected}\n{native}");
+    }
+    assert!(!native.contains(". lifetime ("), "{native}");
+    // One wrapper, in the Orb module: the services are its.
+    assert_eq!(tokens(&module).matches(":: tembra :: __host !").count(), 1);
+}
+
+/// The ownership policy of `#[service(lifetime = host)]` and `#[service(linger_ms = n)]` goes on
+/// the `Service`, as the manifest carries it for a component; a plain service sets none.
+#[test]
+fn a_native_service_takes_the_lifetime_of_its_attribute() {
+    let host = native(
+        &expanded(PACKAGE, &ledger("#[service(lifetime = host)]")),
+        &[],
+    );
+    assert!(
+        host.contains(". lifetime (:: tembra :: core :: Lifetime :: Host , 0u32)"),
+        "{host}"
+    );
+    let lingering = native(
+        &expanded(PACKAGE, &ledger("#[service(linger_ms = 2500)]")),
+        &[],
+    );
+    assert!(
+        lingering.contains(". lifetime (:: tembra :: core :: Lifetime :: Referenced , 2500u32)"),
+        "{lingering}"
+    );
+}
+
+/// A method's handle takes the arguments as a tuple of the author's parameter types, in order,
+/// checks the context and calls the author's function, awaited when it is `async`; a function
+/// without a result answers `()`. Its codec reads the arguments from a JSON array, or `null`, of as
+/// many elements as parameters, each by the kind of its WIT type: serde for a scalar, a string or
+/// a char, element by element for a list, `null` or the value for an option, an array for a tuple;
+/// a result is written the same way, `null` for none.
+#[test]
+fn a_native_method_takes_a_tuple_of_arguments_and_gets_a_codec() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            #[service]
+            pub struct Math;
+            impl Math {
+                pub fn add(a: u32, b: u32) -> u32 { a + b }
+                pub async fn total(values: Vec<u32>) -> u64 { 0 }
+                pub fn count_words(text: String) -> Option<u32> { None }
+                pub fn initial(text: Option<String>) -> Option<char> { None }
+                pub fn swap(pair: (String, u32)) -> (u32, String) { (pair.1, pair.0) }
+                pub fn ping() {}
+            }
+        }",
+    );
+    let native = native(&module, &[]);
+    for expected in [
+        ". method_with (\"add\" , | _ , __tembra_context : :: tembra :: Context , (a , b ,) : (u32 , u32 ,) | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Math :: add (a , b)) } , __TEMBRA_CODEC_MATH_ADD ,)",
+        ". method_with (\"total\" , | _ , __tembra_context : :: tembra :: Context , (values ,) : (Vec < u32 > ,) | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Math :: total (values) . await) } , __TEMBRA_CODEC_MATH_TOTAL ,)",
+        ". method_with (\"count-words\" ,",
+        ". method_with (\"ping\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; Math :: ping () ; :: core :: result :: Result :: Ok (()) } , __TEMBRA_CODEC_MATH_PING ,)",
+        "const __TEMBRA_CODEC_MATH_ADD : :: tembra :: Codec < (u32 , u32 ,) , u32 > = :: tembra :: Codec {",
+        ":: tembra :: serde_json :: Value :: Null => :: std :: vec :: Vec :: new () ,",
+        "let [__tembra_0 , __tembra_1] = < [:: tembra :: serde_json :: Value ; 2usize] > :: try_from (items) . map_err (| items | :: std :: format ! (\"expected 2 arguments, got {}\" , items . len ())) ? ;",
+        ":: tembra :: serde_json :: from_value :: < u32 > (__tembra_0) . map_err (| error | error . to_string ())",
+        ". collect :: < :: core :: result :: Result < Vec < u32 > , :: std :: string :: String >> ()",
+        "const __TEMBRA_CODEC_MATH_COUNT_WORDS : :: tembra :: Codec < (String ,) , Option < u32 > >",
+        ":: core :: option :: Option :: None => { :: core :: result :: Result :: Ok (:: tembra :: serde_json :: Value :: Null) } :: core :: option :: Option :: Some (item) => :: tembra :: serde_json :: to_value (item) . map_err (| error | error . to_string ()) ,",
+        "const __TEMBRA_CODEC_MATH_INITIAL : :: tembra :: Codec < (Option < String > ,) , Option < char > >",
+        "match __tembra_0 { :: tembra :: serde_json :: Value :: Null => { :: core :: result :: Result :: Ok (:: core :: option :: Option :: None) } item => :: tembra :: serde_json :: from_value :: < String > (item) . map_err (| error | error . to_string ()) . map (:: core :: option :: Option :: Some) , } ?",
+        "const __TEMBRA_CODEC_MATH_SWAP : :: tembra :: Codec < ((String , u32) ,) , (u32 , String) >",
+        "\"expected a tuple of 2 elements, got {}\"",
+        "const __TEMBRA_CODEC_MATH_PING : :: tembra :: Codec < () , () > = :: tembra :: Codec { decode : | value | {",
+        "encode : | () | :: core :: result :: Result :: Ok (:: tembra :: serde_json :: Value :: Null) , } ;",
+    ] {
+        assert!(native.contains(expected), "{expected}\n{native}");
+    }
+}
+
+/// A service of a sub-module is built by a function of its module, where its struct and its types
+/// resolve as written, whatever the module's and the struct's visibility; `orb()` reaches it by
+/// path, and it reaches the signature constant of the Orb module through `super::`.
+#[test]
+fn a_native_service_of_a_sub_module_is_built_in_its_module() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            pub mod pinned {
+                #[service(lifetime = host)]
+                pub struct Pinned;
+                impl Pinned { pub fn add(amount: i64) -> i64 { amount } }
+            }
+            mod memo {
+                #[service]
+                pub struct Memo;
+                impl Memo { pub fn echo(text: String) -> String { text } }
+            }
+        }",
+    );
+    let root = native(&module, &[]);
+    assert!(
+        root.contains(
+            ". service (self :: pinned :: __tembra_service_pinned (name)) . service (self :: memo :: __tembra_service_memo (name))"
+        ),
+        "{root}"
+    );
+    assert!(!root.contains("fn __tembra_service_"), "{root}");
+    let pinned = native(&module, &["pinned"]);
+    for expected in [
+        "pub (crate) fn __tembra_service_pinned (orb : & str) -> :: tembra :: Service < () >",
+        ":: std :: string :: String :: from (super :: __TEMBRA_SIGNATURE_PINNED)",
+        ". lifetime (:: tembra :: core :: Lifetime :: Host , 0u32)",
+        ":: core :: result :: Result :: Ok (Pinned :: add (amount))",
+        "const __TEMBRA_CODEC_PINNED_ADD : :: tembra :: Codec < (i64 ,) , i64 >",
+    ] {
+        assert!(pinned.contains(expected), "{expected}\n{pinned}");
+    }
+    assert!(
+        native(&module, &["memo"]).contains("pub (crate) fn __tembra_service_memo (orb : & str)"),
+        "{}",
+        native(&module, &["memo"])
+    );
+}
+
+const COUNTER_WIT: &str = "package example:counters@1.0.0;
+interface counter {
+  add: func(amount: u32) -> u32;
+}
+world counting { export counter; }
+";
+
+/// A service implementing a consumed interface is registered under that interface's identity, with
+/// the signature its own contract gives it.
+#[test]
+fn a_native_service_implementing_an_interface_is_named_by_its_identity() {
+    let dir = consumed("native-implemented", COUNTER_WIT);
+    let module = orb_with(
+        options("example:tally@1.0.0", Some(&dir)),
+        "mod tally {
+            #[service(\"example:counters/counter@1.0.0\")]
+            pub struct Counter;
+            impl Counter { pub fn add(amount: u32) -> u32 { amount } }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let native = native(&module, &[]);
+    for expected in [
+        ":: std :: format ! (\"{}::{}\" , orb , \"example:counters/counter@1.0.0\")",
+        ":: std :: string :: String :: from (__TEMBRA_SIGNATURE_COUNTER)",
+        ". method_with (\"add\" ,",
+    ] {
+        assert!(native.contains(expected), "{expected}\n{native}");
+    }
+}
+
+/// What the native side does not cover yet is a compile error inside the facade's wrapper, so a
+/// component build of the module is unaffected: the `context` option, a state, a root resource, an
+/// import, a hook contributed to or declared, and a WIT resource, each named.
+#[test]
+fn the_native_side_refuses_what_it_does_not_cover_yet() {
+    let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
+    let dir = consumed("native-hook", ADMISSION_WIT);
+    for (options, module, message) in [
+        (
+            Options {
+                context: true,
+                ..options(PACKAGE, None)
+            },
+            ledger("#[service]"),
+            "the `context` option is not supported natively yet",
+        ),
+        (
+            options(PACKAGE, None),
+            format!("mod book {{ #[state] pub struct Sealed {{ pub count: u32 }} {service} }}"),
+            "`Sealed` is marked #[state]; states are not supported natively yet",
+        ),
+        (
+            options(PACKAGE, None),
+            format!(
+                "mod book {{ #[resource] pub struct Banner {{ pub text: String }} impl Banner {{ #[open] pub fn open() -> Self {{ Banner {{ text: String::new() }} }} }} {service} }}"
+            ),
+            "`Banner` is marked #[resource]; root resources are not supported natively yet",
+        ),
+        (
+            Options {
+                imports: vec![literal("wasi:random/random@0.3.0")],
+                ..options(PACKAGE, None)
+            },
+            ledger("#[service]"),
+            "the import of wasi:random/random@0.3.0 is not supported natively yet",
+        ),
+        (
+            options(PACKAGE, Some(&dir)),
+            format!(
+                "mod book {{ #[hook(\"example:admission/guard@1.0.0\", priority = 1)] pub fn admit(input: guard::Admission) -> guard::Admission {{ input }} {service} }}"
+            ),
+            "the contribution to the hook example:admission/guard@1.0.0 is not supported natively yet",
+        ),
+        (
+            options(PACKAGE, None),
+            format!(
+                "mod book {{ #[hook(composition = series, input = Admission)] pub struct Guard; pub struct Admission {{ pub value: i32 }} {service} }}"
+            ),
+            "the declaration of the hook example:book/guard@1.0.0 is not supported natively yet",
+        ),
+        (
+            options(PACKAGE, None),
+            "mod book {
+                #[wit_resource]
+                pub struct Ticket;
+                impl Ticket {
+                    #[constructor]
+                    pub fn new() -> Self { Ticket }
+                    pub fn id(&self) -> u32 { 0 }
+                }
+                #[service]
+                pub struct Admissions;
+                impl Admissions { pub fn issue() -> Ticket { Ticket } }
+            }"
+            .to_owned(),
+            "`Ticket` is marked #[wit_resource]; WIT resources are not supported natively yet",
+        ),
+    ] {
+        let module =
+            orb_with(options, &module).unwrap_or_else(|error| panic!("{message}: {error}"));
+        assert_eq!(
+            native(&module, &[]),
+            format!(":: core :: compile_error ! (\"{message}\") ;"),
+            "{message}"
+        );
+        assert!(wit(&module).starts_with("package "), "{message}");
+    }
+}
+
+/// A method taking or returning a type whose JSON the codecs do not write yet is refused the same
+/// way, naming the method, the type and what it is: a record, an enum, a variant, a flags, a
+/// `Result`, inside a list, an option or a tuple too, and a type of a consumed interface.
+#[test]
+fn the_native_side_refuses_the_types_its_codecs_do_not_cover_yet() {
+    for (items, function, message) in [
+        (
+            "pub struct Entry { pub label: String }",
+            "pub fn add(entry: Entry) -> u32 { 0 }",
+            "`Ledger::add` takes `Entry`, a record; records are not supported natively yet",
+        ),
+        (
+            "pub struct Entry { pub label: String }",
+            "pub fn list() -> Vec<Entry> { Vec::new() }",
+            "`Ledger::list` returns `Vec<Entry>`, which holds `Entry`, a record; records are not supported natively yet",
+        ),
+        (
+            "pub enum Mode { Fast, Slow }",
+            "pub fn set(mode: Mode) {}",
+            "`Ledger::set` takes `Mode`, an enum; enums are not supported natively yet",
+        ),
+        (
+            "pub enum Shape { Dot, Line(u32) }",
+            "pub fn draw(shape: Option<Shape>) {}",
+            "`Ledger::draw` takes `Option<Shape>`, which holds `Shape`, a variant; variants are not supported natively yet",
+        ),
+        (
+            "pub enum Outcome { Accepted, Refused { reason: String } }",
+            "pub fn judge() -> Outcome { Outcome::Accepted }",
+            "`Ledger::judge` returns `Outcome`, a variant; variants are not supported natively yet",
+        ),
+        (
+            "#[flags] #[derive(Default, PartialEq, Clone)] pub struct Rights { pub read: bool }",
+            "pub fn grant(rights: Rights) {}",
+            "`Ledger::grant` takes `Rights`, a flags; flags are not supported natively yet",
+        ),
+        (
+            "",
+            "pub fn div(a: u32, b: u32) -> Result<u32, String> { Ok(a / b) }",
+            "`Ledger::div` returns `Result<u32, String>`, a result; results are not supported natively yet",
+        ),
+        (
+            "",
+            "pub fn pairs() -> Vec<(u32, Result<u32, String>)> { Vec::new() }",
+            "`Ledger::pairs` returns `Vec<(u32, Result<u32, String>)>`, which holds `Result<u32, String>`, a result; results are not supported natively yet",
+        ),
+    ] {
+        let module = expanded(
+            PACKAGE,
+            &format!(
+                "mod book {{ {items} #[service] pub struct Ledger; impl Ledger {{ {function} }} }}"
+            ),
+        );
+        assert_eq!(
+            native(&module, &[]),
+            format!(":: core :: compile_error ! (\"{message}\") ;"),
+            "{message}"
+        );
+    }
+    let dir = consumed("native-consumed", LEDGER_WIT);
+    let module = orb_with(options("example:keeper@1.0.0", Some(&dir)), KEEPER)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        native(&module, &[]),
+        ":: core :: compile_error ! (\"`Keeper::add` takes `book::Entry`, a type of the consumed interface example:ledger/book@1.0.0; consumed types are not supported natively yet\") ;"
+    );
 }
