@@ -1932,8 +1932,10 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
+ "serde",
  "syn 2.0.119",
  "tembra-contracts",
+ "toml 0.8.23",
  "wit-parser 0.261.0",
 ]
 

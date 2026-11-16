@@ -39,6 +39,9 @@
 mod flags;
 mod foreign;
 mod keyed;
+// No expansion reads the manifest's table yet.
+#[cfg_attr(not(test), allow(dead_code))]
+mod metadata;
 mod resource_params;
 mod wasi;
 mod wit;
@@ -5088,3 +5091,6 @@ mod keyed_tests;
 
 #[cfg(test)]
 mod foreign_tests;
+
+#[cfg(test)]
+mod metadata_tests;

@@ -15,7 +15,9 @@ tembra-contracts = { workspace = true, default-features = false }
 heck = "0.5"
 proc-macro2 = "1"
 quote = "1"
+serde.workspace = true
 syn = { version = "2", features = ["full"] }
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 wit-parser = "=0.261.0"
 
 [lints]
