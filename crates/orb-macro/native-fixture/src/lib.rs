@@ -294,12 +294,12 @@ pub mod calculator {
 }
 
 /// Notes kept for the host, with what the host lends the Orb: the argument of `notebook::orb(..)`.
-/// Native only, as host values and the objects a create builds are.
+/// Native only, as host values, the objects a create builds and a method's `&Context` are.
 #[cfg(not(target_arch = "wasm32"))]
 #[tembra::orb(package = "example:notes@1.0.0")]
 pub mod notebook {
     use std::{cell::RefCell, rc::Rc};
-    use tembra::{Declaration, Resource, core::Address};
+    use tembra::{Context, Declaration, Resource, core::Address};
 
     /// What the host lends every service of the Orb.
     #[inputs]
@@ -446,6 +446,18 @@ pub mod notebook {
             self.events.borrow_mut().push(format!("pin {text}"));
         }
     }
+
+    /// What a call carries besides its arguments: a method that takes `&Context` reads the call's
+    /// context, which a native host passes and the WIT leaves out.
+    #[service]
+    pub struct Session;
+
+    impl Session {
+        /// The principal of the caller's root.
+        pub fn caller(context: &Context) -> String {
+            context.principal().unwrap_or_default()
+        }
+    }
 }
 
 /// Shelves of books, with what every shelf shares: the catalogue the Orb's root creates once, which
@@ -458,7 +470,7 @@ pub mod library {
         cell::{Cell, RefCell},
         rc::Rc,
     };
-    use tembra::Declaration;
+    use tembra::{Context, Declaration};
 
     /// What the host lends the Orb.
     #[inputs]
@@ -508,6 +520,14 @@ pub mod library {
             let books = self.catalogue.books.get() + 1;
             self.catalogue.books.set(books);
             books
+        }
+
+        /// How many books the library holds, read from the catalogue through the call's context,
+        /// as a method that keeps nothing of the root reads it.
+        pub fn books(context: &Context) -> u32 {
+            context
+                .orb::<Catalogue>()
+                .map_or(0, |catalogue| catalogue.books.get())
         }
     }
 

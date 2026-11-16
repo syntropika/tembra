@@ -419,6 +419,9 @@ struct Function {
     /// The service method returns `tembra::Result<T>`, its error channel: a failure is the call's
     /// error, natively, and `result` is `T`, nothing for `()`.
     fallible: bool,
+    /// Where a service method takes the call's `&Context`, which a native host passes and the
+    /// WIT leaves out: the number of `params` written before it.
+    context: Option<usize>,
 }
 
 /// A hook contribution: a free `pub fn` marked `#[hook("ns:name/hook@version", priority = n)]`.
@@ -1517,6 +1520,19 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             });
             if matches!(function.vis, Visibility::Public(_)) && !create {
                 let read = method(function)?;
+                // In a module with a `Context` of its own, `&Context` names that type, which no
+                // WIT parameter takes by reference, not the call's context.
+                if read.context.is_some()
+                    && declares(&mut tree, &candidates, &modules[*scope], *scope, "Context")
+                {
+                    return Err(syn::Error::new(
+                        read.ident.span(),
+                        format!(
+                            "`{}::{}` takes `&Context`, and this module declares a `Context` of its own: pass that type owned, as WIT parameters are, or rename it for the method to take the call's `&Context`",
+                            service.ident, read.ident
+                        ),
+                    ));
+                }
                 // An implemented interface's names are fixed by its WIT, checked with it below.
                 if service.implements.is_none()
                     && let Some(member) = reserved_member(&wit::kebab(&read.ident))
@@ -2478,6 +2494,14 @@ fn component(
                 consumed_modules,
                 call,
             );
+            let body = match function.context {
+                Some(_) => native_only(
+                    target,
+                    ident,
+                    function.params.iter().map(|(param, _, _)| param),
+                ),
+                None => body,
+            };
             quote! { #asynchronous fn #generated(#(#params),*) #result { #body } }
         });
         let owned = wit_resources
@@ -3203,6 +3227,7 @@ fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction
             None => None,
         },
         fallible: false,
+        context: None,
     };
     Ok(match receiver {
         Some(_) => ResourceFunction::Method(read),
@@ -3245,6 +3270,21 @@ fn answered(function: &Function, call: proc_macro2::TokenStream) -> proc_macro2:
             ::core::result::Result::Err(error) => ::core::panic!("{}", error),
         }
     }
+}
+
+/// The body of a component's bridge to a method that takes the call's `&Context`, which only a
+/// native host passes: it never calls the author's function. The bridge still compiles on the
+/// host with the others, so its parameters are read here.
+fn native_only<'a>(
+    service: &Ident,
+    function: &Ident,
+    params: impl IntoIterator<Item = &'a Ident>,
+) -> proc_macro2::TokenStream {
+    let message = format!(
+        "`{service}::{function}` takes the call's `&Context`, which only a native host passes"
+    );
+    let params = params.into_iter();
+    quote! { #(let _ = #params;)* ::core::unreachable!(#message) }
 }
 
 /// Preserve async execution in the bindings: poll the author's future instead of blocking it.
@@ -3704,11 +3744,14 @@ fn implemented_service(
         } = signature(&function.params, function.result.as_ref(), depth)?;
         let (asynchronous, await_) = async_bridge(function.asynchronous);
         let author = &own.ident;
-        let body = wrapped(
-            handles,
-            &module,
-            answered(own, quote! { #target::#author(#(#names),*) #await_ }),
-        );
+        let body = match own.context {
+            Some(_) => native_only(target, author, &names),
+            None => wrapped(
+                handles,
+                &module,
+                answered(own, quote! { #target::#author(#(#names),*) #await_ }),
+            ),
+        };
         functions.push(quote! { #asynchronous fn #ident(#(#params),*) #result { #body } });
     }
     let mut owned = Vec::new();
@@ -4631,12 +4674,14 @@ fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> B
     serialized
 }
 
-/// Read one public function of a service: a plain name for each owned parameter, and `&self`
-/// when the service's create builds it. A result spelled `tembra::Result<T>` is the method's
-/// error channel, so its WIT result is `T`.
+/// Read one public function of a service: a plain name for each owned parameter, `&self` when
+/// the service's create builds it, and at most one `&Context`, the call's, which stays out of the
+/// WIT. A result spelled `tembra::Result<T>` is the method's error channel, so its WIT result is
+/// `T`.
 fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
     let mut params = Vec::new();
     let mut receiver = false;
+    let mut context = None;
     for input in &function.sig.inputs {
         match input {
             FnArg::Receiver(borrowed)
@@ -4651,6 +4696,14 @@ fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
                     other.span(),
                     "a method borrows `&self`; change the service through Cell or RefCell",
                 ));
+            }
+            FnArg::Typed(typed) if is_context(&typed.ty) => {
+                if context.replace(params.len()).is_some() {
+                    return Err(syn::Error::new(
+                        typed.span(),
+                        "a method takes the call's `&Context` once",
+                    ));
+                }
             }
             FnArg::Typed(typed) => {
                 let Pat::Ident(pat) = &*typed.pat else {
@@ -4682,6 +4735,7 @@ fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
         params,
         result,
         fallible: value.is_some(),
+        context,
     })
 }
 
@@ -4709,6 +4763,45 @@ fn tembra_result(ty: &Type) -> Option<&Type> {
         }
         _ => None,
     }
+}
+
+/// Whether the module at `path`, by `scope`, declares a type named `name` of its own: one of its
+/// candidate types, or a struct, a union or a type alias it keeps as written.
+fn declares(
+    tree: &mut Module,
+    candidates: &[Candidate],
+    path: &[Ident],
+    scope: usize,
+    name: &str,
+) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| candidate.scope == scope && candidate.ident == name)
+        || tree.at(path).items.iter().any(|item| match item {
+            Item::Struct(item) => item.ident == name,
+            Item::Union(item) => item.ident == name,
+            Item::Type(item) => item.ident == name,
+            _ => false,
+        })
+}
+
+/// Whether a parameter takes the call's context: `&Context`, through any path to `Context`. No
+/// WIT type is a reference, so the name alone tells it apart where the module declares no
+/// `Context` of its own.
+fn is_context(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    let Type::Path(path) = &*reference.elem else {
+        return false;
+    };
+    reference.mutability.is_none()
+        && path.qself.is_none()
+        && path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Context" && segment.arguments.is_none())
 }
 
 /// Read a hook contribution: a `pub fn` taking the hook input and returning its output, with the

@@ -113,3 +113,29 @@ fn a_service_without_methods_runs_its_task_while_referenced() {
     );
     pool.run_until(host.close()).unwrap();
 }
+
+/// A method that takes the call's `&Context` reads the root's value through it, with
+/// `Context::orb::<T>()`, as a create reads it through its declaration: the books two shelves
+/// shelved are the catalogue's, which a method of either counts.
+#[test]
+fn a_method_reads_the_root_through_its_context() {
+    let events = Events::default();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![library::orb(library::Inputs { events }).unwrap()])
+        .unwrap();
+    let get = |key: &str| Rc::new(host.get(SHELF, vec![key.into()], "alice").unwrap());
+    let shelves = [get("a"), get("b")];
+    assert_eq!(shelve(&mut pool, &host, &shelves), [1, 2]);
+    let counted = shelves[0].clone();
+    let books = pool
+        .run_until(host.root("host", move |context| {
+            async move { counted.call::<_, u32>(&context, "books", ()).await }.boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(books, 2);
+    for shelf in &shelves {
+        shelf.release().unwrap();
+    }
+    pool.run_until(host.close()).unwrap();
+}

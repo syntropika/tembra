@@ -437,24 +437,29 @@ fn guard(service: &Service, identity: &str) -> Option<TokenStream> {
 
 /// The `method_with` call binding one method: the handle takes the arguments as a tuple of the
 /// author's parameter types, checks the context and calls the author's function, on the object's
-/// environment when it borrows `&self`, answering with its value, or with the `tembra::Result` it
-/// returns, whose failure is the call's error.
+/// environment when it borrows `&self`, passing the context itself where the function takes
+/// `&Context`, and answering with its value, or with the `tembra::Result` it returns, whose
+/// failure is the call's error.
 fn method(service: &Service, function: &Function, codec: &Ident) -> TokenStream {
     let name = wit::kebab(&function.ident);
     let target = &service.ident;
     let ident = &function.ident;
     let params: Vec<&Ident> = function.params.iter().map(|(name, _, _)| name).collect();
     let types: Vec<&Type> = function.params.iter().map(|(_, ty, _)| ty).collect();
+    let mut arguments: Vec<TokenStream> = params.iter().map(|param| quote! { #param }).collect();
+    if let Some(index) = function.context {
+        arguments.insert(index, quote! { &__tembra_context });
+    }
     let awaited = function.asynchronous.then(|| quote! { .await });
     let (environment, call) = if function.receiver {
         (
             quote! { __tembra_self: ::std::rc::Rc<#target> },
-            quote! { __tembra_self.#ident(#(#params),*) #awaited },
+            quote! { __tembra_self.#ident(#(#arguments),*) #awaited },
         )
     } else {
         (
             quote! { _ },
-            quote! { #target::#ident(#(#params),*) #awaited },
+            quote! { #target::#ident(#(#arguments),*) #awaited },
         )
     };
     // A method returning `tembra::Result<T>` answers with it: its failure is the call's error.

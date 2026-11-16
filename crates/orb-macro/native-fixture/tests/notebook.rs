@@ -9,6 +9,7 @@ use tembra_orb_native_fixture::notebook;
 
 const NOTES: &str = "calculator::example:notes/notes@1.0.0";
 const BOARD: &str = "calculator::example:notes/board@1.0.0";
+const SESSION: &str = "calculator::example:notes/session@1.0.0";
 
 /// What happened in the Orb, in order, as its objects report it to the host.
 type Events = Rc<RefCell<Vec<String>>>;
@@ -287,5 +288,42 @@ fn a_tembra_result_is_the_error_channel_any_other_result_a_value() {
     }))
     .unwrap();
     notes.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}
+
+/// A method that takes `&Context` reads the call's context, which the WIT leaves out: a local
+/// caller passes `()` and a portable caller `[]`, and both get the principal of their root.
+#[test]
+fn a_method_reads_the_callers_principal_from_its_context() {
+    assert!(
+        notebook::WIT.contains("caller: func() -> string;"),
+        "{}",
+        notebook::WIT
+    );
+    let events = Events::default();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![notebook::orb(inputs(&events)).unwrap()])
+        .unwrap();
+    let session = Rc::new(host.get(SESSION, vec!["main".into()], "alice").unwrap());
+    let called = session.clone();
+    pool.run_until(host.root("alice", move |context| {
+        async move {
+            assert_eq!(
+                called.call::<_, String>(&context, "caller", ()).await?,
+                "alice"
+            );
+            assert_eq!(
+                called
+                    .call_portable::<_, Value>(&context, "caller", json!([]))
+                    .await?,
+                json!("alice")
+            );
+            Ok(())
+        }
+        .boxed_local()
+    }))
+    .unwrap();
+    session.release().unwrap();
     pool.run_until(host.close()).unwrap();
 }

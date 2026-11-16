@@ -49,6 +49,9 @@ wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macr
 `wit-bindgen`'s `async` feature serves the bindings of a `pub async fn`, of an import by key,
 whose `get` is asynchronous, and of a WASI interface that waits.
 
+The crate of a native-only module, see [using the Orb natively](#using-the-orb-natively), also
+depends on `tembra` with `host` on native targets: its own code names the runtime.
+
 ## Standard library and freestanding guests
 
 A guest uses Rust's standard library by default. The macro leaves its allocator and panic handler
@@ -1115,6 +1118,11 @@ call's error channel, which a method that uses `?` on the runtime's results need
 value of a resource its environment holds. Any other `Result<T, E>` is a value, a WIT `result`.
 The runtime's `Result` exists only where the facade links the runtime, so a module with such a
 method is native only.
+
+A method may also take the call's `&Context` among its parameters, for the caller's principal or
+the call's cancellation. The WIT, the codec and the tuple of arguments leave it out, and the native
+side passes the call's own context there. Only a native host has a context to pass, so such a
+module is native only.
 
 The codec reads and writes the JSON form compiled and TypeScript callers send and validate: the
 arguments as an array, `null` too without parameters; a record as an object of its fields, keyed by

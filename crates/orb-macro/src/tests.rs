@@ -4605,6 +4605,107 @@ fn a_native_service_implementing_an_interface_is_named_by_its_identity() {
     }
 }
 
+/// A method may take the call's `&Context`, anywhere among its parameters and through any path to
+/// `Context`: the WIT, the arguments' tuple and the codec leave it out, and the native handle
+/// passes its own context there. A component's bridge, derived or implemented, never calls such a
+/// method; it reads its parameters, so the host compiles it cleanly. A second `&Context` is
+/// refused.
+#[test]
+fn a_native_method_takes_the_calls_context_outside_the_wit() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            use tembra::Context;
+            #[service]
+            pub struct Ledger;
+            impl Ledger {
+                pub fn owner(context: &Context) -> String { String::new() }
+                pub async fn add(amount: u32, context: &::tembra::Context, label: String) -> u32 { amount }
+            }
+        }",
+    );
+    let wit = wit(&module);
+    for expected in [
+        "owner: func() -> string;",
+        "add: async func(amount: u32, label: string) -> u32;",
+    ] {
+        assert!(wit.contains(expected), "{expected}\n{wit}");
+    }
+    assert!(!wit.contains("context"), "{wit}");
+    let handles = native(&module, &[]);
+    for expected in [
+        ". method_with (\"owner\" , | _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: owner (& __tembra_context)) } , __TEMBRA_CODEC_OWNER ,)",
+        ". method_with (\"add\" , | _ , __tembra_context : :: tembra :: Context , (amount , label ,) : (u32 , String ,) | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: add (amount , & __tembra_context , label) . await) } , __TEMBRA_CODEC_ADD ,)",
+        "const __TEMBRA_CODEC_OWNER : :: tembra :: Codec < () , String >",
+        "const __TEMBRA_CODEC_ADD : :: tembra :: Codec < (u32 , String ,) , u32 >",
+    ] {
+        assert!(handles.contains(expected), "{expected}\n{handles}");
+    }
+    let generated = tokens(&module);
+    for expected in [
+        "fn owner () -> String { :: core :: unreachable ! (\"`Ledger::owner` takes the call's `&Context`, which only a native host passes\") }",
+        "async fn add (amount : u32 , label : String) -> u32 { let _ = amount ; let _ = label ; :: core :: unreachable ! (\"`Ledger::add` takes the call's `&Context`, which only a native host passes\") }",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let dir = consumed("native-context", COUNTER_WIT);
+    let module = orb_with(
+        options("example:tally@1.0.0", Some(&dir)),
+        "mod tally {
+            #[service(\"example:counters/counter@1.0.0\")]
+            pub struct Counter;
+            impl Counter { pub fn add(context: &tembra::Context, amount: u32) -> u32 { amount } }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let implemented = native(&module, &[]);
+    assert!(
+        implemented.contains(
+            "(amount ,) : (u32 ,) | async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Counter :: add (& __tembra_context , amount)) }"
+        ),
+        "{implemented}"
+    );
+    let generated = tokens(&module);
+    assert!(
+        generated.contains(
+            "fn add (amount : u32) -> u32 { let _ = amount ; :: core :: unreachable ! (\"`Counter::add` takes the call's `&Context`, which only a native host passes\") }"
+        ),
+        "{generated}"
+    );
+    assert_eq!(
+        refused(
+            PACKAGE,
+            "mod book {
+                #[service]
+                pub struct Ledger;
+                impl Ledger { pub fn twice(first: &Context, second: &Context) {} }
+            }"
+        ),
+        "a method takes the call's `&Context` once"
+    );
+    // A module with a `Context` of its own, a record or a struct it keeps, means that one.
+    for declared in [
+        "pub struct Context { pub user: String }",
+        "pub struct Context(String);",
+    ] {
+        assert_eq!(
+            refused(
+                PACKAGE,
+                &format!(
+                    "mod book {{
+                        {declared}
+                        #[service]
+                        pub struct Ledger;
+                        impl Ledger {{ pub fn greet(c: &Context) -> String {{ String::new() }} }}
+                    }}"
+                )
+            ),
+            "`Ledger::greet` takes `&Context`, and this module declares a `Context` of its own: pass that type owned, as WIT parameters are, or rename it for the method to take the call's `&Context`",
+            "{declared}"
+        );
+    }
+}
+
 /// What the native side does not cover yet is a compile error inside the facade's wrapper, so a
 /// component build of the module is unaffected: the `context` option, a state, a root resource, an
 /// import, a hook contributed to or declared, and a WIT resource, each named.
