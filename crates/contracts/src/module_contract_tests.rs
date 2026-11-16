@@ -101,6 +101,23 @@ world other {
 }
 ";
 
+/// The contract of another Orb module of the crate, whose world imports a WASI interface: a
+/// standard package other than the kernel's.
+const DICE: &str = "package example:dice@1.0.0;
+
+interface dice {
+  roll: func() -> u64;
+}
+
+world roller {
+  import wasi:random/random@0.3.0;
+  export dice;
+}
+";
+
+/// A standard package as an earlier write left it in `deps/`.
+const CLOCKS: &str = "package wasi:clocks@0.3.0;\n\ninterface clock {}\n";
+
 fn contract(package: &str, world: &str) -> String {
     format!(
         "package {package};\n\ninterface counter {{\n  add: func(by: s64) -> s64;\n}}\n\n\
@@ -289,9 +306,9 @@ fn a_standard_package_the_contract_no_longer_depends_on_is_removed() {
     assert_eq!(written.former_dependencies, std::slice::from_ref(&former));
     assert_eq!(written.dependencies, [deps.join("tembra-guest.wit")]);
     assert!(!former.exists() && notes.exists());
-    // A contract that depends on no standard package leaves no deps/ behind.
+    // The same world, once it depends on no standard package, leaves no deps/ behind.
     std::fs::remove_file(&notes).unwrap();
-    let written = ModuleContract::new(&contract("example:counter@1.0.0", "plain"), None)
+    let written = ModuleContract::new(&contract("example:first@1.0.0", "first"), None)
         .unwrap()
         .write(root.path())
         .unwrap();
@@ -461,4 +478,76 @@ fn a_stale_temporary_of_an_earlier_write_is_removed() {
         ]
     );
     assert_eq!(names(&deps), ["tembra-guest.wit"]);
+}
+
+/// The Orb modules of one crate write one `contract/`: a standard package one world depends on
+/// stays while another writes, whichever writes first, and one no world depends on goes. Writing
+/// them all again changes no file.
+#[test]
+fn the_worlds_of_one_crate_keep_the_standard_packages_each_depends_on() {
+    let tally = ModuleContract::new(TALLY, None).unwrap();
+    let dice = ModuleContract::new(DICE, None).unwrap();
+    let plain = ModuleContract::new(&contract("example:counter@1.0.0", "ledger"), None).unwrap();
+    for order in [[&tally, &dice, &plain], [&plain, &dice, &tally]] {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("contract");
+        let deps = dir.join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        // A standard package no world of the directory depends on, which an earlier write left.
+        std::fs::write(deps.join("wasi-clocks.wit"), CLOCKS).unwrap();
+        for module in order {
+            module.write(root.path()).unwrap();
+        }
+        assert_eq!(
+            names(&dir),
+            ["deps", "first.wit", "ledger.wit", "roller.wit"]
+        );
+        assert_eq!(names(&deps), ["tembra-guest.wit", "wasi-random.wit"]);
+        let earlier = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let files: Vec<PathBuf> = ["first.wit", "ledger.wit", "roller.wit"]
+            .map(|name| dir.join(name))
+            .into_iter()
+            .chain(["tembra-guest.wit", "wasi-random.wit"].map(|name| deps.join(name)))
+            .collect();
+        for file in &files {
+            std::fs::File::options()
+                .write(true)
+                .open(file)
+                .unwrap()
+                .set_modified(earlier)
+                .unwrap();
+        }
+        for module in order {
+            let written = module.write(root.path()).unwrap();
+            assert!(written.former_dependencies.is_empty(), "{written:?}");
+        }
+        for file in &files {
+            assert_eq!(modified(file), earlier, "{}", file.display());
+        }
+    }
+}
+
+/// Builds of one crate may write its `contract/` at once and remove the same file: the one that
+/// finds it gone has nothing left to do. Here concurrent writes of the crate's contract each find
+/// a standard package no world depends on, which only one of them removes.
+#[test]
+fn a_file_another_build_removed_first_is_no_error() {
+    let root = tempfile::tempdir().unwrap();
+    crate::module_contract::remove(&root.path().join("gone.wit")).unwrap();
+    let tally = ModuleContract::new(TALLY, None).unwrap();
+    tally.write(root.path()).unwrap();
+    let deps = root.path().join("contract").join("deps");
+    for _ in 0..20 {
+        std::fs::write(deps.join("wasi-clocks.wit"), CLOCKS).unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    tally.write(root.path()).unwrap();
+                });
+            }
+        });
+        assert_eq!(names(&deps), ["tembra-guest.wit"]);
+    }
 }

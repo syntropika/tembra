@@ -42,7 +42,7 @@ pub struct WrittenContract {
     pub dependencies: Vec<PathBuf>,
     /// The contracts of the world's former names, removed.
     pub former_contracts: Vec<PathBuf>,
-    /// The standard packages the contract no longer depends on, removed.
+    /// The standard packages no contract of the directory depends on any more, removed.
     pub former_dependencies: Vec<PathBuf>,
 }
 
@@ -145,22 +145,24 @@ impl ModuleContract {
     /// A file whose content the directory holds already is left alone; any other is written
     /// through a temporary file renamed into place, so a reader never sees a partial file, and
     /// the stale temporaries of earlier writes are removed. The contract of a former name of the
-    /// world, a `.wit` file of the same package, and a standard package in `deps/` the contract
-    /// no longer depends on are removed; any other file stays.
+    /// world, a `.wit` file of the same package, is removed. The directory is the crate's, shared
+    /// by every Orb module of the crate, so a standard package leaves `deps/` only when no
+    /// `<world>.wit` of the directory depends on it; any other file stays. Builds of one crate
+    /// may write at once: a file another one removed first is no error.
     pub fn write(&self, crate_dir: &Path) -> Result<WrittenContract, Error> {
         let dir = crate_dir.join(DIRECTORY);
         let contract = dir.join(format!("{}.wit", self.world));
-        let deps = dir.join(DEPENDENCIES);
         std::fs::create_dir_all(&dir).map_err(|error| io("creating", &dir, error))?;
         remove_stale_temporaries(&dir)?;
         // Removed before the new file is written: where file names ignore case, a former name
         // that differs only in case is the new file.
         let former_contracts = former_contracts(&dir, &contract, &self.package)?;
         for former in &former_contracts {
-            std::fs::remove_file(former).map_err(|error| io("removing", former, error))?;
+            remove(former)?;
         }
         write_if_changed(&contract, &self.text)?;
-        let (dependencies, former_dependencies) = write_dependencies(&deps, &self.dependencies)?;
+        let (dependencies, former_dependencies) =
+            write_dependencies(&dir, &contract, &self.dependencies)?;
         Ok(WrittenContract {
             contract,
             dependencies,
@@ -273,7 +275,7 @@ fn remove_stale_temporaries(dir: &Path) -> Result<(), Error> {
                 .and_then(|modified| modified.elapsed().ok())
                 .is_some_and(|age| age >= STALE);
         if stale {
-            std::fs::remove_file(&path).map_err(|error| io("removing", &path, error))?;
+            remove(&path)?;
         }
     }
     Ok(())
@@ -338,37 +340,103 @@ fn former_contracts(dir: &Path, current: &Path, own: &PackageName) -> Result<Vec
     Ok(formers)
 }
 
-/// Write the standard packages the contract depends on into `deps`, one file each, and return
-/// the files, then the files removed: a standard package an earlier write left there that the
-/// contract no longer depends on is removed first, and `deps` too when nothing else is left in it.
+/// Write the standard packages the contract `current` of `dir` depends on into its `deps/`, one
+/// file each, and return the files, then the files removed: a standard package an earlier write
+/// left there that neither this contract nor another `<world>.wit` of `dir` depends on is removed
+/// first, and `deps/` too when nothing else is left in it.
 fn write_dependencies(
-    deps: &Path,
+    dir: &Path,
+    current: &Path,
     dependencies: &[(&str, &str)],
 ) -> Result<(Vec<PathBuf>, Vec<PathBuf>), Error> {
+    let deps = dir.join(DEPENDENCIES);
     let files: Vec<PathBuf> = dependencies
         .iter()
         .map(|(name, _)| deps.join(name))
         .collect();
-    remove_stale_temporaries(deps)?;
-    let formers = former_dependencies(deps, &files)?;
+    remove_stale_temporaries(&deps)?;
+    // Listed before the other contracts are read: a build writes its contract before its
+    // packages, so a package listed here has its contract in place for the reading.
+    let candidates = former_dependencies(&deps, &files)?;
+    let others = others_dependencies(dir, current)?;
+    let formers: Vec<PathBuf> = candidates
+        .into_iter()
+        .filter(|former| !others.iter().any(|name| deps.join(name) == *former))
+        .collect();
     for former in &formers {
-        std::fs::remove_file(former).map_err(|error| io("removing", former, error))?;
+        remove(former)?;
     }
     if !files.is_empty() {
-        std::fs::create_dir_all(deps).map_err(|error| io("creating", deps, error))?;
+        std::fs::create_dir_all(&deps).map_err(|error| io("creating", &deps, error))?;
     }
     for ((_, source), file) in dependencies.iter().zip(&files) {
         write_if_changed(file, source)?;
     }
     if deps.is_dir()
-        && std::fs::read_dir(deps)
-            .map_err(|error| io("reading", deps, error))?
+        && std::fs::read_dir(&deps)
+            .map_err(|error| io("reading", &deps, error))?
             .next()
             .is_none()
     {
-        std::fs::remove_dir(deps).map_err(|error| io("removing", deps, error))?;
+        // Another build may have removed it first, or written into it since.
+        match std::fs::remove_dir(&deps) {
+            Err(error)
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                return Err(io("removing", &deps, error));
+            }
+            _ => {}
+        }
     }
     Ok((files, formers))
+}
+
+/// The standard packages the other contracts of `dir` depend on, by their file names in `deps/`:
+/// those of every `<world>.wit` but `current` that reads as the contract of its world, as
+/// another Orb module of the crate writes it. A file that does not is not this writer's, and
+/// keeps nothing.
+fn others_dependencies(dir: &Path, current: &Path) -> Result<Vec<&'static str>, Error> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|error| io("reading", dir, error))? {
+        let path = entry.map_err(|error| io("reading", dir, error))?.path();
+        if path.file_name() == current.file_name()
+            || path.extension().is_none_or(|extension| extension != "wit")
+            || !path.is_file()
+        {
+            continue;
+        }
+        let (Some(world), Ok(source)) = (
+            path.file_stem().and_then(|stem| stem.to_str()),
+            std::fs::read_to_string(&path),
+        ) else {
+            continue;
+        };
+        let Ok(contract) = Contract::from_source(&path.to_string_lossy(), &source, Some(world))
+        else {
+            continue;
+        };
+        names.extend(
+            contract
+                .standard_dependencies()
+                .into_iter()
+                .map(|(name, _)| name),
+        );
+    }
+    Ok(names)
+}
+
+/// Remove a file of the contract directory, which another build of the crate may have removed
+/// first: then there is nothing left to do.
+pub(crate) fn remove(path: &Path) -> Result<(), Error> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(io("removing", path, error))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The standard packages an earlier write left in `deps` and this one does not: the `.wit` files
