@@ -1,9 +1,12 @@
 //! The types of the consumed interfaces in derived signatures: the `use` lines the derived WIT
 //! gains, the bridges that pass the author's values as they are, the states that hold them, and
 //! what is refused where.
-use super::{Options, expand};
+use super::Options;
+use super::tests::{
+    expanded_with as expanded, literal, refused_with as refused, resolved_with, tokens, wit,
+};
 use std::path::{Path, PathBuf};
-use syn::{Expr, Item, ItemMod, Lit};
+use syn::ItemMod;
 
 /// A consumed package whose `catalog` interface has a type of every kind, one it uses from another
 /// interface, two aliases, a WIT name the bindings spell otherwise, a resource and records holding
@@ -35,19 +38,9 @@ interface catalog {
 }
 ";
 
-fn literal(text: &str) -> syn::LitStr {
-    syn::LitStr::new(text, proc_macro2::Span::call_site())
-}
-
-/// A directory holding one consumed WIT package, under the system's temporary directory.
+/// A directory holding one consumed WIT package, under this module's prefix.
 fn consumed(name: &str, wit: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "tembra-orb-macro-foreign-{name}-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("package.wit"), wit).unwrap();
-    dir
+    super::tests::consumed(&format!("foreign-{name}"), wit)
 }
 
 /// The options of `package`, consuming `dir` and importing `imports`.
@@ -69,39 +62,6 @@ fn shopping(dir: &Path) -> Options {
     )
 }
 
-fn expanded(options: Options, module: &str) -> ItemMod {
-    let module = syn::parse_str(module).expect("a module");
-    syn::parse2(expand(options, module).unwrap_or_else(|error| panic!("{error}"))).unwrap()
-}
-
-fn refused(options: Options, module: &str) -> String {
-    match expand(options, syn::parse_str(module).expect("a module")) {
-        Err(error) => error.to_string(),
-        Ok(_) => panic!("the module was accepted"),
-    }
-}
-
-/// The derived WIT, from the generated `WIT` constant.
-fn wit(module: &ItemMod) -> String {
-    module
-        .content
-        .as_ref()
-        .expect("a body")
-        .1
-        .iter()
-        .find_map(|item| match item {
-            Item::Const(constant) if constant.ident == "WIT" => match &*constant.expr {
-                Expr::Lit(literal) => match &literal.lit {
-                    Lit::Str(text) => Some(text.value()),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("the WIT constant")
-}
-
 /// The derived WIT, after checking that it resolves next to the consumed packages of `dir` and the
 /// kernel's package a state imports from.
 fn resolved(module: &ItemMod, dir: &Path) -> String {
@@ -111,14 +71,8 @@ fn resolved(module: &ItemMod, dir: &Path) -> String {
         .push_str("guest.wit", tembra_contracts::guest::SOURCE)
         .unwrap();
     resolve.push_dir(dir).unwrap();
-    resolve
-        .push_str("orb.wit", &text)
-        .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
+    resolved_with(resolve, &text);
     text
-}
-
-fn tokens(module: &ItemMod) -> String {
-    quote::quote!(#module).to_string()
 }
 
 const SHOPPER: &str = "mod shopper {

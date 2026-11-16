@@ -1,8 +1,11 @@
 //! Keyed imports: the view the macro derives from the provider's WIT, the role it embeds, the
 //! module it re-exports and the imports it refuses.
-use super::{Options, expand, expansion};
+use super::tests::{
+    expanded_with as expanded, literal, refused_with as refused, resolved_with, wit,
+};
+use super::{Options, expansion};
 use std::path::{Path, PathBuf};
-use syn::{Expr, Item, ItemMod, Lit, LitStr, UnOp};
+use syn::ItemMod;
 
 const COUNTERS: &str = "package example:counters@1.0.0;
 
@@ -48,19 +51,9 @@ interface counter-ref {
 }
 ";
 
-fn literal(text: &str) -> LitStr {
-    LitStr::new(text, proc_macro2::Span::call_site())
-}
-
-/// A directory holding one consumed WIT package, under the system's temporary directory.
+/// A directory holding one consumed WIT package, under this module's prefix.
 fn consumed(name: &str, wit: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "tembra-orb-macro-keyed-{name}-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("package.wit"), wit).unwrap();
-    dir
+    super::tests::consumed(&format!("keyed-{name}"), wit)
 }
 
 /// The options of `example:router@1.0.0` consuming `dir` and importing `keyed` by key.
@@ -73,66 +66,16 @@ fn options(dir: Option<&Path>, keyed: &[&str]) -> Options {
     }
 }
 
-fn expanded(options: Options, module: &str) -> ItemMod {
-    let module = syn::parse_str(module).expect("a module");
-    syn::parse2(expand(options, module).unwrap_or_else(|error| panic!("{error}"))).unwrap()
-}
-
-fn refused(options: Options, module: &str) -> String {
-    match expand(options, syn::parse_str(module).expect("a module")) {
-        Err(error) => error.to_string(),
-        Ok(_) => panic!("the module was accepted"),
-    }
-}
-
-fn items(module: &ItemMod) -> &[Item] {
-    &module.content.as_ref().expect("a body").1
-}
-
-/// The derived WIT, from the generated `WIT` constant.
-fn wit(module: &ItemMod) -> String {
-    items(module)
-        .iter()
-        .find_map(|item| match item {
-            Item::Const(constant) if constant.ident == "WIT" => match &*constant.expr {
-                Expr::Lit(literal) => match &literal.lit {
-                    Lit::Str(text) => Some(text.value()),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("the WIT constant")
-}
-
 /// The JSON of the `tembra:manifest` section.
 fn manifest(module: &ItemMod) -> String {
-    items(module)
-        .iter()
-        .find_map(|item| match item {
-            Item::Static(section) if section.ident == "__TEMBRA_MANIFEST" => match &*section.expr {
-                Expr::Unary(deref) if matches!(deref.op, UnOp::Deref(_)) => match &*deref.expr {
-                    Expr::Lit(literal) => match &literal.lit {
-                        Lit::ByteStr(bytes) => Some(String::from_utf8(bytes.value()).unwrap()),
-                        _ => None,
-                    },
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("the manifest")
+    super::tests::manifest(module).expect("the manifest")
 }
 
 /// The derived WIT read with the consumed packages, as the bindings read it.
 fn resolved(dir: &Path, text: &str) {
     let mut resolve = wit_parser::Resolve::default();
     resolve.push_dir(dir).unwrap();
-    resolve
-        .push_str("orb.wit", text)
-        .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
+    resolved_with(resolve, text);
 }
 
 /// An interface imported by key gets a view in the Orb's package: a resource of the interface's

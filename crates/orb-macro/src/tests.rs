@@ -1,5 +1,6 @@
 //! The macro's reading of a module, checked on its output: the WIT it derives, the manifest it
 //! embeds and the errors it reports. The generated bindings themselves compile in the examples.
+//! The helpers that expand a module and read its output serve the other test modules too.
 use super::{Options, expand, expansion};
 use syn::{Expr, Item, ItemMod, Lit, UnOp};
 
@@ -9,7 +10,7 @@ fn orb(package: &str, module: &str) -> syn::Result<ItemMod> {
 }
 
 /// A string literal, as written on the attribute.
-fn literal(text: &str) -> syn::LitStr {
+pub(crate) fn literal(text: &str) -> syn::LitStr {
     syn::LitStr::new(text, proc_macro2::Span::call_site())
 }
 
@@ -24,8 +25,10 @@ fn options(package: &str, wit: Option<&std::path::Path>) -> Options {
     }
 }
 
-/// A directory holding one consumed WIT package, under the system's temporary directory.
-fn consumed(name: &str, wit: &str) -> std::path::PathBuf {
+/// A directory holding one consumed WIT package, under the system's temporary directory. Another
+/// test module starts `name` with a prefix of its own: the modules use the same names, and the
+/// tests run at once.
+pub(crate) fn consumed(name: &str, wit: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("tembra-orb-macro-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("package.wit"), wit).unwrap();
@@ -33,7 +36,7 @@ fn consumed(name: &str, wit: &str) -> std::path::PathBuf {
 }
 
 /// The generated module as one token string, for looking up generated items.
-fn tokens(module: &ItemMod) -> String {
+pub(crate) fn tokens(module: &ItemMod) -> String {
     quote::quote!(#module).to_string()
 }
 
@@ -46,11 +49,15 @@ fn expanded(package: &str, module: &str) -> ItemMod {
     orb(package, module).unwrap_or_else(|error| panic!("{error}"))
 }
 
+pub(crate) fn expanded_with(options: Options, module: &str) -> ItemMod {
+    orb_with(options, module).unwrap_or_else(|error| panic!("{error}"))
+}
+
 fn refused(package: &str, module: &str) -> String {
     refused_with(options(package, None), module)
 }
 
-fn refused_with(options: Options, module: &str) -> String {
+pub(crate) fn refused_with(options: Options, module: &str) -> String {
     match orb_with(options, module) {
         Err(error) => error.to_string(),
         Ok(_) => panic!("the module was accepted"),
@@ -62,7 +69,7 @@ fn items(module: &ItemMod) -> &[Item] {
 }
 
 /// The derived WIT, from the generated `WIT` constant.
-fn wit(module: &ItemMod) -> String {
+pub(crate) fn wit(module: &ItemMod) -> String {
     items(module)
         .iter()
         .find_map(|item| match item {
@@ -79,7 +86,7 @@ fn wit(module: &ItemMod) -> String {
 }
 
 /// The JSON of the `tembra:manifest` section, if the module embeds one.
-fn manifest(module: &ItemMod) -> Option<String> {
+pub(crate) fn manifest(module: &ItemMod) -> Option<String> {
     items(module).iter().find_map(|item| match item {
         Item::Static(section) if section.ident == "__TEMBRA_MANIFEST" => match &*section.expr {
             Expr::Unary(deref) if matches!(deref.op, UnOp::Deref(_)) => match &*deref.expr {
@@ -1152,11 +1159,16 @@ fn a_consumed_name_that_is_a_rust_keyword_is_bridged_as_the_bindings_name_it() {
 /// The derived WIT, checked to resolve as a package.
 fn resolved(module: &ItemMod) -> String {
     let text = wit(module);
-    let mut resolve = wit_parser::Resolve::default();
-    resolve
-        .push_str("orb.wit", &text)
-        .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
+    resolved_with(wit_parser::Resolve::default(), &text);
     text
+}
+
+/// Check that `text`, a derived WIT, resolves after the packages `resolve` holds, as the bindings
+/// read it.
+pub(crate) fn resolved_with(mut resolve: wit_parser::Resolve, text: &str) {
+    resolve
+        .push_str("orb.wit", text)
+        .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
 }
 
 /// An interface `use`s what the constructors, methods and static functions of its own resources

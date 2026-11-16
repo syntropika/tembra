@@ -1,5 +1,6 @@
 //! WASI imports: `import = "wasi:..."` names an interface of the WASI packages bundled with
 //! `tembra-contracts`, which the inline WIT nests unless the consumed directory holds them.
+use super::tests::literal;
 use super::{Options, expand};
 use std::path::{Path, PathBuf};
 
@@ -10,10 +11,6 @@ const DICE: &str = "mod dice {
         pub fn draw(length: u64) -> Vec<u8> { random::get_random_bytes(length) }
     }
 }";
-
-fn literal(text: &str) -> syn::LitStr {
-    syn::LitStr::new(text, proc_macro2::Span::call_site())
-}
 
 fn importing(imports: &[&str], wit: Option<&Path>) -> Options {
     Options {
