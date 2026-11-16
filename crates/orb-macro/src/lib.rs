@@ -2097,7 +2097,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             ));
         }
     }
-    let wit = wit::render(
+    let (wit, used) = wit::render(
         &package,
         &world,
         wit::Items {
@@ -2490,7 +2490,10 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // bindings implement themselves, and the attributes those derives read.
     let (types, members) = carried_attributes(
         &shapes,
-        &placement,
+        Layout {
+            placement: &placement,
+            used: &used,
+        },
         &package,
         &bindings,
         &implemented_elsewhere,
@@ -4732,6 +4735,14 @@ struct ModuleType {
     traits: BTreeSet<String>,
 }
 
+/// Where the WIT puts the module's types: the interface defining each, by the type's name
+/// (`wit::placement`), and the WIT names of the types each interface `use`s from the others, by
+/// interface name, which its bindings' module declares as aliases (`wit::render`).
+struct Layout<'a> {
+    placement: &'a BTreeMap<String, Ident>,
+    used: &'a BTreeMap<String, BTreeSet<String>>,
+}
+
 /// The attributes the bindings put on the generated types replacing the author's, as the options
 /// `additional_type_attributes` and `additional_member_attributes` of `wit-bindgen` select them,
 /// by the type's full WIT name, `ns:name/interface@version/type`, and the member's after a `.`:
@@ -4745,13 +4756,14 @@ struct ModuleType {
 /// struct's derives.
 fn carried_attributes(
     shapes: &[Shape],
-    placement: &BTreeMap<String, Ident>,
+    layout: Layout<'_>,
     package: &str,
     bindings: &wit::Bindings,
     elsewhere: &BTreeMap<String, BTreeSet<String>>,
     uses: &[Uses],
     modules: &[Vec<Ident>],
 ) -> syn::Result<(Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>)> {
+    let Layout { placement, used } = layout;
     let mut types = Vec::new();
     let mut members = Vec::new();
     let mut namesakes: BTreeSet<&String> = bindings.namesakes.iter().collect();
@@ -4836,15 +4848,17 @@ fn carried_attributes(
             }
         }
         // The types of the module the bindings' module declares beside the generated type, under
-        // the author's name: those the owner's interface defines, and those it `use`s for the
-        // owner's fields; a flags struct only where it is used, since `with` maps the defining
-        // interface's flags onto the author's struct without declaring it there.
+        // the author's name: those the owner's interface defines, and those it `use`s, for any of
+        // its functions or types, which the module declares as aliases; a flags struct only where
+        // it is used, since `with` maps the defining interface's flags onto the author's struct
+        // without declaring it there.
+        let interface = &placement[&shape.ident.to_string()];
+        let aliased = used.get(&wit::kebab(interface));
         let defined: BTreeSet<String> = shapes
             .iter()
             .filter(|other| {
-                let together =
-                    placement[&other.ident.to_string()] == placement[&shape.ident.to_string()];
-                let used = !together && shape.references.contains(&other.ident);
+                let together = placement[&other.ident.to_string()] == *interface;
+                let used = aliased.is_some_and(|names| names.contains(&wit::kebab(&other.ident)));
                 let declared = match other.kind {
                     ShapeKind::Flags(_) => used,
                     _ => together || used,

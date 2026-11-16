@@ -252,7 +252,9 @@ struct Interface<'a> {
 /// interface defines; then the view of each interface imported by key. Then a world using the
 /// kernel's interfaces for its states, resources and context, importing every consumed interface
 /// and every view, importing and exporting every hook, consumed or derived, and exporting every
-/// service interface, derived or implemented.
+/// service interface, derived or implemented. Returns the text and, by interface name, the WIT
+/// names of the types each interface `use`s from the others, which its bindings' module declares
+/// as aliases beside the types it defines.
 pub(crate) fn render<'a>(
     package: &str,
     world: &str,
@@ -261,7 +263,7 @@ pub(crate) fn render<'a>(
     imports: &[String],
     views: &[crate::keyed::View],
     kernel: Kernel,
-) -> syn::Result<String> {
+) -> syn::Result<(String, BTreeMap<String, BTreeSet<String>>)> {
     let Items {
         shapes,
         placement,
@@ -487,7 +489,18 @@ pub(crate) fn render<'a>(
         }
     }
     wit.push_str("}\n");
-    Ok(wit)
+    let used = interfaces
+        .iter()
+        .map(|interface| {
+            let names = interface
+                .uses
+                .iter()
+                .flat_map(|(_, names)| names.iter().cloned())
+                .collect();
+            (interface.name.clone(), names)
+        })
+        .collect();
+    Ok((wit, used))
 }
 
 /// One function of an interface or a resource, with its `///` lines, at the given indentation.

@@ -4355,6 +4355,32 @@ fn a_helper_attribute_the_bindings_module_cannot_read_is_refused() {
         "{}",
         tokens(&carried)
     );
+    // So is one another interface defines and the owner's interface `use`s for a function or a
+    // type of its own, which the bindings' module declares as an alias.
+    let carried = expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            pub enum Mode { Fast, Slow }
+            #[service]
+            pub struct Settings;
+            impl Settings { pub fn current() -> Mode { todo!() } }
+            #[derive(smart_default::SmartDefault)]
+            pub struct Page { #[default(Mode::Slow as u32)] pub level: u32 }
+            #[service]
+            pub struct Walker;
+            impl Walker {
+                pub fn speed(mode: Mode) -> u32 { 0 }
+                pub fn walk(page: Page) -> u32 { 0 }
+            }
+        }",
+    );
+    assert!(
+        tokens(&carried).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/page.level\" : [# [default (Mode :: Slow as u32)]] } ,"
+        ),
+        "{}",
+        tokens(&carried)
+    );
     // A derive's helper attribute resolves in the macro namespace, so an item of its name the
     // module imports, a module here, shadows nothing: the derive that reads it by name takes it.
     let carried = expanded(
