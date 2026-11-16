@@ -1048,6 +1048,88 @@ fn an_item_named_like_a_reexported_module_is_refused() {
     }
 }
 
+/// The `context` option imports the kernel's interface tembra:guest/context, which the Orb module
+/// re-exports as `context`: a service implementing that interface, a hook contributing to it and a
+/// hook declaring it would each re-export a second module under that name, and each is refused at
+/// its item, naming the option. Without the option the service expands, while a hook on that
+/// interface is refused there too, as the interface has more than one function.
+#[test]
+fn a_service_or_a_hook_of_the_kernels_context_is_refused_beside_the_context_option() {
+    let dir = consumed(
+        "kernel-context",
+        "package example:notes@1.0.0;\ninterface topics {\n  topic: func() -> string;\n}\n",
+    );
+    // The kernel's package, as a contract's `deps/` holds it, for the interface's WIT.
+    std::fs::create_dir_all(dir.join("deps")).unwrap();
+    std::fs::write(
+        dir.join("deps").join("tembra-guest.wit"),
+        tembra_contracts::guest::SOURCE,
+    )
+    .unwrap();
+    let watching = |context| Options {
+        context,
+        ..options("example:watcher@1.0.0", Some(&dir), &[])
+    };
+    let service = "mod watcher {
+        #[service(\"tembra:guest/context@1.0.0\")]
+        pub struct Kernel;
+        impl Kernel {
+            pub fn object() -> context::Address { todo!() }
+            pub fn principal() -> String { String::new() }
+            pub fn cancelled() -> bool { false }
+            pub fn cancel() {}
+            pub fn log(level: context::Level, message: String) {}
+        }
+    }";
+    let hooked = |hook: &str| {
+        format!(
+            "mod watcher {{
+                #[service]
+                pub struct Report;
+                impl Report {{ pub fn count() -> u32 {{ 0 }} }}
+                {hook}
+            }}"
+        )
+    };
+    let contribution = hooked(
+        "#[hook(\"tembra:guest/context@1.0.0\", priority = 1)]
+        pub fn principal(input: String) -> String { input }",
+    );
+    let declaration = hooked(
+        "#[hook(\"tembra:guest/context@1.0.0\", composition = series)]
+        pub struct Watch;",
+    );
+    let kernel = "and that of the kernel's interface tembra:guest/context@1.0.0, which the `context` option imports; keep one of them";
+    for (module, role) in [
+        (
+            service,
+            "the implemented interface tembra:guest/context@1.0.0",
+        ),
+        (
+            contribution.as_str(),
+            "the hook tembra:guest/context@1.0.0, which this module contributes to",
+        ),
+        (
+            declaration.as_str(),
+            "the hook tembra:guest/context@1.0.0, which this module declares",
+        ),
+    ] {
+        let message = format!(
+            "the Orb module would re-export two modules as `context`: that of {role}, {kernel}"
+        );
+        let error = refused(watching(true), module);
+        assert!(error.contains(&message), "{message}\n{error}");
+    }
+    expanded(watching(false), service);
+    for module in [&contribution, &declaration] {
+        let error = refused(watching(false), module);
+        assert!(
+            error.contains("hook tembra:guest/context@1.0.0 must declare exactly one callback"),
+            "{error}"
+        );
+    }
+}
+
 /// What a derived interface does not take from a consumed interface is refused where it is named:
 /// a name the interface does not define, a WASI type, a consumed type holding a resource handle,
 /// an imported handle in a type of the module, a consumed type in a derived hook's input, and a
