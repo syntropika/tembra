@@ -1,6 +1,8 @@
 //! `notebook::orb(..)` in a native host: the Orb takes the host's inputs, the create of `Notes`
-//! builds each of its objects from them, and `Board` admits only the address its guard names.
+//! builds each of its objects from them, `Board` admits only the address its guard names, and a
+//! method's `tembra::Result` is the call's error channel.
 use futures::{FutureExt, executor::LocalPool};
+use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
 use tembra::{Code, Host, contracts::Contract};
 use tembra_orb_native_fixture::notebook;
@@ -184,5 +186,106 @@ fn the_guard_admits_only_its_address() {
     .unwrap();
     assert_eq!(*events.borrow(), ["board main/host", "pin hello"]);
     board.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}
+
+/// A method returning `tembra::Result<T>` answers `T`, which is all its WIT result carries, or
+/// fails the call with its error, the same for a local and a portable caller, through `?` on the
+/// object's environment and `.await` too, and without a value for `tembra::Result<()>`. Any other
+/// `Result` is a value: its failure comes back as a WIT `result`'s `err`, and the call succeeds.
+#[test]
+fn a_tembra_result_is_the_error_channel_any_other_result_a_value() {
+    for function in [
+        "note: func(position: u32) -> string;",
+        "position: func(text: string) -> result<u32, string>;",
+        "heading: async func() -> string;",
+        "holds: func(count: u32);",
+    ] {
+        assert!(notebook::WIT.contains(function), "{function}");
+    }
+    let events = Events::default();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![notebook::orb(inputs(&events)).unwrap()])
+        .unwrap();
+    let notes = Rc::new(host.get(NOTES, vec!["a".into()], "alice").unwrap());
+    let called = notes.clone();
+    pool.run_until(host.root("host", move |context| {
+        async move {
+            let failed = |error: tembra::Error, reason: &str, message: &str| {
+                assert_eq!(error.code, Code::Invalid, "{error}");
+                assert_eq!(
+                    (error.reason.as_str(), error.message.as_str()),
+                    (reason, message)
+                );
+            };
+            called
+                .call::<_, u32>(&context, "add", ("first".to_string(),))
+                .await?;
+            assert_eq!(
+                called.call::<_, String>(&context, "note", (0u32,)).await?,
+                "first"
+            );
+            let error = called
+                .call::<_, String>(&context, "note", (1u32,))
+                .await
+                .unwrap_err();
+            failed(error, "no-note", "there is no note 1");
+            assert_eq!(
+                called
+                    .call::<_, Result<u32, String>>(&context, "position", ("other".to_string(),))
+                    .await?,
+                Err("no note other".to_string())
+            );
+            assert_eq!(
+                called.call::<_, String>(&context, "heading", ()).await?,
+                "a of alice: journal of a/alice"
+            );
+            called.call::<_, ()>(&context, "holds", (1u32,)).await?;
+            let error = called
+                .call::<_, ()>(&context, "holds", (2u32,))
+                .await
+                .unwrap_err();
+            failed(error, "too-few", "1 notes, not 2");
+
+            let call = |method: &'static str, arguments: Value| {
+                let called = called.clone();
+                let context = context.clone();
+                async move {
+                    called
+                        .call_portable::<_, Value>(&context, method, arguments)
+                        .await
+                }
+            };
+            assert_eq!(call("note", json!([0])).await?, json!("first"));
+            failed(
+                call("note", json!([1])).await.unwrap_err(),
+                "no-note",
+                "there is no note 1",
+            );
+            assert_eq!(
+                call("position", json!(["first"])).await?,
+                json!({ "tag": "ok", "val": 0 })
+            );
+            assert_eq!(
+                call("position", json!(["other"])).await?,
+                json!({ "tag": "err", "val": "no note other" })
+            );
+            assert_eq!(
+                call("heading", json!([])).await?,
+                json!("a of alice: journal of a/alice")
+            );
+            assert_eq!(call("holds", json!([1])).await?, Value::Null);
+            failed(
+                call("holds", json!([2])).await.unwrap_err(),
+                "too-few",
+                "1 notes, not 2",
+            );
+            Ok(())
+        }
+        .boxed_local()
+    }))
+    .unwrap();
+    notes.release().unwrap();
     pool.run_until(host.close()).unwrap();
 }

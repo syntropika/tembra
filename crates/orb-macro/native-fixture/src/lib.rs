@@ -344,6 +344,48 @@ pub mod notebook {
         pub fn journal(&self) -> Option<String> {
             self.journal.value().ok().map(|journal| journal.to_string())
         }
+
+        /// The note at the position, or the call's error when there is none: a `tembra::Result`
+        /// is the method's error channel, and its WIT result is the note alone.
+        pub fn note(&self, position: u32) -> tembra::Result<String> {
+            self.notes
+                .borrow()
+                .get(position as usize)
+                .cloned()
+                .ok_or_else(|| {
+                    tembra::Error::invalid("no-note", format!("there is no note {position}"))
+                })
+        }
+
+        /// Where the note is, its absence a value: any other `Result` is a WIT `result`.
+        pub fn position(&self, text: String) -> Result<u32, String> {
+            self.notes
+                .borrow()
+                .iter()
+                .position(|note| *note == text)
+                .map(|position| position as u32)
+                .ok_or_else(|| format!("no note {text}"))
+        }
+
+        /// The title with the journal, awaited, through `?` on the object's environment, which
+        /// needs the error channel.
+        pub async fn heading(&self) -> tembra::Result<String> {
+            let journal = self.journal.value()?;
+            Ok(format!("{}: {journal}", self.title))
+        }
+
+        /// Nothing, when the object holds at least `count` notes; the call fails otherwise.
+        pub fn holds(&self, count: u32) -> tembra::Result<()> {
+            let held = self.notes.borrow().len() as u32;
+            if held >= count {
+                Ok(())
+            } else {
+                Err(tembra::Error::invalid(
+                    "too-few",
+                    format!("{held} notes, not {count}"),
+                ))
+            }
+        }
     }
 
     /// The board the host pins notes on: one object, of key `main` and principal `host`, which

@@ -1857,10 +1857,17 @@ pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
                     })
                     .collect::<syn::Result<Vec<_>>>()?;
                 if types.len() != count {
+                    // The runtime's `Result<T>`, imported by `use`, is a service method's error
+                    // channel only by its path.
+                    let hint = if name == "Result" && types.len() == 1 {
+                        "; for a service method's error channel, spell the runtime's by its path, `tembra::Result<T>`"
+                    } else {
+                        ""
+                    };
                     return Err(syn::Error::new(
                         segment.span(),
                         format!(
-                            "the macro reads `{name}` by its name as {}, so another `{name}`, such as a module's own alias, cannot stand for it here",
+                            "the macro reads `{name}` by its name as {}, so another `{name}`, such as a module's own alias, cannot stand for it here{hint}",
                             if count == 1 {
                                 format!("`{name}<T>`")
                             } else {

@@ -4684,6 +4684,92 @@ fn the_native_side_refuses_what_it_does_not_cover_yet() {
     }
 }
 
+/// A method returning `tembra::Result<T>`, its error channel, has `T` as its WIT result, nothing
+/// for `()`. Its native handle answers with the author's result, whose failure is the call's
+/// error, and its codec writes `T`; the component's bridge, which a host build type-checks, takes
+/// the value out, in a derived and in an implemented interface. Any other `Result` is a WIT
+/// `result`, and a `Result` of one type argument, the runtime's imported by `use`, stands for no
+/// `tembra::Result`: the refusal says to spell it by its path.
+#[test]
+fn a_tembra_result_is_the_error_channel_of_a_native_method() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            #[service]
+            pub struct Ledger;
+            impl Ledger {
+                pub fn divide(a: u32, b: u32) -> tembra::Result<u32> { todo!() }
+                pub async fn settle() -> ::tembra::Result<()> { todo!() }
+                pub fn quotient(a: u32, b: u32) -> Result<u32, String> { todo!() }
+            }
+        }",
+    );
+    let wit = wit(&module);
+    for expected in [
+        "divide: func(a: u32, b: u32) -> u32;",
+        "settle: async func();",
+        "quotient: func(a: u32, b: u32) -> result<u32, string>;",
+    ] {
+        assert!(wit.contains(expected), "{expected}\n{wit}");
+    }
+    let native = native(&module, &[]);
+    for expected in [
+        "const __TEMBRA_CODEC_DIVIDE : :: tembra :: Codec < (u32 , u32 ,) , u32 >",
+        "const __TEMBRA_CODEC_SETTLE : :: tembra :: Codec < () , () >",
+        "| _ , __tembra_context : :: tembra :: Context , (a , b ,) : (u32 , u32 ,) | async move { __tembra_context . check () ? ; Ledger :: divide (a , b) } , __TEMBRA_CODEC_DIVIDE ,",
+        "| _ , __tembra_context : :: tembra :: Context , () : () | async move { __tembra_context . check () ? ; Ledger :: settle () . await } , __TEMBRA_CODEC_SETTLE ,",
+        "async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: quotient (a , b)) }",
+    ] {
+        assert!(native.contains(expected), "{expected}\n{native}");
+    }
+    let generated = tokens(&module);
+    for expected in [
+        "fn divide (a : u32 , b : u32) -> u32 { match Ledger :: divide (a , b) { :: core :: result :: Result :: Ok (value) => value , :: core :: result :: Result :: Err (error) => :: core :: panic ! (\"{}\" , error) , } }",
+        "async fn settle () { match Ledger :: settle () . await { :: core :: result :: Result :: Ok (value) => value ,",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    let dir = consumed("fallible-implemented", COUNTER_WIT);
+    let module = orb_with(
+        options("example:tally@1.0.0", Some(&dir)),
+        "mod tally {
+            #[service(\"example:counters/counter@1.0.0\")]
+            pub struct Counter;
+            impl Counter { pub fn add(amount: u32) -> tembra::Result<u32> { todo!() } }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let implemented = self::native(&module, &[]);
+    assert!(
+        implemented.contains(
+            "async move { __tembra_context . check () ? ; Counter :: add (amount) } , __TEMBRA_CODEC_ADD ,"
+        ),
+        "{implemented}"
+    );
+    let generated = tokens(&module);
+    assert!(
+        generated.contains(
+            "fn add (amount : u32) -> u32 { match Counter :: add (amount) { :: core :: result :: Result :: Ok (value) => value ,"
+        ),
+        "{generated}"
+    );
+    let refused = refused(
+        PACKAGE,
+        "mod book {
+            use tembra::Result;
+            #[service]
+            pub struct Ledger;
+            impl Ledger { pub fn divide(a: u32) -> Result<u32> { todo!() } }
+        }",
+    );
+    assert!(
+        refused.contains(
+            "the macro reads `Result` by its name as `Result<T, E>`, so another `Result`, such as a module's own alias, cannot stand for it here; for a service method's error channel, spell the runtime's by its path, `tembra::Result<T>`"
+        ),
+        "{refused}"
+    );
+}
+
 /// A type of a consumed interface has no native codec yet: a method taking or returning one is
 /// refused the same way, naming the method, the type and its interface, and so is a type of the
 /// module holding one, naming the field.

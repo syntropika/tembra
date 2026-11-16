@@ -393,6 +393,9 @@ struct Function {
     docs: Vec<String>,
     params: Vec<(Ident, Type, String)>,
     result: Option<(Type, String)>,
+    /// The service method returns `tembra::Result<T>`, its error channel: a failure is the call's
+    /// error, natively, and `result` is `T`, nothing for `()`.
+    fallible: bool,
 }
 
 /// A hook contribution: a free `pub fn` marked `#[hook("ns:name/hook@version", priority = n)]`.
@@ -2402,7 +2405,7 @@ fn component(
                 consumed_modules,
             );
             let (asynchronous, await_) = async_bridge(function.asynchronous);
-            let call = quote! { #target::#ident(#(#names),*) #await_ };
+            let call = answered(function, quote! { #target::#ident(#(#names),*) #await_ });
             let (result, body) = derived_result(
                 &function.result,
                 service.scope,
@@ -3102,6 +3105,7 @@ fn resource_function(function: &syn::ImplItemFn) -> syn::Result<ResourceFunction
             Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
             None => None,
         },
+        fallible: false,
     };
     Ok(match receiver {
         Some(_) => ResourceFunction::Method(read),
@@ -3129,6 +3133,21 @@ fn typed_params(function: &syn::ImplItemFn) -> syn::Result<Vec<(Ident, Type, Str
         ));
     }
     Ok(params)
+}
+
+/// The call of an author's service method as a bridge answers it: the value of a method returning
+/// `tembra::Result<T>`, which only a native host links. Such a module builds no component, so the
+/// bridge, which a host build still type-checks, never runs.
+fn answered(function: &Function, call: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    if !function.fallible {
+        return call;
+    }
+    quote! {
+        match #call {
+            ::core::result::Result::Ok(value) => value,
+            ::core::result::Result::Err(error) => ::core::panic!("{}", error),
+        }
+    }
 }
 
 /// Preserve async execution in the bindings: poll the author's future instead of blocking it.
@@ -3576,7 +3595,6 @@ fn implemented_service(
         let Some(own) = implementing(&service.functions, &function.name)? else {
             continue;
         };
-        let own = &own.ident;
         let Signature {
             names,
             params,
@@ -3584,10 +3602,11 @@ fn implemented_service(
             handles,
         } = signature(&function.params, function.result.as_ref(), depth)?;
         let (asynchronous, await_) = async_bridge(function.asynchronous);
+        let author = &own.ident;
         let body = wrapped(
             handles,
             &module,
-            quote! { #target::#own(#(#names),*) #await_ },
+            answered(own, quote! { #target::#author(#(#names),*) #await_ }),
         );
         functions.push(quote! { #asynchronous fn #ident(#(#params),*) #result { #body } });
     }
@@ -4505,7 +4524,8 @@ fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> B
 }
 
 /// Read one public function of a service: a plain name for each owned parameter, and `&self`
-/// when the service's create builds it.
+/// when the service's create builds it. A result spelled `tembra::Result<T>` is the method's
+/// error channel, so its WIT result is `T`.
 fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
     let mut params = Vec::new();
     let mut receiver = false;
@@ -4539,17 +4559,48 @@ fn method(function: &syn::ImplItemFn) -> syn::Result<Function> {
             }
         }
     }
+    let output = result(&function.sig.output);
+    let value = output.and_then(tembra_result);
+    let result = match value.or(output) {
+        Some(Type::Tuple(unit)) if unit.elems.is_empty() => None,
+        Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
+        None => None,
+    };
     Ok(Function {
         ident: function.sig.ident.clone(),
         asynchronous: function.sig.asyncness.is_some(),
         receiver,
         docs: wit::docs(&function.attrs)?,
         params,
-        result: match result(&function.sig.output) {
-            Some(ty) => Some((ty.clone(), wit::wit_type(ty)?)),
-            None => None,
-        },
+        result,
+        fallible: value.is_some(),
     })
+}
+
+/// The value of a result spelled `tembra::Result<T>`, the runtime's, `T`: a native method's error
+/// channel rather than a WIT `result`, which only `Result<T, E>` spells.
+fn tembra_result(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segments: Vec<&syn::PathSegment> = path.path.segments.iter().collect();
+    let ([tembra, result], None) = (segments.as_slice(), &path.qself) else {
+        return None;
+    };
+    let syn::PathArguments::AngleBracketed(arguments) = &result.arguments else {
+        return None;
+    };
+    let mut arguments = arguments.args.iter();
+    match (arguments.next(), arguments.next()) {
+        (Some(syn::GenericArgument::Type(value)), None)
+            if tembra.ident == "tembra"
+                && tembra.arguments.is_empty()
+                && result.ident == "Result" =>
+        {
+            Some(value)
+        }
+        _ => None,
+    }
 }
 
 /// Read a hook contribution: a `pub fn` taking the hook input and returning its output, with the

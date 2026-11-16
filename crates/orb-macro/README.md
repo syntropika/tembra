@@ -1096,6 +1096,13 @@ address of the service's objects: the native factory refuses an object at anothe
 `principal`, before the create runs. A component does not check them. A host-lifetime object
 belongs to the principal `host`, so `lifetime = host` takes no other principal.
 
+A method that returns `tembra::Result<T>` answers `T`, which is all its WIT result carries, or
+fails the call with its error, for a local and a portable caller alike: `tembra::Result` is the
+call's error channel, which a method that uses `?` on the runtime's results needs, such as the
+value of a resource its environment holds. Any other `Result<T, E>` is a value, a WIT `result`.
+The runtime's `Result` exists only where the facade links the runtime, so a module with such a
+method is native only.
+
 The codec reads and writes the JSON form compiled and TypeScript callers send and validate: the
 arguments as an array, `null` too without parameters; a record as an object of its fields, keyed by
 the lowerCamelCase form of their WIT names; an enum as the WIT name of its case; a variant and a

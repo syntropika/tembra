@@ -430,7 +430,8 @@ fn guard(service: &Service, identity: &str) -> Option<TokenStream> {
 
 /// The `method_with` call binding one method: the handle takes the arguments as a tuple of the
 /// author's parameter types, checks the context and calls the author's function, on the object's
-/// environment when it borrows `&self`.
+/// environment when it borrows `&self`, answering with its value, or with the `tembra::Result` it
+/// returns, whose failure is the call's error.
 fn method(service: &Service, function: &Function, codec: &Ident) -> TokenStream {
     let name = wit::kebab(&function.ident);
     let target = &service.ident;
@@ -449,9 +450,11 @@ fn method(service: &Service, function: &Function, codec: &Ident) -> TokenStream 
             quote! { #target::#ident(#(#params),*) #awaited },
         )
     };
-    let body = match &function.result {
-        Some(_) => quote! { ::core::result::Result::Ok(#call) },
-        None => quote! { #call; ::core::result::Result::Ok(()) },
+    // A method returning `tembra::Result<T>` answers with it: its failure is the call's error.
+    let body = match (&function.result, function.fallible) {
+        (_, true) => call,
+        (Some(_), false) => quote! { ::core::result::Result::Ok(#call) },
+        (None, false) => quote! { #call; ::core::result::Result::Ok(()) },
     };
     quote! {
         .method_with(
