@@ -488,6 +488,15 @@ struct Inputs {
     scope: usize,
 }
 
+/// The free function marked `#[root]`, `fn(&Inputs, &Declaration) -> tembra::Result<T>`: the
+/// Orb's create, which the native `orb(..)` hands `Orb::create`, and whose value every object of
+/// the Orb shares. It stays the author's function, out of the WIT.
+struct Root {
+    ident: Ident,
+    /// The module declaring the function, by scope; 0 is the Orb module.
+    scope: usize,
+}
+
 /// A marker on a function of an `impl` block. The functions the generated code calls by role
 /// carry one, whatever their names and visibility; a function without one is ordinary Rust.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -645,6 +654,7 @@ struct Scan {
     resources: Vec<Resource>,
     wit_resources: Vec<WitResource>,
     inputs: Option<Inputs>,
+    root: Option<Root>,
     impls: Vec<(usize, syn::ItemImpl)>,
     /// The type of each `impl Default for ..` of the Orb module, with the module it is written in.
     default_impls: Vec<(usize, Type)>,
@@ -882,6 +892,7 @@ impl Scan {
                         let syn::ImplItem::Fn(function) = impl_item else {
                             continue;
                         };
+                        no_root(&function.attrs)?;
                         let mut carried = Vec::new();
                         for marker in Marker::ALL {
                             if let Some(attribute) = take(&mut function.attrs, marker.name()) {
@@ -955,6 +966,7 @@ impl Scan {
                         let syn::ImplItem::Fn(function) = impl_item else {
                             continue;
                         };
+                        no_root(&function.attrs)?;
                         for marker in Marker::ALL {
                             if let Some(attribute) = function
                                 .attrs
@@ -992,6 +1004,9 @@ impl Scan {
                                 ),
                             ));
                         }
+                    }
+                    if let Some(attribute) = take(&mut function.attrs, "root") {
+                        self.root(&function, &attribute, scope)?;
                     }
                     if let Some(attribute) = take(&mut function.attrs, "hook") {
                         let mut contribution = contribution(&function, &attribute)?;
@@ -1057,6 +1072,67 @@ impl Scan {
             scope,
         });
         Ok(())
+    }
+
+    /// Read the function marked `#[root]`, the module's one, which the Orb module's `orb(..)`
+    /// calls with the Orb's inputs and its declaration, both borrowed.
+    fn root(&mut self, function: &ItemFn, attribute: &Attribute, scope: usize) -> syn::Result<()> {
+        let signature = &function.sig;
+        let ident = &signature.ident;
+        if !matches!(attribute.meta, syn::Meta::Path(_)) {
+            return Err(syn::Error::new(
+                attribute.span(),
+                "#[root] takes no options",
+            ));
+        }
+        if let Some(first) = &self.root {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "`{}` and `{ident}` are both marked #[root]; an Orb has one, its create",
+                    first.ident
+                ),
+            ));
+        }
+        if scope != 0 && !reaches_root(&function.vis) {
+            return Err(syn::Error::new(
+                attribute.span(),
+                "#[root] on a function of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, which calls it",
+            ));
+        }
+        let borrowed = |input: &FnArg| {
+            matches!(input, FnArg::Typed(typed)
+                if matches!(&*typed.ty, Type::Reference(reference) if reference.mutability.is_none()))
+        };
+        if signature.asyncness.is_some()
+            || signature.inputs.len() != 2
+            || !signature.inputs.iter().all(borrowed)
+            || matches!(signature.output, ReturnType::Default)
+        {
+            return Err(syn::Error::new(
+                attribute.span(),
+                "#[root] marks `fn(&Inputs, &Declaration) -> tembra::Result<T>`, a free function of the module",
+            ));
+        }
+        self.root = Some(Root {
+            ident: ident.clone(),
+            scope,
+        });
+        Ok(())
+    }
+}
+
+/// Refuse `#[root]` on a function of an impl block: it marks a free function.
+fn no_root(attrs: &[Attribute]) -> syn::Result<()> {
+    match attrs
+        .iter()
+        .find(|attribute| attribute.path().is_ident("root"))
+    {
+        Some(attribute) => Err(syn::Error::new(
+            attribute.span(),
+            "#[root] goes on a free function of the module, not in an impl block",
+        )),
+        None => Ok(()),
     }
 }
 
@@ -1179,6 +1255,8 @@ struct Analysis {
     resources: Vec<Resource>,
     /// The struct marked `#[inputs]`, if any: the argument of the native `orb(..)`.
     inputs: Option<Inputs>,
+    /// The function marked `#[root]`, if any: the Orb's create, natively.
+    root: Option<Root>,
     /// The states, each resolved to the service whose objects own it.
     states: Vec<State>,
     /// The hook contributions, and the priority of each hook contributed to, by hook identity.
@@ -1318,6 +1396,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         resources: Vec::new(),
         wit_resources: Vec::new(),
         inputs: None,
+        root: None,
         impls: Vec::new(),
         default_impls: Vec::new(),
         marked: Vec::new(),
@@ -1343,6 +1422,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         mut resources,
         mut wit_resources,
         inputs,
+        root,
         impls,
         default_impls,
         marked,
@@ -1565,6 +1645,18 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             ));
         }
         service.create = Some(signature.ident.clone());
+    }
+    // The Orb's root is created from its inputs, as a service's object is.
+    if let Some(root) = &root
+        && inputs.is_none()
+    {
+        return Err(syn::Error::new(
+            root.ident.span(),
+            format!(
+                "`{}` is marked #[root], which takes the Orb's inputs: mark the struct `orb(..)` takes #[inputs]",
+                root.ident
+            ),
+        ));
     }
     // An Orb exports services, declares hooks or contributes to them; a module doing none of
     // those would be an empty world.
@@ -2147,6 +2239,7 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         wit_resources,
         resources,
         inputs,
+        root,
         states,
         contributions,
         hooks,

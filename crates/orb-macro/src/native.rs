@@ -60,11 +60,17 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         .inputs
         .as_ref()
         .map(|inputs| crate::from_root(&analysis.modules[inputs.scope], &inputs.ident));
-    let shared = analysis
-        .services
-        .iter()
-        .any(|service| service.create.is_some());
-    let orb = orb(metadata, inputs.as_ref(), shared, &calls);
+    // The Orb's `#[root]` is its create, which takes the inputs too.
+    let create = analysis
+        .root
+        .as_ref()
+        .map(|root| crate::from_root(&analysis.modules[root.scope], &root.ident));
+    let shared = create.is_some()
+        || analysis
+            .services
+            .iter()
+            .any(|service| service.create.is_some());
+    let orb = orb(metadata, inputs.as_ref(), shared, create.as_ref(), &calls);
     Native {
         root: wrapped(quote! { #orb #(#root)* }),
         nested: by_scope
@@ -83,8 +89,10 @@ fn wrapped(items: TokenStream) -> TokenStream {
 /// `orb()`, the Orb named and versioned by the manifest, and `orb_named`, which builds it with
 /// every service registered under the name and API version a host gives it; `orb()` forwards to
 /// it. With an `#[inputs]` struct, `inputs` the path the Orb module names it by, they are
-/// `orb(inputs)` and `orb_named(name, api_version, inputs)`, and when a service has a create,
-/// `shared`, the inputs go to each such service as one `Rc`.
+/// `orb(inputs)` and `orb_named(name, api_version, inputs)`, and when a service has a create or
+/// the Orb a `#[root]`, `shared`, the inputs go to each as one `Rc`. The root, `create` the path
+/// the Orb module names it by, is the Orb's create: `Orb::create` runs it with the inputs and the
+/// Orb's declaration.
 ///
 /// Cargo does not rebuild a crate when only `[package.metadata.tembra]` changes, so the generated
 /// code includes the manifest, which makes the compiler track the file: the next build then reads
@@ -93,6 +101,7 @@ fn orb(
     metadata: &Metadata,
     inputs: Option<&TokenStream>,
     shared: bool,
+    create: Option<&TokenStream>,
     calls: &[TokenStream],
 ) -> TokenStream {
     let name = &metadata.name;
@@ -112,6 +121,14 @@ fn orb(
     let named_parameter = inputs.map(|path| quote! { , inputs: #path });
     let argument = inputs.map(|_| quote! { , inputs });
     let shared = shared.then(|| quote! { let inputs = ::std::rc::Rc::new(inputs); });
+    let create = create.map(|create| {
+        quote! {
+            .create({
+                let inputs = ::std::rc::Rc::clone(&inputs);
+                move |declaration| self::#create(&inputs, &declaration)
+            })
+        }
+    });
     quote! {
         const _: &[u8] = ::core::include_bytes!(::core::concat!(
             ::core::env!("CARGO_MANIFEST_DIR"),
@@ -130,7 +147,9 @@ fn orb(
             #named_parameter
         ) -> ::tembra::Result<::tembra::Orb> {
             #shared
-            ::core::result::Result::Ok(::tembra::Orb::new(name, api_version) #(.service(#calls))*)
+            ::core::result::Result::Ok(
+                ::tembra::Orb::new(name, api_version) #create #(.service(#calls))*
+            )
         }
     }
 }

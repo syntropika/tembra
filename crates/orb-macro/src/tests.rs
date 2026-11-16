@@ -5069,6 +5069,138 @@ fn a_host_lifetime_guards_no_other_principal() {
     );
 }
 
+/// The function marked `#[root]` is the Orb's create: `orb(..)` shares the inputs as one `Rc` and
+/// hands `Orb::create` a closure calling the root with them and the Orb's `Declaration`. The root
+/// stays the author's function, as written but for the marker, and its value no type of the WIT. In
+/// a sub-module, the Orb module names it by its path.
+#[test]
+fn the_root_is_the_create_of_the_orb() {
+    let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
+    let module = expanded(
+        PACKAGE,
+        &format!(
+            "mod book {{
+                #[inputs]
+                pub struct Inputs {{ pub base: u32 }}
+                pub struct Shared {{ pub base: u32 }}
+                #[root]
+                fn shared(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Shared> {{
+                    Ok(Shared {{ base: inputs.base }})
+                }}
+                {service}
+            }}"
+        ),
+    );
+    let root = native(&module, &[]);
+    assert!(
+        root.contains(
+            "pub fn orb_named (name : & str , api_version : u32 , inputs : Inputs) -> :: tembra :: Result < :: tembra :: Orb > { let inputs = :: std :: rc :: Rc :: new (inputs) ; :: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: shared (& inputs , & declaration) }) . service (self :: __tembra_service_ledger (name))) }"
+        ),
+        "{root}"
+    );
+    let tokens = tokens(&module);
+    assert!(
+        tokens.contains(
+            "fn shared (inputs : & Inputs , declaration : & Declaration) -> tembra :: Result < Shared > { Ok (Shared { base : inputs . base }) }"
+        ),
+        "{tokens}"
+    );
+    assert!(!tokens.contains("root ]"), "{tokens}");
+    assert_eq!(
+        wit(&module),
+        wit(&expanded(PACKAGE, &format!("mod book {{ {service} }}")))
+    );
+    let module = expanded(
+        PACKAGE,
+        &format!(
+            "mod book {{
+                #[inputs]
+                pub struct Inputs {{ pub base: u32 }}
+                pub mod shared {{
+                    #[root]
+                    pub(super) fn open(inputs: &super::Inputs, declaration: &Declaration) -> tembra::Result<u32> {{
+                        Ok(inputs.base)
+                    }}
+                }}
+                {service}
+            }}"
+        ),
+    );
+    let root = native(&module, &[]);
+    assert!(
+        root.contains(
+            ". create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: shared :: open (& inputs , & declaration) })"
+        ),
+        "{root}"
+    );
+}
+
+/// A `#[root]` is a free function of the module, the Orb's one, without options, that takes the
+/// Orb's inputs and its `Declaration` by reference and returns the root's value; the Orb has
+/// `#[inputs]`, and the Orb module can call it.
+#[test]
+fn a_root_is_refused_when_ill_formed() {
+    let inputs = "#[inputs] pub struct Inputs { pub base: u32 }";
+    let root = "#[root] fn shared(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<u32> { todo!() }";
+    let shape = "#[root] marks `fn(&Inputs, &Declaration) -> tembra::Result<T>`, a free function of the module";
+    for (items, message) in [
+        (
+            root.to_owned(),
+            "`shared` is marked #[root], which takes the Orb's inputs: mark the struct `orb(..)` takes #[inputs]",
+        ),
+        (
+            format!("{inputs} {root} {}", root.replace("fn shared", "fn other")),
+            "`shared` and `other` are both marked #[root]; an Orb has one, its create",
+        ),
+        (
+            format!("{inputs} {}", root.replace("#[root]", "#[root(shared)]")),
+            "#[root] takes no options",
+        ),
+        (
+            format!("{inputs} {}", root.replace("fn shared", "async fn shared")),
+            shape,
+        ),
+        (
+            format!(
+                "{inputs} {}",
+                root.replace("inputs: &Inputs", "inputs: Inputs")
+            ),
+            shape,
+        ),
+        (
+            format!("{inputs} {}", root.replace("inputs: &Inputs, ", "")),
+            shape,
+        ),
+        (
+            format!(
+                "{inputs} {}",
+                root.replace(" -> tembra::Result<u32> { todo!() }", " {}")
+            ),
+            shape,
+        ),
+        (
+            format!("{inputs} mod shared {{ {root} }}"),
+            "#[root] on a function of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, which calls it",
+        ),
+        (
+            format!("{inputs} pub struct Shared; impl Shared {{ {root} }}"),
+            "#[root] goes on a free function of the module, not in an impl block",
+        ),
+        (
+            format!("{inputs} pub struct Shared; impl Clone for Shared {{ {root} }}"),
+            "#[root] goes on a free function of the module, not in an impl block",
+        ),
+    ] {
+        let error = refused(
+            PACKAGE,
+            &format!(
+                "mod book {{ {items} #[service] pub struct Ledger; impl Ledger {{ pub fn count() -> u32 {{ 0 }} }} }}"
+            ),
+        );
+        assert_eq!(error, message, "{items}");
+    }
+}
+
 /// The contract an Orb crate carries, written as `cargo tembra build` writes it: only when the
 /// macro is given the crate's directory, which `primary_crate_dir` takes from Cargo's variables
 /// as `expansion` reads them, so a dependency's is never written and the token tests write nothing.

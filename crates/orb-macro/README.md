@@ -1046,8 +1046,35 @@ impl Notes {
 }
 ```
 
-Like any native-only module, a module with a `#[create]` serves only a native host. The create
-names `Declaration` and `tembra::Result`, which the facade has only with `host`, so the crate
+What every object of the Orb shares comes from the free function marked `#[root]`,
+`fn(&Inputs, &Declaration) -> tembra::Result<T>`, the Orb's create: `orb(..)` hands it to
+`Orb::create`, so the host runs it once when it installs the Orb, before any object is built, and
+again for the new code when it reloads the Orb. Its `Declaration` declares what the Orb holds for
+its lifetime: its resources, with `resource_async` for an asynchronous open that depends on other
+resources or an asynchronous close, its background tasks, and the references it keeps. A
+`#[create]` reads the value as an `Rc<T>` with `declaration.orb::<T>()`, and may keep it for its
+methods. An Orb has at most one, visible to the Orb module.
+
+```rust,ignore
+pub struct Catalogue {
+    books: Cell<u32>,
+}
+
+#[root]
+fn catalogue(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Catalogue> {
+    Ok(Catalogue { books: Cell::new(0) })
+}
+
+impl Shelf {
+    #[create]
+    fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+        Ok(Self { catalogue: declaration.orb::<Catalogue>()? })
+    }
+}
+```
+
+Like any native-only module, a module with a `#[create]` or a `#[root]` serves only a native host.
+They name `Declaration` and `tembra::Result`, which the facade has only with `host`, so the crate
 depends on `tembra` with `host` on native targets and compiles the module only there, under
 `#[cfg(not(target_arch = "wasm32"))]`, as the native fixture's manifest and its `notebook` do:
 
@@ -1131,10 +1158,10 @@ The macro rewrites the module with:
    function and emptied by the `#[close]` one, and the `with` function on each resource type;
 10. inside `tembra::__host!`, so only where the facade links the runtime, `pub fn orb()`, or
     `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest through
-    `pub fn orb_named(name, api_version, ..)`, from one hidden function per service, written in
-    the service's module with the codec constant of each of its methods and the service's typed
-    client, `<Service>Client`, and an `include_bytes!` of the manifest, see
-    [using the Orb natively](#using-the-orb-natively).
+    `pub fn orb_named(name, api_version, ..)`, with its `#[root]` as the Orb's create, from one
+    hidden function per service, written in the service's module with the codec constant of each
+    of its methods and the service's typed client, `<Service>Client`, and an `include_bytes!` of
+    the manifest, see [using the Orb natively](#using-the-orb-natively).
 
 The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) among its dependencies,
 `dlmalloc` (feature `global`) only with `no_std`, and `serde` (features `derive`, `alloc`) and

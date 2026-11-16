@@ -1,8 +1,9 @@
 //! An Orb crate used natively. The module `calculator` is one `cargo tembra build` would compile
 //! into a component; the tests of this crate are a native host instead, which installs
 //! `calculator::orb()` and calls its services locally, with Rust values, and portably, with the
-//! boundary's JSON. The module `notebook` takes host values, which only a native host can lend.
-//! The manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
+//! boundary's JSON. The module `notebook` takes host values, which only a native host can lend,
+//! and `library` shares its root's value among its objects. The manifest names every Orb of the
+//! crate `calculator` at API version 2, which `orb()` reports.
 
 #[tembra::orb(package = "example:calculator@1.0.0")]
 pub mod calculator {
@@ -214,6 +215,69 @@ pub mod notebook {
         /// Pin a note on the board.
         pub fn pin(&self, text: String) {
             self.events.borrow_mut().push(format!("pin {text}"));
+        }
+    }
+}
+
+/// Shelves of books, with what every shelf shares: the catalogue the Orb's root creates once, which
+/// each shelf's create and methods read. Native only, as `notebook`.
+#[cfg(not(target_arch = "wasm32"))]
+#[tembra::orb(package = "example:library@1.0.0")]
+pub mod library {
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+    use tembra::Declaration;
+
+    /// What the host lends the Orb.
+    #[inputs]
+    pub struct Inputs {
+        /// What happened, in order, for the host to read back.
+        pub events: Rc<RefCell<Vec<String>>>,
+    }
+
+    /// What every shelf shares: how many books the library holds.
+    pub struct Catalogue {
+        books: Cell<u32>,
+    }
+
+    /// Create the catalogue, once for the Orb, and report it to the host.
+    #[root]
+    fn catalogue(inputs: &Inputs, _declaration: &Declaration) -> tembra::Result<Catalogue> {
+        inputs.events.borrow_mut().push("root".to_string());
+        Ok(Catalogue {
+            books: Cell::new(0),
+        })
+    }
+
+    /// One shelf of the library, an object per key and principal.
+    #[service]
+    pub struct Shelf {
+        catalogue: Rc<Catalogue>,
+    }
+
+    impl Shelf {
+        /// Build a shelf on the catalogue the root created, and report how many books the
+        /// library held then.
+        #[create]
+        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+            let catalogue = declaration.orb::<Catalogue>()?;
+            let address = declaration.address()?;
+            inputs.events.borrow_mut().push(format!(
+                "shelf {}/{} with {}",
+                address.key.join("/"),
+                address.principal,
+                catalogue.books.get()
+            ));
+            Ok(Self { catalogue })
+        }
+
+        /// Shelve a book, and return how many books the library holds, across its shelves.
+        pub fn shelve(&self) -> u32 {
+            let books = self.catalogue.books.get() + 1;
+            self.catalogue.books.set(books);
+            books
         }
     }
 }
