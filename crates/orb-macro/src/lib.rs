@@ -1658,13 +1658,28 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             ),
         ));
     }
+    // A module is native only when it holds what only a native host gives it: inputs, which its
+    // creates and its root take, or an address guard.
+    let native_only = inputs.is_some()
+        || services
+            .iter()
+            .any(|service| service.guard.main || service.guard.principal.is_some());
     // An Orb exports services, declares hooks or contributes to them; a module doing none of
-    // those would be an empty world.
+    // those would be an empty world. A native-only one may instead run only its root, or hold
+    // only root resources, while the host keeps it installed: its world is then empty.
     if services.is_empty() && contributions.is_empty() && declared.is_empty() {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "nothing to export: mark a unit struct with #[service] and give it an impl block of pub fn, or mark a hook with #[hook]",
-        ));
+        if !native_only {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "nothing to export: mark a unit struct with #[service] and give it an impl block of pub fn, or mark a hook with #[hook]",
+            ));
+        }
+        if root.is_none() && resources.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root] or a #[resource]",
+            ));
+        }
     }
     if let Some(service) = services
         .iter()

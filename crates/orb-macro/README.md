@@ -1073,6 +1073,10 @@ impl Shelf {
 }
 ```
 
+A native-only module, such as one with `#[inputs]`, may export nothing: an Orb whose only content is
+its `#[root]`, or root resources, runs what they declare while the host keeps it installed, such as
+a background task. Its WIT is then an empty world, and `orb(..)` registers no service.
+
 Like any native-only module, a module with a `#[create]` or a `#[root]` serves only a native host.
 They name `Declaration` and `tembra::Result`, which the facade has only with `host`, so the crate
 depends on `tembra` with `host` on native targets and compiles the module only there, under

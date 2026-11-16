@@ -2,8 +2,8 @@
 //! into a component; the tests of this crate are a native host instead, which installs
 //! `calculator::orb()` and calls its services locally, with Rust values, and portably, with the
 //! boundary's JSON. The module `notebook` takes host values, which only a native host can lend,
-//! and `library` shares its root's value among its objects. The manifest names every Orb of the
-//! crate `calculator` at API version 2, which `orb()` reports.
+//! `library` shares its root's value among its objects, and `worker` only runs its root. The
+//! manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 
 #[tembra::orb(package = "example:calculator@1.0.0")]
 pub mod calculator {
@@ -279,5 +279,37 @@ pub mod library {
             self.catalogue.books.set(books);
             books
         }
+    }
+}
+
+/// A worker the host runs while the Orb is installed: an Orb whose only content is its root, which
+/// declares the worker. It exports nothing, so its WIT is an empty world. Native only, as
+/// `notebook`.
+#[cfg(not(target_arch = "wasm32"))]
+#[tembra::orb(package = "example:worker@1.0.0")]
+pub mod worker {
+    use std::{cell::RefCell, rc::Rc};
+    use tembra::Declaration;
+
+    /// What the host lends the Orb.
+    #[inputs]
+    pub struct Inputs {
+        /// What the worker did, in order, for the host to read back.
+        pub events: Rc<RefCell<Vec<String>>>,
+    }
+
+    /// Declare the worker: a task that runs once the Orb is active and stops when it is
+    /// cancelled, as the host closes.
+    #[root]
+    fn start(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<()> {
+        let events = inputs.events.clone();
+        declaration.task(move |scope| {
+            Box::pin(async move {
+                events.borrow_mut().push("run".to_string());
+                scope.signal().cancelled().await;
+                events.borrow_mut().push("stop".to_string());
+                Ok(())
+            })
+        })
     }
 }

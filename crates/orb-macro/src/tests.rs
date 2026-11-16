@@ -5201,6 +5201,50 @@ fn a_root_is_refused_when_ill_formed() {
     }
 }
 
+/// A native-only module may export nothing when what it runs is its root or its root resources:
+/// the WIT is then an empty world, and `orb(..)` an Orb of no service whose create is the root.
+/// Root resources stay refused natively until the native side covers them. A module that is not
+/// native only, or has nothing to run, still exports something.
+#[test]
+fn a_native_only_module_may_only_run_its_root() {
+    const WORKER: &str = "example:worker@1.0.0";
+    let inputs = "#[inputs] pub struct Inputs { pub label: String }";
+    let counts = "#[resource] pub struct Counts { pub seen: u32 } impl Counts { #[open] pub fn open() -> Counts { Counts { seen: 0 } } }";
+    let module = expanded(
+        WORKER,
+        &format!(
+            "mod worker {{
+                {inputs}
+                #[root]
+                fn start(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<()> {{ Ok(()) }}
+            }}"
+        ),
+    );
+    let derived = wit(&module);
+    assert!(derived.contains("world worker {\n}"), "{derived}");
+    assert!(!derived.contains("interface"), "{derived}");
+    let root = native(&module, &[]);
+    assert!(
+        root.contains(
+            ":: core :: result :: Result :: Ok (:: tembra :: Orb :: new (name , api_version) . create ({ let inputs = :: std :: rc :: Rc :: clone (& inputs) ; move | declaration | self :: start (& inputs , & declaration) })) }"
+        ),
+        "{root}"
+    );
+    let module = expanded(WORKER, &format!("mod worker {{ {inputs} {counts} }}"));
+    assert_eq!(
+        native(&module, &[]),
+        ":: core :: compile_error ! (\"`Counts` is marked #[resource]; root resources are not supported natively yet\") ;"
+    );
+    assert_eq!(
+        refused(WORKER, &format!("mod worker {{ {counts} }}")),
+        "nothing to export: mark a unit struct with #[service] and give it an impl block of pub fn, or mark a hook with #[hook]"
+    );
+    assert_eq!(
+        refused(WORKER, &format!("mod worker {{ {inputs} }}")),
+        "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root] or a #[resource]"
+    );
+}
+
 /// The contract an Orb crate carries, written as `cargo tembra build` writes it: only when the
 /// macro is given the crate's directory, which `primary_crate_dir` takes from Cargo's variables
 /// as `expansion` reads them, so a dependency's is never written and the token tests write nothing.
