@@ -27,6 +27,7 @@ use crate::{
     Candidate, Contribution, Declared, Service, Shape, ShapeKind, State, WitResource, hook_path,
     keyed, resource_params, wasi, wit,
 };
+use quote::ToTokens;
 use std::collections::{BTreeMap, BTreeSet};
 use syn::{Ident, Item, LitStr, Type, spanned::Spanned};
 
@@ -100,6 +101,10 @@ pub(crate) struct Named<'m, 't> {
     pub ident: &'t Ident,
     pub ty: &'t Type,
     pub in_option: bool,
+    /// Whether the path leads into the bindings' own module of the interface's import,
+    /// `self::example::counters::counter::Tally`, rather than through the module the Orb module
+    /// re-exports: the import's copy of the type, whatever that module holds.
+    pub through_import: bool,
 }
 
 /// What a walk through a type reaches: a name through a consumed interface's module, or the last
@@ -274,12 +279,24 @@ impl Modules {
         if interface.role == Role::Context {
             return None;
         }
+        // The bindings put an interface's import in `namespace::package::interface` and its export
+        // under `exports`: a path through the namespace and the package, not under `exports`, is
+        // the import module's, `self::example::counters::counter::Tally`.
+        let identity = crate::Identity::of(&interface.identity);
+        let through_import = matches!(
+            segments.as_slice(),
+            [before @ .., namespace, package, _, _]
+                if namespace.ident == crate::rust_ident(identity.namespace)
+                    && package.ident == crate::rust_ident(identity.package)
+                    && before.last().is_none_or(|exports| exports.ident != "exports")
+        );
         Some(Named {
             interface,
             module,
             ident: &item.ident,
             ty,
             in_option: false,
+            through_import,
         })
     }
 
@@ -849,6 +866,24 @@ fn checked<'a>(
         Place::Field { interface, .. } => (*interface, false),
         Place::Input { .. } | Place::State { .. } => unreachable!("checked above"),
     };
+    // A path into the bindings' module of the import of an interface the world exports names the
+    // import's copy of its types, as the view of its keyed import does, while a derived interface,
+    // exported, takes the copy of the export, which the module the Orb module re-exports for an
+    // implemented interface and a contributed hook names; a declared hook's module is the import's
+    // too, which its rule refuses below.
+    if named.through_import
+        && let Some(takes) = match interface.role {
+            Role::Implemented => Some("an implemented interface"),
+            Role::Contributed => Some("a hook"),
+            _ => None,
+        }
+    {
+        let module = named.module;
+        let written = named.ty.to_token_stream().to_string().replace(' ', "");
+        return refuse(format!(
+            "{what} of {of}, through the bindings' module of its import: a derived interface takes the types of {takes} from its export, as `{module}::{ident}` names them; `{written}` is the import's"
+        ));
+    }
     // The `run` of a hook the module declares, for the errors.
     let run = || {
         declared

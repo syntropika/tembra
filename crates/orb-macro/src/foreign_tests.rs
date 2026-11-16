@@ -547,6 +547,15 @@ fn a_derived_signature_names_an_implemented_interfaces_and_a_hooks_types() {
         error.contains("`Report::give` returns `Cursor`, a resource of the implemented interface example:ledger/book@1.0.0: the runtime returns a resource only from the interface that defines it"),
         "{error}"
     );
+    // The world imports a contributed hook itself, so the bindings' import module of the hook
+    // names the import's copy of its types, which the derived interface does not take.
+    let error = refused(
+        "pub fn judged(admission: self::example::ledger::guard::Admission) -> bool { admission.blocked }",
+    );
+    assert!(
+        error.contains("`Report::judged` takes `Admission`, a record of the hook example:ledger/guard@1.0.0, which this module contributes to, through the bindings' module of its import: a derived interface takes the types of a hook from its export, as `guard::Admission` names them; `self::example::ledger::guard::Admission` is the import's"),
+        "{error}"
+    );
 }
 
 /// An imported interface whose types are its own but which `use`s the book, the interface the

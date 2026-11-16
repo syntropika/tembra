@@ -780,6 +780,10 @@ the type that names it:
   of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
 - a type of a hook the module declares from a consumed package, whose `run` speaks the import's
   types where a derived interface takes the export's ([declaring a hook](#declaring-a-hook));
+- a type of an implemented interface or of a hook the module contributes to named through the
+  bindings' module of its import, `self::example::counters::counter::Tally`, the import's copy,
+  where a derived interface takes the export's, which the interface's own module names,
+  `counter::Tally`;
 - a type or a handle of a WASI interface, named through that interface's module or through a
   consumed interface that `use`s it from WASI, `files::Descriptor` for a
   `use wasi:filesystem/types@0.3.0.{descriptor};` in `files`;

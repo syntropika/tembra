@@ -465,6 +465,65 @@ fn an_implemented_interface_is_imported_by_key() {
     }
 }
 
+/// The keyed import of an implemented interface brings the bindings' import module of the
+/// interface, `self::example::counters::counter`, which names the import's copy of its types, as
+/// the view's module does: a derived signature names an implemented interface's types through the
+/// interface's own module, `counter::Tally`, the export's copy, or through the export module the
+/// Orb module re-exports it from; a path into the bindings' import is refused, named as written.
+#[test]
+fn a_path_into_the_bindings_import_of_an_implemented_interface_is_refused() {
+    let dir = consumed("bindings-import", COUNTERS);
+    let proxy = |relayed: &str| {
+        format!(
+            "mod proxy {{
+                #[service(\"example:counters/counter@1.0.0\")]
+                pub struct Counter;
+                impl Counter {{
+                    pub fn add(amount: u32) -> u32 {{ amount }}
+                    pub async fn read() -> counter::Tally {{ counter::Tally {{ key: vec![], count: 0 }} }}
+                }}
+                #[service]
+                pub struct Relay;
+                impl Relay {{ {relayed} }}
+            }}"
+        )
+    };
+    for (written, subject, path) in [
+        (
+            "pub fn relayed(last: self::example::counters::counter::Tally) -> u32 { last.count }",
+            "takes",
+            "self::example::counters::counter::Tally",
+        ),
+        (
+            "pub fn relayed() -> Option<example::counters::counter::Tally> { None }",
+            "returns",
+            "example::counters::counter::Tally",
+        ),
+    ] {
+        let refusal = refused(
+            options(Some(&dir), &["example:counters/counter@1.0.0"]),
+            &proxy(written),
+        );
+        assert!(
+            refusal.contains(&format!(
+                "`Relay::relayed` {subject} `Tally`, a record of the implemented interface example:counters/counter@1.0.0, through the bindings' module of its import: a derived interface takes the types of an implemented interface from its export, as `counter::Tally` names them; `{path}` is the import's"
+            )),
+            "{refusal}"
+        );
+    }
+    for path in [
+        "counter::Tally",
+        "exports::example::counters::counter::Tally",
+    ] {
+        expanded(
+            options(Some(&dir), &["example:counters/counter@1.0.0"]),
+            &proxy(&format!(
+                "pub fn relayed(last: {path}) -> u32 {{ last.count }}"
+            )),
+        );
+    }
+}
+
 /// A view is an interface of the Orb's package named after the provider interface: an interface
 /// imported by key twice, two interfaces of one name, a view named like the world or a service's
 /// interface, and a provider type named like the view's resource or `get`, are errors.
