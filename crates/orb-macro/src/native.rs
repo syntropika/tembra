@@ -9,9 +9,10 @@
 //! arguments and result cross as the boundary's JSON, the form `tembra_contracts` validates,
 //! through a codec written from the WIT types, kind by kind: each type of the module that enters
 //! the WIT reads and writes its own JSON through a hidden trait of the Orb module, implemented in
-//! the type's module, where its members are visible. What the native side does not cover yet is a
-//! compile error inside the same wrapper, naming the item; a component build of the module is
-//! unaffected.
+//! the type's module, where its members are visible. With the `context` option, the Orb module
+//! gets a native `context`, whose functions read the call each method's future runs for. What the
+//! native side does not cover yet is a compile error inside the same wrapper, naming the item; a
+//! component build of the module is unaffected.
 use crate::{
     Analysis, Function, Payload, Service, Shape, ShapeKind, camel_ident, metadata::Metadata,
     rust_ident, wit,
@@ -33,8 +34,10 @@ pub(crate) struct Native {
 
 /// Write the native side of the module: `orb()` with the registration of every service, the
 /// client of each and the JSON of every type that enters the WIT, or the compile error for what
-/// the native side does not cover yet.
+/// the native side does not cover yet; with the `context` option, the native `context` too, which
+/// the author's code calls either way.
 pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
+    let context = analysis.options.context.then(context_module);
     let registrations = covered(analysis).and_then(|()| {
         analysis
             .services
@@ -46,7 +49,7 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         Ok(registrations) => registrations,
         Err(Refused(error)) => {
             return Native {
-                root: wrapped(error),
+                root: wrapped(quote! { #error #context }),
                 nested: Vec::new(),
             };
         }
@@ -79,7 +82,7 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         }
         Err(Refused(error)) => {
             return Native {
-                root: wrapped(error),
+                root: wrapped(quote! { #error #context }),
                 nested: Vec::new(),
             };
         }
@@ -102,7 +105,7 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
     let orb = orb(metadata, inputs.as_ref(), shared, create.as_ref(), &calls);
     let boundary = (!analysis.shapes.is_empty()).then(boundary_trait);
     Native {
-        root: wrapped(quote! { #orb #boundary #(#root)* }),
+        root: wrapped(quote! { #orb #boundary #(#root)* #context }),
         nested: by_scope
             .into_iter()
             .map(|(scope, items)| (scope, wrapped(quote! { #(#items)* })))
@@ -211,6 +214,123 @@ fn boundary_trait() -> TokenStream {
     }
 }
 
+/// `context` with the `context` option, in place of the component's, with the functions and
+/// types of the kernel's interface: each function reads the call of the method being polled, which
+/// the method's scope sets around each poll of its future, as the executor answers a component
+/// from the call it serves.
+fn context_module() -> TokenStream {
+    quote! {
+        /// The kernel's view of the call a method serves: its principal and cancellation, the
+        /// address of the object running it, and the host's log.
+        pub mod context {
+            pub use super::tembra::guest::context::{Address, Level};
+
+            /// The call of the method being polled on this thread, with the principal it was
+            /// admitted with.
+            struct Call {
+                context: ::tembra::Context,
+                principal: ::std::string::String,
+            }
+
+            ::std::thread_local! {
+                static CALL: ::core::cell::RefCell<::core::option::Option<::std::rc::Rc<Call>>> =
+                    const { ::core::cell::RefCell::new(::core::option::Option::None) };
+            }
+
+            /// Run a method's future in the scope of its call: while it is polled, the functions
+            /// of this module read that call, and an outer poll's call comes back after.
+            pub(crate) fn __scoped<F: ::core::future::Future>(
+                context: ::tembra::Context,
+                future: F,
+            ) -> impl ::core::future::Future<Output = F::Output> {
+                // Read as the call starts: the call keeps this principal once its root is
+                // cancelled, when the root no longer answers it.
+                let principal = context.principal().unwrap_or_default();
+                let call = ::std::rc::Rc::new(Call { context, principal });
+                let mut future = ::std::boxed::Box::pin(future);
+                ::core::future::poll_fn(move |cx| {
+                    let _entered = Entered::enter(call.clone());
+                    ::core::future::Future::poll(future.as_mut(), cx)
+                })
+            }
+
+            /// The call set for one poll, which puts the previous one back when dropped, also when
+            /// the poll panics.
+            struct Entered(::core::option::Option<::std::rc::Rc<Call>>);
+
+            impl Entered {
+                fn enter(call: ::std::rc::Rc<Call>) -> Self {
+                    Self(CALL.with(|current| current.replace(::core::option::Option::Some(call))))
+                }
+            }
+
+            impl ::core::ops::Drop for Entered {
+                fn drop(&mut self) {
+                    let previous = self.0.take();
+                    CALL.with(|current| current.replace(previous));
+                }
+            }
+
+            /// The call of the method running, which only a method of this Orb has.
+            fn current() -> ::std::rc::Rc<Call> {
+                CALL.with(|current| current.borrow().clone())
+                    .expect("the kernel's context is read inside a method of the Orb")
+            }
+
+            /// The address of the object running the current call.
+            pub fn object() -> Address {
+                let address = current()
+                    .context
+                    .address()
+                    .expect("the object running a call has an address");
+                Address {
+                    key: address.key,
+                    principal: address.principal,
+                }
+            }
+
+            /// The principal of the current call, the one it was admitted with, also once
+            /// cancelled.
+            pub fn principal() -> ::std::string::String {
+                current().principal.clone()
+            }
+
+            /// Whether the current call was cancelled.
+            pub fn cancelled() -> bool {
+                current().context.signal().is_cancelled()
+            }
+
+            /// Cancel the current call: the caller and this Orb both observe it cancelled.
+            /// Cancelling a cancelled call changes nothing, as in a component: its caller may
+            /// have cancelled it alone, and its root goes on.
+            pub fn cancel() {
+                let call = current();
+                if call.context.signal().is_cancelled() {
+                    return;
+                }
+                call.context
+                    .cancel()
+                    .expect("the root of a running call is retained");
+            }
+
+            /// Write a diagnostic record attributed to this Orb, for the host's log observer.
+            pub fn log(level: Level, message: &str) {
+                let level = match level {
+                    Level::Log => "log",
+                    Level::Debug => "debug",
+                    Level::Info => "info",
+                    Level::Warn => "warn",
+                    Level::Error => "error",
+                };
+                current()
+                    .context
+                    .log(level, message)
+                    .expect("a running call writes for its Orb");
+            }
+        }
+    }
+}
+
 /// The trait of `boundary_trait`, as the module `scope` names it.
 fn boundary(scope: usize, analysis: &Analysis) -> TokenStream {
     let root = crate::supers(analysis.modules[scope].len());
@@ -230,12 +350,6 @@ fn refused(span: Span, message: &str) -> Refused {
 /// Whether the native side covers the module's features; the first it does not is refused. Each
 /// has its item of the plan, which lifts the refusal.
 fn covered(analysis: &Analysis) -> Result<(), Refused> {
-    if analysis.options.context {
-        return Err(refused(
-            Span::call_site(),
-            "the `context` option is not supported natively yet",
-        ));
-    }
     if let Some(state) = analysis.states.first() {
         return Err(refused(
             state.ident.span(),
@@ -377,15 +491,20 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
             .signature(::core::option::Option::Some(::std::string::String::from(#root #signature)))
         }
     });
+    // With the `context` option, each method runs in the scope of its call, which `context` reads.
+    let scoped = analysis
+        .options
+        .context
+        .then(|| quote! { self::#root context::__scoped });
     let mut codecs = Vec::new();
     let mut methods = Vec::new();
     for method in &service.functions {
         let codec = codec_ident(method);
         codecs.push(self::codec(service, method, &codec, analysis)?);
-        methods.push(self::method(service, method, Some(&codec)));
+        methods.push(self::method(service, method, Some(&codec), scoped.as_ref()));
     }
     for local in &service.locals {
-        methods.push(self::method(service, local, None));
+        methods.push(self::method(service, local, None, scoped.as_ref()));
     }
     let doc = format!(
         " The service `{}` of the native Orb named `orb`, as `orb()` registers it.",
@@ -444,8 +563,14 @@ fn guard(service: &Service, identity: &str) -> Option<TokenStream> {
 /// of the author's parameter types, checks the context and calls the author's function, on the
 /// object's environment when it borrows `&self`, passing the context itself where the function
 /// takes `&Context`, and answering with its value, or with the `tembra::Result` it returns, whose
-/// failure is the call's error.
-fn method(service: &Service, function: &Function, codec: Option<&Ident>) -> TokenStream {
+/// failure is the call's error; with `scoped`, the path of the native `context`'s scope, its future
+/// runs in the scope of its call.
+fn method(
+    service: &Service,
+    function: &Function,
+    codec: Option<&Ident>,
+    scoped: Option<&TokenStream>,
+) -> TokenStream {
     let name = wit::kebab(&function.ident);
     let target = &service.ident;
     let ident = &function.ident;
@@ -473,6 +598,16 @@ fn method(service: &Service, function: &Function, codec: Option<&Ident>) -> Toke
         (Some(_), false) => quote! { ::core::result::Result::Ok(#call) },
         (None, false) => quote! { #call; ::core::result::Result::Ok(()) },
     };
+    let future = quote! {
+        async move {
+            __tembra_context.check()?;
+            #body
+        }
+    };
+    let future = match scoped {
+        Some(scoped) => quote! { #scoped(__tembra_context.clone(), #future) },
+        None => future,
+    };
     let (register, codec) = match codec {
         Some(codec) => (quote! { method_with }, quote! { #codec, }),
         None => (quote! { local_method }, quote! {}),
@@ -480,10 +615,7 @@ fn method(service: &Service, function: &Function, codec: Option<&Ident>) -> Toke
     quote! {
         .#register(
             #name,
-            |#environment, __tembra_context: ::tembra::Context, (#(#params,)*): (#(#types,)*)| async move {
-                __tembra_context.check()?;
-                #body
-            },
+            |#environment, __tembra_context: ::tembra::Context, (#(#params,)*): (#(#types,)*)| #future,
             #codec
         )
     }

@@ -10,13 +10,9 @@ use std::sync::{
 use tembra::{Orb, Result};
 use wasmtime::{Module, component::Component};
 
-/// Console output is attributed by the host, never by a guest-provided Orb name.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct LogRecord {
-    pub orb: String,
-    pub level: String,
-    pub message: String,
-}
+/// Console output is attributed by the host, never by a guest-provided Orb name: the runtime's
+/// record, which a native Orb's log takes too.
+pub use tembra::LogRecord;
 
 pub(crate) type LogSink = Arc<dyn Fn(&LogRecord) + Send + Sync>;
 

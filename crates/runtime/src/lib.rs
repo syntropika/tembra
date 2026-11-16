@@ -21,7 +21,7 @@ pub use readable::{Observation, Readable};
 pub use hooks::{Hook, HookHandle};
 pub use host::{
     AcquisitionOptions, Cancellation, Context, Declaration, ForeignNotification, Host, IssuedCall,
-    Reference, Resource, ResourceKey, ResourceSignal, TaskScope,
+    LogRecord, Reference, Resource, ResourceKey, ResourceSignal, TaskScope,
 };
 pub use orb::{Codec, Orb, Service};
 /// The JSON crate the codecs `#[tembra::orb]` generates read and write portable values with: an

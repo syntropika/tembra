@@ -1,11 +1,12 @@
 //! An Orb crate used natively. The module `calculator` is one `cargo tembra build` would compile
 //! into a component; the tests of this crate are a native host instead, which installs
 //! `calculator::orb()` and calls its services locally, with Rust values, and portably, with the
-//! boundary's JSON. The module `notebook` takes host values, which only a native host can lend,
+//! boundary's JSON, and whose methods read their call through the kernel's `context`, as a
+//! component's do. The module `notebook` takes host values, which only a native host can lend,
 //! `library` shares its root's value among its objects, and `worker` only runs its root. The
 //! manifest names every Orb of the crate `calculator` at API version 2, which `orb()` reports.
 
-#[tembra::orb(package = "example:calculator@1.0.0")]
+#[tembra::orb(package = "example:calculator@1.0.0", context)]
 pub mod calculator {
     /// Arithmetic over plain values: numbers, strings, characters, lists, options and tuples.
     #[service]
@@ -223,6 +224,61 @@ pub mod calculator {
             let result = if off == 0 { Ok(()) } else { Err(off) };
             (headings, result)
         }
+    }
+
+    /// What the kernel tells a method of its call, through the functions of `context`: in a
+    /// component as in a native host.
+    #[service]
+    pub struct Caller;
+
+    impl Caller {
+        /// Who calls and which object answers: the principal before and after the call waits,
+        /// then the key of the object and the principal that acquired it.
+        pub async fn whoami() -> (String, String, Vec<String>, String) {
+            let before = context::principal();
+            waited().await;
+            let object = context::object();
+            (before, context::principal(), object.key, object.principal)
+        }
+
+        /// Write the message to the host's log at level warn, once the call has waited.
+        pub async fn warn(message: String) {
+            waited().await;
+            context::log(context::Level::Warn, &message);
+        }
+
+        /// Once the call has waited, whether it reads as cancelled before and after it cancels
+        /// itself, and its principal, which it keeps once cancelled.
+        pub async fn give_up() -> (bool, bool, String) {
+            waited().await;
+            let before = context::cancelled();
+            context::cancel();
+            (before, context::cancelled(), context::principal())
+        }
+
+        /// Wait until the caller cancels the call, then cancel it from inside: a cancelled call's
+        /// cancel changes nothing, so its root and the root's other calls go on.
+        pub async fn abandon() {
+            while !context::cancelled() {
+                waited().await;
+            }
+            context::cancel();
+        }
+    }
+
+    /// Wait once: pending on the first poll, so the method resumes in a later one, after the
+    /// executor has polled whatever else is ready.
+    async fn waited() {
+        let mut first = true;
+        std::future::poll_fn(|cx| {
+            if std::mem::take(&mut first) {
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(())
+            }
+        })
+        .await;
     }
 
     /// A running total for the host's lifetime. The service lives in a sub-module, with its data,

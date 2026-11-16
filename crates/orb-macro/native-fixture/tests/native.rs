@@ -1,19 +1,20 @@
 //! `calculator::orb()` in a native host: the declaration the kernel sees, local calls with Rust
 //! values, through the generated clients too, portable calls with the boundary's JSON through the
-//! generated codecs, which write what the module's contract accepts, a cancelled context, and the
-//! services of the sub-modules.
+//! generated codecs, which write what the module's contract accepts, a cancelled context, the
+//! services of the sub-modules, and the kernel's `context` read in a method.
 use futures::{FutureExt, executor::LocalPool, future::LocalBoxFuture};
 use serde_json::{Value, json};
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 use tembra::{
-    Context, Host, Reference,
-    contracts::Contract,
+    Context, Host, LogRecord, Reference,
+    contracts::{Binding, Contract, guest},
     core::{Code, Lifetime},
 };
 use tembra_orb_native_fixture::calculator::{self, Heading, Move, Note, Pen, Point, Shape, Stroke};
 
 const MATH: &str = "calculator::example:calculator/math@1.0.0";
 const PLOTTER: &str = "calculator::example:calculator/plotter@1.0.0";
+const CALLER: &str = "calculator::example:calculator/caller@1.0.0";
 const TALLY: &str = "calculator::example:calculator/tally@1.0.0";
 const MEMO: &str = "calculator::example:calculator/memo@1.0.0";
 
@@ -57,13 +58,15 @@ fn with_main(
 /// module's `WIT`: the Orb named by the manifest, `calculator` at API version 2, not the crate
 /// name at 1; each interface as a service, with its signature and its methods; and the ownership
 /// policy of each `#[service]` attribute, which the WIT does not carry and a component's manifest
-/// adds, so the expectation sets it the same way.
+/// adds, so the expectation sets it the same way. The kernel's context interface, which the world
+/// imports, binds to the kernel, as an installer binds it, and asks nothing of the Orb.
 #[test]
 fn the_declaration_is_the_plan_of_the_contract() {
     let orb = calculator::orb().unwrap();
+    let kernel = [(guest::CONTEXT.to_owned(), Binding::Kernel)].into();
     let mut expected = Contract::from_source("calculator.wit", calculator::WIT, Some("calculator"))
         .unwrap()
-        .plan("calculator", 2, &Default::default())
+        .plan("calculator", 2, &kernel)
         .unwrap()
         .orb;
     for service in &mut expected.services {
@@ -79,7 +82,7 @@ fn the_declaration_is_the_plan_of_the_contract() {
         .iter()
         .map(|service| service.name.as_str())
         .collect();
-    assert_eq!(names, [MATH, PLOTTER, TALLY, MEMO]);
+    assert_eq!(names, [MATH, PLOTTER, CALLER, TALLY, MEMO]);
     assert!(
         expected
             .services
@@ -748,6 +751,155 @@ fn what_the_contract_refuses_fails_as_arguments() {
         }
         .boxed_local()
     });
+}
+
+/// With `context`, a method reads its call through the kernel's functions, after an `.await` too:
+/// the principal, the address of the object, a record for the host's log observer, which the host
+/// attributes to the Orb, and its own cancellation, after which it keeps its principal.
+#[test]
+fn the_context_functions_read_the_call_after_an_await() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let records = Rc::new(RefCell::new(Vec::<LogRecord>::new()));
+    let observed = records.clone();
+    host.on_log(move |record| observed.borrow_mut().push(record.clone()));
+    host.install(vec![calculator::orb().unwrap()]).unwrap();
+    let caller = Rc::new(host.get(CALLER, vec!["desk".into()], "alice").unwrap());
+    let called = caller.clone();
+    pool.run_until(host.root("alice", move |context| {
+        async move {
+            let alice = || "alice".to_owned();
+            assert_eq!(
+                called
+                    .call::<_, (String, String, Vec<String>, String)>(&context, "whoami", ())
+                    .await?,
+                (alice(), alice(), vec!["desk".to_owned()], alice())
+            );
+            assert_eq!(
+                called
+                    .call_portable::<_, Value>(&context, "whoami", json!([]))
+                    .await?,
+                json!(["alice", "alice", ["desk"], "alice"])
+            );
+            called
+                .call::<_, ()>(&context, "warn", ("the desk is full".to_owned(),))
+                .await?;
+            assert_eq!(
+                called
+                    .call::<_, (bool, bool, String)>(&context, "give-up", ())
+                    .await?,
+                (false, true, alice())
+            );
+            Ok(())
+        }
+        .boxed_local()
+    }))
+    .unwrap();
+    let logged: Vec<(String, String, String)> = records
+        .borrow()
+        .iter()
+        .map(|record| {
+            (
+                record.orb.clone(),
+                record.level.clone(),
+                record.message.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        [(
+            "calculator".to_owned(),
+            "warn".to_owned(),
+            "the desk is full".to_owned()
+        )]
+    );
+    caller.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+/// Two calls running at once each read their own: both wait once, so each resumes after the other
+/// ran, and still reads its own principal and object.
+#[test]
+fn concurrent_calls_each_read_their_own_context() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![calculator::orb().unwrap()]).unwrap();
+    let left = Rc::new(host.get(CALLER, vec!["left".into()], "alice").unwrap());
+    let right = Rc::new(host.get(CALLER, vec!["right".into()], "bob").unwrap());
+    let whoami = |caller: Rc<Reference>, principal: &'static str| {
+        host.root(principal, move |context| {
+            async move {
+                caller
+                    .call::<_, (String, String, Vec<String>, String)>(&context, "whoami", ())
+                    .await
+            }
+            .boxed_local()
+        })
+    };
+    let (alice, bob) = pool.run_until(futures::future::join(
+        whoami(left.clone(), "alice"),
+        whoami(right.clone(), "bob"),
+    ));
+    let read = |principal: &str, key: &str| {
+        (
+            principal.to_owned(),
+            principal.to_owned(),
+            vec![key.to_owned()],
+            principal.to_owned(),
+        )
+    };
+    assert_eq!(alice.unwrap(), read("alice", "left"));
+    assert_eq!(bob.unwrap(), read("bob", "right"));
+    left.release().unwrap();
+    right.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}
+
+/// A call its caller cancelled reads as cancelled, and its own `context::cancel()` then changes
+/// nothing, as a component's: the root, and the root's next call, go on.
+#[test]
+fn cancelling_a_cancelled_call_leaves_its_root_alone() {
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![calculator::orb().unwrap()]).unwrap();
+    let caller = Rc::new(host.get(CALLER, vec!["desk".into()], "alice").unwrap());
+    let called = caller.clone();
+    let (principal, ..) = pool
+        .run_until(host.root("alice", move |context| {
+            async move {
+                let (abandoned, _) = called
+                    .issue_portable::<_, Value>(&context, "abandon", json!([]))
+                    .await?;
+                // The call starts waiting before its caller cancels it.
+                waited().await;
+                abandoned.cancel();
+                abandoned.settled().await;
+                called
+                    .call::<_, (String, String, Vec<String>, String)>(&context, "whoami", ())
+                    .await
+            }
+            .boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(principal, "alice");
+    caller.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}
+
+/// Wait once, so that the executor polls whatever else is ready first.
+async fn waited() {
+    let mut first = true;
+    std::future::poll_fn(|cx| {
+        if std::mem::take(&mut first) {
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
+    })
+    .await;
 }
 
 /// A service of a sub-module is registered from the Orb module, with the lifetime of its

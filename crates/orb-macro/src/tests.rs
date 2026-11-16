@@ -221,7 +221,8 @@ fn only_a_component_build_exports() {
 }
 
 /// `context` on the attribute imports the kernel's context interface, alone, and re-exports its
-/// generated module under its own name.
+/// generated module under its own name in a component build, through the facade's `__guest!`: a
+/// native host gets the native side's `context` instead.
 #[test]
 fn the_context_option_imports_the_kernel_interface() {
     let module = orb_with(
@@ -238,14 +239,21 @@ fn the_context_option_imports_the_kernel_interface() {
         "{}",
         wit(&module)
     );
-    assert!(
-        items(&module)
-            .iter()
-            .any(|item| matches!(item, Item::Use(reexport)
-        if quote::quote!(#reexport).to_string().contains("tembra :: guest :: context")))
-    );
+    let guest: Vec<String> = items(&module)
+        .iter()
+        .filter_map(|item| match item {
+            Item::Macro(invocation) => {
+                let path = &invocation.mac.path;
+                (quote::quote!(#path).to_string() == ":: tembra :: __guest")
+                    .then(|| invocation.mac.tokens.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(guest, ["pub use self :: tembra :: guest :: context ;"]);
     let plain = expanded(PACKAGE, &ledger("#[service]"));
     assert!(!wit(&plain).contains("context"));
+    assert!(!tokens(&plain).contains("__guest"));
 }
 
 const COUNTER: &str = "mod tally {
@@ -4848,22 +4856,87 @@ fn a_local_method_is_registered_natively_and_kept_out_of_the_wit() {
     }
 }
 
+/// With `context`, a native host gets a native `context` in the Orb module, in place of the
+/// component's: the kernel interface's types and its functions, which read the call whose method
+/// is being polled. Each method's future, local ones too, runs in the scope of its call, which a
+/// sub-module's service reaches through `super::`. A refused module keeps its `context`, so the
+/// author's calls to it add no errors to the refusal.
+#[test]
+fn the_native_context_reads_the_call_each_method_runs_for() {
+    let module = orb_with(
+        Options {
+            context: true,
+            ..options(PACKAGE, None)
+        },
+        "mod book {
+            #[service]
+            pub struct Ledger;
+            impl Ledger {
+                pub fn count() -> u32 { 0 }
+                #[local]
+                pub fn rewind() {}
+            }
+            pub mod shelf {
+                #[service]
+                pub struct Shelf;
+                impl Shelf { pub fn size() -> u32 { 0 } }
+            }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let root = native(&module, &[]);
+    for expected in [
+        "pub mod context { pub use super :: tembra :: guest :: context :: { Address , Level } ;",
+        "pub (crate) fn __scoped < F : :: core :: future :: Future > (context : :: tembra :: Context , future : F ,) -> impl :: core :: future :: Future < Output = F :: Output > {",
+        "let principal = context . principal () . unwrap_or_default () ;",
+        "pub fn object () -> Address {",
+        "pub fn principal () -> :: std :: string :: String { current () . principal . clone () }",
+        "pub fn cancelled () -> bool { current () . context . signal () . is_cancelled () }",
+        "pub fn cancel () {",
+        "pub fn log (level : Level , message : & str) {",
+        ". method_with (\"count\" , | _ , __tembra_context : :: tembra :: Context , () : () | self :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ; :: core :: result :: Result :: Ok (Ledger :: count ()) }) , __TEMBRA_CODEC_COUNT ,)",
+        ". local_method (\"rewind\" , | _ , __tembra_context : :: tembra :: Context , () : () | self :: context :: __scoped (__tembra_context . clone () , async move { __tembra_context . check () ? ; Ledger :: rewind () ; :: core :: result :: Result :: Ok (()) }) ,)",
+    ] {
+        assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    let shelf = native(&module, &["shelf"]);
+    assert!(
+        shelf.contains("| self :: super :: context :: __scoped (__tembra_context . clone () ,"),
+        "{shelf}"
+    );
+    assert!(!shelf.contains("pub mod context"), "{shelf}");
+    let refused = orb_with(
+        Options {
+            context: true,
+            ..options(PACKAGE, None)
+        },
+        "mod book {
+            #[state]
+            pub struct Sealed { pub count: u32 }
+            #[service]
+            pub struct Ledger;
+            impl Ledger { pub fn count() -> u32 { 0 } }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let refused = native(&refused, &[]);
+    assert!(
+        refused.starts_with(
+            ":: core :: compile_error ! (\"`Sealed` is marked #[state]; states are not supported natively yet\") ;"
+        ),
+        "{refused}"
+    );
+    assert!(refused.contains("pub mod context {"), "{refused}");
+}
+
 /// What the native side does not cover yet is a compile error inside the facade's wrapper, so a
-/// component build of the module is unaffected: the `context` option, a state, a root resource, an
-/// import, a hook contributed to or declared, and a WIT resource, each named.
+/// component build of the module is unaffected: a state, a root resource, an import, a hook
+/// contributed to or declared, and a WIT resource, each named.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
     let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
     let dir = consumed("native-hook", ADMISSION_WIT);
     for (options, module, message) in [
-        (
-            Options {
-                context: true,
-                ..options(PACKAGE, None)
-            },
-            ledger("#[service]"),
-            "the `context` option is not supported natively yet",
-        ),
         (
             options(PACKAGE, None),
             format!("mod book {{ #[state] pub struct Sealed {{ pub count: u32 }} {service} }}"),

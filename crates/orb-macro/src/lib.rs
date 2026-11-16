@@ -2626,10 +2626,11 @@ fn component(
         }))
         .chain(keyed::reexports(package, views));
     // The kernel's context interface is re-exported as `context`, so the author writes
-    // `context::principal()`.
+    // `context::principal()`; only in a component build, as a native host gets the native side's
+    // `context` instead.
     let context_module = options
         .context
-        .then(|| quote! { pub use self::tembra::guest::context; });
+        .then(|| quote! { ::tembra::__guest! { pub use self::tembra::guest::context; } });
     // Each hook's generated module is re-exported under its interface name: the export module
     // of a contributed hook, whose callback forwards to the author's function, and the import
     // module of a hook declared from a consumed package, whose types `run` takes and returns.

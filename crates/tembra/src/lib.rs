@@ -62,3 +62,31 @@ macro_rules! __host {
 __host! {
     const _: Option<Orb> = None;
 }
+
+/// Expand the input only when this crate does not link the native runtime: the counterpart of
+/// `__host!`, for an item a component build has and a native host replaces with its own, of the
+/// same name, from `__host!`.
+///
+/// `#[tembra::orb]` re-exports the bindings' `context` module through it, by the absolute path, so
+/// a native host gets the `context` the native side writes in its place.
+#[cfg(not(feature = "host"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __guest {
+    ($($item:tt)*) => {
+        $($item)*
+    };
+}
+
+/// With `host`, the input is dropped; the other definition describes the macro.
+#[cfg(feature = "host")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __guest {
+    ($($item:tt)*) => {};
+}
+
+// A build with `host` compiles this only because the macro drops it.
+__guest! {
+    const _: () = assert!(!cfg!(feature = "host"));
+}

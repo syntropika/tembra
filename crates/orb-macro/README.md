@@ -1148,12 +1148,26 @@ later call and every other object failing as `unavailable`, until a reload insta
 Each type of the module that enters the WIT reads and writes its JSON in its own module, through a
 hidden trait of the Orb module.
 
+With `context` on the attribute, a native host gets a `context` of its own, with the functions and
+types of the component's: `principal()`, `cancelled()`, `cancel()`, `object()` and `log(..)` read
+the call whose method is running, which the native side sets around each poll of the method's
+future, so they answer after an `.await` and for each of several calls at once. The principal is
+the one the call was admitted with, also once cancelled, and a record written with `log(..)` goes to
+the observer of `Host::on_log`, attributed to the Orb by the host. A component build keeps the
+bindings' `context`, through `tembra::__guest!`, the facade's counterpart of `tembra::__host!`.
+
+These functions serve a method's body and the futures it awaits, nothing else. In a `#[create]`,
+a `#[root]`, a task or a resource's closure, or a future spawned off the call, there is no call to
+read: they panic there, and the host's executor does not catch the panic. A create reads its
+object's address with `declaration.address()` instead, and a method reads what a future it spawns
+needs before handing it over.
+
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, free JSON, records, enums, variants, flags, `Result`s, and `Vec`, `Option` and tuples of
-them. A type of a consumed interface, a resource, the `context` option, `#[state]`, `#[resource]`,
-`#[wit_resource]`, an import and a hook are compile errors where the runtime is linked, naming the
-item, until the native side covers them, and so is an `Option` of an `Option`, which the boundary's
-JSON cannot tell from `None`; a component build of the same module is unaffected.
+them. A type of a consumed interface, a resource, `#[state]`, `#[resource]`, `#[wit_resource]`, an
+import and a hook are compile errors where the runtime is linked, naming the item, until the native
+side covers them, and so is an `Option` of an `Option`, which the boundary's JSON cannot tell from
+`None`; a component build of the same module is unaffected.
 
 ## What it generates
 
@@ -1195,7 +1209,7 @@ The macro rewrites the module with:
    the generated traits share one type, and each derive of such a type is imported again under no
    name, `use EnumIter as _;`, where the type was written, so the imports it names stay used;
    `pub use exports::...::guard;` for each contributed hook and each
-   implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option;
+   implemented interface, `pub use ...::guard;`, the import module, for each hook declared from a consumed package and each imported interface; `pub use ...::counter_ref;`, the import module of the view, for each interface imported by key; `pub use ...::context;` with the `context` option, inside `tembra::__guest!`, so only in a component build;
 6. the author's items, unchanged, but for each `#[flags]` struct that enters the WIT the derives
    it lacks, `Clone`, `Copy`, `Debug` and, with a state, serde's, and the functions its bindings
    call on it, `empty`, `bits`, `from_bits_retain` and `BitOr`;
@@ -1219,7 +1233,8 @@ The macro rewrites the module with:
     hidden function per service, written in the service's module and declaring the codec of each
     of its methods, next to the service's typed client, `<Service>Client`, an `include_bytes!` of
     the manifest, and a hidden trait that each type of the module entering the WIT implements in
-    its own module, reading and writing its JSON, see
+    its own module, reading and writing its JSON; with the `context` option, the native `context`,
+    whose functions read the call each method's future runs for, see
     [using the Orb natively](#using-the-orb-natively).
 
 The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) among its dependencies,
