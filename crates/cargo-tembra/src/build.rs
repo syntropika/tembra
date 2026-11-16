@@ -77,10 +77,12 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
     let target_dir = manifest_dir.join("target");
     let profile = if release { "release" } else { "debug" };
 
-    // 1. Compile the component on stable: a core module linked by the component linker. Cargo
-    //    reports the files it built as JSON on stdout and still renders the diagnostics on
-    //    stderr. The component is the file cargo names: a name derived from the crate's misses
-    //    a [lib] name, and may find a file an earlier build left.
+    // 1. Compile the component on stable: a core module linked by the component linker. The
+    //    library is compiled as a cdylib whatever crate type the manifest names, so that an Orb
+    //    crate keeps the default one and a native host can depend on it. Cargo reports the files
+    //    it built as JSON on stdout and still renders the diagnostics on stderr. The component is
+    //    the file cargo names: a name derived from the crate's misses a [lib] name, and may find
+    //    a file an earlier build left.
     println!("compiling {crate_name} for wasm32-unknown-unknown ({profile})");
     let package = manifest_path
         .canonicalize()
@@ -92,6 +94,8 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         .arg(&manifest_path)
         .arg("--target")
         .arg("wasm32-unknown-unknown")
+        .arg("--crate-type")
+        .arg("cdylib")
         .arg("--target-dir")
         .arg(&target_dir)
         .arg("--message-format=json-render-diagnostics")
@@ -113,11 +117,8 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
             "compilation failed; if the target is missing: rustup target add wasm32-unknown-unknown"
         );
     }
-    let component_path = built.with_context(|| {
-        format!(
-            "cargo built no cdylib for {crate_name}; an Orb's [lib] has crate-type = [\"cdylib\"]"
-        )
-    })?;
+    let component_path =
+        built.with_context(|| format!("cargo built no cdylib for {crate_name}"))?;
     let component = std::fs::read(&component_path)
         .with_context(|| format!("missing {}", component_path.display()))?;
     let (resolve, world_id) = decode(&component)?;

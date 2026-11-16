@@ -144,9 +144,6 @@ publish = false
 
 [workspace]
 
-[lib]
-crate-type = ["cdylib"]
-
 # Read by `cargo tembra build`: the Orb name and API version, which the WIT does not carry.
 [package.metadata.tembra]
 name = "{name}"

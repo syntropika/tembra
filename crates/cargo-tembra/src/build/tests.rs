@@ -181,6 +181,48 @@ fn checksums_keep_the_lines_of_the_files_a_build_did_not_write() {
     );
 }
 
+/// An Orb whose manifest names no crate type.
+const CALCULATOR: &str = r#"#[tembra::orb(package = "example:calculator@1.0.0")]
+mod calculator {
+    #[service]
+    pub struct Math;
+
+    impl Math {
+        pub fn add(a: u32, b: u32) -> u32 {
+            a + b
+        }
+    }
+}
+"#;
+
+#[test]
+fn a_crate_without_a_crate_type_builds_into_a_component() {
+    // The default library type, which a native host can depend on: the build asks for the cdylib.
+    let dir = scratch("default-crate-type");
+    let facade = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tembra");
+    let facade = toml::Value::String(facade.display().to_string());
+    let manifest = format!(
+        r#"[package]
+name = "calculator"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+tembra = {{ path = {facade}, default-features = false, features = ["macros"] }}
+wit-bindgen = {{ version = "=0.63.0", default-features = false, features = ["macros", "realloc"] }}
+"#
+    );
+    std::fs::write(dir.join("Cargo.toml"), manifest).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src").join("lib.rs"), CALCULATOR).unwrap();
+    build(Some(dir.join("Cargo.toml")), false, None).unwrap();
+    let component = std::fs::read(dir.join("artifacts").join("calculator.wasm")).unwrap();
+    assert!(wasmparser::Parser::is_component(&component));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn a_manifest_without_a_package_name_is_refused_with_an_error() {
     let dir = scratch("package-name");
