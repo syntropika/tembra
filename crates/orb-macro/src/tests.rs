@@ -2873,12 +2873,12 @@ fn a_derived_hook_input_keeps_its_derives() {
 }
 
 /// What the generated type cannot take is refused on the author's item: a derive of another crate
-/// implementing a trait the bindings implement, a derive of the standard library the type's
-/// contents rule out, `Default` included on a record whose every value holds a resource handle,
-/// serde's derives on a type holding one anywhere, a derive the macro cannot name from the
-/// bindings' module, a helper attribute on a case's payload, and a `#[cfg_attr(..)]` wrapping a
-/// derive or a helper, which would come and go. Kept out of the WIT, the same type is the
-/// author's, as written.
+/// implementing a trait the bindings implement, with the helper attributes no other derive of the
+/// type reads, which go with it, a derive of the standard library the type's contents rule out,
+/// `Default` included on a record whose every value holds a resource handle, serde's derives on a
+/// type holding one anywhere, a derive the macro cannot name from the bindings' module, a helper
+/// attribute on a case's payload, and a `#[cfg_attr(..)]` wrapping a derive or a helper, which
+/// would come and go. Kept out of the WIT, the same type is the author's, as written.
 #[test]
 fn what_the_generated_type_cannot_take_is_refused() {
     let module = |types: &str, returned: &str| {
@@ -2927,7 +2927,13 @@ fn what_the_generated_type_cannot_take_is_refused() {
         (
             "#[derive(thiserror::Error)] pub struct Fault { pub code: u32 }",
             "Result<(), Fault>",
-            "implements `Error` already, as the bindings implement it for the error of a function's result",
+            "implements `Error` already, as the bindings implement it for the error of a function's result; remove the derive, or keep `Fault` out of the WIT",
+        ),
+        (
+            "#[derive(Hash, thiserror::Error)]
+             pub enum Fault { #[error(\"lost\")] Lost, #[error(\"stuck\")] Stuck }",
+            "Result<u32, Fault>",
+            "`thiserror::Error` on `Fault`: `Fault` enters the WIT and the generated type replacing it implements `Error` already, as the bindings implement it for the error of a function's result; remove the derive and the attributes it reads, `#[error(..)]`, or keep `Fault` out of the WIT",
         ),
         (
             "#[derive(Clone)] pub struct Lease { pub pen: Pen }",

@@ -3770,7 +3770,8 @@ impl quote::ToTokens for Named {
 /// `None` when the bindings, or the derives a state adds, implement it already, otherwise the
 /// path that names it from the bindings' module, `::core::hash::Hash` for a derive of the standard
 /// library. A derive the generated type cannot take is refused: one of another crate implementing
-/// a trait the bindings implement, which would implement it twice, and one of the standard library
+/// a trait the bindings implement, which would implement it twice, with `unread`, the helper
+/// attributes no other derive of the type reads, which go with it, and one of the standard library
 /// or of `serde` that the type's contents rule out.
 fn carried_derive(
     shape: &Shape,
@@ -3779,6 +3780,7 @@ fn carried_derive(
     serialized: bool,
     uses: &[Uses],
     modules: &[Vec<Ident>],
+    unread: &str,
 ) -> syn::Result<Option<proc_macro2::TokenStream>> {
     let owner = &shape.ident;
     let written = written(path);
@@ -3854,8 +3856,13 @@ fn carried_derive(
         Derive::Other(named) => {
             let name = named.segments.last().map(Ident::to_string);
             if let Some((name, reason)) = name.as_deref().and_then(implements) {
+                let remove = if unread.is_empty() {
+                    "remove the derive".to_owned()
+                } else {
+                    format!("remove the derive and the attributes it reads, {unread}")
+                };
                 return refuse(format!(
-                    "`{written}` on `{owner}`: `{owner}` enters the WIT and the generated type replacing it implements `{name}` already, as {reason}; remove the derive, or keep `{owner}` out of the WIT"
+                    "`{written}` on `{owner}`: `{owner}` enters the WIT and the generated type replacing it implements `{name}` already, as {reason}; {remove}, or keep `{owner}` out of the WIT"
                 ));
             }
             Ok(Some(quote! { #named }))
@@ -4009,6 +4016,21 @@ fn shown(attribute: &Attribute) -> String {
     }
 }
 
+/// The helper attributes of `carried` that none of `others` reads, as the errors show them, each
+/// once: those a derive refused for what the bindings implement takes with it.
+fn unread(carried: &Carried, others: &[Reads]) -> String {
+    let members = carried.members.iter().flat_map(|(_, helpers)| helpers);
+    let mut unread: Vec<String> = Vec::new();
+    for attribute in carried.helpers.iter().chain(members) {
+        let name = written(attribute.path());
+        let shown = format!("`{}`", shown(attribute));
+        if !others.iter().any(|reads| reads.reads(&name)) && !unread.contains(&shown) {
+            unread.push(shown);
+        }
+    }
+    unread.join(", ")
+}
+
 /// Refuse a helper attribute that the bindings' module, which reads it on the generated type
 /// replacing `shape`, would not know: an attribute macro the type's module imports, which is no
 /// derive's helper attribute, an attribute none of the derives the generated type takes reads,
@@ -4081,13 +4103,25 @@ fn carried_attributes(
         let selector = format!("{}/{name}", identity(package, &interface));
         let generated = bindings.types.get(&selector).copied().unwrap_or_default();
         let serialized = serde && !bindings.unserializable.contains(&wit::ignored_name(&name));
+        // What each derive reads of the helper attributes: a derive refused for what the bindings
+        // implement names those no other derive reads, which go with it.
+        let reads: Vec<Reads> = shape
+            .carried
+            .derives
+            .iter()
+            .map(|path| Reads::of(shape, path, uses, modules))
+            .collect();
         let mut derives = Vec::new();
         let mut readers = Vec::new();
-        for path in &shape.carried.derives {
-            if let Some(derive) = carried_derive(shape, path, generated, serialized, uses, modules)?
+        for (index, path) in shape.carried.derives.iter().enumerate() {
+            let mut others = reads.clone();
+            others.remove(index);
+            let unread = unread(&shape.carried, &others);
+            if let Some(derive) =
+                carried_derive(shape, path, generated, serialized, uses, modules, &unread)?
             {
                 derives.push(derive);
-                readers.push(Reads::of(shape, path, uses, modules));
+                readers.push(reads[index]);
             }
         }
         readable(shape, &readers, uses, modules)?;

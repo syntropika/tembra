@@ -1066,8 +1066,10 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   out could not apply, `Clone`, `Copy`, a comparison, `Hash`, `Serialize` or `Deserialize` on a
   type holding a resource handle, `Default` on a record no value of which is without one, a handle
   in a field, in a tuple or in such a record, and `Copy` on one holding a string or a list: both
-  are compile errors on the derive. A handle in an option or a list leaves `Default` a value
-  without it, and a variant takes its unit `#[default]` case.
+  are compile errors on the derive, the first naming the helper attributes no other derive of the
+  type reads, which go with it, `#[error(..)]` for `thiserror::Error` on a function's error. A
+  handle in an option or a list leaves `Default` a value without it, and a variant takes its unit
+  `#[default]` case.
 - The bindings read a derive's path in their own module, so the macro names each derive from its
   crate, `::strum::EnumIter` for `EnumIter` after `use strum::EnumIter;`, following the `use` and
   `extern crate` declarations of the type's module, `self::`, `super::`, the Orb's sub-modules and
