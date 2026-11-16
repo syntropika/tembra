@@ -61,11 +61,11 @@ pub(crate) fn option(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<LitSt
     Ok(identity)
 }
 
-/// The views of the interfaces the attribute imports by key, in the order it names them. Each is
-/// a WIT identity of another Orb's interface, not of WASI, which the installation grants instead,
-/// and not one the module implements, `implemented`, imported by key once, read from the consumed
-/// packages of `dir`, and its view takes a name that neither the world nor another interface of
-/// the package, `taken`, has.
+/// The views of the interfaces the attribute imports by key, in the order it names them, whose
+/// literals `expand` has read as WIT identities already. Each is another Orb's interface, not
+/// WASI's, which the installation grants instead, and not one the module implements,
+/// `implemented`, imported by key once, read from the consumed packages of `dir`, and its view
+/// takes a name that neither the world nor another interface of the package, `taken`, has.
 pub(crate) fn views(
     imports: &[LitStr],
     dir: Option<&Path>,
@@ -79,7 +79,7 @@ pub(crate) fn views(
     let resolve = dir.map(crate::wit::resolve).transpose()?;
     let mut views: Vec<View> = Vec::new();
     for literal in imports {
-        let target = crate::wit_identity(literal, "an interface imported by key", true)?;
+        let target = literal.value();
         if crate::wasi::is_wasi(&target) {
             return Err(syn::Error::new(
                 literal.span(),
@@ -137,8 +137,7 @@ pub(crate) fn views(
 
 /// The view's interface name for the provider interface `ns:name/interface@version`.
 pub(crate) fn view_name(target: &str) -> String {
-    let interface = target.split_once('/').map_or(target, |(_, rest)| rest);
-    let interface = interface.split('@').next().unwrap_or(interface);
+    let interface = crate::Identity::of(target).interface.unwrap_or_default();
     format!("{interface}-ref")
 }
 

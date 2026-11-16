@@ -1162,8 +1162,11 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .iter()
         .map(|import| wit_identity(import, "an imported interface", true))
         .collect::<syn::Result<Vec<String>>>()?;
-    let (namespace, rest) = package.split_once(':').unwrap_or_default();
-    let name = rest.split_once('@').map_or(rest, |(name, _)| name);
+    let Identity {
+        namespace,
+        package: name,
+        ..
+    } = Identity::of(&package);
     let world = wit::kebab(&module.ident);
     if let Some(problem) = wit::name_problem(&world) {
         return Err(syn::Error::new(
@@ -2500,10 +2503,11 @@ fn take(attrs: &mut Vec<Attribute>, name: &str) -> Option<Attribute> {
 
 /// The versioned identity of an interface of this package: `ns:name/interface@version`.
 fn identity(package: &str, interface: &str) -> String {
-    match package.split_once('@') {
-        Some((name, version)) => format!("{name}/{interface}@{version}"),
-        None => format!("{package}/{interface}"),
+    Identity {
+        interface: Some(interface),
+        ..Identity::of(package)
     }
+    .to_string()
 }
 
 /// Read a `#[service]` attribute: the identity of an interface the service implements, if it
@@ -5362,13 +5366,11 @@ fn result(output: &ReturnType) -> Option<&Type> {
 /// The generated module of a hook interface: `exports::<ns>::<package>::<interface>` for the
 /// export, `<ns>::<package>::<interface>` for the import.
 pub(crate) fn hook_path(hook: &str) -> [Ident; 3] {
-    let (package, rest) = hook.split_once('/').unwrap_or((hook, ""));
-    let (namespace, name) = package.split_once(':').unwrap_or((package, ""));
-    let interface = rest.split('@').next().unwrap_or(rest);
+    let hook = Identity::of(hook);
     [
-        rust_ident(namespace),
-        package_module(name),
-        rust_ident(interface),
+        rust_ident(hook.namespace),
+        package_module(hook.package),
+        rust_ident(hook.interface.unwrap_or_default()),
     ]
 }
 
@@ -5487,19 +5489,70 @@ fn wit_identity(literal: &LitStr, role: &str, interface: bool) -> syn::Result<St
     }
 }
 
+/// A WIT identity in its parts: `namespace:package/interface@version` names an interface,
+/// `namespace:package@version` a package, either with or without its version.
+pub(crate) struct Identity<'a> {
+    pub namespace: &'a str,
+    pub package: &'a str,
+    pub interface: Option<&'a str>,
+    pub version: Option<&'a str>,
+}
+
+impl<'a> Identity<'a> {
+    /// Split the identity of an interface, or of a package when not `interface`, into its parts,
+    /// or say which separator it lacks.
+    fn split(text: &'a str, interface: bool) -> Result<Self, &'static str> {
+        let (name, version) = match text.split_once('@') {
+            Some((name, version)) => (name, Some(version)),
+            None => (text, None),
+        };
+        let (package, interface) = match (interface, name.split_once('/')) {
+            (true, Some((package, interface))) => (package, Some(interface)),
+            (true, None) => return Err("it names no interface after a `/`"),
+            (false, _) => (name, None),
+        };
+        let Some((namespace, package)) = package.split_once(':') else {
+            return Err("it has no `:` between the namespace and the package name");
+        };
+        Ok(Self {
+            namespace,
+            package,
+            interface,
+            version,
+        })
+    }
+
+    /// The parts of an identity `wit_identity` has read, or the macro has built from one: an
+    /// interface's when it has a `/`.
+    pub(crate) fn of(text: &'a str) -> Self {
+        Self::split(text, text.contains('/')).expect("an identity the macro has read")
+    }
+}
+
+/// The identity as the WIT text writes it.
+impl std::fmt::Display for Identity<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}:{}", self.namespace, self.package)?;
+        if let Some(interface) = self.interface {
+            write!(formatter, "/{interface}")?;
+        }
+        if let Some(version) = self.version {
+            write!(formatter, "@{version}")?;
+        }
+        Ok(())
+    }
+}
+
 /// What makes a text no WIT identity of the given kind, if anything.
 fn identity_problem(text: &str, interface: bool) -> Option<String> {
-    let (name, version) = match text.split_once('@') {
-        Some((name, version)) => (name, Some(version)),
-        None => (text, None),
-    };
-    let (package, interface) = match (interface, name.split_once('/')) {
-        (true, Some((package, interface))) => (package, Some(interface)),
-        (true, None) => return Some("it names no interface after a `/`".into()),
-        (false, _) => (name, None),
-    };
-    let Some((namespace, package)) = package.split_once(':') else {
-        return Some("it has no `:` between the namespace and the package name".into());
+    let Identity {
+        namespace,
+        package,
+        interface,
+        version,
+    } = match Identity::split(text, interface) {
+        Ok(identity) => identity,
+        Err(problem) => return Some(problem.into()),
     };
     let names = [("namespace", namespace), ("package name", package)]
         .into_iter()

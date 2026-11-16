@@ -576,8 +576,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
 /// The type of the objects the view of a keyed import gives the interface `identity`, which takes
 /// the interface's name: `Counter` for `example:counters/counter@1.0.0`.
 fn view_object(identity: &str) -> Ident {
-    let interface = identity.split_once('/').map_or(identity, |(_, rest)| rest);
-    crate::type_ident(interface.split('@').next().unwrap_or(interface))
+    crate::type_ident(crate::Identity::of(identity).interface.unwrap_or_default())
 }
 
 /// Each item `ty`, written in the module `scope`, names through a consumed interface's module,

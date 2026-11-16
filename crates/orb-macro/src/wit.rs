@@ -561,9 +561,7 @@ pub(crate) fn guest_package() -> syn::Result<String> {
 }
 
 /// Whether the inline WIT needs the kernel's bundled package nested in it: not when the consumed
-/// directory resolves that package already, as a contract `cargo tembra build` wrote does from its
-/// `deps/`, since the bindings would read it twice. Such a copy must be the bundled file line for
-/// line, whatever its line endings (`bundled_copy`); another is an error naming its file.
+/// directory holds a copy already (`bundled_copy`).
 pub(crate) fn guest_package_needed(dir: Option<&Path>) -> syn::Result<bool> {
     let Some(dir) = dir else {
         return Ok(true);
@@ -574,45 +572,43 @@ pub(crate) fn guest_package_needed(dir: Option<&Path>) -> syn::Result<bool> {
         .push_str("guest.wit", GUEST)
         .map_err(|cause| error(format!("the bundled tembra:guest package: {cause:#}")))?;
     let name = &bundled.packages[bundled_id].name;
-    let Some(&consumed_id) = consumed.package_names.get(name) else {
-        return Ok(true);
-    };
-    if let Err(file) = bundled_copy(&consumed, consumed_id) {
-        let place = file.unwrap_or_else(|| dir.display().to_string());
-        return Err(error(format!(
-            "{place}: this copy of {name}, the kernel's package, differs from the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version"
-        )));
-    }
-    Ok(false)
+    Ok(!bundled_copy(&consumed, dir, name, "the kernel's package")?)
 }
 
-/// Whether a consumed package named as a bundled one is a copy `Contract::from_dir` reads too: its
-/// file, found by its first interface, is the bundled one line for line, whatever its line endings
-/// (`tembra_contracts::bundled`), so a copy differing only in its comments is not. Else the file,
-/// if the package has an interface to find it by, for the error to name.
+/// Whether the consumed packages, read from `dir`, hold the bundled package `name` already, as a
+/// contract `cargo tembra build` wrote does in its `deps/`; the inline WIT then leaves the bundled
+/// one out, since the bindings would read it twice. The copy must be one `Contract::from_dir`
+/// reads too: its file, found by its first interface, is the bundled one line for line, whatever
+/// its line endings (`tembra_contracts::bundled`), so a copy differing only in its comments is
+/// not. Another copy is an error naming its file, else `dir`, and the package, `what` it is.
 pub(crate) fn bundled_copy(
-    resolve: &Resolve,
-    package: wit_parser::PackageId,
-) -> Result<(), Option<String>> {
-    let file = resolve.packages[package]
+    consumed: &Resolve,
+    dir: &Path,
+    name: &wit_parser::PackageName,
+    what: &str,
+) -> syn::Result<bool> {
+    let Some(&package) = consumed.package_names.get(name) else {
+        return Ok(false);
+    };
+    let file = consumed.packages[package]
         .interfaces
         .values()
         .next()
         .and_then(|id| {
-            resolve
+            consumed
                 .source_map
-                .resolve_span(resolve.interfaces[*id].span)
+                .resolve_span(consumed.interfaces[*id].span)
         })
         .map(|location| location.path.to_owned());
-    match file {
-        Some(file)
-            if std::fs::read_to_string(&file)
-                .is_ok_and(|source| tembra_contracts::bundled(&source)) =>
-        {
-            Ok(())
-        }
-        file => Err(file),
+    if let Some(file) = &file
+        && std::fs::read_to_string(file).is_ok_and(|source| tembra_contracts::bundled(&source))
+    {
+        return Ok(true);
     }
+    let place = file.unwrap_or_else(|| dir.display().to_string());
+    Err(error(format!(
+        "{place}: this copy of {name}, {what}, differs from the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version"
+    )))
 }
 
 /// A WIT package file in nested form: its declaration, a line `package ns:name@version;`, opens
@@ -1529,7 +1525,7 @@ fn rust_type(resolve: &Resolve, ty: wit_parser::Type, module: &str) -> syn::Resu
     })
 }
 
-fn error(message: impl std::fmt::Display) -> syn::Error {
+pub(crate) fn error(message: impl std::fmt::Display) -> syn::Error {
     syn::Error::new(Span::call_site(), message.to_string())
 }
 

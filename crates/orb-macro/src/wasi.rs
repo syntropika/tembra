@@ -4,7 +4,7 @@
 //! directory, and nests, with the packages it builds on, in the inline WIT the bindings read,
 //! unless the consumed directory holds them already. Which grant an import needs is the
 //! installation's rule, read from the same identity.
-use proc_macro2::Span;
+use crate::wit::error;
 use std::{collections::BTreeSet, path::Path};
 use syn::LitStr;
 use wit_parser::{PackageId, Resolve};
@@ -35,12 +35,10 @@ pub(crate) fn resolve() -> syn::Result<Resolve> {
 
 /// The WASI packages the Orb's imports need, nested for the inline WIT: the package of each
 /// imported WASI interface and the bundled packages it builds on, in dependency order. A package
-/// the consumed directory `dir` resolves already, as a contract `cargo tembra build` wrote does
-/// from its `deps/`, is left out, since the bindings would read it twice; that copy must be the
-/// bundled file line for line, whatever its line endings (`wit::bundled_copy`), or the error
-/// names its file. An import in the `wasi` namespace that names no interface of the bundled
-/// packages, another version or an unstable interface, is an error on its literal, and so is an
-/// interface no host serves as an import, one a component exports instead.
+/// the consumed directory `dir` holds a copy of already is left out (`wit::bundled_copy`). An
+/// import in the `wasi` namespace that names no interface of the bundled packages, another
+/// version or an unstable interface, is an error on its literal, and so is an interface no host
+/// serves as an import, one a component exports instead.
 pub(crate) fn packages(imports: &[LitStr], dir: Option<&Path>) -> syn::Result<String> {
     let imported: Vec<&LitStr> = imports
         .iter()
@@ -87,18 +85,9 @@ pub(crate) fn packages(imports: &[LitStr], dir: Option<&Path>) -> syn::Result<St
     let mut nested = String::new();
     for (id, source) in sources.iter().filter(|(id, _)| needed.contains(id)) {
         let name = &bundled.packages[*id].name;
-        if let Some((consumed, &copy)) = consumed
-            .as_ref()
-            .and_then(|consumed| Some((consumed, consumed.package_names.get(name)?)))
+        if let Some((dir, consumed)) = dir.zip(consumed.as_ref())
+            && crate::wit::bundled_copy(consumed, dir, name, "a WASI package Tembra serves")?
         {
-            if let Err(file) = crate::wit::bundled_copy(consumed, copy) {
-                let place = file
-                    .or_else(|| dir.map(|dir| dir.display().to_string()))
-                    .unwrap_or_default();
-                return Err(error(format!(
-                    "{place}: this copy of {name}, a WASI package Tembra serves, differs from the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version"
-                )));
-            }
             continue;
         }
         nested.push('\n');
@@ -114,9 +103,11 @@ pub(crate) fn packages(imports: &[LitStr], dir: Option<&Path>) -> syn::Result<St
 /// Why an identity of the `wasi` namespace names no bundled interface: the interfaces its package
 /// has, when the package is bundled, else the bundled packages.
 fn unknown(bundled: &Resolve, sources: &[(PackageId, &str)], identity: &str) -> String {
-    let (package, rest) = identity.split_once('/').unwrap_or((identity, ""));
-    let version = rest.split_once('@').map_or("", |(_, version)| version);
-    let wanted = format!("{package}@{version}");
+    let wanted = crate::Identity {
+        interface: None,
+        ..crate::Identity::of(identity)
+    }
+    .to_string();
     let names: Vec<String> = sources
         .iter()
         .map(|(id, _)| bundled.packages[*id].name.to_string())
@@ -166,8 +157,4 @@ fn unserved(bundled: &Resolve, package: PackageId, identity: &str) -> String {
         package.name,
         served.join(", ")
     )
-}
-
-fn error(message: impl std::fmt::Display) -> syn::Error {
-    syn::Error::new(Span::call_site(), message.to_string())
 }
