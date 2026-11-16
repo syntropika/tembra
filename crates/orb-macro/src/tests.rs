@@ -3211,7 +3211,8 @@ fn a_glob_import_from_a_module_of_the_orb_is_followed() {
 /// crate as well, `super::Serialize` from the Orb module, `crate::prelude::Serialize` or a name a
 /// crate's glob may bring, as on a path from `serde`. Where the bindings derive none, such a path
 /// is carried when it names the derive from the bindings' module and refused as any other when it
-/// does not.
+/// does not. Another crate's derive of either name, `rkyv::Serialize`, is that crate's, carried
+/// with a state too, renamed or not, with the helper attribute it reads.
 #[test]
 fn a_serde_derive_the_bindings_cover_is_theirs_under_any_path() {
     let module = |imports: &str, state: &str| {
@@ -3253,6 +3254,29 @@ fn a_serde_derive_the_bindings_cover_is_theirs_under_any_path() {
         ),
         "{}",
         tokens(&stateless)
+    );
+    let rkyv = expanded(
+        "example:walk@1.0.0",
+        &format!(
+            "mod walk {{
+                use rkyv::Serialize as Rk;
+                {state}
+                #[derive(rkyv::Archive, Rk, rkyv::Deserialize, Hash)]
+                #[rkyv(compare(PartialEq))]
+                pub struct Point {{ pub x: i32, pub y: i32 }}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> Point {{ todo!() }} }}
+            }}"
+        ),
+    );
+    assert_eq!(
+        type_attributes(&rkyv).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: rkyv :: Archive , :: rkyv :: Serialize , :: rkyv :: Deserialize , :: core :: hash :: Hash)] # [rkyv (compare (PartialEq))]] } ,"
+        ),
+        "{}",
+        tokens(&rkyv)
     );
     for (imports, message) in [
         (
@@ -3328,9 +3352,10 @@ fn a_derived_hook_input_keeps_its_derives() {
 /// implementing a trait the bindings implement, with the helper attributes no other derive of the
 /// type reads, which go with it, a derive of the standard library the type's contents rule out,
 /// `Default` included on a record whose every value holds a resource handle, serde's derives on a
-/// type holding one anywhere, a derive the macro cannot name from the bindings' module, a helper
-/// attribute on a case's payload, and a `#[cfg_attr(..)]` wrapping a derive or a helper, which
-/// would come and go. Kept out of the WIT, the same type is the author's, as written.
+/// type holding one anywhere, under a path the bindings would take over in an Orb with a state
+/// too, a derive the macro cannot name from the bindings' module, a helper attribute on a case's
+/// payload, and a `#[cfg_attr(..)]` wrapping a derive or a helper, which would come and go. Kept
+/// out of the WIT, the same type is the author's, as written.
 #[test]
 fn what_the_generated_type_cannot_take_is_refused() {
     let module = |types: &str, returned: &str| {
@@ -3436,6 +3461,16 @@ fn what_the_generated_type_cannot_take_is_refused() {
             "#[derive(serde::Serialize)] pub struct Page { pub next: Option<Pen> }",
             "Page",
             "`serde::Serialize` on `Page`: `Page` enters the WIT and holds a resource handle, which implements no `Serialize`",
+        ),
+        (
+            "#[state] pub struct Count { pub steps: u32 } #[derive(Serialize)] pub struct Lease { pub pen: Pen }",
+            "Lease",
+            "`Serialize` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Serialize`",
+        ),
+        (
+            "#[state] pub struct Count { pub steps: u32 } use super::Deserialize; #[derive(Deserialize)] pub struct Lease { pub pen: Pen }",
+            "Lease",
+            "`Deserialize` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Deserialize`",
         ),
         (
             "#[derive(EnumIter)] pub enum Heading { North, East }",
@@ -4516,6 +4551,57 @@ fn the_state_derives_leave_out_the_types_that_cannot_carry_them() {
         "{}",
         tokens(&stateless)
     );
+}
+
+/// The bindings give a consumed package's flags type no serde implementation, nor a consumed type
+/// holding one, and, in an Orb without a state, where they derive serde's traits on no type, no
+/// consumed type at all: serde's derives on a type of the module holding such a type are refused
+/// at the derive. With a state, one holding a consumed record serde writes leaves them to the
+/// bindings.
+#[test]
+fn a_serde_derive_on_a_type_holding_a_consumed_type_without_serde_is_refused() {
+    let dir = consumed("badge", ACCESS_WIT);
+    let imports = || Options {
+        imports: vec![literal("example:access/grants@1.0.0")],
+        ..options("example:keeper@1.0.0", Some(&dir))
+    };
+    let module = |state: &str, derive: &str, field: &str| {
+        format!(
+            "mod vault {{
+                {state}
+                {derive}
+                pub struct Badge {{ {field} }}
+                #[service]
+                pub struct Keeper;
+                impl Keeper {{ pub fn issue() -> Badge {{ todo!() }} }}
+            }}"
+        )
+    };
+    let state = "#[state] pub struct Count { pub total: u32 }";
+    let flags =
+        "a consumed package's flags type, which the bindings give no `serde` implementation";
+    let stateless = "a type of a consumed package, which the bindings give no `serde` implementation in an Orb without a state";
+    for (state, field, held) in [
+        (state, "pub permissions: grants::Permissions", Some(flags)),
+        (state, "pub grant: Option<grants::Grant>", Some(flags)),
+        (state, "pub plain: grants::Plain", None),
+        ("", "pub permissions: grants::Permissions", Some(stateless)),
+        ("", "pub plain: grants::Plain", Some(stateless)),
+        ("", "pub all: Vec<grants::Plain>", Some(stateless)),
+    ] {
+        let derived = module(state, "#[derive(serde::Serialize)]", field);
+        let Some(held) = held else {
+            let module = orb_with(imports(), &derived).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(type_attributes(&module), None, "{}", tokens(&module));
+            continue;
+        };
+        let error = refused_with(imports(), &derived);
+        assert!(
+            error.contains(&format!("`serde::Serialize` on `Badge`: `Badge` enters the WIT and holds {held}, so the generated type replacing it cannot derive `Serialize`; remove the derive, or keep `Badge` out of the WIT")),
+            "{state} {field}: {error}"
+        );
+        orb_with(imports(), &module(state, "", field)).unwrap_or_else(|error| panic!("{error}"));
+    }
 }
 
 /// A freestanding (`no_std`) guest gets the runtime prelude once, inside its module, and a refused

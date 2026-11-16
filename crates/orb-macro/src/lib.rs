@@ -2279,7 +2279,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // it: the serde derives of a state, or the author's derives and the attributes they read.
     let serde = !states.is_empty();
     let bindings = if serde || shapes.iter().any(|shape| !shape.carried.is_empty()) {
-        wit::bindings(wit_dir.as_deref(), &inline.value())
+        wit::bindings(wit_dir.as_deref(), &inline.value(), serde)
     } else {
         wit::Bindings::default()
     };
@@ -3954,7 +3954,40 @@ fn carried_derive(
     // Where the bindings derive serde's traits, the author's `Serialize` or `Deserialize` is
     // theirs under a path the macro cannot follow to a crate as well: the module calls it so.
     let covered = |ident: &Ident| serialized && serde_name(&ident.to_string());
-    let derive = match followed(path, shape.scope, uses, modules, owner)? {
+    // A resource handle implements none of the traits a derive implements; `Default` alone makes a
+    // value without one, unless every value of the type holds one.
+    let refuse_handle = |name: &str| {
+        refuse(format!(
+            "`{written}` on `{owner}`: `{owner}` enters the WIT and holds a resource handle, which implements no `{name}`, so the generated type replacing it cannot derive `{name}`; remove the derive, or keep `{owner}` out of the WIT"
+        ))
+    };
+    // serde's derives apply to no type holding what the bindings give no `serde` implementation.
+    let unwritable = |name: &str| {
+        if generated.resource {
+            return Some(refuse_handle(name));
+        }
+        let held = if generated.consumed {
+            "a type of a consumed package, which the bindings give no `serde` implementation in an Orb without a state"
+        } else if generated.unserializable {
+            "a consumed package's flags type, which the bindings give no `serde` implementation"
+        } else {
+            return None;
+        };
+        Some(refuse(format!(
+            "`{written}` on `{owner}`: `{owner}` enters the WIT and holds {held}, so the generated type replacing it cannot derive `{name}`; remove the derive, or keep `{owner}` out of the WIT"
+        )))
+    };
+    let followed = followed(path, shape.scope, uses, modules, owner)?;
+    // A `Serialize` or `Deserialize` the macro cannot follow to a crate, from a crate's glob or
+    // from above the Orb module, is serde's where the bindings derive serde's traits, so what the
+    // type holds is the reason to give first, before the path.
+    if let Followed::Name { ident, globs: true } | Followed::Above(ident) = &followed
+        && serde_name(&ident.to_string())
+        && let Some(refused) = unwritable(&ident.to_string())
+    {
+        return refused;
+    }
+    let derive = match followed {
         Followed::Path(named) => Derive::of(named),
         // A single name no declaration of the module binds is a prelude's, which brings the
         // derives of the standard library, or a glob import's, which the macro cannot read.
@@ -3983,13 +4016,6 @@ fn carried_derive(
     };
     let own = implemented(&shape.kind, generated);
     let implements = |name: &str| own.iter().find(|(known, _)| *known == name);
-    // A resource handle implements none of the traits a derive implements; `Default` alone makes a
-    // value without one, unless every value of the type holds one.
-    let refuse_handle = |name: &str| {
-        refuse(format!(
-            "`{written}` on `{owner}`: `{owner}` enters the WIT and holds a resource handle, which implements no `{name}`, so the generated type replacing it cannot derive `{name}`; remove the derive, or keep `{owner}` out of the WIT"
-        ))
-    };
     match derive {
         Derive::Standard(name, module) => {
             if implements(name).is_some() {
@@ -4013,9 +4039,9 @@ fn carried_derive(
             Ok(Some(quote! { ::core::#module::#name }))
         }
         Derive::Serde(named) => {
-            if generated.resource {
-                let name = named.segments.last().expect("serde's derive has a name");
-                return refuse_handle(&name.to_string());
+            let name = named.segments.last().expect("serde's derive has a name");
+            if let Some(refused) = unwritable(&name.to_string()) {
+                return refused;
             }
             Ok((!serialized).then(|| quote! { #named }))
         }

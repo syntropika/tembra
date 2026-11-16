@@ -1089,12 +1089,15 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   after one of those traits, or implementing one under another name, `Educe` or `Derivative` with
   the trait in `#[educe(..)]` or `#[derivative(..)]`, would implement it twice, and a derive that
   the type's contents rule out could not apply, `Clone`, `Copy`, a comparison, `Hash`, `Serialize`
-  or `Deserialize` on a type holding a resource handle, `Default` on a record no value of which is
-  without one, a handle in a field, in a tuple or in such a record, and `Copy` on one holding a
-  string or a list: both are compile errors on the derive, the first naming the helper attributes
-  no other derive of the type reads, which go with it, `#[error(..)]` for `thiserror::Error` on a
-  function's error, or the entry of `#[educe(..)]` to remove. A handle in an option or a list
-  leaves `Default` a value without it, and a variant takes its unit `#[default]` case.
+  or `Deserialize` on a type holding a resource handle, `Serialize` or `Deserialize` on one holding
+  a consumed package's flags type, alone or in a consumed type, or, in an Orb without a state,
+  where the bindings derive serde's traits on no type, any type of a consumed package, `Default` on
+  a record no value of which is without one, a handle in a field, in a tuple or in such a record,
+  and `Copy` on one holding a string or a list: both are compile errors on the derive, the first
+  naming the helper attributes no other derive of the type reads, which go with it, `#[error(..)]`
+  for `thiserror::Error` on a function's error, or the entry of `#[educe(..)]` to remove. A handle
+  in an option or a list leaves `Default` a value without it, and a variant takes its unit
+  `#[default]` case.
 - The bindings read a derive's path in their own module, so the macro names each derive from its
   crate, `::strum::EnumIter` for `EnumIter` after `use strum::EnumIter;`, following the `use` and
   `extern crate` declarations of the type's module, `self::`, `super::`, the Orb's sub-modules and
@@ -1104,7 +1107,10 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   through `super::`, is a compile error saying what to write instead. `serde`'s derives are the
   exception where the bindings derive them, in an Orb with a state: a `Serialize` or `Deserialize`
   the macro cannot follow to a crate, through such a glob, through `super::` or through a re-export
-  of this crate, `crate::prelude::Serialize`, is left to the bindings as `serde`'s own is.
+  of this crate, `crate::prelude::Serialize`, is left to the bindings as `serde`'s own is, and
+  refused before its path on a type whose contents rule it out. Another crate's derive of either
+  name, `rkyv::Serialize`, is that crate's own and carried as any other, so a derive of serde's
+  that another crate re-exports is written `serde::Serialize`, or through `crate::`.
 - The bindings' module reads the helper attributes too, as written, so one it would not know is a
   compile error on the attribute: one no derive the generated type takes reads, since a derive of
   the standard library reads none but `#[default]` and a derive the bindings implement is theirs,

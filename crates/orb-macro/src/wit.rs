@@ -1136,7 +1136,7 @@ pub(crate) struct Bindings {
 /// it to choose what it derives and implements: whether the type holds a string or a list, whether
 /// it holds a resource handle, and whether a function of a world returns it as the error of its
 /// result; and, for the derives the macro carries onto the type, whether every value of it holds a
-/// resource handle.
+/// resource handle, and whether it holds what the bindings give no `serde` implementation.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Generated {
     pub list: bool,
@@ -1146,11 +1146,20 @@ pub(crate) struct Generated {
     /// a tuple holding one or such a type. A handle in an option or a list may be absent, and a
     /// variant may take a case without one; `Default`, which makes a value from nothing, cannot.
     pub needs_handle: bool,
+    /// The type holds, anywhere, a value the bindings give no `serde` implementation, as
+    /// `holds_unserializable` tells: besides a resource handle, a type of the module can hold a
+    /// consumed package's flags type, alone or in a consumed type.
+    pub unserializable: bool,
+    /// In an Orb without a state, where the bindings derive serde's traits on no type, the type
+    /// holds, anywhere, a type of a consumed package, which then has no `serde` implementation
+    /// either, or a resource handle; with a state, unset.
+    pub consumed: bool,
 }
 
 /// Read the WIT the bindings read, `inline` with the consumed packages of `dir`, for what they make
-/// of its types; a WIT the bindings would refuse yields nothing, and the bindings report it.
-pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
+/// of its types, where a state, `serde`, makes them derive serde's traits on the types that can
+/// carry them; a WIT the bindings would refuse yields nothing, and the bindings report it.
+pub(crate) fn bindings(dir: Option<&Path>, inline: &str, serde: bool) -> Bindings {
     let mut resolve = Resolve::default();
     if let Some(dir) = dir
         && resolve.push_dir(dir).is_err()
@@ -1190,6 +1199,7 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
                 wit_parser::Type::Id(*id),
                 &mut BTreeSet::new(),
                 own,
+                false,
             )
         })
         .filter_map(|(_, definition)| definition.name.as_deref())
@@ -1231,6 +1241,7 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
                 wit_parser::Type::Id(*id),
                 &mut BTreeSet::new(),
                 own,
+                false,
             )
         })
         .filter_map(|(id, _)| full_name(id))
@@ -1247,11 +1258,22 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
         .filter_map(|(id, _)| {
             let name = full_name(id)?;
             let (list, resource) = holds(&resolve, wit_parser::Type::Id(id));
+            let unserializable = |stateless: bool| {
+                holds_unserializable(
+                    &resolve,
+                    wit_parser::Type::Id(id),
+                    &mut BTreeSet::new(),
+                    own,
+                    stateless,
+                )
+            };
             let generated = Generated {
                 list,
                 resource,
                 error: false,
                 needs_handle: needs_handle(&resolve, wit_parser::Type::Id(id)),
+                unserializable: unserializable(false),
+                consumed: !serde && unserializable(true),
             };
             Some((name, generated))
         })
@@ -1304,12 +1326,14 @@ pub(crate) fn ignored_name(name: &str) -> String {
 /// Whether a WIT type holds, anywhere, a value the bindings give no `serde` implementation: a
 /// flags type of another package than `own`, the Orb's, whose flags types are the author's
 /// structs, a resource handle, a stream, a future, an error context, or an array longer than
-/// `serde`'s.
+/// `serde`'s; and, `stateless`, in an Orb without a state, where the bindings derive serde's
+/// traits on no type, a record, a variant or an enum of another package too.
 fn holds_unserializable(
     resolve: &Resolve,
     ty: wit_parser::Type,
     seen: &mut BTreeSet<wit_parser::TypeId>,
     own: wit_parser::PackageId,
+    stateless: bool,
 ) -> bool {
     let id = match ty {
         wit_parser::Type::Id(id) => id,
@@ -1320,10 +1344,16 @@ fn holds_unserializable(
     if !seen.insert(id) {
         return false;
     }
-    let mut holds = |ty: wit_parser::Type| holds_unserializable(resolve, ty, seen, own);
+    let mut holds = |ty: wit_parser::Type| holds_unserializable(resolve, ty, seen, own, stateless);
+    let foreign = !matches!(resolve.types[id].owner,
+        wit_parser::TypeOwner::Interface(owner) if resolve.interfaces[owner].package == Some(own));
     match &resolve.types[id].kind {
-        TypeDefKind::Flags(_) => !matches!(resolve.types[id].owner,
-            wit_parser::TypeOwner::Interface(owner) if resolve.interfaces[owner].package == Some(own)),
+        TypeDefKind::Flags(_) => foreign,
+        TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_)
+            if stateless && foreign =>
+        {
+            true
+        }
         TypeDefKind::Handle(_)
         | TypeDefKind::Resource
         | TypeDefKind::Future(_)
