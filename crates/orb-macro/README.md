@@ -826,8 +826,9 @@ resources' functions, and the others `use` it from there. See
 A derived function takes a resource as a parameter, owned: a `#[wit_resource]` struct of its own
 interface, `T`, which the WIT names `own<t>`, or the handle of an imported interface,
 `texts::Builder`, named through the interface's module, which the derived interface `use`s from
-the imported one. Either may sit in an `Option`, a `Result`, a `Vec` or a tuple, and a service's
-functions, a resource's constructor, its methods and its static functions take them alike:
+the imported one. Either may sit in an `Option`, a `Result`, a `Vec`, a tuple, or a record or a
+variant of the module, and a service's functions, a resource's constructor, its methods and its
+static functions take them alike:
 
 ```rust
 impl Builder {
@@ -862,15 +863,16 @@ type, with the bindings' handle in the resource's place: a function taking one g
 whose `into_inner` gives the value.
 
 The runtime moves an owned resource only into the interface that defines it, or into an Orb that
-imports that interface. It refuses at installation today an Orb whose function takes a borrowed
-resource, `borrow<t>` ("borrow requires a dedicated interpreter value adapter"), so the macro
-derives none: `&T` is refused as every reference in a signature is. A function taking a resource of
-another service's interface or of an implemented interface, itself or in a record or a variant of
-the module, a WASI handle, also one an imported interface `use`s from WASI, which the runtime moves
-between no Orbs, and a hook's input holding a resource are compile errors too; so is a derived
-function returning an imported interface's handle, or another service's resource, which the runtime
-returns only from the interface that defines it, and a record or a variant of the module holding an
-imported interface's handle.
+imports that interface, anywhere in an argument: a record or a variant of the module holds an
+imported interface's handle where only parameters reach it. It refuses at installation today an Orb
+whose function takes a borrowed resource, `borrow<t>` ("borrow requires a dedicated interpreter
+value adapter"), so the macro derives none: `&T` is refused as every reference in a signature is. A
+function taking a resource of another service's interface or of an implemented interface, itself or
+in a record or a variant of the module, a WASI handle, also one an imported interface `use`s from
+WASI, which the runtime moves between no Orbs, and a hook's input holding a resource are compile
+errors too; so is a derived function returning an imported interface's handle, itself or in a
+record or a variant of the module, or another service's resource, which the runtime returns only
+from the interface that defines it.
 
 ## Flags
 

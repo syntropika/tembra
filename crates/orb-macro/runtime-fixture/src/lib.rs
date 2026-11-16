@@ -12,6 +12,7 @@ extern crate alloc;
         import("example:counters/counter@1.0.0", keyed),
         import = "example:counters/counter@1.0.0",
         import = "example:ledger/book@1.0.0",
+        import = "example:texts/texts@1.0.0",
         no_std
     )
 )]
@@ -24,7 +25,8 @@ extern crate alloc;
         import = "wasi:clocks/monotonic-clock@0.3.0",
         import("example:counters/counter@1.0.0", keyed),
         import = "example:counters/counter@1.0.0",
-        import = "example:ledger/book@1.0.0"
+        import = "example:ledger/book@1.0.0",
+        import = "example:texts/texts@1.0.0"
     )
 )]
 mod guest {
@@ -255,6 +257,40 @@ mod guest {
                     key: vec![tally.key.join("/")],
                     ..tally
                 }
+            }
+        }
+    }
+
+    /// Spells words into the builders of `example:texts/texts@1.0.0`, an interface the attribute
+    /// imports plainly, from the package in `consumed/deps/`: a job holds the caller's builder, the
+    /// imported interface's handle, in a record of the module, which the runtime moves into the
+    /// call as it moves the handle alone. The Orb calls every function of the interface, since the
+    /// test reads its contract from the component, which keeps no import function the code never
+    /// calls.
+    pub mod spelling {
+        use super::texts;
+        use alloc::string::String;
+
+        /// A word to append to the builder the caller hands over.
+        pub struct Job {
+            pub builder: texts::Builder,
+            pub word: String,
+        }
+
+        #[service]
+        pub struct Speller;
+
+        impl Speller {
+            /// Append the job's word to its builder and return the length of the text; the
+            /// builder is consumed.
+            pub fn spell_job(job: Job) -> u32 {
+                job.builder.append(&job.word)
+            }
+
+            /// Spell `word` into a builder of the Orb's own, started through the import and
+            /// dropped with the call, and return the length of its text.
+            pub fn spell(word: String) -> u32 {
+                texts::Builder::new("").append(&word)
             }
         }
     }

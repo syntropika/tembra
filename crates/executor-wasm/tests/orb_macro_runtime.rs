@@ -1,11 +1,15 @@
 //! Real macro guests link either std or the explicitly selected freestanding runtime.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
-use std::{cell::Cell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    rc::Rc,
+};
 use tembra::{
     Context, Host, Orb, Reference, Service,
     core::Code,
-    portable::{Owned, Payload},
+    portable::{Capability, Issued, Nominal, Owned, Payload},
 };
 use tembra_executor_wasm::{
     Binding, Contract, Deterministic, Engine, Install, Limits, SystemCapability,
@@ -62,8 +66,8 @@ fn host(import: &str, provider: &str) -> (String, Binding) {
 }
 
 /// The bindings of the fixture's imports: the kernel serves the walker's state, the host chance's
-/// WASI imports, and an Orb provider answers the keyed import's view and the plain import of the
-/// same interface.
+/// WASI imports, an Orb provider answers the keyed import's view and the plain import of the same
+/// interface, and another the texts import.
 fn bindings() -> BTreeMap<String, Binding> {
     BTreeMap::from([
         ("tembra:guest/state@1.0.0".to_owned(), Binding::Kernel),
@@ -71,6 +75,7 @@ fn bindings() -> BTreeMap<String, Binding> {
         host(CLOCK, "clocks"),
         view(),
         provider(),
+        texts(),
     ])
 }
 
@@ -86,10 +91,11 @@ struct Guest {
 /// Read both guests and check what needs no engine. Both share one WIT, one model and one plan.
 /// The contract depends on the bundled packages it imports from, which `cargo tembra build`
 /// writes into `contract/deps/`; it binds each WASI import to the host's provider of its grant,
-/// as for any compiled component, and requires one Orb, the provider of the keyed import's view
-/// and of the plain import. The WIT holds the author's flags and `use`s the consumed packages'
-/// records as they define them: `readings` the tally of the imported interface, `library` the
-/// book and the topic of the shelf the Orb implements. The roles the component carries pair the
+/// as for any compiled component, and requires two Orbs: the provider of the keyed import's view
+/// and of the plain import, and the provider of the texts import. The WIT holds the author's flags
+/// and `use`s the consumed packages' records as they define them: `readings` the tally of the
+/// imported interface, `library` the book and the topic of the shelf the Orb implements, `speller`
+/// the builder of the texts, in a record of the module. The roles the component carries pair the
 /// view with the interface it views, and the artifact keeps the pair.
 fn guests() -> [Guest; 2] {
     let guests = [
@@ -109,8 +115,8 @@ fn guests() -> [Guest; 2] {
             ["wasi-clocks.wit", "wasi-random.wit", "tembra-guest.wit"],
             "{name}"
         );
-        // The keyed import's view and the plain import need their provider named; the WASI
-        // imports need their grants.
+        // The keyed import's view, the plain import and the texts import need their providers
+        // named; the WASI imports need their grants.
         let orb = tembra_contracts::OrbProvider {
             orb: COUNTERS.into(),
             api_version: 1,
@@ -118,6 +124,13 @@ fn guests() -> [Guest; 2] {
         let requires = BTreeMap::from([
             (COUNTER_VIEW.to_owned(), orb.clone()),
             (COUNTER.to_owned(), orb),
+            (
+                TEXTS.to_owned(),
+                tembra_contracts::OrbProvider {
+                    orb: BUILDERS.into(),
+                    api_version: 1,
+                },
+            ),
         ]);
         assert_eq!(
             contract.providers(&requires, &granted().grants).unwrap(),
@@ -132,20 +145,23 @@ fn guests() -> [Guest; 2] {
             .collect();
         imports.sort();
         assert_eq!(imports, [(CLOCK, "clocks"), (RANDOM, "random")], "{name}");
-        // No WASI import requires an Orb: the provider of the view and of the plain import is
-        // the only one.
-        let required: Vec<&str> = plan
+        // No WASI import requires an Orb: the provider of the view and of the plain import and
+        // the provider of the texts import are the only ones.
+        let mut required: Vec<&str> = plan
             .orb
             .requires
             .iter()
             .map(|requirement| requirement.orb.as_str())
             .collect();
-        assert_eq!(required, [COUNTERS], "{name}");
+        required.sort();
+        assert_eq!(required, [BUILDERS, COUNTERS], "{name}");
         let words: String = wit.split_whitespace().collect();
         for expected in [
             "flagsaccess{read,write,share,}",
             "interfacereadings{useexample:counters/counter@1.0.0.{tally};",
             "interfacelibrary{useexample:shelves/shelf@1.0.0.{book,topic};",
+            "interfacespeller{useexample:texts/texts@1.0.0.{builder};",
+            "recordjob{builder:builder,word:string,}",
         ] {
             assert!(words.contains(expected), "{name}: {expected}\n{wit}");
         }
@@ -192,7 +208,7 @@ fn std_and_freestanding_guests_execute_interpreted() {
     execute(Engine::interpreted(Limits::default()).unwrap());
 }
 
-/// Load both guests into `engine` once, beside the native provider of the interface they import,
+/// Load both guests into `engine` once, beside the native providers of the interfaces they import,
 /// and drive every service of each in one host; the engine's secure random source is fixed for
 /// chance's draws. The installations the kernel refuses are checked after the good loads. Both
 /// guests reach the provider's `main` object, the host's, in `read`: the second counts on.
@@ -206,7 +222,7 @@ fn execute(engine: Engine) {
     refuse_ungranted(&engine, &guests);
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
-    let orbs = loaded.into_iter().chain([counters()]).collect();
+    let orbs = loaded.into_iter().chain([counters(), builders()]).collect();
     host.install(orbs).unwrap();
     for (guest, counted) in guests.iter().zip([0, 7]) {
         let name = guest.name;
@@ -215,6 +231,7 @@ fn execute(engine: Engine) {
         chance(&mut pool, &host, name);
         count(&mut pool, &host, name);
         tally(&mut pool, &host, &engine, name);
+        spell(&mut pool, &host, name);
         permit(&mut pool, &host, name);
         read(&mut pool, &host, name, counted);
         shelve(&mut pool, &host, name);
@@ -404,12 +421,28 @@ fn provider() -> (String, Binding) {
     (COUNTER.to_owned(), provider)
 }
 
+/// The interface the fixture imports for the builders its spelling jobs hold, and the native Orb
+/// providing it.
+const TEXTS: &str = "example:texts/texts@1.0.0";
+const BUILDERS: &str = "builders";
+
+/// The binding of the texts import to its provider.
+fn texts() -> (String, Binding) {
+    let provider = Binding::Orb {
+        name: BUILDERS.into(),
+        api_version: 1,
+    };
+    (TEXTS.to_owned(), provider)
+}
+
 /// An installation of the fixture that binds the keyed import's view and the plain import to the
-/// provider; without them the kernel refuses the fixture, as for any import of another Orb.
+/// provider, and the texts import to its own; without them the kernel refuses the fixture, as for
+/// any import of another Orb.
 fn bound(install: Install) -> Install {
     install
         .requires(COUNTER_VIEW, COUNTERS, 1)
         .requires(COUNTER, COUNTERS, 1)
+        .requires(TEXTS, BUILDERS, 1)
 }
 
 /// One object of the provider: the key it was acquired with, the principal that acquired it and
@@ -809,4 +842,137 @@ fn shelve(pool: &mut LocalPool, host: &Host, name: &str) {
         "{name}"
     );
     library.release().unwrap();
+}
+
+thread_local! {
+    /// How many builders of the native provider were closed on this thread, each test's own: a
+    /// builder is closed when its last holder drops it, the guest that consumed it included.
+    static CLOSED: Cell<u32> = const { Cell::new(0) };
+}
+
+/// One builder of the native provider of the texts: the text it holds. Its `Drop`, the close of
+/// the capability, counts it among the builders closed.
+struct Builder {
+    nominal: Nominal,
+    text: RefCell<String>,
+}
+
+impl Capability for Builder {
+    fn nominal(&self) -> &Nominal {
+        &self.nominal
+    }
+}
+
+impl Drop for Builder {
+    fn drop(&mut self) {
+        CLOSED.set(CLOSED.get() + 1);
+    }
+}
+
+/// The native provider of the interface the fixture's spelling jobs hold a builder of, read from
+/// the package the fixture consumes: its constructor issues a builder as a capability, which
+/// `append` finds again as the call's `self`.
+fn builders() -> Orb {
+    let wit = format!(
+        "{}\nworld provider {{ export texts; }}\n",
+        include_str!("../../orb-macro/runtime-fixture/consumed/deps/texts.wit")
+    );
+    let service = Contract::from_source("texts.wit", &wit, Some("provider"))
+        .unwrap()
+        .plan(BUILDERS, 1, &BTreeMap::new())
+        .unwrap()
+        .orb
+        .services
+        .remove(0);
+    Orb::new(BUILDERS, 1).service(
+        Service::new(service.name, |_| Ok(()))
+            .signature(service.signature)
+            .payload_method(
+                "[constructor]builder",
+                |_, _, payload: Payload| async move {
+                    let (text,): (String,) = serde_json::from_value(payload.into_data()?).unwrap();
+                    let mut result = Payload::data(Value::Null);
+                    let index = result.attach(Issued::new(Builder {
+                        nominal: Nominal {
+                            interface: TEXTS.into(),
+                            name: "builder".into(),
+                        },
+                        text: RefCell::new(text),
+                    }));
+                    result.map_value(|_| Ok(json!(index)))
+                },
+            )
+            .payload_method(
+                "[method]builder.append",
+                |_, _, mut payload: Payload| async move {
+                    let builder = payload.take_receiver().expect("the builder appended to");
+                    let (word,): (String,) = serde_json::from_value(payload.into_data()?).unwrap();
+                    let length = builder
+                        .with_backend::<Builder, _>(|builder| {
+                            let mut text = builder.text.borrow_mut();
+                            text.push_str(&word);
+                            text.len() as u32
+                        })
+                        .expect("a builder of this provider");
+                    Ok(Payload::data(json!(length)))
+                },
+            ),
+    )
+}
+
+/// Drive the speller of the Orb `name`, whose `spell-job` takes a record of the module holding an
+/// imported interface's handle, as the runtime moves such a handle anywhere into an argument: a
+/// builder the native provider issues goes into the call inside the record, attached to the call's
+/// payload where the record's field names it; the guest appends the word through the import and
+/// returns the text's length, and the builder, consumed, is closed before the call returns.
+/// `spell` starts a builder of the guest's own through the import and drops it with the call.
+fn spell(pool: &mut LocalPool, host: &Host, name: &str) {
+    let reference = |pool: &mut LocalPool, service: String| {
+        let reference = Rc::new(host.get(&service, vec!["main".into()], "alice").unwrap());
+        pool.run_until(reference.ready()).unwrap();
+        reference
+    };
+    let speller = reference(pool, format!("{name}::example:runtime/speller@1.0.0"));
+    let builders = reference(pool, format!("{BUILDERS}::{TEXTS}"));
+    let call = |pool: &mut LocalPool, method: &'static str, payload: Payload| -> Value {
+        let speller = speller.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move { speller.call_portable(&context, method, payload).await }.boxed_local()
+        }))
+        .unwrap()
+    };
+    let before = CLOSED.get();
+    let builder: Owned = {
+        let builders = builders.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move {
+                builders
+                    .call_portable(&context, "[constructor]builder", ("hello".to_owned(),))
+                    .await
+            }
+            .boxed_local()
+        }))
+        .unwrap()
+    };
+    assert_eq!(CLOSED.get(), before, "{name}");
+    let mut payload = Payload::data(json!([{"builder": 0, "word": "world"}]));
+    payload.attach_argument(builder).unwrap();
+    assert_eq!(call(pool, "spell-job", payload), json!(10), "{name}");
+    assert_eq!(
+        CLOSED.get(),
+        before + 1,
+        "{name}: the guest consumed the builder"
+    );
+    assert_eq!(
+        call(pool, "spell", Payload::data(json!(["hi"]))),
+        json!(2),
+        "{name}"
+    );
+    assert_eq!(
+        CLOSED.get(),
+        before + 2,
+        "{name}: the guest dropped its own builder"
+    );
+    builders.release().unwrap();
+    speller.release().unwrap();
 }

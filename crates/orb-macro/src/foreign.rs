@@ -4,7 +4,10 @@
 //! type the view of an interface imported by key uses, `book::Entry` for an implemented
 //! `#[service("example:ledger/book@1.0.0")]`, `guard::Admission` for a hook the module contributes
 //! to. So does a field or a case of a record or a variant of the module that enters the WIT, and a
-//! parameter names the handle of an imported interface's resource the same way, `texts::Builder`.
+//! parameter names the handle of an imported interface's resource the same way, `texts::Builder`,
+//! itself or in a record or a variant of the module that no derived function returns, as the
+//! runtime moves such a handle anywhere into an argument but returns a resource only from the
+//! interface that defines it.
 //! The derived interface `use`s each name from the interface that defines it, so its bindings name
 //! the type the author's code holds: a value crosses as it is, with no copy and no conversion.
 //!
@@ -32,7 +35,8 @@ use syn::{Ident, Item, LitStr, Type, spanned::Spanned};
 /// the interface's module.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
-    /// Another Orb's interface, imported: its types, and its resources' handles as parameters.
+    /// Another Orb's interface, imported: its types, and its resources' handles as parameters,
+    /// alone or in the records and variants of the module that no derived function returns.
     Imported,
     /// Another Orb's interface, imported by key, whose view the Orb module re-exports: the
     /// interface's types the view uses, but not the view's objects.
@@ -390,10 +394,11 @@ enum Place<'a> {
         interface: &'a Ident,
     },
     /// A field or a case of `shape`, a type of the module that the interface of the service
-    /// `interface` defines.
+    /// `interface` defines, and the derived function whose result reaches `shape`, if one does.
     Field {
         shape: &'a Ident,
         interface: &'a Ident,
+        returned: Option<Returning<'a>>,
     },
     /// The input of the derived hook `hook`, or a field or a case of the type `via` it reaches.
     Input {
@@ -405,6 +410,15 @@ enum Place<'a> {
         state: &'a Ident,
         via: Option<Ident>,
     },
+}
+
+/// A derived function whose result reaches a type of the module: its name, its result type, where
+/// the error points, and the type of the module the result names, which holds the reached type.
+#[derive(Clone, Copy)]
+struct Returning<'a> {
+    function: &'a str,
+    result: &'a Type,
+    via: &'a Ident,
 }
 
 impl Place<'_> {
@@ -451,9 +465,10 @@ pub(crate) struct Reach<'a> {
 /// once every item a consumed interface's module names is checked where it is named. A derived
 /// function, a constructor and a type of the module that enters the WIT name the data types of an
 /// interface imported, plainly or by key, or implemented, or of a hook the module contributes to,
-/// and a parameter the handles of an imported interface's resources; a derived hook's input names
-/// none; a state names the data types that `serde` can write. Nothing is read from the consumed
-/// packages when nothing names them.
+/// and a parameter the handles of an imported interface's resources, itself or in a type of the
+/// module that no derived function returns; a derived hook's input names none; a state names the
+/// data types that `serde` can write. Nothing is read from the consumed packages when nothing
+/// names them.
 pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Foreign>>> {
     let Reach {
         modules,
@@ -491,6 +506,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         .iter()
         .filter(|declaration| declaration.input.is_some())
         .collect();
+    let returned = returned(&functions, shapes, modules);
     for shape in shapes {
         let Some(interface) = placement.get(&shape.ident.to_string()) else {
             continue;
@@ -504,6 +520,9 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             None => Place::Field {
                 shape: &shape.ident,
                 interface,
+                returned: returned
+                    .get(&(shape.ident.to_string(), shape.scope))
+                    .copied(),
             },
         };
         for ty in shape_types(shape) {
@@ -661,6 +680,59 @@ fn found_in<'a, 'p>(
     found.extend(named.into_iter().map(|named| (named, place.clone())));
 }
 
+/// The types of the module the results of the derived functions reach, by name and by the module
+/// declaring each, with the first function returning it: the types a result names, itself or
+/// inside its containers, and those their fields and cases reach in turn, as the runtime looks
+/// into a result. A name resolves by `own_or_only`: to the type of the module naming it, else to
+/// the only type of that name in the Orb.
+fn returned<'f>(
+    functions: &'f [resource_params::Derived<'f>],
+    shapes: &'f [Shape],
+    modules: &Modules,
+) -> BTreeMap<(String, usize), Returning<'f>> {
+    let mut returned: BTreeMap<(String, usize), Returning<'f>> = BTreeMap::new();
+    for function in functions {
+        let Some(result) = function.result else {
+            continue;
+        };
+        let mut named = Vec::new();
+        modules.references(result, function.scope, &mut named);
+        let mut pending: Vec<(Ident, usize, Option<&'f Ident>)> = named
+            .into_iter()
+            .map(|ident| (ident, function.scope, None))
+            .collect();
+        while let Some((ident, scope, via)) = pending.pop() {
+            let named = shapes
+                .iter()
+                .filter(|shape| shape.ident == ident)
+                .map(|shape| (shape.scope, shape));
+            let Some(shape) = crate::own_or_only(named, scope) else {
+                continue;
+            };
+            let key = (ident.to_string(), shape.scope);
+            if returned.contains_key(&key) {
+                continue;
+            }
+            let via = via.unwrap_or(&shape.ident);
+            returned.insert(
+                key,
+                Returning {
+                    function: &function.name,
+                    result,
+                    via,
+                },
+            );
+            pending.extend(
+                shape
+                    .references
+                    .iter()
+                    .map(|reference| (reference.clone(), shape.scope, Some(via))),
+            );
+        }
+    }
+    returned
+}
+
 /// Check one item a consumed interface's module names where it is named, and return the service
 /// whose derived interface `use`s it, if one does. `dependency` is an interface the world exports
 /// that the consumed interface depends on, if there is one.
@@ -764,14 +836,31 @@ fn checked<'a>(
                 "{what} of {of}: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{module}::{ident}` and {run} are the import's; use a type of the module"
             ))
         }
+        // The runtime moves an owned handle of an imported interface anywhere into an argument,
+        // in a record or a variant of the module too, and returns a resource only from the
+        // interface that defines it, wherever the result holds it.
         (Role::Imported, wit::Kind::Resource) => match place {
-            Place::Param { .. } => Ok(Some(interface_of)),
+            Place::Param { .. } | Place::Field { returned: None, .. } => Ok(Some(interface_of)),
             Place::Result { .. } => refuse(format!(
                 "{what} of {of}: the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle but returns none"
             )),
-            _ => refuse(format!(
-                "{what} of {of}: a derived function takes such a handle as a parameter, alone or in an option, a result, a list or a tuple, but a record or a variant of the module holds none"
-            )),
+            Place::Field {
+                returned: Some(returning),
+                ..
+            } => {
+                let Returning {
+                    function,
+                    result,
+                    via,
+                } = returning;
+                Err(syn::Error::new(
+                    result.span(),
+                    format!(
+                        "`{function}` returns `{via}`, which holds `{ident}`, {what} of {of}: the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none"
+                    ),
+                ))
+            }
+            Place::Input { .. } | Place::State { .. } => unreachable!("checked above"),
         },
         (Role::Implemented | Role::Contributed, wit::Kind::Resource) if returned => {
             refuse(format!(

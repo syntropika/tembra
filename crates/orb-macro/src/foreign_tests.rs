@@ -38,6 +38,21 @@ interface catalog {
 }
 ";
 
+/// A consumed package whose `texts` interface has a resource and nothing else, whose handle the
+/// records and variants of a module hold.
+const TEXTS: &str = "package example:texts@1.0.0;
+
+/// Texts under construction.
+interface texts {
+  /// A text that grows as words are appended.
+  resource builder {
+    constructor(text: string);
+    /// Append `word` and return the length of the text.
+    append: func(word: string) -> u32;
+  }
+}
+";
+
 /// A directory holding one consumed WIT package, under this module's prefix.
 fn consumed(name: &str, wit: &str) -> PathBuf {
     super::tests::consumed(&format!("foreign-{name}"), wit)
@@ -131,6 +146,99 @@ fn a_derived_signature_names_an_imported_interfaces_types() {
     ] {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
+}
+
+/// A record or a variant of the module holds the handle of an imported interface's resource where
+/// only parameters reach it, of a service's functions and of a resource's constructor and methods
+/// alike, as the runtime moves such a handle anywhere into an argument: the interface defining the
+/// type `use`s the resource, and the bridge passes the bindings' type as it is, with the bindings'
+/// handle in the resource's place.
+#[test]
+fn a_parameter_record_holds_an_imported_interfaces_handle() {
+    let dir = consumed("job", TEXTS);
+    let module = expanded(
+        options(
+            "example:speller@1.0.0",
+            Some(&dir),
+            &["example:texts/texts@1.0.0"],
+        ),
+        "mod spelling {
+            /// A word to append to the caller's builder.
+            pub struct Job { pub builder: texts::Builder, pub word: String }
+            pub enum Task { Spell(Job), Skip(u32) }
+            #[wit_resource(service = Speller)]
+            pub struct Draft { length: core::cell::Cell<u32> }
+            impl Draft {
+                #[constructor]
+                pub fn new(job: Job) -> Self { Draft { length: core::cell::Cell::new(job.builder.append(&job.word)) } }
+                pub fn add(&self, job: Job) -> u32 { job.builder.append(&job.word) }
+            }
+            #[service]
+            pub struct Speller;
+            impl Speller {
+                pub fn spell_job(job: Job) -> u32 { job.builder.append(&job.word) }
+                pub fn run(tasks: Vec<Task>, last: Option<Job>) -> u32 { 0 }
+            }
+        }",
+    );
+    let text = resolved(&module, &dir);
+    for expected in [
+        "interface speller {\n  use example:texts/texts@1.0.0.{builder};\n",
+        "  record job {\n    builder: builder,\n    word: string,\n  }\n",
+        "  variant task {\n    spell(job),\n    skip(u32),\n  }\n",
+        "    constructor(job: job);\n",
+        "    add: func(job: job) -> u32;\n",
+        "  spell-job: func(job: job) -> u32;\n",
+        "  run: func(tasks: list<task>, last: option<job>) -> u32;\n",
+        "world spelling {\n  import example:texts/texts@1.0.0;\n  export speller;\n}\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let generated = tokens(&module);
+    for expected in [
+        "fn spell_job (job : Job) -> u32 { Speller :: spell_job (job) }",
+        "fn run (tasks : Vec < Task > , last : Option < Job >) -> u32 { Speller :: run (tasks , last) }",
+        "fn new (job : Job) -> Self { Draft :: new (job) }",
+        "fn add (& self , job : Job) -> u32 { Draft :: add (self , job) }",
+        "pub use exports :: example :: speller :: speller :: { Job , Task } ;",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+}
+
+/// A name a result writes resolves to the type of the module writing it before the handle rule
+/// looks into it: a `Job` returned in one module is not the `Job` of another that holds an imported
+/// handle, so the two get the error for a name that enters the WIT twice, not the handle's.
+#[test]
+fn a_returned_type_resolves_in_its_module_before_the_handle_rule() {
+    let dir = consumed("twice", TEXTS);
+    let error = refused(
+        options(
+            "example:speller@1.0.0",
+            Some(&dir),
+            &["example:texts/texts@1.0.0"],
+        ),
+        "mod spelling {
+            pub mod jobs {
+                pub struct Job { pub builder: super::texts::Builder, pub word: String }
+                #[service]
+                pub struct Speller;
+                impl Speller { pub fn spell_job(job: Job) -> u32 { job.builder.append(&job.word) } }
+            }
+            pub mod counts {
+                pub struct Job { pub count: u32 }
+                #[service]
+                pub struct Counting;
+                impl Counting { pub fn total() -> Job { Job { count: 0 } } }
+            }
+        }",
+    );
+    assert!(
+        error.contains(
+            "`Job` is declared in `jobs` and in `counts`; a name that enters the WIT is one across the Orb module"
+        ),
+        "{error}"
+    );
 }
 
 /// A type of the module that holds a consumed type is defined in one interface, which `use`s the
@@ -718,9 +826,27 @@ fn what_a_derived_interface_cannot_take_from_a_consumed_interface_is_refused() {
             "`Shopping::hold` takes `Slot`, a record of the imported interface example:shop/catalog@1.0.0 that holds a resource handle: a derived interface names the consumed types that carry data only",
         ),
         (
-            "pub fn bag(bag: Bag) -> u32 { 0 }",
+            "pub fn bag(bag: Bag) -> u32 { 0 } pub fn pack() -> Bag { todo!() }",
             "pub struct Bag { pub cart: catalog::Cart }",
-            "`Bag` holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: a derived function takes such a handle as a parameter, alone or in an option, a result, a list or a tuple, but a record or a variant of the module holds none",
+            "`Shopping::pack` returns `Bag`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it, so a derived function takes such a handle, alone or in a record or a variant of the module, but returns none",
+        ),
+        (
+            "pub fn next() -> Vec<Choice> { todo!() }",
+            "pub enum Choice { Cart(catalog::Cart), Nothing }",
+            "`Shopping::next` returns `Choice`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it",
+        ),
+        (
+            "pub fn open() -> Tally { Tally }",
+            "pub struct Bag { pub cart: catalog::Cart }
+            #[wit_resource(service = Shopping)]
+            pub struct Tally;
+            impl Tally { pub fn drain(&self) -> Bag { todo!() } }",
+            "`Tally::drain` returns `Bag`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it",
+        ),
+        (
+            "pub fn last() -> Option<Receipt> { None }",
+            "pub struct Bag { pub cart: catalog::Cart } pub struct Receipt { pub bag: Bag }",
+            "`Shopping::last` returns `Receipt`, which holds `Cart`, a resource of the imported interface example:shop/catalog@1.0.0: the runtime returns a resource only from the interface that defines it",
         ),
         (
             "pub fn order() { Ordered::run(Order { item: todo!() }) }",

@@ -39,15 +39,25 @@ resource handles, which `serde` cannot write. The bindings leave a type out of a
 derives by its bare name, so they leave the provider's `tally` out too, and the macro gives it its
 derives back by its full name for the state of `readings`.
 
+Its `speller` service, in the `spelling` module, imports `example:texts/texts@1.0.0` plainly, from
+`consumed/deps/`, an interface with a resource: `spell-job` takes a record of the module holding
+the caller's builder, the imported interface's handle, which the runtime moves into the call as it
+moves the handle alone, appends the job's word through the import and consumes the builder; `spell`
+starts a builder of its own through the import, so the Orb calls every function of the interface,
+as the test reads its contract from the component, which keeps no import function the code never
+calls. Every installation binds the import to a provider; the test's is native and issues its
+builders as capabilities.
+
 Run `just test-orb-macro` from the repository root to build both real components and execute
 `executor-wasm/tests/orb_macro_runtime.rs`, one test on Cranelift and one on Pulley. Each test
 decodes both component contracts, compares their WIT and typed metadata, loads each guest once with
 the grants of chance's WASI imports, then checks that the kernel refuses an installation without
 them, and runs every service of both guests in one host: it greets, observes the walker's state,
 draws and waits through chance, reaches the provider's objects by key, takes the tallies back,
-crosses the flags, passes the consumed records through `readings` and `library`, and verifies
-physical Store and kernel cleanup. Explicit execution requires both fixture paths and fails if
-either is absent. The macro-only facade dependency disables host features in both guest builds.
+moves a builder into `speller` inside a record, crosses the flags, passes the consumed records
+through `readings` and `library`, and verifies physical Store and kernel cleanup. Explicit
+execution requires both fixture paths and fails if either is absent. The macro-only facade
+dependency disables host features in both guest builds.
 
 The target is `wasm32-unknown-unknown`. Linking `std` here demonstrates support for ordinary Rust
 libraries; it does not provide operating-system I/O, threads or network capabilities.
