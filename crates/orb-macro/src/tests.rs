@@ -4517,6 +4517,59 @@ fn a_native_service_of_a_sub_module_is_built_in_its_module() {
     );
 }
 
+/// Each service gets a typed client in its module, `MathClient` for `Math`, as visible as the
+/// service's struct: `new` wraps a reference to one of its objects, and each function of the
+/// interface is an async method, with the function's documentation, that takes the call's
+/// `&Context` first and then the function's parameters, and calls the method locally with them as
+/// a tuple in WIT order, `()` without parameters, for its result, `()` without one. A function
+/// named `new` is `new_` on the client, and keeps its WIT name.
+#[test]
+fn a_native_service_gets_a_typed_client() {
+    let module = expanded(
+        PACKAGE,
+        "mod book {
+            #[service]
+            pub struct Math;
+            impl Math {
+                /// The sum of two numbers.
+                pub fn add(a: u32, b: u32) -> u32 { a + b }
+                pub async fn total(values: Vec<u32>) -> u64 { 0 }
+                pub fn count_words(text: String) -> Option<u32> { None }
+                pub fn ping() {}
+                pub fn new() -> u32 { 0 }
+            }
+            pub mod memo {
+                #[service]
+                pub(crate) struct Memo;
+                impl Memo { pub fn echo(context: String) -> String { context } }
+            }
+        }",
+    );
+    let root = native(&module, &[]);
+    for expected in [
+        "pub struct MathClient { reference : :: std :: rc :: Rc < :: tembra :: Reference > , }",
+        "impl MathClient {",
+        "pub fn new (reference : :: std :: rc :: Rc < :: tembra :: Reference >) -> Self { Self { reference } }",
+        "# [doc = \" The sum of two numbers.\"] pub async fn add (& self , context : & :: tembra :: Context , a : u32 , b : u32) -> :: tembra :: Result < u32 > { self . reference . call :: < (u32 , u32 ,) , u32 > (context , \"add\" , (a , b ,)) . await }",
+        "pub async fn total (& self , context : & :: tembra :: Context , values : Vec < u32 >) -> :: tembra :: Result < u64 > { self . reference . call :: < (Vec < u32 > ,) , u64 > (context , \"total\" , (values ,)) . await }",
+        "pub async fn count_words (& self , context : & :: tembra :: Context , text : String) -> :: tembra :: Result < Option < u32 > > { self . reference . call :: < (String ,) , Option < u32 > > (context , \"count-words\" , (text ,)) . await }",
+        "pub async fn ping (& self , context : & :: tembra :: Context) -> :: tembra :: Result < () > { self . reference . call :: < () , () > (context , \"ping\" , ()) . await }",
+        "pub async fn new_ (& self , context : & :: tembra :: Context) -> :: tembra :: Result < u32 > { self . reference . call :: < () , u32 > (context , \"new\" , ()) . await }",
+        ". method_with (\"new\" ,",
+    ] {
+        assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    assert!(!root.contains("pub async fn new ("), "{root}");
+    assert!(!root.contains("MemoClient"), "{root}");
+    let memo = native(&module, &["memo"]);
+    for expected in [
+        "pub (crate) struct MemoClient {",
+        "pub async fn echo (& self , context : & :: tembra :: Context , context : String) -> :: tembra :: Result < String > { self . reference . call :: < (String ,) , String > (context , \"echo\" , (context ,)) . await }",
+    ] {
+        assert!(memo.contains(expected), "{expected}\n{memo}");
+    }
+}
+
 const COUNTER_WIT: &str = "package example:counters@1.0.0;
 interface counter {
   add: func(amount: u32) -> u32;

@@ -3,12 +3,12 @@
 //! macro that expands its input only where the facade links the runtime, so a component build
 //! gets none of it and the host crate's `tembra` decides.
 //!
-//! Each service is registered by a hidden function in the module that declares it, where the
-//! author's types and functions resolve as written, whatever their visibility; `orb()`, in the Orb
-//! module, collects them. A method's portable arguments and result cross as the boundary's JSON
-//! through a codec written from the WIT types, kind by kind. What the native side does not cover
-//! yet is a compile error inside the same wrapper, naming the item; a component build of the
-//! module is unaffected.
+//! Each service is registered by a hidden function in the module that declares it, next to its
+//! typed client, where the author's types and functions resolve as written, whatever their
+//! visibility; `orb()`, in the Orb module, collects the registrations. A method's portable
+//! arguments and result cross as the boundary's JSON through a codec written from the WIT types,
+//! kind by kind. What the native side does not cover yet is a compile error inside the same
+//! wrapper, naming the item; a component build of the module is unaffected.
 use crate::{Analysis, Function, Service, ShapeKind, metadata::Metadata, wit};
 use heck::{ToShoutySnakeCase, ToSnakeCase};
 use proc_macro2::{Span, TokenStream};
@@ -23,8 +23,8 @@ pub(crate) struct Native {
     pub nested: Vec<(usize, TokenStream)>,
 }
 
-/// Write the native side of the module: `orb()` with the registration of every service, or the
-/// compile error for what the native side does not cover yet.
+/// Write the native side of the module: `orb()` with the registration of every service, and the
+/// client of each, or the compile error for what the native side does not cover yet.
 pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
     let registrations = covered(analysis).and_then(|()| {
         analysis
@@ -50,7 +50,10 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         // A service its create builds takes the inputs `orb(..)` shares.
         let inputs = service.create.is_some().then(|| quote! { , &inputs });
         calls.push(quote! { self::#(#path::)* #function(name #inputs) });
-        by_scope.entry(service.scope).or_default().push(items);
+        by_scope
+            .entry(service.scope)
+            .or_default()
+            .extend([items, client(service)]);
     }
     let root = by_scope.remove(&0).unwrap_or_default();
     let inputs = analysis
@@ -357,6 +360,65 @@ fn method(service: &Service, function: &Function, codec: &Ident) -> TokenStream 
             },
             #codec,
         )
+    }
+}
+
+/// The typed client of a service, `MathClient` for `Math`, in the service's module and as visible
+/// as its struct: `new` wraps a reference to one of its objects, and each function of the
+/// interface is an async method that takes the call's `&Context` first and then the function's
+/// parameters, and calls the method's local entrypoint with them as a tuple in WIT order, `()`
+/// without parameters, so the compiler checks the types `Reference::call` checks at run time. A
+/// function named `new` is `new_` on the client, since `new` builds the client; its WIT name stays
+/// `new`. The context's name is hygienic: a parameter of the same name stays the author's.
+fn client(service: &Service) -> TokenStream {
+    let vis = &service.vis;
+    let ident = format_ident!("{}Client", service.ident);
+    let context = Ident::new("context", Span::mixed_site());
+    let methods = service.functions.iter().map(|function| {
+        let name = wit::kebab(&function.ident);
+        let method = if function.ident == "new" {
+            format_ident!("new_", span = function.ident.span())
+        } else {
+            function.ident.clone()
+        };
+        let docs = &function.docs;
+        let params: Vec<&Ident> = function.params.iter().map(|(name, _, _)| name).collect();
+        let types: Vec<&Type> = function.params.iter().map(|(_, ty, _)| ty).collect();
+        let result = match &function.result {
+            Some((ty, _)) => quote! { #ty },
+            None => quote! { () },
+        };
+        quote! {
+            #(#[doc = #docs])*
+            pub async fn #method(
+                &self,
+                #context: &::tembra::Context
+                #(, #params: #types)*
+            ) -> ::tembra::Result<#result> {
+                self.reference
+                    .call::<(#(#types,)*), #result>(#context, #name, (#(#params,)*))
+                    .await
+            }
+        }
+    });
+    let doc = format!(
+        " A typed client of the service `{}`: one async method per function of its interface, which takes the call's context first and then the function's parameters.",
+        service.ident
+    );
+    quote! {
+        #[doc = #doc]
+        #vis struct #ident {
+            reference: ::std::rc::Rc<::tembra::Reference>,
+        }
+
+        impl #ident {
+            /// A client of the object `reference` holds.
+            pub fn new(reference: ::std::rc::Rc<::tembra::Reference>) -> Self {
+                Self { reference }
+            }
+
+            #(#methods)*
+        }
     }
 }
 

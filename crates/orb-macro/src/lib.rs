@@ -306,6 +306,8 @@ impl Payload {
 /// `#[create]` builds it, once per object.
 struct Service {
     ident: Ident,
+    /// The struct's visibility, which its native client takes.
+    vis: Visibility,
     docs: Vec<String>,
     functions: Vec<Function>,
     policy: Option<Policy>,
@@ -846,6 +848,7 @@ impl Scan {
                         let (implements, policy, guard) = service_attribute(&attribute)?;
                         self.services.push(Service {
                             ident: s.ident.clone(),
+                            vis: s.vis.clone(),
                             docs: wit::docs(&s.attrs)?,
                             functions: Vec::new(),
                             policy,

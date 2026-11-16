@@ -1,6 +1,6 @@
 //! `calculator::orb()` in a native host: the declaration the kernel sees, local calls with Rust
-//! values, portable calls with the boundary's JSON through the generated codecs, a cancelled
-//! context, and the services of the sub-modules.
+//! values, through the generated clients too, portable calls with the boundary's JSON through the
+//! generated codecs, a cancelled context, and the services of the sub-modules.
 use futures::{FutureExt, executor::LocalPool, future::LocalBoxFuture};
 use serde_json::{Value, json};
 use std::rc::Rc;
@@ -68,7 +68,8 @@ fn the_declaration_is_the_plan_of_the_contract() {
     assert_eq!(
         expected.services[0].methods,
         [
-            "add", "both", "initial", "largest", "negate", "ping", "scale", "swap", "total"
+            "add", "both", "initial", "label", "largest", "negate", "new", "ping", "scale", "swap",
+            "total"
         ]
         .map(String::from)
         .into()
@@ -120,6 +121,42 @@ fn local_calls_move_rust_values() {
                 .await
                 .unwrap_err();
             assert_eq!(error.reason, "rust_type", "{error}");
+            Ok(())
+        }
+        .boxed_local()
+    });
+}
+
+/// The typed client of a service calls each of its methods with the parameters the function takes,
+/// after the call's context, and returns what it returns: the compiler checks both, and the call
+/// takes the local entrypoint, with the arguments as a tuple. The function `new` is the client's
+/// `new_`, and a parameter named `context` is the function's, beside the call's context. A service
+/// of a sub-module has its client in its module.
+#[test]
+fn the_client_calls_each_method_with_its_types() {
+    with_main(MATH, |math, context| {
+        async move {
+            let math = calculator::MathClient::new(math);
+            assert_eq!(math.add(&context, 1, 2).await?, 3);
+            assert_eq!(math.negate(&context, 5).await?, -5);
+            assert_eq!(math.largest(&context, vec![3, 9, 4]).await?, Some(9));
+            assert_eq!(math.scale(&context, vec![1.5, 2.0], 2.0).await?, [3.0, 4.0]);
+            assert_eq!(math.initial(&context, "héllo".into()).await?, Some('h'));
+            assert_eq!(math.swap(&context, ("a".into(), 1)).await?, (1, "a".into()));
+            assert!(!math.both(&context, true, false).await?);
+            assert_eq!(math.total(&context, vec![1, 2, 3]).await?, 6);
+            math.ping(&context).await?;
+            assert_eq!(math.new_(&context).await?, 0);
+            assert_eq!(math.label(&context, 42, "total".into()).await?, "total: 42");
+            Ok(())
+        }
+        .boxed_local()
+    });
+    // Recording nothing leaves the total, which another test of the process may be adding to.
+    with_main(TALLY, |tally, context| {
+        async move {
+            let tally = calculator::tally::TallyClient::new(tally);
+            let _total: u32 = tally.record(&context, 0).await?;
             Ok(())
         }
         .boxed_local()

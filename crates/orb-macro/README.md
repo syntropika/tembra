@@ -964,10 +964,19 @@ The same module serves a native host: the macro also generates
 reading of the module as the component. Each `#[service]` is a `Service` named
 `<orb>::<interface identity>`, with the signature of its interface, the lifetime and linger of its
 attribute, and one method per `pub fn` under its WIT name. A local caller passes the arguments as a
-tuple in WIT order, `()` without arguments, and gets the Rust value back; a portable caller's JSON
-array of arguments goes through a codec the macro writes from the WIT, so the author's types need
-no serde. The Orb's name and API version come from `[package.metadata.tembra]` of the crate
-manifest, with the defaults of `cargo tembra build`: the crate name and 1.
+tuple of the parameters in WIT order, `()` without parameters, and gets the Rust value back:
+`Reference::call` checks the types only at run time, and another type fails the call with
+`rust_type`. So for each service the macro also generates a typed client in the service's module,
+as visible as its struct, `MathClient` for `Math`: `MathClient::new(reference)` wraps an
+`Rc<Reference>` to one of the service's objects, and each function of the interface is an async
+method that takes the call's `&Context` first and then the function's parameters, which the
+compiler checks. A function named `new` is `new_` on the client, since `new` builds the client; its
+WIT name stays `new`. The client of a service in a private module is as unreachable as the module:
+make the module `pub` for a host to use it, or re-export the client where the runtime is linked,
+since a component build has none. A portable caller's JSON array of arguments goes through a codec
+the macro writes from the WIT, so the author's types need no serde. The Orb's name and API version
+come from `[package.metadata.tembra]` of the crate manifest, with the defaults of
+`cargo tembra build`: the crate name and 1.
 
 ```rust,ignore
 #[tembra::orb(package = "example:calculator@1.0.0")]
@@ -985,8 +994,10 @@ pub mod calculator {
 // In a native host, under a root context.
 host.install(vec![calculator::orb()?])?;
 let math = host.get("calculator::example:calculator/math@1.0.0", vec!["main".into()], "host")?;
+let math = Rc::new(math);
 let sum: u32 = math.call(&context, "add", (1u32, 2u32)).await?;
 let sum: Value = math.call_portable(&context, "add", json!([1, 2])).await?;
+let sum: u32 = calculator::MathClient::new(math).add(&context, 1, 2).await?;
 ```
 
 The native items sit inside `tembra::__host!`, a hidden macro of the facade that expands its input
@@ -1103,8 +1114,8 @@ The macro rewrites the module with:
 10. inside `tembra::__host!`, so only where the facade links the runtime, `pub fn orb()`, or
     `orb(inputs)` with an `#[inputs]` struct, which builds the Orb named by the manifest from one
     hidden function per service, written in the service's module with the codec constant of each
-    of its methods, and an `include_bytes!` of the manifest, see
-    [using the Orb natively](#using-the-orb-natively).
+    of its methods and the service's typed client, `<Service>Client`, and an `include_bytes!` of
+    the manifest, see [using the Orb natively](#using-the-orb-natively).
 
 The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) among its dependencies,
 `dlmalloc` (feature `global`) only with `no_std`, and `serde` (features `derive`, `alloc`) and

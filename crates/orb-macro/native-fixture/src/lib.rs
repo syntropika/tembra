@@ -53,6 +53,19 @@ pub mod calculator {
 
         /// Nothing in, nothing out.
         pub fn ping() {}
+
+        /// Zero, the value a calculation starts from. Its client calls it `new_`, since `new`
+        /// builds the client.
+        #[allow(clippy::new_ret_no_self)]
+        pub fn new() -> u32 {
+            0
+        }
+
+        /// A value labelled with the context it was computed in. The client names the call's
+        /// context `context` too, and keeps the two apart.
+        pub fn label(value: u32, context: String) -> String {
+            format!("{context}: {value}")
+        }
     }
 
     /// A running total for the host's lifetime. The service lives in a sub-module, with its data,
