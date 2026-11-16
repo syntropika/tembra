@@ -2266,11 +2266,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let world_literal = LitStr::new(&wit::escaped(&world), Span::call_site());
     // The bindings read the author's WIT and, nested in it, the kernel package a state, a
     // resource or the context uses and the WASI packages the imports need, unless the consumed
-    // directory holds them already, as a contract with its dependencies does; the hook packages
-    // come from the consumed directory. Foreign interfaces need `generate_all`.
+    // directory holds them already, as a contract with its dependencies does, every copy of a
+    // bundled package there checked whether the Orb uses it or not; the hook packages come from
+    // the consumed directory. Foreign interfaces need `generate_all`.
     let kernel = !states.is_empty() || !resources.is_empty() || options.context;
-    let standard = wasi::packages(&options.imports, wit_dir.as_deref())?;
-    let inline = if kernel && wit::guest_package_needed(wit_dir.as_deref())? {
+    let copies = wit::bundled_copies(wit_dir.as_deref())?;
+    let standard = wasi::packages(&options.imports, &copies)?;
+    let inline = if kernel && wit::guest_package_needed(&copies)? {
         LitStr::new(
             &format!("{wit}\n{}{standard}", wit::guest_package()?),
             Span::call_site(),

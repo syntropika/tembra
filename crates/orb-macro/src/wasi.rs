@@ -5,9 +5,9 @@
 //! unless the consumed directory holds them already. Which grant an import needs is the
 //! installation's rule, read from the same identity.
 use crate::wit::error;
-use std::{collections::BTreeSet, path::Path};
+use std::collections::BTreeSet;
 use syn::LitStr;
-use wit_parser::{PackageId, Resolve};
+use wit_parser::{PackageId, PackageName, Resolve};
 
 /// Whether an imported interface is one of WASI, by its namespace, rather than another Orb's.
 pub(crate) fn is_wasi(identity: &str) -> bool {
@@ -35,11 +35,12 @@ pub(crate) fn resolve() -> syn::Result<Resolve> {
 
 /// The WASI packages the Orb's imports need, nested for the inline WIT: the package of each
 /// imported WASI interface and the bundled packages it builds on, in dependency order. A package
-/// the consumed directory `dir` holds a copy of already is left out (`wit::bundled_copy`). An
-/// import in the `wasi` namespace that names no interface of the bundled packages, another
-/// version or an unstable interface, is an error on its literal, and so is an interface no host
-/// serves as an import, one a component exports instead.
-pub(crate) fn packages(imports: &[LitStr], dir: Option<&Path>) -> syn::Result<String> {
+/// the consumed directory holds a copy of already, one of its bundled `copies`
+/// (`wit::bundled_copies`), is left out. An import in the `wasi` namespace that names no
+/// interface of the bundled packages, another version or an unstable interface, is an error on
+/// its literal, and so is an interface no host serves as an import, one a component exports
+/// instead.
+pub(crate) fn packages(imports: &[LitStr], copies: &BTreeSet<PackageName>) -> syn::Result<String> {
     let imported: Vec<&LitStr> = imports
         .iter()
         .filter(|import| is_wasi(&import.value()))
@@ -81,13 +82,10 @@ pub(crate) fn packages(imports: &[LitStr], dir: Option<&Path>) -> syn::Result<St
             pending.extend(bundled.package_direct_deps(package));
         }
     }
-    let consumed = dir.map(crate::wit::resolve).transpose()?;
     let mut nested = String::new();
     for (id, source) in sources.iter().filter(|(id, _)| needed.contains(id)) {
         let name = &bundled.packages[*id].name;
-        if let Some((dir, consumed)) = dir.zip(consumed.as_ref())
-            && crate::wit::bundled_copy(consumed, dir, name, "a WASI package Tembra serves")?
-        {
+        if copies.contains(name) {
             continue;
         }
         nested.push('\n');

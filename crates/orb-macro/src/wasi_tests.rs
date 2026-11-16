@@ -35,7 +35,8 @@ fn inline(generated: &str) -> String {
 }
 
 /// A directory holding the contract of an Orb that imports a WASI interface, as `cargo tembra
-/// build` writes it: the world, and in `deps/` each given WASI package as its file.
+/// build` writes it: the world, and under `deps/` each given package at its path there, which is
+/// its file, or a file in a directory of its own.
 fn contract(name: &str, deps: &[(&str, &str)]) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "tembra-orb-macro-wasi-{name}-{}",
@@ -49,7 +50,9 @@ fn contract(name: &str, deps: &[(&str, &str)]) -> PathBuf {
     )
     .unwrap();
     for (file, source) in deps {
-        std::fs::write(dir.join("deps").join(file), source).unwrap();
+        let path = dir.join("deps").join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
     }
     dir
 }
@@ -294,4 +297,115 @@ fn a_consumed_contract_may_bring_the_wasi_packages() {
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+/// Every copy of a bundled package a consumed directory holds is checked as `Contract::from_dir`
+/// checks it, whether the imports need the package or not: an edited copy in `deps/` of
+/// `wasi:random` or of the kernel's package, in an Orb that imports `wasi:clocks` or no WASI
+/// interface and has no state, is an error naming its file and what the package is, and a copy in
+/// a directory of `deps/`, even line for line, or nested in a file of the directory itself, is
+/// `from_dir`'s error naming that directory. The same copies, line for line in `deps/` itself,
+/// expand.
+#[test]
+fn every_copy_of_a_bundled_package_is_checked() {
+    let clocks = bundled("wasi-clocks.wit");
+    let random = bundled("wasi-random.wit");
+    let guest = tembra_contracts::guest::SOURCE;
+    let imports: [&[&str]; 2] = [
+        &[
+            "example:timer/timer@1.0.0",
+            "wasi:clocks/monotonic-clock@0.3.0",
+        ],
+        &["example:timer/timer@1.0.0"],
+    ];
+    let refused = |imports: &[&str], dir: &Path| {
+        expanded(importing(imports, Some(dir)), DICE)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string()
+    };
+    let provided = |package: &str, place: &Path| {
+        format!(
+            "WIT package {package} in {} is already provided by the standard contracts bundled with Tembra; remove the duplicate",
+            place.display()
+        )
+    };
+    let dir = contract(
+        "unused-copies",
+        &[
+            ("wasi-clocks.wit", clocks),
+            ("wasi-random.wit", random),
+            ("tembra-guest.wit", guest),
+        ],
+    );
+    for imports in imports {
+        expanded(importing(imports, Some(&dir)), DICE)
+            .unwrap_or_else(|error| panic!("{imports:?}: {error}"));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+    let edited_random = random.replace("/// ", "/// (another text) ");
+    let edited_guest = guest.replace("/// ", "/// (another text) ");
+    for (file, copy, what) in [
+        (
+            "wasi-random.wit",
+            edited_random.as_str(),
+            "wasi:random@0.3.0, a WASI package Tembra serves",
+        ),
+        (
+            "tembra-guest.wit",
+            edited_guest.as_str(),
+            "tembra:guest@1.0.0, the kernel's package",
+        ),
+    ] {
+        let dir = contract(
+            &format!("edited-{file}"),
+            &[("wasi-clocks.wit", clocks), (file, copy)],
+        );
+        for imports in imports {
+            let error = refused(imports, &dir);
+            assert!(
+                error.contains(&format!(
+                    "deps/{file}: this copy of {what}, differs from the one bundled with this macro"
+                )),
+                "{imports:?}: {error}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    for (name, deps, package, place) in [
+        (
+            "clocks-directory",
+            vec![("clocks/wasi-clocks.wit", clocks)],
+            "wasi:clocks@0.3.0",
+            "clocks",
+        ),
+        (
+            "kernel-directory",
+            vec![
+                ("wasi-clocks.wit", clocks),
+                ("kernel/tembra-guest.wit", guest),
+            ],
+            "tembra:guest@1.0.0",
+            "kernel",
+        ),
+    ] {
+        let dir = contract(name, &deps);
+        let message = provided(package, &dir.join("deps").join(place));
+        for imports in imports {
+            let error = refused(imports, &dir);
+            assert!(error.contains(&message), "{name}, {imports:?}: {error}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    let dir = contract("nested-clocks", &[]);
+    let timer = dir.join("timer.wit");
+    let own = std::fs::read_to_string(&timer).unwrap();
+    let nested = crate::wit::nested(clocks).unwrap();
+    std::fs::write(&timer, format!("{own}\n{nested}")).unwrap();
+    let message = provided("wasi:clocks@0.3.0", &dir);
+    for imports in imports {
+        let error = refused(imports, &dir);
+        assert!(error.contains(&message), "{imports:?}: {error}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

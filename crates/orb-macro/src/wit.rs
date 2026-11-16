@@ -12,7 +12,7 @@ use syn::{
     Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, Meta, Type, ext::IdentExt,
     spanned::Spanned,
 };
-use wit_parser::{Resolve, TypeDefKind};
+use wit_parser::{PackageName, Resolve, TypeDefKind};
 
 /// WIT names are kebab-case; Rust identifiers map to them one by one, a raw identifier without
 /// its `r#`.
@@ -561,54 +561,91 @@ pub(crate) fn guest_package() -> syn::Result<String> {
 }
 
 /// Whether the inline WIT needs the kernel's bundled package nested in it: not when the consumed
-/// directory holds a copy already (`bundled_copy`).
-pub(crate) fn guest_package_needed(dir: Option<&Path>) -> syn::Result<bool> {
-    let Some(dir) = dir else {
-        return Ok(true);
-    };
-    let consumed = resolve(dir)?;
+/// directory holds a copy already, one of its bundled `copies` (`bundled_copies`).
+pub(crate) fn guest_package_needed(copies: &BTreeSet<PackageName>) -> syn::Result<bool> {
     let mut bundled = Resolve::default();
     let bundled_id = bundled
         .push_str("guest.wit", GUEST)
         .map_err(|cause| error(format!("the bundled tembra:guest package: {cause:#}")))?;
-    let name = &bundled.packages[bundled_id].name;
-    Ok(!bundled_copy(&consumed, dir, name, "the kernel's package")?)
+    Ok(!copies.contains(&bundled.packages[bundled_id].name))
 }
 
-/// Whether the consumed packages, read from `dir`, hold the bundled package `name` already, as a
-/// contract `cargo tembra build` wrote does in its `deps/`; the inline WIT then leaves the bundled
-/// one out, since the bindings would read it twice. The copy must be one `Contract::from_dir`
-/// reads too: its file, found by its first interface, is the bundled one line for line, whatever
-/// its line endings (`tembra_contracts::bundled`), so a copy differing only in its comments is
-/// not. Another copy is an error naming its file, else `dir`, and the package, `what` it is.
-pub(crate) fn bundled_copy(
-    consumed: &Resolve,
-    dir: &Path,
-    name: &wit_parser::PackageName,
-    what: &str,
-) -> syn::Result<bool> {
-    let Some(&package) = consumed.package_names.get(name) else {
-        return Ok(false);
+/// The bundled packages the consumed packages, read from `dir`, hold copies of, as a contract
+/// `cargo tembra build` wrote holds them in its `deps/`: the inline WIT leaves those out, since
+/// the bindings would read them twice. Every consumed package named as a bundled one, a WASI
+/// package Tembra serves or the kernel's, is checked as `Contract::from_dir` checks it, whether
+/// the Orb uses it or not. Its file, found by its first interface, must be in `deps/` itself: a
+/// copy in a directory of `deps/` or in `dir`, even line for line, is `from_dir`'s error naming
+/// that directory. And it must be the bundled file line for line, whatever its line endings
+/// (`tembra_contracts::bundled`), so a copy differing only in its comments is not: another copy
+/// is an error naming its file, else `dir`, and the package and what it is.
+pub(crate) fn bundled_copies(dir: Option<&Path>) -> syn::Result<BTreeSet<PackageName>> {
+    let Some(dir) = dir else {
+        return Ok(BTreeSet::new());
     };
-    let file = consumed.packages[package]
-        .interfaces
-        .values()
-        .next()
-        .and_then(|id| {
-            consumed
-                .source_map
-                .resolve_span(consumed.interfaces[*id].span)
-        })
-        .map(|location| location.path.to_owned());
-    if let Some(file) = &file
-        && std::fs::read_to_string(file).is_ok_and(|source| tembra_contracts::bundled(&source))
-    {
-        return Ok(true);
+    let consumed = resolve(dir)?;
+    // The bundled packages by the names their sources declare: resolved together with the
+    // consumed ones, each would be found as its own copy.
+    let bundled: Vec<&str> = tembra_contracts::WASI_SOURCES
+        .iter()
+        .map(|(_, source)| *source)
+        .chain([GUEST])
+        .filter_map(|source| source.lines().find_map(declared))
+        .collect();
+    let deps = dir.join("deps");
+    let mut copies = BTreeSet::new();
+    for (name, &package) in &consumed.package_names {
+        if !bundled.contains(&name.to_string().as_str()) {
+            continue;
+        }
+        let file = consumed.packages[package]
+            .interfaces
+            .values()
+            .next()
+            .and_then(|id| {
+                consumed
+                    .source_map
+                    .resolve_span(consumed.interfaces[*id].span)
+            })
+            .map(|location| location.path.to_owned());
+        if let Some(place) = file
+            .as_deref()
+            .and_then(|file| Path::new(file).parent())
+            .filter(|place| *place != deps.as_path())
+        {
+            return Err(error(format!(
+                "WIT package {name} in {} is already provided by the standard contracts bundled with Tembra; remove the duplicate",
+                place.display()
+            )));
+        }
+        if let Some(file) = &file
+            && std::fs::read_to_string(file).is_ok_and(|source| tembra_contracts::bundled(&source))
+        {
+            copies.insert(name.clone());
+            continue;
+        }
+        let what = if name.namespace == "wasi" {
+            "a WASI package Tembra serves"
+        } else {
+            "the kernel's package"
+        };
+        let place = file.unwrap_or_else(|| dir.display().to_string());
+        return Err(error(format!(
+            "{place}: this copy of {name}, {what}, differs from the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version"
+        )));
     }
-    let place = file.unwrap_or_else(|| dir.display().to_string());
-    Err(error(format!(
-        "{place}: this copy of {name}, {what}, differs from the one bundled with this macro; build the consumed contract with the `cargo tembra` of the same version"
-    )))
+    Ok(copies)
+}
+
+/// The package a line of a WIT package file declares: `ns:name@version` for the line
+/// `package ns:name@version;`.
+fn declared(line: &str) -> Option<&str> {
+    Some(
+        line.trim()
+            .strip_prefix("package ")?
+            .strip_suffix(';')?
+            .trim(),
+    )
 }
 
 /// A WIT package file in nested form: its declaration, a line `package ns:name@version;`, opens
@@ -619,12 +656,8 @@ pub(crate) fn nested(file: &str) -> Option<String> {
     let mut nested = String::new();
     loop {
         let line = lines.next()?;
-        let declared = line
-            .trim()
-            .strip_prefix("package ")
-            .and_then(|rest| rest.strip_suffix(';'));
-        if let Some(name) = declared {
-            nested.push_str(&format!("package {} {{\n", name.trim()));
+        if let Some(name) = declared(line) {
+            nested.push_str(&format!("package {name} {{\n"));
             break;
         }
         nested.push_str(line);

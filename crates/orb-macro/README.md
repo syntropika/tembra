@@ -631,11 +631,13 @@ The WASI packages are bundled with `tembra-contracts`, so a WASI import needs no
 the macro reads the interface from its bundled package and nests that package, with the bundled
 packages it builds on, in the WIT the bindings read. A consumed directory may hold some of them
 already, as a contract `cargo tembra build` wrote holds those it depends on in its `deps/`: the
-bindings read those from there. Each must be the bundled file line for line, comments included,
-whatever its line endings, as the tools that load the directory require; another copy is an error
-naming its file. The `wasi` namespace holds the bundled packages and nothing else: an identity
-naming none of their interfaces, of another version or unstable like `wasi:clocks/timezone`, is a
-compile error listing what there is.
+bindings read those from there. As the tools that load the directory require, every copy of a
+bundled package the directory holds, whether the Orb uses it or not, must be a file of `deps/`
+itself and the bundled file line for line, comments included, whatever its line endings: another
+copy there is an error naming its file, and a copy in a directory of `deps/`, even line for line,
+is an error asking to remove it. The `wasi` namespace holds the bundled packages and nothing
+else: an identity naming none of their interfaces, of another version or unstable like
+`wasi:clocks/timezone`, is a compile error listing what there is.
 
 WASI 0.3 is asynchronous where it waits: a clock's waits, files, sockets and HTTP are `async func`,
 whose bindings are `async fn` a method awaits, as `throw_after` does, and standard input and output
@@ -1005,8 +1007,9 @@ The macro rewrites the module with:
    as a string, plus `path` when the Orb consumes other packages and, with a state, a resource or
    the context, the kernel's `tembra:guest` package nested in the inline text, unless the consumed
    directory holds it already, as a contract `cargo tembra build` wrote does in its `deps/`; that
-   copy must be the bundled file line for line, whatever its line endings, or the macro names
-   its file. With a WASI import, the WASI packages it needs are nested the same way, from the
+   copy, as every copy of a bundled package the directory holds, used or not, must be a file of
+   `deps/` itself and the bundled file line for line, whatever its line endings, or the macro
+   names it. With a WASI import, the WASI packages it needs are nested the same way, from the
    sources `tembra-contracts` bundles.
    With a state, also `serde` derives on the generated types, except the records and
    variants holding a consumed package's flags type or a resource handle, which have no `serde`
