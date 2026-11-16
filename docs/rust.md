@@ -286,7 +286,65 @@ issuing Store's remaining handles. `Engine::resources()` counts entries still he
 tables; `Engine::instances()` counts live Stores. A removed entry may still be completing
 its destructor.
 
-This transport currently covers compiled exporters with native or compiled callers through
+A native Orb exports resources over the same transport, and its callers, native or compiled,
+hold them as they hold a compiled exporter's. A Rust type implementing `portable::Issuable`
+names the WIT resource type its values are issued as. The exporter serves each function of the
+interface with `Service::payload_method`, under its WIT name and with the interface's signature.
+`Payload::issue` issues a value into the result and returns the `Slot` to place wherever the
+result's data names the resource: alone, or in a record, a list, a tuple, an option, a variant
+or a result. `Payload::receiver::<T>()` takes a method's implicit `self` as a `Receiver<T>`, whose
+`with` reads the value:
+
+```rust
+use serde_json::{Value, json};
+use std::cell::Cell;
+use tembra::portable::{Issuable, Nominal, Payload};
+
+struct Session {
+    total: Cell<u64>,
+}
+
+impl Issuable for Session {
+    fn nominal() -> Nominal {
+        Nominal { interface: "example:sessions/sessions@1.0.0".into(), name: "session".into() }
+    }
+}
+
+/// The arguments of a call, read from the boundary's JSON array.
+fn arguments<A: serde::de::DeserializeOwned>(payload: Payload) -> tembra::Result<A> {
+    serde_json::from_value(payload.into_data()?)
+        .map_err(|error| tembra::Error::invalid(tembra::core::Reason::Arguments, error.to_string()))
+}
+
+let service = Service::new(name, |_| Ok(()))
+    .signature(signature)
+    .payload_method("[constructor]session", |_, _, payload: Payload| async move {
+        let (seed,): (u64,) = arguments(payload)?;
+        let mut result = Payload::data(Value::Null);
+        let session = result.issue(Session { total: Cell::new(seed) });
+        result.encode(session)
+    })
+    .payload_method("[method]session.add", |_, _, mut payload: Payload| async move {
+        let session = payload.receiver::<Session>()?;
+        let (n,): (u64,) = arguments(payload)?;
+        let total = session.with(|session| {
+            session.total.set(session.total.get() + n);
+            session.total.get()
+        })?;
+        Ok(Payload::data(json!(total)))
+    });
+```
+
+A `self` of another resource type is refused as `Forbidden/resource`, one of another object or of
+a retired revision as `Gone/resource`, and a method called without one as `Invalid/resource`. The
+receiver reads the value across the call's awaits, since the call pins it, but cannot keep it
+alive beyond the call. The value belongs to the object version that issued it, as a guest
+instance belongs to its Store: it closes, running its `Drop`, once with its last owner, or when
+that object is reloaded or released or the host closes, whatever handles remain. A later call
+through a remaining handle answers as for a compiled exporter: `Gone/resource` after a reload,
+`Gone/object` once the object is released, and `Cancelled/root` from a root the close cancelled.
+
+This transport covers compiled and native exporters with native or compiled callers through
 the Rust facade. Source Orbs and the Node/mobile JSON ports refuse inter-Orb resource contracts until
 their capability carriers are implemented. Compiled callers use ordinary generated WIT bindings
 for owned results nested in records, lists, tuples, simple options, variants and results. Native
