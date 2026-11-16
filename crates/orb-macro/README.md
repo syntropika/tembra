@@ -982,7 +982,9 @@ the macro writes from the WIT, so the author's types need no serde. The Orb's na
 come from `[package.metadata.tembra]` of the crate manifest, with the defaults of
 `cargo tembra build`: the crate name and 1. `orb_named(name, api_version, ..)` builds the same Orb
 under a name and API version the host chooses at run time, so that a host can also install the
-crate twice; `orb(..)` only calls it with the manifest's, passing its own arguments on.
+crate twice; `orb(..)` only calls it with the manifest's, passing its own arguments on. Both return
+the runtime's `Orb`, an ordinary builder: before installing it, a host may append services written
+by hand and the requirements they need.
 
 ```rust,ignore
 #[tembra::orb(package = "example:calculator@1.0.0")]

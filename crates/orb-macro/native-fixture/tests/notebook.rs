@@ -1,11 +1,11 @@
 //! `notebook::orb(..)` in a native host: the Orb takes the host's inputs, the create of `Notes`
 //! builds each of its objects from them, `Board` admits only the address its guard names, a
-//! method's `tembra::Result` is the call's error channel, and the `archive` feature adds what its
-//! `#[cfg]`s gate.
+//! method's `tembra::Result` is the call's error channel, the `archive` feature adds what its
+//! `#[cfg]`s gate, and the host extends the Orb `orb(..)` builds.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
-use tembra::{Code, Host, contracts::Contract};
+use tembra::{Code, Host, Orb, Service, contracts::Contract, core::Requirement};
 use tembra_orb_native_fixture::notebook;
 
 const NOTES: &str = "calculator::example:notes/notes@1.0.0";
@@ -464,5 +464,84 @@ fn the_archive_feature_adds_an_input_a_method_and_a_service() {
     if let Some(shelf) = shelf {
         shelf.release().unwrap();
     }
+    pool.run_until(host.close()).unwrap();
+}
+
+/// `orb(..)` returns the runtime's `Orb`, an ordinary builder: a host appends a service written by
+/// hand and a requirement on another Orb, which that service calls, and installs the result beside
+/// that Orb. The declaration is the macro's with both appended; the host refuses the Orb alone,
+/// whose requirement nothing provides; and once both are installed, the appended service reaches
+/// the other Orb through the requirement while the macro's services answer as before.
+#[test]
+fn orb_stays_an_ordinary_builder() {
+    const CLOCK: &str = "clock::time";
+    const STAMP: &str = "calculator::stamp";
+    let events = Events::default();
+    let requirement = Requirement {
+        signatures: Default::default(),
+        hook_signatures: Default::default(),
+        orb: "clock".into(),
+        api_version: 1,
+        methods: [(CLOCK.into(), ["now".into()].into())].into(),
+        hooks: Default::default(),
+    };
+    let extended = || {
+        notebook::orb(inputs(&events))
+            .unwrap()
+            .service(
+                Service::new(STAMP, |declaration| {
+                    declaration.get(CLOCK, vec!["main".into()])
+                })
+                .method(
+                    "stamp",
+                    |clock, context, (text,): (String,)| async move {
+                        let now = clock.call::<_, u32>(&context, "now", ()).await?;
+                        Ok(format!("{text} at {now}"))
+                    },
+                ),
+            )
+            .requires(requirement.clone())
+    };
+    let clock = Orb::new("clock", 1).service(
+        Service::new(CLOCK, |_| Ok(())).method("now", |_, _, (): ()| async move { Ok(7u32) }),
+    );
+    let mut expected = notebook::orb(inputs(&events))
+        .unwrap()
+        .declaration()
+        .clone();
+    expected
+        .services
+        .push(tembra::core::Service::new(STAMP, ["stamp"]));
+    expected.requires.push(requirement.clone());
+    assert_eq!(extended().declaration(), &expected);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    let error = host.install(vec![extended()]).unwrap_err();
+    assert_eq!(
+        (error.code, error.reason.as_str(), error.message.as_str()),
+        (Code::Unavailable, "dependency", "clock"),
+        "{error}"
+    );
+    host.install(vec![extended(), clock]).unwrap();
+    let stamp = Rc::new(host.get(STAMP, vec!["main".into()], "host").unwrap());
+    let notes = Rc::new(host.get(NOTES, vec!["a".into()], "alice").unwrap());
+    let (stamped, added) = (stamp.clone(), notes.clone());
+    let answers = pool
+        .run_until(host.root("host", move |context| {
+            async move {
+                let stamped = stamped
+                    .call::<_, String>(&context, "stamp", ("noted".to_string(),))
+                    .await?;
+                let count = added
+                    .call::<_, u32>(&context, "add", ("note".to_string(),))
+                    .await?;
+                Ok((stamped, count))
+            }
+            .boxed_local()
+        }))
+        .unwrap();
+    assert_eq!(answers, ("noted at 7".to_string(), 1));
+    stamp.release().unwrap();
+    notes.release().unwrap();
     pool.run_until(host.close()).unwrap();
 }
