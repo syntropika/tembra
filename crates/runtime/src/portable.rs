@@ -10,6 +10,11 @@
 //! duplicated kernel claim with the ordinary admission checks. The implicit `self` travels as a
 //! [`Loan`] that only the issuer can interpret.
 //!
+//! A native exporter issues a plain Rust value as a capability of a WIT resource type: the type
+//! names its resource type ([`Issuable`]), [`Payload::issue`] issues the value and places its
+//! [`Slot`] wherever the result's data names it, and a method reads its implicit `self` back as
+//! the value with [`Payload::receiver`].
+//!
 //! A payload may also carry the end of a byte stream ([`ByteStream`]). The physical work that
 //! produces it never travels in a payload: a provider returns it beside its result in an
 //! [`Outcome`], and the call's own managed task keeps driving it under the call's invocation.
@@ -57,6 +62,41 @@ impl Issued {
     }
 }
 
+/// A Rust type whose values a native exporter issues as capabilities of one WIT resource type.
+pub trait Issuable: 'static {
+    /// The resource type the values are issued as.
+    fn nominal() -> Nominal;
+}
+
+/// The backend of an issued Rust value. Dropping it, with the last owner, drops the value,
+/// unless a method still holds it as its `self`: the managed call pins the backend until that
+/// call has physically ended.
+struct Backend<T> {
+    nominal: Nominal,
+    value: Rc<T>,
+}
+
+impl<T: Issuable> Capability for Backend<T> {
+    fn nominal(&self) -> &Nominal {
+        &self.nominal
+    }
+}
+
+/// The data slot of a capability issued by [`Payload::issue`]. It serializes as the capability's
+/// payload-local index, wherever the result's data names the resource: the whole result, a
+/// record field, a list element, a tuple position, an option, or a variant or result payload.
+#[must_use = "a slot names its capability in the result's data"]
+pub struct Slot(u32);
+
+impl Serialize for Slot {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.0)
+    }
+}
+
 /// The implicit `self` of one call. The managed call holds its physical owner separately;
 /// retaining this weak loan cannot extend the resource's lifetime.
 pub struct Loan(Weak<dyn Capability>);
@@ -67,6 +107,32 @@ impl Loan {
     pub fn with_backend<T: Capability, R>(&self, operation: impl FnOnce(&T) -> R) -> Option<R> {
         let owner = self.0.upgrade()?;
         (&*owner as &dyn Any).downcast_ref::<T>().map(operation)
+    }
+
+    /// The value of a loan issued by [`Payload::issue`] for `T`. Another resource type is
+    /// refused as `Forbidden/resource`; another issuer's or a closed capability as
+    /// `Gone/resource`.
+    fn value<T: Issuable>(&self) -> Result<Rc<T>> {
+        let owner = self
+            .0
+            .upgrade()
+            .ok_or_else(|| Error::new(core::Code::Gone, Reason::Resource, "resource has closed"))?;
+        if let Some(backend) = (&*owner as &dyn Any).downcast_ref::<Backend<T>>() {
+            return Ok(backend.value.clone());
+        }
+        Err(if *owner.nominal() == T::nominal() {
+            Error::new(
+                core::Code::Gone,
+                Reason::Resource,
+                "the resource belongs to another issuer",
+            )
+        } else {
+            Error::new(
+                core::Code::Forbidden,
+                Reason::Resource,
+                "the resource has another type",
+            )
+        })
     }
 }
 
@@ -134,6 +200,39 @@ impl Payload {
     /// Take the implicit `self` loan of this call, if any.
     pub fn take_receiver(&mut self) -> Option<Loan> {
         self.receiver.take()
+    }
+
+    /// Issue a Rust value as a capability of its WIT resource type, owned by this payload until
+    /// it is delivered. Place the returned [`Slot`] where the result's data names the resource,
+    /// and serialize that result with [`Payload::encode`].
+    pub fn issue<T: Issuable>(&mut self, value: T) -> Slot {
+        Slot(self.attach(Issued::new(Backend {
+            nominal: T::nominal(),
+            value: Rc::new(value),
+        })))
+    }
+
+    /// Replace the data with a serialized result, whose resource positions hold the slots this
+    /// payload issued.
+    pub fn encode(self, result: impl Serialize) -> Result<Self> {
+        self.map_value(|_| {
+            serde_json::to_value(result)
+                .map_err(|error| Error::invalid(Reason::Result, error.to_string()))
+        })
+    }
+
+    /// Take the implicit `self` of this call as the value it was issued from. A method may use
+    /// the value across awaits: the managed call pins its capability until the call has
+    /// physically ended. A call without `self` is refused, as is a `self` of another resource
+    /// type (`Forbidden/resource`) or of another issuer (`Gone/resource`).
+    pub fn receiver<T: Issuable>(&mut self) -> Result<Rc<T>> {
+        let loan = self.receiver.take().ok_or_else(|| {
+            Error::invalid(
+                Reason::Resource,
+                "a resource method requires its owned handle",
+            )
+        })?;
+        loan.value()
     }
 
     /// Whether the payload carries no capability at all.
