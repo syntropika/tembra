@@ -342,6 +342,43 @@ pub(crate) fn implemented_by_hand(
         .collect()
 }
 
+/// The trait impls the Orb's modules write by hand for the type `ident` of the module `home`, a
+/// flags struct or not, each with the module it is written in: those whose type, written in that
+/// module, is the type (`names`).
+pub(crate) fn impls_of(
+    tree: &mut Module,
+    modules: &[Vec<Ident>],
+    uses: &[Uses],
+    declared: &[(usize, Ident)],
+    ident: &Ident,
+    home: usize,
+) -> Vec<(usize, syn::ItemImpl)> {
+    trait_impls(tree, modules, |ty: &Type, scope: usize| {
+        names(ty, scope, ident, home, modules, uses, declared)
+    })
+}
+
+/// The trait impls the Orb's modules write, each with the module it is written in, whose type is
+/// the one `names` tells, which says whether a type written in a module is it.
+fn trait_impls(
+    tree: &mut Module,
+    modules: &[Vec<Ident>],
+    names: impl Fn(&Type, usize) -> bool,
+) -> Vec<(usize, syn::ItemImpl)> {
+    let mut found = Vec::new();
+    for (scope, module) in modules.iter().enumerate() {
+        for item in &tree.at(module).items {
+            if let Item::Impl(block) = item
+                && block.trait_.is_some()
+                && names(&block.self_ty, scope)
+            {
+                found.push((scope, block.clone()));
+            }
+        }
+    }
+    found
+}
+
 /// Whether a type, written in the module `scope`, is the type `ident` of the module `home`: a path
 /// that names it in that module, followed through the module's `use`s, `self::`, `super::` and
 /// the sub-modules (`type_module`), as `Access` in its own module, `model::Access` from the Orb
@@ -390,49 +427,41 @@ fn traits_implemented(
     names: impl Fn(&Type, usize) -> bool,
 ) -> BTreeMap<String, Span> {
     let mut implemented = BTreeMap::new();
-    for (scope, module) in modules.iter().enumerate() {
-        for item in &tree.at(module).items {
-            let Item::Impl(block) = item else {
-                continue;
+    for (scope, block) in trait_impls(tree, modules, &names) {
+        let Some((_, path, _)) = &block.trait_ else {
+            continue;
+        };
+        let Some(last) = path.segments.last() else {
+            continue;
+        };
+        if last.ident == "BitOr" {
+            let parameter = |rhs: &Type| {
+                block.generics.type_params().any(|param| {
+                    matches!(rhs, Type::Path(path)
+                        if path.qself.is_none() && path.path.is_ident(&param.ident))
+                })
             };
-            let Some((_, path, _)) = &block.trait_ else {
-                continue;
-            };
-            let Some(last) = path.segments.last() else {
-                continue;
-            };
-            if !names(&block.self_ty, scope) {
-                continue;
-            }
-            if last.ident == "BitOr" {
-                let parameter = |rhs: &Type| {
-                    block.generics.type_params().any(|param| {
-                        matches!(rhs, Type::Path(path)
-                            if path.qself.is_none() && path.path.is_ident(&param.ident))
-                    })
-                };
-                let overlaps = match &last.arguments {
-                    syn::PathArguments::None => true,
-                    syn::PathArguments::AngleBracketed(arguments) => {
-                        let mut arguments = arguments.args.iter();
-                        match (arguments.next(), arguments.next()) {
-                            (Some(syn::GenericArgument::Type(rhs)), None) => {
-                                matches!(rhs, Type::Path(path)
-                                    if path.qself.is_none() && path.path.is_ident("Self"))
-                                    || names(rhs, scope)
-                                    || parameter(rhs)
-                            }
-                            _ => false,
+            let overlaps = match &last.arguments {
+                syn::PathArguments::None => true,
+                syn::PathArguments::AngleBracketed(arguments) => {
+                    let mut arguments = arguments.args.iter();
+                    match (arguments.next(), arguments.next()) {
+                        (Some(syn::GenericArgument::Type(rhs)), None) => {
+                            matches!(rhs, Type::Path(path)
+                                if path.qself.is_none() && path.path.is_ident("Self"))
+                                || names(rhs, scope)
+                                || parameter(rhs)
                         }
+                        _ => false,
                     }
-                    syn::PathArguments::Parenthesized(_) => false,
-                };
-                if !overlaps {
-                    continue;
                 }
+                syn::PathArguments::Parenthesized(_) => false,
+            };
+            if !overlaps {
+                continue;
             }
-            implemented.insert(last.ident.to_string(), block.span());
         }
+        implemented.insert(last.ident.to_string(), block.span());
     }
     implemented
 }

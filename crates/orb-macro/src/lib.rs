@@ -1868,12 +1868,24 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         if let Some(attrs) = attrs
             && serialized.contains(&index)
         {
+            // The traits of `serde` the type has already: a derive of one, under any name, or an
+            // impl the Orb's modules write by hand. A derive the macro cannot follow to a crate
+            // is `serde`'s by its name, as one a crate-root `#[macro_use]` brings.
+            let derived = serde_derived(attrs, scope, &uses, &modules, &ident, true);
+            let by_hand: Vec<String> =
+                flags::impls_of(&mut tree, &modules, &uses, &declared_types, &ident, scope)
+                    .into_iter()
+                    .filter_map(|(written, block)| {
+                        let (_, path, _) = block.trait_.as_ref()?;
+                        serde_trait(path, written, &uses, &modules, &ident, true)
+                    })
+                    .collect();
             let missing: Vec<(&str, proc_macro2::TokenStream)> = [
                 ("Serialize", quote! { ::serde::Serialize }),
                 ("Deserialize", quote! { ::serde::Deserialize }),
             ]
             .into_iter()
-            .filter(|(name, _)| !derives(attrs, name))
+            .filter(|(name, _)| !derived.iter().chain(&by_hand).any(|has| has == name))
             .collect();
             // The macro reads the type's derives before the compiler evaluates `#[cfg_attr(..)]`:
             // one of those it writes, derived under such an attribute as well, would be a second
@@ -3949,7 +3961,20 @@ fn conditional_serde(
     modules: &[Vec<Ident>],
     owner: &Ident,
 ) -> Vec<String> {
-    applied(meta)
+    serde_derived(&applied(meta), scope, uses, modules, owner, false)
+}
+
+/// The traits of `serde`, by name, that the `#[derive(..)]`s among `attrs` implement on `owner`,
+/// in the module `scope`, each derive's path followed as `serde_trait` follows it.
+fn serde_derived(
+    attrs: &[Attribute],
+    scope: usize,
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+    owner: &Ident,
+    unbound: bool,
+) -> Vec<String> {
+    attrs
         .iter()
         .filter(|attribute| attribute.path().is_ident("derive"))
         .filter_map(|derive| {
@@ -3960,18 +3985,35 @@ fn conditional_serde(
                 .ok()
         })
         .flatten()
-        .filter_map(|path| {
-            let name = match followed(&path, scope, uses, modules, owner).ok()? {
-                Followed::Path(named) => match Derive::of(named) {
-                    Derive::Serde(named) => named.segments.last()?.to_string(),
-                    Derive::Standard(..) | Derive::Other(_) => return None,
-                },
-                Followed::Name { ident, globs: true } | Followed::Above(ident) => ident.to_string(),
-                Followed::Name { globs: false, .. } => return None,
-            };
-            serde_name(&name).then_some(name)
-        })
+        .filter_map(|path| serde_trait(&path, scope, uses, modules, owner, unbound))
         .collect()
+}
+
+/// The trait of `serde`, `Serialize` or `Deserialize`, that a path written in the module `scope`
+/// for `owner` names, a derive's or an implemented trait's, followed as `carried_derive` follows a
+/// derive: through a path the macro follows to `serde`, a re-export through `crate::` included,
+/// under any name, or by the name of a path it cannot follow to a crate, from a crate's glob
+/// import or from above the Orb module, which `carried_derive` takes for `serde`'s too, and, with
+/// `unbound`, from nothing the module binds, as a crate-root `#[macro_use]` brings it. Another
+/// crate's trait of either name, `rkyv::Serialize`, is another trait.
+fn serde_trait(
+    path: &syn::Path,
+    scope: usize,
+    uses: &[Uses],
+    modules: &[Vec<Ident>],
+    owner: &Ident,
+    unbound: bool,
+) -> Option<String> {
+    let name = match followed(path, scope, uses, modules, owner).ok()? {
+        Followed::Path(named) => match Derive::of(named) {
+            Derive::Serde(named) => named.segments.last()?.to_string(),
+            Derive::Standard(..) | Derive::Other(_) => return None,
+        },
+        Followed::Name { ident, globs } if globs || unbound => ident.to_string(),
+        Followed::Above(ident) => ident.to_string(),
+        Followed::Name { .. } => return None,
+    };
+    serde_name(&name).then_some(name)
 }
 
 /// Whether an attribute is a `#[cfg_attr(..)]` hiding from the macro, until the compiler evaluates

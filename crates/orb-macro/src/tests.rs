@@ -3602,6 +3602,97 @@ fn the_types_a_state_out_of_the_wit_reaches_get_serde_derives() {
     );
 }
 
+/// The serde derives the macro adds to a state kept out of the WIT, and to the types it reaches,
+/// are those the type does not have yet: a derive the macro follows to `serde`, under another name
+/// too, `Ser` after `use serde::{Serialize as Ser};`, or an impl of `serde`'s trait the Orb's
+/// modules write by hand, in the type's module or another, gives the type the trait, and the macro
+/// adds no second one. Another crate's trait of either name, `rkyv::Serialize`, derived or
+/// implemented, is no `serde` trait, so the macro still adds `serde`'s.
+#[test]
+fn the_serde_derives_a_state_gets_follow_renames_and_hand_impls() {
+    let module = |items: &str| {
+        format!(
+            "mod ledger {{
+                use serde::{{Serialize as Ser, Deserialize as De}};
+                #[state]
+                pub struct Balance {{ pub total: i64, pub notes: Vec<Note>, pub mood: Mood }}
+                pub struct Note {{ pub text: String }}
+                pub enum Mood {{ Calm, Loud }}
+                {items}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    let serialize = "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() }";
+    let deserialize = "fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> { todo!() }";
+    for (items, expected) in [
+        (
+            "#[derive(Default, Ser, De)] pub struct Unused;".to_owned(),
+            [
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Note",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Mood",
+            ],
+        ),
+        (
+            format!(
+                "impl serde::Serialize for Balance {{ {serialize} }}
+                impl<'de> De<'de> for Note {{ {deserialize} }}
+                pub mod json {{
+                    use serde::ser::Serialize;
+                    impl Serialize for super::Mood {{ {serialize} }}
+                }}"
+            ),
+            [
+                "# [derive (:: serde :: Deserialize)] pub struct Balance",
+                "# [derive (:: serde :: Serialize)] pub struct Note",
+                "# [derive (:: serde :: Deserialize)] pub enum Mood",
+            ],
+        ),
+        (
+            format!(
+                "impl<S> rkyv::Serialize<S> for Balance {{}}
+                impl<'de> ::serde::de::Deserialize<'de> for Balance {{ {deserialize} }}"
+            ),
+            [
+                "# [derive (:: serde :: Serialize)] pub struct Balance",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Note",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Mood",
+            ],
+        ),
+    ] {
+        let generated = tokens(&expanded("example:ledger@1.0.0", &module(&items)));
+        for expected in expected {
+            assert!(generated.contains(expected), "{expected}\n{generated}");
+        }
+    }
+    let renamed = module("").replace(
+        "pub struct Balance",
+        "#[derive(Default, Ser, De)] pub struct Balance",
+    );
+    let renamed = renamed.replace("pub struct Note", "#[derive(Ser)] pub struct Note");
+    let renamed = renamed.replace(
+        "pub enum Mood",
+        "#[derive(rkyv::Serialize, De)] pub enum Mood",
+    );
+    let generated = tokens(&expanded("example:ledger@1.0.0", &renamed));
+    for expected in [
+        "# [derive (Default , Ser , De)] pub struct Balance",
+        "# [derive (Ser)] # [derive (:: serde :: Deserialize)] pub struct Note",
+        "# [derive (rkyv :: Serialize , De)] # [derive (:: serde :: Serialize)] pub enum Mood",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    assert!(
+        !generated.contains(
+            "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance"
+        ),
+        "{generated}"
+    );
+}
+
 /// A type is translated to WIT only once a method, a resource or a hook reaches it: a type no
 /// method mentions stays ordinary Rust whatever it holds, an array, a reference or a variant with
 /// named fields, and the same type is a compile error once it enters the WIT.
