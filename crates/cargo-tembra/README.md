@@ -65,11 +65,25 @@ The contract goes to `contract/`, not `wit/`: `wit-bindgen` loads a `wit` direct
 crate on its own, even with an inline WIT, and finding the package twice it panics with
 "attempting to re-add package".
 
-`build` reads the contract on its own before writing it, so no other file in `contract/` takes
-part in it, and checks that it resolves with its standard packages alone. The world is named after
-the Orb's module: when the module is renamed, the `.wit` file of the former name, which declares
-the same package, is removed, and `build` says so on stderr. A standard package in `deps/` the
-contract no longer depends on is removed the same way. Any other file stays.
+The macro writes the same files when Cargo compiles the Orb crate for itself, as the primary
+package, on any target: a crate used natively, which `build` never compiles, has its contract too,
+and a dependency's is never written into. Both writers are `ModuleContract` of `tembra-contracts`,
+so `build` finds the contract current after the compilation it runs, and a file is rewritten only
+when its content changes, through a temporary file renamed into place. The consumed packages are
+nested in the order the module's WIT names them, the one text both writers share, so a
+`cargo check` and a `build` of the same source write the same contract.
+
+`contract/` must be committed, current and packaged. `cargo publish`, and `cargo package`, verify
+the package with a build of the packaged crate, which is its primary package, so the macro writes
+the contract into it; Cargo then refuses a package whose build changed or added a file. A stale
+`contract/`, or one left out by an `include` list in `Cargo.toml`, fails the publication; any
+`cargo check` or `cargo tembra build` of the crate leaves it current.
+
+The contract is read on its own before it is written, so no other file in `contract/` takes part
+in it, and checked to resolve with its standard packages alone. The world is named after the Orb's
+module: when the module is renamed, the `.wit` file of the former name, which declares the same
+package, is removed, and `build` says so on stderr. A standard package in `deps/` the contract no
+longer depends on is removed the same way. Any other file stays.
 
 ## Manifest metadata
 

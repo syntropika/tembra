@@ -1007,7 +1007,11 @@ a component build of the same module is unaffected.
 
 The macro rewrites the module with:
 
-1. `pub const WIT: &str`, the derived WIT text;
+1. `pub const WIT: &str`, the derived WIT text. When Cargo compiles the crate for itself, as the
+   primary package, the macro also writes it to the crate's `contract/<world>.wit`, the consumed
+   packages nested whole after it and the standard packages it depends on in `contract/deps/`:
+   the files `cargo tembra build` writes, rewritten only when their content changes, so a crate
+   used natively has the contract a compiled consumer reads, and a dependency's is never written;
 2. the same text as a `tembra:wit` custom section of the Wasm module, and the manifest, the
    declared hooks with their composition, the contributions with their priorities, the
    services that chose a lifetime or a linger, the views of the interfaces imported by key with

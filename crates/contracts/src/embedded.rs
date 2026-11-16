@@ -125,7 +125,10 @@ pub(crate) fn roles(
 /// The custom section `name` of the first core module holding one, in the order of the binary,
 /// the modules of nested components included: the component linker keeps the custom sections of
 /// the compiled code in the core module it links.
-fn module_section<'a>(component: &'a [u8], name: &str) -> Result<Option<&'a [u8]>, Error> {
+pub(crate) fn module_section<'a>(
+    component: &'a [u8],
+    name: &str,
+) -> Result<Option<&'a [u8]>, Error> {
     const CUSTOM: u8 = 0;
     const CORE_MODULE: u8 = 1;
     const COMPONENT: u8 = 4;

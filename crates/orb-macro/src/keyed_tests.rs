@@ -76,7 +76,7 @@ fn options(dir: Option<&Path>, keyed: &[&str]) -> Options {
 fn expanded(options: Options, module: &str) -> ItemMod {
     let module = syn::parse_str(module).expect("a module");
     syn::parse2(
-        expand(options, module, Metadata::named("router"))
+        expand(options, module, Metadata::named("router"), None)
             .unwrap_or_else(|error| panic!("{error}")),
     )
     .unwrap()
@@ -87,6 +87,7 @@ fn refused(options: Options, module: &str) -> String {
         options,
         syn::parse_str(module).expect("a module"),
         Metadata::named("router"),
+        None,
     ) {
         Err(error) => error.to_string(),
         Ok(_) => panic!("the module was accepted"),

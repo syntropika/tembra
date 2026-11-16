@@ -50,6 +50,8 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use syn::{
     Attribute, Fields, FnArg, Ident, Item, ItemFn, ItemMod, LitByteStr, LitInt, LitStr, Pat,
     ReturnType, Token, Type, Visibility, spanned::Spanned,
@@ -73,9 +75,20 @@ fn expansion(
         .clone()
         .into_iter()
         .any(|token| matches!(&token, proc_macro2::TokenTree::Ident(ident) if ident == "no_std"));
+    let crate_dir = primary_crate_dir(
+        std::env::var_os("CARGO_PRIMARY_PACKAGE"),
+        std::env::var_os("CARGO_MANIFEST_DIR"),
+    );
     let expanded = options(attribute)
         .and_then(|options| Ok((options, syn::parse2::<ItemMod>(item)?)))
-        .and_then(|(options, module)| expand(options, module, metadata::Metadata::read()?));
+        .and_then(|(options, module)| {
+            expand(
+                options,
+                module,
+                metadata::Metadata::read()?,
+                crate_dir.as_deref(),
+            )
+        });
     match expanded {
         Ok(tokens) => tokens,
         Err(error) => {
@@ -84,6 +97,16 @@ fn expansion(
             quote! { #error #prelude }
         }
     }
+}
+
+/// The directory the contract is written into, from the values of `CARGO_PRIMARY_PACKAGE` and
+/// `CARGO_MANIFEST_DIR`: the crate's own when Cargo compiles the crate for itself, which sets the
+/// first; none for a dependency, whose contract is never written into.
+fn primary_crate_dir(
+    primary_package: Option<OsString>,
+    manifest_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    primary_package.and(manifest_dir).map(PathBuf::from)
 }
 
 /// Read the attribute's options.
@@ -1109,11 +1132,14 @@ impl Analysis {
 
 /// The module's expansion: one analysis of the module, then each side of the output written from
 /// it into the author's module, after the WIT both sides share. The native side names the Orb
-/// after the crate manifest's `[package.metadata.tembra]`, read by the caller.
+/// after the crate manifest's `[package.metadata.tembra]`, read by the caller. With `crate_dir`,
+/// the directory of the crate being compiled for itself, its `contract/` is written too, as
+/// `cargo tembra build` writes it; the token tests pass none.
 fn expand(
     options: Options,
     module: ItemMod,
     metadata: metadata::Metadata,
+    crate_dir: Option<&Path>,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let analysis = analyze(options, module)?;
     let native = native::emit(&analysis, &metadata);
@@ -1121,6 +1147,22 @@ fn expand(
     let native = native.root;
     // Last, once both sides accepted the module: the signature of each service, from the WIT.
     let signatures = signatures(&analysis)?;
+    // The contract follows the module: `contract/<world>.wit` with the consumed packages nested
+    // and `contract/deps/` with the standard packages, the files `cargo tembra build` writes,
+    // rewritten only when their content changes. A compile error names what went wrong.
+    if let Some(crate_dir) = crate_dir {
+        tembra_contracts::ModuleContract::new(&analysis.wit, analysis.wit_dir.as_deref())
+            .and_then(|contract| contract.write(crate_dir))
+            .map_err(|error| {
+                syn::Error::new(
+                    analysis.ident.span(),
+                    format!(
+                        "writing the contract into {}: {error}",
+                        crate_dir.join("contract").display()
+                    ),
+                )
+            })?;
+    }
     let (outer_attrs, inner_attrs) = placed(&analysis.attrs);
     let vis = &analysis.vis;
     let ident = &analysis.ident;

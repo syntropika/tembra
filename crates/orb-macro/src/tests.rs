@@ -1,6 +1,6 @@
 //! The macro's reading of a module, checked on its output: the WIT it derives, the manifest it
 //! embeds and the errors it reports. The generated bindings themselves compile in the examples.
-use super::{Options, expand, expansion, metadata::Metadata};
+use super::{Options, expand, expansion, metadata::Metadata, primary_crate_dir};
 use syn::{Expr, Item, ItemMod, Lit, UnOp};
 
 /// Expand a module under `#[orb(package = ...)]` and parse the generated module back.
@@ -44,7 +44,7 @@ fn orb_with(options: Options, module: &str) -> syn::Result<ItemMod> {
 /// Expand a module with the given options and manifest table, and parse the generated module back.
 fn orb_as(options: Options, metadata: Metadata, module: &str) -> syn::Result<ItemMod> {
     let module: ItemMod = syn::parse_str(module).expect("a module");
-    syn::parse2(expand(options, module, metadata)?)
+    syn::parse2(expand(options, module, metadata, None)?)
 }
 
 fn expanded(package: &str, module: &str) -> ItemMod {
@@ -4693,4 +4693,55 @@ fn the_native_side_refuses_the_types_its_codecs_do_not_cover_yet() {
         native(&module, &[]),
         ":: core :: compile_error ! (\"`Keeper::add` takes `book::Entry`, a type of the consumed interface example:ledger/book@1.0.0; consumed types are not supported natively yet\") ;"
     );
+}
+
+/// The contract an Orb crate carries, written as `cargo tembra build` writes it: only when the
+/// macro is given the crate's directory, which `primary_crate_dir` takes from Cargo's variables
+/// as `expansion` reads them, so a dependency's is never written and the token tests write nothing.
+#[test]
+fn the_contract_is_written_into_the_crate_compiled_for_itself_alone() {
+    let dir =
+        std::env::temp_dir().join(format!("tembra-orb-macro-contract-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let module = || syn::parse_str::<ItemMod>(COUNTER).unwrap();
+    let manifest_dir = || Some(dir.clone().into_os_string());
+    // A dependency: Cargo sets no CARGO_PRIMARY_PACKAGE, and nothing is written.
+    let dependency = primary_crate_dir(None, manifest_dir());
+    assert_eq!(dependency, None);
+    expand(
+        options("example:counter@1.0.0", None),
+        module(),
+        Metadata::named("counter"),
+        dependency.as_deref(),
+    )
+    .unwrap();
+    assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
+    // The crate compiled for itself: Cargo sets CARGO_PRIMARY_PACKAGE to 1.
+    let primary = primary_crate_dir(Some("1".into()), manifest_dir());
+    assert_eq!(primary.as_deref(), Some(dir.as_path()));
+    let expanded: ItemMod = syn::parse2(
+        expand(
+            options("example:counter@1.0.0", None),
+            module(),
+            Metadata::named("counter"),
+            primary.as_deref(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let contract = dir.join("contract");
+    assert_eq!(
+        std::fs::read_to_string(contract.join("tally.wit")).unwrap(),
+        wit(&expanded)
+    );
+    // The state imports the kernel's package, which goes to deps/, and the directory reads back
+    // as the contract, as a consumer's `wit = "../counter/contract"` reads it.
+    let deps: Vec<String> = std::fs::read_dir(contract.join("deps"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(deps, ["tembra-guest.wit"]);
+    tembra_contracts::Contract::from_dir(&contract, Some("tally")).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
 }

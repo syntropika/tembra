@@ -11,8 +11,8 @@ description = "Derives the WIT contract and the component bindings of a compiled
 proc-macro = true
 
 [dependencies]
-# `authoring` resolves the derived WIT as a contract, for the signatures; a proc-macro dependency,
-# so a guest build links none of it.
+# `authoring` resolves the derived WIT as a contract, for the signatures and the contract the
+# macro writes; a proc-macro dependency, so a guest build links none of it.
 tembra-contracts = { workspace = true, default-features = false, features = ["authoring"] }
 heck = "0.5"
 proc-macro2 = "1"

@@ -1,13 +1,9 @@
 //! The build's reading of its inputs and writing of its outputs, checked without compiling an Orb.
-use super::{
-    build, built_component, former_contracts, merged_checksums, resolves_alone, write_dependencies,
-};
+use super::{build, built_component, merged_checksums};
 use crate::scratch;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use tembra_contracts::Contract;
-use wit_parser::Resolve;
 
 /// A `compiler-artifact` message as cargo writes it, for a target of the given kinds.
 fn artifact(manifest: &Path, kinds: &[&str], filenames: &[&str]) -> String {
@@ -53,100 +49,6 @@ fn the_component_is_the_wasm_file_cargo_built_for_the_package() {
     // A library that is no cdylib is no component, whatever lies in the target directory.
     let rlib = artifact(&package, &["lib"], &["/target/liborb.rlib"]);
     assert_eq!(built_component(rlib.as_bytes(), &package).unwrap(), None);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn a_former_contract_is_a_wit_file_of_the_same_package() {
-    let dir = scratch("former-contracts");
-    let contract = |package: &str, world: &str| {
-        format!(
-            "package {package};\n\ninterface counter {{\n  add: func(by: s64) -> s64;\n}}\n\n\
-             world {world} {{\n  export counter;\n}}\n"
-        )
-    };
-    let text = contract("example:counter@1.0.0", "ledger");
-    let files = [
-        // The file being written, as an earlier build left it.
-        ("ledger.wit", text.clone()),
-        // The world's former name: the one to remove.
-        ("tally.wit", contract("example:counter@1.0.0", "tally")),
-        // Another package, another version of this one, and this one nested in another.
-        ("other.wit", contract("example:other@1.0.0", "other")),
-        ("next.wit", contract("example:counter@2.0.0", "next")),
-        (
-            "speller.wit",
-            "package example:speller@1.0.0;\n\nworld speller {\n  import example:counter/counter@1.0.0;\n}\n\n\
-             package example:counter@1.0.0 {\n  interface counter {\n    add: func(by: s64) -> s64;\n  }\n}\n"
-                .to_owned(),
-        ),
-        // A file that does not parse, and one that is no .wit file.
-        ("broken.wit", "package example:counter@1.0.0;\n\nworld {\n".to_owned()),
-        ("notes.txt", contract("example:counter@1.0.0", "notes")),
-    ];
-    for (name, content) in &files {
-        std::fs::write(dir.join(name), content).unwrap();
-    }
-    let formers = former_contracts(&dir, &dir.join("ledger.wit"), &text).unwrap();
-    assert_eq!(formers, [dir.join("tally.wit")]);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-/// The contract of an Orb whose world imports the kernel's state.
-const TALLY: &str = "package example:first@1.0.0;
-
-interface tally {
-  bump: func() -> u32;
-}
-
-world first {
-  import tembra:guest/state@1.0.0;
-  export tembra:guest/state-init@1.0.0;
-  export tally;
-}
-";
-
-#[test]
-fn the_contract_directory_holds_the_standard_packages_it_depends_on() {
-    let dir = scratch("contract-dependencies");
-    let (file, deps) = (dir.join("first.wit"), dir.join("deps"));
-    let contract =
-        Contract::from_source(&file.display().to_string(), TALLY, Some("first")).unwrap();
-    let dependencies = contract.standard_dependencies();
-    // Alone, the contract names a package the directory does not hold.
-    let error = resolves_alone(&file, TALLY, &deps, &[]).unwrap_err();
-    assert!(error.to_string().contains("tembra:guest@1.0.0"), "{error}");
-    resolves_alone(&file, TALLY, &deps, &dependencies).unwrap();
-    // A standard package an earlier build wrote and the contract no longer depends on is removed;
-    // a file of another package stays.
-    std::fs::create_dir_all(&deps).unwrap();
-    let former = deps.join("wasi-random.wit");
-    let notes = deps.join("notes.wit");
-    std::fs::write(
-        &former,
-        "package wasi:random@0.3.0;\n\ninterface random {\n  get-random-u64: func() -> u64;\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        &notes,
-        "package example:notes@1.0.0;\n\ninterface notes {}\n",
-    )
-    .unwrap();
-    std::fs::write(&file, TALLY).unwrap();
-    assert_eq!(
-        write_dependencies(&deps, &dependencies).unwrap(),
-        [deps.join("tembra-guest.wit")]
-    );
-    assert!(!former.exists() && notes.exists());
-    // The directory resolves on its own, as another Orb's bindings read it, and reads as the
-    // contract itself.
-    Resolve::default().push_dir(&dir).unwrap();
-    let read = Contract::from_dir(&dir, Some("first")).unwrap();
-    assert_eq!(read.prepared(), contract.prepared());
-    // A contract that depends on no standard package leaves no deps/ behind.
-    std::fs::remove_file(&notes).unwrap();
-    assert!(write_dependencies(&deps, &[]).unwrap().is_empty());
-    assert!(!deps.exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
 

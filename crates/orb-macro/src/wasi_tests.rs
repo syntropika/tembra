@@ -30,6 +30,7 @@ fn expanded(options: Options, module: &str) -> syn::Result<String> {
         options,
         syn::parse_str(module).expect("a module"),
         Metadata::named("dice"),
+        None,
     )
     .map(|tokens| tokens.to_string())
 }
