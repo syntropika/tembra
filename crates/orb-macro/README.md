@@ -911,13 +911,13 @@ the author derives or implements it. A state's JSON holds every field of the str
 as an object of its set flags in camelCase, `{"read": true}`, a flag left out being unset.
 
 A flags holds one to 32 flags, as the component model rules, and its struct takes no generic
-parameter; a flags struct of a sub-module is `pub` or `pub(super)`, visible to the Orb module, as
-the bindings name it from there. A derived hook's input holds no flags: the bindings name a hook's
-types from its import module and from its export module, at two depths, and the macro maps a flags
-onto the author's struct through one path. The macro reads the struct before the compiler evaluates
-`#[cfg(..)]` and `#[cfg_attr(..)]`: a field under `#[cfg(..)]` and a derive under
-`#[cfg_attr(..)]` are compile errors. A struct marked `#[flags]` that no function uses stays
-ordinary Rust.
+parameter; a flags struct of a sub-module is visible to the Orb module, as are the modules between
+them, since the bindings name it from there through each, as the next section says. A derived
+hook's input holds no flags: the bindings name a hook's types from its import module and from its
+export module, at two depths, and the macro maps a flags onto the author's struct through one path.
+The macro reads the struct before the compiler evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`: a
+field under `#[cfg(..)]` and a derive under `#[cfg_attr(..)]` are compile errors. A struct marked
+`#[flags]` that no function uses stays ordinary Rust.
 
 ## Organizing the module in sub-modules
 
@@ -951,7 +951,11 @@ an item go in the item's module, so the author's types and functions resolve whe
 written: a WIT resource's bridge, for a derived or an implemented interface, sits next to its struct
 and calls its `#[constructor]` whatever its visibility. What the Orb module itself reaches, a state
 and its fields, a root resource, a WIT resource, a state's `#[validate]` function and a root
-resource's `#[open]` and `#[close]` functions, is `pub` or `pub(super)` in a sub-module. A name that
+resource's `#[open]` and `#[close]` functions, is visible to the Orb module: `pub` or `pub(crate)`
+at any depth, `pub(super)` one level down only. The macro names such an item through every module
+of its path, from the Orb module, and a WIT resource from its service's module, so each of those
+modules is visible there too: a WIT resource may sit below a private module that also holds its
+service. A `pub use` re-exporting the item past a module hidden there does not help. A name that
 enters the WIT is one across the modules, because the package has one namespace: the services, the
 hooks, the resources and the types a method or a hook mentions; a state that stays out of the WIT
 may repeat its name module by module, as `Balance` does, and a module's own name wins when a method

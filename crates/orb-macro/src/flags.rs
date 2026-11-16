@@ -14,7 +14,9 @@
 //! interface that defines or uses it, four modules below the Orb module. A derived hook's types are
 //! named from its import module too, one module higher, which one path cannot serve: a hook's input
 //! holds no flags.
-use crate::{Candidate, Declared, Module, Shape, ShapeKind, identity, reaches_root, relative, wit};
+use crate::{
+    Candidate, Declared, Module, Shape, ShapeKind, identity, reaches_root, reaching, relative, wit,
+};
 use proc_macro2::Span;
 use quote::quote;
 use std::collections::BTreeMap;
@@ -26,14 +28,14 @@ const RESERVED: [&str; 3] = ["empty", "bits", "from_bits_retain"];
 /// The most flags a WIT `flags` holds, as the component model rules.
 const MOST: usize = 32;
 
-/// Read a struct marked `#[flags]`: named fields, all `bool`, between one and 32, each the WIT
-/// name of a flag, no generic parameter; in a sub-module, visible to the Orb module, whose bindings
-/// name it.
+/// Read a struct marked `#[flags]`, declared `depth` modules below the Orb module: named fields,
+/// all `bool`, between one and 32, each the WIT name of a flag, no generic parameter; in a
+/// sub-module, visible to the Orb module, whose bindings name it.
 pub(crate) fn candidate(
     item: syn::ItemStruct,
     attribute: &Attribute,
     scope: usize,
-    nested: bool,
+    depth: usize,
 ) -> syn::Result<Candidate> {
     let ident = &item.ident;
     if !matches!(attribute.meta, syn::Meta::Path(_)) {
@@ -42,11 +44,12 @@ pub(crate) fn candidate(
             "#[flags] takes no options: each `bool` field of the struct is a flag",
         ));
     }
-    if nested && !reaches_root(&item.vis) {
+    if !reaches_root(&item.vis, depth) {
         return Err(syn::Error::new(
             ident.span(),
             format!(
-                "`{ident}` is a flags of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, whose bindings name it"
+                "`{ident}` is a flags of a sub-module: make it visible to the Orb module, {}, whose bindings name it",
+                reaching(depth)
             ),
         ));
     }

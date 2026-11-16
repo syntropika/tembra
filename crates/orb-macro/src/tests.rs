@@ -1958,6 +1958,210 @@ fn a_flags_struct_of_a_sub_module_is_named_from_its_module() {
     );
 }
 
+/// The bindings name a flags struct through every module between it and the Orb module: `pub` and
+/// `pub(crate)` make the struct or a module visible to the Orb module at any depth, `pub(super)`
+/// one level down only, and a module the Orb module cannot see is refused, though a `pub use`
+/// re-exports the struct past it.
+#[test]
+fn a_flags_struct_is_named_through_every_module_above_it() {
+    let nested = |inner: &str, access: &str| {
+        format!(
+            "mod office {{
+                pub mod a {{
+                    {inner} mod b {{
+                        #[flags]
+                        {access} struct Access {{ pub read: bool }}
+                        #[service]
+                        pub struct Permits;
+                        impl Permits {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                    }}
+                }}
+            }}"
+        )
+    };
+    for (inner, access) in [("pub", "pub"), ("pub(super)", "pub(crate)")] {
+        let generated = tokens(&expanded("example:office@1.0.0", &nested(inner, access)));
+        assert!(
+            generated.contains("\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: a :: b :: Access"),
+            "{generated}"
+        );
+    }
+    let error = refused("example:office@1.0.0", &nested("pub", "pub(super)"));
+    assert!(
+        error.contains("`Access` is a flags of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, whose bindings name it"),
+        "{error}"
+    );
+    let reexported = |access: &str| {
+        format!(
+            "mod office {{
+                mod model {{
+                    {access} mod access {{
+                        #[flags]
+                        pub struct Access {{ pub read: bool }}
+                    }}
+                    pub use access::Access;
+                }}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check(access: model::Access) -> bool {{ access.read }} }}
+            }}"
+        )
+    };
+    let error = refused("example:office@1.0.0", &reexported(""));
+    assert!(
+        error.contains("`Access` is a flags of a sub-module the Orb module cannot see: make the module `access` visible to the Orb module, `pub` or `pub(super)`, whose bindings name it"),
+        "{error}"
+    );
+    let generated = tokens(&expanded("example:office@1.0.0", &reexported("pub(super)")));
+    assert!(
+        generated.contains("\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: model :: access :: Access"),
+        "{generated}"
+    );
+}
+
+/// What else the Orb module names in a sub-module, a state and its fields, a root resource and its
+/// marked functions, and a WIT resource of a service of the Orb module, is visible to it through
+/// every module between them, as a flags struct is.
+#[test]
+fn what_the_orb_module_names_is_visible_through_every_module_above_it() {
+    let module = |inner: &str, item: &str| {
+        format!(
+            "mod ledger {{
+                pub mod a {{
+                    {inner} mod b {{
+                        {item}
+                    }}
+                }}
+                #[service]
+                pub struct Passing;
+                impl Passing {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    for (item, hidden, refused_item) in [
+        (
+            "#[state] VIS struct Balance { VIS total: i64 }",
+            Some(
+                "`Balance` is a state of a sub-module the Orb module cannot see: make the module `b` visible to the Orb module, `pub` or `pub(super)`, which builds and reads it",
+            ),
+            "`Balance` is a state of a sub-module: make the struct and its fields visible to the Orb module, `pub` or `pub(crate)`, which builds and reads it",
+        ),
+        (
+            "#[resource] VIS struct Counts { pub seen: u32 }
+            impl Counts { #[open] pub fn open() -> Self { Counts { seen: 0 } } }",
+            Some(
+                "`Counts` is a resource of a sub-module the Orb module cannot see: make the module `b` visible to the Orb module, `pub` or `pub(super)`, which opens and closes it",
+            ),
+            "`Counts` is a resource of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, which opens and closes it",
+        ),
+        (
+            "#[resource] pub struct Counts { pub seen: u32 }
+            impl Counts { #[open] VIS fn open() -> Self { Counts { seen: 0 } } }",
+            None,
+            "#[open] on a function of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, which calls it",
+        ),
+        (
+            "#[wit_resource] VIS struct Pen { pub ink: u32 }
+            impl Pen { pub fn ink(&self) -> u32 { self.ink } }",
+            Some(
+                "`Pen` is a resource of a sub-module the Orb module cannot see: make the module `b` visible to the Orb module, `pub` or `pub(super)`, whose service `Passing` hands it out",
+            ),
+            "`Pen` is a resource of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, whose services hand it out",
+        ),
+    ] {
+        let item = |vis: &str| item.replace("VIS", vis);
+        expanded("example:ledger@1.0.0", &module("pub", &item("pub")));
+        expanded(
+            "example:ledger@1.0.0",
+            &module("pub(super)", &item("pub(crate)")),
+        );
+        let error = refused("example:ledger@1.0.0", &module("pub", &item("pub(super)")));
+        assert!(error.contains(refused_item), "{error}");
+        if let Some(hidden) = hidden {
+            let error = refused("example:ledger@1.0.0", &module("", &item("pub")));
+            assert!(error.contains(hidden), "{error}");
+        }
+    }
+}
+
+/// The bindings name a WIT resource from its service's module, so a module between the resource
+/// and the Orb module may stay hidden from the Orb module when the service sits inside it; a module
+/// the service's module cannot see is refused, naming the visibility it needs there.
+#[test]
+fn a_wit_resource_is_named_from_its_service_module() {
+    const PEN: &str = "#[wit_resource(service = Walker)]
+        pub struct Pen { pub ink: u32 }
+        impl Pen { pub fn ink(&self) -> u32 { self.ink } }";
+    let beside = expanded(
+        "example:walk@1.0.0",
+        &format!(
+            "mod walk {{
+                pub mod a {{
+                    mod b {{
+                        {PEN}
+                        #[service]
+                        pub struct Walker;
+                        impl Walker {{ pub fn lend() -> Pen {{ todo!() }} }}
+                    }}
+                }}
+            }}"
+        ),
+    );
+    let generated = tokens(&beside);
+    assert!(
+        generated.contains("type Pen = super :: super :: a :: b :: Pen ;"),
+        "{generated}"
+    );
+    let below = expanded(
+        "example:walk@1.0.0",
+        &format!(
+            "mod walk {{
+                pub mod a {{
+                    mod b {{
+                        pub mod c {{
+                            {PEN}
+                        }}
+                        #[service]
+                        pub struct Walker;
+                        impl Walker {{ pub fn lend() -> c::Pen {{ todo!() }} }}
+                    }}
+                }}
+            }}"
+        ),
+    );
+    let generated = tokens(&below);
+    assert!(
+        generated.contains("type Pen = super :: super :: a :: b :: c :: Pen ;"),
+        "{generated}"
+    );
+    let above = |c: &str| {
+        format!(
+            "mod walk {{
+                pub mod a {{
+                    pub mod b {{
+                        {c} mod c {{
+                            {PEN}
+                        }}
+                    }}
+                    #[service]
+                    pub struct Walker;
+                    impl Walker {{ pub fn lend() -> b::c::Pen {{ todo!() }} }}
+                }}
+            }}"
+        )
+    };
+    let error = refused("example:walk@1.0.0", &above(""));
+    assert!(
+        error.contains("`Pen` is a resource of a sub-module the module `a` cannot see: make the module `c` visible to the module `a`, `pub` or `pub(super)`, whose service `Walker` hands it out"),
+        "{error}"
+    );
+    let generated = tokens(&expanded("example:walk@1.0.0", &above("pub(super)")));
+    assert!(
+        generated.contains("type Pen = super :: a :: b :: c :: Pen ;"),
+        "{generated}"
+    );
+}
+
 /// What WIT or the bindings rule out of a flags struct is refused on the item: a field that is no
 /// `bool`, no field or more than the component model's 32, a generic parameter, two fields of one
 /// WIT name, an option on the attribute, a function of a name the bindings call or the author's own

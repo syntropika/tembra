@@ -553,6 +553,10 @@ struct Scan {
     package: String,
     /// The path of each module from the Orb module, by scope; scope 0 is the Orb module itself.
     modules: Vec<Vec<Ident>>,
+    /// Where each module of each module's path is visible, by scope: the depth of the module of
+    /// the path it is visible in, and so in every module below that one. The macro names an item
+    /// through every module of its path.
+    seen_from: Vec<Vec<usize>>,
     candidates: Vec<Candidate>,
     services: Vec<Service>,
     contributions: Vec<Contribution>,
@@ -681,9 +685,84 @@ impl Uses {
     }
 }
 
-/// Whether an item of a sub-module is visible to the Orb module: `pub`, or `pub(..)`.
-fn reaches_root(vis: &Visibility) -> bool {
-    !matches!(vis, Visibility::Inherited)
+/// How many modules above the one declaring it an item of this visibility is visible in: none
+/// when private, one for `pub(super)`, as many as the `super`s of `pub(in ..)`, and all of them for
+/// `pub`, `pub(crate)` and a path from `crate`, which the macro cannot place and leaves to the
+/// compiler.
+fn reach(vis: &Visibility) -> usize {
+    match vis {
+        Visibility::Public(_) => usize::MAX,
+        Visibility::Restricted(restricted) => {
+            let segments = &restricted.path.segments;
+            if segments
+                .first()
+                .is_some_and(|segment| segment.ident == "crate")
+            {
+                usize::MAX
+            } else {
+                segments
+                    .iter()
+                    .filter(|segment| segment.ident == "super")
+                    .count()
+            }
+        }
+        Visibility::Inherited => 0,
+    }
+}
+
+/// Whether an item declared `depth` modules below the Orb module is visible to it: `pub` and
+/// `pub(crate)` at any depth, `pub(super)` one level down. Every item of the Orb module itself is.
+fn reaches_root(vis: &Visibility, depth: usize) -> bool {
+    reach(vis) >= depth
+}
+
+/// The visibilities that make an item visible `levels` modules above the one declaring it, for the
+/// errors: `pub(super)` reaches one level up only.
+fn reaching(levels: usize) -> &'static str {
+    if levels == 1 {
+        "`pub` or `pub(super)`"
+    } else {
+        "`pub` or `pub(crate)`"
+    }
+}
+
+/// Refuse an item of the module at `path` when a module of the path is hidden from the module at
+/// `from`, which names the item through every one of them; `seen_from` says where each module of
+/// the path is visible. `what` the item is and `why` that module names it, for the error.
+fn check_seen(
+    path: &[Ident],
+    seen_from: &[usize],
+    from: &[Ident],
+    ident: &Ident,
+    what: &str,
+    why: &str,
+) -> syn::Result<()> {
+    let Some(position) = seen_from
+        .iter()
+        .position(|&depth| !from.starts_with(&path[..depth]))
+    else {
+        return Ok(());
+    };
+    // The hidden module, declared `position` modules below the Orb module, is visible to `from`
+    // once it is visible in the deepest module above both.
+    let shared = from
+        .iter()
+        .zip(path)
+        .take_while(|(named, declared)| named == declared)
+        .count();
+    let viewer = if from.is_empty() {
+        "the Orb module".to_owned()
+    } else {
+        format!("the module {}", describe(from))
+    };
+    Err(syn::Error::new(
+        ident.span(),
+        format!(
+            "`{ident}` is {what} of a sub-module {viewer} cannot see: make the module `{}` visible to {viewer}, {}, {why}",
+            path[position],
+            reaching(position - shared)
+        ),
+    ))
 }
 
 impl Scan {
@@ -692,7 +771,7 @@ impl Scan {
     fn scan(&mut self, items: Vec<Item>, scope: usize) -> syn::Result<(Vec<Item>, Vec<Module>)> {
         let mut passthrough = Vec::new();
         let mut children = Vec::new();
-        let nested = scope != 0;
+        let depth = self.modules[scope].len();
         for item in items {
             self.uses[scope].add_item(&item);
             match item {
@@ -707,6 +786,9 @@ impl Scan {
                     let mut path = self.modules[scope].clone();
                     path.push(module.ident.clone());
                     self.modules.push(path);
+                    let mut seen_from = self.seen_from[scope].clone();
+                    seen_from.push(depth.saturating_sub(reach(&module.vis)));
+                    self.seen_from.push(seen_from);
                     self.uses.push(Uses::default());
                     let (items, grandchildren) = self.scan(inner, child)?;
                     children.push(Module {
@@ -726,12 +808,16 @@ impl Scan {
                         self.declared.push(declaration);
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "wit_resource") {
-                        if nested && !reaches_root(&s.vis) {
+                        // The Orb module's exports take the struct as a type of theirs; the
+                        // modules of its path are checked from its service's module, which names
+                        // it through them, once the service is known.
+                        if !reaches_root(&s.vis, depth) {
                             return Err(syn::Error::new(
                                 s.ident.span(),
                                 format!(
-                                    "`{}` is a resource of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, whose services hand it out",
-                                    s.ident
+                                    "`{}` is a resource of a sub-module: make it visible to the Orb module, {}, whose services hand it out",
+                                    s.ident,
+                                    reaching(depth)
                                 ),
                             ));
                         }
@@ -740,15 +826,25 @@ impl Scan {
                         self.wit_resources.push(resource);
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "resource") {
-                        if nested && !reaches_root(&s.vis) {
+                        let why = "which opens and closes it";
+                        if !reaches_root(&s.vis, depth) {
                             return Err(syn::Error::new(
                                 s.ident.span(),
                                 format!(
-                                    "`{}` is a resource of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, which opens and closes it",
-                                    s.ident
+                                    "`{}` is a resource of a sub-module: make it visible to the Orb module, {}, {why}",
+                                    s.ident,
+                                    reaching(depth)
                                 ),
                             ));
                         }
+                        check_seen(
+                            &self.modules[scope],
+                            &self.seen_from[scope],
+                            &[],
+                            &s.ident,
+                            "a resource",
+                            why,
+                        )?;
                         let mut resource = resource(&s, &attribute)?;
                         resource.scope = scope;
                         self.resources.push(resource);
@@ -759,23 +855,32 @@ impl Scan {
                             passthrough.push(Item::Struct(s));
                         }
                     } else if let Some(attribute) = take(&mut s.attrs, "state") {
-                        if nested {
-                            let fields_visible = match &s.fields {
-                                Fields::Named(fields) => {
-                                    fields.named.iter().all(|field| reaches_root(&field.vis))
-                                }
-                                _ => true,
-                            };
-                            if !reaches_root(&s.vis) || !fields_visible {
-                                return Err(syn::Error::new(
-                                    s.ident.span(),
-                                    format!(
-                                        "`{}` is a state of a sub-module: make the struct and its fields visible to the Orb module, `pub` or `pub(super)`, which builds and reads it",
-                                        s.ident
-                                    ),
-                                ));
-                            }
+                        let why = "which builds and reads it";
+                        let fields_visible = match &s.fields {
+                            Fields::Named(fields) => fields
+                                .named
+                                .iter()
+                                .all(|field| reaches_root(&field.vis, depth)),
+                            _ => true,
+                        };
+                        if !reaches_root(&s.vis, depth) || !fields_visible {
+                            return Err(syn::Error::new(
+                                s.ident.span(),
+                                format!(
+                                    "`{}` is a state of a sub-module: make the struct and its fields visible to the Orb module, {}, {why}",
+                                    s.ident,
+                                    reaching(depth)
+                                ),
+                            ));
                         }
+                        check_seen(
+                            &self.modules[scope],
+                            &self.seen_from[scope],
+                            &[],
+                            &s.ident,
+                            "a state",
+                            why,
+                        )?;
                         let mut state = state(&s, &attribute)?;
                         state.scope = scope;
                         self.states.push(state);
@@ -798,8 +903,16 @@ impl Scan {
                         });
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "flags") {
-                        self.candidates
-                            .push(flags::candidate(s, &attribute, scope, nested)?);
+                        let candidate = flags::candidate(s, &attribute, scope, depth)?;
+                        check_seen(
+                            &self.modules[scope],
+                            &self.seen_from[scope],
+                            &[],
+                            &candidate.ident,
+                            "a flags",
+                            "whose bindings name it",
+                        )?;
+                        self.candidates.push(candidate);
                     } else if matches!(s.fields, Fields::Named(_)) {
                         self.candidates.push(Candidate::record(s, scope));
                     } else {
@@ -840,12 +953,13 @@ impl Scan {
                         };
                         // The Orb module calls a state's rule and a root resource's functions; a
                         // WIT resource's constructor is called from its own module's bridge.
-                        if nested && marker != Marker::Constructor && !reaches_root(&function.vis) {
+                        if marker != Marker::Constructor && !reaches_root(&function.vis, depth) {
                             return Err(syn::Error::new(
                                 span,
                                 format!(
-                                    "#[{}] on a function of a sub-module: make it visible to the Orb module, `pub` or `pub(super)`, which calls it",
-                                    marker.name()
+                                    "#[{}] on a function of a sub-module: make it visible to the Orb module, {}, which calls it",
+                                    marker.name(),
+                                    reaching(depth)
                                 ),
                             ));
                         }
@@ -1069,6 +1183,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let mut scan = Scan {
         package: package.clone(),
         modules: vec![Vec::new()],
+        seen_from: vec![Vec::new()],
         candidates: Vec::new(),
         services: Vec::new(),
         contributions: Vec::new(),
@@ -1093,6 +1208,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     };
     let Scan {
         modules,
+        seen_from,
         mut candidates,
         mut services,
         contributions,
@@ -1408,7 +1524,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         state.identity = owner.identity(&package);
         state.service = Some(owner.ident.clone());
     }
-    // Each WIT resource belongs to the interface of one service, found the same way.
+    // Each WIT resource belongs to the interface of one service, found the same way. The bindings
+    // name it from that service's module, through every module of its path.
     for resource in &mut wit_resources {
         let owner = owner_of(
             &services,
@@ -1416,6 +1533,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             resource.scope,
             resource.ident.span(),
             "name the service whose interface defines this resource, #[wit_resource(service = Name)], or put the resource in the service's sub-module",
+        )?;
+        check_seen(
+            &modules[resource.scope],
+            &seen_from[resource.scope],
+            &modules[owner.scope],
+            &resource.ident,
+            "a resource",
+            &format!("whose service `{}` hands it out", owner.ident),
         )?;
         resource.service = Some(owner.ident.clone());
     }
