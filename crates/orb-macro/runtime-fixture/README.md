@@ -31,14 +31,14 @@ last one, which the kernel stores as the JSON `serde` writes for the provider's 
 export. Every installation binds the plain import to the provider too.
 
 Run `just test-orb-macro` from the repository root to build both real components and execute
-`executor-wasm/tests/orb_macro_runtime.rs` on Cranelift and Pulley. The test decodes both component
-contracts, compares their WIT and typed metadata, calls each guest, observes the walker's state,
-reaches the provider's objects by key, passes the consumed records through `readings` and
-`library`, and verifies physical Store and kernel cleanup. It installs
-each guest without the grants of chance's WASI imports, which the kernel refuses, then with them,
-and draws and waits through them. Explicit execution requires both fixture paths and
-fails if either is absent. The macro-only facade dependency disables host features in both guest
-builds.
+`executor-wasm/tests/orb_macro_runtime.rs`, one test on Cranelift and one on Pulley. Each test
+decodes both component contracts, compares their WIT and typed metadata, loads each guest once with
+the grants of chance's WASI imports, then checks that the kernel refuses an installation without
+them, and runs every service of both guests in one host: it greets, observes the walker's state,
+draws and waits through chance, reaches the provider's objects by key, takes the tallies back,
+crosses the flags, passes the consumed records through `readings` and `library`, and verifies
+physical Store and kernel cleanup. Explicit execution requires both fixture paths and fails if
+either is absent. The macro-only facade dependency disables host features in both guest builds.
 
 The target is `wasm32-unknown-unknown`. Linking `std` here demonstrates support for ordinary Rust
 libraries; it does not provide operating-system I/O, threads or network capabilities.
