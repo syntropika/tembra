@@ -60,6 +60,9 @@ struct Environment {
     environment: Data,
     implementation: Implementation,
     scope: core::Id,
+    /// The owner of the native resources this version issues; its drop, with the version,
+    /// closes those still held.
+    issuer: Rc<crate::portable::Issuer>,
 }
 
 struct Object {

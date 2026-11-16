@@ -2,7 +2,7 @@
 
 use super::*;
 
-use crate::portable::{FromPayload, IntoPayload, Origin, Payload};
+use crate::portable::{FromPayload, IntoPayload, Issuer, Origin, Payload};
 
 /// Encoding and decoding of one portable call. Arguments move by value so that capabilities
 /// can travel; decoding receives the calling claim to anchor owned results.
@@ -204,8 +204,9 @@ impl Reference {
         let entered = host.context(call.root, Some(call.clone()))?;
         let receive = self.host.spawn_managed_settling(call.id, async move {
             let result = match (route, boundary) {
-                (Route::Portable(environment, handle), Some((encode, decode))) => {
-                    let (arguments, receiver) = match encode(arguments).and_then(Payload::for_call)
+                (Route::Portable(environment, handle, issuer), Some((encode, decode))) => {
+                    let (arguments, receiver) = match encode(arguments)
+                        .and_then(|payload| payload.for_call(&issuer))
                     {
                         Ok(prepared) => prepared,
                         Err(error) => return (Err(error), None),
@@ -214,10 +215,12 @@ impl Reference {
                         Ok(outcome) => outcome.into_parts(),
                         Err(error) => return (Err(error), None),
                     };
-                    // The head is bound and decoded here, before it is published. A refused
-                    // head is dropped, closing what it carries. Native decoding, or a refused
-                    // attachment's close, may panic: only that step is caught, so the physical
-                    // work and the receiver pin below are never lost with it.
+                    // The values the head issued become the object version's here, before the
+                    // head is bound and decoded, and published. A refused head is dropped,
+                    // closing what it carries. Native decoding, or a refused attachment's
+                    // close, may panic: only that step is caught, so the physical work and the
+                    // receiver pin below are never lost with it.
+                    let head = head.map(|payload| payload.issued_by(&issuer));
                     let head = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         head.and_then(|payload| {
                             payload.bind_streams(&origin)?;
@@ -301,7 +304,7 @@ impl Reference {
         let implementation = &object.implementation;
         if portable {
             match implementation.portable.get(method) {
-                Some(handle) => Route::Portable(environment, handle.clone()),
+                Some(handle) => Route::Portable(environment, handle.clone(), object.issuer.clone()),
                 // A host-local method refuses every portable caller.
                 None if implementation.local_only(method) => Route::LocalOnly,
                 None => Route::Missing,
@@ -360,7 +363,7 @@ impl IssuedCall {
 
 /// The entrypoint an admitted call dispatches to.
 enum Route {
-    Portable(crate::orb::Data, crate::orb::PortableMethod),
+    Portable(crate::orb::Data, crate::orb::PortableMethod, Rc<Issuer>),
     Local(crate::orb::Data, crate::orb::LocalMethod),
     Foreign,
     LocalOnly,

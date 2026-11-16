@@ -13,7 +13,12 @@
 //! A native exporter issues a plain Rust value as a capability of a WIT resource type: the type
 //! names its resource type ([`Issuable`]), [`Payload::issue`] issues the value and places its
 //! [`Slot`] wherever the result's data names it, and a method reads its implicit `self` back as
-//! the value with [`Payload::receiver`].
+//! the value through the [`Receiver`] of [`Payload::receiver`]. The value belongs to the object
+//! version that issued it, as a compiled exporter's instance belongs to its Store: it closes
+//! with its last owner, and with that version when the exporter is reloaded or released or the
+//! host closes, whatever handles remain. A method on such a handle then answers as it would for
+//! a compiled exporter: `Gone/resource` from the reloaded exporter, and the kernel's refusal of
+//! the call once the object is released or the host has closed.
 //!
 //! A payload may also carry the end of a byte stream ([`ByteStream`]). The physical work that
 //! produces it never travels in a payload: a provider returns it beside its result in an
@@ -24,8 +29,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     any::Any,
-    cell::RefCell,
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
     future::Future,
+    marker::PhantomData,
     rc::{Rc, Weak},
 };
 
@@ -68,17 +75,99 @@ pub trait Issuable: 'static {
     fn nominal() -> Nominal;
 }
 
-/// The backend of an issued Rust value. Dropping it, with the last owner, drops the value,
-/// unless a method still holds it as its `self`: the managed call pins the backend until that
-/// call has physically ended.
-struct Backend<T> {
-    nominal: Nominal,
-    value: Rc<T>,
+/// The issuing object version of a native exporter's resources. It owns the values it issued,
+/// as a compiled exporter's Store owns its instances; a handle only names an entry. The last
+/// owner's drop removes its entry, and the version's end drops the table, which closes every
+/// value still owned: the drain compiled exporters do on release and host close.
+#[derive(Default)]
+pub(crate) struct Issuer {
+    values: RefCell<BTreeMap<u64, Rc<dyn Any>>>,
+    next: Cell<u64>,
 }
 
-impl<T: Issuable> Capability for Backend<T> {
+impl Issuer {
+    fn adopt(&self, value: Rc<dyn Any>) -> u64 {
+        let key = self.next.get();
+        self.next.set(key + 1);
+        self.values.borrow_mut().insert(key, value);
+        key
+    }
+
+    fn value(&self, key: u64) -> Option<Rc<dyn Any>> {
+        self.values.borrow().get(&key).cloned()
+    }
+
+    /// Remove a value. It drops outside the table's borrow: its drop may close other handles.
+    fn close(&self, key: u64) {
+        let value = self.values.borrow_mut().remove(&key);
+        drop(value);
+    }
+}
+
+/// The backend of an issued Rust value. It holds the value until the managed call that returns
+/// it stamps the issuing object, so a result refused or undelivered before then closes the value
+/// with the backend; afterwards it names the issuer's entry, which its last owner removes. A
+/// method's `self` stays pinned by the managed call until that call has physically ended.
+struct Backend {
+    nominal: Nominal,
+    place: RefCell<Place>,
+}
+
+enum Place {
+    Pending(Rc<dyn Any>),
+    Issued { issuer: Weak<Issuer>, key: u64 },
+}
+
+impl Backend {
+    fn adopt(&self, issuer: &Rc<Issuer>) {
+        let mut place = self.place.borrow_mut();
+        if let Place::Pending(value) = &*place {
+            let key = issuer.adopt(value.clone());
+            *place = Place::Issued {
+                issuer: Rc::downgrade(issuer),
+                key,
+            };
+        }
+    }
+}
+
+impl Capability for Backend {
     fn nominal(&self) -> &Nominal {
         &self.nominal
+    }
+}
+
+impl Drop for Backend {
+    /// The last owner's drop closes the value, unless its issuer has drained it already.
+    fn drop(&mut self) {
+        if let Place::Issued { issuer, key } = self.place.get_mut()
+            && let Some(issuer) = issuer.upgrade()
+        {
+            issuer.close(*key);
+        }
+    }
+}
+
+/// The implicit `self` of one call, read as the value a native exporter issued it from. The
+/// call pins the value, so the receiver reads it across awaits within the call. It cannot
+/// extend the value's life: retained beyond the call, it reads while an owner lives and answers
+/// `Gone/resource` once the last owner or the issuing object has closed the value.
+pub struct Receiver<T> {
+    issuer: Weak<Issuer>,
+    key: u64,
+    marker: PhantomData<T>,
+}
+
+impl<T: Issuable> Receiver<T> {
+    /// Read the value, or refuse as `Gone/resource` once it has closed.
+    pub fn with<R>(&self, read: impl FnOnce(&T) -> R) -> Result<R> {
+        let value = self
+            .issuer
+            .upgrade()
+            .and_then(|issuer| issuer.value(self.key))
+            .ok_or_else(resource_closed)?;
+        let value = (*value).downcast_ref::<T>().ok_or_else(mistyped)?;
+        Ok(read(value))
     }
 }
 
@@ -108,32 +197,6 @@ impl Loan {
         let owner = self.0.upgrade()?;
         (&*owner as &dyn Any).downcast_ref::<T>().map(operation)
     }
-
-    /// The value of a loan issued by [`Payload::issue`] for `T`. Another resource type is
-    /// refused as `Forbidden/resource`; another issuer's or a closed capability as
-    /// `Gone/resource`.
-    fn value<T: Issuable>(&self) -> Result<Rc<T>> {
-        let owner = self
-            .0
-            .upgrade()
-            .ok_or_else(|| Error::new(core::Code::Gone, Reason::Resource, "resource has closed"))?;
-        if let Some(backend) = (&*owner as &dyn Any).downcast_ref::<Backend<T>>() {
-            return Ok(backend.value.clone());
-        }
-        Err(if *owner.nominal() == T::nominal() {
-            Error::new(
-                core::Code::Gone,
-                Reason::Resource,
-                "the resource belongs to another issuer",
-            )
-        } else {
-            Error::new(
-                core::Code::Forbidden,
-                Reason::Resource,
-                "the resource has another type",
-            )
-        })
-    }
 }
 
 /// The one internal payload of portable calls: data plus capabilities addressed by
@@ -144,6 +207,8 @@ pub struct Payload {
     moved: Vec<Moved>,
     receiver: Option<Loan>,
     streams: Vec<ByteStream>,
+    /// The object version serving the call these arguments enter, stamped by the managed call.
+    issuer: Option<Weak<Issuer>>,
 }
 
 impl Payload {
@@ -155,6 +220,7 @@ impl Payload {
             moved: Vec::new(),
             receiver: None,
             streams: Vec::new(),
+            issuer: None,
         }
     }
 
@@ -202,13 +268,14 @@ impl Payload {
         self.receiver.take()
     }
 
-    /// Issue a Rust value as a capability of its WIT resource type, owned by this payload until
-    /// it is delivered. Place the returned [`Slot`] where the result's data names the resource,
-    /// and serialize that result with [`Payload::encode`].
+    /// Issue a Rust value as a capability of its WIT resource type. Place the returned [`Slot`]
+    /// where the result's data names the resource, and serialize that result with
+    /// [`Payload::encode`]. The value is this payload's until the call returns it: then it
+    /// belongs to the issuing object, and the delivered handle names it.
     pub fn issue<T: Issuable>(&mut self, value: T) -> Slot {
         Slot(self.attach(Issued::new(Backend {
             nominal: T::nominal(),
-            value: Rc::new(value),
+            place: RefCell::new(Place::Pending(Rc::new(value))),
         })))
     }
 
@@ -221,18 +288,46 @@ impl Payload {
         })
     }
 
-    /// Take the implicit `self` of this call as the value it was issued from. A method may use
-    /// the value across awaits: the managed call pins its capability until the call has
-    /// physically ended. A call without `self` is refused, as is a `self` of another resource
-    /// type (`Forbidden/resource`) or of another issuer (`Gone/resource`).
-    pub fn receiver<T: Issuable>(&mut self) -> Result<Rc<T>> {
+    /// Take the implicit `self` of this call as the value it was issued from. A call without
+    /// `self` is refused, as is a `self` of another resource type (`Forbidden/resource`), of
+    /// another object or a retired revision of the exporter, or one that has closed
+    /// (`Gone/resource`).
+    pub fn receiver<T: Issuable>(&mut self) -> Result<Receiver<T>> {
         let loan = self.receiver.take().ok_or_else(|| {
             Error::invalid(
                 Reason::Resource,
                 "a resource method requires its owned handle",
             )
         })?;
-        loan.value()
+        let owner = loan.0.upgrade().ok_or_else(resource_closed)?;
+        let Some(backend) = (&*owner as &dyn Any).downcast_ref::<Backend>() else {
+            return Err(if *owner.nominal() == T::nominal() {
+                another_issuer()
+            } else {
+                mistyped()
+            });
+        };
+        if backend.nominal != T::nominal() {
+            return Err(mistyped());
+        }
+        let (issuer, key) = match &*backend.place.borrow() {
+            Place::Issued { issuer, key } => (issuer.clone(), *key),
+            Place::Pending(_) => return Err(another_issuer()),
+        };
+        if !self
+            .issuer
+            .as_ref()
+            .is_some_and(|current| Weak::ptr_eq(current, &issuer))
+        {
+            return Err(another_issuer());
+        }
+        let receiver = Receiver {
+            issuer,
+            key,
+            marker: PhantomData,
+        };
+        receiver.with(|_| ())?;
+        Ok(receiver)
     }
 
     /// Whether the payload carries no capability at all.
@@ -274,10 +369,15 @@ impl Payload {
         Ok(self)
     }
 
-    /// Newly issued capabilities cannot become arguments without a calling claim. Existing
-    /// moved owners keep their exact claim. Pin implicit self outside the provider's payload so
-    /// retaining that payload cannot keep a resource alive after the physical call settles.
-    pub(crate) fn for_call(self) -> Result<(Self, Option<Rc<dyn Capability>>)> {
+    /// Enter the call that `issuer`'s object version serves. Newly issued capabilities cannot
+    /// become arguments without a calling claim. Existing moved owners keep their exact claim.
+    /// Pin implicit self outside the provider's payload so retaining that payload cannot keep a
+    /// resource alive after the physical call settles.
+    pub(crate) fn for_call(
+        mut self,
+        issuer: &Rc<Issuer>,
+    ) -> Result<(Self, Option<Rc<dyn Capability>>)> {
+        self.issuer = Some(Rc::downgrade(issuer));
         if !self.owned.is_empty() {
             return Err(Error::invalid(
                 Reason::Arguments,
@@ -293,14 +393,41 @@ impl Payload {
         let owner = self
             .receiver
             .as_ref()
-            .map(|loan| {
-                loan.0.upgrade().ok_or_else(|| {
-                    Error::new(core::Code::Gone, Reason::Resource, "resource has closed")
-                })
-            })
+            .map(|loan| loan.0.upgrade().ok_or_else(resource_closed))
             .transpose()?;
         Ok((self, owner))
     }
+
+    /// Give every value this result issued to the object version returning it: from here on
+    /// its last owner removes it from that object, and the object's end closes it.
+    pub(crate) fn issued_by(self, issuer: &Rc<Issuer>) -> Self {
+        for issued in &self.owned {
+            if let Some(backend) = (&*issued.0 as &dyn Any).downcast_ref::<Backend>() {
+                backend.adopt(issuer);
+            }
+        }
+        self
+    }
+}
+
+fn resource_closed() -> Error {
+    Error::new(core::Code::Gone, Reason::Resource, "resource has closed")
+}
+
+fn another_issuer() -> Error {
+    Error::new(
+        core::Code::Gone,
+        Reason::Resource,
+        "the resource belongs to another object or a retired revision",
+    )
+}
+
+fn mistyped() -> Error {
+    Error::new(
+        core::Code::Forbidden,
+        Reason::Resource,
+        "the resource has another type",
+    )
 }
 
 /// Refusal of capabilities by a data-only boundary (JSON, RPC or a foreign host).
@@ -390,6 +517,7 @@ impl FromPayload for Delivered {
             moved,
             receiver,
             streams,
+            issuer: _,
         } = payload;
         if receiver.is_some() || !moved.is_empty() {
             return Err(Error::invalid(
