@@ -324,12 +324,12 @@ fn codec_ident(function: &Function) -> Ident {
 
 /// The registration of one service, in its own module: the function `orb()` calls, which declares
 /// the codec of each method and builds the `Service` named `{orb}::{identity}` with the signature
-/// of its interface, the ownership policy of its attribute and one method per `pub fn`, under its
-/// WIT name. The method runs `context.check()` first and then the author's function, awaited when
-/// it is `async`, with the arguments as a tuple in WIT order. A service with a create takes the
-/// inputs `orb(..)` shares, and its factory calls the create with them and the object's
-/// declaration: the service it returns is the object's environment, which a method borrowing
-/// `&self` is called on. The guard of the attribute, if any, runs first in the factory.
+/// of its interface, unless it has no method, the ownership policy of its attribute and one method
+/// per `pub fn`, under its WIT name. The method runs `context.check()` first and then the author's
+/// function, awaited when it is `async`, with the arguments as a tuple in WIT order. A service with
+/// a create takes the inputs `orb(..)` shares, and its factory calls the create with them and the
+/// object's declaration: the service it returns is the object's environment, which a method
+/// borrowing `&self` is called on. The guard of the attribute, if any, runs first in the factory.
 fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, Refused> {
     let depth = analysis.modules[service.scope].len();
     let root = crate::supers(depth);
@@ -369,6 +369,13 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
         let linger = policy.linger_ms;
         quote! { .lifetime(::tembra::core::Lifetime::#lifetime, #linger) }
     });
+    // A service without methods exports an empty interface, of which a contract plans no
+    // service: it has no signature.
+    let signed = service.planned().then(|| {
+        quote! {
+            .signature(::core::option::Option::Some(::std::string::String::from(#root #signature)))
+        }
+    });
     let mut codecs = Vec::new();
     let mut methods = Vec::new();
     for method in &service.functions {
@@ -387,7 +394,7 @@ fn registration(service: &Service, analysis: &Analysis) -> Result<TokenStream, R
 
             #shared
             ::tembra::Service::new(::std::format!("{}::{}", orb, #identity), #factory)
-            .signature(::core::option::Option::Some(::std::string::String::from(#root #signature)))
+            #signed
             #lifetime
             #(#methods)*
         }

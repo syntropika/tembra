@@ -6,6 +6,7 @@ use tembra::{Host, Reference, contracts::Contract};
 use tembra_orb_native_fixture::library;
 
 const SHELF: &str = "calculator::example:library/shelf@1.0.0";
+const PORTER: &str = "calculator::example:library/porter@1.0.0";
 
 /// What happened in the Orb, in order, as its root and its shelves report it to the host.
 type Events = Rc<RefCell<Vec<String>>>;
@@ -28,9 +29,9 @@ fn shelve(pool: &mut LocalPool, host: &Host, shelves: &[Rc<Reference>]) -> Vec<u
 }
 
 /// The root runs once, when the host installs the Orb, and not when `orb(..)` builds it, which
-/// declares the plan of the module's contract. Each shelf's create reads the catalogue the root
-/// created, and so does each shelf's method: the books shelved on two shelves are what a third
-/// shelf's create finds and its method counts on.
+/// declares the plan of the module's contract, but for the porter. Each shelf's create reads the
+/// catalogue the root created, and so does each shelf's method: the books shelved on two shelves
+/// are what a third shelf's create finds and its method counts on.
 #[test]
 fn the_root_runs_once_and_every_object_reads_its_value() {
     let events = Events::default();
@@ -43,7 +44,13 @@ fn the_root_runs_once_and_every_object_reads_its_value() {
         .plan("calculator", 2, &Default::default())
         .unwrap()
         .orb;
-    assert_eq!(orb.declaration(), &expected);
+    // A contract plans no service for an empty interface: the porter, which has no method, is
+    // declared by the Orb alone.
+    let mut declared = orb.declaration().clone();
+    declared
+        .services
+        .retain(|service| !service.methods.is_empty());
+    assert_eq!(declared, expected);
     assert!(events.borrow().is_empty(), "{:?}", events.borrow());
     let mut pool = LocalPool::new();
     let host = Host::new(pool.spawner());
@@ -67,5 +74,42 @@ fn the_root_runs_once_and_every_object_reads_its_value() {
     for shelf in first.iter().chain([&third]) {
         shelf.release().unwrap();
     }
+    pool.run_until(host.close()).unwrap();
+}
+
+/// A porter has no method, and the Orb declares it without a signature, which only a contract's
+/// service has. An object of it runs the task its create declared while it is referenced, and the
+/// task stops when its last reference is released.
+#[test]
+fn a_service_without_methods_runs_its_task_while_referenced() {
+    let events = Events::default();
+    let orb = library::orb(library::Inputs {
+        events: events.clone(),
+    })
+    .unwrap();
+    let declared = orb
+        .declaration()
+        .services
+        .iter()
+        .find(|service| service.name == PORTER)
+        .unwrap();
+    assert!(declared.methods.is_empty(), "{declared:?}");
+    assert_eq!(declared.signature, None);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![orb]).unwrap();
+    let porter = host.get(PORTER, vec!["main".into()], "alice").unwrap();
+    pool.run_until_stalled();
+    assert_eq!(*events.borrow(), ["root", "porter main/alice starts"]);
+    porter.release().unwrap();
+    pool.run_until_stalled();
+    assert_eq!(
+        *events.borrow(),
+        [
+            "root",
+            "porter main/alice starts",
+            "porter main/alice stops"
+        ]
+    );
     pool.run_until(host.close()).unwrap();
 }

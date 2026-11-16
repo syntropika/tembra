@@ -340,6 +340,13 @@ impl Service {
             .clone()
             .unwrap_or_else(|| identity(package, &wit::kebab(&self.ident)))
     }
+
+    /// Whether a contract plans a service for the interface, which then has a signature: its
+    /// methods, or the implemented interface's, which its WIT gives. A contract plans none for an
+    /// empty interface, which a native-only service without methods exports.
+    fn planned(&self) -> bool {
+        self.implements.is_some() || !self.functions.is_empty()
+    }
 }
 
 /// A WIT resource: a struct marked `#[wit_resource]` whose instances callers own through handles.
@@ -1684,13 +1691,19 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
             ));
         }
     }
-    if let Some(service) = services
-        .iter()
-        .find(|service| service.implements.is_none() && service.functions.is_empty())
-    {
+    // A service exports its methods. In a native-only module, one that its create builds may have
+    // none: its objects then only run what the create declares, such as tasks, while they are
+    // referenced.
+    if let Some(service) = services.iter().find(|service| {
+        service.implements.is_none() && service.functions.is_empty() && service.create.is_none()
+    }) {
         return Err(syn::Error::new(
             service.ident.span(),
-            "a service needs at least one pub fn in an impl block",
+            if native_only {
+                "a service needs at least one pub fn in an impl block, or a function marked #[create] that declares what its objects run"
+            } else {
+                "a service needs at least one pub fn in an impl block"
+            },
         ));
     }
     // The module names the world; WIT refuses a world and an interface with one name.
@@ -2820,6 +2833,7 @@ fn signatures(analysis: &Analysis) -> syn::Result<Vec<proc_macro2::TokenStream>>
     })?;
     services
         .iter()
+        .filter(|service| service.planned())
         .map(|service| {
             let identity = service.identity(package);
             let digest = signatures.get(&identity).ok_or_else(|| {

@@ -449,7 +449,8 @@ pub mod notebook {
 }
 
 /// Shelves of books, with what every shelf shares: the catalogue the Orb's root creates once, which
-/// each shelf's create and methods read. Native only, as `notebook`.
+/// each shelf's create and methods read; and porters, objects without methods that run a task.
+/// Native only, as `notebook`.
 #[cfg(not(target_arch = "wasm32"))]
 #[tembra::orb(package = "example:library@1.0.0")]
 pub mod library {
@@ -507,6 +508,31 @@ pub mod library {
             let books = self.catalogue.books.get() + 1;
             self.catalogue.books.set(books);
             books
+        }
+    }
+
+    /// A porter who tidies the library while someone keeps one at hand: its objects have no
+    /// method, only the task their create declares.
+    #[service]
+    pub struct Porter;
+
+    impl Porter {
+        /// Declare the porter's round: a task reported when it starts, once the object is active,
+        /// and when it is cancelled, as the object goes.
+        #[create]
+        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+            let address = declaration.address()?;
+            let porter = format!("{}/{}", address.key.join("/"), address.principal);
+            let events = inputs.events.clone();
+            declaration.task(move |scope| {
+                Box::pin(async move {
+                    events.borrow_mut().push(format!("porter {porter} starts"));
+                    scope.signal().cancelled().await;
+                    events.borrow_mut().push(format!("porter {porter} stops"));
+                    Ok(())
+                })
+            })?;
+            Ok(Self)
         }
     }
 }

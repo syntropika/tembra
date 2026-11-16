@@ -1078,6 +1078,11 @@ A native-only module, such as one with `#[inputs]`, may export nothing: an Orb w
 its `#[root]`, or root resources, runs what they declare while the host keeps it installed, such as
 a background task. Its WIT is then an empty world, and `orb(..)` registers no service.
 
+Likewise, a service that its `#[create]` builds may have no method: its objects only run what the
+create declares, such as tasks, while they are referenced. Its interface is empty in the WIT. A
+contract plans no service for an empty interface, so `orb(..)` registers the service without a
+signature, beside the services of its contract's plan.
+
 Like any native-only module, a module with a `#[create]` or a `#[root]` serves only a native host.
 They name `Declaration` and `tembra::Result`, which the facade has only with `host`, so the crate
 depends on `tembra` with `host` on native targets and compiles the module only there, under

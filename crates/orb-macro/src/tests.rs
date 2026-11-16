@@ -5588,6 +5588,54 @@ fn a_native_only_module_may_only_run_its_root() {
     );
 }
 
+/// A service of a native-only module may have no method when its create builds its objects, which
+/// then only run what the create declares while they are referenced. Its interface is empty in the
+/// WIT, and a contract plans no service for an empty interface, so the service has no signature:
+/// its registration is a factory, without a signature or a method. A component's service, or one
+/// without a create, still has a method.
+#[test]
+fn a_native_only_service_may_have_no_method() {
+    let porter = "#[service] pub struct Porter; impl Porter {
+        #[create]
+        fn create(inputs: &Inputs, declaration: &Declaration) -> tembra::Result<Self> { Ok(Self) }
+    }";
+    let module = expanded(
+        PACKAGE,
+        &format!("mod book {{ #[inputs] pub struct Inputs {{ pub base: u32 }} {porter} }}"),
+    );
+    let derived = wit(&module);
+    assert!(derived.contains("interface porter {\n}"), "{derived}");
+    assert!(derived.contains("  export porter;\n"), "{derived}");
+    let root = native(&module, &[]);
+    assert!(
+        root.contains(
+            ":: tembra :: Service :: new (:: std :: format ! (\"{}::{}\" , orb , \"example:book/porter@1.0.0\") , move | declaration | Porter :: create (& inputs , & declaration)) }"
+        ),
+        "{root}"
+    );
+    assert!(!root.contains("method_with"), "{root}");
+    assert!(
+        !tokens(&module).contains("SIGNATURE"),
+        "{}",
+        tokens(&module)
+    );
+    assert_eq!(
+        refused(
+            PACKAGE,
+            "mod book { #[service] pub struct Ledger; impl Ledger {} }"
+        ),
+        "a service needs at least one pub fn in an impl block"
+    );
+    // Without a create, its objects would run nothing.
+    assert_eq!(
+        refused(
+            PACKAGE,
+            "mod book { #[inputs] pub struct Inputs { pub base: u32 } #[service] pub struct Ledger; impl Ledger {} }"
+        ),
+        "a service needs at least one pub fn in an impl block, or a function marked #[create] that declares what its objects run"
+    );
+}
+
 /// The contract an Orb crate carries, written as `cargo tembra build` writes it: only when the
 /// macro is given the crate's directory, which `primary_crate_dir` takes from Cargo's variables
 /// as `expansion` reads them, so a dependency's is never written and the token tests write nothing.
