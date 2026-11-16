@@ -1197,12 +1197,17 @@ pub(crate) struct Bindings {
 /// How `wit-bindgen` 0.63 generates a record, a variant or an enum, as `wit-bindgen-core` records
 /// it to choose what it derives and implements: whether the type holds a string or a list, whether
 /// it holds a resource handle, and whether a function of a world returns it as the error of its
-/// result.
+/// result; and, for the derives the macro carries onto the type, whether every value of it holds a
+/// resource handle.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Generated {
     pub list: bool,
     pub resource: bool,
     pub error: bool,
+    /// No value of the type is without a resource handle: a record with a field that is a handle,
+    /// a tuple holding one or such a type. A handle in an option or a list may be absent, and a
+    /// variant may take a case without one; `Default`, which makes a value from nothing, cannot.
+    pub needs_handle: bool,
 }
 
 /// Read the WIT the bindings read, `inline` with the consumed packages of `dir`, for what they make
@@ -1268,6 +1273,7 @@ pub(crate) fn bindings(dir: Option<&Path>, inline: &str) -> Bindings {
                 list,
                 resource,
                 error: false,
+                needs_handle: needs_handle(&resolve, wit_parser::Type::Id(id)),
             };
             Some((name, generated))
         })
@@ -1488,6 +1494,30 @@ fn holds(resolve: &Resolve, ty: wit_parser::Type) -> (bool, bool) {
         | TypeDefKind::Future(_)
         | TypeDefKind::Stream(_) => (false, true),
         _ => (false, false),
+    }
+}
+
+/// Whether every value of a WIT type holds an owned resource handle, which no `Default` makes: a
+/// handle itself, a record or a tuple with such a part, or a variant or a result whose every case
+/// has one; an option or a list may be empty, and a variant may take another case.
+fn needs_handle(resolve: &Resolve, ty: wit_parser::Type) -> bool {
+    let wit_parser::Type::Id(id) = ty else {
+        return false;
+    };
+    let needs = |ty: wit_parser::Type| needs_handle(resolve, ty);
+    match &resolve.types[id].kind {
+        TypeDefKind::Handle(wit_parser::Handle::Own(_)) => true,
+        TypeDefKind::Record(record) => record.fields.iter().any(|field| needs(field.ty)),
+        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().any(needs),
+        TypeDefKind::Variant(variant) => {
+            variant.cases.iter().all(|case| case.ty.is_some_and(needs))
+        }
+        TypeDefKind::Result(result) => {
+            result.ok.is_some_and(needs) && result.err.is_some_and(needs)
+        }
+        TypeDefKind::FixedLengthList(inner, length) => *length > 0 && needs(*inner),
+        TypeDefKind::Type(inner) => needs(*inner),
+        _ => false,
     }
 }
 

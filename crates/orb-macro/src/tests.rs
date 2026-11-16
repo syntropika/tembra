@@ -2455,8 +2455,9 @@ fn a_derive_of_another_crate_is_named_from_its_crate() {
 }
 
 /// A state makes the bindings derive serde's traits on every generated type that can carry them:
-/// the author's serde derives are left to them there, and handed to them on a type that cannot,
-/// or in an Orb without a state, where the bindings derive none.
+/// the author's serde derives are left to them there, and handed to them in an Orb without a
+/// state, where the bindings derive none. A type holding a resource handle carries them from
+/// neither side.
 #[test]
 fn serde_derives_go_where_the_bindings_derive_none() {
     let module = |state: &str| {
@@ -2493,8 +2494,10 @@ fn serde_derives_go_where_the_bindings_derive_none() {
         "{}",
         tokens(&stateless)
     );
-    // A record holding a resource handle has no serde implementation from the bindings.
-    let held = expanded(
+    // A record holding a resource handle has no serde implementation from the bindings, which
+    // leave it out of their derives, and takes none from the author's derive either: the handle
+    // type implements no serde trait, so the derive is refused.
+    let error = refused(
         "example:walk@1.0.0",
         "mod walk {
             #[state]
@@ -2509,13 +2512,76 @@ fn serde_derives_go_where_the_bindings_derive_none() {
             impl Walker { pub fn lend() -> Lease { todo!() } }
         }",
     );
+    assert!(
+        error.contains(
+            "`serde::Serialize` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Serialize`, so the generated type replacing it cannot derive `Serialize`; remove the derive, or keep `Lease` out of the WIT"
+        ),
+        "{error}"
+    );
+}
+
+/// `Default` makes a value without a handle where the type has one: a record holding handles in
+/// options and lists only, and a variant whose `#[default]` case holds none, carry it. Serde's
+/// derives on a type holding a handle anywhere are refused in an Orb with a state as well, where
+/// the bindings leave such a type out of their derives and the author's derive would stand alone.
+#[test]
+fn a_default_without_a_handle_is_carried_onto_a_type_holding_one() {
+    let module = |types: &str, state: &str| {
+        format!(
+            "mod walk {{
+                {state}
+                #[wit_resource]
+                pub struct Pen {{ pub ink: u32 }}
+                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
+                {types}
+                #[service]
+                pub struct Walker;
+                impl Walker {{
+                    pub fn walk() -> Page {{ todo!() }}
+                    pub fn lend() -> Pen {{ todo!() }}
+                }}
+            }}"
+        )
+    };
+    let carried = expanded(
+        "example:walk@1.0.0",
+        &module(
+            "#[derive(Default)]
+             pub struct Page { pub next: Option<Pen>, pub all: Vec<Pen>, pub held: Held }
+             #[derive(Default)]
+             pub enum Held { Pen(Pen), #[default] Nothing }",
+            "",
+        ),
+    );
     assert_eq!(
-        type_attributes(&held).as_deref(),
-        Some(
-            "additional_type_attributes : { \"example:walk/walker@1.0.0/lease\" : [# [derive (:: serde :: Serialize)]] } ,"
+        type_attributes(&carried).as_deref(),
+        Some(concat!(
+            "additional_type_attributes : { ",
+            "\"example:walk/walker@1.0.0/page\" : [# [derive (:: core :: default :: Default)]] , ",
+            "\"example:walk/walker@1.0.0/held\" : [# [derive (:: core :: default :: Default)]] } ,",
+        )),
+        "{}",
+        tokens(&carried)
+    );
+    assert!(
+        tokens(&carried).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/held.nothing\" : [# [default]] } ,"
         ),
         "{}",
-        tokens(&held)
+        tokens(&carried)
+    );
+    let error = refused(
+        "example:walk@1.0.0",
+        &module(
+            "#[derive(serde::Serialize, serde::Deserialize)] pub struct Page { pub pen: Pen }",
+            "#[state] pub struct Count { pub steps: u32 }",
+        ),
+    );
+    assert!(
+        error.contains(
+            "`serde::Serialize` on `Page`: `Page` enters the WIT and holds a resource handle, which implements no `Serialize`"
+        ),
+        "{error}"
     );
 }
 
@@ -2700,9 +2766,10 @@ fn a_derived_hook_input_keeps_its_derives() {
 
 /// What the generated type cannot take is refused on the author's item: a derive of another crate
 /// implementing a trait the bindings implement, a derive of the standard library the type's
-/// contents rule out, a derive the macro cannot name from the bindings' module, a helper attribute
-/// on a case's payload, and `#[cfg_attr(..)]`, under which a derive would come and go. Kept out of
-/// the WIT, the same type is the author's, as written.
+/// contents rule out, `Default` included on a record whose every value holds a resource handle,
+/// serde's derives on a type holding one anywhere, a derive the macro cannot name from the
+/// bindings' module, a helper attribute on a case's payload, and `#[cfg_attr(..)]`, under which a
+/// derive would come and go. Kept out of the WIT, the same type is the author's, as written.
 #[test]
 fn what_the_generated_type_cannot_take_is_refused() {
     let module = |types: &str, returned: &str| {
@@ -2767,6 +2834,31 @@ fn what_the_generated_type_cannot_take_is_refused() {
             "#[derive(Copy)] pub struct Note { pub text: String }",
             "Note",
             "`Copy` on `Note`: `Note` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`",
+        ),
+        (
+            "#[derive(Default)] pub struct Page { pub next: Pen }",
+            "Page",
+            "`Default` on `Page`: `Page` enters the WIT and every value of it holds a resource handle, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `Page` out of the WIT",
+        ),
+        (
+            "#[derive(Default)] pub struct Page { pub pair: (Pen, u32) }",
+            "Page",
+            "`Default` on `Page`: `Page` enters the WIT and every value of it holds a resource handle",
+        ),
+        (
+            "pub struct Slot { pub pen: Pen } #[derive(Default)] pub struct Page { pub slot: Slot }",
+            "Page",
+            "`Default` on `Page`: `Page` enters the WIT and every value of it holds a resource handle",
+        ),
+        (
+            "#[derive(serde::Deserialize)] pub enum Held { Pen(Pen), Nothing }",
+            "Held",
+            "`serde::Deserialize` on `Held`: `Held` enters the WIT and holds a resource handle, which implements no `Deserialize`, so the generated type replacing it cannot derive `Deserialize`; remove the derive, or keep `Held` out of the WIT",
+        ),
+        (
+            "#[derive(serde::Serialize)] pub struct Page { pub next: Option<Pen> }",
+            "Page",
+            "`serde::Serialize` on `Page`: `Page` enters the WIT and holds a resource handle, which implements no `Serialize`",
         ),
         (
             "#[derive(EnumIter)] pub enum Heading { North, East }",

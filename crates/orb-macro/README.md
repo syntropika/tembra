@@ -1059,10 +1059,12 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   no resource handle, and `Copy` when it holds no string or list either; `Clone`, `Copy`,
   `PartialEq`, `Eq`, `PartialOrd` and `Ord` for an enum; `Display` and `Error` for the error of a
   function's result; and `serde`'s derives in an Orb with a state. A derive of another crate named
-  after one of those traits would implement it twice, and a derive of the standard library that the
-  type's contents rule out could not apply, `Clone`, `Copy`, a comparison or `Hash` on a type
-  holding a resource handle, `Copy` on one holding a string or a list: both are compile errors on
-  the derive.
+  after one of those traits would implement it twice, and a derive that the type's contents rule
+  out could not apply, `Clone`, `Copy`, a comparison, `Hash`, `Serialize` or `Deserialize` on a
+  type holding a resource handle, `Default` on a record no value of which is without one, a handle
+  in a field, in a tuple or in such a record, and `Copy` on one holding a string or a list: both
+  are compile errors on the derive. A handle in an option or a list leaves `Default` a value
+  without it, and a variant takes its unit `#[default]` case.
 - The bindings read a derive's path in their own module, so the macro names each derive from its
   crate, `::strum::EnumIter` for `EnumIter` after `use strum::EnumIter;`, following the `use` and
   `extern crate` declarations of the type's module, `self::`, `super::`, the Orb's sub-modules and

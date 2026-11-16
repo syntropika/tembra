@@ -3647,7 +3647,7 @@ impl quote::ToTokens for Named {
 /// path that names it from the bindings' module, `::core::hash::Hash` for a derive of the standard
 /// library. A derive the generated type cannot take is refused: one of another crate implementing
 /// a trait the bindings implement, which would implement it twice, and one of the standard library
-/// that the type's contents rule out.
+/// or of `serde` that the type's contents rule out.
 fn carried_derive(
     shape: &Shape,
     path: &syn::Path,
@@ -3691,15 +3691,26 @@ fn carried_derive(
     };
     let own = implemented(&shape.kind, generated);
     let implements = |name: &str| own.iter().find(|(known, _)| *known == name);
+    // A resource handle implements none of the traits a derive implements; `Default` alone makes a
+    // value without one, unless every value of the type holds one.
+    let refuse_handle = |name: &str| {
+        refuse(format!(
+            "`{written}` on `{owner}`: `{owner}` enters the WIT and holds a resource handle, which implements no `{name}`, so the generated type replacing it cannot derive `{name}`; remove the derive, or keep `{owner}` out of the WIT"
+        ))
+    };
     match derive {
         Derive::Standard(name, module) => {
             if implements(name).is_some() {
                 return Ok(None);
             }
-            if generated.resource && name != "Default" {
-                return refuse(format!(
-                    "`{written}` on `{owner}`: `{owner}` enters the WIT and holds a resource handle, which implements no `{name}`, so the generated type replacing it cannot derive `{name}`; remove the derive, or keep `{owner}` out of the WIT"
-                ));
+            if name == "Default" {
+                if generated.needs_handle {
+                    return refuse(format!(
+                        "`{written}` on `{owner}`: `{owner}` enters the WIT and every value of it holds a resource handle, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `{owner}` out of the WIT"
+                    ));
+                }
+            } else if generated.resource {
+                return refuse_handle(name);
             }
             if generated.list && name == "Copy" {
                 return refuse(format!(
@@ -3709,8 +3720,13 @@ fn carried_derive(
             let (module, name) = (format_ident!("{module}"), format_ident!("{name}"));
             Ok(Some(quote! { ::core::#module::#name }))
         }
-        Derive::Serde(_) if serialized => Ok(None),
-        Derive::Serde(named) => Ok(Some(quote! { #named })),
+        Derive::Serde(named) => {
+            if generated.resource {
+                let name = named.segments.last().expect("serde's derive has a name");
+                return refuse_handle(&name.to_string());
+            }
+            Ok((!serialized).then(|| quote! { #named }))
+        }
         Derive::Other(named) => {
             let name = named.segments.last().map(Ident::to_string);
             if let Some((name, reason)) = name.as_deref().and_then(implements) {
