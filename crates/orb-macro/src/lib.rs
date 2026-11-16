@@ -36,6 +36,7 @@
 //! also depends on `serde` (`derive`, `alloc`) and `serde_json` (`alloc`). `cargo tembra build`
 //! compiles the crate, reads the same WIT and the hook priorities from the component and
 //! packages the artifact.
+mod cfg;
 mod flags;
 mod foreign;
 mod keyed;
@@ -65,7 +66,9 @@ pub fn orb(attribute: TokenStream, item: TokenStream) -> TokenStream {
 
 /// The module's expansion, or the macro's error next to the runtime prelude the module would have
 /// brought: without its allocator and panic handler, a `no_std` crate would report their absence
-/// after the error that matters. A std crate has its own runtime and gets none.
+/// after the error that matters. A std crate has its own runtime and gets none. A module whose
+/// services, methods, root or hooks carry `#[cfg]`s expands into one copy per combination of
+/// their predicates instead, which the macro expands again, see `cfg`.
 fn expansion(
     attribute: proc_macro2::TokenStream,
     item: proc_macro2::TokenStream,
@@ -79,16 +82,20 @@ fn expansion(
         std::env::var_os("CARGO_PRIMARY_PACKAGE"),
         std::env::var_os("CARGO_MANIFEST_DIR"),
     );
-    let expanded = options(attribute)
-        .and_then(|options| Ok((options, syn::parse2::<ItemMod>(item)?)))
-        .and_then(|(options, module)| {
-            expand(
-                options,
-                module,
-                metadata::Metadata::read()?,
-                crate_dir.as_deref(),
-            )
-        });
+    let expanded = match cfg::combinations(&attribute, &item) {
+        Ok(Some(copies)) => Ok(copies),
+        Ok(None) => options(attribute)
+            .and_then(|options| Ok((options, syn::parse2::<ItemMod>(item)?)))
+            .and_then(|(options, module)| {
+                expand(
+                    options,
+                    module,
+                    metadata::Metadata::read()?,
+                    crate_dir.as_deref(),
+                )
+            }),
+        Err(error) => Err(error),
+    };
     match expanded {
         Ok(tokens) => tokens,
         Err(error) => {
@@ -1434,7 +1441,9 @@ fn expand(
 /// Read and check the module: scan its items, resolve each marked item to what it belongs to,
 /// read the consumed packages, decide which types enter the WIT and render it. What a side of the
 /// output alone can refuse, its emitter refuses.
-fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
+fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
+    // The combination of `#[cfg]` predicates the module is the copy for, if it is one.
+    let configuration = cfg::configuration(&mut module.attrs);
     let package = options
         .package
         .as_ref()
@@ -1778,13 +1787,19 @@ fn analyze(options: Options, module: ItemMod) -> syn::Result<Analysis> {
         if native_only.is_empty() {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "nothing to export: mark a unit struct with #[service] and give it an impl block of pub fn, or mark a hook with #[hook]",
+                cfg::under(
+                    configuration.as_ref(),
+                    "nothing to export: mark a unit struct with #[service] and give it an impl block of pub fn, or mark a hook with #[hook]",
+                ),
             ));
         }
         if root.is_none() && resources.is_empty() {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root]",
+                cfg::under(
+                    configuration.as_ref(),
+                    "nothing to export or run: mark a unit struct with #[service] and give it an impl block of pub fn, mark a hook with #[hook], or give the Orb a function marked #[root]",
+                ),
             ));
         }
     }
@@ -6467,3 +6482,6 @@ mod foreign_tests;
 
 #[cfg(test)]
 mod metadata_tests;
+
+#[cfg(test)]
+mod cfg_tests;

@@ -12,6 +12,11 @@ description = "An Orb crate the macro's tests use natively: its tests are a host
 name = "calculator"
 api-version = 2
 
+[features]
+# Adds an input, the Orb's root, a method and a sub-module with a service to the module `notebook`,
+# each under a `#[cfg]`: the crate builds and passes its tests with and without it.
+archive = []
+
 [dependencies]
 # What an Orb crate depends on: the facade's authoring entry point, without the host runtime.
 tembra = { path = "../../tembra", default-features = false, features = ["macros"] }

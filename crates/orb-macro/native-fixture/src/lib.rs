@@ -351,7 +351,8 @@ pub mod calculator {
 
 /// Notes kept for the host, with what the host lends the Orb: the argument of `notebook::orb(..)`.
 /// Native only, as host values, the objects a create builds, a method's `&Context` and a `#[local]`
-/// method's closure are.
+/// method's closure are. The crate's `archive` feature adds an input, the Orb's root, a method of
+/// `Notes` and the sub-module `shelf` with its service, under `#[cfg]`s the macro evaluates.
 #[cfg(not(target_arch = "wasm32"))]
 #[tembra::orb(package = "example:notes@1.0.0")]
 pub mod notebook {
@@ -365,6 +366,22 @@ pub mod notebook {
         pub events: Rc<RefCell<Vec<String>>>,
         /// The title of an object's notes, resolved from its address.
         pub title: Box<dyn Fn(&Address) -> String>,
+        /// Where archived notes go, with the `archive` feature: the compiler evaluates this
+        /// `#[cfg]`, as on any struct, since `orb(..)` takes the inputs whole.
+        #[cfg(feature = "archive")]
+        pub archive: Rc<RefCell<Vec<String>>>,
+    }
+
+    /// The host's archive, as the Orb's root shares it with every object.
+    #[cfg(feature = "archive")]
+    pub struct Archive(Rc<RefCell<Vec<String>>>);
+
+    /// Share the host's archive with the Orb's objects, once: the Orb's root, which the `archive`
+    /// feature adds.
+    #[cfg(feature = "archive")]
+    #[root]
+    fn share(inputs: &Inputs, _: &Declaration) -> tembra::Result<Archive> {
+        Ok(Archive(inputs.archive.clone()))
     }
 
     /// The notes of one object, which its create builds once per key and principal.
@@ -373,6 +390,8 @@ pub mod notebook {
         title: String,
         notes: RefCell<Vec<String>>,
         journal: Resource<String>,
+        #[cfg(feature = "archive")]
+        archive: Rc<RefCell<Vec<String>>>,
     }
 
     impl Notes {
@@ -413,6 +432,8 @@ pub mod notebook {
                 title: (inputs.title)(&address),
                 notes: RefCell::default(),
                 journal,
+                #[cfg(feature = "archive")]
+                archive: declaration.orb::<Archive>()?.0.clone(),
             })
         }
 
@@ -474,6 +495,16 @@ pub mod notebook {
                 ))
             }
         }
+
+        /// Move the object's notes to the host's archive and return how many moved: a method
+        /// the `archive` feature adds to the interface.
+        #[cfg(feature = "archive")]
+        pub fn archive(&self) -> u32 {
+            let notes = self.notes.take();
+            let moved = notes.len() as u32;
+            self.archive.borrow_mut().extend(notes);
+            moved
+        }
     }
 
     /// The board the host pins notes on: one object, of key `main` and principal `host`, which
@@ -520,6 +551,36 @@ pub mod notebook {
         #[local]
         pub fn apply(value: u32, operation: Rc<dyn Fn(u32) -> u32>) -> u32 {
             operation(value)
+        }
+    }
+
+    /// The service of the host's archive, in a sub-module the `archive` feature adds, whose
+    /// `#[cfg]` takes the service with it.
+    #[cfg(feature = "archive")]
+    pub mod shelf {
+        use super::{Archive, Inputs};
+        use std::{cell::RefCell, rc::Rc};
+        use tembra::Declaration;
+
+        /// The host's archive of every object's notes.
+        #[service]
+        pub struct Shelf {
+            archive: Rc<RefCell<Vec<String>>>,
+        }
+
+        impl Shelf {
+            /// Read the archive the Orb's root shares.
+            #[create]
+            fn create(_: &Inputs, declaration: &Declaration) -> tembra::Result<Self> {
+                Ok(Self {
+                    archive: declaration.orb::<Archive>()?.0.clone(),
+                })
+            }
+
+            /// How many notes the archive holds.
+            pub fn count(&self) -> u32 {
+                self.archive.borrow().len() as u32
+            }
         }
     }
 }

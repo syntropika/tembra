@@ -37,6 +37,7 @@ deps:
 test: build-node build-wasm build-sdk
     cargo test --locked --workspace --all-features
     just test-no-hooks
+    just test-native-fixture
     just test-native-rpc
     bun test scripts/release.test.ts
     bun run --cwd packages/ts/sdk test
@@ -46,6 +47,10 @@ test: build-node build-wasm build-sdk
 # Verify the core and bridge with optional hook APIs disabled.
 test-no-hooks:
     cargo test --locked -p tembra-core -p tembra-bridge --no-default-features
+
+# Verify the macro's native fixture without its `archive` feature, whose `#[cfg]` items then leave its WIT and `orb(..)`.
+test-native-fixture:
+    cargo test --locked -p tembra-orb-native-fixture
 
 # Execute documented Rust guarantees, including the optional native hooks facade.
 test-doc:

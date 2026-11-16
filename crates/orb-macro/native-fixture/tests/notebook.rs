@@ -1,6 +1,7 @@
 //! `notebook::orb(..)` in a native host: the Orb takes the host's inputs, the create of `Notes`
-//! builds each of its objects from them, `Board` admits only the address its guard names, and a
-//! method's `tembra::Result` is the call's error channel.
+//! builds each of its objects from them, `Board` admits only the address its guard names, a
+//! method's `tembra::Result` is the call's error channel, and the `archive` feature adds what its
+//! `#[cfg]`s gate.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
@@ -10,15 +11,19 @@ use tembra_orb_native_fixture::notebook;
 const NOTES: &str = "calculator::example:notes/notes@1.0.0";
 const BOARD: &str = "calculator::example:notes/board@1.0.0";
 const SESSION: &str = "calculator::example:notes/session@1.0.0";
+const SHELF: &str = "calculator::example:notes/shelf@1.0.0";
 
 /// What happened in the Orb, in order, as its objects report it to the host.
 type Events = Rc<RefCell<Vec<String>>>;
 
-/// The inputs a host lends the Orb: the log of what happened, and a title per address.
+/// The inputs a host lends the Orb: the log of what happened, a title per address and, with the
+/// `archive` feature, an empty archive.
 fn inputs(events: &Events) -> notebook::Inputs {
     notebook::Inputs {
         events: events.clone(),
         title: Box::new(|address| format!("{} of {}", address.key.join("/"), address.principal)),
+        #[cfg(feature = "archive")]
+        archive: Rc::default(),
     }
 }
 
@@ -373,5 +378,91 @@ fn a_method_reads_the_callers_principal_from_its_context() {
     }))
     .unwrap();
     session.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+}
+
+/// The `archive` feature adds an input, the Orb's root, a method and a sub-module with a service,
+/// each under its `#[cfg]`, and the crate builds with and without it: the macro expands the module
+/// once per configuration, so the WIT, the signatures and the declaration have the method and the
+/// service exactly when the feature is on, as the contract of the WIT the build carries plans them.
+/// Then `orb(..)` takes the archive, the root shares it with the objects, the method moves an
+/// object's notes there and the service counts them; without the feature, the host knows neither.
+/// The expectation adds the `#[local]` method, as `orb_takes_the_inputs` does.
+#[test]
+fn the_archive_feature_adds_an_input_a_method_and_a_service() {
+    let archive = cfg!(feature = "archive");
+    let events = Events::default();
+    let orb = notebook::orb(inputs(&events)).unwrap();
+    let mut expected = Contract::from_source("notebook.wit", notebook::WIT, Some("notebook"))
+        .unwrap()
+        .plan("calculator", 2, &Default::default())
+        .unwrap()
+        .orb;
+    for service in &mut expected.services {
+        if service.name == SESSION {
+            service.methods.insert("apply".into());
+        }
+    }
+    assert_eq!(orb.declaration(), &expected);
+    for text in ["archive: func() -> u32;", "interface shelf {"] {
+        assert_eq!(
+            notebook::WIT.contains(text),
+            archive,
+            "{text}\n{}",
+            notebook::WIT
+        );
+    }
+    let services = &orb.declaration().services;
+    let names: Vec<&str> = services
+        .iter()
+        .map(|service| service.name.as_str())
+        .collect();
+    let mut expected = vec![NOTES, BOARD, SESSION];
+    if archive {
+        expected.push(SHELF);
+    }
+    assert_eq!(names, expected);
+    assert_eq!(services[0].methods.contains("archive"), archive);
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![orb]).unwrap();
+    let notes = Rc::new(host.get(NOTES, vec!["a".into()], "alice").unwrap());
+    let shelf = host.get(SHELF, vec!["main".into()], "host");
+    if let Err(error) = &shelf {
+        assert!(!archive, "{error}");
+        assert_eq!(error.reason, "unknown_service", "{error}");
+    }
+    let shelf = shelf.ok().map(Rc::new);
+    let (called, counted) = (notes.clone(), shelf.clone());
+    let (moved, count) = pool
+        .run_until(host.root("host", move |context| {
+            async move {
+                for text in ["first", "second"] {
+                    called
+                        .call::<_, u32>(&context, "add", (text.to_string(),))
+                        .await?;
+                }
+                let moved = called.call::<_, u32>(&context, "archive", ()).await;
+                let count = match counted {
+                    Some(shelf) => Some(shelf.call::<_, u32>(&context, "count", ()).await?),
+                    None => None,
+                };
+                Ok((moved, count))
+            }
+            .boxed_local()
+        }))
+        .unwrap();
+    if archive {
+        assert_eq!(moved.unwrap(), 2);
+        assert_eq!(count, Some(2));
+    } else {
+        let error = moved.unwrap_err();
+        assert_eq!(error.reason, "method", "{error}");
+        assert_eq!(count, None);
+    }
+    notes.release().unwrap();
+    if let Some(shelf) = shelf {
+        shelf.release().unwrap();
+    }
     pool.run_until(host.close()).unwrap();
 }

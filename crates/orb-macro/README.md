@@ -1169,9 +1169,69 @@ import and a hook are compile errors where the runtime is linked, naming the ite
 side covers them, and so is an `Option` of an `Option`, which the boundary's JSON cannot tell from
 `None`; a component build of the same module is unaffected.
 
+## Items under `#[cfg]`
+
+An attribute macro reads the module before the compiler evaluates the `#[cfg(..)]`s in it. On the
+items the macro reads into the WIT and into `orb(..)`, a `#[service]` struct, an `impl` block of
+one, a `pub fn` or the `#[create]` of such a block, the function marked `#[root]`, a function or a
+struct marked `#[hook]`, and a sub-module that holds a service, the root or a hook, the macro
+evaluates them itself: it expands the module once per combination of their distinct predicates.
+Each copy of the module leaves out the items its combination rules out and goes through
+`#[tembra::orb]` again under the `#[cfg]` of its combination, and the compiler keeps the one copy
+whose combination holds. So a Cargo feature can add a service, a method, the Orb's root or a hook:
+the WIT, the signatures, `orb(..)` and the contract the macro writes are those of the configuration
+being built.
+
+```rust,ignore
+#[service]
+pub struct Notes;
+
+impl Notes {
+    pub fn add(text: String) -> u32 {
+        /* .. */
+    }
+
+    #[cfg(feature = "archive")]
+    pub fn archive() -> u32 {
+        /* .. */
+    }
+}
+
+#[cfg(feature = "archive")]
+#[service]
+pub struct Shelf;
+
+#[cfg(feature = "archive")]
+impl Shelf {
+    pub fn count() -> u32 {
+        /* .. */
+    }
+}
+```
+
+A predicate counts once however often it is written, and `not(feature = "archive")` is the same
+predicate as `feature = "archive"`, turned over. A module takes at most 4 distinct predicates, 16
+copies; a 5th is a compile error at its `#[cfg]`. A copy left with nothing to export, every
+service of the module under a `#[cfg]` that does not hold, is a compile error that names the
+configuration of the build. The copies name the macro as `::tembra::orb`, through the facade the
+crate depends on.
+
+Any other `#[cfg]` is left to the compiler. On a field of the `#[inputs]` struct, which `orb(..)`
+takes whole, or on a sub-module holding no service, root or hook, such as `#[cfg(test)] mod tests`,
+it works as anywhere else; on another item the macro reads, such as a `#[state]`, a `#[resource]`
+or a type that enters the WIT, the macro reads the item in every configuration.
+
+The contract the macro writes follows the last build that compiled the crate for itself, with its
+features: `cargo test --all-features` writes the contract of every feature, and a later
+`cargo tembra build`, which compiles the component with the crate's default features, writes that
+configuration's back. Commit the contract of the configuration consumers build against: for a
+component, the one `cargo tembra build` writes, so run it last before committing `contract/`; for
+a crate used only natively, the one a build with the default features writes.
+
 ## What it generates
 
-The macro rewrites the module with:
+The macro rewrites the module, or each copy of it under `#[cfg]`, see
+[items under `#[cfg]`](#items-under-cfg), with:
 
 1. `pub const WIT: &str`, the derived WIT text. When Cargo compiles the crate for itself, as the
    primary package, the macro also writes it to the crate's `contract/<world>.wit`, the consumed
