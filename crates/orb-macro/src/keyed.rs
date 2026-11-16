@@ -74,14 +74,14 @@ pub(crate) fn option(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<LitSt
 /// hook, an interface the world imports itself.
 pub(crate) fn views(
     imports: &[LitStr],
-    dir: Option<&Path>,
+    dir: Option<&crate::wit::Directory>,
     world: &str,
     taken: &BTreeMap<String, &Ident>,
 ) -> syn::Result<Vec<View>> {
     if imports.is_empty() {
         return Ok(Vec::new());
     }
-    let resolve = dir.map(crate::wit::resolve).transpose()?;
+    let resolve = dir.map(crate::wit::Directory::packages).transpose()?;
     let mut views: Vec<View> = Vec::new();
     for literal in imports {
         let target = literal.value();
@@ -93,7 +93,7 @@ pub(crate) fn views(
                 ),
             ));
         }
-        let (Some(dir), Some(resolve)) = (dir, &resolve) else {
+        let (Some(dir), Some(resolve)) = (dir, resolve) else {
             return Err(syn::Error::new(
                 literal.span(),
                 "importing an interface by key needs wit = \"<dir>\", the directory with its WIT package",
@@ -121,7 +121,7 @@ pub(crate) fn views(
         if let Some(clash) = clash {
             return Err(syn::Error::new(literal.span(), clash));
         }
-        let (text, used) = view_text(resolve, dir, &target, &name)
+        let (text, used) = view_text(resolve, dir.path(), &target, &name)
             .map_err(|message| syn::Error::new(literal.span(), message))?;
         views.push(View {
             target,

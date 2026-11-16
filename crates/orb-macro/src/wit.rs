@@ -5,6 +5,7 @@ use crate::{Composition, Declared, Function, Handles, Service, Shape, ShapeKind,
 use heck::{ToKebabCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use std::{
+    cell::OnceCell,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
@@ -570,20 +571,21 @@ pub(crate) fn guest_package_needed(copies: &BTreeSet<PackageName>) -> syn::Resul
     Ok(!copies.contains(&bundled.packages[bundled_id].name))
 }
 
-/// The bundled packages the consumed packages, read from `dir`, hold copies of, as a contract
-/// `cargo tembra build` wrote holds them in its `deps/`: the inline WIT leaves those out, since
-/// the bindings would read them twice. Every consumed package named as a bundled one, a WASI
-/// package Tembra serves or the kernel's, is checked as `Contract::from_dir` checks it, whether
-/// the Orb uses it or not. Its file, found by its first interface, must be in `deps/` itself: a
-/// copy in a directory of `deps/` or in `dir`, even line for line, is `from_dir`'s error naming
-/// that directory. And it must be the bundled file line for line, whatever its line endings
-/// (`tembra_contracts::bundled`), so a copy differing only in its comments is not: another copy
-/// is an error naming its file, else `dir`, and the package and what it is.
-pub(crate) fn bundled_copies(dir: Option<&Path>) -> syn::Result<BTreeSet<PackageName>> {
-    let Some(dir) = dir else {
+/// The bundled packages the consumed packages, read from the consumed directory, hold copies of,
+/// as a contract `cargo tembra build` wrote holds them in its `deps/`: the inline WIT leaves those
+/// out, since the bindings would read them twice. Every consumed package named as a bundled one, a
+/// WASI package Tembra serves or the kernel's, is checked as `Contract::from_dir` checks it,
+/// whether the Orb uses it or not. Its file, found by its first interface, must be in `deps/`
+/// itself: a copy in a directory of `deps/` or in the directory itself, even line for line, is
+/// `from_dir`'s error naming that directory. And it must be the bundled file line for line,
+/// whatever its line endings (`tembra_contracts::bundled`), so a copy differing only in its
+/// comments is not: another copy is an error naming its file, else the directory, and the package
+/// and what it is.
+pub(crate) fn bundled_copies(parsed: &Parsed) -> syn::Result<BTreeSet<PackageName>> {
+    let Some(dir) = parsed.dir() else {
         return Ok(BTreeSet::new());
     };
-    let consumed = resolve(dir)?;
+    let (dir, consumed) = (dir.path(), dir.packages()?);
     // The bundled packages by the names their sources declare: resolved together with the
     // consumed ones, each would be found as its own copy.
     let bundled: Vec<&str> = tembra_contracts::WASI_SOURCES
@@ -728,8 +730,17 @@ pub(crate) struct ConsumedResource {
     pub statics: Vec<ConsumedFunction>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many directories of WIT packages this thread has read, for the test that an expansion
+    /// reads its consumed directory once.
+    pub(crate) static DIRECTORY_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Read the WIT packages of a directory.
-pub(crate) fn resolve(dir: &Path) -> syn::Result<Resolve> {
+fn resolve(dir: &Path) -> syn::Result<Resolve> {
+    #[cfg(test)]
+    DIRECTORY_PARSES.set(DIRECTORY_PARSES.get() + 1);
     let mut resolve = Resolve::default();
     resolve.push_dir(dir).map_err(|cause| {
         error(format!(
@@ -738,6 +749,75 @@ pub(crate) fn resolve(dir: &Path) -> syn::Result<Resolve> {
         ))
     })?;
     Ok(resolve)
+}
+
+/// The WIT packages an expansion parses, each set once, the first time something asks for it: the
+/// consumed packages of `wit = "<dir>"`, when the attribute names a directory, and the bundled
+/// WASI packages, which an import in the `wasi` namespace names. An expansion that asks for none
+/// parses none.
+pub(crate) struct Parsed {
+    dir: Option<Directory>,
+    bundled: OnceCell<syn::Result<crate::wasi::Bundled>>,
+}
+
+/// The consumed directory, `wit = "<dir>"`, and its packages, parsed once, the first time
+/// something asks for them.
+pub(crate) struct Directory {
+    path: PathBuf,
+    packages: OnceCell<syn::Result<Resolve>>,
+}
+
+impl Parsed {
+    /// Nothing parsed yet, of the consumed directory `dir`, if the attribute names one.
+    pub(crate) fn new(dir: Option<PathBuf>) -> Self {
+        Parsed {
+            dir: dir.map(|path| Directory {
+                path,
+                packages: OnceCell::new(),
+            }),
+            bundled: OnceCell::new(),
+        }
+    }
+
+    /// The consumed directory, if the attribute names one.
+    pub(crate) fn dir(&self) -> Option<&Directory> {
+        self.dir.as_ref()
+    }
+
+    /// The bundled WASI packages, resolved, and each package with its source, in dependency
+    /// order.
+    pub(crate) fn bundled(&self) -> syn::Result<&crate::wasi::Bundled> {
+        self.bundled
+            .get_or_init(crate::wasi::bundled)
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// The consumed packages, owned, for the one reader that adds to them: the directory's,
+    /// parsed now if nothing asked for them yet, or none without a directory.
+    pub(crate) fn into_consumed(self) -> syn::Result<Resolve> {
+        match self.dir {
+            Some(Directory { path, packages }) => {
+                packages.into_inner().unwrap_or_else(|| resolve(&path))
+            }
+            None => Ok(Resolve::default()),
+        }
+    }
+}
+
+impl Directory {
+    /// The directory's path, as `absolute` gives it.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The directory's packages, parsed the first time.
+    pub(crate) fn packages(&self) -> syn::Result<&Resolve> {
+        self.packages
+            .get_or_init(|| resolve(&self.path))
+            .as_ref()
+            .map_err(Clone::clone)
+    }
 }
 
 /// The interface of the consumed packages with the given identity.
@@ -761,22 +841,22 @@ pub(crate) fn interface<'a>(
 
 /// The consumed interfaces an Orb implements or imports, spelled for the bindings.
 pub(crate) fn consumed<'a>(
-    dir: &Path,
+    dir: &Directory,
     identities: impl Iterator<Item = &'a String>,
 ) -> syn::Result<BTreeMap<String, Consumed>> {
     use wit_parser::FunctionKind;
-    let resolve = resolve(dir)?;
+    let resolve = dir.packages()?;
     identities
         .map(|identity| {
-            let interface = interface(&resolve, dir, identity)?;
+            let interface = interface(resolve, dir.path(), identity)?;
             let [namespace, package, name] = crate::hook_path(identity);
             let import = format!("self::{namespace}::{package}::{name}");
             let export = format!("exports::{namespace}::{package}::{name}");
             let spell = |ty: wit_parser::Type| -> syn::Result<Spelled> {
                 Ok(Spelled {
-                    import: rust_type(&resolve, ty, &import)?,
-                    export: rust_type(&resolve, ty, &export)?,
-                    handles: handles(&resolve, ty),
+                    import: rust_type(resolve, ty, &import)?,
+                    export: rust_type(resolve, ty, &export)?,
+                    handles: handles(resolve, ty),
                 })
             };
             let function = |function: &wit_parser::Function| -> syn::Result<ConsumedFunction> {
@@ -927,10 +1007,10 @@ impl Defined {
     }
 }
 
-/// What each consumed interface of `identities` defines, read from the packages of `dir`, or from
-/// the bundled WASI packages for a WASI interface.
+/// What each consumed interface of `identities` defines, read from the packages of the consumed
+/// directory, or from the bundled WASI packages for a WASI interface.
 pub(crate) fn defined<'a>(
-    dir: Option<&Path>,
+    parsed: &Parsed,
     identities: impl Iterator<Item = &'a str>,
 ) -> syn::Result<BTreeMap<String, Defined>> {
     use crate::wasi::is_wasi;
@@ -938,16 +1018,19 @@ pub(crate) fn defined<'a>(
     let bundled = identities
         .iter()
         .any(|identity| is_wasi(identity))
-        .then(crate::wasi::resolve)
-        .transpose()?;
-    let consumed = match dir {
-        Some(dir) if identities.iter().any(|identity| !is_wasi(identity)) => Some(resolve(dir)?),
+        .then(|| parsed.bundled())
+        .transpose()?
+        .map(|(bundled, _)| bundled);
+    let consumed = match parsed.dir() {
+        Some(dir) if identities.iter().any(|identity| !is_wasi(identity)) => {
+            Some((dir.path(), dir.packages()?))
+        }
         _ => None,
     };
     let mut defined = BTreeMap::new();
     for identity in identities {
-        let (resolve, interface) = match (is_wasi(identity), &bundled, &consumed, dir) {
-            (true, Some(bundled), _, _) => {
+        let (resolve, interface) = match (is_wasi(identity), bundled, consumed) {
+            (true, Some(bundled), _) => {
                 let interface = bundled
                     .interfaces
                     .iter()
@@ -960,9 +1043,7 @@ pub(crate) fn defined<'a>(
                     })?;
                 (bundled, interface)
             }
-            (false, _, Some(consumed), Some(dir)) => {
-                (consumed, interface(consumed, dir, identity)?)
-            }
+            (false, _, Some((dir, consumed))) => (consumed, interface(consumed, dir, identity)?),
             _ => {
                 return Err(error(format!(
                     "{identity} is read from wit = \"<dir>\", the directory with its WIT package"
@@ -1257,16 +1338,14 @@ pub(crate) enum Held {
     },
 }
 
-/// Read the WIT the bindings read, `inline` with the consumed packages of `dir`, for what they make
-/// of its types, where a state, `serde`, makes them derive serde's traits on the types that can
-/// carry them; a WIT the bindings would refuse yields nothing, and the bindings report it.
-pub(crate) fn bindings(dir: Option<&Path>, inline: &str, serde: bool) -> Bindings {
-    let mut resolve = Resolve::default();
-    if let Some(dir) = dir
-        && resolve.push_dir(dir).is_err()
-    {
+/// Read the WIT the bindings read, `inline` added to the consumed packages `parsed` holds, which
+/// makes this their last reader, for what they make of its types, where a state, `serde`, makes
+/// them derive serde's traits on the types that can carry them; a WIT the bindings would refuse
+/// yields nothing, and the bindings report it.
+pub(crate) fn bindings(parsed: Parsed, inline: &str, serde: bool) -> Bindings {
+    let Ok(mut resolve) = parsed.into_consumed() else {
         return Bindings::default();
-    }
+    };
     let Ok(own) = resolve.push_str("orb.wit", inline) else {
         return Bindings::default();
     };
@@ -1450,13 +1529,13 @@ fn holds_unserializable(
 
 /// The callback of every hook: the single function of its interface in the consumed packages.
 pub(crate) fn callbacks<'a>(
-    dir: &Path,
+    dir: &Directory,
     hooks: impl Iterator<Item = &'a String>,
 ) -> syn::Result<BTreeMap<String, Callback>> {
-    let resolve = resolve(dir)?;
+    let resolve = dir.packages()?;
     hooks
         .map(|hook| {
-            let interface = interface(&resolve, dir, hook)?;
+            let interface = interface(resolve, dir.path(), hook)?;
             let mut functions = interface.functions.values();
             let (Some(function), None) = (functions.next(), functions.next()) else {
                 return Err(error(format!(
@@ -1473,9 +1552,9 @@ pub(crate) fn callbacks<'a>(
             let export = format!("exports::{namespace}::{package}::{interface}");
             let spell = |ty: wit_parser::Type| -> syn::Result<Spelled> {
                 Ok(Spelled {
-                    import: rust_type(&resolve, ty, &import)?,
-                    export: rust_type(&resolve, ty, &export)?,
-                    handles: handles(&resolve, ty),
+                    import: rust_type(resolve, ty, &import)?,
+                    export: rust_type(resolve, ty, &export)?,
+                    handles: handles(resolve, ty),
                 })
             };
             Ok((
@@ -1485,11 +1564,11 @@ pub(crate) fn callbacks<'a>(
                     series: function.result.is_none(),
                     waterfall: function
                         .result
-                        .is_some_and(|result| same_type(&resolve, result, param.ty)),
-                    bail: function.result.is_some_and(|ty| optional(&resolve, ty)),
+                        .is_some_and(|result| same_type(resolve, result, param.ty)),
+                    bail: function.result.is_some_and(|ty| optional(resolve, ty)),
                     input: spell(param.ty)?,
                     result: function.result.map(spell).transpose()?,
-                    passed: passed(&resolve, param.ty),
+                    passed: passed(resolve, param.ty),
                 },
             ))
         })

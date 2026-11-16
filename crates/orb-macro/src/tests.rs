@@ -5748,3 +5748,89 @@ fn generated_code_names_prelude_items_by_their_paths() {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
 }
+
+/// A module that reads its consumed directory from every place the expansion reads it: an
+/// implemented interface and an imported one, a hook it contributes to, an interface imported by
+/// key, a type of an import in a derived signature and in a state, whose serde derives make the
+/// expansion read the WIT as the bindings do, and a WASI import, which nests the bundled packages.
+#[test]
+fn an_expansion_reads_the_consumed_directory_and_the_bundled_packages_once() {
+    let dir = consumed(
+        "once",
+        "package example:ledger@1.0.0;
+
+interface book {
+  record entry { label: string, amount: s64 }
+  add: func(entry: entry) -> u32;
+}
+
+interface guard {
+  record admission { value: s32, blocked: bool }
+  apply: func(input: admission) -> admission;
+}
+
+interface reports {
+  record report { total: s64 }
+  latest: func() -> report;
+}
+
+interface counter {
+  add: func(amount: u32) -> u32;
+}
+",
+    );
+    let options = Options {
+        imports: vec![
+            literal("example:ledger/reports@1.0.0"),
+            literal("wasi:random/random@0.3.0"),
+        ],
+        keyed: vec![literal("example:ledger/counter@1.0.0")],
+        ..options("example:keeper@1.0.0", Some(&dir))
+    };
+    let directories = super::wit::DIRECTORY_PARSES.get();
+    let bundled = super::wasi::BUNDLED_PARSES.get();
+    let module = expanded_with(
+        options,
+        "mod keeper {
+            #[state(service = Keeper)]
+            pub struct Kept { pub total: i64, pub last: Option<reports::Report> }
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper { pub fn add(entry: book::Entry) -> u32 { 0 } }
+            #[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
+            pub fn admit(input: guard::Admission) -> guard::Admission { input }
+            #[service]
+            pub struct Report;
+            impl Report {
+                pub fn latest() -> reports::Report { reports::latest() }
+                pub async fn bump(key: String) -> Result<u32, String> {
+                    Ok(counter_ref::get(vec![key]).await?.add(1))
+                }
+                pub fn draw(length: u64) -> Vec<u8> { random::get_random_bytes(length) }
+            }
+        }",
+    );
+    let text = wit(&module);
+    for expected in [
+        "  use example:ledger/reports@1.0.0.{report};\n",
+        "  import example:ledger/reports@1.0.0;\n",
+        "  import wasi:random/random@0.3.0;\n",
+        "  import counter-ref;\n",
+        "  import example:ledger/guard@1.0.0;\n  export example:ledger/guard@1.0.0;\n",
+        "  export example:ledger/book@1.0.0;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    assert!(
+        tokens(&module)
+            .contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize]")
+    );
+    assert_eq!(
+        (
+            super::wit::DIRECTORY_PARSES.get() - directories,
+            super::wasi::BUNDLED_PARSES.get() - bundled,
+        ),
+        (1, 1),
+        "the consumed directory and the bundled WASI packages are read once each"
+    );
+}

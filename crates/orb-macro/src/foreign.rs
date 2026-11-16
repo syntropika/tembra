@@ -26,10 +26,7 @@ use crate::{
     Candidate, Contribution, Declared, Service, Shape, ShapeKind, State, WitResource, hook_path,
     keyed, resource_params, wasi, wit,
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-};
+use std::collections::{BTreeMap, BTreeSet};
 use syn::{Ident, Item, LitStr, Type, spanned::Spanned};
 
 /// How the world holds a consumed interface, which decides what a derived interface names through
@@ -491,14 +488,14 @@ impl Place<'_> {
     }
 }
 
-/// What the uses of the consumed interfaces are read from: the consumed modules and the directory
-/// of the consumed packages, the views of the interfaces imported by key, the module's services,
+/// What the uses of the consumed interfaces are read from: the consumed modules and the packages
+/// the expansion parses, the views of the interfaces imported by key, the module's services,
 /// resources, contributions and declared hooks, the types that enter the WIT with the interface
 /// defining each, and the states with the module types that stay out of the WIT, which a state's
 /// fields may reach.
 pub(crate) struct Reach<'a> {
     pub modules: &'a Modules,
-    pub dir: Option<&'a Path>,
+    pub parsed: &'a wit::Parsed,
     pub views: &'a [keyed::View],
     pub services: &'a [Service],
     pub resources: &'a [WitResource],
@@ -521,7 +518,7 @@ pub(crate) struct Reach<'a> {
 pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Foreign>>> {
     let Reach {
         modules,
-        dir,
+        parsed,
         views,
         services,
         resources,
@@ -599,7 +596,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         return Ok(BTreeMap::new());
     }
     let defined = wit::defined(
-        dir,
+        parsed,
         found
             .iter()
             .map(|(named, _)| named.interface.identity.as_str()),

@@ -1635,9 +1635,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     for candidate in &mut candidates {
         candidate.references = consumed_modules.item_references(&candidate.item, candidate.scope);
     }
-    // Consumed packages: the callback of every hook, contributed or declared, and every interface
-    // implemented or imported are read from their WIT packages.
-    let wit_dir = options.wit.as_deref().map(wit::absolute).transpose()?;
+    // Consumed packages, parsed once for the expansion: the callback of every hook, contributed or
+    // declared, and every interface implemented or imported are read from their WIT packages.
+    let parsed = wit::Parsed::new(options.wit.as_deref().map(wit::absolute).transpose()?);
     let implemented: Vec<String> = services
         .iter()
         .filter_map(|service| service.implements.clone())
@@ -1647,7 +1647,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         .iter()
         .filter(|identity| !wasi::is_wasi(identity))
         .collect();
-    let consumed = match (&wit_dir, implemented.is_empty() && imported.is_empty()) {
+    let consumed = match (parsed.dir(), implemented.is_empty() && imported.is_empty()) {
         (_, true) => BTreeMap::new(),
         (Some(dir), false) => wit::consumed(dir, implemented.iter().chain(imported))?,
         (None, false) => {
@@ -1668,7 +1668,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 .map(|(hook, _)| hook),
         )
         .collect();
-    let callbacks = match (&wit_dir, consumed_hooks.is_empty()) {
+    let callbacks = match (parsed.dir(), consumed_hooks.is_empty()) {
         (_, true) => Default::default(),
         (Some(dir), false) => wit::callbacks(dir, consumed_hooks.iter().copied())?,
         (None, false) => {
@@ -1778,13 +1778,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     );
     // The view of each interface imported by key, derived from the interface's WIT: its module
     // re-exports the types the view uses, which a derived signature names.
-    let views = keyed::views(&options.keyed, wit_dir.as_deref(), &world, &interface_names)?;
+    let views = keyed::views(&options.keyed, parsed.dir(), &world, &interface_names)?;
     // What each derived interface `use`s from the consumed interfaces: the types its functions and
     // the types it defines name, and the handles its functions take, once each is checked where
     // it is named, a state's fields included.
     let foreign = foreign::foreign(foreign::Reach {
         modules: &consumed_modules,
-        dir: wit_dir.as_deref(),
+        parsed: &parsed,
         views: &views,
         services: &services,
         resources: &wit_resources,
@@ -2423,8 +2423,8 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // bundled package there checked whether the Orb uses it or not; the hook packages come from
     // the consumed directory. Foreign interfaces need `generate_all`.
     let kernel = !states.is_empty() || !resources.is_empty() || options.context;
-    let copies = wit::bundled_copies(wit_dir.as_deref())?;
-    let standard = wasi::packages(&options.imports, &copies)?;
+    let copies = wit::bundled_copies(&parsed)?;
+    let standard = wasi::packages(&parsed, &options.imports, &copies)?;
     let inline = if kernel && wit::guest_package_needed(&copies)? {
         LitStr::new(
             &format!("{wit}\n{}{standard}", wit::guest_package()?),
@@ -2433,15 +2433,16 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     } else {
         LitStr::new(&format!("{wit}{standard}"), Span::call_site())
     };
-    let path = wit_dir.as_ref().map(|dir| {
-        let dir = LitStr::new(&dir.display().to_string(), Span::call_site());
+    let path = parsed.dir().map(|dir| {
+        let dir = LitStr::new(&dir.path().display().to_string(), Span::call_site());
         quote! { path: #dir, }
     });
     // What the bindings make of the WIT, read when a generated type carries more than they give
-    // it: the serde derives of a state, or the author's derives and the attributes they read.
+    // it: the serde derives of a state, or the author's derives and the attributes they read. The
+    // bindings add the inline WIT to the consumed packages, so they read them last.
     let serde = !states.is_empty();
     let bindings = if serde || shapes.iter().any(|shape| !shape.carried.is_empty()) {
-        wit::bindings(wit_dir.as_deref(), &inline.value(), serde)
+        wit::bindings(parsed, &inline.value(), serde)
     } else {
         wit::Bindings::default()
     };

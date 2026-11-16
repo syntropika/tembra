@@ -14,9 +14,21 @@ pub(crate) fn is_wasi(identity: &str) -> bool {
     identity.starts_with("wasi:")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has read the bundled WASI packages, for the test that an
+    /// expansion reads them once.
+    pub(crate) static BUNDLED_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The bundled WASI packages, resolved from their sources in dependency order, and each package
 /// with its source, in that order.
-fn bundled() -> syn::Result<(Resolve, Vec<(PackageId, &'static str)>)> {
+pub(crate) type Bundled = (Resolve, Vec<(PackageId, &'static str)>);
+
+/// The bundled WASI packages, resolved, which `wit::Parsed` holds for an expansion.
+pub(crate) fn bundled() -> syn::Result<Bundled> {
+    #[cfg(test)]
+    BUNDLED_PARSES.set(BUNDLED_PARSES.get() + 1);
     let mut resolve = Resolve::default();
     let mut sources = Vec::new();
     for (file, source) in tembra_contracts::WASI_SOURCES {
@@ -28,19 +40,18 @@ fn bundled() -> syn::Result<(Resolve, Vec<(PackageId, &'static str)>)> {
     Ok((resolve, sources))
 }
 
-/// The bundled WASI packages, resolved, for what an interface of them defines.
-pub(crate) fn resolve() -> syn::Result<Resolve> {
-    Ok(bundled()?.0)
-}
-
 /// The WASI packages the Orb's imports need, nested for the inline WIT: the package of each
-/// imported WASI interface and the bundled packages it builds on, in dependency order. A package
-/// the consumed directory holds a copy of already, one of its bundled `copies`
-/// (`wit::bundled_copies`), is left out. An import in the `wasi` namespace that names no
-/// interface of the bundled packages, another version or an unstable interface, is an error on
-/// its literal, and so is an interface no host serves as an import, one a component exports
-/// instead.
-pub(crate) fn packages(imports: &[LitStr], copies: &BTreeSet<PackageName>) -> syn::Result<String> {
+/// imported WASI interface and the bundled packages it builds on, in dependency order, read from
+/// the bundled packages `parsed` holds. A package the consumed directory holds a copy of already,
+/// one of its bundled `copies` (`wit::bundled_copies`), is left out. An import in the `wasi`
+/// namespace that names no interface of the bundled packages, another version or an unstable
+/// interface, is an error on its literal, and so is an interface no host serves as an import, one
+/// a component exports instead.
+pub(crate) fn packages(
+    parsed: &crate::wit::Parsed,
+    imports: &[LitStr],
+    copies: &BTreeSet<PackageName>,
+) -> syn::Result<String> {
     let imported: Vec<&LitStr> = imports
         .iter()
         .filter(|import| is_wasi(&import.value()))
@@ -48,7 +59,7 @@ pub(crate) fn packages(imports: &[LitStr], copies: &BTreeSet<PackageName>) -> sy
     if imported.is_empty() {
         return Ok(String::new());
     }
-    let (bundled, sources) = bundled()?;
+    let (bundled, sources) = parsed.bundled()?;
     let mut pending = Vec::new();
     for import in imported {
         let identity = import.value();
@@ -62,7 +73,7 @@ pub(crate) fn packages(imports: &[LitStr], copies: &BTreeSet<PackageName>) -> sy
         else {
             return Err(syn::Error::new(
                 import.span(),
-                unknown(&bundled, &sources, &identity),
+                unknown(bundled, sources, &identity),
             ));
         };
         // The installation binds an import with functions to the host's provider of its grant,
@@ -71,7 +82,7 @@ pub(crate) fn packages(imports: &[LitStr], copies: &BTreeSet<PackageName>) -> sy
         if !interface.functions.is_empty() && !tembra_contracts::host_serves(&identity) {
             return Err(syn::Error::new(
                 import.span(),
-                unserved(&bundled, package, &identity),
+                unserved(bundled, package, &identity),
             ));
         }
         pending.push(package);
