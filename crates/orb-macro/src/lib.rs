@@ -34,9 +34,10 @@
 //! The crate using the macro depends on `tembra` with the `macros` feature, which brings the
 //! `wit-bindgen` the generated bindings use, at the version whose rules the macro follows, and
 //! on `dlmalloc` (feature `global`) only in `no_std` mode; a crate with a state
-//! also depends on `serde` (`derive`, `alloc`) and `serde_json` (`alloc`). `cargo tembra build`
-//! compiles the crate, reads the same WIT and the hook priorities from the component and
-//! packages the artifact.
+//! also depends on `serde` (`derive`, `alloc`) and `serde_json` (`alloc`). A crate that depends on
+//! the facade under another name gives that name with `crate = ".."` on the attribute.
+//! `cargo tembra build` compiles the crate, reads the same WIT and the hook priorities from the
+//! component and packages the artifact.
 mod flags;
 mod foreign;
 mod keyed;
@@ -102,9 +103,17 @@ fn options(attribute: proc_macro2::TokenStream) -> syn::Result<Options> {
             options.context = true;
         } else if meta.path.is_ident("no_std") {
             options.no_std = true;
+        } else if meta.path.is_ident("crate") {
+            let name = meta.value()?.parse::<LitStr>()?;
+            options.facade = Some(name.parse::<Ident>().map_err(|_| {
+                syn::Error::new(
+                    name.span(),
+                    "`crate` names the facade dependency as the crate's code writes it, a Rust identifier: #[sdk::orb(crate = \"sdk\", ..)] for `sdk = { package = \"tembra\", .. }`",
+                )
+            })?);
         } else {
             return Err(meta.error(
-                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", import(\"ns:name/interface@version\", keyed), context, no_std)]",
+                "unknown option; use #[orb(package = \"ns:name@1.0.0\", wit = \"dir\", import = \"ns:name/interface@version\", import(\"ns:name/interface@version\", keyed), context, no_std, crate = \"name\")]",
             ));
         }
         Ok(())
@@ -141,6 +150,9 @@ struct Options {
     context: bool,
     /// Supply the allocator and panic handler for a freestanding Wasm guest.
     no_std: bool,
+    /// The name the crate depends on the facade under, as its code writes it, from `crate = ".."`
+    /// on the attribute; `tembra` without it.
+    facade: Option<Ident>,
     /// Interfaces of other Orbs the module imports, from the consumed WIT packages, as written on
     /// the attribute; the installer binds each to a provider.
     imports: Vec<LitStr>,
@@ -2482,15 +2494,25 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     let with = (!remapped.is_empty()).then(|| quote! { with: { #(#remapped),* }, });
     // The generated code follows the derive rules and the flags lowering of one wit-bindgen
     // version, so the facade picks it, not the author's crate: the bindings come from its
-    // re-export, and their runtime and the bitflags they name are reached there as well.
+    // re-export, and their runtime and the bitflags they name are reached there as well, under the
+    // name the crate depends on the facade under.
+    let facade = options
+        .facade
+        .clone()
+        .unwrap_or_else(|| Ident::new("tembra", Span::call_site()));
+    let runtime = LitStr::new(&format!("::{facade}::__wit_bindgen::rt"), Span::call_site());
+    let bitflags = LitStr::new(
+        &format!("::{facade}::__wit_bindgen::rt::bitflags"),
+        Span::call_site(),
+    );
     let generate = quote! {
-        ::tembra::__wit_bindgen::generate!({
+        ::#facade::__wit_bindgen::generate!({
             #path
             inline: #inline,
             world: #world_literal,
             generate_all,
-            runtime_path: "::tembra::__wit_bindgen::rt",
-            bitflags_path: "::tembra::__wit_bindgen::rt::bitflags",
+            runtime_path: #runtime,
+            bitflags_path: #bitflags,
             #derives
             #type_attributes
             #member_attributes

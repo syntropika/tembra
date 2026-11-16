@@ -20,6 +20,7 @@ fn options(package: &str, wit: Option<&std::path::Path>) -> Options {
         wit: wit.map(|dir| dir.display().to_string()),
         context: false,
         no_std: false,
+        facade: None,
         imports: Vec::new(),
         keyed: Vec::new(),
     }
@@ -142,6 +143,58 @@ fn the_bindings_come_from_the_wit_bindgen_the_facade_pins() {
         assert!(generated.contains(expected), "{expected}\n{generated}");
     }
     assert!(!generated.contains(":: wit_bindgen"), "{generated}");
+}
+
+/// A guest that depends on the facade under another name, `sdk = { package = "tembra", .. }`,
+/// names it with `crate = ".."` on the attribute, as serde and tokio take theirs: every path the
+/// expansion writes through the facade takes that name, while the bindings' modules of the kernel's
+/// `tembra:guest` package keep theirs. Without the option the name is `tembra`. A value that is not
+/// a name the crate's code can write is refused at the literal.
+#[test]
+fn the_crate_option_names_the_facade_dependency() {
+    use proc_macro2::TokenStream;
+    use quote::quote;
+    let attribute = |tail: TokenStream| quote!(package = "example:counter@1.0.0", context #tail);
+    let generated = |tail: TokenStream| {
+        expansion(attribute(tail), syn::parse_str(COUNTER).unwrap()).to_string()
+    };
+    let plain = generated(quote!());
+    assert_eq!(generated(quote!(, crate = "tembra")), plain);
+    let renamed = generated(quote!(, crate = "sdk"));
+    for expected in [
+        ":: sdk :: __wit_bindgen :: generate !",
+        "runtime_path : \"::sdk::__wit_bindgen::rt\"",
+        "bitflags_path : \"::sdk::__wit_bindgen::rt::bitflags\"",
+        "exports :: tembra :: guest :: state_init",
+        "pub use self :: tembra :: guest :: context ;",
+    ] {
+        assert!(renamed.contains(expected), "{expected}\n{renamed}");
+    }
+    assert_eq!(
+        renamed,
+        plain
+            .replace(":: tembra :: __wit_bindgen", ":: sdk :: __wit_bindgen")
+            .replace("\"::tembra::__wit_bindgen", "\"::sdk::__wit_bindgen")
+    );
+    for value in ["my-sdk", "::sdk", "sdk::orb", "crate", ""] {
+        let error = match super::options(attribute(quote!(, crate = #value))) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("`{value}` was accepted"),
+        };
+        assert_eq!(
+            error,
+            "`crate` names the facade dependency as the crate's code writes it, a Rust identifier: #[sdk::orb(crate = \"sdk\", ..)] for `sdk = { package = \"tembra\", .. }`",
+            "{value}"
+        );
+    }
+    let error = match super::options(attribute(quote!(, krate = "sdk"))) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("`krate` was accepted"),
+    };
+    assert!(
+        error.contains("context, no_std, crate = \"name\")]"),
+        "{error}"
+    );
 }
 
 #[test]

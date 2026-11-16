@@ -50,6 +50,19 @@ rules the macro follows, so a guest does not name it; its `async` feature serves
 a `pub async fn`, of an import by key, whose `get` is asynchronous, and of a WASI interface that
 waits.
 
+A guest that depends on the facade under another name gives that name with `crate` on the
+attribute, as serde's and tokio's attributes do; without it, the generated code reaches the facade
+as `::tembra`. With
+
+```toml
+[dependencies]
+sdk = { package = "tembra", version = "0.2.2", default-features = false, features = ["macros"] }
+```
+
+the module is marked `#[sdk::orb(package = "example:greeter@1.0.0", crate = "sdk")]`. The value is
+the name as the guest's code writes it, a Rust identifier: `my_sdk` for a dependency named
+`my-sdk`. The macro refuses another value at the literal.
+
 ## Standard library and freestanding guests
 
 A guest uses Rust's standard library by default. The macro leaves its allocator and panic handler
