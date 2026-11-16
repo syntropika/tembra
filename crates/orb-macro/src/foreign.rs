@@ -17,7 +17,8 @@
 //! and a derived interface, exported too, uses that copy: the Orb module re-exports the export
 //! module of an implemented interface and of a contributed hook, but the import module of a hook it
 //! declares, which `run` calls, so a derived interface names none of a declared hook's types, and
-//! none of an implemented interface's through the view of its keyed import, the import's copy. A
+//! none of an exported interface's, an implemented one's or a hook's, through the view of its
+//! keyed import, the import's copy. A
 //! WASI interface's names stay out of a derived interface, named through the WASI interface's
 //! module or through a consumed interface that `use`s them, and a consumed type crosses one when it
 //! carries data only. A state may hold a consumed type that `serde` can write, which the bindings
@@ -350,16 +351,20 @@ impl Modules {
         });
     }
 
-    /// The module the Orb module re-exports for the interface `identity` when the module implements
-    /// it, `counter` for `example:counters/counter@1.0.0`: the export module, whose types a derived
-    /// interface takes.
-    fn implementing(&self, identity: &str) -> Option<&str> {
+    /// The module the Orb module re-exports for the interface `identity` when the world exports
+    /// it, with the role the module holds it in: `counter` for an implemented
+    /// `example:counters/counter@1.0.0`, the export module, whose types a derived interface takes,
+    /// as for a hook the module contributes to; the import module for a hook it declares.
+    fn exporting(&self, identity: &str) -> Option<(&str, Role)> {
         self.reexported
             .iter()
             .find(|(_, reexported)| {
-                reexported.role == Role::Implemented && reexported.identity == identity
+                matches!(
+                    reexported.role,
+                    Role::Implemented | Role::Contributed | Role::Declared
+                ) && reexported.identity == identity
             })
-            .map(|(module, _)| module.as_str())
+            .map(|(module, reexported)| (module.as_str(), reexported.role))
     }
 
     /// The module types the fields of a struct or the payloads of an enum's cases mention, the
@@ -844,16 +849,34 @@ fn checked<'a>(
         Place::Field { interface, .. } => (*interface, false),
         Place::Input { .. } | Place::State { .. } => unreachable!("checked above"),
     };
-    // The view of an interface the module implements names the import's copy of the interface's
-    // types, while a derived interface, exported, takes the copy of its export, which the
-    // implemented interface's module names.
+    // The `run` of a hook the module declares, for the errors.
+    let run = || {
+        declared
+            .iter()
+            .find(|declaration| declaration.hook == interface.identity)
+            .map(|declaration| format!("`{}::run`", declaration.ident))
+            .unwrap_or_else(|| "`run`".to_owned())
+    };
+    // The view of an interface the world exports, one the module implements or a hook it
+    // contributes to or declares, names the import's copy of the interface's types, while a
+    // derived interface, exported, takes the copy of its export, which the implemented interface's
+    // or the contributed hook's module names; a declared hook's module names the import's too.
     if interface.role == Role::Keyed
-        && let Some(module) = modules.implementing(&interface.identity)
+        && let Some((module, role)) = modules.exporting(&interface.identity)
     {
         let view = named.module;
-        return refuse(format!(
-            "{what} of {of} and implements: a derived interface takes the types of an implemented interface from its export, as `{module}::{ident}` names them; `{view}::{ident}` is the import's"
-        ));
+        return match role {
+            Role::Implemented => refuse(format!(
+                "{what} of {of} and implements: a derived interface takes the types of an implemented interface from its export, as `{module}::{ident}` names them; `{view}::{ident}` is the import's"
+            )),
+            Role::Contributed => refuse(format!(
+                "{what} of {of} and contributes to: a derived interface takes the types of a hook from its export, as `{module}::{ident}` names them; `{view}::{ident}` is the import's"
+            )),
+            _ => refuse(format!(
+                "{what} of {of} and declares: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{view}::{ident}`, `{module}::{ident}` and {} are the import's; use a type of the module",
+                run()
+            )),
+        };
     }
     // A WASI interface's type or resource, named through the WASI interface's module or through
     // a consumed interface that `use`s it: the runtime carries neither between Orbs.
@@ -885,14 +908,10 @@ fn checked<'a>(
         (Role::Wasi, _) => unreachable!("checked above"),
         (Role::Context, _) => unreachable!("`Modules::named` reaches no name of the context"),
         (Role::Declared, _) => {
-            let run = declared
-                .iter()
-                .find(|declaration| declaration.hook == interface.identity)
-                .map(|declaration| format!("`{}::run`", declaration.ident))
-                .unwrap_or_else(|| "`run`".to_owned());
             let module = named.module;
             refuse(format!(
-                "{what} of {of}: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{module}::{ident}` and {run} are the import's; use a type of the module"
+                "{what} of {of}: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `{module}::{ident}` and {} are the import's; use a type of the module",
+                run()
             ))
         }
         // The runtime moves an owned handle of an imported interface anywhere into an argument,

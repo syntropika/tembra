@@ -797,6 +797,63 @@ fn a_declared_hooks_types_stay_out_of_a_derived_signature() {
     );
 }
 
+/// A hook the module contributes to or declares is exported by the world, as an implemented
+/// interface is, so the view of its keyed import names the import's copy of the hook's types,
+/// which a derived interface, exported, does not take: a derived signature names a contributed
+/// hook's types through the hook's module, the export's copy, and none of a declared hook's.
+#[test]
+fn a_keyed_view_of_an_exported_hook_names_the_imports_copy() {
+    let dir = consumed("hooked-views", LEDGER);
+    let keyed = |hook: &str| Options {
+        keyed: vec![literal(hook)],
+        ..options("example:keeper@1.0.0", Some(&dir), &[])
+    };
+    // A contribution beside the view of its hook.
+    let module = expanded(
+        keyed("example:ledger/guard@1.0.0"),
+        &keeper("pub fn judged(admission: guard::Admission) -> bool { admission.blocked }"),
+    );
+    let generated = tokens(&module);
+    for reexport in [
+        "pub use exports :: example :: ledger :: guard ;",
+        "pub use self :: example :: keeper :: guard_ref ;",
+    ] {
+        assert!(generated.contains(reexport), "{reexport}\n{generated}");
+    }
+    let error = refused(
+        keyed("example:ledger/guard@1.0.0"),
+        &keeper("pub fn judged(admission: guard_ref::Admission) -> bool { admission.blocked }"),
+    );
+    assert!(
+        error.contains("`Report::judged` takes `Admission`, a record of the interface example:ledger/guard@1.0.0, which this module imports by key and contributes to: a derived interface takes the types of a hook from its export, as `guard::Admission` names them; `guard_ref::Admission` is the import's"),
+        "{error}"
+    );
+    // A declaration beside the view of its hook: the Orb module re-exports the hook's import.
+    let gatekeeper = |admit: &str| {
+        format!(
+            "mod gatekeeper {{
+                #[hook(\"example:ledger/gate@1.0.0\", composition = waterfall)]
+                pub struct Gate;
+                #[service]
+                pub struct Admissions;
+                impl Admissions {{ {admit} }}
+            }}"
+        )
+    };
+    expanded(
+        keyed("example:ledger/gate@1.0.0"),
+        &gatekeeper("pub fn admit(value: i32) -> i32 { Gate::run(gate::Ticket { value }).value }"),
+    );
+    let error = refused(
+        keyed("example:ledger/gate@1.0.0"),
+        &gatekeeper("pub fn admit(ticket: gate_ref::Ticket) -> i32 { ticket.value }"),
+    );
+    assert!(
+        error.contains("`Admissions::admit` takes `Ticket`, a record of the interface example:ledger/gate@1.0.0, which this module imports by key and declares: the world exports the hook too, as the portable hook contract requires, and a derived interface takes the names of that export, while `gate_ref::Ticket`, `gate::Ticket` and `Gate::run` are the import's; use a type of the module"),
+        "{error}"
+    );
+}
+
 /// The world holds a consumed interface in one role, and the Orb module re-exports one module for
 /// it: an interface imported plainly beside a hook the module contributes to or declares,
 /// implemented beside such a hook, or imported or implemented twice is an error on the second

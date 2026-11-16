@@ -611,7 +611,10 @@ so the elaborated world imports the interface it exports, for the types alone, w
 build` and the kernel tell from a hook, an interface the world imports itself. A derived signature
 names such an interface's types through the implemented interface's module, `counter::Tally`, the
 copy of the export the derived interface takes; the view's `counter_ref::Tally` is the import's,
-which the view's methods take and return, and the macro refuses it in a derived signature. The
+which the view's methods take and return, and the macro refuses it in a derived signature. So does
+a view of a hook the module contributes to or declares beside the keyed import, an interface the
+world exports too: a derived signature names a contributed hook's types through the hook's module,
+`guard::Admission`, and none of a declared hook's. The
 `counting` and `lending` services of the [runtime fixture](runtime-fixture/src/lib.rs) import by
 key, `lending` the interface the fixture implements.
 
