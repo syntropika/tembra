@@ -3941,6 +3941,71 @@ fn what_the_generated_type_cannot_take_is_refused() {
             "`Deserialize` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Deserialize`",
         ),
         (
+            "#[derive(PartialEq, Eq)] pub struct Point { pub x: f64 }",
+            "Point",
+            "`Eq` on `Point`: `Point` enters the WIT and holds an `f64`, which implements no `Eq`, so the generated type replacing it cannot derive `Eq`; remove the derive, or keep `Point` out of the WIT",
+        ),
+        (
+            "#[derive(Hash)] pub struct Point { pub x: Option<f32> }",
+            "Point",
+            "`Hash` on `Point`: `Point` enters the WIT and holds an `f32`, which implements no `Hash`",
+        ),
+        (
+            "#[derive(PartialOrd, Ord)] pub enum Move { Jump((u32, f64)), Rest }",
+            "Move",
+            "`Ord` on `Move`: `Move` enters the WIT and holds an `f64`, which implements no `Ord`",
+        ),
+        (
+            "#[derive(Default)] pub struct Page { pub checked: Result<u32, String> }",
+            "Page",
+            "`Default` on `Page`: `Page` enters the WIT and holds a `Result`, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `Page` out of the WIT",
+        ),
+        (
+            "pub struct Spot { pub x: i32 } #[derive(PartialEq)] pub struct Point { pub at: Spot }",
+            "Point",
+            "`PartialEq` on `Point`: `Point` enters the WIT and holds `Spot`, which implements no `PartialEq`, so the generated type replacing it cannot derive `PartialEq`; derive `PartialEq` on `Spot` too, remove the derive, or keep `Point` out of the WIT",
+        ),
+        (
+            "pub enum Heading { North, East } #[derive(Hash)] pub struct Point { pub heading: Heading }",
+            "Point",
+            "`Hash` on `Point`: `Point` enters the WIT and holds `Heading`, which implements no `Hash`",
+        ),
+        (
+            "pub struct Spot { pub x: i32 } #[derive(Default)] pub struct Page { pub at: Spot }",
+            "Page",
+            "`Default` on `Page`: `Page` enters the WIT and holds `Spot`, which implements no `Default`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool } #[derive(PartialEq)] pub struct Grant { pub access: Access }",
+            "Grant",
+            "`PartialEq` on `Grant`: `Grant` enters the WIT and holds `Access`, which implements no `PartialEq`, so the generated type replacing it cannot derive `PartialEq`; derive `PartialEq` on `Access` too",
+        ),
+        (
+            "#[derive(educe::Educe)] #[educe(Clone)] pub struct Lease { pub pen: Pen }",
+            "Lease",
+            "`educe::Educe` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Clone`, so the generated type replacing it cannot derive `Clone`; remove `Clone` from `#[educe(..)]`, or keep `Lease` out of the WIT",
+        ),
+        (
+            "#[derive(educe::Educe)] #[educe(Copy)] pub struct Note { pub text: String }",
+            "Note",
+            "`educe::Educe` on `Note`: `Note` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`; remove `Copy` from `#[educe(..)]`",
+        ),
+        (
+            "#[derive(educe::Educe)] #[educe(Eq)] pub struct Point { pub x: f64 }",
+            "Point",
+            "`educe::Educe` on `Point`: `Point` enters the WIT and holds an `f64`, which implements no `Eq`, so the generated type replacing it cannot derive `Eq`; remove `Eq` from `#[educe(..)]`, or keep `Point` out of the WIT",
+        ),
+        (
+            "#[derive(educe::Educe, smart_default::SmartDefault)] #[educe(Eq)] pub struct Point { #[default(1.5)] pub x: f64 }",
+            "Point",
+            "`educe::Educe` on `Point`: `Point` enters the WIT and holds an `f64`, which implements no `Eq`, so the generated type replacing it cannot derive `Eq`; remove `Eq` from `#[educe(..)]`, or keep `Point` out of the WIT",
+        ),
+        (
+            "#[derive(smart_default::SmartDefault)] pub struct Lease { pub pen: Pen }",
+            "Lease",
+            "`smart_default::SmartDefault` on `Lease`: `Lease` enters the WIT and every value of it holds a resource handle, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `Lease` out of the WIT",
+        ),
+        (
             "#[derive(EnumIter)] pub enum Heading { North, East }",
             "Heading",
             "`EnumIter` on `Heading`: `Heading` enters the WIT and the generated type replacing it is declared in the bindings' module, which `EnumIter` does not reach: this module imports no `EnumIter` by name, unless a glob import brings it; import it with `use`, or name it from its crate, such as `::name::EnumIter`",
@@ -3981,6 +4046,164 @@ fn what_the_generated_type_cannot_take_is_refused() {
     assert!(
         generated.contains("[# [derive (:: educe :: Educe)] # [educe (Hash)]]"),
         "{generated}"
+    );
+    // A member carrying the helper attribute a derive is known to read is the derive's, which may
+    // give it its own value or leave it out: `#[default(..)]` of `SmartDefault` on a handle,
+    // `#[educe(..)]` of `Educe` on an `f64`.
+    for (types, returned, expected) in [
+        (
+            "#[derive(smart_default::SmartDefault)] pub struct Lease { #[default(crate::walk::pen())] pub pen: Pen }",
+            "Lease",
+            "\"example:walk/walker@1.0.0/lease\" : [# [derive (:: smart_default :: SmartDefault)]] } , additional_member_attributes : { \"example:walk/walker@1.0.0/lease.pen\" : [# [default (crate :: walk :: pen ())]] } ,",
+        ),
+        (
+            "#[derive(educe::Educe)] #[educe(Hash)] pub struct Point { #[educe(Hash(ignore))] pub x: f64 }",
+            "Point",
+            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: educe :: Educe)] # [educe (Hash)]] } , additional_member_attributes : { \"example:walk/walker@1.0.0/point.x\" : [# [educe (Hash (ignore))]] } ,",
+        ),
+    ] {
+        let generated = tokens(&expanded("example:walk@1.0.0", &module(types, returned)));
+        assert!(generated.contains(expected), "{types}: {generated}");
+    }
+}
+
+const BOOK_KINDS_WIT: &str = "package example:ledger@1.0.0;
+interface book {
+  record entry { label: string, amount: s64 }
+  enum side { credit, debit }
+  flags marks { urgent, checked }
+  add: func(entry: entry, side: side, marks: marks) -> u32;
+}
+";
+
+/// A derive of the standard library is decided trait by trait from the type's fields, as the
+/// bindings would decide it inside their module: a consumed type has what its bindings give it, a
+/// record `Debug`, `Clone` and `Copy` as its contents allow, an enum the comparisons too, a flags
+/// everything but `Default`; a type of the module has what the bindings implement for it and what
+/// its derives, or a flags struct's impls, implement; and a trait every field has is carried, as is
+/// `Default` over options, lists and the cases of a variant, which `Default` leaves empty. A derive
+/// implementing a trait under another name follows the same rule, but for a member whose helper
+/// attributes it reads, which it may give its own value.
+#[test]
+fn a_standard_derive_is_decided_from_the_fields() {
+    let dir = consumed("notes", BOOK_KINDS_WIT);
+    let importing = || Options {
+        imports: vec![literal("example:ledger/book@1.0.0")],
+        ..options("example:notes@1.0.0", Some(&dir))
+    };
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod notes {{
+                #[flags]
+                pub struct Access {{ pub read: bool }}
+                impl PartialEq for Access {{
+                    fn eq(&self, other: &Self) -> bool {{ self.read == other.read }}
+                }}
+                pub enum Heading {{ North, East }}
+                pub struct Spot {{ pub x: i32 }}
+                {types}
+                #[service]
+                pub struct Shelf;
+                impl Shelf {{ pub fn last() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    for (types, message) in [
+        (
+            "#[derive(PartialEq)] pub struct Note { pub entry: book::Entry }",
+            "`PartialEq` on `Note`: `Note` enters the WIT and holds `Entry`, a record of example:ledger/book@1.0.0, which the bindings generate without `PartialEq`, so the generated type replacing it cannot derive `PartialEq`; remove the derive, or keep `Note` out of the WIT",
+        ),
+        (
+            "#[derive(Hash)] pub struct Note { pub side: book::Side }",
+            "`Hash` on `Note`: `Note` enters the WIT and holds `Side`, an enum of example:ledger/book@1.0.0, which the bindings generate without `Hash`",
+        ),
+        (
+            "#[derive(Default)] pub struct Note { pub marks: book::Marks }",
+            "`Default` on `Note`: `Note` enters the WIT and holds `Marks`, a flags of example:ledger/book@1.0.0, which the bindings generate without `Default`",
+        ),
+        (
+            "#[derive(PartialEq, Eq)] pub struct Note { pub entries: Vec<(book::Entry, u32)> }",
+            "`PartialEq` on `Note`: `Note` enters the WIT and holds `Entry`, a record of example:ledger/book@1.0.0, which the bindings generate without `PartialEq`",
+        ),
+    ] {
+        let error = refused_with(importing(), &module(types, "Note"));
+        assert!(error.contains(message), "{types}: {error}");
+        expanded_with(importing(), &module(types, "u32"));
+    }
+    for (types, carried) in [
+        // A record of integers and strings carries its comparisons and `Hash`.
+        (
+            "#[derive(PartialEq, Eq, Hash)] pub struct Note { pub text: String, pub count: u32, pub tags: Vec<String> }",
+            ":: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash",
+        ),
+        (
+            "#[derive(PartialEq, PartialOrd)] pub struct Note { pub heading: Heading, pub x: f32 }",
+            ":: core :: cmp :: PartialEq , :: core :: cmp :: PartialOrd",
+        ),
+        (
+            "#[derive(PartialEq, Eq, PartialOrd, Ord)] pub struct Note { pub side: book::Side }",
+            ":: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: cmp :: PartialOrd , :: core :: cmp :: Ord",
+        ),
+        (
+            "#[derive(PartialEq, Eq, Hash)] pub struct Note { pub marks: book::Marks }",
+            ":: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash",
+        ),
+        (
+            "#[derive(Default)] pub struct Note { pub entry: Option<book::Entry>, pub spots: Vec<Spot> }",
+            ":: core :: default :: Default",
+        ),
+        (
+            "#[derive(Default)] pub enum Note { Entry(book::Entry), Spot(Spot), #[default] Blank }",
+            ":: core :: default :: Default",
+        ),
+        (
+            "#[derive(PartialEq)] pub struct Note { pub access: Access }",
+            ":: core :: cmp :: PartialEq",
+        ),
+        (
+            "#[derive(smart_default::SmartDefault)] pub struct Note { #[default(Ok(1))] pub checked: Result<u32, String> }",
+            ":: smart_default :: SmartDefault",
+        ),
+        // A trait the author implements by hand applies to the generated type replacing the type,
+        // and a state has the `Default` the macro writes for it.
+        (
+            "impl Default for Spot { fn default() -> Self { Spot { x: 1 } } } #[derive(Default)] pub struct Note { pub at: Spot }",
+            ":: core :: default :: Default",
+        ),
+        (
+            "#[state] pub struct Position { pub x: i32 } #[derive(Default)] pub struct Note { pub position: Position }",
+            ":: core :: default :: Default",
+        ),
+    ] {
+        let module = expanded_with(importing(), &module(types, "Note"));
+        let expected = format!("\"example:notes/shelf@1.0.0/note\" : [# [derive ({carried})]");
+        assert!(
+            type_attributes(&module).is_some_and(|attributes| attributes.contains(&expected)),
+            "{types}: {}",
+            tokens(&module)
+        );
+    }
+    // A type of the module carries what its own derives give it, and so does one holding it.
+    let module = expanded_with(
+        importing(),
+        &module(
+            "#[derive(PartialEq, Eq, Hash)] pub struct Point { pub at: Spot }",
+            "Point",
+        )
+        .replace(
+            "pub struct Spot { pub x: i32 }",
+            "#[derive(PartialEq, Eq, Hash)] pub struct Spot { pub x: i32 }",
+        ),
+    );
+    assert_eq!(
+        type_attributes(&module).as_deref(),
+        Some(concat!(
+            "additional_type_attributes : { ",
+            "\"example:notes/shelf@1.0.0/spot\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] , ",
+            "\"example:notes/shelf@1.0.0/point\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] } ,",
+        )),
+        "{}",
+        tokens(&module)
     );
 }
 

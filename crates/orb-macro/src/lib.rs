@@ -1852,7 +1852,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     }
     // A flags struct that enters the WIT stays the author's, with what the bindings call on it.
     flags::check_hooks(&shapes, &declared, &consumed_modules)?;
-    flags::emit(
+    let mut implemented_elsewhere = flags::emit(
         &shapes,
         &mut tree,
         &modules,
@@ -1860,6 +1860,29 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         &declared_types,
         !states.is_empty(),
     )?;
+    // What each other type that enters the WIT implements besides what the bindings implement for
+    // it and what its derives implement, which the types holding one may derive: the traits the
+    // Orb's modules implement for it by hand, which apply to the generated type replacing it, and
+    // the `Default` the macro writes for a state the author gives none.
+    for shape in &shapes {
+        if matches!(shape.kind, ShapeKind::Flags(_)) {
+            continue;
+        }
+        let mut traits = flags::implemented_by_hand(
+            &mut tree,
+            &modules,
+            &declared_types,
+            &shape.ident,
+            shape.scope,
+        );
+        let macro_default = states.iter().any(|state| {
+            state.ident == shape.ident && state.scope == shape.scope && !state.authored_default
+        });
+        if macro_default {
+            traits.insert("Default".to_owned());
+        }
+        implemented_elsewhere.insert(shape.ident.to_string(), traits);
+    }
     // A name that enters the WIT is one across the Orb module: the types, the services, the
     // derived hooks and the resources of every module share the package's names.
     {
@@ -2441,7 +2464,13 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // The generated types replacing the author's take the author's derives, less what the
     // bindings implement themselves, and the attributes those derives read.
     let (types, members) = carried_attributes(
-        &shapes, &placement, &package, &bindings, serde, &uses, &modules,
+        &shapes,
+        &placement,
+        &package,
+        &bindings,
+        &implemented_elsewhere,
+        &uses,
+        &modules,
     )?;
     let type_attributes =
         (!types.is_empty()).then(|| quote! { additional_type_attributes: { #(#types),* }, });
@@ -2518,27 +2547,28 @@ fn reserved_member(wit_name: &str) -> Option<String> {
         .then_some(member)
 }
 
-/// Whether an item's `#[derive(..)]` attributes implement a trait: one of them names it, by the
-/// last segment of its path, or implements it under another name (`implemented_by`).
-fn derives(attrs: &[Attribute], name: &str) -> bool {
+/// The traits an item's `#[derive(..)]` attributes implement, by name: the trait of each derive's
+/// last name, or those it implements under another name (`implemented_by`).
+fn derived(attrs: &[Attribute]) -> Vec<String> {
     attrs
         .iter()
         .filter(|attribute| attribute.path().is_ident("derive"))
-        .any(|attribute| {
+        .filter_map(|attribute| {
             attribute
                 .parse_args_with(
                     syn::punctuated::Punctuated::<syn::Path, Token![,]>::parse_terminated,
                 )
-                .is_ok_and(|paths| {
-                    paths.iter().any(|path| {
-                        path.segments.last().is_some_and(|segment| {
-                            implemented_by(&segment.ident, attrs)
-                                .iter()
-                                .any(|implemented| implemented == name)
-                        })
-                    })
-                })
+                .ok()
         })
+        .flatten()
+        .filter_map(|path| Some(implemented_by(&path.segments.last()?.ident, attrs)))
+        .flatten()
+        .collect()
+}
+
+/// Whether an item's `#[derive(..)]` attributes implement a trait (`derived`).
+fn derives(attrs: &[Attribute], name: &str) -> bool {
+    derived(attrs).iter().any(|implemented| implemented == name)
 }
 
 /// The type-level helper attribute through which a derive names the traits it implements, for
@@ -2550,6 +2580,17 @@ fn trait_helper(derive: &Ident) -> Option<&'static str> {
         "Derivative" => Some("derivative"),
         _ => None,
     }
+}
+
+/// The helper attribute on a member through which a derive that implements a trait under another
+/// name gives the member its own value or leaves it out, where the macro knows it: `#[default(..)]`
+/// for `smart_default`'s `SmartDefault`, and the helper of `trait_helper` for its derives,
+/// `#[educe(Hash(ignore))]`.
+fn member_helper(derive: &Ident) -> Option<&'static str> {
+    if derive == "SmartDefault" {
+        return Some("default");
+    }
+    trait_helper(derive)
 }
 
 /// The traits a derive implements, by name: the trait of the derive's last name, `Hash` for
@@ -4111,7 +4152,7 @@ fn written(path: &syn::Path) -> String {
 /// `Clone` derived unless it holds a resource handle, and `Copy` unless it also holds a string or a
 /// list; for an enum, `Clone`, `Copy`, `PartialEq`, `Eq`, `PartialOrd` and `Ord` derived; and
 /// `Display` and `Error` by hand for the error of a result.
-fn implemented(kind: &ShapeKind, generated: wit::Generated) -> Vec<(&'static str, &'static str)> {
+fn implemented(kind: &ShapeKind, generated: &wit::Generated) -> Vec<(&'static str, &'static str)> {
     let mut traits = vec![("Debug", "the bindings implement `Debug` for every type")];
     match kind {
         ShapeKind::Enum(_) => traits.extend(
@@ -4207,44 +4248,52 @@ impl quote::ToTokens for Named {
 /// library. A derive the generated type cannot take is refused: one of another crate implementing
 /// a trait the bindings implement, which would implement it twice, with `unread`, the helper
 /// attributes no other derive of the type reads, which go with it, and one of the standard library
-/// or of `serde` that the type's contents rule out.
+/// or of `serde`, by name or under another name, that the type's contents rule out, trait by trait
+/// (`ruled_out`); `module_types` tells what the generated types of the module's own types
+/// implement, by WIT name, for the fields holding one.
 fn carried_derive(
     shape: &Shape,
     path: &syn::Path,
-    generated: wit::Generated,
-    serialized: bool,
+    generated: &wit::Generated,
     uses: &[Uses],
     modules: &[Vec<Ident>],
     unread: &str,
+    module_types: &BTreeMap<String, ModuleType>,
 ) -> syn::Result<Option<proc_macro2::TokenStream>> {
     let owner = &shape.ident;
     let written = written(path);
     let refuse = |message: String| Err(syn::Error::new(path.span(), message));
     // Where the bindings derive serde's traits, the author's `Serialize` or `Deserialize` is
     // theirs under a path the macro cannot follow to a crate as well: the module calls it so.
-    let covered = |ident: &Ident| serialized && serde_name(&ident.to_string());
-    // A resource handle implements none of the traits a derive implements; `Default` alone makes a
-    // value without one, unless every value of the type holds one.
-    let refuse_handle = |name: &str| {
-        refuse(format!(
-            "`{written}` on `{owner}`: `{owner}` enters the WIT and holds a resource handle, which implements no `{name}`, so the generated type replacing it cannot derive `{name}`; remove the derive, or keep `{owner}` out of the WIT"
-        ))
+    let covered = |ident: &Ident| generated.serialized && serde_name(&ident.to_string());
+    // The refusal of a derive of the trait `name` that the type's contents rule out, `held` saying
+    // what the type holds and `remove` how to take the derive off.
+    let cannot = |name: &str, held: &str, remove: &str| {
+        format!(
+            "`{written}` on `{owner}`: `{owner}` enters the WIT and {held}, so the generated type replacing it cannot derive `{name}`; {remove}, or keep `{owner}` out of the WIT"
+        )
+    };
+    // A resource handle implements none of the traits a derive implements.
+    let holds_handle = |name: &str, remove: &str| {
+        cannot(
+            name,
+            &format!("holds a resource handle, which implements no `{name}`"),
+            remove,
+        )
     };
     // serde's derives apply to no type holding what the bindings give no `serde` implementation.
     let unwritable = |name: &str| {
         if generated.resource {
-            return Some(refuse_handle(name));
+            return Some(refuse(holds_handle(name, "remove the derive")));
         }
         let held = if generated.consumed {
-            "a type of a consumed package, which the bindings give no `serde` implementation in an Orb without a state"
+            "holds a type of a consumed package, which the bindings give no `serde` implementation in an Orb without a state"
         } else if generated.unserializable {
-            "a consumed package's flags type, which the bindings give no `serde` implementation"
+            "holds a consumed package's flags type, which the bindings give no `serde` implementation"
         } else {
             return None;
         };
-        Some(refuse(format!(
-            "`{written}` on `{owner}`: `{owner}` enters the WIT and holds {held}, so the generated type replacing it cannot derive `{name}`; remove the derive, or keep `{owner}` out of the WIT"
-        )))
+        Some(refuse(cannot(name, held, "remove the derive")))
     };
     let followed = followed(path, shape.scope, uses, modules, owner)?;
     // A `Serialize` or `Deserialize` the macro cannot follow to a crate, from a crate's glob or
@@ -4285,24 +4334,102 @@ fn carried_derive(
     };
     let own = implemented(&shape.kind, generated);
     let implements = |name: &str| own.iter().find(|(known, _)| *known == name);
+    // The helper attribute on a member through which the derive gives the member its own value or
+    // leaves it out, where the macro knows it (`member_helper`): what such a member holds is the
+    // derive's.
+    let customizing = match &derive {
+        Derive::Other(named) => named.segments.last().and_then(member_helper),
+        Derive::Standard(..) | Derive::Serde(_) => None,
+    };
+    // Why the type's contents rule out the trait `name` of the standard library, if they do, for
+    // the generated type to derive it, with `remove` saying how to take the derive off: the first
+    // part of the fields (`wit::Held`) that lacks the trait, but for the parts of a member the
+    // derive customizes and, for `Default`, which makes a value without them, the parts an option,
+    // a list or a variant's case holds. A type of the module that lacks the trait for a handle, a
+    // string or a list it holds names that, which the type holds through it. A trait the macro
+    // does not know the rules of, `Display`, is left to the derive.
+    let ruled_out = |name: &str, remove: &str| -> Option<String> {
+        if !STANDARD_DERIVES.iter().any(|(known, _)| *known == name) {
+            return None;
+        }
+        let no_default = "every value of it holds a resource handle, which implements no `Default`";
+        let not_copy = || {
+            format!(
+                "`{written}` on `{owner}`: `{owner}` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`; {remove}"
+            )
+        };
+        for part in &generated.parts {
+            let customized = customizing.is_some_and(|helper| {
+                shape.carried.members.iter().any(|(member, helpers)| {
+                    *member == part.member
+                        && helpers
+                            .iter()
+                            .any(|attribute| attribute.path().is_ident(helper))
+                })
+            });
+            if customized || (name == "Default" && part.absent_in_default) {
+                continue;
+            }
+            return Some(match &part.held {
+                wit::Held::Handle if name == "Default" => cannot(name, no_default, remove),
+                wit::Held::Handle => holds_handle(name, remove),
+                wit::Held::List if name == "Copy" => not_copy(),
+                wit::Held::Float(float) if matches!(name, "Eq" | "Ord" | "Hash") => cannot(
+                    name,
+                    &format!("holds an `{float}`, which implements no `{name}`"),
+                    remove,
+                ),
+                wit::Held::Result if name == "Default" => cannot(
+                    name,
+                    "holds a `Result`, which implements no `Default`",
+                    remove,
+                ),
+                wit::Held::Own(wit_name) => {
+                    let Some(inner) = module_types.get(wit_name) else {
+                        continue;
+                    };
+                    if inner.traits.contains(name) {
+                        continue;
+                    }
+                    if name == "Default" && inner.generated.needs_handle {
+                        cannot(name, no_default, remove)
+                    } else if name != "Default" && inner.generated.resource {
+                        holds_handle(name, remove)
+                    } else if name == "Copy" && inner.generated.list {
+                        not_copy()
+                    } else {
+                        let inner = &inner.ident;
+                        cannot(
+                            name,
+                            &format!("holds `{inner}`, which implements no `{name}`"),
+                            &format!("derive `{name}` on `{inner}` too, {remove}"),
+                        )
+                    }
+                }
+                wit::Held::Consumed {
+                    name: inner,
+                    kind,
+                    interface,
+                    derives,
+                } if !derives.contains(name) => cannot(
+                    name,
+                    &format!(
+                        "holds `{inner}`, {kind} of {interface}, which the bindings generate without `{name}`"
+                    ),
+                    remove,
+                ),
+                _ => continue,
+            });
+        }
+        None
+    };
     match derive {
         Derive::Standard(name, module) => {
             if implements(name).is_some() {
                 return Ok(None);
             }
-            if name == "Default" {
-                if generated.needs_handle {
-                    return refuse(format!(
-                        "`{written}` on `{owner}`: `{owner}` enters the WIT and every value of it holds a resource handle, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `{owner}` out of the WIT"
-                    ));
-                }
-            } else if generated.resource {
-                return refuse_handle(name);
-            }
-            if generated.list && name == "Copy" {
-                return refuse(format!(
-                    "`{written}` on `{owner}`: `{owner}` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`; remove the derive"
-                ));
+            if let Some(message) = ruled_out(name, "remove the derive") {
+                return refuse(message);
             }
             let (module, name) = (format_ident!("{module}"), format_ident!("{name}"));
             Ok(Some(quote! { ::core::#module::#name }))
@@ -4312,22 +4439,23 @@ fn carried_derive(
             if let Some(refused) = unwritable(&name.to_string()) {
                 return refused;
             }
-            Ok((!serialized).then(|| quote! { #named }))
+            Ok((!generated.serialized).then(|| quote! { #named }))
         }
         Derive::Other(named) => {
             let last = named.segments.last().expect("a derive's path has a name");
             for trait_name in implemented_by(last, &shape.carried.helpers) {
+                let remove = match trait_helper(last) {
+                    Some(helper) => format!("remove `{trait_name}` from `#[{helper}(..)]`"),
+                    None if unread.is_empty() => "remove the derive".to_owned(),
+                    None => format!("remove the derive and the attributes it reads, {unread}"),
+                };
                 if let Some((name, reason)) = implements(&trait_name) {
-                    let remove = match trait_helper(last) {
-                        Some(helper) => format!("remove `{name}` from `#[{helper}(..)]`"),
-                        None if unread.is_empty() => "remove the derive".to_owned(),
-                        None => {
-                            format!("remove the derive and the attributes it reads, {unread}")
-                        }
-                    };
                     return refuse(format!(
                         "`{written}` on `{owner}`: `{owner}` enters the WIT and the generated type replacing it implements `{name}` already, as {reason}; {remove}, or keep `{owner}` out of the WIT"
                     ));
+                }
+                if let Some(message) = ruled_out(&trait_name, &remove) {
+                    return refuse(message);
                 }
             }
             Ok(Some(quote! { #named }))
@@ -4544,38 +4672,90 @@ fn readable(
     Ok(())
 }
 
+/// A type of the module that enters the WIT, for the types holding it: its name as the author
+/// writes it, how the bindings generate it, and the traits its generated type, or the author's
+/// flags struct, implements: what the bindings implement for it, what its derives implement, and
+/// what it implements besides, as `carried_attributes` is told.
+struct ModuleType {
+    ident: Ident,
+    generated: wit::Generated,
+    traits: BTreeSet<String>,
+}
+
 /// The attributes the bindings put on the generated types replacing the author's, as the options
 /// `additional_type_attributes` and `additional_member_attributes` of `wit-bindgen` select them,
 /// by the type's full WIT name, `ns:name/interface@version/type`, and the member's after a `.`:
 /// for each type that enters the WIT, its derives, less those the bindings implement themselves,
 /// and the helper attributes they read, on the type and on each field or case, each of which the
-/// bindings' module must know (`readable`). `serde` tells whether a state makes the bindings
-/// derive serde's traits on the types that can carry them; a type the ignore option leaves without
-/// them only for the name of one that cannot carry them, of the module or consumed, takes them
-/// here instead.
+/// bindings' module must know (`readable`). A type the ignore option leaves without serde's derives
+/// only for the name of one that cannot carry them, of the module or consumed, takes them here
+/// instead (`Bindings::namesakes`). `elsewhere` are the traits each type that enters the WIT
+/// implements besides what the bindings implement for it and what its derives implement, by the
+/// type's name: those the Orb's modules implement for it by hand, a state's `Default`, a flags
+/// struct's derives.
 fn carried_attributes(
     shapes: &[Shape],
     placement: &BTreeMap<String, Ident>,
     package: &str,
     bindings: &wit::Bindings,
-    serde: bool,
+    elsewhere: &BTreeMap<String, BTreeSet<String>>,
     uses: &[Uses],
     modules: &[Vec<Ident>],
 ) -> syn::Result<(Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>)> {
     let mut types = Vec::new();
     let mut members = Vec::new();
-    let mut namesakes: BTreeSet<&String> = bindings.namesakes.iter().filter(|_| serde).collect();
-    for shape in shapes {
+    let mut namesakes: BTreeSet<&String> = bindings.namesakes.iter().collect();
+    let selector_of = |shape: &Shape| {
         let interface = wit::kebab(&placement[&shape.ident.to_string()]);
-        let name = wit::kebab(&shape.ident);
-        let selector = format!("{}/{name}", identity(package, &interface));
+        format!(
+            "{}/{}",
+            identity(package, &interface),
+            wit::kebab(&shape.ident)
+        )
+    };
+    // The types of the module, by WIT name, for the types holding one.
+    let module_types: BTreeMap<String, ModuleType> = shapes
+        .iter()
+        .map(|shape| {
+            let generated = bindings
+                .types
+                .get(&selector_of(shape))
+                .cloned()
+                .unwrap_or_default();
+            let traits = implemented(&shape.kind, &generated)
+                .into_iter()
+                .map(|(name, _)| name.to_owned())
+                .chain(
+                    shape
+                        .carried
+                        .derives
+                        .iter()
+                        .filter_map(|path| path.segments.last())
+                        .flat_map(|segment| implemented_by(&segment.ident, &shape.carried.helpers)),
+                )
+                .chain(
+                    elsewhere
+                        .get(&shape.ident.to_string())
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                )
+                .collect();
+            let module_type = ModuleType {
+                ident: shape.ident.clone(),
+                generated,
+                traits,
+            };
+            (wit::kebab(&shape.ident), module_type)
+        })
+        .collect();
+    for shape in shapes {
+        let selector = selector_of(shape);
         let namesake = namesakes.remove(&selector);
         if shape.carried.is_empty() && !namesake {
             continue;
         }
-        let generated = bindings.types.get(&selector).copied().unwrap_or_default();
-        let serialized =
-            serde && (namesake || !bindings.unserializable.contains(&wit::ignored_name(&name)));
+        let generated = bindings.types.get(&selector).cloned().unwrap_or_default();
         // What each derive reads of the helper attributes: a derive refused for what the bindings
         // implement names those no other derive reads, which go with it.
         let reads: Vec<Reads> = shape
@@ -4596,9 +4776,15 @@ fn carried_attributes(
             let mut others = reads.clone();
             others.remove(index);
             let unread = unread(&shape.carried, &others);
-            if let Some(derive) =
-                carried_derive(shape, path, generated, serialized, uses, modules, &unread)?
-            {
+            if let Some(derive) = carried_derive(
+                shape,
+                path,
+                &generated,
+                uses,
+                modules,
+                &unread,
+                &module_types,
+            )? {
                 derives.push(derive);
                 readers.push(reads[index]);
             }

@@ -19,7 +19,7 @@ use crate::{
 };
 use proc_macro2::Span;
 use quote::quote;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use syn::{Attribute, Fields, Ident, Item, LitInt, LitStr, Type, spanned::Spanned};
 
 /// The inherent functions the macro gives a flags struct, which the bindings call by these names.
@@ -209,7 +209,9 @@ pub(crate) fn remapped(
 /// the functions the bindings call on it. A function of a reserved name in an impl block of the
 /// struct, or a `BitOr` of the struct with itself or with a type parameter, written in any module
 /// of the Orb, is refused: the macro's would clash with it. `declared` are the types of the Orb's
-/// modules, by scope, which tell a name a `use` brings in apart.
+/// modules, by scope, which tell a name a `use` brings in apart. Returns the traits each struct
+/// has, by its name: the macro's derives, the author's, and those the Orb's modules implement for
+/// it by hand, which decide the derives of the generated types holding the struct.
 pub(crate) fn emit(
     shapes: &[Shape],
     tree: &mut Module,
@@ -217,7 +219,8 @@ pub(crate) fn emit(
     impls: &[(usize, syn::ItemImpl)],
     declared: &[(usize, Ident)],
     serde: bool,
-) -> syn::Result<()> {
+) -> syn::Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut traits = BTreeMap::new();
     for shape in shapes {
         let ShapeKind::Flags(item) = &shape.kind else {
             continue;
@@ -264,6 +267,13 @@ pub(crate) fn emit(
             wanted.push(("Serialize", quote! { ::serde::Serialize }));
             wanted.push(("Deserialize", quote! { ::serde::Deserialize }));
         }
+        let has: BTreeSet<String> = wanted
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .chain(crate::derived(&item.attrs))
+            .chain(implemented.keys().cloned())
+            .collect();
+        traits.insert(ident.to_string(), has);
         let missing: Vec<proc_macro2::TokenStream> = wanted
             .into_iter()
             .filter(|(name, _)| {
@@ -279,15 +289,32 @@ pub(crate) fn emit(
         module.items.push(Item::Struct(item));
         module.generated.push(lowered);
     }
-    Ok(())
+    Ok(traits)
 }
 
-/// Whether a type, written in the module `scope`, is the flags struct `ident` of the module `home`:
-/// a path ending in the struct's name that names it in that module (`module_of`), as `Access` in
-/// its own module and `model::Access` from the Orb module. A name the macro cannot place, one a
-/// `use` brings into a module declaring no type of that name, is the struct when no other type of
-/// the Orb's modules has its name, as the state's `impl Default` is read; a path leaving the Orb
-/// module is not the struct.
+/// The traits the Orb's modules implement by hand for the type `ident` of the module `home`, a
+/// flags struct or not, by the last name of each trait's path, as `emit` reads them for a flags
+/// struct (`traits_implemented`): once the generated type replaces a record, a variant or an enum,
+/// the author's impls apply to it, so the types holding it may derive what they implement.
+pub(crate) fn implemented_by_hand(
+    tree: &mut Module,
+    modules: &[Vec<Ident>],
+    declared: &[(usize, Ident)],
+    ident: &Ident,
+    home: usize,
+) -> BTreeSet<String> {
+    let names_type = |ty: &Type, scope: usize| names(ty, scope, ident, home, modules, declared);
+    traits_implemented(tree, modules, names_type)
+        .into_keys()
+        .collect()
+}
+
+/// Whether a type, written in the module `scope`, is the type `ident` of the module `home`: a path
+/// ending in the type's name that names it in that module (`module_of`), as `Access` in its own
+/// module and `model::Access` from the Orb module. A name the macro cannot place, one a `use`
+/// brings into a module declaring no type of that name, is the type when no other type of the
+/// Orb's modules has its name, as the state's `impl Default` is read; a path leaving the Orb
+/// module is not the type.
 fn names(
     ty: &Type,
     scope: usize,
