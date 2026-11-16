@@ -418,12 +418,13 @@ impl Place<'_> {
 }
 
 /// What the uses of the consumed interfaces are read from: the consumed modules and the directory
-/// of the consumed packages, the module's services, resources and declared hooks, the types that
-/// enter the WIT with the interface defining each, and the states with the module types that stay
-/// out of the WIT, which a state's fields may reach.
+/// of the consumed packages, the views of the interfaces imported by key, the module's services,
+/// resources and declared hooks, the types that enter the WIT with the interface defining each,
+/// and the states with the module types that stay out of the WIT, which a state's fields may reach.
 pub(crate) struct Reach<'a> {
     pub modules: &'a Modules,
     pub dir: Option<&'a Path>,
+    pub views: &'a [keyed::View],
     pub services: &'a [Service],
     pub resources: &'a [WitResource],
     pub declared: &'a [Declared],
@@ -444,6 +445,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
     let Reach {
         modules,
         dir,
+        views,
         services,
         resources,
         declared,
@@ -523,10 +525,10 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
     let mut foreign: BTreeMap<String, Vec<Foreign>> = BTreeMap::new();
     for (named, place) in &found {
         let items = &defined[&named.interface.identity];
-        let Some(definition) = items.get(named.ident) else {
-            if named.interface.role == Role::Keyed
-                && *named.ident == view_object(&named.interface.identity)
-            {
+        // A view's module holds its resource, named after the interface, and re-exports the types
+        // the view uses, whatever else the interface defines.
+        if named.interface.role == Role::Keyed {
+            if *named.ident == view_object(&named.interface.identity) {
                 return Err(syn::Error::new(
                     named.ty.span(),
                     format!(
@@ -537,6 +539,36 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
                     ),
                 ));
             }
+            let used = &views
+                .iter()
+                .find(|view| view.target == named.interface.identity)
+                .expect("a view of each interface imported by key")
+                .used;
+            if !used
+                .iter()
+                .any(|name| crate::type_ident(name) == *named.ident)
+            {
+                let listed = if used.is_empty() {
+                    "and they name none".to_owned()
+                } else {
+                    used.iter()
+                        .map(|name| format!("`{}`", crate::type_ident(name)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                return Err(syn::Error::new(
+                    named.ty.span(),
+                    format!(
+                        "{} `{}`, which names no type of the view `{}`: the view of {}, uses only the types the interface's functions name, {listed}",
+                        place.subject(),
+                        named.ident,
+                        named.module,
+                        named.interface.described()
+                    ),
+                ));
+            }
+        }
+        let Some(definition) = items.get(named.ident) else {
             return Err(syn::Error::new(
                 named.ty.span(),
                 format!(

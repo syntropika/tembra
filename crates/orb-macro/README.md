@@ -731,7 +731,9 @@ but is none.
 What a derived interface or a state does not take from a consumed interface is a compile error on
 the type that names it:
 
-- a name the interface does not define, the error listing its types and resources;
+- a name the interface does not define, the error listing its types and resources, and through a
+  view's module, `counter_ref::Count`, a type the view does not use, since it uses only the types
+  the interface's functions name, the error listing those;
 - a type that holds a resource handle, a stream or a future anywhere: a derived interface takes the
   consumed types that carry data only;
 - a resource of the interface, but an imported interface's handle taken as a parameter, alone or in

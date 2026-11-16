@@ -34,6 +34,9 @@ pub(crate) struct View {
     pub name: String,
     /// The view's WIT: an interface of the Orb's package, with its documentation.
     pub text: String,
+    /// The provider interface's types the view `use`s, by their WIT names: those its functions
+    /// name, the only ones the view's module re-exports.
+    pub used: BTreeSet<String>,
 }
 
 /// Read the parenthesized form of the attribute's `import` option,
@@ -128,9 +131,14 @@ pub(crate) fn views(
         if let Some(clash) = clash {
             return Err(syn::Error::new(literal.span(), clash));
         }
-        let text = view_text(resolve, dir, &target, &name)
+        let (text, used) = view_text(resolve, dir, &target, &name)
             .map_err(|message| syn::Error::new(literal.span(), message))?;
-        views.push(View { target, name, text });
+        views.push(View {
+            target,
+            name,
+            text,
+            used,
+        });
     }
     Ok(views)
 }
@@ -144,8 +152,13 @@ pub(crate) fn view_name(target: &str) -> String {
 /// The view's WIT: the provider interface's types its functions name, `use`d from it; a resource
 /// of the provider interface's name whose methods are the interface's functions, each `async`
 /// exactly when the function is, with its documentation; and `get`, the acquisition the kernel
-/// answers with the object of a key or the reason it refused it.
-fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<String, String> {
+/// answers with the object of a key or the reason it refused it. With it, the names it `use`s.
+fn view_text(
+    resolve: &Resolve,
+    dir: &Path,
+    target: &str,
+    name: &str,
+) -> Result<(String, BTreeSet<String>), String> {
     let interface =
         crate::wit::interface(resolve, dir, target).map_err(|error| error.to_string())?;
     let resource = interface.name.clone().unwrap_or_default();
@@ -269,7 +282,7 @@ fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<
         escaped(&resource)
     ));
     text.push_str("}\n");
-    Ok(text)
+    Ok((text, spelling.used))
 }
 
 /// Whether a type of an interface is a resource, defined there or `use`d from another interface.

@@ -293,6 +293,63 @@ fn a_derived_signature_names_a_keyed_imports_types_through_its_view() {
     );
 }
 
+/// A view's module re-exports only the types the interface's functions name: a type of the
+/// interface reached only through a field of one of them is no type of the view, the error listing
+/// those that are, and a type of the interface named like the view's resource is the view's object.
+#[test]
+fn a_derived_signature_names_only_the_types_a_view_uses() {
+    let dir = consumed(
+        "view-types",
+        "package example:counters@1.0.0;
+
+interface counter {
+  record count { value: u32 }
+  record counter { at: u32 }
+  record tally { key: list<string>, count: count, counter: counter }
+  read: async func() -> tally;
+}
+",
+    );
+    let keyed = || Options {
+        keyed: vec![literal("example:counters/counter@1.0.0")],
+        ..options("example:router@1.0.0", Some(&dir), &[])
+    };
+    let routing = |functions: &str| {
+        format!(
+            "mod router {{
+                #[service]
+                pub struct Routing;
+                impl Routing {{ {functions} }}
+            }}"
+        )
+    };
+    let module = expanded(
+        keyed(),
+        &routing("pub fn total(tally: counter_ref::Tally) -> u32 { 0 }"),
+    );
+    assert!(
+        resolved(&module, &dir).contains("  total: func(tally: tally) -> u32;\n"),
+        "{}",
+        wit(&module)
+    );
+    let error = refused(
+        keyed(),
+        &routing("pub fn total(count: counter_ref::Count) -> u32 { 0 }"),
+    );
+    assert!(
+        error.contains("`Routing::total` takes `Count`, which names no type of the view `counter_ref`: the view of the interface example:counters/counter@1.0.0, which this module imports by key, uses only the types the interface's functions name, `Tally`"),
+        "{error}"
+    );
+    let error = refused(
+        keyed(),
+        &routing("pub fn keep(counter: counter_ref::Counter) -> u32 { 0 }"),
+    );
+    assert!(
+        error.contains("`Routing::keep` takes `Counter`, an object of the interface example:counters/counter@1.0.0, which this module imports by key: such an object belongs to the call that acquired it, so a derived interface takes and returns none"),
+        "{error}"
+    );
+}
+
 /// The ledger's book, implemented; a hook a module contributes to; and a hook a module declares.
 const LEDGER: &str = "package example:ledger@1.0.0;
 
