@@ -206,13 +206,16 @@ pub(crate) fn remapped(
 }
 
 /// Put each flags struct that enters the WIT back in its module, with the derives it lacks and
-/// the functions the bindings call on it. A function of the struct's own of a reserved name, or
-/// its own `BitOr`, is refused: the macro's would clash with it.
+/// the functions the bindings call on it. A function of a reserved name in an impl block of the
+/// struct, or a `BitOr` of the struct with itself or with a type parameter, written in any module
+/// of the Orb, is refused: the macro's would clash with it. `declared` are the types of the Orb's
+/// modules, by scope, which tell a name a `use` brings in apart.
 pub(crate) fn emit(
     shapes: &[Shape],
     tree: &mut Module,
     modules: &[Vec<Ident>],
     impls: &[(usize, syn::ItemImpl)],
+    declared: &[(usize, Ident)],
     serde: bool,
 ) -> syn::Result<()> {
     for shape in shapes {
@@ -221,10 +224,11 @@ pub(crate) fn emit(
         };
         let mut item = (**item).clone();
         let ident = item.ident.clone();
-        let own = impls.iter().filter(|(scope, block)| {
-            *scope == shape.scope
-                && matches!(&*block.self_ty, Type::Path(path) if path.path.is_ident(&ident))
-        });
+        let names_struct =
+            |ty: &Type, scope: usize| names(ty, scope, &ident, shape.scope, modules, declared);
+        let own = impls
+            .iter()
+            .filter(|(scope, block)| names_struct(&block.self_ty, *scope));
         for (_, block) in own {
             for function in block.items.iter().filter_map(|item| match item {
                 syn::ImplItem::Fn(function) => Some(function),
@@ -242,8 +246,7 @@ pub(crate) fn emit(
                 }
             }
         }
-        let module = tree.at(&modules[shape.scope]);
-        let implemented = traits_implemented(&module.items, &ident);
+        let implemented = traits_implemented(tree, modules, names_struct);
         if let Some(span) = implemented.get("BitOr") {
             return Err(syn::Error::new(
                 *span,
@@ -272,26 +275,100 @@ pub(crate) fn emit(
             item.attrs.push(syn::parse_quote!(#[derive(#(#missing),*)]));
         }
         let lowered = bits(&item);
+        let module = tree.at(&modules[shape.scope]);
         module.items.push(Item::Struct(item));
         module.generated.push(lowered);
     }
     Ok(())
 }
 
-/// The traits a module's items implement by hand for the type `ident`, by the last name of each
-/// trait's path, with where each impl is written.
-fn traits_implemented(items: &[Item], ident: &Ident) -> BTreeMap<String, Span> {
+/// Whether a type, written in the module `scope`, is the flags struct `ident` of the module `home`:
+/// a path ending in the struct's name that names it in that module (`module_of`), as `Access` in
+/// its own module and `model::Access` from the Orb module. A name the macro cannot place, one a
+/// `use` brings into a module declaring no type of that name, is the struct when no other type of
+/// the Orb's modules has its name, as the state's `impl Default` is read; a path leaving the Orb
+/// module is not the struct.
+fn names(
+    ty: &Type,
+    scope: usize,
+    ident: &Ident,
+    home: usize,
+    modules: &[Vec<Ident>],
+    declared: &[(usize, Ident)],
+) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(last) = path.path.segments.last() else {
+        return false;
+    };
+    if path.qself.is_some() || last.ident != *ident {
+        return false;
+    }
+    let Some(module) = crate::module_of(&path.path, &modules[scope]) else {
+        return false;
+    };
+    if module == modules[home] {
+        return true;
+    }
+    let elsewhere = declared
+        .iter()
+        .any(|(scope, name)| modules[*scope] == module && *name == *ident);
+    !elsewhere && declared.iter().filter(|(_, name)| *name == *ident).count() == 1
+}
+
+/// The traits the Orb's modules implement by hand for a flags struct, by the last name of each
+/// trait's path, with where each impl is written; `names` tells whether a type written in a module
+/// is the struct. `BitOr` counts where it overlaps the macro's own, `BitOr<Self>`: written with
+/// no argument, with `Self`, with the struct, or with a type parameter of the impl, which takes
+/// the struct too; one with another right-hand type does not.
+fn traits_implemented(
+    tree: &mut Module,
+    modules: &[Vec<Ident>],
+    names: impl Fn(&Type, usize) -> bool,
+) -> BTreeMap<String, Span> {
     let mut implemented = BTreeMap::new();
-    for item in items {
-        let Item::Impl(block) = item else {
-            continue;
-        };
-        let Some((_, path, _)) = &block.trait_ else {
-            continue;
-        };
-        let names_type = matches!(&*block.self_ty, Type::Path(ty)
-            if ty.qself.is_none() && ty.path.is_ident(ident));
-        if let (true, Some(last)) = (names_type, path.segments.last()) {
+    for (scope, module) in modules.iter().enumerate() {
+        for item in &tree.at(module).items {
+            let Item::Impl(block) = item else {
+                continue;
+            };
+            let Some((_, path, _)) = &block.trait_ else {
+                continue;
+            };
+            let Some(last) = path.segments.last() else {
+                continue;
+            };
+            if !names(&block.self_ty, scope) {
+                continue;
+            }
+            if last.ident == "BitOr" {
+                let parameter = |rhs: &Type| {
+                    block.generics.type_params().any(|param| {
+                        matches!(rhs, Type::Path(path)
+                            if path.qself.is_none() && path.path.is_ident(&param.ident))
+                    })
+                };
+                let overlaps = match &last.arguments {
+                    syn::PathArguments::None => true,
+                    syn::PathArguments::AngleBracketed(arguments) => {
+                        let mut arguments = arguments.args.iter();
+                        match (arguments.next(), arguments.next()) {
+                            (Some(syn::GenericArgument::Type(rhs)), None) => {
+                                matches!(rhs, Type::Path(path)
+                                    if path.qself.is_none() && path.path.is_ident("Self"))
+                                    || names(rhs, scope)
+                                    || parameter(rhs)
+                            }
+                            _ => false,
+                        }
+                    }
+                    syn::PathArguments::Parenthesized(_) => false,
+                };
+                if !overlaps {
+                    continue;
+                }
+            }
             implemented.insert(last.ident.to_string(), block.span());
         }
     }

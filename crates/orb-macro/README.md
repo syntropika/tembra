@@ -292,10 +292,11 @@ The macro gives the state type two associated functions: `Count::read()` returns
 object running the current call, `Count::update(|count| ...)` changes it and stores it, returning
 the stored value. The initial value is the state's `Default`, which the macro implements field by
 field unless the author provides it: an `impl Default for Count` anywhere in the Orb module, or a
-`#[derive(Default)]` on the state, which stays on the author's struct when the state stays out of
-the WIT and goes to the generated type replacing it when the state enters the WIT, as every derive
-of a type that enters it does (see [Limits](#limits)). That is how a state starts from a value of
-the author's choosing:
+derive of `Default` on the state, `#[derive(Default)]` or one implementing it under another name,
+`SmartDefault`, which stays on the author's struct when the state stays out of the WIT and goes to
+the generated type replacing it when the state enters the WIT, as every derive of a type that
+enters it does (see [Limits](#limits)). That is how a state starts from a value of the author's
+choosing:
 
 ```rust
 impl Default for Count {
@@ -904,8 +905,11 @@ interface permits {
 The macro gives the struct what the bindings call on it, as `wit-bindgen` 0.63 lowers and lifts a
 flags: the functions `empty()`, `bits()` and `from_bits_retain(bits)`, hidden from the
 documentation, and `BitOr`, the union of two values, which the author's code may use too. These
-names are the bindings', so a function of one of them in the struct's own `impl` blocks, or the
-author's own `BitOr`, is a compile error. The macro also derives `Clone`, `Copy` and `Debug`, which
+names are the bindings', so a function of one of them in an `impl` block of the struct, or the
+author's own `BitOr` of the struct with itself, `BitOr`, `BitOr<Self>` or `BitOr<T>` for a type
+parameter `T`, is a compile error, in any module of the Orb, naming the struct by its path or by a
+name a `use` brings in; a `BitOr` with another right-hand type, `BitOr<u32>`, does not overlap and
+stays. The macro also derives `Clone`, `Copy` and `Debug`, which
 a generated record or variant holding the struct needs of it, and, in an Orb with a state, serde's
 `Serialize` and `Deserialize`, so a state can hold the struct, directly or in a record; each unless
 the author derives or implements it. A state's JSON holds every field of the struct,
@@ -1068,14 +1072,15 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   no resource handle, and `Copy` when it holds no string or list either; `Clone`, `Copy`,
   `PartialEq`, `Eq`, `PartialOrd` and `Ord` for an enum; `Display` and `Error` for the error of a
   function's result; and `serde`'s derives in an Orb with a state. A derive of another crate named
-  after one of those traits would implement it twice, and a derive that the type's contents rule
-  out could not apply, `Clone`, `Copy`, a comparison, `Hash`, `Serialize` or `Deserialize` on a
-  type holding a resource handle, `Default` on a record no value of which is without one, a handle
-  in a field, in a tuple or in such a record, and `Copy` on one holding a string or a list: both
-  are compile errors on the derive, the first naming the helper attributes no other derive of the
-  type reads, which go with it, `#[error(..)]` for `thiserror::Error` on a function's error. A
-  handle in an option or a list leaves `Default` a value without it, and a variant takes its unit
-  `#[default]` case.
+  after one of those traits, or implementing one under another name, `Educe` or `Derivative` with
+  the trait in `#[educe(..)]` or `#[derivative(..)]`, would implement it twice, and a derive that
+  the type's contents rule out could not apply, `Clone`, `Copy`, a comparison, `Hash`, `Serialize`
+  or `Deserialize` on a type holding a resource handle, `Default` on a record no value of which is
+  without one, a handle in a field, in a tuple or in such a record, and `Copy` on one holding a
+  string or a list: both are compile errors on the derive, the first naming the helper attributes
+  no other derive of the type reads, which go with it, `#[error(..)]` for `thiserror::Error` on a
+  function's error, or the entry of `#[educe(..)]` to remove. A handle in an option or a list
+  leaves `Default` a value without it, and a variant takes its unit `#[default]` case.
 - The bindings read a derive's path in their own module, so the macro names each derive from its
   crate, `::strum::EnumIter` for `EnumIter` after `use strum::EnumIter;`, following the `use` and
   `extern crate` declarations of the type's module, `self::`, `super::`, the Orb's sub-modules and

@@ -393,8 +393,9 @@ struct State {
     identity: String,
     /// The module declaring the state, by scope; 0 is the Orb module.
     scope: usize,
-    /// The struct derives `Default`: the derive stays on the author's struct when the state stays
-    /// out of the WIT, and goes to the generated type replacing it when the state enters it.
+    /// The struct derives `Default`, by name or under another name, `SmartDefault`: the derive
+    /// stays on the author's struct when the state stays out of the WIT, and goes to the generated
+    /// type replacing it when the state enters it.
     derives_default: bool,
     /// The author gives the state its `Default`, its initial value: by an `impl Default` in the
     /// Orb module, or by a derive. Otherwise the macro implements it field by field.
@@ -1708,7 +1709,14 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     }
     // A flags struct that enters the WIT stays the author's, with what the bindings call on it.
     flags::check_hooks(&shapes, &declared, &consumed_modules)?;
-    flags::emit(&shapes, &mut tree, &modules, &impls, !states.is_empty())?;
+    flags::emit(
+        &shapes,
+        &mut tree,
+        &modules,
+        &impls,
+        &declared_types,
+        !states.is_empty(),
+    )?;
     // A name that enters the WIT is one across the Orb module: the types, the services, the
     // derived hooks and the resources of every module share the package's names.
     {
@@ -2365,7 +2373,8 @@ fn reserved_member(wit_name: &str) -> Option<String> {
         .then_some(member)
 }
 
-/// Whether an item's `#[derive(..)]` attributes name a trait, by the last segment of its path.
+/// Whether an item's `#[derive(..)]` attributes implement a trait: one of them names it, by the
+/// last segment of its path, or implements it under another name (`implemented_by`).
 fn derives(attrs: &[Attribute], name: &str) -> bool {
     attrs
         .iter()
@@ -2377,12 +2386,53 @@ fn derives(attrs: &[Attribute], name: &str) -> bool {
                 )
                 .is_ok_and(|paths| {
                     paths.iter().any(|path| {
-                        path.segments
-                            .last()
-                            .is_some_and(|segment| segment.ident == name)
+                        path.segments.last().is_some_and(|segment| {
+                            implemented_by(&segment.ident, attrs)
+                                .iter()
+                                .any(|implemented| implemented == name)
+                        })
                     })
                 })
         })
+}
+
+/// The type-level helper attribute through which a derive names the traits it implements, for
+/// the derives that implement traits under another name that way: `#[educe(..)]` for `educe`'s
+/// `Educe` and `#[derivative(..)]` for `derivative`'s `Derivative`.
+fn trait_helper(derive: &Ident) -> Option<&'static str> {
+    match derive.to_string().as_str() {
+        "Educe" => Some("educe"),
+        "Derivative" => Some("derivative"),
+        _ => None,
+    }
+}
+
+/// The traits a derive implements, by name: the trait of the derive's last name, `Hash` for
+/// `ordering::Hash`, except for the derives that implement a trait under another name:
+/// `smart_default`'s `SmartDefault` implements `Default`, and a derive of `trait_helper`
+/// implements the traits its type-level helper attribute lists, one per entry, with or without
+/// options, `Debug` and `Clone` for `#[educe(Debug(name(Spot)), Clone)]`. `attrs` are the
+/// attributes of the type the derive is written on, where that helper attribute sits.
+fn implemented_by(derive: &Ident, attrs: &[Attribute]) -> Vec<String> {
+    if derive == "SmartDefault" {
+        return vec!["Default".to_owned()];
+    }
+    let Some(helper) = trait_helper(derive) else {
+        return vec![derive.to_string()];
+    };
+    attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident(helper))
+        .filter_map(|attribute| {
+            attribute
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated,
+                )
+                .ok()
+        })
+        .flatten()
+        .filter_map(|meta| Some(meta.path().segments.last()?.ident.to_string()))
+        .collect()
 }
 
 /// Whether the type of an `impl Default for ..`, written in the module `scope`, is `state`: its
@@ -3823,7 +3873,8 @@ enum Derive {
     Standard(&'static str, &'static str),
     /// `serde`'s `Serialize` or `Deserialize`, which a state makes the bindings derive.
     Serde(Named),
-    /// Any other, by the path naming it, which implements the trait of its last name.
+    /// Any other, by the path naming it, which implements the trait of its last name, or the
+    /// traits it implements under another name (`implemented_by`).
     Other(Named),
 }
 
@@ -3959,16 +4010,20 @@ fn carried_derive(
             Ok((!serialized).then(|| quote! { #named }))
         }
         Derive::Other(named) => {
-            let name = named.segments.last().map(Ident::to_string);
-            if let Some((name, reason)) = name.as_deref().and_then(implements) {
-                let remove = if unread.is_empty() {
-                    "remove the derive".to_owned()
-                } else {
-                    format!("remove the derive and the attributes it reads, {unread}")
-                };
-                return refuse(format!(
-                    "`{written}` on `{owner}`: `{owner}` enters the WIT and the generated type replacing it implements `{name}` already, as {reason}; {remove}, or keep `{owner}` out of the WIT"
-                ));
+            let last = named.segments.last().expect("a derive's path has a name");
+            for trait_name in implemented_by(last, &shape.carried.helpers) {
+                if let Some((name, reason)) = implements(&trait_name) {
+                    let remove = match trait_helper(last) {
+                        Some(helper) => format!("remove `{name}` from `#[{helper}(..)]`"),
+                        None if unread.is_empty() => "remove the derive".to_owned(),
+                        None => {
+                            format!("remove the derive and the attributes it reads, {unread}")
+                        }
+                    };
+                    return refuse(format!(
+                        "`{written}` on `{owner}`: `{owner}` enters the WIT and the generated type replacing it implements `{name}` already, as {reason}; {remove}, or keep `{owner}` out of the WIT"
+                    ));
+                }
             }
             Ok(Some(quote! { #named }))
         }

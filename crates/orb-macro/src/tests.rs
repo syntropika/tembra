@@ -1880,6 +1880,19 @@ fn a_flags_struct_is_a_wit_flags_the_author_keeps() {
         "{}",
         tokens(&module)
     );
+    // Nor is a trait a derive implements under another name, as `#[educe(..)]` names it.
+    let module = expanded(
+        "example:office@1.0.0",
+        &PERMITS.replace(
+            "#[derive(Default, PartialEq, Clone)]",
+            "#[derive(Default, PartialEq, educe::Educe)] #[educe(Clone, Debug(name(Permit)))]",
+        ),
+    );
+    assert!(
+        tokens(&module).contains("# [derive (:: core :: marker :: Copy)] pub struct Access"),
+        "{}",
+        tokens(&module)
+    );
 }
 
 /// In an Orb with a state the flags derive serde's traits, and a record holding the module's own
@@ -1955,6 +1968,77 @@ fn a_flags_struct_of_a_sub_module_is_named_from_its_module() {
     assert!(
         error.contains("`Access` is a flags of a sub-module: make it visible to the Orb module"),
         "{error}"
+    );
+    // An impl of the struct written in another module names it from there: a trait implemented by
+    // hand is not derived again, and a function of a name the bindings call is refused.
+    let office = |extra: &str| {
+        format!(
+            "mod office {{
+                pub mod rights {{
+                    #[flags]
+                    pub struct Access {{ pub read: bool }}
+                    #[service]
+                    pub struct Permits;
+                    impl Permits {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                }}
+                {extra}
+            }}"
+        )
+    };
+    let module = expanded(
+        "example:office@1.0.0",
+        &office("impl Clone for rights::Access { fn clone(&self) -> Self { *self } }"),
+    );
+    assert!(
+        tokens(&module).contains(
+            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access"
+        ),
+        "{}",
+        tokens(&module)
+    );
+    let error = refused(
+        "example:office@1.0.0",
+        &office("impl rights::Access { pub fn empty() -> Self { Self { read: false } } }"),
+    );
+    assert!(
+        error.contains("`Access::empty` takes a name the macro gives a #[flags] struct"),
+        "{error}"
+    );
+    // A name a `use` brings into the module is the struct too, when no other type of the Orb has
+    // its name; with two types of that name the macro cannot tell, and keeps its derive.
+    let imported = |extra: &str| office(&format!("use rights::Access; {extra}"));
+    let module = expanded(
+        "example:office@1.0.0",
+        &imported("impl Clone for Access { fn clone(&self) -> Self { *self } }"),
+    );
+    assert!(
+        tokens(&module).contains(
+            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access"
+        ),
+        "{}",
+        tokens(&module)
+    );
+    let error = refused(
+        "example:office@1.0.0",
+        &imported("impl Access { pub fn empty() -> Self { Self { read: false } } }"),
+    );
+    assert!(
+        error.contains("`Access::empty` takes a name the macro gives a #[flags] struct"),
+        "{error}"
+    );
+    let module = expanded(
+        "example:office@1.0.0",
+        &imported(
+            "pub mod other { pub struct Access { pub level: u32 } }
+            impl Clone for Access { fn clone(&self) -> Self { *self } }",
+        ),
+    );
+    assert!(
+        tokens(&module).contains(
+            "# [derive (:: core :: clone :: Clone , :: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool }"
+        ),
+        "{}",
+        tokens(&module)
     );
 }
 
@@ -2226,6 +2310,26 @@ fn what_a_flags_struct_cannot_be_is_refused() {
         ),
         (
             "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl core::ops::BitOr<Self> for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl core::ops::BitOr<Access> for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl<T> core::ops::BitOr<T> for Access { type Output = Self; fn bitor(self, other: T) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl<T: Into<Access>> core::ops::BitOr<T> for Access { type Output = Self; fn bitor(self, other: T) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
             "#[hook(composition = series, input = Admission)]
             pub struct Guard;
             pub struct Admission { pub access: Access }",
@@ -2235,6 +2339,18 @@ fn what_a_flags_struct_cannot_be_is_refused() {
         let error = refused("example:office@1.0.0", &module(&access, extra));
         assert!(error.contains(message), "{access} {extra}: {error}");
     }
+    // A `BitOr` with another right-hand type does not overlap the macro's `BitOr<Self>`.
+    let generated = tokens(&expanded(
+        "example:office@1.0.0",
+        &module(
+            "#[flags] pub struct Access { pub read: bool }",
+            "impl core::ops::BitOr<u32> for Access { type Output = Self; fn bitor(self, other: u32) -> Self { self } }",
+        ),
+    ));
+    assert!(
+        generated.contains("impl :: core :: ops :: BitOr for Access"),
+        "{generated}"
+    );
 }
 
 /// The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
@@ -3119,6 +3235,16 @@ fn what_the_generated_type_cannot_take_is_refused() {
             "implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle",
         ),
         (
+            "#[derive(educe::Educe)] #[educe(Hash, Debug(name(Spot)))] pub struct Point { pub x: i32 }",
+            "Point",
+            "`educe::Educe` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type; remove `Debug` from `#[educe(..)]`, or keep `Point` out of the WIT",
+        ),
+        (
+            "#[derive(derivative::Derivative)] #[derivative(Clone(bound = \"\"))] pub struct Point { pub x: i32 }",
+            "Point",
+            "`derivative::Derivative` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle; remove `Clone` from `#[derivative(..)]`, or keep `Point` out of the WIT",
+        ),
+        (
             "#[derive(more::Ord)] pub enum Heading { North, East }",
             "Heading",
             "implements `Ord` already, as the bindings derive it for every enum",
@@ -3209,6 +3335,18 @@ fn what_the_generated_type_cannot_take_is_refused() {
         assert!(error.contains(message), "{types}: {error}");
         expanded("example:walk@1.0.0", &module(types, "u32"));
     }
+    // A derive implementing, through its helper, only traits the bindings leave to it is carried.
+    let generated = tokens(&expanded(
+        "example:walk@1.0.0",
+        &module(
+            "#[derive(educe::Educe)] #[educe(Hash)] pub struct Point { pub x: i32 }",
+            "Point",
+        ),
+    ));
+    assert!(
+        generated.contains("[# [derive (:: educe :: Educe)] # [educe (Hash)]]"),
+        "{generated}"
+    );
 }
 
 /// The bindings' module reads the helper attributes the generated type takes, so one it would not
@@ -3281,7 +3419,9 @@ fn a_helper_attribute_the_bindings_module_cannot_read_is_refused() {
 /// A state starts from its `Default`: the macro implements it field by field unless the author
 /// gives it, by an `impl Default` anywhere in the Orb module or by a derive, which stays on a
 /// state out of the WIT and goes to the generated type replacing a state that enters it; the serde
-/// derives the author already wrote are not added again.
+/// derives the author already wrote are not added again. A derive implementing `Default` under
+/// another name, `SmartDefault` or `Derivative` with `#[derivative(Default)]`, is the state's
+/// `Default` too.
 #[test]
 fn the_author_may_give_a_state_its_default_and_its_derives() {
     let generated_default = "impl :: core :: default :: Default for Balance {";
@@ -3340,6 +3480,34 @@ fn the_author_may_give_a_state_its_default_and_its_derives() {
         assert!(!entered.contains(generated_default), "{entered}");
         assert!(
             entered.contains("additional_type_attributes : { \"example:ledger/pinned@1.0.0/balance\" : [# [derive (:: core :: default :: Default)]] } ,"),
+            "{entered}"
+        );
+    }
+    // So does a derive that implements `Default` under another name, in or out of the WIT.
+    for (attributes, carried) in [
+        (
+            "#[derive(smart_default::SmartDefault)]",
+            "[# [derive (:: smart_default :: SmartDefault)]]",
+        ),
+        (
+            "#[derive(derivative::Derivative)] #[derivative(Default(bound = \"\"))]",
+            "[# [derive (:: derivative :: Derivative)] # [derivative (Default (bound = \"\"))]]",
+        ),
+    ] {
+        let kept = tokens(&expanded(
+            "example:ledger@1.0.0",
+            &state(attributes, "", "i64"),
+        ));
+        assert!(!kept.contains(generated_default), "{kept}");
+        let entered = tokens(&expanded(
+            "example:ledger@1.0.0",
+            &state(attributes, "", "Balance"),
+        ));
+        assert!(!entered.contains(generated_default), "{entered}");
+        assert!(
+            entered.contains(&format!(
+                "additional_type_attributes : {{ \"example:ledger/pinned@1.0.0/balance\" : {carried} }} ,"
+            )),
             "{entered}"
         );
     }
