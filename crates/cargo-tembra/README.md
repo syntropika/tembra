@@ -29,10 +29,13 @@ installing `cargo-tembra` from another commit, move the crate's `rev` along.
 
 The build of `cargo-tembra` reads that commit with git from the sources it compiles: the checkout
 `cargo install --git` builds in keeps its `.git`, as a clone or a worktree does for
-`cargo install --path`. Built without git, or from sources without `.git` such as an archive,
-`cargo-tembra` knows no commit, and `new` outside a checkout asks for `--tembra` rather than
-depend on whatever the default branch holds. A commit the repository does not have, one not
-pushed yet, fails when Cargo fetches it; `--tembra` serves there too.
+`cargo install --path`. A `--path` build pins the commit at HEAD, not the changes not committed
+yet: `cargo-tembra` compiles them, but the crate `new` creates outside a checkout takes the
+facade, its macro included, as that commit holds it, unless `--tembra` names the checkout. Built
+without git, or from sources without `.git` such as an archive, `cargo-tembra` knows no commit,
+and `new` outside a checkout asks for `--tembra` rather than depend on whatever the default branch
+holds. A commit the repository does not have, one not pushed yet, fails when Cargo fetches it;
+`--tembra` serves there too.
 
 ## Where the contract comes from
 
