@@ -291,7 +291,7 @@ fn item_types(item: &Item) -> Vec<&Type> {
 }
 
 /// The types of a shape's fields, or of the payloads of its cases.
-fn shape_types(shape: &Shape) -> Vec<&Type> {
+pub(crate) fn shape_types(shape: &Shape) -> Vec<&Type> {
     match &shape.kind {
         ShapeKind::Record(fields) => fields.iter().map(|(_, ty)| ty).collect(),
         ShapeKind::Variant(cases) => cases.iter().filter_map(|(_, ty)| ty.as_ref()).collect(),
@@ -685,8 +685,8 @@ fn checked<'a>(
 
 /// The types of a state's fields and of the module types they reach, each once, with the module
 /// type that holds it, `None` for the state's own fields, and the module the holder is declared
-/// in. A name resolves as `serialized` resolves it: to the type of the module naming it, else to
-/// the one type of that name in the Orb.
+/// in. A name resolves as `serialized` resolves it, by `own_or_only`: to the type of the module
+/// naming it, else to the one type of that name in the Orb.
 fn state_types<'a>(
     state: &State,
     shapes: &'a [Shape],
@@ -706,15 +706,11 @@ fn state_types<'a>(
         }))
         .collect();
     let resolve = |name: &Ident, scope: usize| {
-        let named: Vec<&(&'a Ident, usize, Vec<&'a Type>)> = declared
+        let named = declared
             .iter()
             .filter(|(ident, _, _)| *ident == name)
-            .collect();
-        match named.iter().find(|(_, module, _)| *module == scope) {
-            Some(found) => Some(*found),
-            None if named.len() == 1 => Some(named[0]),
-            None => None,
-        }
+            .map(|entry| (entry.1, entry));
+        crate::own_or_only(named, scope)
     };
     let mut types = Vec::new();
     let mut seen = BTreeSet::new();

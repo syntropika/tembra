@@ -7,7 +7,7 @@
 //! `borrow<t>`, so a `&T` parameter stays refused, as every reference in a signature is.
 use crate::{
     Candidate, Constructor, Declared, Function, Handles, Service, Shape, WitResource,
-    foreign::Modules, handles_of, rebuild, wit, with_handles,
+    foreign::Modules, handles_of, own_or_only, rebuild, wit, with_handles,
 };
 use quote::quote;
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,25 +73,20 @@ pub(crate) fn derived<'a>(
     functions
 }
 
-/// The resource a name written in the module `scope` resolves to: that module's own resource of
-/// the name, none when that module declares another type of the name, as `declares` says, else a
-/// resource of the name in another module.
+/// The resource a name written in the module `scope` resolves to, by `own_or_only`: that module's
+/// own resource of the name, none when that module declares another type of the name, as
+/// `declares` says, else the only resource of the name in the Orb.
 pub(crate) fn resource_named<'a>(
     ident: &Ident,
     scope: usize,
     resources: &'a [WitResource],
     declares: bool,
 ) -> Option<&'a WitResource> {
-    let named = || {
-        resources
-            .iter()
-            .filter(move |resource| resource.ident == *ident)
-    };
-    match named().find(|resource| resource.scope == scope) {
-        Some(own) => Some(own),
-        None if declares => None,
-        None => named().next(),
-    }
+    let named = resources
+        .iter()
+        .filter(|resource| resource.ident == *ident)
+        .map(|resource| (resource.scope, resource));
+    own_or_only(named, scope).filter(|resource| resource.scope == scope || !declares)
 }
 
 /// Refuse a resource of the module where the runtime cannot carry it, before the WIT is derived: a
@@ -292,14 +287,18 @@ fn held<'a>(
     let mut seen = BTreeSet::new();
     let mut held = Vec::new();
     while let Some((ident, scope, via)) = pending.pop() {
-        let own = shapes
-            .iter()
-            .find(|shape| shape.ident == ident && shape.scope == scope);
-        if let Some(resource) = resource_named(&ident, scope, resources, own.is_some()) {
+        let named = || {
+            shapes
+                .iter()
+                .filter(|shape| shape.ident == ident)
+                .map(|shape| (shape.scope, shape))
+        };
+        let declares = named().any(|(module, _)| module == scope);
+        if let Some(resource) = resource_named(&ident, scope, resources, declares) {
             if seen.insert((ident.to_string(), resource.scope)) {
                 held.push((resource, via));
             }
-        } else if let Some(shape) = own.or_else(|| shapes.iter().find(|shape| shape.ident == ident))
+        } else if let Some(shape) = own_or_only(named(), scope)
             && seen.insert((ident.to_string(), shape.scope))
         {
             let via = via.or(Some(&shape.ident));

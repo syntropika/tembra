@@ -3196,14 +3196,28 @@ fn implemented_service(
     Ok((bridge, implementations))
 }
 
+/// The type a name written in the module `scope` names among `named`, the types of the Orb that
+/// take the name, each with the module declaring it: that module's own, else the only one in the
+/// Orb; none of two in other modules, which the name does not tell apart.
+fn own_or_only<T>(named: impl IntoIterator<Item = (usize, T)>, scope: usize) -> Option<T> {
+    let mut named: Vec<(usize, T)> = named.into_iter().collect();
+    let index = match named.iter().position(|(module, _)| *module == scope) {
+        Some(own) => own,
+        None if named.len() == 1 => 0,
+        None => return None,
+    };
+    Some(named.swap_remove(index).1)
+}
+
 /// Keep, in module order, the candidate types that a derived service's method, a derived
 /// resource's function or a derived hook's input reaches; the others, with their shapes, go back
 /// to their modules as ordinary Rust. The resources of an implemented interface reach nothing:
 /// their functions speak the consumed package's types, whatever the module's own are called. A
-/// name resolves to the type of the module naming it, a resource included, else to a resource of
-/// that name, else to the one type of that name in the Orb; a type the module does not declare is
-/// an error, and a resource is a type of its own. What a consumed interface's module names, a type
-/// or a handle, is no type of the module.
+/// name resolves by `own_or_only`: to the type of the module naming it, a resource included, else
+/// to the only resource of that name, else to the only type of that name in the Orb; two of other
+/// modules are ambiguous, a type the module does not declare is an error, and a resource is a type
+/// of its own. What a consumed interface's module names, a type or a handle, is no type of the
+/// module.
 fn reachable(
     candidates: Vec<Candidate>,
     services: &[Service],
@@ -3262,28 +3276,32 @@ fn reachable(
     }
     let mut kept = BTreeSet::new();
     while let Some((ident, scope)) = pending.pop() {
-        let indexes = declared.get(&ident.to_string());
-        let own = indexes.and_then(|indexes| {
-            indexes
-                .iter()
-                .copied()
-                .find(|&index| candidates[index].scope == scope)
-        });
-        if resource_params::resource_named(&ident, scope, resources, own.is_some()).is_some() {
+        let indexes = declared
+            .get(&ident.to_string())
+            .map_or(&[][..], Vec::as_slice);
+        let declares = indexes
+            .iter()
+            .any(|&index| candidates[index].scope == scope);
+        if resource_params::resource_named(&ident, scope, resources, declares).is_some() {
             continue;
         }
-        let Some(indexes) = indexes else {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!(
-                    "`{ident}` is used by a service method or a hook but is not a struct or enum of this module"
-                ),
-            ));
-        };
-        let index = match own {
-            Some(index) => index,
-            None if indexes.len() == 1 => indexes[0],
-            None => {
+        // Resources take the name here only when several of other modules do: the name tells
+        // them apart no more than several candidates.
+        let shared = !declares && resources.iter().any(|resource| resource.ident == ident);
+        let named = indexes
+            .iter()
+            .map(|&index| (candidates[index].scope, index));
+        let index = match own_or_only(named, scope) {
+            Some(index) if !shared => index,
+            None if indexes.is_empty() && !shared => {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!(
+                        "`{ident}` is used by a service method or a hook but is not a struct or enum of this module"
+                    ),
+                ));
+            }
+            _ => {
                 return Err(syn::Error::new(
                     ident.span(),
                     format!(
@@ -4303,9 +4321,9 @@ fn carried_attributes(
 
 /// The types, among those that stay out of the WIT, that serde serializes: each state that stays
 /// out, and every type of the module its fields reach, directly or through other such types. A
-/// name resolves as `reachable` resolves it; one that resolves to a type entering the WIT stops
-/// there, because that type is generated with serde's derives, and one the module does not
-/// declare is the author's to serialize.
+/// name resolves by `own_or_only`; one that resolves to a type entering the WIT stops there,
+/// because that type is generated with serde's derives, and one the module does not declare is
+/// the author's to serialize.
 fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> BTreeSet<usize> {
     let mut serialized = BTreeSet::new();
     let mut pending: Vec<(Ident, usize)> = Vec::new();
@@ -4325,7 +4343,7 @@ fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> B
     }
     while let Some((name, scope)) = pending.pop() {
         // Each type of that name, with its module and its place among the unreached, if there.
-        let named: Vec<(usize, Option<usize>)> = entered
+        let named = entered
             .iter()
             .filter(|shape| shape.ident == name)
             .map(|shape| (shape.scope, None))
@@ -4335,17 +4353,11 @@ fn serialized(unreached: &[Candidate], entered: &[Shape], states: &[State]) -> B
                     .enumerate()
                     .filter(|(_, candidate)| candidate.ident == name)
                     .map(|(index, candidate)| (candidate.scope, Some(index))),
-            )
-            .collect();
-        let resolved = match named.iter().find(|(module, _)| *module == scope) {
-            Some(found) => Some(found),
-            None if named.len() == 1 => named.first(),
-            None => None,
-        };
-        if let Some((_, Some(index))) = resolved
-            && serialized.insert(*index)
+            );
+        if let Some(Some(index)) = own_or_only(named, scope)
+            && serialized.insert(index)
         {
-            let candidate = &unreached[*index];
+            let candidate = &unreached[index];
             pending.extend(
                 candidate
                     .references
@@ -4751,14 +4763,10 @@ fn holding_lists(shapes: &[Shape]) -> BTreeSet<String> {
     loop {
         let known = holding.len();
         for shape in shapes {
-            let types: Vec<&Type> = match &shape.kind {
-                ShapeKind::Record(fields) => fields.iter().map(|(_, ty)| ty).collect(),
-                ShapeKind::Variant(cases) => {
-                    cases.iter().filter_map(|(_, ty)| ty.as_ref()).collect()
-                }
-                ShapeKind::Enum(_) | ShapeKind::Flags(_) => Vec::new(),
-            };
-            if types.iter().any(|ty| holds_list(ty, &holding)) {
+            if foreign::shape_types(shape)
+                .iter()
+                .any(|ty| holds_list(ty, &holding))
+            {
                 holding.insert(shape.ident.to_string());
             }
         }
