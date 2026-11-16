@@ -217,10 +217,11 @@ impl Candidate {
         }
     }
 
-    /// The type's WIT definition, once it enters the WIT, with what the generated type replacing
-    /// it would drop refused first and what it takes of the author's attributes. A flags struct
-    /// is not replaced and keeps its attributes.
+    /// The type's WIT definition, once it enters the WIT, with what the macro cannot evaluate and
+    /// what the generated type replacing it would drop refused first and what it takes of the
+    /// author's attributes. A flags struct is not replaced and keeps its attributes.
     fn translate(&self) -> syn::Result<Shape> {
+        unconditional(&self.item, self.flags)?;
         if let (true, Item::Struct(item)) = (self.flags, &self.item) {
             let mut shape = flags::shape(item)?;
             shape.scope = self.scope;
@@ -3233,15 +3234,103 @@ fn replaceable(item: &Item) -> syn::Result<()> {
             ),
         ));
     }
-    if let Some(attribute) = named("cfg_attr") {
-        return Err(syn::Error::new(
-            attribute.span(),
+    Ok(())
+}
+
+/// Refuse what the macro cannot evaluate in a type that enters the WIT, as it reads the type before
+/// the compiler evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`: a field, a case or a case's payload
+/// under `#[cfg(..)]`, which the WIT would hold in every configuration, and a `#[cfg_attr(..)]` on
+/// the type or a member hiding what the macro reads, which would come and go on the generated type
+/// replacing the type, or beside the derives the macro adds to a flags struct.
+fn unconditional(item: &Item, flags: bool) -> syn::Result<()> {
+    // Each member, by what it is and its name as the errors say them.
+    let (owner, attrs, members) = match item {
+        Item::Struct(item) => (
+            &item.ident,
+            &item.attrs,
+            item.fields
+                .iter()
+                .filter_map(|field| {
+                    let name = format!("`{}::{}`", item.ident, field.ident.as_ref()?);
+                    Some(("field", name, &field.attrs))
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Item::Enum(item) => (
+            &item.ident,
+            &item.attrs,
+            item.variants
+                .iter()
+                .flat_map(|variant| {
+                    let case = format!("`{}::{}`", item.ident, variant.ident);
+                    std::iter::once(("case", case.clone(), &variant.attrs)).chain(
+                        variant
+                            .fields
+                            .iter()
+                            .map(move |field| ("payload", format!("of {case}"), &field.attrs)),
+                    )
+                })
+                .collect(),
+        ),
+        _ => return Ok(()),
+    };
+    for (kind, name, attrs) in &members {
+        if let Some(attribute) = attrs
+            .iter()
+            .find(|attribute| attribute.path().is_ident("cfg"))
+        {
+            return Err(syn::Error::new(
+                attribute.span(),
+                format!(
+                    "`#[cfg(..)]` on the {kind} {name}: `{owner}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the {kind} in every configuration; remove the attribute, or keep `{owner}` out of the WIT"
+                ),
+            ));
+        }
+    }
+    let hiding = attrs
+        .iter()
+        .chain(members.iter().flat_map(|(_, _, attrs)| attrs.iter()))
+        .find(|attribute| hidden(&attribute.meta));
+    if let Some(attribute) = hiding {
+        let message = if flags {
             format!(
-                "`{ident}` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`: write them without it, or keep `{ident}` out of the WIT"
-            ),
-        ));
+                "`{owner}` enters the WIT as a flags, which the macro completes before the compiler evaluates `#[cfg_attr(..)]`: write the attribute without it, or keep `{owner}` out of the WIT"
+            )
+        } else {
+            format!(
+                "`{owner}` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`: write them without it, or keep `{owner}` out of the WIT"
+            )
+        };
+        return Err(syn::Error::new(attribute.span(), message));
     }
     Ok(())
+}
+
+/// Whether an attribute is a `#[cfg_attr(..)]` hiding from the macro, until the compiler evaluates
+/// it, what the macro reads of a type: a derive, an attribute a derive may read or a `#[cfg(..)]`,
+/// directly or through another `#[cfg_attr(..)]`, or what does not parse. Rust's own attributes
+/// other than `derive` and `cfg`, `allow`, `doc` or `deprecated` among them, and an attribute named
+/// by a path, the generated type never takes, so under `#[cfg_attr(..)]` they change nothing the
+/// macro writes.
+fn hidden(meta: &syn::Meta) -> bool {
+    if !meta.path().is_ident("cfg_attr") {
+        return false;
+    }
+    let wrapped = meta.require_list().and_then(|list| {
+        list.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated)
+    });
+    let Ok(wrapped) = wrapped else {
+        return true;
+    };
+    // The first is the configuration predicate.
+    wrapped.iter().skip(1).any(|meta| {
+        hidden(meta)
+            || meta.path().get_ident().is_some_and(|ident| {
+                ident == "cfg"
+                    || ident == "derive"
+                    || !BUILT_IN_ATTRIBUTES.contains(&ident.to_string().as_str())
+            })
+    })
 }
 
 /// The attributes Rust defines itself that may sit on a type, a field or a case: none of them is a

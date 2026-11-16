@@ -913,7 +913,9 @@ A flags holds one to 32 flags, as the component model rules, and its struct take
 parameter; a flags struct of a sub-module is `pub` or `pub(super)`, visible to the Orb module, as
 the bindings name it from there. A derived hook's input holds no flags: the bindings name a hook's
 types from its import module and from its export module, at two depths, and the macro maps a flags
-onto the author's struct through one path. A struct marked `#[flags]` that no function uses stays
+onto the author's struct through one path. The macro reads the struct before the compiler evaluates
+`#[cfg(..)]` and `#[cfg_attr(..)]`: a field under `#[cfg(..)]` and a derive under
+`#[cfg_attr(..)]` are compile errors. A struct marked `#[flags]` that no function uses stays
 ordinary Rust.
 
 ## Organizing the module in sub-modules
@@ -1077,8 +1079,15 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   of this crate, `crate::prelude::Serialize`, is left to the bindings as `serde`'s own is.
 - What the replacement would drop without a word is refused on a type that enters the WIT: an
   explicit discriminant, which a WIT enum has no room for, a `#[serde(..)]` attribute, which would
-  change a state's JSON, a `#[cfg_attr(..)]`, under which a derive or its helper would come and go,
-  and a helper attribute on the payload of a case, which the bindings have no place for.
+  change a state's JSON, and a helper attribute on the payload of a case, which the bindings have
+  no place for.
+- The macro reads a type that enters the WIT, a flags struct included, before the compiler
+  evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`. A field, a case or a case's payload under
+  `#[cfg(..)]`, which the WIT would hold in every configuration, is a compile error, and so is a
+  `#[cfg_attr(..)]` wrapping a derive, a helper attribute or a `#[cfg(..)]`, which would come and
+  go beside what the macro writes. One wrapping only Rust's own attributes other than `derive` and
+  `cfg`, such as `#[cfg_attr(test, allow(dead_code))]`, `doc` or `deprecated`, changes nothing the
+  macro writes.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.
 

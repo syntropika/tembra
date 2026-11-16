@@ -2033,6 +2033,102 @@ fn what_a_flags_struct_cannot_be_is_refused() {
     }
 }
 
+/// The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
+/// `#[cfg_attr(..)]`: a field, a case or a case's payload under `#[cfg(..)]`, which the WIT would
+/// hold in every configuration, is refused, on a flags as on a record, an enum or a variant, and
+/// so is a `#[cfg_attr(..)]` wrapping a derive, a helper or a `#[cfg(..)]`, on a flags too, whose
+/// derives the macro completes. Kept out of the WIT, the same type is the author's, as written.
+#[test]
+fn what_the_macro_cannot_evaluate_is_refused() {
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod office {{
+                {types}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    for (types, returned, message) in [
+        (
+            "#[flags] pub struct Access { pub read: bool, #[cfg(feature = \"sharing\")] pub share: bool }",
+            "Access",
+            "`#[cfg(..)]` on the field `Access::share`: `Access` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the field in every configuration; remove the attribute, or keep `Access` out of the WIT",
+        ),
+        (
+            "#[flags] #[cfg_attr(test, derive(Debug))] pub struct Access { pub read: bool }",
+            "Access",
+            "`Access` enters the WIT as a flags, which the macro completes before the compiler evaluates `#[cfg_attr(..)]`: write the attribute without it, or keep `Access` out of the WIT",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool, #[cfg_attr(test, cfg(feature = \"sharing\"))] pub share: bool }",
+            "Access",
+            "`Access` enters the WIT as a flags, which the macro completes before the compiler evaluates `#[cfg_attr(..)]`",
+        ),
+        (
+            "pub struct Grant { pub who: String, #[cfg(feature = \"audit\")] pub reason: String }",
+            "Grant",
+            "`#[cfg(..)]` on the field `Grant::reason`: `Grant` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the field in every configuration",
+        ),
+        (
+            "pub enum Level { Read, #[cfg(feature = \"admin\")] Admin }",
+            "Level",
+            "`#[cfg(..)]` on the case `Level::Admin`: `Level` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the case in every configuration",
+        ),
+        (
+            "pub enum Holder { Person(#[cfg(feature = \"named\")] String), Nobody }",
+            "Holder",
+            "`#[cfg(..)]` on the payload of `Holder::Person`: `Holder` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the payload in every configuration",
+        ),
+        (
+            "pub struct Grant { #[cfg_attr(feature = \"audit\", allow(unused), cfg_attr(test, serde(skip)))] pub who: String }",
+            "Grant",
+            "`Grant` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`",
+        ),
+    ] {
+        let error = refused("example:office@1.0.0", &module(types, returned));
+        assert!(error.contains(message), "{types}: {error}");
+        expanded("example:office@1.0.0", &module(types, "u32"));
+    }
+}
+
+/// A `#[cfg_attr(..)]` wrapping only Rust's own attributes that the generated type never takes,
+/// such as `allow`, `doc` or `deprecated`, changes nothing the macro writes: it may sit on a type
+/// that enters the WIT, its fields and its cases, and a flags struct keeps it as written.
+#[test]
+fn a_cfg_attr_wrapping_only_what_the_generated_type_never_takes_expands() {
+    let module = expanded(
+        "example:office@1.0.0",
+        "mod office {
+            #[flags]
+            #[cfg_attr(docsrs, doc = \"With every feature.\")]
+            pub struct Access { #[cfg_attr(test, allow(dead_code))] pub read: bool }
+            #[cfg_attr(test, deprecated, cfg_attr(docsrs, doc(hidden)))]
+            pub struct Grant { #[cfg_attr(test, allow(dead_code))] pub who: String, pub access: Access }
+            pub enum Level { #[cfg_attr(test, allow(unused))] Read, Write }
+            #[service]
+            pub struct Permits;
+            impl Permits { pub fn issue(level: Level) -> Grant { todo!() } }
+        }",
+    );
+    let text = resolved(&module);
+    for expected in [
+        "  flags access {\n    read,\n  }\n",
+        "  record grant {\n    who: string,\n    access: access,\n  }\n",
+        "  enum level {\n    read,\n    write,\n  }\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let generated = tokens(&module);
+    assert!(
+        generated.contains(
+            "pub struct Access { # [cfg_attr (test , allow (dead_code))] pub read : bool }"
+        ),
+        "{generated}"
+    );
+}
+
 const NESTED_WIT: &str = "package example:ledger@1.0.0;
 interface book {
   resource entry {
@@ -2780,8 +2876,9 @@ fn a_derived_hook_input_keeps_its_derives() {
 /// implementing a trait the bindings implement, a derive of the standard library the type's
 /// contents rule out, `Default` included on a record whose every value holds a resource handle,
 /// serde's derives on a type holding one anywhere, a derive the macro cannot name from the
-/// bindings' module, a helper attribute on a case's payload, and `#[cfg_attr(..)]`, under which a
-/// derive would come and go. Kept out of the WIT, the same type is the author's, as written.
+/// bindings' module, a helper attribute on a case's payload, and a `#[cfg_attr(..)]` wrapping a
+/// derive or a helper, which would come and go. Kept out of the WIT, the same type is the
+/// author's, as written.
 #[test]
 fn what_the_generated_type_cannot_take_is_refused() {
     let module = |types: &str, returned: &str| {
@@ -2891,11 +2988,6 @@ fn what_the_generated_type_cannot_take_is_refused() {
             "#[cfg_attr(test, derive(Hash))] pub struct Point { pub x: i32 }",
             "Point",
             "`Point` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`",
-        ),
-        (
-            "pub struct Point { #[cfg_attr(test, allow(dead_code))] pub x: i32 }",
-            "Point",
-            "never under `#[cfg_attr(..)]`",
         ),
         (
             "pub enum Heading { #[cfg_attr(test, default)] North, East }",
