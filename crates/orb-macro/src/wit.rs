@@ -820,9 +820,13 @@ pub(crate) fn consumed<'a>(
 }
 
 /// What a consumed interface defines, as the bindings name it: each of its types and resources, in
-/// the order of the interface's text, by the name the bindings give it.
+/// the order of the interface's text, by the name the bindings give it; and the interfaces it
+/// depends on.
 pub(crate) struct Defined {
     items: Vec<(Ident, Definition)>,
+    /// The interfaces it `use`s types from, directly or through others, by identity: a world
+    /// importing it imports them too.
+    pub depends: BTreeSet<String>,
 }
 
 /// A type or a resource of a consumed interface: its WIT name, what it is, and the WASI interface
@@ -958,7 +962,19 @@ pub(crate) fn defined<'a>(
                 (crate::type_ident(name), definition)
             })
             .collect();
-        defined.insert(identity.to_owned(), Defined { items });
+        let mut pending: Vec<wit_parser::InterfaceId> = interface
+            .types
+            .values()
+            .filter_map(|id| resolve.type_interface_dep(*id))
+            .collect();
+        let (mut seen, mut depends) = (BTreeSet::new(), BTreeSet::new());
+        while let Some(id) = pending.pop() {
+            if seen.insert(id) {
+                depends.extend(resolve.id_of(id));
+                pending.extend(resolve.interface_direct_deps(id));
+            }
+        }
+        defined.insert(identity.to_owned(), Defined { items, depends });
     }
     Ok(defined)
 }

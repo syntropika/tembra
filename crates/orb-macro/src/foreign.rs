@@ -419,14 +419,16 @@ impl Place<'_> {
 
 /// What the uses of the consumed interfaces are read from: the consumed modules and the directory
 /// of the consumed packages, the views of the interfaces imported by key, the module's services,
-/// resources and declared hooks, the types that enter the WIT with the interface defining each,
-/// and the states with the module types that stay out of the WIT, which a state's fields may reach.
+/// resources, contributions and declared hooks, the types that enter the WIT with the interface
+/// defining each, and the states with the module types that stay out of the WIT, which a state's
+/// fields may reach.
 pub(crate) struct Reach<'a> {
     pub modules: &'a Modules,
     pub dir: Option<&'a Path>,
     pub views: &'a [keyed::View],
     pub services: &'a [Service],
     pub resources: &'a [WitResource],
+    pub contributions: &'a [Contribution],
     pub declared: &'a [Declared],
     pub shapes: &'a [Shape],
     pub placement: &'a BTreeMap<String, Ident>,
@@ -448,6 +450,7 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
         views,
         services,
         resources,
+        contributions,
         declared,
         shapes,
         placement,
@@ -522,6 +525,25 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
             .iter()
             .map(|(named, _)| named.interface.identity.as_str()),
     )?;
+    // The consumed interfaces the world exports: the implemented ones, the hooks the module
+    // contributes to and those it declares from a consumed package.
+    let exported: Vec<Reexported> = services
+        .iter()
+        .filter_map(|service| service.implements.clone())
+        .map(|identity| (identity, Role::Implemented))
+        .chain(
+            contributions
+                .iter()
+                .map(|contribution| (contribution.hook.clone(), Role::Contributed)),
+        )
+        .chain(
+            declared
+                .iter()
+                .filter(|declaration| declaration.input.is_none())
+                .map(|declaration| (declaration.hook.clone(), Role::Declared)),
+        )
+        .map(|(identity, role)| Reexported { identity, role })
+        .collect();
     let mut foreign: BTreeMap<String, Vec<Foreign>> = BTreeMap::new();
     for (named, place) in &found {
         let items = &defined[&named.interface.identity];
@@ -580,7 +602,10 @@ pub(crate) fn foreign(reach: Reach<'_>) -> syn::Result<BTreeMap<String, Vec<Fore
                 ),
             ));
         };
-        let Some(interface) = checked(named, definition, place, declared)? else {
+        let dependency = exported
+            .iter()
+            .find(|interface| items.depends.contains(&interface.identity));
+        let Some(interface) = checked(named, definition, place, declared, dependency)? else {
             continue;
         };
         let uses = foreign.entry(wit::kebab(interface)).or_default();
@@ -626,12 +651,14 @@ fn found_in<'a, 'p>(
 }
 
 /// Check one item a consumed interface's module names where it is named, and return the service
-/// whose derived interface `use`s it, if one does.
+/// whose derived interface `use`s it, if one does. `dependency` is an interface the world exports
+/// that the consumed interface depends on, if there is one.
 fn checked<'a>(
     named: &Named<'_, '_>,
     definition: &wit::Definition,
     place: &Place<'a>,
     declared: &[Declared],
+    dependency: Option<&Reexported>,
 ) -> syn::Result<Option<&'a Ident>> {
     let subject = place.subject();
     let ident = named.ident;
@@ -703,6 +730,14 @@ fn checked<'a>(
                 "{what} of {of}{from}: the types of a WASI interface stay out of a derived interface; use a type of the module"
             )),
         };
+    }
+    // A derived interface `use`s the item from the interface defining it, which the world then
+    // imports with what it depends on, while an import of a world depends on none of its exports.
+    if let (Role::Imported | Role::Keyed, Some(exported)) = (interface.role, dependency) {
+        return refuse(format!(
+            "{what} of {of}: that interface depends on {}, so a derived interface naming `{ident}` would make the world import an interface depending on one it exports, which WIT refuses; use a type of the module",
+            exported.described()
+        ));
     }
     match (interface.role, &definition.kind) {
         (Role::Wasi, _) => unreachable!("checked above"),

@@ -441,6 +441,64 @@ fn a_derived_signature_names_an_implemented_interfaces_and_a_hooks_types() {
     );
 }
 
+/// An imported interface whose types are its own but which `use`s the book, the interface the
+/// keeper implements.
+const REPORTS: &str = "package example:ledger@1.0.0;
+
+interface book {
+  record entry { label: string, amount: s64 }
+  add: func(entry: entry) -> u32;
+}
+
+interface reports {
+  use book.{entry};
+  record report { entries: list<entry>, total: s64 }
+  latest: func() -> report;
+}
+";
+
+/// A derived interface naming a type of an imported interface `use`s it from the import, and an
+/// import of the world that depends on an interface the world exports, here the implemented book,
+/// is a world WIT refuses: such a type is refused where it is named, while the module importing
+/// the interface without naming its types expands.
+#[test]
+fn a_type_of_an_import_depending_on_an_export_is_refused() {
+    let dir = consumed("reports", REPORTS);
+    let summing = || {
+        options(
+            "example:keeper@1.0.0",
+            Some(&dir),
+            &["example:ledger/reports@1.0.0"],
+        )
+    };
+    let keeper = |functions: &str| {
+        format!(
+            "mod keeper {{
+                #[service(\"example:ledger/book@1.0.0\")]
+                pub struct Keeper;
+                impl Keeper {{ pub fn add(entry: book::Entry) -> u32 {{ 0 }} }}
+                #[service]
+                pub struct Summing;
+                impl Summing {{ {functions} }}
+            }}"
+        )
+    };
+    let module = expanded(summing(), &keeper("pub fn count() -> u32 { 0 }"));
+    let text = resolved(&module, &dir);
+    assert!(
+        text.contains("  import example:ledger/reports@1.0.0;\n  export example:ledger/book@1.0.0;\n  export summing;\n"),
+        "{text}"
+    );
+    let error = refused(
+        summing(),
+        &keeper("pub fn sum(r: reports::Report) -> u32 { 0 }"),
+    );
+    assert!(
+        error.contains("`Summing::sum` takes `Report`, a record of the imported interface example:ledger/reports@1.0.0: that interface depends on the implemented interface example:ledger/book@1.0.0, so a derived interface naming `Report` would make the world import an interface depending on one it exports, which WIT refuses; use a type of the module"),
+        "{error}"
+    );
+}
+
 /// The world exports a hook the module declares from a consumed package, which a derived
 /// interface takes the types of, while the Orb module re-exports the hook's import, whose types
 /// `run` takes and returns: a derived signature names none of them. A state holds them.

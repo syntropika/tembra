@@ -1679,6 +1679,7 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
         views: &views,
         services: &services,
         resources: &wit_resources,
+        contributions: &contributions,
         declared: &declared,
         shapes: &shapes,
         placement: &placement,

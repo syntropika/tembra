@@ -744,6 +744,10 @@ the type that names it:
 - a type or a handle of a WASI interface, named through that interface's module or through a
   consumed interface that `use`s it from WASI, `files::Descriptor` for a
   `use wasi:filesystem/types@0.3.0.{descriptor};` in `files`;
+- a type or a handle of an interface imported, plainly or by key, that `use`s types of an
+  interface the world exports, one the module implements or a hook it contributes to or declares,
+  directly or through other interfaces: the derived interface would `use` it from the import, and
+  WIT refuses a world whose import depends on one of its exports;
 - a consumed type in a derived hook's input, itself or in the types it reaches, which hold the
   module's own;
 - in a state, a resource, a type holding a resource handle, and a consumed flags or a type holding
