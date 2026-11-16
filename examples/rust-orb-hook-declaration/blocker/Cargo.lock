@@ -265,6 +265,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tembra"
+version = "0.2.2"
+dependencies = [
+ "tembra-orb-macro",
+]
+
+[[package]]
 name = "tembra-contracts"
 version = "0.2.2"
 dependencies = [
@@ -284,7 +291,7 @@ name = "tembra-example-blocker"
 version = "0.1.0"
 dependencies = [
  "dlmalloc",
- "tembra-orb-macro",
+ "tembra",
  "wit-bindgen",
 ]
 

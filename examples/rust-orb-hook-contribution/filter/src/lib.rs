@@ -5,7 +5,7 @@
 //! which owns no kernel state; a resource is what it can use.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
-#[tembra_orb_macro::orb(no_std, package = "example:filter@1.0.0", wit = "../wit")]
+#[tembra::orb(no_std, package = "example:filter@1.0.0", wit = "../wit")]
 mod filter {
     /// What this contributor observed: admissions seen, and how many it blocked.
     #[resource]

@@ -9,7 +9,6 @@ publish = false
 # The wiring that installs the compiled Orb and acquires, releases and reacquires its objects; it
 # defines no Orb.
 [dependencies]
-tembra = { path = "../../../crates/tembra" }
-tembra-executor-wasm = { path = "../../../crates/executor-wasm" }
+tembra = { path = "../../../crates/tembra", features = ["wasm"] }
 futures = "0.3"
 serde_json = "1"

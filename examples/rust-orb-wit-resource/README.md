@@ -68,7 +68,7 @@ owner drops the handle the kernel destroys the value, which runs `Drop`, and `dr
 ## The consumer
 
 ```rust
-#[tembra_orb_macro::orb(
+#[tembra::orb(
     package = "example:speller@1.0.0",
     wit = "../text/contract",
     import = "example:text/texts@1.0.0"
@@ -139,8 +139,11 @@ order.
 
 ## Limits
 
-A resource is handed out, never taken: a method taking a resource, owned or borrowed, as a
+A function takes a resource only owned, either one its own interface defines or an imported
+interface's handle, such as a `texts::Builder` taken by a function of the speller, as
+[the macro's README](../../crates/orb-macro/README.md#taking-a-resource) shows; a borrowed
 parameter is not expressed by the macro. Methods borrow `self`; a `&mut self` method is a compile
 error. A resource belongs to one service's interface, the one named by `#[wit_resource(service =
-Name)]` or the module's only service; another service of the module may return it, and its
-interface `use`s the type.
+Name)]` or the module's only service, and only that interface returns it: the runtime returns a
+resource only from the interface that defines it, so another service returning it is a compile
+error.
