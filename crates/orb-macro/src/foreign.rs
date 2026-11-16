@@ -88,13 +88,15 @@ pub(crate) struct Modules {
 }
 
 /// A name a type path reaches through a consumed interface's module, `greeting::Entry`: the
-/// interface, the module's name, the name and the path itself, for the errors.
+/// interface, the module's name, the name and the path itself, for the errors, and whether the
+/// path is the value of an `Option`, `Option<greeting::Entry>`.
 #[derive(Clone, Copy)]
 pub(crate) struct Named<'m, 't> {
     pub interface: &'m Reexported,
     pub module: &'m str,
     pub ident: &'t Ident,
     pub ty: &'t Type,
+    pub in_option: bool,
 }
 
 /// What a walk through a type reaches: a name through a consumed interface's module, or the last
@@ -238,15 +240,23 @@ impl Modules {
             module,
             ident: &item.ident,
             ty,
+            in_option: false,
         })
     }
 
     /// Walk a type written in the module `scope`: itself, then the type parameters of a path and
-    /// the elements of a tuple. Each name a consumed interface's module reaches is reported, and
-    /// not looked into; so is the last name of every other path, before its type parameters.
-    fn walk<'m, 't>(&'m self, ty: &'t Type, scope: usize, visit: &mut impl FnMut(Reached<'m, 't>)) {
+    /// the elements of a tuple. Each name a consumed interface's module reaches is reported, with
+    /// whether it is the value of an `Option`, which `in_option` says of the type itself, and not
+    /// looked into; so is the last name of every other path, before its type parameters.
+    fn walk<'m, 't>(
+        &'m self,
+        ty: &'t Type,
+        scope: usize,
+        in_option: bool,
+        visit: &mut impl FnMut(Reached<'m, 't>),
+    ) {
         if let Some(named) = self.named(ty, scope) {
-            visit(Reached::Consumed(named));
+            visit(Reached::Consumed(Named { in_option, ..named }));
             return;
         }
         match ty {
@@ -258,14 +268,14 @@ impl Modules {
                 if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
                     for argument in &arguments.args {
                         if let syn::GenericArgument::Type(ty) = argument {
-                            self.walk(ty, scope, visit);
+                            self.walk(ty, scope, segment.ident == "Option", visit);
                         }
                     }
                 }
             }
             Type::Tuple(tuple) => {
                 for element in &tuple.elems {
-                    self.walk(element, scope, visit);
+                    self.walk(element, scope, false, visit);
                 }
             }
             _ => {}
@@ -273,14 +283,15 @@ impl Modules {
     }
 
     /// Each name a type written in the module `scope` reaches through a consumed interface's
-    /// module: itself, or inside the type parameters of a path and the elements of a tuple.
+    /// module: itself, or inside the type parameters of a path and the elements of a tuple, each
+    /// with whether it is the value of an `Option`.
     pub(crate) fn named_in<'m, 't>(
         &'m self,
         ty: &'t Type,
         scope: usize,
         out: &mut Vec<Named<'m, 't>>,
     ) {
-        self.walk(ty, scope, &mut |reached| {
+        self.walk(ty, scope, false, &mut |reached| {
             if let Reached::Consumed(named) = reached {
                 out.push(named);
             }
@@ -292,7 +303,7 @@ impl Modules {
     /// and none of the names a consumed interface's module reaches, which are no types of the
     /// module.
     pub(crate) fn references(&self, ty: &Type, scope: usize, out: &mut Vec<Ident>) {
-        self.walk(ty, scope, &mut |reached| {
+        self.walk(ty, scope, false, &mut |reached| {
             if let Reached::Module(ident) = reached
                 && !wit::BUILTIN.contains(&ident.to_string().as_str())
             {
@@ -781,6 +792,18 @@ fn checked<'a>(
             },
         ) => refuse(format!(
             "{what} of {of} that holds {carried}: a derived interface names the consumed types that carry data only"
+        )),
+        (
+            _,
+            wit::Kind::Type {
+                unsupported: Some(problem),
+                ..
+            },
+        ) => refuse(format!(
+            "{what} of {of} that holds {problem}, which the runtime refuses in a signature"
+        )),
+        (_, wit::Kind::Type { option: true, .. }) if named.in_option => refuse(format!(
+            "{what} of {of}, in an `Option`, and `{ident}` is an option itself: an option of an option, which the runtime refuses in a signature; use an enum of the module with a case for each"
         )),
         (_, wit::Kind::Type { .. }) => Ok(Some(interface_of)),
     }

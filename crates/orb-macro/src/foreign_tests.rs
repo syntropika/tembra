@@ -499,6 +499,152 @@ fn a_type_of_an_import_depending_on_an_export_is_refused() {
     );
 }
 
+/// A consumed type holding data the runtime refuses in a signature, an option of an option, a map
+/// or a list of a fixed length, is refused where a derived signature names it, while the
+/// interface's other types are named.
+#[test]
+fn a_consumed_type_the_runtime_refuses_in_a_signature_is_refused() {
+    let dir = consumed(
+        "unsupported",
+        "package example:shop@1.0.0;
+
+interface catalog {
+  record item { name: string, price: u32 }
+  record pending { price: option<option<u32>> }
+  record index { prices: map<string, u32> }
+  type corners = list<u32, 4>;
+  lookup: func(name: string) -> option<item>;
+}
+",
+    );
+    let shopper = |functions: &str| {
+        format!(
+            "mod shopper {{
+                #[service]
+                pub struct Shopping;
+                impl Shopping {{ {functions} }}
+            }}"
+        )
+    };
+    let module = expanded(
+        shopping(&dir),
+        &shopper("pub fn price(item: catalog::Item) -> u32 { item.price }"),
+    );
+    assert!(
+        resolved(&module, &dir).contains("  price: func(item: item) -> u32;\n"),
+        "{}",
+        wit(&module)
+    );
+    for (functions, message) in [
+        (
+            "pub fn update(pending: catalog::Pending) -> u32 { 0 }",
+            "`Shopping::update` takes `Pending`, a record of the imported interface example:shop/catalog@1.0.0 that holds an option of an option, which the runtime refuses in a signature",
+        ),
+        (
+            "pub fn index() -> Option<catalog::Index> { None }",
+            "`Shopping::index` returns `Index`, a record of the imported interface example:shop/catalog@1.0.0 that holds a map, which the runtime refuses in a signature",
+        ),
+        (
+            "pub fn corners(corners: Vec<catalog::Corners>) -> u32 { 0 }",
+            "`Shopping::corners` takes `Corners`, a type of the imported interface example:shop/catalog@1.0.0 that holds a list of a fixed length, which the runtime refuses in a signature",
+        ),
+    ] {
+        let error = refused(shopping(&dir), &shopper(functions));
+        assert!(error.contains(message), "{functions}\n{error}");
+    }
+}
+
+/// A consumed type that is an option, `type opt = option<u32>` or an alias of one, is named alone
+/// or in a list, while an `Option` around it is an option of an option, which the runtime refuses
+/// in a signature: it is refused where it is written, through an import's module or a view's, in
+/// a function or in a field of a type that enters the WIT.
+#[test]
+fn an_option_of_a_consumed_option_is_refused() {
+    let dir = consumed(
+        "options",
+        "package example:shop@1.0.0;
+
+interface catalog {
+  type opt = option<u32>;
+  type again = opt;
+  price: func(name: string) -> opt;
+}
+
+interface counter {
+  type maybe = option<u32>;
+  read: func() -> maybe;
+}
+",
+    );
+    let options = || Options {
+        keyed: vec![literal("example:shop/counter@1.0.0")],
+        ..shopping(&dir)
+    };
+    let shopper = |items: &str, functions: &str| {
+        format!(
+            "mod shopper {{
+                {items}
+                #[service]
+                pub struct Shopping;
+                impl Shopping {{ {functions} }}
+            }}"
+        )
+    };
+    let module = expanded(
+        options(),
+        &shopper(
+            "",
+            "pub fn price() -> catalog::Opt { None }
+            pub fn count(again: catalog::Again) -> u32 { 0 }
+            pub fn read() -> counter_ref::Maybe { None }
+            pub fn listed() -> Vec<catalog::Opt> { Vec::new() }",
+        ),
+    );
+    let text = resolved(&module, &dir);
+    for expected in [
+        "  price: func() -> opt;\n",
+        "  count: func(again: again) -> u32;\n",
+        "  read: func() -> maybe;\n",
+        "  listed: func() -> list<opt>;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let nested = "an option of an option, which the runtime refuses in a signature; use an enum of the module with a case for each";
+    for (items, functions, message) in [
+        (
+            "",
+            "pub fn find() -> Option<catalog::Opt> { None }",
+            format!(
+                "`Shopping::find` returns `Opt`, a type of the imported interface example:shop/catalog@1.0.0, in an `Option`, and `Opt` is an option itself: {nested}"
+            ),
+        ),
+        (
+            "",
+            "pub fn find(again: Vec<Option<catalog::Again>>) -> u32 { 0 }",
+            format!(
+                "`Shopping::find` takes `Again`, a type of the imported interface example:shop/catalog@1.0.0, in an `Option`, and `Again` is an option itself: {nested}"
+            ),
+        ),
+        (
+            "",
+            "pub fn find() -> Option<counter_ref::Maybe> { None }",
+            format!(
+                "`Shopping::find` returns `Maybe`, a type of the interface example:shop/counter@1.0.0, which this module imports by key, in an `Option`, and `Maybe` is an option itself: {nested}"
+            ),
+        ),
+        (
+            "pub struct Found { pub at: Option<catalog::Opt> }",
+            "pub fn last() -> Found { todo!() }",
+            format!(
+                "`Found` holds `Opt`, a type of the imported interface example:shop/catalog@1.0.0, in an `Option`, and `Opt` is an option itself: {nested}"
+            ),
+        ),
+    ] {
+        let error = refused(options(), &shopper(items, functions));
+        assert!(error.contains(&message), "{functions}\n{error}");
+    }
+}
+
 /// The world exports a hook the module declares from a consumed package, which a derived
 /// interface takes the types of, while the Orb module re-exports the hook's import, whose types
 /// `run` takes and returns: a derived signature names none of them. A state holds them.

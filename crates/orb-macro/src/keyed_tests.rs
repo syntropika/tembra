@@ -220,8 +220,9 @@ fn the_attribute_writes_a_keyed_import_in_parentheses() {
 
 /// What makes a keyed import impossible is an error naming the interface: a WASI interface, which
 /// the installation grants and no Orb provides, no directory to read it from, an interface that
-/// is not there, one with a resource, a function carrying something other than data, no function
-/// at all, a function or a parameter named like what a method of the view already has.
+/// is not there, one with a resource, a function carrying something other than data or data the
+/// runtime refuses in a signature, no function at all, a function or a parameter named like what a
+/// method of the view already has.
 #[test]
 fn an_interface_without_a_view_is_refused() {
     let wasi = refused(options(None, &["wasi:random/random@0.3.0"]), ROUTER);
@@ -268,6 +269,27 @@ fn an_interface_without_a_view_is_refused() {
             "stream",
             "watch: async func() -> stream<u8>;",
             "`watch` carries a stream",
+        ),
+        // What tembra-contracts' `supported` refuses in a signature.
+        (
+            "nested",
+            "maybe: func() -> option<option<u32>>;",
+            "`maybe` carries an option of an option, which the runtime refuses in a signature",
+        ),
+        (
+            "map",
+            "index: func(entries: map<string, u32>) -> u32;",
+            "`index` carries a map, which the runtime refuses in a signature",
+        ),
+        (
+            "fixed",
+            "corners: func() -> list<u32, 4>;",
+            "`corners` carries a list of a fixed length, which the runtime refuses in a signature",
+        ),
+        (
+            "nested-held",
+            "record found { at: option<option<u32>> } find: func() -> found;",
+            "`find` carries an option of an option in the type `found`, which the runtime refuses in a signature",
         ),
         ("empty", "record tally { count: u32 }", "has no function"),
         // A resource no function names: the kernel binds an interface with a resource as

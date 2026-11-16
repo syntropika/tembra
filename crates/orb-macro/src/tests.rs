@@ -535,6 +535,43 @@ fn a_side_of_a_result_that_carries_nothing_is_left_out() {
     }
 }
 
+/// WIT spells an option of an option, but the runtime refuses it in a signature: `Option<Option<T>>`
+/// is refused where it is written, in a function and in a field of a type that enters the WIT,
+/// while an option of another type expands.
+#[test]
+fn an_option_of_an_option_is_refused() {
+    let module = |result: &str, field: &str| {
+        format!(
+            "mod book {{
+                pub struct Found {{ pub at: {field} }}
+                #[service]
+                pub struct Ledger;
+                impl Ledger {{
+                    pub fn find(key: String) -> {result} {{ todo!() }}
+                    pub fn last() -> Found {{ todo!() }}
+                }}
+            }}"
+        )
+    };
+    let text = wit(&expanded(PACKAGE, &module("Option<u32>", "Option<u32>")));
+    for expected in [
+        "  record found {\n    at: option<u32>,\n  }\n",
+        "  find: func(key: string) -> option<u32>;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    for (result, field) in [
+        ("Option<Option<u32>>", "Option<u32>"),
+        ("Option<u32>", "Option<Option<u32>>"),
+    ] {
+        let error = refused(PACKAGE, &module(result, field));
+        assert!(
+            error.contains("`Option<Option<T>>` is an option of an option, which the runtime refuses in a signature: use an enum of the module with a case for each"),
+            "{result}, {field}: {error}"
+        );
+    }
+}
+
 /// The package, and every identity an attribute names, of an implemented interface, a hook or an
 /// import, is a WIT identity: names of kebab-case words of lowercase letters and digits, each word
 /// starting with a letter and no name a WIT keyword, and a semantic version when there is one.

@@ -576,9 +576,11 @@ let router = engine.load(&artifact, install)?;
 ```
 
 The objects of a view carry data: an interface with a resource, or a function taking or
-returning a resource handle, a stream or a future, is not imported by key. Nor is an interface
-with a function `handle`, `take-handle` or `from-handle`, which every object's bindings define
-for its handle, or with a parameter `self`, which names a method's object. A plain import of the
+returning a resource handle, a stream or a future, is not imported by key, nor one with a function
+carrying data the runtime refuses in a signature, an option of an option, a map or a list of a
+fixed length. Nor is an interface with a function `handle`, `take-handle` or `from-handle`, which
+every object's bindings define for its handle, or with a parameter `self`, which names a method's
+object. A plain import of the
 same interface may stand next to the keyed one, re-exported under the interface's name. An
 interface the module implements is not imported by key: the view `use`s the interface's types,
 so the world would import the interface it exports, which `cargo tembra build` and the kernel
@@ -736,6 +738,9 @@ the type that names it:
   the interface's functions name, the error listing those;
 - a type that holds a resource handle, a stream or a future anywhere: a derived interface takes the
   consumed types that carry data only;
+- a type that holds an option of an option, a map or a list of a fixed length anywhere, and an
+  `Option` of a type that is an option, `Option<catalog::Opt>` for a `type opt = option<u32>`, all
+  of which the runtime refuses in a signature;
 - a resource of the interface, but an imported interface's handle taken as a parameter, alone or in
   an option, a result, a list or a tuple ([taking a resource](#taking-a-resource)), and an object
   of a view, `counter_ref::Counter`, which belongs to the call that acquired it;
@@ -1067,7 +1072,8 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   requires a dedicated interpreter value adapter"). No `stream` or `future`. `()` is nothing only
   as a function's result or a side of a `Result`, which WIT then leaves out: `Result<T, ()>` is
   `result<t>`, `Result<(), E>` is `result<_, e>` and `Result<(), ()>` is `result`; `Option<()>` has
-  no equivalent, use `bool`.
+  no equivalent, use `bool`. `Option<Option<T>>` is refused, an option of an option, which the
+  runtime refuses in a signature: use an enum of the module with a case for each.
 - An implemented interface is fixed by its WIT: the `impl` adds no function to it. A state is a
   struct of the module, which holds a consumed package's records as they are but is none of them.
 - A type that enters the WIT is replaced by the type the bindings generate, which takes the

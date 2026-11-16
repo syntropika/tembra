@@ -851,6 +851,11 @@ pub(crate) enum Kind {
         /// What the type holds anywhere that is no data, if anything: a resource handle, a stream,
         /// a future or an error context.
         carries: Option<&'static str>,
+        /// What the type holds anywhere that the runtime refuses in a signature though it is data,
+        /// if anything: an option of an option, a map or a list of a fixed length.
+        unsupported: Option<&'static str>,
+        /// Whether the type is an option, through aliases, which an `Option` around it nests.
+        option: bool,
         /// What the type holds anywhere that the bindings give no `serde` implementation, if
         /// anything: a flags, which they generate without the derives a state asks for.
         unwritable: Option<&'static str>,
@@ -951,6 +956,8 @@ pub(crate) fn defined<'a>(
                             _ => "a type",
                         },
                         carries: crate::keyed::no_data(resolve, ty, &mut BTreeSet::new()),
+                        unsupported: unsupported(resolve, ty, &mut BTreeSet::new()),
+                        option: optional(resolve, ty),
                         unwritable: unwritable(resolve, ty, &mut BTreeSet::new()),
                     },
                 };
@@ -1034,6 +1041,50 @@ fn unwritable(
         TypeDefKind::Map(key, value) => holds(*key).or_else(|| holds(*value)),
         TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).find_map(holds),
         _ => None,
+    }
+}
+
+/// What a WIT type holds anywhere that the runtime refuses in a signature though it is data, if
+/// anything, as tembra-contracts' `supported` refuses it: an option of an option, which only a
+/// tagged codec would tell from a missing value, and a map or a list of a fixed length, which need
+/// a value adapter of their own. What is no data, which `supported` refuses too, is
+/// `keyed::no_data`'s to find. An option a Rust type spells around an option is `wit_type`'s,
+/// `Option<Option<T>>`, or the consumed-type check's, `Option<catalog::Opt>` for an option `opt`.
+pub(crate) fn unsupported(
+    resolve: &Resolve,
+    ty: wit_parser::Type,
+    seen: &mut BTreeSet<wit_parser::TypeId>,
+) -> Option<&'static str> {
+    let wit_parser::Type::Id(id) = ty else {
+        return None;
+    };
+    // A type already looked at answered no, or the walk would have stopped there.
+    if !seen.insert(id) {
+        return None;
+    }
+    let mut holds = |ty: wit_parser::Type| unsupported(resolve, ty, seen);
+    match &resolve.types[id].kind {
+        TypeDefKind::Option(inner) if optional(resolve, *inner) => Some("an option of an option"),
+        TypeDefKind::Map(..) => Some("a map"),
+        TypeDefKind::FixedLengthList(..) => Some("a list of a fixed length"),
+        TypeDefKind::Record(record) => record.fields.iter().find_map(|field| holds(field.ty)),
+        TypeDefKind::Variant(variant) => variant
+            .cases
+            .iter()
+            .filter_map(|case| case.ty)
+            .find_map(holds),
+        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().find_map(holds),
+        TypeDefKind::Option(inner) | TypeDefKind::List(inner) | TypeDefKind::Type(inner) => {
+            holds(*inner)
+        }
+        TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).find_map(holds),
+        TypeDefKind::Resource
+        | TypeDefKind::Handle(_)
+        | TypeDefKind::Future(_)
+        | TypeDefKind::Stream(_)
+        | TypeDefKind::Flags(_)
+        | TypeDefKind::Enum(_)
+        | TypeDefKind::Unknown => None,
     }
 }
 
@@ -1701,6 +1752,21 @@ pub(crate) fn wit_type(ty: &Type) -> syn::Result<String> {
                         return Err(syn::Error::new(
                             ty.span(),
                             "`Option<()>` has no WIT equivalent, WIT has no empty value for an option to hold: use `bool`",
+                        ));
+                    }
+                    // What `unsupported` finds in a WIT type, as a Rust type spells it.
+                    let nested = match inner {
+                        Type::Path(path) => path
+                            .path
+                            .segments
+                            .last()
+                            .is_some_and(|segment| segment.ident == "Option"),
+                        _ => false,
+                    };
+                    if nested {
+                        return Err(syn::Error::new(
+                            ty.span(),
+                            "`Option<Option<T>>` is an option of an option, which the runtime refuses in a signature: use an enum of the module with a case for each",
                         ));
                     }
                     format!("option<{}>", wit_type(inner)?)

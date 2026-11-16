@@ -7,7 +7,7 @@
 //! interface. The macro derives the view from the provider's WIT in the consumed directory, names
 //! it after the provider interface followed by `-ref`, imports it in the world, re-exports its
 //! generated module under that name and writes the role in the manifest's `references`.
-use crate::wit::escaped;
+use crate::wit::{escaped, unsupported};
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::{
@@ -203,11 +203,15 @@ fn view_text(
                 function.name, param.name
             ));
         }
-        let carried = |problem: String| {
-            format!(
+        let carried = |problem: Carried| match problem {
+            Carried::NoData(problem) => format!(
                 "{target} cannot be imported by key: `{}` carries {problem}, and the methods of the objects a keyed import reaches carry data only",
                 function.name
-            )
+            ),
+            Carried::Unsupported(problem) => format!(
+                "{target} cannot be imported by key: `{}` carries {problem}, which the runtime refuses in a signature",
+                function.name
+            ),
         };
         let params = function
             .params
@@ -219,7 +223,7 @@ fn view_text(
                     spelling.spell(param.ty)?
                 ))
             })
-            .collect::<Result<Vec<_>, String>>()
+            .collect::<Result<Vec<_>, Carried>>()
             .map_err(carried)?;
         let result = match function.result {
             Some(ty) => format!(" -> {}", spelling.spell(ty).map_err(carried)?),
@@ -316,9 +320,16 @@ struct Spelling<'a> {
     used: BTreeSet<String>,
 }
 
+/// What a function of the provider interface carries that a view's method cannot: what is no data,
+/// which the objects of a view do not carry, or data the runtime refuses in a signature.
+enum Carried {
+    NoData(String),
+    Unsupported(String),
+}
+
 impl Spelling<'_> {
-    /// Spell a type of a function's signature, or say what it carries that is no data.
-    fn spell(&mut self, ty: Type) -> Result<String, String> {
+    /// Spell a type of a function's signature, or say what it carries that a view's method cannot.
+    fn spell(&mut self, ty: Type) -> Result<String, Carried> {
         Ok(match ty {
             Type::Bool => "bool".into(),
             Type::U8 => "u8".into(),
@@ -333,29 +344,33 @@ impl Spelling<'_> {
             Type::F64 => "f64".into(),
             Type::Char => "char".into(),
             Type::String => "string".into(),
-            Type::ErrorContext => return Err("an error context".into()),
+            Type::ErrorContext => return Err(Carried::NoData("an error context".into())),
             Type::Id(id) => {
                 let definition = &self.resolve.types[id];
                 if let Some(type_name) = &definition.name {
                     let owned = matches!(definition.owner, TypeOwner::Interface(owner)
                         if self.resolve.id_of(owner).as_deref() == Some(self.target));
                     if !owned {
-                        return Err(format!(
+                        return Err(Carried::NoData(format!(
                             "the type `{type_name}`, which {} does not name",
                             self.target
-                        ));
+                        )));
                     }
                     if let Some(problem) = no_data(self.resolve, ty, &mut BTreeSet::new()) {
-                        return Err(format!("{problem} in the type `{type_name}`"));
+                        return Err(Carried::NoData(format!(
+                            "{problem} in the type `{type_name}`"
+                        )));
+                    }
+                    if let Some(problem) = unsupported(self.resolve, ty, &mut BTreeSet::new()) {
+                        return Err(Carried::Unsupported(format!(
+                            "{problem} in the type `{type_name}`"
+                        )));
                     }
                     self.used.insert(type_name.clone());
                     return Ok(escaped(type_name));
                 }
-                match &definition.kind {
+                let spelled = match &definition.kind {
                     TypeDefKind::List(inner) => format!("list<{}>", self.spell(*inner)?),
-                    TypeDefKind::FixedLengthList(inner, length) => {
-                        format!("list<{}, {length}>", self.spell(*inner)?)
-                    }
                     TypeDefKind::Option(inner) => format!("option<{}>", self.spell(*inner)?),
                     TypeDefKind::Result(result) => match (result.ok, result.err) {
                         (None, None) => "result".into(),
@@ -374,16 +389,23 @@ impl Spelling<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .join(", ")
                     ),
-                    TypeDefKind::Map(key, value) => {
-                        format!("map<{}, {}>", self.spell(*key)?, self.spell(*value)?)
-                    }
                     TypeDefKind::Type(inner) => self.spell(*inner)?,
                     _ => {
-                        return Err(no_data(self.resolve, ty, &mut BTreeSet::new())
-                            .unwrap_or("a type without a name")
-                            .to_owned());
+                        return Err(match no_data(self.resolve, ty, &mut BTreeSet::new()) {
+                            Some(problem) => Carried::NoData(problem.to_owned()),
+                            None => match unsupported(self.resolve, ty, &mut BTreeSet::new()) {
+                                Some(problem) => Carried::Unsupported(problem.to_owned()),
+                                None => Carried::NoData("a type without a name".to_owned()),
+                            },
+                        });
                     }
+                };
+                // What the runtime refuses of the type itself, its parts spelled: an option of an
+                // option.
+                if let Some(problem) = unsupported(self.resolve, ty, &mut BTreeSet::new()) {
+                    return Err(Carried::Unsupported(problem.to_owned()));
                 }
+                spelled
             }
         })
     }
