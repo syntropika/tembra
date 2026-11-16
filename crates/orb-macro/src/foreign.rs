@@ -277,7 +277,10 @@ fn item_types(item: &Item) -> Vec<&Type> {
 fn shape_types(shape: &Shape) -> Vec<&Type> {
     match &shape.kind {
         ShapeKind::Record(fields) => fields.iter().map(|(_, ty)| ty).collect(),
-        ShapeKind::Variant(cases) => cases.iter().filter_map(|(_, ty)| ty.as_ref()).collect(),
+        ShapeKind::Variant(cases) => cases
+            .iter()
+            .flat_map(|(_, payload)| payload.types())
+            .collect(),
         ShapeKind::Enum(_) | ShapeKind::Flags(_) => Vec::new(),
     }
 }

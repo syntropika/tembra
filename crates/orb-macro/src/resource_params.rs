@@ -6,8 +6,8 @@
 //! that defines it; it refuses at installation an Orb whose function takes a borrowed one,
 //! `borrow<t>`, so a `&T` parameter stays refused, as every reference in a signature is.
 use crate::{
-    Constructor, Declared, Function, Handles, Service, Shape, WitResource, foreign::Modules,
-    handles_of, rebuild, wit, with_handles,
+    Constructor, Declared, Function, Handles, Service, Shape, WitResource, convert,
+    converted_reason, foreign::Modules, handles_of, mentions, rebuild, wit, with_handles,
 };
 use quote::quote;
 use std::collections::{BTreeMap, BTreeSet};
@@ -272,22 +272,72 @@ fn held<'a>(
     held
 }
 
+/// Refuse, once the types that enter the WIT are known, a parameter or a result of a derived
+/// function that holds both a resource and a type the macro converts, the enum with a case with
+/// named fields or a type holding one: the bridge converts such a type between the author's and
+/// the bindings' through `From`, which carries no handle, and wraps or takes back a resource where
+/// the author's type is the bindings' own.
+pub(crate) fn check_converted(
+    services: &[Service],
+    resources: &[WitResource],
+    shapes: &[Shape],
+    converted: &BTreeMap<String, Ident>,
+    modules: &Modules,
+) -> syn::Result<()> {
+    for function in derived(services, resources) {
+        let params = function.params.iter().map(|(_, ty, _)| (ty, "takes"));
+        for (ty, verb) in params.chain(function.result.map(|ty| (ty, "returns"))) {
+            let mut mentioned = Vec::new();
+            modules.references(ty, function.scope, &mut mentioned);
+            let Some(shape) = mentioned.iter().find_map(|name| {
+                shapes
+                    .iter()
+                    .find(|shape| shape.ident == *name && converted.contains_key(&name.to_string()))
+            }) else {
+                continue;
+            };
+            if let Some((resource, _)) =
+                held(ty, function.scope, shapes, resources, modules).first()
+            {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    format!(
+                        "`{}` {verb} `{}`, which holds the resource `{}` and `{}`, {}: the macro converts such a type between the author's and the bindings', and converts no resource; give the case an unnamed payload, a record of the module, or keep the resource apart from the type",
+                        function.name,
+                        quote!(#ty),
+                        resource.ident,
+                        shape.ident,
+                        converted_reason(shape)
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The parameters of a derived function's bridge and the arguments it calls the author's function
 /// with, the function written in the module `scope`: a parameter holding a resource of the module
 /// is the bindings' handle type there, and each handle is taken back into the author's value,
-/// which consumes it; any other parameter, one a consumed interface's module names included,
-/// crosses as it is.
+/// which consumes it; one holding a type the macro converts is the bindings' type there, as for a
+/// handle, and converted part by part; any other parameter, one a consumed interface's module
+/// names included, crosses as it is.
 pub(crate) fn bridged(
     params: &[(Ident, Type, String)],
     scope: usize,
     module: &proc_macro2::TokenStream,
     resources: &BTreeMap<String, Ident>,
+    converted: &BTreeMap<String, Ident>,
     modules: &Modules,
 ) -> (Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>) {
     params
         .iter()
-        .map(
-            |(ident, ty, _)| match handles_of(ty, scope, resources, modules) {
+        .map(|(ident, ty, _)| {
+            if mentions(ty, scope, converted, modules) {
+                let spelled = with_handles(ty, scope, converted, module, modules);
+                return (quote! { #ident: #spelled }, convert(ty, quote! { #ident }));
+            }
+            match handles_of(ty, scope, resources, modules) {
                 Some(handles) => {
                     let spelled = with_handles(ty, scope, resources, module, modules);
                     (
@@ -296,8 +346,8 @@ pub(crate) fn bridged(
                     )
                 }
                 None => (quote! { #ident: #ty }, quote! { #ident }),
-            },
-        )
+            }
+        })
         .unzip()
 }
 

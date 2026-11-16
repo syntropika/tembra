@@ -2240,7 +2240,7 @@ fn only_a_type_that_enters_the_wit_needs_a_wit_spelling() {
         format!(
             "mod safe {{
                 pub struct Digest {{ pub bytes: [u8; 32] }}
-                pub enum Shape {{ Circle {{ radius: u32 }}, Square(u32) }}
+                pub enum Shape {{ Circle {{ radius: u32 }}, Rectangle(u32, u32) }}
                 #[state]
                 pub struct Sealed {{ pub digest: [u8; 4], pub shape: Shape }}
                 #[resource]
@@ -2262,14 +2262,17 @@ fn only_a_type_that_enters_the_wit_needs_a_wit_spelling() {
     for expected in [
         "pub struct Digest { pub bytes : [u8 ; 32] }".into(),
         format!("{derived} pub struct Sealed {{ pub digest : [u8 ; 4] , pub shape : Shape }}"),
-        format!("{derived} pub enum Shape {{ Circle {{ radius : u32 }} , Square (u32) }}"),
+        format!("{derived} pub enum Shape {{ Circle {{ radius : u32 }} , Rectangle (u32 , u32) }}"),
         "pub struct Banner { pub text : & 'static str }".into(),
     ] {
         assert!(generated.contains(&expected), "{expected}\n{generated}");
     }
     for (returned, message) in [
         ("Digest", "this type has no WIT equivalent"),
-        ("Shape", "a variant carries at most one unnamed payload"),
+        (
+            "Shape",
+            "`Shape::Rectangle` carries 2 unnamed payloads: a case carries nothing, one unnamed payload or named fields",
+        ),
         ("Banner", "WIT boundaries pass owned values"),
     ] {
         let error = refused("example:vault@1.0.0", &module(returned));
@@ -2323,6 +2326,254 @@ fn what_a_replaced_type_would_drop_is_refused() {
             "{types}: {error}"
         );
         expanded("example:ledger@1.0.0", &module(types, "u32"));
+    }
+}
+
+const REVIEW: &str = "mod review {
+    /// What a reviewer decided.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Outcome {
+        Accepted,
+        /// Why, and how badly.
+        Refused { reason: String, severity: u32 },
+        Deferred(u32),
+    }
+    /// A decision with its reviewer.
+    pub struct Decision { pub reviewer: String, outcome: Outcome }
+    /// How a reviewer voted.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum Vote { Yes, No }
+    #[service]
+    pub struct Reviews;
+    impl Reviews {
+        pub fn decide(reviewer: String, vote: Vote) -> Decision { todo!() }
+        pub fn outcomes(decisions: Vec<Decision>) -> Vec<Outcome> { todo!() }
+        pub fn worst(outcomes: Vec<Outcome>, fallback: Option<Outcome>) -> Result<Outcome, String> { todo!() }
+    }
+}";
+
+/// A case with named fields enters the WIT as a record of its own, `<enum>-<case>`, the case's
+/// payload. The bindings give such a case a tuple payload, so the enum stays the author's, as
+/// written, and so does every type holding it: nothing re-exports a generated type in their place,
+/// and the macro converts each between the author's type and the bindings' with `From` in both
+/// directions, in the type's module, a case with named fields field by field into the record. A
+/// bridge spells such a type as the bindings' and converts it where it is, inside lists, options and
+/// results too; any other type crosses as it is.
+#[test]
+fn an_enum_case_with_named_fields_gets_a_record_as_its_payload() {
+    let module = expanded("example:review@1.0.0", REVIEW);
+    assert_eq!(
+        resolved(&module),
+        "package example:review@1.0.0;
+
+interface reviews {
+  record outcome-refused {
+    reason: string,
+    severity: u32,
+  }
+  /// What a reviewer decided.
+  variant outcome {
+    accepted,
+    refused(outcome-refused),
+    deferred(u32),
+  }
+  /// A decision with its reviewer.
+  record decision {
+    reviewer: string,
+    outcome: outcome,
+  }
+  /// How a reviewer voted.
+  enum vote {
+    yes,
+    no,
+  }
+  decide: func(reviewer: string, vote: vote) -> decision;
+  outcomes: func(decisions: list<decision>) -> list<outcome>;
+  worst: func(outcomes: list<outcome>, fallback: option<outcome>) -> result<outcome, string>;
+}
+
+world review {
+  export reviews;
+}
+"
+    );
+    let generated = tokens(&module);
+    let bindings = "exports :: example :: review :: reviews";
+    let into = ":: core :: convert :: Into :: into";
+    for expected in [
+        // The author's types stay, as written; the plain enum is replaced.
+        "# [doc = \" What a reviewer decided.\"] # [derive (Debug , Clone , PartialEq)] pub enum Outcome { Accepted , # [doc = \" Why, and how badly.\"] Refused { reason : String , severity : u32 } , Deferred (u32) , }".to_owned(),
+        "# [doc = \" A decision with its reviewer.\"] pub struct Decision { pub reviewer : String , outcome : Outcome }".to_owned(),
+        format!("pub use {bindings} :: {{ Vote }} ;"),
+        // The conversions of the enum: the named case field by field into the record.
+        format!(
+            "impl :: core :: convert :: From < Outcome > for {bindings} :: Outcome {{ fn from (value : Outcome) -> Self {{ match value {{ Outcome :: Accepted => Self :: Accepted , Outcome :: Refused {{ reason , severity }} => Self :: Refused ({bindings} :: OutcomeRefused {{ reason : {into} (reason) , severity : {into} (severity) }}) , Outcome :: Deferred (item) => Self :: Deferred ({into} (item)) , }} }} }}"
+        ),
+        format!(
+            "impl :: core :: convert :: From < {bindings} :: Outcome > for Outcome {{ fn from (value : {bindings} :: Outcome) -> Self {{ match value {{ {bindings} :: Outcome :: Accepted => Self :: Accepted , {bindings} :: Outcome :: Refused (item) => Self :: Refused {{ reason : {into} (item . reason) , severity : {into} (item . severity) }} , {bindings} :: Outcome :: Deferred (item) => Self :: Deferred ({into} (item)) , }} }} }}"
+        ),
+        // The conversions of the record holding it, field by field.
+        format!(
+            "impl :: core :: convert :: From < Decision > for {bindings} :: Decision {{ fn from (value : Decision) -> Self {{ Self {{ reviewer : {into} (value . reviewer) , outcome : {into} (value . outcome) }} }} }}"
+        ),
+        format!(
+            "impl :: core :: convert :: From < {bindings} :: Decision > for Decision {{ fn from (value : {bindings} :: Decision) -> Self {{ Self {{ reviewer : {into} (value . reviewer) , outcome : {into} (value . outcome) }} }} }}"
+        ),
+        // The bridges spell the bindings' types and convert where the author's types are.
+        format!("fn decide (reviewer : String , vote : Vote) -> {bindings} :: Decision {{ {into} (Reviews :: decide (reviewer , vote)) }}"),
+        format!(
+            "fn outcomes (decisions : Vec < {bindings} :: Decision >) -> Vec < {bindings} :: Outcome > {{ Reviews :: outcomes (decisions . into_iter () . map (| item | {into} (item)) . collect ()) . into_iter () . map (| item | {into} (item)) . collect () }}"
+        ),
+        format!(
+            "fn worst (outcomes : Vec < {bindings} :: Outcome > , fallback : Option < {bindings} :: Outcome >) -> Result < {bindings} :: Outcome , String > {{ match Reviews :: worst (outcomes . into_iter () . map (| item | {into} (item)) . collect () , fallback . map (| item | {into} (item))) {{ :: core :: result :: Result :: Ok (item) => :: core :: result :: Result :: Ok ({into} (item)) , :: core :: result :: Result :: Err (item) => :: core :: result :: Result :: Err ({into} (item)) , }} }}"
+        ),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+    for unexpected in ["{ Outcome", "Outcome }", "{ Decision", "Decision }"] {
+        assert!(
+            !generated.contains(&format!("pub use {bindings} :: {unexpected}")),
+            "{unexpected}\n{generated}"
+        );
+    }
+    assert!(
+        !generated.contains("additional_type_attributes"),
+        "{generated}"
+    );
+}
+
+/// A type the macro converts goes back to its own module, where its fields are visible, with its
+/// conversions, which name the bindings from there; a function of another module names it through
+/// the module. Where serde serializes such a type, a state or a type a state reaches, it derives
+/// serde's traits, unless the author does; one no state reaches derives nothing more. A type that
+/// stays the author's keeps the names the bindings would spell otherwise: the conversions use both.
+#[test]
+fn a_converted_type_is_converted_in_its_own_module() {
+    let module = expanded(
+        "example:review@1.0.0",
+        "mod review {
+            pub mod verdicts {
+                /// What a reviewer decided.
+                pub enum Outcome { Accepted, Refused { reason: String } }
+                #[derive(Debug, Clone, PartialEq)]
+                pub enum Mood { Calm, Upset { since: u64, HTTPCode: u16 } }
+            }
+            /// The last decision, kept by the kernel.
+            #[state(service = Reviews)]
+            pub struct Last { pub outcome: Option<verdicts::Outcome>, pub count: u32 }
+            pub struct Report { pub mood: verdicts::Mood }
+            #[service]
+            pub struct Reviews;
+            impl Reviews {
+                pub fn decide(reason: Option<String>) -> verdicts::Outcome { todo!() }
+                pub fn latest() -> Last { todo!() }
+                pub fn moods() -> Report { todo!() }
+            }
+        }",
+    );
+    let text = wit(&module);
+    for expected in [
+        "  record outcome-refused {\n    reason: string,\n  }\n  /// What a reviewer decided.\n  variant outcome {\n    accepted,\n    refused(outcome-refused),\n  }\n",
+        "  record mood-upset {\n    since: u64,\n    http-code: u16,\n  }\n  variant mood {\n    calm,\n    upset(mood-upset),\n  }\n",
+        "  /// The last decision, kept by the kernel.\n  record last {\n    outcome: option<outcome>,\n    count: u32,\n  }\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let generated = tokens(&module);
+    let bindings = "super :: exports :: example :: review :: reviews";
+    let into = ":: core :: convert :: Into :: into";
+    for expected in [
+        // The state and the enum it reaches derive serde's traits; the other enum does not.
+        "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Last { pub outcome : Option < verdicts :: Outcome > , pub count : u32 }".to_owned(),
+        "# [doc = \" What a reviewer decided.\"] # [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Outcome { Accepted , Refused { reason : String } }".to_owned(),
+        "# [derive (Debug , Clone , PartialEq)] pub enum Mood { Calm , Upset { since : u64 , HTTPCode : u16 } }".to_owned(),
+        // The conversions sit in the sub-module and name the bindings from there, each side with
+        // its own names.
+        format!("impl :: core :: convert :: From < Outcome > for {bindings} :: Outcome {{ fn from (value : Outcome) -> Self {{ match value {{ Outcome :: Accepted => Self :: Accepted , Outcome :: Refused {{ reason }} => Self :: Refused ({bindings} :: OutcomeRefused {{ reason : {into} (reason) }}) , }} }} }}"),
+        format!("Mood :: Upset {{ since , HTTPCode }} => Self :: Upset ({bindings} :: MoodUpset {{ since : {into} (since) , http_code : {into} (HTTPCode) }})"),
+        format!("{bindings} :: Mood :: Upset (item) => Self :: Upset {{ since : {into} (item . since) , HTTPCode : {into} (item . http_code) }}"),
+        format!("impl :: core :: convert :: From < Last > for exports :: example :: review :: reviews :: Last {{ fn from (value : Last) -> Self {{ Self {{ outcome : value . outcome . map (| item | {into} (item)) , count : {into} (value . count) }} }} }}"),
+        // The bridges name the sub-module's types as the bindings do.
+        format!("fn decide (reason : Option < String >) -> exports :: example :: review :: reviews :: Outcome {{ {into} (Reviews :: decide (reason)) }}"),
+        format!("fn latest () -> exports :: example :: review :: reviews :: Last {{ {into} (Reviews :: latest ()) }}"),
+        format!("fn moods () -> exports :: example :: review :: reviews :: Report {{ {into} (Reviews :: moods ()) }}"),
+    ] {
+        assert!(generated.contains(&expected), "{expected}\n{generated}");
+    }
+    assert!(
+        generated.contains("pub mod verdicts { # [doc = \" What a reviewer decided.\"]"),
+        "{generated}"
+    );
+    assert!(!generated.contains("pub use exports"), "{generated}");
+}
+
+/// What a type the macro converts cannot do is refused: a case with named fields but none of
+/// them, a type or a function whose WIT name is the record's, a derived hook's input reaching the
+/// enum, and a function taking or returning a resource with such a type, alone or in a container;
+/// a case with two unnamed payloads stays refused.
+#[test]
+fn what_a_converted_type_cannot_be_is_refused() {
+    let module = |types: &str, methods: &str| {
+        format!(
+            "mod review {{
+                {types}
+                #[service]
+                pub struct Reviews;
+                impl Reviews {{ {methods} }}
+            }}"
+        )
+    };
+    let draft = "#[wit_resource] pub struct Draft; impl Draft { #[constructor] pub fn new() -> Self { Draft } }";
+    for (types, methods, message) in [
+        (
+            "pub enum Outcome { Accepted, Refused {} }".to_owned(),
+            "pub fn decide() -> Outcome { todo!() }",
+            "`Outcome::Refused {}` has no field: a case carries nothing, one unnamed payload or named fields, at least one, which enter the WIT as a record of their own",
+        ),
+        (
+            "pub enum Outcome { Accepted, Refused(String, u32) }".to_owned(),
+            "pub fn decide() -> Outcome { todo!() }",
+            "`Outcome::Refused` carries 2 unnamed payloads: a case carries nothing, one unnamed payload or named fields, which enter the WIT as a record of their own",
+        ),
+        (
+            "pub struct OutcomeRefused { pub code: u32 } pub enum Outcome { Accepted, Refused { reason: String } }".to_owned(),
+            "pub fn code() -> OutcomeRefused { todo!() } pub fn decide() -> Outcome { todo!() }",
+            "the type `OutcomeRefused` and the record of the case `Outcome::Refused` are both `outcome-refused` in the interface `reviews`, where types and functions share one namespace; rename one of them",
+        ),
+        (
+            "pub enum Outcome { Accepted, Refused { reason: String } }".to_owned(),
+            "pub fn decide() -> Outcome { todo!() } pub fn outcome_refused() -> u32 { 0 }",
+            "the record of the case `Outcome::Refused` and `Reviews::outcome_refused` are both `outcome-refused` in the interface `reviews`",
+        ),
+        (
+            "pub enum Outcome { Accepted, Refused { reason: String } }
+            pub struct Decision { pub outcome: Outcome }
+            #[hook(composition = waterfall, input = Decision)]
+            pub struct Vetting;"
+                .to_owned(),
+            "pub fn decide() -> u32 { 0 }",
+            "`Outcome` is an enum with a case with named fields that a derived hook's input reaches",
+        ),
+        (
+            format!("pub enum Outcome {{ Accepted, Refused {{ reason: String }} }} {draft}"),
+            "pub fn open(outcome: Outcome) -> Result<Draft, Outcome> { todo!() }",
+            "`Reviews::open` returns `Result < Draft , Outcome >`, which holds the resource `Draft` and `Outcome`, an enum with a case with named fields: the macro converts such a type between the author's and the bindings', and converts no resource; give the case an unnamed payload, a record of the module, or keep the resource apart from the type",
+        ),
+        (
+            format!("pub enum Outcome {{ Accepted, Opened {{ draft: Draft }} }} {draft}"),
+            "pub fn open() -> Outcome { todo!() }",
+            "`Reviews::open` returns `Outcome`, which holds the resource `Draft` and `Outcome`, an enum with a case with named fields",
+        ),
+        (
+            format!(
+                "pub enum Outcome {{ Accepted, Refused {{ reason: String }} }} pub struct Decision {{ pub outcome: Outcome }} {draft}"
+            ),
+            "pub fn open(decision: Decision, draft: (Draft, Decision)) -> u32 { 0 }",
+            "`Reviews::open` takes `(Draft , Decision)`, which holds the resource `Draft` and `Decision`, which holds an enum with a case with named fields",
+        ),
+    ] {
+        let error = refused("example:review@1.0.0", &module(&types, methods));
+        assert!(error.contains(message), "{types} {methods}: {error}");
     }
 }
 

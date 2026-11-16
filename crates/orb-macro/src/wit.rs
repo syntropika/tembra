@@ -1,6 +1,8 @@
 //! The WIT text derived from the module items, and the consumed packages it refers to.
 use crate::foreign::{Foreign, Modules};
-use crate::{Composition, Declared, Function, Handles, Service, Shape, ShapeKind, WitResource};
+use crate::{
+    Composition, Declared, Function, Handles, Payload, Service, Shape, ShapeKind, WitResource,
+};
 use heck::{ToKebabCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use std::{
@@ -8,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use syn::{
-    Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, Meta, Type, ext::IdentExt,
+    Attribute, Expr, Fields, Ident, Item, ItemEnum, ItemStruct, Lit, Meta, Type, ext::IdentExt,
     spanned::Spanned,
 };
 use tembra_contracts::guest;
@@ -75,9 +77,15 @@ impl Namespace {
                 format!("{item} has no WIT name: its kebab-case form `{name}` {problem}"),
             ));
         }
+        self.claim_named(name, ident.span(), item)
+    }
+
+    /// Claim the WIT name `name`, a WIT identifier already, for `item`, described for the errors,
+    /// which point at `span`.
+    fn claim_named(&mut self, name: String, span: Span, item: String) -> syn::Result<()> {
         if let Some(previous) = self.claimed.insert(name.clone(), item.clone()) {
             return Err(syn::Error::new(
-                ident.span(),
+                span,
                 format!(
                     "{previous} and {item} are both `{name}` in {}{}; rename one of them",
                     self.scope, self.rule
@@ -378,8 +386,22 @@ pub(crate) fn render<'a>(
             }
         }
         uses.retain(|(_, names)| !names.is_empty());
+        // A case with named fields defines the record of its payload next to its variant.
         for shape in &defined {
             namespace.claim(&shape.ident, format!("the type `{}`", shape.ident))?;
+            let ShapeKind::Variant(cases) = &shape.kind else {
+                continue;
+            };
+            for (case, _) in cases
+                .iter()
+                .filter(|(_, payload)| matches!(payload, Payload::Named(_)))
+            {
+                namespace.claim_named(
+                    case_record(&shape.ident, case),
+                    case.span(),
+                    format!("the record of the case `{}::{case}`", shape.ident),
+                )?;
+            }
         }
         match derived_hooks.iter().find(|hook| &hook.ident == *ident) {
             Some(hook) => {
@@ -1693,16 +1715,24 @@ pub(crate) fn record(item: &ItemStruct) -> syn::Result<Shape> {
         kind: ShapeKind::Record(named),
         scope: 0,
         carried: Default::default(),
+        item: Item::Struct(item.clone()),
     })
 }
 
+/// The WIT name of the record a case with named fields carries: `<enum>-<case>`.
+pub(crate) fn case_record(enumeration: &Ident, case: &Ident) -> String {
+    format!("{}-{}", kebab(enumeration), kebab(case))
+}
+
 /// An enum becomes an `enum` when every variant is empty, otherwise a `variant` with one payload
-/// per case; the module types the payloads name are the caller's to give it.
+/// per case; the module types the payloads name are the caller's to give it. A case with named
+/// fields carries a record of its own, `<enum>-<case>`, defined before the variant.
 pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
     let plain = item
         .variants
         .iter()
         .all(|variant| matches!(variant.fields, Fields::Unit));
+    let mut records = String::new();
     let mut wit = String::new();
     for doc in docs(&item.attrs)? {
         wit.push_str(&format!("  ///{doc}\n"));
@@ -1718,19 +1748,55 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
         match &variant.fields {
             Fields::Unit => {
                 wit.push_str(&format!("    {case},\n"));
-                cases.push((variant.ident.clone(), None));
+                cases.push((variant.ident.clone(), Payload::None));
             }
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 wit.push_str(&format!(
                     "    {case}({}),\n",
                     wit_type(&fields.unnamed[0].ty)?
                 ));
-                cases.push((variant.ident.clone(), Some(fields.unnamed[0].ty.clone())));
+                cases.push((
+                    variant.ident.clone(),
+                    Payload::Unnamed(fields.unnamed[0].ty.clone()),
+                ));
             }
-            _ => {
+            Fields::Named(fields) if !fields.named.is_empty() => {
+                let record = case_record(&item.ident, &variant.ident);
+                records.push_str(&format!("  record {record} {{\n"));
+                let mut named = Vec::new();
+                for field in &fields.named {
+                    let Some(ident) = &field.ident else {
+                        continue;
+                    };
+                    records.push_str(&format!(
+                        "    {}: {},\n",
+                        escaped(&kebab(ident)),
+                        wit_type(&field.ty)?
+                    ));
+                    named.push((ident.clone(), field.ty.clone()));
+                }
+                records.push_str("  }\n");
+                wit.push_str(&format!("    {case}({record}),\n"));
+                cases.push((variant.ident.clone(), Payload::Named(named)));
+            }
+            Fields::Named(_) => {
                 return Err(syn::Error::new(
                     variant.span(),
-                    "a variant carries at most one unnamed payload",
+                    format!(
+                        "`{}::{} {{}}` has no field: a case carries nothing, one unnamed payload or named fields, at least one, which enter the WIT as a record of their own",
+                        item.ident, variant.ident
+                    ),
+                ));
+            }
+            Fields::Unnamed(fields) => {
+                return Err(syn::Error::new(
+                    variant.span(),
+                    format!(
+                        "`{}::{}` carries {} unnamed payloads: a case carries nothing, one unnamed payload or named fields, which enter the WIT as a record of their own",
+                        item.ident,
+                        variant.ident,
+                        fields.unnamed.len()
+                    ),
                 ));
             }
         }
@@ -1743,11 +1809,12 @@ pub(crate) fn enumeration(item: &ItemEnum) -> syn::Result<Shape> {
     };
     Ok(Shape {
         ident: item.ident.clone(),
-        wit,
+        wit: format!("{records}{wit}"),
         references: Vec::new(),
         kind,
         scope: 0,
         carried: Default::default(),
+        item: Item::Enum(item.clone()),
     })
 }
 

@@ -425,4 +425,67 @@ mod guest {
             Granted::read()
         }
     }
+
+    /// What a reviewer decided about a text. The case with named fields enters the WIT as a record
+    /// of its own, `outcome-refused`; the enum stays this one, converted at the boundary.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Outcome {
+        Accepted,
+        Refused { reason: String, severity: u32 },
+        Deferred(u32),
+    }
+
+    /// A decision with its reviewer; it holds the enum, so it stays the author's too.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Decision {
+        pub reviewer: String,
+        pub outcome: Outcome,
+    }
+
+    #[service]
+    pub struct Reviews;
+
+    impl Reviews {
+        /// Decide on `text` for `reviewer`: an empty text is refused, one under four characters
+        /// deferred by the characters it lacks, any other accepted.
+        pub fn decide(reviewer: String, text: String) -> Decision {
+            let outcome = match text.chars().count() {
+                0 => Outcome::Refused {
+                    reason: String::from("empty"),
+                    severity: 3,
+                },
+                length if length < 4 => Outcome::Deferred(4 - length as u32),
+                _ => Outcome::Accepted,
+            };
+            Decision { reviewer, outcome }
+        }
+
+        /// The refusals among the decisions, each as `reviewer: reason (severity)`.
+        pub fn reasons(decisions: Vec<Decision>) -> Vec<String> {
+            decisions
+                .into_iter()
+                .filter_map(|decision| match decision.outcome {
+                    Outcome::Refused { reason, severity } => {
+                        Some(format!("{}: {reason} ({severity})", decision.reviewer))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The worst of the outcomes, a refusal before a deferral before an acceptance, else
+        /// `fallback`; the error when there is neither.
+        pub fn worst(outcomes: Vec<Outcome>, fallback: Option<Outcome>) -> Result<Outcome, String> {
+            let rank = |outcome: &Outcome| match outcome {
+                Outcome::Refused { severity, .. } => 200 + *severity,
+                Outcome::Deferred(by) => 100 + *by,
+                Outcome::Accepted => 0,
+            };
+            outcomes
+                .into_iter()
+                .max_by_key(rank)
+                .or(fallback)
+                .ok_or_else(|| String::from("no outcome"))
+        }
+    }
 }

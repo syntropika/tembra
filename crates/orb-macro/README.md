@@ -101,6 +101,7 @@ starts with this explicit freestanding mode.
 | each `pub fn` without `self`                                                | a `func`; name and parameters in kebab-case                                                                                                                        |
 | a struct with named fields, when a service method uses it                   | a `record`                                                                                                                                                         |
 | an enum, when a service method uses it                                      | an `enum` when every variant is empty, otherwise a `variant`                                                                                                       |
+| a case with named fields, `Refused { reason: String }`, of such an enum     | a `record` of its own, `<enum>-<case>`, the case's payload; the enum stays the author's, converted to and from the bindings' type, and so does every type holding it |
 | a struct of `bool` fields with `#[flags]`, when a service method uses it    | a `flags`, a flag per field in kebab-case; the struct stays the author's, which the bindings take as it is                                                         |
 | `i32`, `u32`, `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`, tuples       | `s32`, `u32`, `string`, `list<T>`, `option<T>`, `result<T, E>`, `tuple<...>`                                                                                       |
 | a free `pub fn` with `#[hook("ns:name/hook@version", priority = n)]`        | `import` and `export` of that hook interface in the world: a contribution                                                                                          |
@@ -119,8 +120,8 @@ Nothing is exported by accident. A service is a unit struct marked `#[service]`;
 when a service method, a WIT resource's function or a hook's input uses it, directly or through the
 fields of another type that enters; a state alone does not make a type enter. The other types of the
 module, and unit structs without the marker, remain ordinary Rust, whatever they hold: only a type
-that enters the WIT needs a WIT spelling for its fields and cases, so an array field or a variant
-with named fields is a compile error there and nowhere else. A state that stays out of the WIT, and
+that enters the WIT needs a WIT spelling for its fields and cases, so an array field or a case with
+two unnamed payloads is a compile error there and nowhere else. A state that stays out of the WIT, and
 every type of the module its fields reach that stays out too, get `serde`'s derives. A method that
 names a type the module does not declare, other than a consumed interface's type named through
 that interface's module, `greeting::Entry`, is a compile error, and so is a service with the name of
@@ -1080,6 +1081,16 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   explicit discriminant, which a WIT enum has no room for, a `#[serde(..)]` attribute, which would
   change a state's JSON, a `#[cfg_attr(..)]`, under which a derive or its helper would come and go,
   and a helper attribute on the payload of a case, which the bindings have no place for.
+- An enum with a case with named fields, `Refused { reason: String }`, is not replaced, nor is any
+  type holding it, directly or through other types of the module. The case enters the WIT as a
+  record of its own, `<enum>-<case>`, `outcome-refused`, which the bindings give the case as a tuple
+  payload, so the author's type stays as written, attributes and derives included, and the macro
+  converts it to and from the bindings' type at the boundary, `From` in both directions in the
+  type's module, inside lists, options, results and tuples too. Such a type derives `serde`'s traits
+  where a state reaches it, unless the author does. The bindings name its fields and cases from their
+  WIT names, which the conversions use on their side, so the author's names are free. It holds no
+  resource, and a derived hook's input reaches none of them: both are compile errors, as is another
+  type or a function of the interface whose WIT name is the record's.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.
 

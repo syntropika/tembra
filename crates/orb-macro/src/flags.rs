@@ -149,6 +149,7 @@ pub(crate) fn shape(item: &syn::ItemStruct) -> syn::Result<Shape> {
         kind: ShapeKind::Flags(Box::new(item.clone())),
         scope: 0,
         carried: Default::default(),
+        item: Item::Struct(item.clone()),
     })
 }
 
@@ -277,7 +278,7 @@ pub(crate) fn emit(
 
 /// The traits a module's items implement by hand for the type `ident`, by the last name of each
 /// trait's path, with where each impl is written.
-fn traits_implemented(items: &[Item], ident: &Ident) -> BTreeMap<String, Span> {
+pub(crate) fn traits_implemented(items: &[Item], ident: &Ident) -> BTreeMap<String, Span> {
     let mut implemented = BTreeMap::new();
     for item in items {
         let Item::Impl(block) = item else {

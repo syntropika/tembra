@@ -802,6 +802,123 @@ fn permit(pool: &mut LocalPool, host: &Host, name: &str) {
     permits.release().unwrap();
 }
 
+/// A case with named fields crosses the boundary both ways on both guests and both engines, as a
+/// variant case whose payload is the record of the case: alone, in a record of the module, in a
+/// list, in an option and in a result. The contract defines the record next to the variant.
+#[test]
+#[ignore = "requires TEMBRA_WASM_ORB_MACRO_STD and TEMBRA_WASM_ORB_MACRO_NO_STD"]
+fn a_case_with_named_fields_crosses_as_the_record_of_the_case() {
+    let guests = [
+        ("standard", component("TEMBRA_WASM_ORB_MACRO_STD")),
+        ("freestanding", component("TEMBRA_WASM_ORB_MACRO_NO_STD")),
+    ];
+    for interpreted in [false, true] {
+        let engine = if interpreted {
+            Engine::interpreted(Limits::default())
+        } else {
+            Engine::new(Limits::default())
+        }
+        .unwrap();
+        let mut pool = LocalPool::new();
+        let host = Host::new(pool.spawner());
+        let orbs = guests
+            .iter()
+            .map(|(name, bytes)| {
+                let (wit, contract) = contract(bytes);
+                let words: String = wit.split_whitespace().collect();
+                for expected in [
+                    "recordoutcome-refused{reason:string,severity:u32,}",
+                    "variantoutcome{accepted,refused(outcome-refused),deferred(u32),}",
+                    "recorddecision{reviewer:string,outcome:outcome,}",
+                ] {
+                    assert!(words.contains(expected), "{expected}\n{wit}");
+                }
+                let roles = contract.embedded_roles(bytes).unwrap();
+                let artifact = contract.component_artifact(bytes, name, 1, &roles).unwrap();
+                engine.load(&artifact, bound(granted())).unwrap()
+            })
+            .chain([counters()])
+            .collect();
+        host.install(orbs).unwrap();
+        for (name, _) in &guests {
+            review(&mut pool, &host, name);
+        }
+        pool.run_until(host.close()).unwrap();
+        assert_eq!(engine.instances(), 0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+    }
+}
+
+/// Drive the reviews of the Orb `name`: the case with named fields is `{tag, val}` with the record
+/// as its value on the portable boundary, like any case with a payload.
+fn review(pool: &mut LocalPool, host: &Host, name: &str) {
+    let reviews = Rc::new(
+        host.get(
+            &format!("{name}::example:runtime/reviews@1.0.0"),
+            vec!["main".into()],
+            "alice",
+        )
+        .unwrap(),
+    );
+    pool.run_until(reviews.ready()).unwrap();
+    let call = |pool: &mut LocalPool, method: &'static str, arguments: Value| {
+        let reviews = reviews.clone();
+        pool.run_until(host.root("alice", move |context| {
+            async move {
+                reviews
+                    .call_portable::<_, Value>(&context, method, arguments)
+                    .await
+            }
+            .boxed_local()
+        }))
+        .unwrap()
+    };
+    let refused = json!({"tag": "refused", "val": {"reason": "empty", "severity": 3}});
+    let deferred = json!({"tag": "deferred", "val": 2});
+    let accepted = json!({"tag": "accepted"});
+    assert_eq!(
+        call(pool, "decide", json!(["ada", ""])),
+        json!({"reviewer": "ada", "outcome": refused}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "decide", json!(["bob", "hi"])),
+        json!({"reviewer": "bob", "outcome": deferred}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "decide", json!(["cy", "long enough"])),
+        json!({"reviewer": "cy", "outcome": accepted}),
+        "{name}"
+    );
+    let decisions = json!([
+        {"reviewer": "ada", "outcome": refused},
+        {"reviewer": "bob", "outcome": deferred},
+        {"reviewer": "dee", "outcome": {"tag": "refused", "val": {"reason": "off topic", "severity": 1}}},
+    ]);
+    assert_eq!(
+        call(pool, "reasons", json!([decisions])),
+        json!(["ada: empty (3)", "dee: off topic (1)"]),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "worst", json!([[accepted, deferred, refused], null])),
+        json!({"tag": "ok", "val": refused}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "worst", json!([[], deferred])),
+        json!({"tag": "ok", "val": deferred}),
+        "{name}"
+    );
+    assert_eq!(
+        call(pool, "worst", json!([[], null])),
+        json!({"tag": "err", "val": "no outcome"}),
+        "{name}"
+    );
+    reviews.release().unwrap();
+}
+
 /// The records of the consumed packages cross the derived interfaces of both guests, on both
 /// engines, as the consumed packages define them. `readings` `use`s the tally of the imported
 /// interface: the tally the plain import reads comes back alone and in a record of the module, goes
