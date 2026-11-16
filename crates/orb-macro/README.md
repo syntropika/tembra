@@ -789,8 +789,7 @@ it: the runtime returns a resource only from the interface that defines it, so a
 another service or of another service's resource returning it, alone, nested or in a record or a
 variant, is a compile error on its result type. A record or an enum is defined in the interface
 of the earliest service, in declaration order, that mentions it, in its functions or its
-resources' functions, and the others `use` it from there; interfaces that would `use` each other,
-which WIT refuses, are a compile error naming them. See
+resources' functions, and the others `use` it from there. See
 [rust-orb-wit-resource](../../examples/rust-orb-wit-resource/README.md).
 
 ## Taking a resource

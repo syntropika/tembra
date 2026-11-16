@@ -248,7 +248,7 @@ pub(crate) struct Kernel {
 }
 
 /// One interface of the package: its name, its docs, the shapes it defines, what it `use`s from
-/// which other interface, and the struct it is derived from, for the errors.
+/// which other interface, and the struct it is derived from.
 struct Interface<'a> {
     name: String,
     ident: &'a Ident,
@@ -263,8 +263,7 @@ struct Interface<'a> {
 /// interface defines; then the view of each interface imported by key. Then a world using the
 /// kernel's interfaces for its states, resources and context, importing every consumed interface
 /// and every view, importing and exporting every hook, consumed or derived, and exporting every
-/// service interface, derived or implemented. Interfaces that `use` each other, which WIT
-/// refuses, are an error naming them.
+/// service interface, derived or implemented.
 pub(crate) fn render<'a>(
     package: &str,
     world: &str,
@@ -331,8 +330,9 @@ pub(crate) fn render<'a>(
         for shape in &defined {
             mentioned.extend(shape.references.iter().cloned());
         }
-        // Each name another interface defines is borrowed from it with `use`, the shapes then
-        // the resources, one line per interface in package order.
+        // Each type another interface defines is borrowed from it with `use`, one line per
+        // interface in package order. A resource is mentioned only in the interface that owns it,
+        // as `resource_params` checks, so none is borrowed.
         let mut uses: Vec<(String, Vec<String>)> = order
             .iter()
             .filter(|(other, _, _)| other != name)
@@ -353,14 +353,6 @@ pub(crate) fn render<'a>(
                 && owner != *ident
             {
                 borrowed.push((kebab(owner), &shape.ident));
-            }
-        }
-        for resource in resources
-            .iter()
-            .filter(|resource| mentioned.contains(&resource.ident))
-        {
-            if owner_of(resource) != *name {
-                borrowed.push((owner_of(resource), &resource.ident));
             }
         }
         for (from, item) in borrowed {
@@ -416,25 +408,15 @@ pub(crate) fn render<'a>(
             uses,
         });
     }
-    if let Some(cycle) = use_cycle(&interfaces) {
-        let first = &interfaces[cycle[0]];
-        let steps: Vec<String> = cycle
+    // `placement` defines each type no later than the first interface that mentions it, and no
+    // resource is borrowed, so an interface `use`s only the ones before it: the `use`s form no
+    // cycle, which WIT would refuse.
+    debug_assert!(interfaces.iter().enumerate().all(|(at, interface)| {
+        interface
+            .uses
             .iter()
-            .zip(cycle.iter().cycle().skip(1))
-            .map(|(&from, &to)| {
-                let (from, to) = (&interfaces[from], &interfaces[to]);
-                let names = to_names(from, &to.name);
-                format!("`{}` uses {} of `{}`", from.name, names, to.name)
-            })
-            .collect();
-        return Err(syn::Error::new(
-            first.ident.span(),
-            format!(
-                "{}: WIT refuses interfaces that depend on themselves through `use`; let one service's interface define or own what the others use",
-                steps.join(", ")
-            ),
-        ));
-    }
+            .all(|(from, _)| interfaces[..at].iter().any(|earlier| earlier.name == *from))
+    }));
     let mut wit = format!("package {package};\n");
     for interface in &interfaces {
         wit.push('\n');
@@ -522,55 +504,6 @@ pub(crate) fn render<'a>(
     }
     wit.push_str("}\n");
     Ok(wit)
-}
-
-/// The names an interface `use`s from another one, for the errors: `{a, b}`.
-fn to_names(interface: &Interface<'_>, from: &str) -> String {
-    let names = interface
-        .uses
-        .iter()
-        .find(|(other, _)| other == from)
-        .map(|(_, names)| names.join(", "))
-        .unwrap_or_default();
-    format!("`{{{names}}}`")
-}
-
-/// A cycle of interfaces that `use` one another, as indexes in `interfaces`, if there is one.
-fn use_cycle(interfaces: &[Interface<'_>]) -> Option<Vec<usize>> {
-    let edges: Vec<Vec<usize>> = interfaces
-        .iter()
-        .map(|interface| {
-            interface
-                .uses
-                .iter()
-                .filter_map(|(from, _)| interfaces.iter().position(|other| other.name == *from))
-                .collect()
-        })
-        .collect();
-    // Depth first, with the path walked so far: an edge back into the path closes a cycle.
-    fn visit(
-        node: usize,
-        edges: &[Vec<usize>],
-        path: &mut Vec<usize>,
-        done: &mut BTreeSet<usize>,
-    ) -> Option<Vec<usize>> {
-        if let Some(start) = path.iter().position(|&walked| walked == node) {
-            return Some(path[start..].to_vec());
-        }
-        if !done.insert(node) {
-            return None;
-        }
-        path.push(node);
-        for &next in &edges[node] {
-            if let Some(cycle) = visit(next, edges, path, done) {
-                return Some(cycle);
-            }
-        }
-        path.pop();
-        None
-    }
-    let mut done = BTreeSet::new();
-    (0..interfaces.len()).find_map(|node| visit(node, &edges, &mut Vec::new(), &mut done))
 }
 
 /// One function of an interface or a resource, with its `///` lines, at the given indentation.
