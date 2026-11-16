@@ -4355,6 +4355,24 @@ fn a_helper_attribute_the_bindings_module_cannot_read_is_refused() {
         "{}",
         tokens(&carried)
     );
+    // A derive's helper attribute resolves in the macro namespace, so an item of its name the
+    // module imports, a module here, shadows nothing: the derive that reads it by name takes it.
+    let carried = expanded(
+        "example:walk@1.0.0",
+        &module(
+            "use core::default;
+             #[derive(Default)]
+             pub enum Mode { #[default] Fast, Slow }",
+            "Mode",
+        ),
+    );
+    assert!(
+        tokens(&carried).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/mode.fast\" : [# [default]] } ,"
+        ),
+        "{}",
+        tokens(&carried)
+    );
     for (types, message) in [
         (
             "const PAGE: u32 = 20;

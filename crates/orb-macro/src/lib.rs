@@ -4667,8 +4667,9 @@ fn unread(carried: &Carried, others: &[Reads]) -> String {
 
 /// Refuse a helper attribute that the bindings' module, which reads it on the generated type
 /// replacing `shape`, would not know: an attribute macro the type's module imports, which is no
-/// derive's helper attribute, an attribute none of the derives the generated type takes reads,
-/// by what each of them reads, `readers`, and one whose arguments name what the type's module
+/// derive's helper attribute, unless a derive the generated type takes reads an attribute of
+/// that name, an attribute none of the derives the generated type takes reads, by what each of
+/// them reads, `readers`, and one whose arguments name what the type's module
 /// declares or imports, or start from that module, but for the types of the module the bindings'
 /// module declares beside the generated type under the same name, `defined`.
 fn readable(
@@ -4688,7 +4689,14 @@ fn readable(
             .path()
             .get_ident()
             .expect("a helper attribute is a single name");
-        if let Some(Bound::Imported) = bound(name, shape.scope, uses, modules) {
+        // A derive's helper attribute resolves in the macro namespace: an item of its name the
+        // module imports, `use core::default;` under `#[default]`, shadows nothing where a derive
+        // the generated type takes reads it by name, and the macro cannot tell a module or a type
+        // imported from an attribute macro.
+        let named = readers
+            .iter()
+            .any(|reads| matches!(reads, Reads::Named(known) if name == known));
+        if !named && let Some(Bound::Imported) = bound(name, shape.scope, uses, modules) {
             return refuse(format!(
                 "`{shown}` on `{owner}`: `{owner}` enters the WIT and the generated type replacing it takes its derives and the helper attributes they read, which come with the derives, while this module imports `{name}`, an attribute macro, which the generated type cannot take; remove it, or keep `{owner}` out of the WIT"
             ));

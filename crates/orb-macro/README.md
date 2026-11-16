@@ -1172,7 +1172,10 @@ the version whose rules the macro follows, and the generated code reaches it the
   compile error on the attribute: one no derive the generated type takes reads, since a derive of
   the standard library reads none but `#[default]` and a derive the bindings implement is theirs,
   as `Debug` is after `use derive_more::*;`; an attribute macro the type's module imports,
-  `#[skip_serializing_none]`, which is no derive's helper; and arguments naming what the type's
+  `#[skip_serializing_none]`, which is no derive's helper, unless a derive the generated type takes
+  reads an attribute of that name, since a helper attribute resolves in the macro namespace, where
+  a module or a type the module imports, `use core::default;` under `#[default]`, shadows nothing;
+  and arguments naming what the type's
   module declares or imports, or a path from `self::` or `super::`, which a path from `crate::`,
   `#[default(crate::walk::PAGE)]`, or from a crate names from every module. A type of the module
   that enters the WIT is the exception: the bindings' module declares the generated type replacing
