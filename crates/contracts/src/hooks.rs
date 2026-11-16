@@ -338,9 +338,10 @@ impl PreparedContract {
                 composition: *composition,
             });
         }
-        // `providers` binds to the kernel's plan every import the world also exports and no
-        // requirement selects; only an Orb that declares that hook runs it. Any other such import
-        // has no provider, which installation refuses here instead of trapping on the first call.
+        // `providers` binds to the kernel's plan every import the world names itself, also
+        // exports and no requirement selects; only an Orb that declares that hook runs it. Any
+        // other such import has no provider, which installation refuses here instead of trapping
+        // on the first call.
         for (binding, selected) in bindings {
             if !matches!(selected, Binding::Hook) {
                 continue;

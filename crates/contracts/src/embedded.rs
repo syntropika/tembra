@@ -62,8 +62,9 @@ impl EmbeddedManifest {
 /// not import; a reference view names an interface the world imports and does not export. An
 /// import pairs with an export only when the world imports the interface itself: one elaboration
 /// added because a view `use`s its types, the view of the interface the component implements, is
-/// no hook, and the kernel binds it to nothing. The contract checks the roles themselves, a view's
-/// shape included, when the component is packaged.
+/// no hook, and the kernel binds it to nothing, or to the provider the installer names when it
+/// holds a resource. The contract checks the roles themselves, a view's shape included, when the
+/// component is packaged.
 #[cfg(feature = "authoring")]
 pub(crate) fn roles(
     contract: &PreparedContract,

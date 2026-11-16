@@ -118,12 +118,18 @@ impl PreparedContract {
                     },
                 );
                 continue;
-            } else if self.model().exports.iter().any(|entry| {
-                matches!(&entry.item, Item::Interface(exported)
-                    if exported.contract.as_deref() == Some(contract.as_str()))
-            }) {
+            } else if interface.explicit
+                && self.model().exports.iter().any(|entry| {
+                    matches!(&entry.item, Item::Interface(exported)
+                        if exported.contract.as_deref() == Some(contract.as_str()))
+                })
+            {
                 // An import of an interface this world also exports, with no provider required
                 // for it, is the Orb's typed entry to a hook it declares: the kernel runs its plan.
+                // The world imports a hook itself; an interface it imports only because another
+                // import `use`s its types, exporting it, is no hook, as packaging rules, and
+                // binds like any other import when it is callable: a resource of the interface the
+                // Orb implements, which the installer binds to the other import's provider.
                 bindings.insert(binding, Binding::Hook);
                 continue;
             } else {

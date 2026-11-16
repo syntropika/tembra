@@ -709,6 +709,103 @@ fn a_contribution_to_an_interface_imported_only_for_its_types_is_refused() {
     assert_eq!(Artifact::decode(&forged).err().unwrap().0, refusal);
 }
 
+/// A world importing an interface that `use`s a resource of the interface it implements, as
+/// `#[orb]` derives one for `import = "example:docs/index@1.0.0"` beside
+/// `#[service("example:docs/store@1.0.0")]`: elaboration imports the implemented interface for
+/// the resource's type, and an import holding a resource is callable.
+const DOCS_PROXY: &str = "package example:docs@1.0.0;
+interface store {
+  resource doc { constructor(title: string); title: func() -> string; }
+}
+interface index {
+  use store.{doc};
+  search: func(q: string) -> list<doc>;
+}
+world proxy { import index; export store; }
+";
+
+/// An import pairs with an export, as a hook, only when the world imports the interface itself,
+/// at installation as at packaging: an interface the world exports and imports only because
+/// another import `use`s its resource is a service, which packaging accepts with its lifetime,
+/// and its import binds like any other callable import, to the provider the installer names, the
+/// one serving the import that `use`s the resource. Without one it is missing a provider; it is no
+/// entry to a hook, which the Orb never declared, so installation refused the packaged Orb.
+#[test]
+fn an_interface_imported_for_its_resource_binds_to_a_provider_not_to_a_hook() {
+    const STORE: &str = "example:docs/store@1.0.0";
+    const INDEX: &str = "example:docs/index@1.0.0";
+    let contract = Contract::from_source("proxy.wit", DOCS_PROXY, Some("proxy")).unwrap();
+    let manifest = format!(r#"{{"services":{{"{STORE}":{{"lifetime":"host"}}}}}}"#);
+    let component = component_carrying(&contract, &[("tembra:manifest", manifest.as_bytes())]);
+    let roles = contract.embedded_roles(&component).unwrap();
+    assert_eq!(
+        roles,
+        ComponentRoles {
+            services: [(
+                STORE.into(),
+                ServicePolicy {
+                    lifetime: Lifetime::Host,
+                    linger_ms: 0,
+                },
+            )]
+            .into(),
+            ..Default::default()
+        }
+    );
+    contract
+        .component_artifact(&component, "proxy", 1, &roles)
+        .unwrap();
+    let indexer = || crate::OrbProvider {
+        orb: "indexer".into(),
+        api_version: 1,
+    };
+    let error = contract
+        .providers(
+            &[(INDEX.to_owned(), indexer())].into(),
+            &crate::Grants::default(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        (error.reason.as_str(), error.message.as_str()),
+        (
+            "wit_binding",
+            format!("{STORE}: missing Orb provider requirement").as_str()
+        )
+    );
+    let requires = [(INDEX.to_owned(), indexer()), (STORE.to_owned(), indexer())].into();
+    let bindings = contract
+        .providers(&requires, &crate::Grants::default())
+        .unwrap();
+    let bound = crate::Binding::Orb {
+        name: "indexer".into(),
+        api_version: 1,
+    };
+    assert_eq!(
+        bindings,
+        BTreeMap::from([(INDEX.to_owned(), bound.clone()), (STORE.to_owned(), bound)])
+    );
+    contract
+        .check_hooks(&Implementation::default(), &bindings)
+        .unwrap();
+    let plan = contract.plan("proxy", 1, &bindings).unwrap();
+    assert_eq!(
+        plan.orb
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        [format!("proxy::{STORE}").as_str()]
+    );
+    assert_eq!(
+        plan.orb
+            .requires
+            .iter()
+            .map(|requirement| requirement.orb.as_str())
+            .collect::<Vec<_>>(),
+        ["indexer"]
+    );
+}
+
 /// The manifest is the section of the first core module holding one, in the order of the binary,
 /// the modules of nested components included; a core module is no component.
 #[test]
