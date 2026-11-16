@@ -11,6 +11,7 @@ use syn::{
     Attribute, Expr, Fields, Ident, ItemEnum, ItemStruct, Lit, Meta, Type, ext::IdentExt,
     spanned::Spanned,
 };
+use tembra_contracts::guest;
 use wit_parser::{Resolve, TypeDefKind};
 
 /// WIT names are kebab-case; Rust identifiers map to them one by one, a raw identifier without
@@ -479,16 +480,20 @@ pub(crate) fn render<'a>(
     wit.push_str(&format!("\nworld {} {{\n", escaped(world)));
     if kernel.state {
         wit.push_str(&format!(
-            "  import {GUEST_STATE};\n  export {GUEST_STATE_INIT};\n"
+            "  import {};\n  export {};\n",
+            guest::STATE,
+            guest::STATE_INIT
         ));
     }
     if kernel.resources {
         wit.push_str(&format!(
-            "  import {GUEST_RESOURCES};\n  export {GUEST_RESOURCES_INIT};\n"
+            "  import {};\n  export {};\n",
+            guest::RESOURCE,
+            guest::RESOURCE_INIT
         ));
     }
     if kernel.context {
-        wit.push_str(&format!("  import {GUEST_CONTEXT};\n"));
+        wit.push_str(&format!("  import {};\n", guest::CONTEXT));
     }
     for import in imports {
         wit.push_str(&format!("  import {import};\n"));
@@ -567,15 +572,8 @@ fn resource_text(resource: &WitResource) -> String {
     text
 }
 
-/// The kernel's interfaces, as the world names them.
-const GUEST_STATE: &str = "tembra:guest/state@1.0.0";
-const GUEST_STATE_INIT: &str = "tembra:guest/state-init@1.0.0";
-const GUEST_RESOURCES: &str = "tembra:guest/resources@1.0.0";
-const GUEST_RESOURCES_INIT: &str = "tembra:guest/resources-init@1.0.0";
-const GUEST_CONTEXT: &str = "tembra:guest/context@1.0.0";
-
 /// The kernel's `tembra:guest` package, as `tembra-contracts` bundles it for every host.
-const GUEST: &str = tembra_contracts::guest::SOURCE;
+const GUEST: &str = guest::SOURCE;
 
 /// The kernel's `tembra:guest` package in nested form, appended to the inline WIT so the bindings
 /// of a state, a resource or the context resolve it.
