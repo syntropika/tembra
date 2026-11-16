@@ -1123,12 +1123,15 @@ The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) amo
   change a state's JSON, and a helper attribute on the payload of a case, which the bindings have
   no place for.
 - The macro reads a type that enters the WIT, a flags struct included, before the compiler
-  evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`. A field, a case or a case's payload under
+  evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`. The type, a field, a case or a case's payload under
   `#[cfg(..)]`, which the WIT would hold in every configuration, is a compile error, and so is a
   `#[cfg_attr(..)]` wrapping a derive, a helper attribute or a `#[cfg(..)]`, which would come and
   go beside what the macro writes. One wrapping only Rust's own attributes other than `derive` and
   `cfg`, such as `#[cfg_attr(test, allow(dead_code))]`, `doc` or `deprecated`, changes nothing the
   macro writes.
+- The macro writes the code serving a struct marked `#[service]`, `#[state]`, `#[resource]`,
+  `#[wit_resource]` or `#[hook(..)]` before the compiler evaluates `#[cfg(..)]`, and that code
+  names the struct in every configuration: such a struct under `#[cfg(..)]` is a compile error.
 - Keep no `wit/` directory in the crate: `wit-bindgen` loads it on its own and finds the package
   twice.
 

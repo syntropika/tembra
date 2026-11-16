@@ -2581,6 +2581,130 @@ fn a_cfg_attr_wrapping_only_what_the_generated_type_never_takes_expands() {
     );
 }
 
+/// The macro writes the WIT, and the generated type replacing a record, an enum or a variant that
+/// enters it, before the compiler evaluates `#[cfg(..)]`: the type would stay in the WIT and in the
+/// generated code in every configuration, the attribute doing nothing, so a `#[cfg(..)]` on a type
+/// that enters the WIT is refused. The same type without the attribute enters the WIT, and kept out
+/// of the WIT, the type is the author's, as written, `#[cfg(..)]` included.
+#[test]
+fn a_type_entering_the_wit_under_cfg_is_refused() {
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod office {{
+                {types}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    for (kind, name, item, entered, kept) in [
+        (
+            "record",
+            "Grant",
+            "pub struct Grant { pub who: String }",
+            "  record grant {\n    who: string,\n  }\n",
+            "# [cfg (feature = \"audit\")] pub struct Grant { pub who : String }",
+        ),
+        (
+            "enum",
+            "Level",
+            "pub enum Level { Read, Write }",
+            "  enum level {\n    read,\n    write,\n  }\n",
+            "# [cfg (feature = \"audit\")] pub enum Level { Read , Write }",
+        ),
+        (
+            "variant",
+            "Holder",
+            "pub enum Holder { Person(String), Nobody }",
+            "  variant holder {\n    person(string),\n    nobody,\n  }\n",
+            "# [cfg (feature = \"audit\")] pub enum Holder { Person (String) , Nobody }",
+        ),
+    ] {
+        let conditional = format!("#[cfg(feature = \"audit\")] {item}");
+        let error = refused("example:office@1.0.0", &module(&conditional, name));
+        let message = format!(
+            "`#[cfg(..)]` on the {kind} `{name}`: `{name}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the {kind} and the generated type would replace `{name}` in every configuration; remove the attribute, or keep `{name}` out of the WIT"
+        );
+        assert!(error.contains(&message), "{item}: {error}");
+        let text = resolved(&expanded("example:office@1.0.0", &module(item, name)));
+        assert!(text.contains(entered), "{entered}\n{text}");
+        let generated = tokens(&expanded(
+            "example:office@1.0.0",
+            &module(&conditional, "u32"),
+        ));
+        assert!(generated.contains(kept), "{kept}\n{generated}");
+    }
+}
+
+/// The macro writes the code serving a struct it marks before the compiler evaluates
+/// `#[cfg(..)]`, and that code names the struct in every configuration: the kernel's callbacks
+/// build and read a state and open and close a resource of the root, a bridge calls the functions
+/// of a service and of a WIT resource, and a declared hook's export and `run` serve its struct.
+/// Where the attribute is off, the compiler would find the struct gone, so a `#[cfg(..)]` on a
+/// marked struct is refused, before or after the marker, and the same module without it expands.
+#[test]
+fn a_marked_struct_under_cfg_is_refused() {
+    let module = |items: &str| {
+        format!(
+            "mod office {{
+                {items}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+            }}"
+        )
+    };
+    for (items, what, name, does) in [
+        (
+            "{cfg} #[state] pub struct Tally { pub count: u32 }",
+            "state",
+            "Tally",
+            "builds and reads it",
+        ),
+        (
+            "{cfg} #[resource] pub struct Pool { pub size: u32 }
+            impl Pool { #[open] pub fn open() -> Self { Pool { size: 0 } } }",
+            "resource",
+            "Pool",
+            "opens and closes it",
+        ),
+        (
+            "{cfg} #[wit_resource] pub struct Badge { holder: String }
+            impl Badge {
+                #[constructor]
+                pub fn new(holder: String) -> Self { Badge { holder } }
+                pub fn holder(&self) -> String { self.holder.clone() }
+            }",
+            "resource",
+            "Badge",
+            "calls its functions",
+        ),
+        (
+            "#[service] {cfg} pub struct Ledger;
+            impl Ledger { pub fn count() -> u32 { 0 } }",
+            "service",
+            "Ledger",
+            "calls its functions",
+        ),
+        (
+            "{cfg} #[hook(composition = series, input = Grant)] pub struct Granted;
+            pub struct Grant { pub who: String }",
+            "hook",
+            "Granted",
+            "runs it",
+        ),
+    ] {
+        let conditional = module(&items.replace("{cfg}", "#[cfg(feature = \"audit\")]"));
+        let error = refused("example:office@1.0.0", &conditional);
+        let message = format!(
+            "`#[cfg(..)]` on the {what} `{name}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{name}` in every configuration; remove the attribute"
+        );
+        assert!(error.contains(&message), "{items}: {error}");
+        expanded("example:office@1.0.0", &module(&items.replace("{cfg}", "")));
+    }
+}
+
 const NESTED_WIT: &str = "package example:ledger@1.0.0;
 interface book {
   resource entry {

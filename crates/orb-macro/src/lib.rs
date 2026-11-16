@@ -806,11 +806,13 @@ impl Scan {
                 }
                 Item::Struct(mut s) => {
                     if let Some(attribute) = take(&mut s.attrs, "hook") {
+                        unconditional_marked(&s, "hook", "runs it")?;
                         let mut declaration = declaration(&s, &attribute, &self.package)?;
                         declaration.scope = scope;
                         self.declared.push(declaration);
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "wit_resource") {
+                        unconditional_marked(&s, "resource", "calls its functions")?;
                         // The Orb module's exports take the struct as a type of theirs; the
                         // modules of its path are checked from its service's module, which names
                         // it through them, once the service is known.
@@ -829,6 +831,7 @@ impl Scan {
                         self.wit_resources.push(resource);
                         passthrough.push(Item::Struct(s));
                     } else if let Some(attribute) = take(&mut s.attrs, "resource") {
+                        unconditional_marked(&s, "resource", "opens and closes it")?;
                         let why = "which opens and closes it";
                         if !reaches_root(&s.vis, depth) {
                             return Err(syn::Error::new(
@@ -858,6 +861,7 @@ impl Scan {
                             passthrough.push(Item::Struct(s));
                         }
                     } else if let Some(attribute) = take(&mut s.attrs, "state") {
+                        unconditional_marked(&s, "state", "builds and reads it")?;
                         let why = "which builds and reads it";
                         let fields_visible = match &s.fields {
                             Fields::Named(fields) => fields
@@ -889,6 +893,7 @@ impl Scan {
                         self.states.push(state);
                         self.candidates.push(Candidate::record(s, scope));
                     } else if let Some(attribute) = take(&mut s.attrs, "service") {
+                        unconditional_marked(&s, "service", "calls its functions")?;
                         if !matches!(s.fields, Fields::Unit) {
                             return Err(syn::Error::new(
                                 attribute.span(),
@@ -3413,12 +3418,13 @@ fn replaceable(item: &Item) -> syn::Result<()> {
 }
 
 /// Refuse what the macro cannot evaluate in a type that enters the WIT, as it reads the type before
-/// the compiler evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`: a flags struct under `#[cfg(..)]`,
-/// which stays the author's, gone where the attribute is off, while the WIT would hold it and the
-/// bindings name it in every configuration, a field, a case or a case's payload under
-/// `#[cfg(..)]`, which the WIT would hold in every configuration, and a `#[cfg_attr(..)]` on the
-/// type or a member hiding what the macro reads, which would come and go on the generated type
-/// replacing the type, or beside the derives the macro adds to a flags struct.
+/// the compiler evaluates `#[cfg(..)]` and `#[cfg_attr(..)]`: the type under `#[cfg(..)]`, which
+/// the WIT would hold in every configuration, as the generated type replacing a record, an enum or
+/// a variant would be, while a flags struct stays the author's, gone where the attribute is off,
+/// and the bindings name it; a field, a case or a case's payload under `#[cfg(..)]`, which the WIT
+/// would hold in every configuration; and a `#[cfg_attr(..)]` on the type or a member hiding what
+/// the macro reads, which would come and go on the generated type replacing the type, or beside the
+/// derives the macro adds to a flags struct.
 fn unconditional(item: &Item, flags: bool) -> syn::Result<()> {
     // Each member, by what it is and its name as the errors say them.
     let (owner, attrs, members) = match item {
@@ -3451,15 +3457,34 @@ fn unconditional(item: &Item, flags: bool) -> syn::Result<()> {
         ),
         _ => return Ok(()),
     };
-    if flags
-        && let Some(attribute) = attrs
-            .iter()
-            .find(|attribute| attribute.path().is_ident("cfg"))
+    if let Some(attribute) = attrs
+        .iter()
+        .find(|attribute| attribute.path().is_ident("cfg"))
     {
+        let kind = match item {
+            Item::Enum(item)
+                if item
+                    .variants
+                    .iter()
+                    .all(|variant| matches!(variant.fields, Fields::Unit)) =>
+            {
+                "enum"
+            }
+            Item::Enum(_) => "variant",
+            _ if flags => "flags",
+            _ => "record",
+        };
+        // A flags struct stays the author's, which the bindings name; the generated type replaces
+        // any other type.
+        let named = if flags {
+            "the bindings would name the struct".to_owned()
+        } else {
+            format!("the generated type would replace `{owner}`")
+        };
         return Err(syn::Error::new(
             attribute.span(),
             format!(
-                "`#[cfg(..)]` on the flags `{owner}`: `{owner}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the flags and the bindings would name the struct in every configuration; remove the attribute, or keep `{owner}` out of the WIT"
+                "`#[cfg(..)]` on the {kind} `{owner}`: `{owner}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the {kind} and {named} in every configuration; remove the attribute, or keep `{owner}` out of the WIT"
             ),
         ));
     }
@@ -3493,6 +3518,27 @@ fn unconditional(item: &Item, flags: bool) -> syn::Result<()> {
         return Err(syn::Error::new(attribute.span(), message));
     }
     Ok(())
+}
+
+/// Refuse a `#[cfg(..)]` on a struct the macro marks, with `what` the marker makes it and what the
+/// code the macro writes for it `does`, for the error: the macro reads the struct before the
+/// compiler evaluates the attribute, and that code names the struct in every configuration, also
+/// where the attribute is off and the compiler drops the struct.
+fn unconditional_marked(item: &syn::ItemStruct, what: &str, does: &str) -> syn::Result<()> {
+    let Some(attribute) = item
+        .attrs
+        .iter()
+        .find(|attribute| attribute.path().is_ident("cfg"))
+    else {
+        return Ok(());
+    };
+    let ident = &item.ident;
+    Err(syn::Error::new(
+        attribute.span(),
+        format!(
+            "`#[cfg(..)]` on the {what} `{ident}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{ident}` in every configuration; remove the attribute"
+        ),
+    ))
 }
 
 /// Whether an attribute is a `#[cfg_attr(..)]` hiding from the macro, until the compiler evaluates
