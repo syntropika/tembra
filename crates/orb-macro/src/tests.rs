@@ -128,6 +128,23 @@ fn a_plain_service_derives_its_interface_and_embeds_no_manifest() {
 }
 
 #[test]
+fn the_bindings_come_from_the_wit_bindgen_the_facade_pins() {
+    // The generated code follows the derive rules and the flags lowering of one wit-bindgen
+    // version, so the facade picks it, not the author's crate: the expansion calls `generate!`
+    // through the facade's re-export, reaches the bindings' runtime there, and names no
+    // `wit_bindgen` crate of the author's.
+    let generated = tokens(&expanded(PACKAGE, &ledger("#[service]")));
+    for expected in [
+        ":: tembra :: __wit_bindgen :: generate !",
+        "runtime_path : \"::tembra::__wit_bindgen::rt\"",
+        "bitflags_path : \"::tembra::__wit_bindgen::rt::bitflags\"",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    assert!(!generated.contains(":: wit_bindgen"), "{generated}");
+}
+
+#[test]
 fn a_service_lifetime_goes_to_the_manifest_and_leaves_the_wit_alone() {
     let plain = wit(&expanded(PACKAGE, &ledger("#[service]")));
     let module = expanded(PACKAGE, &ledger("#[service(lifetime = host)]"));

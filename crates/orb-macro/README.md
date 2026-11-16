@@ -43,11 +43,12 @@ without linking the application's host runtime:
 ```toml
 [dependencies]
 tembra = { version = "0.2.2", default-features = false, features = ["macros"] }
-wit-bindgen = { version = "=0.63.0", default-features = false, features = ["macros", "realloc", "async"] }
 ```
 
-`wit-bindgen`'s `async` feature serves the bindings of a `pub async fn`, of an import by key,
-whose `get` is asynchronous, and of a WASI interface that waits.
+The feature brings the `wit-bindgen` the generated bindings use, pinned to the version whose
+rules the macro follows, so a guest does not name it; its `async` feature serves the bindings of
+a `pub async fn`, of an import by key, whose `get` is asynchronous, and of a WASI interface that
+waits.
 
 ## Standard library and freestanding guests
 
@@ -561,7 +562,7 @@ whose methods call that object. A key the kernel refuses, one the provider does 
 instance, is the `Err` of `get`, and the call goes on. One key reaches one object, through any
 number of handles; another key or another principal reaches another object. `get` is
 asynchronous: the function calling it is a `pub async fn`, `async` in the WIT as well, whose
-bindings use the `async` feature of `wit-bindgen`, which a guest's dependencies enable. A handle
+bindings use the `async` feature of `wit-bindgen`, which the facade enables. A handle
 belongs to the call's root: dropping it releases its claim when the call settles, and the root's
 end expires every claim, a handle kept in a `static` included, so a later call cannot use it.
 
@@ -639,7 +640,7 @@ compile error listing what there is.
 WASI 0.3 is asynchronous where it waits: a clock's waits, files, sockets and HTTP are `async func`,
 whose bindings are `async fn` a method awaits, as `throw_after` does, and standard input and output
 are streams and futures. The bindings of such an interface use `wit-bindgen`'s `async` feature,
-which a guest's dependencies enable, even when its methods call only the interface's synchronous
+which the facade enables, even when its methods call only the interface's synchronous
 functions, such as `monotonic_clock::now()`; `wasi:random` needs none.
 
 Nothing binds a WASI import to another Orb: the installation grants it. `cargo tembra build`
@@ -998,7 +999,9 @@ The macro rewrites the module with:
    guests keep their standard runtime, and host checks require no Wasm target. When the macro
    refuses the module of a `no_std` guest, the prelude comes with its error, which is then the
    only one the compiler reports;
-4. `wit_bindgen::generate!({ inline: WIT, world, generate_all })`, the official macro with the WIT
+4. `generate!({ inline: WIT, world, generate_all, runtime_path })`, the official `wit-bindgen`
+   macro, called through the facade's re-export of the version whose rules the macro follows,
+   with the bindings' runtime reached there too, and the WIT
    as a string, plus `path` when the Orb consumes other packages and, with a state, a resource or
    the context, the kernel's `tembra:guest` package nested in the inline text, unless the consumed
    directory holds it already, as a contract `cargo tembra build` wrote does in its `deps/`; that
@@ -1035,9 +1038,10 @@ The macro rewrites the module with:
 9. with a resource, one slot in the component's memory per resource, filled by the `#[open]`
    function and emptied by the `#[close]` one, and the `with` function on each resource type.
 
-The crate must list `wit-bindgen` (features `macros`, `realloc` and `async`) among its dependencies,
-`dlmalloc` (feature `global`) only with `no_std`, and `serde` (features `derive`, `alloc`) and
-`serde_json` (feature `alloc`) when it has a state: the generated code names them.
+The crate must list `dlmalloc` (feature `global`) among its dependencies only with `no_std`, and
+`serde` (features `derive`, `alloc`) and `serde_json` (feature `alloc`) when it has a state: the
+generated code names them. `wit-bindgen` it does not list: the facade's `macros` feature brings
+the version whose rules the macro follows, and the generated code reaches it there.
 
 ## Limits
 
@@ -1141,7 +1145,7 @@ An implemented interface keeps the calling convention written in its WIT. Implem
 `async func` with `pub async fn`, including resource methods and static factories. The macro
 forwards the future with `.await` through the official `wit-bindgen` async bindings; it does
 not run an executor or block the guest thread. Those bindings use `wit-bindgen`'s `async` feature,
-which a guest's dependencies enable.
+which the facade enables.
 
 For example, given an existing interface:
 

@@ -16,9 +16,10 @@
 //! types its fields reach, get serde's derives.
 //!
 //! The macro derives the WIT contract from those items and generates what a WIT-first crate
-//! writes by hand: the `wit_bindgen::generate!` invocation with the WIT inline, the `Guest`
-//! implementations forwarding to the author's functions and `export!`. The module uses the
-//! standard library by default; `no_std` on the attribute adds the freestanding Wasm prelude.
+//! writes by hand: the `generate!` invocation of the `wit-bindgen` the facade re-exports, with
+//! the WIT inline, the `Guest` implementations forwarding to the author's functions and
+//! `export!`. The module uses the standard library by default; `no_std` on the attribute adds
+//! the freestanding Wasm prelude.
 //! The hook interfaces come from the provider's WIT, found in the
 //! directory named by `wit = "dir"` on the attribute, relative to the crate manifest; their
 //! generated modules are re-exported under their own names, so the author writes
@@ -30,8 +31,9 @@
 //! `import = "wasi:..."` imports an interface of the WASI 0.3 packages `tembra-contracts` bundles,
 //! which the host serves under the installation's grants, with no directory to name.
 //!
-//! The crate using the macro must depend on `wit-bindgen` (features `macros` and `realloc`),
-//! and on `dlmalloc` (feature `global`) only in `no_std` mode; a crate with a state
+//! The crate using the macro depends on `tembra` with the `macros` feature, which brings the
+//! `wit-bindgen` the generated bindings use, at the version whose rules the macro follows, and
+//! on `dlmalloc` (feature `global`) only in `no_std` mode; a crate with a state
 //! also depends on `serde` (`derive`, `alloc`) and `serde_json` (`alloc`). `cargo tembra build`
 //! compiles the crate, reads the same WIT and the hook priorities from the component and
 //! packages the artifact.
@@ -2316,12 +2318,17 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
     // The bindings take each flags type as the author's struct.
     let remapped = flags::remapped(&shapes, &placement, &package, &modules);
     let with = (!remapped.is_empty()).then(|| quote! { with: { #(#remapped),* }, });
+    // The generated code follows the derive rules and the flags lowering of one wit-bindgen
+    // version, so the facade picks it, not the author's crate: the bindings come from its
+    // re-export, and their runtime and the bitflags they name are reached there as well.
     let generate = quote! {
-        ::wit_bindgen::generate!({
+        ::tembra::__wit_bindgen::generate!({
             #path
             inline: #inline,
             world: #world_literal,
             generate_all,
+            runtime_path: "::tembra::__wit_bindgen::rt",
+            bitflags_path: "::tembra::__wit_bindgen::rt::bitflags",
             #derives
             #type_attributes
             #member_attributes

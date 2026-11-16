@@ -77,7 +77,8 @@ fn a_wasi_import_needs_no_consumed_directory() {
         generated.contains("pub use self :: wasi :: random :: random ;"),
         "{generated}"
     );
-    assert!(!generated.contains("path :"), "{generated}");
+    // No `path` option, which would open the bindings' options with a consumed directory.
+    assert!(!generated.contains("({ path :"), "{generated}");
     // Nothing for the manifest: no hook, no policy, no consumed directory.
     assert!(!generated.contains("tembra:manifest"), "{generated}");
     let inline = inline(&generated);

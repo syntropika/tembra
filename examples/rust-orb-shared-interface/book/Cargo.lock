@@ -269,6 +269,7 @@ name = "tembra"
 version = "0.2.2"
 dependencies = [
  "tembra-orb-macro",
+ "wit-bindgen",
 ]
 
 [[package]]
@@ -294,7 +295,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tembra",
- "wit-bindgen",
 ]
 
 [[package]]

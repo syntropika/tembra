@@ -149,8 +149,8 @@ serves the kernel interfaces and the declared hooks itself, as the native execut
 ## Not yet
 
 - Registry-based scaffolding instead of a checkout path or a git commit. The facade already
-  exports the macro; generated bindings still use the explicit `wit-bindgen` and `dlmalloc`
-  dependencies.
+  exports the macro and the bindings generator; generated bindings still use the explicit
+  `dlmalloc`, `serde` and `serde_json` dependencies.
 - `run --call`, behind an optional feature, to install and call the Orb with the executor.
 - `wasm-opt`, once Binaryen handles components; today it works on core modules only.
 - Reproducible builds in a container, like the optimizer, when a marketplace must trust a hash.

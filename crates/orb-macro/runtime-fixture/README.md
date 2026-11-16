@@ -12,8 +12,9 @@ default build counts distinct moves in a `HashSet`, the `no-std` one in a `BTree
 
 Its `chance` service imports `wasi:random/random` and `wasi:clocks/monotonic-clock` with the macro's
 `import` option: it draws bytes from the host's secure random source and awaits a wait on its
-monotonic clock, so both builds enable `wit-bindgen`'s `async` feature. Every installation of the
-fixture grants the `random` and `clocks` system capabilities; the kernel refuses one that does not.
+monotonic clock, through the asynchronous bindings of the `wit-bindgen` the facade brings. Every
+installation of the fixture grants the `random` and `clocks` system capabilities; the kernel
+refuses one that does not.
 
 Its `counting` service, in the `keyed` module, imports `example:counters/counter@1.0.0` by key,
 from the package in `consumed/`: its asynchronous `count` acquires the provider's objects of two
