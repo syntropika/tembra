@@ -1813,6 +1813,7 @@ dependencies = [
  "tembra-executor-wasm",
  "tembra-orb-macro",
  "tembra-runtime",
+ "wit-bindgen",
 ]
 
 [[package]]
@@ -1944,9 +1945,11 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde",
+ "serde_json",
  "syn 2.0.119",
  "tembra-contracts",
  "toml 0.8.23",
+ "wit-component 0.261.0",
  "wit-parser 0.261.0",
 ]
 

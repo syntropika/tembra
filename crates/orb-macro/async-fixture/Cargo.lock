@@ -278,6 +278,7 @@ name = "tembra"
 version = "0.2.2"
 dependencies = [
  "tembra-orb-macro",
+ "wit-bindgen",
 ]
 
 [[package]]
@@ -306,6 +307,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde",
+ "serde_json",
  "syn 2.0.119",
  "tembra-contracts",
  "toml",
@@ -318,7 +320,6 @@ version = "0.1.0"
 dependencies = [
  "dlmalloc",
  "tembra",
- "wit-bindgen",
 ]
 
 [[package]]

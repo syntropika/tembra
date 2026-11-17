@@ -543,6 +543,269 @@ fn reference_views_the_contract_does_not_import_are_refused() {
     }
 }
 
+/// A world importing by key the interface it implements, as `#[orb]` derives one for a proxy: the
+/// view's `use` of the interface's types makes elaboration import the interface the world exports,
+/// for its types only, while the world itself imports the view alone.
+fn proxy() -> String {
+    format!(
+        "package example:router@1.0.0;
+interface counter-ref {{
+  use example:counters/counter@1.0.0.{{tally}};
+  resource counter {{ add: func(amount: u32) -> u32; read: async func() -> tally; }}
+  get: async func(key: list<string>) -> result<counter, string>;
+}}
+world proxy {{ import counter-ref; export example:counters/counter@1.0.0; }}
+package example:counters@1.0.0 {{ {COUNTER} }}
+"
+    )
+}
+
+/// An interface the world exports and imports only because a view `use`s its types is no hook: a
+/// world pairs an import with an export only when it imports the interface itself. The manifest's
+/// lifetime for the implemented interface is a service's, the view is read as a reference, both are
+/// packaged, and a hook role naming the interface is refused as for one the world never imports.
+/// The kernel binds the view alone: the type-only import needs no provider.
+#[test]
+fn an_interface_imported_only_for_its_types_stays_a_service() {
+    const COUNTER_ID: &str = "example:counters/counter@1.0.0";
+    const VIEW: &str = "example:router/counter-ref@1.0.0";
+    let contract = Contract::from_source("proxy.wit", &proxy(), Some("proxy")).unwrap();
+    let manifest =
+        |json: &str| component_carrying(&contract, &[("tembra:manifest", json.as_bytes())]);
+    let component = manifest(&format!(
+        r#"{{"services":{{"{COUNTER_ID}":{{"lifetime":"host"}}}},"references":{{"{VIEW}":"{COUNTER_ID}"}}}}"#
+    ));
+    let roles = contract.embedded_roles(&component).unwrap();
+    let host = ServicePolicy {
+        lifetime: Lifetime::Host,
+        linger_ms: 0,
+    };
+    assert_eq!(
+        roles,
+        ComponentRoles {
+            services: [(COUNTER_ID.into(), host)].into(),
+            references: [(VIEW.to_owned(), COUNTER_ID.to_owned())].into(),
+            ..Default::default()
+        }
+    );
+    let decoded = Artifact::decode(
+        &contract
+            .component_artifact(&component, "proxy", 1, &roles)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded.services, roles.services);
+    assert!(decoded.contributions.is_empty() && decoded.hooks.is_empty());
+    assert_eq!(decoded.contract.references()[VIEW].interface, COUNTER_ID);
+    for (json, refusal) in [
+        (
+            format!(r#"{{"declares":{{"{COUNTER_ID}":"series"}}}}"#),
+            format!(
+                "#[hook] declares {COUNTER_ID}, but the contract does not import and export it"
+            ),
+        ),
+        (
+            format!(r#"{{"contributes":{{"{COUNTER_ID}":1}}}}"#),
+            format!(
+                "#[hook] contributes to {COUNTER_ID}, but the contract does not import and export it as a contribution"
+            ),
+        ),
+    ] {
+        assert_eq!(
+            contract.embedded_roles(&manifest(&json)).unwrap_err().0,
+            refusal
+        );
+    }
+    let provider = crate::OrbProvider {
+        orb: "counters".into(),
+        api_version: 1,
+    };
+    let bindings = contract
+        .providers(
+            &[(VIEW.to_owned(), provider)].into(),
+            &crate::Grants::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        bindings,
+        BTreeMap::from([(
+            VIEW.to_owned(),
+            crate::Binding::Orb {
+                name: "counters".into(),
+                api_version: 1,
+            },
+        )])
+    );
+    let plan = contract.plan("proxy", 1, &bindings).unwrap();
+    assert_eq!(
+        plan.orb
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        [format!("proxy::{COUNTER_ID}").as_str()]
+    );
+    assert_eq!(
+        plan.orb
+            .requires
+            .iter()
+            .map(|requirement| requirement.orb.as_str())
+            .collect::<Vec<_>>(),
+        ["counters"]
+    );
+}
+
+/// A world importing by key the hook-shaped interface it implements: the view `use`s the record of
+/// its one callback, so elaboration imports the interface the world exports, for its types only.
+const GUARD_PROXY: &str = "package example:router@1.0.0;
+interface guard-ref {
+  use example:admission/guard@1.0.0.{admission};
+  resource guard { apply: func(input: admission) -> admission; }
+  get: async func(key: list<string>) -> result<guard, string>;
+}
+world proxy { import guard-ref; export example:admission/guard@1.0.0; }
+package example:admission@1.0.0 {
+  interface guard { record admission { value: s32, blocked: bool } apply: func(input: admission) -> admission; }
+}
+";
+
+/// A contribution passed beside the manifest, as the Node binding's `contributes` passes one,
+/// pairs the hook's export with the world's own import of it, which installation binds to the Orb
+/// declaring the hook. An interface the world imports only because a view `use`s its types pairs
+/// with nothing, and installation would find no provider to select for it: packaging refuses the
+/// contribution, as `embedded_roles` refuses it in a manifest, and so does decoding an artifact
+/// claiming it.
+#[test]
+fn a_contribution_to_an_interface_imported_only_for_its_types_is_refused() {
+    const GUARD: &str = "example:admission/guard@1.0.0";
+    const VIEW: &str = "example:router/guard-ref@1.0.0";
+    let contract = Contract::from_source("proxy.wit", GUARD_PROXY, Some("proxy")).unwrap();
+    let manifest = format!(r#"{{"references":{{"{VIEW}":"{GUARD}"}}}}"#);
+    let component = component_carrying(&contract, &[("tembra:manifest", manifest.as_bytes())]);
+    let mut roles = contract.embedded_roles(&component).unwrap();
+    contract
+        .component_artifact(&component, "proxy", 1, &roles)
+        .unwrap();
+    roles.contributions.insert(GUARD.into(), 0);
+    let refusal = format!("{GUARD}: a contribution must import its WIT callback interface");
+    assert_eq!(
+        contract
+            .component_artifact(&component, "proxy", 1, &roles)
+            .unwrap_err()
+            .0,
+        refusal
+    );
+    let identity = Identity {
+        name: "proxy".into(),
+        api_version: 1,
+        world: "proxy".into(),
+    };
+    let mut forged = component;
+    crate::artifact::append_section(
+        &mut forged,
+        "tembra:orb",
+        &crate::artifact::encode_orb_roles(&identity, contract.prepared(), &roles),
+    );
+    assert_eq!(Artifact::decode(&forged).err().unwrap().0, refusal);
+}
+
+/// A world importing an interface that `use`s a resource of the interface it implements, as
+/// `#[orb]` derives one for `import = "example:docs/index@1.0.0"` beside
+/// `#[service("example:docs/store@1.0.0")]`: elaboration imports the implemented interface for
+/// the resource's type, and an import holding a resource is callable.
+const DOCS_PROXY: &str = "package example:docs@1.0.0;
+interface store {
+  resource doc { constructor(title: string); title: func() -> string; }
+}
+interface index {
+  use store.{doc};
+  search: func(q: string) -> list<doc>;
+}
+world proxy { import index; export store; }
+";
+
+/// An import pairs with an export, as a hook, only when the world imports the interface itself,
+/// at installation as at packaging: an interface the world exports and imports only because
+/// another import `use`s its resource is a service, which packaging accepts with its lifetime,
+/// and its import binds like any other callable import, to the provider the installer names, the
+/// one serving the import that `use`s the resource. Without one it is missing a provider; it is no
+/// entry to a hook, which the Orb never declared, so installation refused the packaged Orb.
+#[test]
+fn an_interface_imported_for_its_resource_binds_to_a_provider_not_to_a_hook() {
+    const STORE: &str = "example:docs/store@1.0.0";
+    const INDEX: &str = "example:docs/index@1.0.0";
+    let contract = Contract::from_source("proxy.wit", DOCS_PROXY, Some("proxy")).unwrap();
+    let manifest = format!(r#"{{"services":{{"{STORE}":{{"lifetime":"host"}}}}}}"#);
+    let component = component_carrying(&contract, &[("tembra:manifest", manifest.as_bytes())]);
+    let roles = contract.embedded_roles(&component).unwrap();
+    assert_eq!(
+        roles,
+        ComponentRoles {
+            services: [(
+                STORE.into(),
+                ServicePolicy {
+                    lifetime: Lifetime::Host,
+                    linger_ms: 0,
+                },
+            )]
+            .into(),
+            ..Default::default()
+        }
+    );
+    contract
+        .component_artifact(&component, "proxy", 1, &roles)
+        .unwrap();
+    let indexer = || crate::OrbProvider {
+        orb: "indexer".into(),
+        api_version: 1,
+    };
+    let error = contract
+        .providers(
+            &[(INDEX.to_owned(), indexer())].into(),
+            &crate::Grants::default(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        (error.reason.as_str(), error.message.as_str()),
+        (
+            "wit_binding",
+            format!("{STORE}: missing Orb provider requirement").as_str()
+        )
+    );
+    let requires = [(INDEX.to_owned(), indexer()), (STORE.to_owned(), indexer())].into();
+    let bindings = contract
+        .providers(&requires, &crate::Grants::default())
+        .unwrap();
+    let bound = crate::Binding::Orb {
+        name: "indexer".into(),
+        api_version: 1,
+    };
+    assert_eq!(
+        bindings,
+        BTreeMap::from([(INDEX.to_owned(), bound.clone()), (STORE.to_owned(), bound)])
+    );
+    contract
+        .check_hooks(&Implementation::default(), &bindings)
+        .unwrap();
+    let plan = contract.plan("proxy", 1, &bindings).unwrap();
+    assert_eq!(
+        plan.orb
+            .services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<Vec<_>>(),
+        [format!("proxy::{STORE}").as_str()]
+    );
+    assert_eq!(
+        plan.orb
+            .requires
+            .iter()
+            .map(|requirement| requirement.orb.as_str())
+            .collect::<Vec<_>>(),
+        ["indexer"]
+    );
+}
+
 /// The manifest is the section of the first core module holding one, in the order of the binary,
 /// the modules of nested components included; a core module is no component.
 #[test]
@@ -572,6 +835,49 @@ fn the_manifest_is_read_from_the_first_core_module_holding_one() {
         Some("nested".into())
     );
     assert!(EmbeddedManifest::read(&module(Some("{}")).finish()).is_err());
+}
+
+/// `#[orb]` writes the manifest it serializes, which reads back as it was. One without a keyed
+/// import or a consumed directory leaves `references` and `wit` out, as before keyed imports.
+#[test]
+fn a_serialized_manifest_reads_back_as_written() {
+    let written = EmbeddedManifest {
+        contributes: [("test:embedded/audit@1.0.0".into(), -3)].into(),
+        declares: [(
+            "test:embedded/guard@1.0.0".into(),
+            HookComposition::Waterfall,
+        )]
+        .into(),
+        services: [(
+            "test:embedded/ledger@1.0.0".into(),
+            ServicePolicy {
+                lifetime: Lifetime::Host,
+                linger_ms: 0,
+            },
+        )]
+        .into(),
+        references: [(
+            "example:router/counter-ref@1.0.0".into(),
+            "example:counters/counter@1.0.0".into(),
+        )]
+        .into(),
+        wit: Some("../wit".into()),
+    };
+    let json = serde_json::to_string(&written).unwrap();
+    assert_eq!(
+        EmbeddedManifest::read(&manifest(&json)).unwrap(),
+        written,
+        "{json}"
+    );
+    let plain = EmbeddedManifest {
+        references: BTreeMap::new(),
+        wit: None,
+        ..written
+    };
+    assert_eq!(
+        serde_json::to_string(&plain).unwrap(),
+        r#"{"contributes":{"test:embedded/audit@1.0.0":-3},"declares":{"test:embedded/guard@1.0.0":"waterfall"},"services":{"test:embedded/ledger@1.0.0":{"lifetime":"host","linger_ms":0}}}"#
+    );
 }
 
 #[test]

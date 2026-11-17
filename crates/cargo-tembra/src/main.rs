@@ -11,6 +11,10 @@
 mod build;
 mod component;
 mod scaffold;
+// The files the build script watches, tested with the CLI.
+#[cfg(test)]
+#[path = "../watched.rs"]
+mod watched;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

@@ -217,7 +217,14 @@ pub fn build(manifest_path: Option<PathBuf>, release: bool, out: Option<PathBuf>
         println!("  {world}.wit         the contract, copied from contract/");
     }
     println!("  checksums.txt");
-    summary(&resolve, world_id, &orb_name, &roles);
+    summary(
+        &mut std::io::stdout(),
+        &resolve,
+        world_id,
+        &orb_name,
+        &roles,
+        Some(contract.prepared().model()),
+    )?;
     Ok(())
 }
 

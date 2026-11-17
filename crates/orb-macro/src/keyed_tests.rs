@@ -1,8 +1,11 @@
 //! Keyed imports: the view the macro derives from the provider's WIT, the role it embeds, the
 //! module it re-exports and the imports it refuses.
-use super::{Options, expand, expansion, metadata::Metadata};
+use super::tests::{
+    expanded_with as expanded, literal, refused_with as refused, resolved_with, wit,
+};
+use super::{Options, expansion};
 use std::path::{Path, PathBuf};
-use syn::{Expr, Item, ItemMod, Lit, LitStr, UnOp};
+use syn::ItemMod;
 
 const COUNTERS: &str = "package example:counters@1.0.0;
 
@@ -48,19 +51,9 @@ interface counter-ref {
 }
 ";
 
-fn literal(text: &str) -> LitStr {
-    LitStr::new(text, proc_macro2::Span::call_site())
-}
-
-/// A directory holding one consumed WIT package, under the system's temporary directory.
+/// A directory holding one consumed WIT package, under this module's prefix.
 fn consumed(name: &str, wit: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "tembra-orb-macro-keyed-{name}-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("package.wit"), wit).unwrap();
-    dir
+    super::tests::consumed(&format!("keyed-{name}"), wit)
 }
 
 /// The options of `example:router@1.0.0` consuming `dir` and importing `keyed` by key.
@@ -73,75 +66,16 @@ fn options(dir: Option<&Path>, keyed: &[&str]) -> Options {
     }
 }
 
-fn expanded(options: Options, module: &str) -> ItemMod {
-    let module = syn::parse_str(module).expect("a module");
-    syn::parse2(
-        expand(options, module, Metadata::named("router"), None)
-            .unwrap_or_else(|error| panic!("{error}")),
-    )
-    .unwrap()
-}
-
-fn refused(options: Options, module: &str) -> String {
-    match expand(
-        options,
-        syn::parse_str(module).expect("a module"),
-        Metadata::named("router"),
-        None,
-    ) {
-        Err(error) => error.to_string(),
-        Ok(_) => panic!("the module was accepted"),
-    }
-}
-
-fn items(module: &ItemMod) -> &[Item] {
-    &module.content.as_ref().expect("a body").1
-}
-
-/// The derived WIT, from the generated `WIT` constant.
-fn wit(module: &ItemMod) -> String {
-    items(module)
-        .iter()
-        .find_map(|item| match item {
-            Item::Const(constant) if constant.ident == "WIT" => match &*constant.expr {
-                Expr::Lit(literal) => match &literal.lit {
-                    Lit::Str(text) => Some(text.value()),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("the WIT constant")
-}
-
 /// The JSON of the `tembra:manifest` section.
 fn manifest(module: &ItemMod) -> String {
-    items(module)
-        .iter()
-        .find_map(|item| match item {
-            Item::Static(section) if section.ident == "__TEMBRA_MANIFEST" => match &*section.expr {
-                Expr::Unary(deref) if matches!(deref.op, UnOp::Deref(_)) => match &*deref.expr {
-                    Expr::Lit(literal) => match &literal.lit {
-                        Lit::ByteStr(bytes) => Some(String::from_utf8(bytes.value()).unwrap()),
-                        _ => None,
-                    },
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("the manifest")
+    super::tests::manifest(module).expect("the manifest")
 }
 
 /// The derived WIT read with the consumed packages, as the bindings read it.
 fn resolved(dir: &Path, text: &str) {
     let mut resolve = wit_parser::Resolve::default();
     resolve.push_dir(dir).unwrap();
-    resolve
-        .push_str("orb.wit", text)
-        .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
+    resolved_with(resolve, text);
 }
 
 /// An interface imported by key gets a view in the Orb's package: a resource of the interface's
@@ -295,8 +229,9 @@ fn the_attribute_writes_a_keyed_import_in_parentheses() {
 
 /// What makes a keyed import impossible is an error naming the interface: a WASI interface, which
 /// the installation grants and no Orb provides, no directory to read it from, an interface that
-/// is not there, one with a resource, a function carrying something other than data, no function
-/// at all.
+/// is not there, one with a resource, a function carrying something other than data or data the
+/// runtime refuses in a signature, no function at all, a function or a parameter named like what a
+/// method of the view already has.
 #[test]
 fn an_interface_without_a_view_is_refused() {
     let wasi = refused(options(None, &["wasi:random/random@0.3.0"]), ROUTER);
@@ -344,6 +279,27 @@ fn an_interface_without_a_view_is_refused() {
             "watch: async func() -> stream<u8>;",
             "`watch` carries a stream",
         ),
+        // What tembra-contracts' `supported` refuses in a signature.
+        (
+            "nested",
+            "maybe: func() -> option<option<u32>>;",
+            "`maybe` carries an option of an option, which the runtime refuses in a signature",
+        ),
+        (
+            "map",
+            "index: func(entries: map<string, u32>) -> u32;",
+            "`index` carries a map, which the runtime refuses in a signature",
+        ),
+        (
+            "fixed",
+            "corners: func() -> list<u32, 4>;",
+            "`corners` carries a list of a fixed length, which the runtime refuses in a signature",
+        ),
+        (
+            "nested-held",
+            "record found { at: option<option<u32>> } find: func() -> found;",
+            "`find` carries an option of an option in the type `found`, which the runtime refuses in a signature",
+        ),
         ("empty", "record tally { count: u32 }", "has no function"),
         // A resource no function names: the kernel binds an interface with a resource as
         // callable, so the view's `use` of the interface would need a provider of its own.
@@ -351,6 +307,33 @@ fn an_interface_without_a_view_is_refused() {
             "bare",
             "resource cursor; record tally { count: u32 } read: func() -> tally;",
             "has the resource `cursor`, and the objects of a view carry data, so an interface with a resource is not imported by key",
+        ),
+        // The bindings of every object have their own methods for its handle, and a method takes
+        // its object as `self`, which WIT does not tell from `SELF`.
+        (
+            "handle-method",
+            "handle: func() -> u32;",
+            "`handle` would be the method `handle` of the objects a keyed import reaches, which their bindings define already for the object's handle",
+        ),
+        (
+            "take-handle",
+            "take-handle: func() -> u32;",
+            "`take-handle` would be the method `take_handle` of the objects a keyed import reaches",
+        ),
+        (
+            "from-handle",
+            "from-handle: func(handle: u32) -> u32;",
+            "`from-handle` would be the method `from_handle` of the objects a keyed import reaches",
+        ),
+        (
+            "self",
+            "add: func(self: u32) -> u32;",
+            "`add` has a parameter `self`, and as a method of the objects a keyed import reaches it takes its object as `self`",
+        ),
+        (
+            "upper-self",
+            "add: func(amount: u32, SELF: u32) -> u32;",
+            "`add` has a parameter `SELF`, and as a method of the objects a keyed import reaches it takes its object as `self`",
         ),
     ] {
         let dir = consumed(
@@ -386,11 +369,16 @@ interface counter { use cursors.{cursor}; read: func() -> u32; }
     );
 }
 
-/// An interface the module implements is not imported by key: the view would `use` the
-/// interface's types, so the world would import the interface it exports, which `cargo tembra
-/// build` and the kernel read as a hook. The error is on the import.
+/// An interface the module implements is imported by key, not plainly: a proxy serving the
+/// interface reaches another provider's objects through the view, while a world that imports the
+/// interface itself and exports it is a hook, so a plain import is an error on the import. The view
+/// `use`s the interface's types, so the elaborated world imports the interface it exports, for the
+/// types alone, which the contracts and `cargo tembra build` tell from a hook, an interface the
+/// world imports itself. A derived signature names the interface's types through the implemented
+/// interface's module, the export's copy, which the derived interface takes; the view's module
+/// names the import's.
 #[test]
-fn an_implemented_interface_is_not_imported_by_key() {
+fn an_implemented_interface_is_imported_by_key() {
     const PROXY: &str = "mod proxy {
         #[service(\"example:counters/counter@1.0.0\")]
         pub struct Counter;
@@ -400,22 +388,275 @@ fn an_implemented_interface_is_not_imported_by_key() {
         }
     }";
     let dir = consumed("implemented", COUNTERS);
-    // The proxy implements the interface and reaches another provider's objects plainly.
-    expanded(
+    // Imported plainly, the interface would be both the import and the export the Orb module
+    // re-exports as `counter`, in a world that pairs them as a hook.
+    let plain = refused(
         Options {
             imports: vec![literal("example:counters/counter@1.0.0")],
             ..options(Some(&dir), &[])
         },
         PROXY,
     );
-    let refusal = refused(
+    assert!(
+        plain.contains("example:counters/counter@1.0.0 is implemented by this module and imported plainly: a world that imports and exports one interface is a hook; reach another provider's objects with import(\"example:counters/counter@1.0.0\", keyed), or contribute to or declare the hook with #[hook(\"example:counters/counter@1.0.0\", ..)]"),
+        "{plain}"
+    );
+    // The proxy implements the interface and reaches another provider's objects by key.
+    expanded(
         options(Some(&dir), &["example:counters/counter@1.0.0"]),
         PROXY,
     );
+    // Through the view, from a derived service.
+    let relaying = PROXY.replace(
+        "\n    }",
+        "
+        #[service]
+        pub struct Relay;
+        impl Relay {
+            /// The tally of the object of `key` of the provider the view reaches.
+            pub async fn relayed(key: String) -> Result<counter::Tally, String> {
+                let tally = counter_ref::get(vec![key]).await?.read().await;
+                Ok(counter::Tally { key: tally.key, count: tally.count })
+            }
+        }
+    }",
+    );
+    let module = expanded(
+        options(Some(&dir), &["example:counters/counter@1.0.0"]),
+        &relaying,
+    );
+    let text = wit(&module);
+    for expected in [
+        "interface relay {\n  use example:counters/counter@1.0.0.{tally};\n  /// The tally of the object of `key` of the provider the view reaches.\n  relayed: async func(key: string) -> result<tally, string>;\n}\n".to_owned(),
+        format!("{VIEW}\nworld proxy {{\n  import counter-ref;\n  export example:counters/counter@1.0.0;\n  export relay;\n}}\n"),
+    ] {
+        assert!(text.contains(&expected), "{expected}\n{text}");
+    }
+    resolved(&dir, &text);
     assert!(
-        refusal.contains("example:counters/counter@1.0.0 is implemented by this module and imported by key: the view `use`s the interface's types, so the world imports example:counters/counter@1.0.0 while the Orb exports it, which `cargo tembra build` and the kernel read as a hook; an interface imported by key is one another Orb implements"),
+        manifest(&module).contains(
+            r#""references":{"example:router/counter-ref@1.0.0":"example:counters/counter@1.0.0"}"#
+        ),
+        "{}",
+        manifest(&module)
+    );
+    let tokens = quote::quote!(#module).to_string();
+    for reexport in [
+        "pub use exports :: example :: counters :: counter ;",
+        "pub use self :: example :: router :: counter_ref ;",
+    ] {
+        assert!(tokens.contains(reexport), "{reexport}\n{tokens}");
+    }
+    // The view's module names the import's copy of the interface's types, which the derived
+    // interface's bindings do not take: the error points to the implemented interface's module.
+    for (written, named, subject) in [
+        (
+            "-> Result<counter::Tally, String>",
+            "-> Result<counter_ref::Tally, String>",
+            "returns",
+        ),
+        (
+            "relayed(key: String)",
+            "relayed(key: String, last: counter_ref::Tally)",
+            "takes",
+        ),
+    ] {
+        let refusal = refused(
+            options(Some(&dir), &["example:counters/counter@1.0.0"]),
+            &relaying.replace(written, named),
+        );
+        assert!(
+            refusal.contains(&format!(
+                "`Relay::relayed` {subject} `Tally`, a record of the interface example:counters/counter@1.0.0, which this module imports by key and implements: a derived interface takes the types of an implemented interface from its export, as `counter::Tally` names them; `counter_ref::Tally` is the import's"
+            )),
+            "{refusal}"
+        );
+    }
+}
+
+/// The keyed import of an implemented interface brings the bindings' import module of the
+/// interface, `self::example::counters::counter`, which names the import's copy of its types, as
+/// the view's module does: a derived signature names an implemented interface's types through the
+/// interface's own module, `counter::Tally`, the export's copy, or through the export module the
+/// Orb module re-exports it from; a path into the bindings' import is refused, named as written.
+#[test]
+fn a_path_into_the_bindings_import_of_an_implemented_interface_is_refused() {
+    let dir = consumed("bindings-import", COUNTERS);
+    let proxy = |relayed: &str| {
+        format!(
+            "mod proxy {{
+                #[service(\"example:counters/counter@1.0.0\")]
+                pub struct Counter;
+                impl Counter {{
+                    pub fn add(amount: u32) -> u32 {{ amount }}
+                    pub async fn read() -> counter::Tally {{ counter::Tally {{ key: vec![], count: 0 }} }}
+                }}
+                #[service]
+                pub struct Relay;
+                impl Relay {{ {relayed} }}
+            }}"
+        )
+    };
+    for (written, subject, path) in [
+        (
+            "pub fn relayed(last: self::example::counters::counter::Tally) -> u32 { last.count }",
+            "takes",
+            "self::example::counters::counter::Tally",
+        ),
+        (
+            "pub fn relayed() -> Option<example::counters::counter::Tally> { None }",
+            "returns",
+            "example::counters::counter::Tally",
+        ),
+    ] {
+        let refusal = refused(
+            options(Some(&dir), &["example:counters/counter@1.0.0"]),
+            &proxy(written),
+        );
+        assert!(
+            refusal.contains(&format!(
+                "`Relay::relayed` {subject} `Tally`, a record of the implemented interface example:counters/counter@1.0.0, through the bindings' module of its import: a derived interface takes the types of an implemented interface from its export, as `counter::Tally` names them; `{path}` is the import's"
+            )),
+            "{refusal}"
+        );
+    }
+    for path in [
+        "counter::Tally",
+        "exports::example::counters::counter::Tally",
+    ] {
+        expanded(
+            options(Some(&dir), &["example:counters/counter@1.0.0"]),
+            &proxy(&format!(
+                "pub fn relayed(last: {path}) -> u32 {{ last.count }}"
+            )),
+        );
+    }
+}
+
+/// A path is read where it leads, through the `use` declarations of the modules it passes: a
+/// `use` of the bindings' import module of an implemented interface makes a path through its name
+/// the import's, and one of the bindings' `exports` module makes a path through it the export's,
+/// whatever the path's own text says.
+#[test]
+fn a_path_into_the_bindings_import_is_followed_through_uses() {
+    let dir = consumed("used-import", COUNTERS);
+    let proxy = |uses: &str, relayed: &str| {
+        format!(
+            "mod proxy {{
+                #[service(\"example:counters/counter@1.0.0\")]
+                pub struct Counter;
+                impl Counter {{
+                    pub fn add(amount: u32) -> u32 {{ amount }}
+                    pub async fn read() -> counter::Tally {{ counter::Tally {{ key: vec![], count: 0 }} }}
+                }}
+                pub mod relay {{
+                    {uses}
+                    #[service]
+                    pub struct Relay;
+                    impl Relay {{ pub fn relayed(last: {relayed}) -> u32 {{ last.count }} }}
+                }}
+            }}"
+        )
+    };
+    for (uses, relayed) in [
+        ("use super::example::counters::counter;", "counter::Tally"),
+        ("use super::example::counters;", "counters::counter::Tally"),
+        (
+            "use super::example as bindings;",
+            "bindings::counters::counter::Tally",
+        ),
+    ] {
+        let refusal = refused(
+            options(Some(&dir), &["example:counters/counter@1.0.0"]),
+            &proxy(uses, relayed),
+        );
+        assert!(
+            refusal.contains(&format!(
+                "`Relay::relayed` takes `Tally`, a record of the implemented interface example:counters/counter@1.0.0, through the bindings' module of its import: a derived interface takes the types of an implemented interface from its export, as `counter::Tally` names them; `{relayed}` is the import's, a `use` leading it to `example::counters::counter::Tally` of the Orb module"
+            )),
+            "{uses}\n{refusal}"
+        );
+    }
+    for (uses, relayed) in [
+        (
+            "use super::exports as ex;",
+            "ex::example::counters::counter::Tally",
+        ),
+        (
+            "use super::exports::example::counters::counter;",
+            "counter::Tally",
+        ),
+        ("use super::counter;", "counter::Tally"),
+        ("use super::*;", "counter::Tally"),
+        (
+            "use super::*;",
+            "exports::example::counters::counter::Tally",
+        ),
+    ] {
+        expanded(
+            options(Some(&dir), &["example:counters/counter@1.0.0"]),
+            &proxy(uses, relayed),
+        );
+    }
+    // A name a glob brings from the bindings' modules keeps the path's own text.
+    let refusal = refused(
+        options(Some(&dir), &["example:counters/counter@1.0.0"]),
+        &proxy("use super::*;", "example::counters::counter::Tally"),
+    );
+    assert!(
+        refusal.contains(
+            "as `counter::Tally` names them; `example::counters::counter::Tally` is the import's"
+        ),
         "{refusal}"
     );
+}
+
+/// An implemented interface may `use` its types from an interface the world only imports: the
+/// bindings alias the implemented interface's import and export, and the view of its keyed
+/// import, to the type of that import, so the view and the bindings' module of the import name
+/// the very type a derived interface takes.
+#[test]
+fn a_type_an_implemented_interface_uses_from_an_import_has_one_copy() {
+    let dir = consumed(
+        "used-tally",
+        "package example:counters@1.0.0;
+
+interface types {
+  record tally { key: list<string>, count: u32 }
+}
+
+interface counter {
+  use types.{tally};
+  add: func(amount: u32) -> u32;
+  read: async func() -> tally;
+}
+",
+    );
+    let module = expanded(
+        options(Some(&dir), &["example:counters/counter@1.0.0"]),
+        "mod proxy {
+            #[service(\"example:counters/counter@1.0.0\")]
+            pub struct Counter;
+            impl Counter {
+                pub fn add(amount: u32) -> u32 { amount }
+                pub async fn read() -> counter::Tally { counter::Tally { key: vec![], count: 0 } }
+            }
+            #[service]
+            pub struct Relay;
+            impl Relay {
+                pub async fn relayed(key: String) -> Result<counter_ref::Tally, String> {
+                    Ok(counter_ref::get(vec![key]).await?.read().await)
+                }
+                pub fn counted(last: self::example::counters::counter::Tally) -> u32 { last.count }
+            }
+        }",
+    );
+    let text = wit(&module);
+    assert!(
+        text.contains("interface relay {\n  use example:counters/counter@1.0.0.{tally};\n"),
+        "{text}"
+    );
+    resolved(&dir, &text);
 }
 
 /// A view is an interface of the Orb's package named after the provider interface: an interface
@@ -476,4 +717,44 @@ package example:other@1.0.0 {{
         let refusal = refused(options(Some(&dir), keyed), &module);
         assert!(refusal.contains(message), "{message}\n{refusal}");
     }
+}
+
+/// The Orb module re-exports a view's module under the view's name, and an imported interface's
+/// under the interface's: an import of an interface named like a view is an error naming both,
+/// and either import alone expands.
+#[test]
+fn an_import_named_like_a_view_is_refused() {
+    let dir = consumed(
+        "reexported",
+        &format!(
+            "{COUNTERS}
+package example:other@1.0.0 {{
+  interface counter-ref {{ read: func() -> u32; }}
+}}
+"
+        ),
+    );
+    let plain = || vec![literal("example:other/counter-ref@1.0.0")];
+    let refusal = refused(
+        Options {
+            imports: plain(),
+            ..options(Some(&dir), &["example:counters/counter@1.0.0"])
+        },
+        ROUTER,
+    );
+    assert!(
+        refusal.contains("the Orb module would re-export two modules as `counter_ref`: that of the imported interface example:other/counter-ref@1.0.0, and that of the interface example:counters/counter@1.0.0, which this module imports by key; keep one of them"),
+        "{refusal}"
+    );
+    expanded(
+        options(Some(&dir), &["example:counters/counter@1.0.0"]),
+        ROUTER,
+    );
+    expanded(
+        Options {
+            imports: plain(),
+            ..options(Some(&dir), &[])
+        },
+        ROUTER,
+    );
 }

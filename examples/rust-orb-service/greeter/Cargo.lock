@@ -267,6 +267,7 @@ name = "tembra"
 version = "0.2.2"
 dependencies = [
  "tembra-orb-macro",
+ "wit-bindgen",
 ]
 
 [[package]]
@@ -292,7 +293,6 @@ name = "tembra-example-greeter"
 version = "0.1.0"
 dependencies = [
  "tembra",
- "wit-bindgen",
 ]
 
 [[package]]
@@ -303,6 +303,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde",
+ "serde_json",
  "syn 2.0.119",
  "tembra-contracts",
  "toml",

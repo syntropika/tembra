@@ -7,7 +7,7 @@
 //! interface. The macro derives the view from the provider's WIT in the consumed directory, names
 //! it after the provider interface followed by `-ref`, imports it in the world, re-exports its
 //! generated module under that name and writes the role in the manifest's `references`.
-use crate::wit::escaped;
+use crate::wit::{anywhere, escaped, unsupported};
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::{
@@ -20,6 +20,9 @@ use wit_parser::{FunctionKind, Resolve, Type, TypeDefKind, TypeOwner};
 /// The acquisition function of every view.
 const GET: &str = "get";
 
+/// The methods `wit-bindgen` gives every imported resource, the view's included, for its handle.
+const HANDLE_METHODS: [&str; 3] = ["handle", "take_handle", "from_handle"];
+
 /// How the attribute writes a keyed import, for the errors.
 const USAGE: &str = "an interface imported by key is written import(\"ns:name/interface@version\", keyed); import = \"ns:name/interface@version\" reaches the provider's main object";
 
@@ -31,6 +34,9 @@ pub(crate) struct View {
     pub name: String,
     /// The view's WIT: an interface of the Orb's package, with its documentation.
     pub text: String,
+    /// The provider interface's types the view `use`s, by their WIT names: those its functions
+    /// name, the only ones the view's module re-exports.
+    pub used: BTreeSet<String>,
 }
 
 /// Read the parenthesized form of the attribute's `import` option,
@@ -58,25 +64,27 @@ pub(crate) fn option(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<LitSt
     Ok(identity)
 }
 
-/// The views of the interfaces the attribute imports by key, in the order it names them. Each is
-/// a WIT identity of another Orb's interface, not of WASI, which the installation grants instead,
-/// and not one the module implements, `implemented`, imported by key once, read from the consumed
-/// packages of `dir`, and its view takes a name that neither the world nor another interface of
-/// the package, `taken`, has.
+/// The views of the interfaces the attribute imports by key, in the order it names them, whose
+/// literals `expand` has read as WIT identities already. Each is another Orb's interface, or one
+/// this module implements, a proxy reaching other providers' objects, not WASI's, which the
+/// installation grants instead, imported by key once, read from the consumed packages of `dir`,
+/// and its view takes a name that neither the world nor another interface of the package, `taken`,
+/// has. The view's `use` of an implemented interface's types makes the elaborated world import the
+/// interface it exports, for the types alone, which `cargo tembra build` and the kernel tell from a
+/// hook, an interface the world imports itself.
 pub(crate) fn views(
     imports: &[LitStr],
-    dir: Option<&Path>,
+    dir: Option<&crate::wit::Directory>,
     world: &str,
     taken: &BTreeMap<String, &Ident>,
-    implemented: &[String],
 ) -> syn::Result<Vec<View>> {
     if imports.is_empty() {
         return Ok(Vec::new());
     }
-    let resolve = dir.map(crate::wit::resolve).transpose()?;
+    let resolve = dir.map(crate::wit::Directory::packages).transpose()?;
     let mut views: Vec<View> = Vec::new();
     for literal in imports {
-        let target = crate::wit_identity(literal, "an interface imported by key", true)?;
+        let target = literal.value();
         if crate::wasi::is_wasi(&target) {
             return Err(syn::Error::new(
                 literal.span(),
@@ -85,19 +93,7 @@ pub(crate) fn views(
                 ),
             ));
         }
-        // The view `use`s the interface's types, which imports the interface into the elaborated
-        // world; an interface the world imports and exports is a hook to `cargo tembra build`
-        // and the kernel, so a service's lifetime is refused and its functions are read as a
-        // hook's callback.
-        if implemented.contains(&target) {
-            return Err(syn::Error::new(
-                literal.span(),
-                format!(
-                    "{target} is implemented by this module and imported by key: the view `use`s the interface's types, so the world imports {target} while the Orb exports it, which `cargo tembra build` and the kernel read as a hook; an interface imported by key is one another Orb implements"
-                ),
-            ));
-        }
-        let (Some(dir), Some(resolve)) = (dir, &resolve) else {
+        let (Some(dir), Some(resolve)) = (dir, resolve) else {
             return Err(syn::Error::new(
                 literal.span(),
                 "importing an interface by key needs wit = \"<dir>\", the directory with its WIT package",
@@ -125,25 +121,34 @@ pub(crate) fn views(
         if let Some(clash) = clash {
             return Err(syn::Error::new(literal.span(), clash));
         }
-        let text = view_text(resolve, dir, &target, &name)
+        let (text, used) = view_text(resolve, dir.path(), &target, &name)
             .map_err(|message| syn::Error::new(literal.span(), message))?;
-        views.push(View { target, name, text });
+        views.push(View {
+            target,
+            name,
+            text,
+            used,
+        });
     }
     Ok(views)
 }
 
 /// The view's interface name for the provider interface `ns:name/interface@version`.
 pub(crate) fn view_name(target: &str) -> String {
-    let interface = target.split_once('/').map_or(target, |(_, rest)| rest);
-    let interface = interface.split('@').next().unwrap_or(interface);
+    let interface = crate::Identity::of(target).interface.unwrap_or_default();
     format!("{interface}-ref")
 }
 
 /// The view's WIT: the provider interface's types its functions name, `use`d from it; a resource
 /// of the provider interface's name whose methods are the interface's functions, each `async`
 /// exactly when the function is, with its documentation; and `get`, the acquisition the kernel
-/// answers with the object of a key or the reason it refused it.
-fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<String, String> {
+/// answers with the object of a key or the reason it refused it. With it, the names it `use`s.
+fn view_text(
+    resolve: &Resolve,
+    dir: &Path,
+    target: &str,
+    name: &str,
+) -> Result<(String, BTreeSet<String>), String> {
     let interface =
         crate::wit::interface(resolve, dir, target).map_err(|error| error.to_string())?;
     let resource = interface.name.clone().unwrap_or_default();
@@ -169,11 +174,34 @@ fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<
                 ));
             }
         };
-        let carried = |problem: String| {
-            format!(
+        let method = crate::rust_ident(&function.name).to_string();
+        if HANDLE_METHODS.contains(&method.as_str()) {
+            return Err(format!(
+                "{target} cannot be imported by key: `{}` would be the method `{method}` of the objects a keyed import reaches, which their bindings define already for the object's handle",
+                function.name
+            ));
+        }
+        // A method takes its object as `self`, and WIT tells names apart by neither case nor
+        // dashes: `SELF` is `self` too.
+        if let Some(param) = function
+            .params
+            .iter()
+            .find(|param| param.name.replace('-', "").eq_ignore_ascii_case("self"))
+        {
+            return Err(format!(
+                "{target} cannot be imported by key: `{}` has a parameter `{}`, and as a method of the objects a keyed import reaches it takes its object as `self`",
+                function.name, param.name
+            ));
+        }
+        let carried = |problem: Carried| match problem {
+            Carried::NoData(problem) => format!(
                 "{target} cannot be imported by key: `{}` carries {problem}, and the methods of the objects a keyed import reaches carry data only",
                 function.name
-            )
+            ),
+            Carried::Unsupported(problem) => format!(
+                "{target} cannot be imported by key: `{}` carries {problem}, which the runtime refuses in a signature",
+                function.name
+            ),
         };
         let params = function
             .params
@@ -185,7 +213,7 @@ fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<
                     spelling.spell(param.ty)?
                 ))
             })
-            .collect::<Result<Vec<_>, String>>()
+            .collect::<Result<Vec<_>, Carried>>()
             .map_err(carried)?;
         let result = match function.result {
             Some(ty) => format!(" -> {}", spelling.spell(ty).map_err(carried)?),
@@ -248,7 +276,7 @@ fn view_text(resolve: &Resolve, dir: &Path, target: &str, name: &str) -> Result<
         escaped(&resource)
     ));
     text.push_str("}\n");
-    Ok(text)
+    Ok((text, spelling.used))
 }
 
 /// Whether a type of an interface is a resource, defined there or `use`d from another interface.
@@ -282,9 +310,16 @@ struct Spelling<'a> {
     used: BTreeSet<String>,
 }
 
+/// What a function of the provider interface carries that a view's method cannot: what is no data,
+/// which the objects of a view do not carry, or data the runtime refuses in a signature.
+enum Carried {
+    NoData(String),
+    Unsupported(String),
+}
+
 impl Spelling<'_> {
-    /// Spell a type of a function's signature, or say what it carries that is no data.
-    fn spell(&mut self, ty: Type) -> Result<String, String> {
+    /// Spell a type of a function's signature, or say what it carries that a view's method cannot.
+    fn spell(&mut self, ty: Type) -> Result<String, Carried> {
         Ok(match ty {
             Type::Bool => "bool".into(),
             Type::U8 => "u8".into(),
@@ -299,29 +334,33 @@ impl Spelling<'_> {
             Type::F64 => "f64".into(),
             Type::Char => "char".into(),
             Type::String => "string".into(),
-            Type::ErrorContext => return Err("an error context".into()),
+            Type::ErrorContext => return Err(Carried::NoData("an error context".into())),
             Type::Id(id) => {
                 let definition = &self.resolve.types[id];
                 if let Some(type_name) = &definition.name {
                     let owned = matches!(definition.owner, TypeOwner::Interface(owner)
                         if self.resolve.id_of(owner).as_deref() == Some(self.target));
                     if !owned {
-                        return Err(format!(
+                        return Err(Carried::NoData(format!(
                             "the type `{type_name}`, which {} does not name",
                             self.target
-                        ));
+                        )));
                     }
-                    if let Some(problem) = no_data(self.resolve, ty, &mut BTreeSet::new()) {
-                        return Err(format!("{problem} in the type `{type_name}`"));
+                    if let Some(problem) = no_data(self.resolve, ty) {
+                        return Err(Carried::NoData(format!(
+                            "{problem} in the type `{type_name}`"
+                        )));
+                    }
+                    if let Some(problem) = unsupported(self.resolve, ty) {
+                        return Err(Carried::Unsupported(format!(
+                            "{problem} in the type `{type_name}`"
+                        )));
                     }
                     self.used.insert(type_name.clone());
                     return Ok(escaped(type_name));
                 }
-                match &definition.kind {
+                let spelled = match &definition.kind {
                     TypeDefKind::List(inner) => format!("list<{}>", self.spell(*inner)?),
-                    TypeDefKind::FixedLengthList(inner, length) => {
-                        format!("list<{}, {length}>", self.spell(*inner)?)
-                    }
                     TypeDefKind::Option(inner) => format!("option<{}>", self.spell(*inner)?),
                     TypeDefKind::Result(result) => match (result.ok, result.err) {
                         (None, None) => "result".into(),
@@ -340,57 +379,48 @@ impl Spelling<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .join(", ")
                     ),
-                    TypeDefKind::Map(key, value) => {
-                        format!("map<{}, {}>", self.spell(*key)?, self.spell(*value)?)
-                    }
                     TypeDefKind::Type(inner) => self.spell(*inner)?,
                     _ => {
-                        return Err(no_data(self.resolve, ty, &mut BTreeSet::new())
-                            .unwrap_or("a type without a name")
-                            .to_owned());
+                        return Err(match no_data(self.resolve, ty) {
+                            Some(problem) => Carried::NoData(problem.to_owned()),
+                            None => match unsupported(self.resolve, ty) {
+                                Some(problem) => Carried::Unsupported(problem.to_owned()),
+                                None => Carried::NoData("a type without a name".to_owned()),
+                            },
+                        });
                     }
+                };
+                // What the runtime refuses of the type itself, its parts spelled: an option of an
+                // option.
+                if let Some(problem) = unsupported(self.resolve, ty) {
+                    return Err(Carried::Unsupported(problem.to_owned()));
                 }
+                spelled
             }
         })
     }
 }
 
-/// What a type holds anywhere that is no data, if anything: a resource or a handle to one, a
-/// future, a stream or an error context.
-pub(crate) fn no_data(
-    resolve: &Resolve,
-    ty: Type,
-    seen: &mut BTreeSet<wit_parser::TypeId>,
-) -> Option<&'static str> {
+/// What a type holds anywhere that is no data, if anything, as `no_data_itself` finds it in each
+/// type.
+pub(crate) fn no_data(resolve: &Resolve, ty: Type) -> Option<&'static str> {
+    anywhere(resolve, ty, |ty| no_data_itself(resolve, ty))
+}
+
+/// Whether a type is itself no data, and what: a resource or a handle to one, a future, a stream
+/// or an error context.
+pub(crate) fn no_data_itself(resolve: &Resolve, ty: Type) -> Option<&'static str> {
     let id = match ty {
         Type::Id(id) => id,
         Type::ErrorContext => return Some("an error context"),
         _ => return None,
     };
-    // A type already looked at answered no, or the walk would have stopped there.
-    if !seen.insert(id) {
-        return None;
-    }
-    let mut holds = |ty: Type| no_data(resolve, ty, seen);
     match &resolve.types[id].kind {
         TypeDefKind::Resource => Some("a resource"),
         TypeDefKind::Handle(_) => Some("a resource handle"),
         TypeDefKind::Future(_) => Some("a future"),
         TypeDefKind::Stream(_) => Some("a stream"),
-        TypeDefKind::Record(record) => record.fields.iter().find_map(|field| holds(field.ty)),
-        TypeDefKind::Variant(variant) => variant
-            .cases
-            .iter()
-            .filter_map(|case| case.ty)
-            .find_map(holds),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().copied().find_map(holds),
-        TypeDefKind::Option(inner)
-        | TypeDefKind::List(inner)
-        | TypeDefKind::FixedLengthList(inner, _)
-        | TypeDefKind::Type(inner) => holds(*inner),
-        TypeDefKind::Map(key, value) => holds(*key).or_else(|| holds(*value)),
-        TypeDefKind::Result(result) => result.ok.into_iter().chain(result.err).find_map(holds),
-        TypeDefKind::Flags(_) | TypeDefKind::Enum(_) | TypeDefKind::Unknown => None,
+        _ => None,
     }
 }
 
@@ -399,18 +429,12 @@ fn binding(package: &str, view: &View) -> String {
     crate::identity(package, &view.name)
 }
 
-/// The manifest's `references`, each view's binding mapped to the provider interface it reaches,
-/// as a member to append to the manifest's object; nothing without a keyed import, so the
-/// manifest of an Orb without one is what it was.
-pub(crate) fn manifest(package: &str, views: &[View]) -> String {
-    if views.is_empty() {
-        return String::new();
-    }
-    let references: Vec<String> = views
+/// The manifest's `references`: each view's binding mapped to the provider interface it reaches.
+pub(crate) fn manifest(package: &str, views: &[View]) -> BTreeMap<String, String> {
+    views
         .iter()
-        .map(|view| format!("\"{}\":\"{}\"", binding(package, view), view.target))
-        .collect();
-    format!(",\"references\":{{{}}}", references.join(","))
+        .map(|view| (binding(package, view), view.target.clone()))
+        .collect()
 }
 
 /// The re-export of each view's generated module in the Orb module, under the view's interface

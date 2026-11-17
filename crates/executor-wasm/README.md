@@ -53,8 +53,10 @@ host.install(vec![arithmetic, calculator])?;
 `Engine::load` returns the same `Orb` type as a native declaration. Install it
 with other Orbs, replace it with `Host::reload`, and call it through ordinary
 references. `Engine::instances()` reports live Stores; it returns to zero after
-the host closes. `Engine::on_log` receives guest console output attributed by the
-host, not by the guest.
+the host closes. The Orbs loaded from one compiled artifact share the component
+its first load compiled, kept while any of them runs; `Engine::components()`
+counts the components kept. `Engine::on_log` receives guest console output
+attributed by the host, not by the guest.
 
 A complete example is [examples/rust/wasm.rs](../../examples/rust/wasm.rs):
 

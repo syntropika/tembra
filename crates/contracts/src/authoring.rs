@@ -125,7 +125,7 @@ fn dependencies(
         let source = String::from_utf8(bytes).map_err(|error| package(&dependency, error))?;
         // A copy of a bundled standard contract, there so that the directory resolves with
         // `Resolve::push_dir` alone too, adds nothing to the bundled package.
-        if crate::standard::bundled(&source) {
+        if crate::bundled(&source) {
             continue;
         }
         let group =

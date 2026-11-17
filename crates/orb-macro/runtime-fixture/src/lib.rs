@@ -11,6 +11,9 @@ extern crate alloc;
         import = "wasi:clocks/monotonic-clock@0.3.0",
         import("example:counters/counter@1.0.0", keyed),
         import = "example:counters/counter@1.0.0",
+        import = "example:ledger/book@1.0.0",
+        import = "example:texts/texts@1.0.0",
+        import("example:shelves/shelf@1.0.0", keyed),
         no_std
     )
 )]
@@ -22,7 +25,10 @@ extern crate alloc;
         import = "wasi:random/random@0.3.0",
         import = "wasi:clocks/monotonic-clock@0.3.0",
         import("example:counters/counter@1.0.0", keyed),
-        import = "example:counters/counter@1.0.0"
+        import = "example:counters/counter@1.0.0",
+        import = "example:ledger/book@1.0.0",
+        import = "example:texts/texts@1.0.0",
+        import("example:shelves/shelf@1.0.0", keyed)
     )
 )]
 mod guest {
@@ -216,6 +222,10 @@ mod guest {
         pub struct Recorded {
             pub last: Option<counter::Tally>,
             pub readings: u32,
+            /// How many readings were thrown away: no build holds the field, as `any()` is never
+            /// on, and the `Default` the macro writes for the state leaves it out with it.
+            #[cfg(any())]
+            pub discarded: u32,
         }
 
         #[service]
@@ -253,12 +263,48 @@ mod guest {
         }
     }
 
+    /// Spells words into the builders of `example:texts/texts@1.0.0`, an interface the attribute
+    /// imports plainly, from the package in `consumed/deps/`: a job holds the caller's builder, the
+    /// imported interface's handle, in a record of the module, which the runtime moves into the
+    /// call as it moves the handle alone. The Orb calls every function of the interface, since the
+    /// test reads its contract from the component, which keeps no import function the code never
+    /// calls.
+    pub mod spelling {
+        use super::texts;
+        use alloc::string::String;
+
+        /// A word to append to the builder the caller hands over.
+        pub struct Job {
+            pub builder: texts::Builder,
+            pub word: String,
+        }
+
+        #[service]
+        pub struct Speller;
+
+        impl Speller {
+            /// Append the job's word to its builder and return the length of the text; the
+            /// builder is consumed.
+            pub fn spell_job(job: Job) -> u32 {
+                job.builder.append(&job.word)
+            }
+
+            /// Spell `word` into a builder of the Orb's own, started through the import and
+            /// dropped with the call, and return the length of its text.
+            pub fn spell(word: String) -> u32 {
+                texts::Builder::new("").append(&word)
+            }
+        }
+    }
+
     /// Keeps a shelf of `example:shelves/shelf@1.0.0`, an interface of a consumed package this Orb
-    /// implements, and sorts its books in `library`, a derived interface that takes and returns
-    /// them as the shelf's export defines them.
+    /// implements, sorts its books in `library`, a derived interface that takes and returns them
+    /// as the shelf's export defines them, and lends them to the shelves of another keeper, which
+    /// `lending` reaches by key through the view the macro derives for the attribute's
+    /// `import("example:shelves/shelf@1.0.0", keyed)`: the interface this Orb implements.
     pub mod shelves {
-        use super::shelf;
-        use alloc::vec::Vec;
+        use super::{shelf, shelf_ref};
+        use alloc::{string::String, vec, vec::Vec};
         use core::sync::atomic::{AtomicU32, Ordering};
 
         /// How many books the shelf holds.
@@ -297,6 +343,42 @@ mod guest {
             /// The longest book, if any.
             pub fn longest(books: Vec<shelf::Book>) -> Option<shelf::Book> {
                 books.into_iter().max_by_key(|book| book.pages)
+            }
+        }
+
+        /// Lends books to the shelves of another keeper of `example:shelves/shelf@1.0.0`, the
+        /// interface this Orb implements, selected by key. The world imports the interface only for
+        /// the types the view `use`s, so the installation binds the view alone, and the shelf this
+        /// Orb exports stays a service.
+        #[service]
+        pub struct Lending;
+
+        impl Lending {
+            /// Put `books` on the shelf of `key` of the keeper the view reaches, one by one, and
+            /// return how many books that shelf holds. A key the keeper refuses is the error.
+            pub async fn lend(key: String, books: Vec<shelf::Book>) -> Result<u32, String> {
+                let shelf = shelf_ref::get(vec![key]).await?;
+                let mut held = 0;
+                for book in books {
+                    held = shelf.shelve(&lent(book));
+                }
+                Ok(held)
+            }
+        }
+
+        /// A book as the view takes it. A derived signature names the shelf's types through the
+        /// implemented interface's module, `shelf::Book`, the copy of the export; the view's methods
+        /// take the copy of the import, which the view's module names, `shelf_ref::Book`, and whose
+        /// `Topic` the bindings' import module of the interface defines.
+        fn lent(book: shelf::Book) -> shelf_ref::Book {
+            use super::example::shelves::shelf as imported;
+            shelf_ref::Book {
+                title: book.title,
+                pages: book.pages,
+                topic: match book.topic {
+                    shelf::Topic::Fiction => imported::Topic::Fiction,
+                    shelf::Topic::Science => imported::Topic::Science,
+                },
             }
         }
     }

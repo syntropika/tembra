@@ -1,5 +1,6 @@
 //! The macro's reading of a module, checked on its output: the WIT it derives, the manifest it
 //! embeds and the errors it reports. The generated bindings themselves compile in the examples.
+//! The helpers that expand a module and read its output serve the other test modules too.
 use super::{Options, expand, expansion, metadata::Metadata, primary_crate_dir};
 use syn::{Expr, Item, ItemMod, Lit, UnOp};
 
@@ -9,7 +10,7 @@ fn orb(package: &str, module: &str) -> syn::Result<ItemMod> {
 }
 
 /// A string literal, as written on the attribute.
-fn literal(text: &str) -> syn::LitStr {
+pub(crate) fn literal(text: &str) -> syn::LitStr {
     syn::LitStr::new(text, proc_macro2::Span::call_site())
 }
 
@@ -19,13 +20,16 @@ fn options(package: &str, wit: Option<&std::path::Path>) -> Options {
         wit: wit.map(|dir| dir.display().to_string()),
         context: false,
         no_std: false,
+        facade: None,
         imports: Vec::new(),
         keyed: Vec::new(),
     }
 }
 
-/// A directory holding one consumed WIT package, under the system's temporary directory.
-fn consumed(name: &str, wit: &str) -> std::path::PathBuf {
+/// A directory holding one consumed WIT package, under the system's temporary directory. Another
+/// test module starts `name` with a prefix of its own: the modules use the same names, and the
+/// tests run at once.
+pub(crate) fn consumed(name: &str, wit: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("tembra-orb-macro-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("package.wit"), wit).unwrap();
@@ -33,7 +37,7 @@ fn consumed(name: &str, wit: &str) -> std::path::PathBuf {
 }
 
 /// The generated module as one token string, for looking up generated items.
-fn tokens(module: &ItemMod) -> String {
+pub(crate) fn tokens(module: &ItemMod) -> String {
     quote::quote!(#module).to_string()
 }
 
@@ -51,11 +55,15 @@ fn expanded(package: &str, module: &str) -> ItemMod {
     orb(package, module).unwrap_or_else(|error| panic!("{error}"))
 }
 
+pub(crate) fn expanded_with(options: Options, module: &str) -> ItemMod {
+    orb_with(options, module).unwrap_or_else(|error| panic!("{error}"))
+}
+
 fn refused(package: &str, module: &str) -> String {
     refused_with(options(package, None), module)
 }
 
-fn refused_with(options: Options, module: &str) -> String {
+pub(crate) fn refused_with(options: Options, module: &str) -> String {
     match orb_with(options, module) {
         Err(error) => error.to_string(),
         Ok(_) => panic!("the module was accepted"),
@@ -67,7 +75,7 @@ fn items(module: &ItemMod) -> &[Item] {
 }
 
 /// The derived WIT, from the generated `WIT` constant.
-fn wit(module: &ItemMod) -> String {
+pub(crate) fn wit(module: &ItemMod) -> String {
     constant(module, "WIT")
 }
 
@@ -89,7 +97,7 @@ fn constant(module: &ItemMod, name: &str) -> String {
 }
 
 /// The JSON of the `tembra:manifest` section, if the module embeds one.
-fn manifest(module: &ItemMod) -> Option<String> {
+pub(crate) fn manifest(module: &ItemMod) -> Option<String> {
     items(module).iter().find_map(|item| match item {
         Item::Static(section) if section.ident == "__TEMBRA_MANIFEST" => match &*section.expr {
             Expr::Unary(deref) if matches!(deref.op, UnOp::Deref(_)) => match &*deref.expr {
@@ -163,6 +171,75 @@ fn a_plain_service_derives_its_interface_and_embeds_no_manifest() {
         "package example:book@1.0.0;\n\ninterface ledger {\n  /// How many entries the ledger holds.\n  count: func() -> u32;\n}\n\nworld book {\n  export ledger;\n}\n"
     );
     assert_eq!(manifest(&module), None);
+}
+
+#[test]
+fn the_bindings_come_from_the_wit_bindgen_the_facade_pins() {
+    // The generated code follows the derive rules and the flags lowering of one wit-bindgen
+    // version, so the facade picks it, not the author's crate: the expansion calls `generate!`
+    // through the facade's re-export, reaches the bindings' runtime there, and names no
+    // `wit_bindgen` crate of the author's.
+    let generated = tokens(&expanded(PACKAGE, &ledger("#[service]")));
+    for expected in [
+        ":: tembra :: __wit_bindgen :: generate !",
+        "runtime_path : \"::tembra::__wit_bindgen::rt\"",
+        "bitflags_path : \"::tembra::__wit_bindgen::rt::bitflags\"",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    assert!(!generated.contains(":: wit_bindgen"), "{generated}");
+}
+
+/// A guest that depends on the facade under another name, `sdk = { package = "tembra", .. }`,
+/// names it with `crate = ".."` on the attribute, as serde and tokio take theirs: every path the
+/// expansion writes through the facade takes that name, while the bindings' modules of the kernel's
+/// `tembra:guest` package keep theirs. Without the option the name is `tembra`. A value that is not
+/// a name the crate's code can write is refused at the literal.
+#[test]
+fn the_crate_option_names_the_facade_dependency() {
+    use proc_macro2::TokenStream;
+    use quote::quote;
+    let attribute = |tail: TokenStream| quote!(package = "example:counter@1.0.0", context #tail);
+    let generated = |tail: TokenStream| {
+        expansion(attribute(tail), syn::parse_str(COUNTER).unwrap()).to_string()
+    };
+    let plain = generated(quote!());
+    assert_eq!(generated(quote!(, crate = "tembra")), plain);
+    let renamed = generated(quote!(, crate = "sdk"));
+    for expected in [
+        ":: sdk :: __wit_bindgen :: generate !",
+        "runtime_path : \"::sdk::__wit_bindgen::rt\"",
+        "bitflags_path : \"::sdk::__wit_bindgen::rt::bitflags\"",
+        "exports :: tembra :: guest :: state_init",
+        "pub use self :: tembra :: guest :: context ;",
+    ] {
+        assert!(renamed.contains(expected), "{expected}\n{renamed}");
+    }
+    assert_eq!(
+        renamed,
+        plain
+            .replace(":: tembra :: __wit_bindgen", ":: sdk :: __wit_bindgen")
+            .replace("\"::tembra::__wit_bindgen", "\"::sdk::__wit_bindgen")
+    );
+    for value in ["my-sdk", "::sdk", "sdk::orb", "crate", ""] {
+        let error = match super::options(attribute(quote!(, crate = #value))) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("`{value}` was accepted"),
+        };
+        assert_eq!(
+            error,
+            "`crate` names the facade dependency as the crate's code writes it, a Rust identifier: #[sdk::orb(crate = \"sdk\", ..)] for `sdk = { package = \"tembra\", .. }`",
+            "{value}"
+        );
+    }
+    let error = match super::options(attribute(quote!(, krate = "sdk"))) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("`krate` was accepted"),
+    };
+    assert!(
+        error.contains("context, no_std, crate = \"name\")]"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -254,6 +331,60 @@ fn the_context_option_imports_the_kernel_interface() {
     let plain = expanded(PACKAGE, &ledger("#[service]"));
     assert!(!wit(&plain).contains("context"));
     assert!(!tokens(&plain).contains("__guest"));
+}
+
+/// The Orb module re-exports the kernel's context interface as `context` for the `context` option:
+/// an imported or an implemented interface named `context` beside it is an error naming both, an
+/// import of the kernel's interface itself is an error asking to remove it, and each expands
+/// without the option.
+#[test]
+fn an_interface_named_context_is_refused_beside_the_context_option() {
+    let dir = consumed(
+        "notes-context",
+        "package example:notes@1.0.0;\ninterface context {\n  topic: func() -> string;\n}\n",
+    );
+    // The kernel's package, as a contract's `deps/` holds it, for the import of its interface.
+    std::fs::create_dir_all(dir.join("deps")).unwrap();
+    std::fs::write(
+        dir.join("deps").join("tembra-guest.wit"),
+        tembra_contracts::guest::SOURCE,
+    )
+    .unwrap();
+    let kernel = "and that of the kernel's interface tembra:guest/context@1.0.0, which the `context` option imports; keep one of them";
+    let importing = |identity: &str, context: bool| Options {
+        imports: vec![literal(identity)],
+        context,
+        ..options(PACKAGE, Some(&dir))
+    };
+    for (identity, message) in [
+        (
+            "example:notes/context@1.0.0",
+            format!("the Orb module would re-export two modules as `context`: that of the imported interface example:notes/context@1.0.0, {kernel}"),
+        ),
+        (
+            "tembra:guest/context@1.0.0",
+            "the `context` option imports the kernel's interface tembra:guest/context@1.0.0 already, which the Orb module re-exports as `context`; remove this import".to_owned(),
+        ),
+    ] {
+        let error = refused_with(importing(identity, true), &ledger("#[service]"));
+        assert!(error.contains(&message), "{identity}: {error}");
+        expanded_with(importing(identity, false), &ledger("#[service]"));
+    }
+    let topics = "mod topics {
+        #[service(\"example:notes/context@1.0.0\")]
+        pub struct Topics;
+        impl Topics { pub fn topic() -> String { String::new() } }
+    }";
+    let implementing = |context| Options {
+        context,
+        ..options("example:topics@1.0.0", Some(&dir))
+    };
+    let error = refused_with(implementing(true), topics);
+    assert!(
+        error.contains(&format!("the Orb module would re-export two modules as `context`: that of the implemented interface example:notes/context@1.0.0, {kernel}")),
+        "{error}"
+    );
+    expanded_with(implementing(false), topics);
 }
 
 const COUNTER: &str = "mod tally {
@@ -559,6 +690,43 @@ fn a_side_of_a_result_that_carries_nothing_is_left_out() {
     ] {
         let error = refused(PACKAGE, &method(rust));
         assert!(error.contains(message), "{rust}: {error}");
+    }
+}
+
+/// WIT spells an option of an option, but the runtime refuses it in a signature: `Option<Option<T>>`
+/// is refused where it is written, in a function and in a field of a type that enters the WIT,
+/// while an option of another type expands.
+#[test]
+fn an_option_of_an_option_is_refused() {
+    let module = |result: &str, field: &str| {
+        format!(
+            "mod book {{
+                pub struct Found {{ pub at: {field} }}
+                #[service]
+                pub struct Ledger;
+                impl Ledger {{
+                    pub fn find(key: String) -> {result} {{ todo!() }}
+                    pub fn last() -> Found {{ todo!() }}
+                }}
+            }}"
+        )
+    };
+    let text = wit(&expanded(PACKAGE, &module("Option<u32>", "Option<u32>")));
+    for expected in [
+        "  record found {\n    at: option<u32>,\n  }\n",
+        "  find: func(key: string) -> option<u32>;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    for (result, field) in [
+        ("Option<Option<u32>>", "Option<u32>"),
+        ("Option<u32>", "Option<Option<u32>>"),
+    ] {
+        let error = refused(PACKAGE, &module(result, field));
+        assert!(
+            error.contains("`Option<Option<T>>` is an option of an option, which the runtime refuses in a signature: use an enum of the module with a case for each"),
+            "{result}, {field}: {error}"
+        );
     }
 }
 
@@ -1289,11 +1457,16 @@ fn a_consumed_name_that_is_a_rust_keyword_is_bridged_as_the_bindings_name_it() {
 /// The derived WIT, checked to resolve as a package.
 fn resolved(module: &ItemMod) -> String {
     let text = wit(module);
-    let mut resolve = wit_parser::Resolve::default();
-    resolve
-        .push_str("orb.wit", &text)
-        .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
+    resolved_with(wit_parser::Resolve::default(), &text);
     text
+}
+
+/// Check that `text`, a derived WIT, resolves after the packages `resolve` holds, as the bindings
+/// read it.
+pub(crate) fn resolved_with(mut resolve: wit_parser::Resolve, text: &str) {
+    resolve
+        .push_str("orb.wit", text)
+        .unwrap_or_else(|error| panic!("{error:#}\n{text}"));
 }
 
 /// An interface `use`s what the constructors, methods and static functions of its own resources
@@ -2005,6 +2178,19 @@ fn a_flags_struct_is_a_wit_flags_the_author_keeps() {
         "{}",
         tokens(&module)
     );
+    // Nor is a trait a derive implements under another name, as `#[educe(..)]` names it.
+    let module = expanded(
+        "example:office@1.0.0",
+        &PERMITS.replace(
+            "#[derive(Default, PartialEq, Clone)]",
+            "#[derive(Default, PartialEq, educe::Educe)] #[educe(Clone, Debug(name(Permit)))]",
+        ),
+    );
+    assert!(
+        tokens(&module).contains("# [derive (:: core :: marker :: Copy)] pub struct Access"),
+        "{}",
+        tokens(&module)
+    );
 }
 
 /// In an Orb with a state the flags derive serde's traits, and a record holding the module's own
@@ -2081,6 +2267,281 @@ fn a_flags_struct_of_a_sub_module_is_named_from_its_module() {
         error.contains("`Access` is a flags of a sub-module: make it visible to the Orb module"),
         "{error}"
     );
+    // An impl of the struct written in another module names it from there: a trait implemented by
+    // hand is not derived again, and a function of a name the bindings call is refused.
+    let office = |extra: &str| {
+        format!(
+            "mod office {{
+                pub mod rights {{
+                    #[flags]
+                    pub struct Access {{ pub read: bool }}
+                    #[service]
+                    pub struct Permits;
+                    impl Permits {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                }}
+                {extra}
+            }}"
+        )
+    };
+    let module = expanded(
+        "example:office@1.0.0",
+        &office("impl Clone for rights::Access { fn clone(&self) -> Self { *self } }"),
+    );
+    assert!(
+        tokens(&module).contains(
+            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access"
+        ),
+        "{}",
+        tokens(&module)
+    );
+    let error = refused(
+        "example:office@1.0.0",
+        &office("impl rights::Access { pub fn empty() -> Self { Self { read: false } } }"),
+    );
+    assert!(
+        error.contains("`Access::empty` takes a name the macro gives a #[flags] struct"),
+        "{error}"
+    );
+    // A name a `use` brings into the module is the struct too, followed through the `use`, with
+    // or without another type of the Orb of that name.
+    let imported = |extra: &str| office(&format!("use rights::Access; {extra}"));
+    let module = expanded(
+        "example:office@1.0.0",
+        &imported("impl Clone for Access { fn clone(&self) -> Self { *self } }"),
+    );
+    assert!(
+        tokens(&module).contains(
+            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access"
+        ),
+        "{}",
+        tokens(&module)
+    );
+    let error = refused(
+        "example:office@1.0.0",
+        &imported("impl Access { pub fn empty() -> Self { Self { read: false } } }"),
+    );
+    assert!(
+        error.contains("`Access::empty` takes a name the macro gives a #[flags] struct"),
+        "{error}"
+    );
+    let module = expanded(
+        "example:office@1.0.0",
+        &imported(
+            "pub mod other { pub struct Access { pub level: u32 } }
+            impl Clone for Access { fn clone(&self) -> Self { *self } }",
+        ),
+    );
+    assert!(
+        tokens(&module).contains(
+            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool }"
+        ),
+        "{}",
+        tokens(&module)
+    );
+}
+
+/// The bindings name a flags struct through every module between it and the Orb module: `pub` and
+/// `pub(crate)` make the struct or a module visible to the Orb module at any depth, `pub(super)`
+/// one level down only, and a module the Orb module cannot see is refused, though a `pub use`
+/// re-exports the struct past it.
+#[test]
+fn a_flags_struct_is_named_through_every_module_above_it() {
+    let nested = |inner: &str, access: &str| {
+        format!(
+            "mod office {{
+                pub mod a {{
+                    {inner} mod b {{
+                        #[flags]
+                        {access} struct Access {{ pub read: bool }}
+                        #[service]
+                        pub struct Permits;
+                        impl Permits {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                    }}
+                }}
+            }}"
+        )
+    };
+    for (inner, access) in [("pub", "pub"), ("pub(super)", "pub(crate)")] {
+        let generated = tokens(&expanded("example:office@1.0.0", &nested(inner, access)));
+        assert!(
+            generated.contains("\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: a :: b :: Access"),
+            "{generated}"
+        );
+    }
+    let error = refused("example:office@1.0.0", &nested("pub", "pub(super)"));
+    assert!(
+        error.contains("`Access` is a flags of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, whose bindings name it"),
+        "{error}"
+    );
+    let reexported = |access: &str| {
+        format!(
+            "mod office {{
+                mod model {{
+                    {access} mod access {{
+                        #[flags]
+                        pub struct Access {{ pub read: bool }}
+                    }}
+                    pub use access::Access;
+                }}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check(access: model::Access) -> bool {{ access.read }} }}
+            }}"
+        )
+    };
+    let error = refused("example:office@1.0.0", &reexported(""));
+    assert!(
+        error.contains("`Access` is a flags of a sub-module the Orb module cannot see: make the module `access` visible to the Orb module, `pub` or `pub(super)`, whose bindings name it"),
+        "{error}"
+    );
+    let generated = tokens(&expanded("example:office@1.0.0", &reexported("pub(super)")));
+    assert!(
+        generated.contains("\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: model :: access :: Access"),
+        "{generated}"
+    );
+}
+
+/// What else the Orb module names in a sub-module, a state and its fields, a root resource and its
+/// marked functions, and a WIT resource of a service of the Orb module, is visible to it through
+/// every module between them, as a flags struct is.
+#[test]
+fn what_the_orb_module_names_is_visible_through_every_module_above_it() {
+    let module = |inner: &str, item: &str| {
+        format!(
+            "mod ledger {{
+                pub mod a {{
+                    {inner} mod b {{
+                        {item}
+                    }}
+                }}
+                #[service]
+                pub struct Passing;
+                impl Passing {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    for (item, hidden, refused_item) in [
+        (
+            "#[state] VIS struct Balance { VIS total: i64 }",
+            Some(
+                "`Balance` is a state of a sub-module the Orb module cannot see: make the module `b` visible to the Orb module, `pub` or `pub(super)`, which builds and reads it",
+            ),
+            "`Balance` is a state of a sub-module: make the struct and its fields visible to the Orb module, `pub` or `pub(crate)`, which builds and reads it",
+        ),
+        (
+            "#[resource] VIS struct Counts { pub seen: u32 }
+            impl Counts { #[open] pub fn open() -> Self { Counts { seen: 0 } } }",
+            Some(
+                "`Counts` is a resource of a sub-module the Orb module cannot see: make the module `b` visible to the Orb module, `pub` or `pub(super)`, which opens and closes it",
+            ),
+            "`Counts` is a resource of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, which opens and closes it",
+        ),
+        (
+            "#[resource] pub struct Counts { pub seen: u32 }
+            impl Counts { #[open] VIS fn open() -> Self { Counts { seen: 0 } } }",
+            None,
+            "#[open] on a function of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, which calls it",
+        ),
+        (
+            "#[wit_resource] VIS struct Pen { pub ink: u32 }
+            impl Pen { pub fn ink(&self) -> u32 { self.ink } }",
+            Some(
+                "`Pen` is a resource of a sub-module the Orb module cannot see: make the module `b` visible to the Orb module, `pub` or `pub(super)`, whose service `Passing` hands it out",
+            ),
+            "`Pen` is a resource of a sub-module: make it visible to the Orb module, `pub` or `pub(crate)`, whose services hand it out",
+        ),
+    ] {
+        let item = |vis: &str| item.replace("VIS", vis);
+        expanded("example:ledger@1.0.0", &module("pub", &item("pub")));
+        expanded(
+            "example:ledger@1.0.0",
+            &module("pub(super)", &item("pub(crate)")),
+        );
+        let error = refused("example:ledger@1.0.0", &module("pub", &item("pub(super)")));
+        assert!(error.contains(refused_item), "{error}");
+        if let Some(hidden) = hidden {
+            let error = refused("example:ledger@1.0.0", &module("", &item("pub")));
+            assert!(error.contains(hidden), "{error}");
+        }
+    }
+}
+
+/// The bindings name a WIT resource from its service's module, so a module between the resource
+/// and the Orb module may stay hidden from the Orb module when the service sits inside it; a module
+/// the service's module cannot see is refused, naming the visibility it needs there.
+#[test]
+fn a_wit_resource_is_named_from_its_service_module() {
+    const PEN: &str = "#[wit_resource(service = Walker)]
+        pub struct Pen { pub ink: u32 }
+        impl Pen { pub fn ink(&self) -> u32 { self.ink } }";
+    let beside = expanded(
+        "example:walk@1.0.0",
+        &format!(
+            "mod walk {{
+                pub mod a {{
+                    mod b {{
+                        {PEN}
+                        #[service]
+                        pub struct Walker;
+                        impl Walker {{ pub fn lend() -> Pen {{ todo!() }} }}
+                    }}
+                }}
+            }}"
+        ),
+    );
+    let generated = tokens(&beside);
+    assert!(
+        generated.contains("type Pen = super :: super :: a :: b :: Pen ;"),
+        "{generated}"
+    );
+    let below = expanded(
+        "example:walk@1.0.0",
+        &format!(
+            "mod walk {{
+                pub mod a {{
+                    mod b {{
+                        pub mod c {{
+                            {PEN}
+                        }}
+                        #[service]
+                        pub struct Walker;
+                        impl Walker {{ pub fn lend() -> c::Pen {{ todo!() }} }}
+                    }}
+                }}
+            }}"
+        ),
+    );
+    let generated = tokens(&below);
+    assert!(
+        generated.contains("type Pen = super :: super :: a :: b :: c :: Pen ;"),
+        "{generated}"
+    );
+    let above = |c: &str| {
+        format!(
+            "mod walk {{
+                pub mod a {{
+                    pub mod b {{
+                        {c} mod c {{
+                            {PEN}
+                        }}
+                    }}
+                    #[service]
+                    pub struct Walker;
+                    impl Walker {{ pub fn lend() -> b::c::Pen {{ todo!() }} }}
+                }}
+            }}"
+        )
+    };
+    let error = refused("example:walk@1.0.0", &above(""));
+    assert!(
+        error.contains("`Pen` is a resource of a sub-module the module `a` cannot see: make the module `c` visible to the module `a`, `pub` or `pub(super)`, whose service `Walker` hands it out"),
+        "{error}"
+    );
+    let generated = tokens(&expanded("example:walk@1.0.0", &above("pub(super)")));
+    assert!(
+        generated.contains("type Pen = super :: a :: b :: c :: Pen ;"),
+        "{generated}"
+    );
 }
 
 /// What WIT or the bindings rule out of a flags struct is refused on the item: a field that is no
@@ -2147,6 +2608,26 @@ fn what_a_flags_struct_cannot_be_is_refused() {
         ),
         (
             "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl core::ops::BitOr<Self> for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl core::ops::BitOr<Access> for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl<T> core::ops::BitOr<T> for Access { type Output = Self; fn bitor(self, other: T) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
+            "impl<T: Into<Access>> core::ops::BitOr<T> for Access { type Output = Self; fn bitor(self, other: T) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool }".to_owned(),
             "#[hook(composition = series, input = Admission)]
             pub struct Guard;
             pub struct Admission { pub access: Access }",
@@ -2155,6 +2636,1148 @@ fn what_a_flags_struct_cannot_be_is_refused() {
     ] {
         let error = refused("example:office@1.0.0", &module(&access, extra));
         assert!(error.contains(message), "{access} {extra}: {error}");
+    }
+    // A `BitOr` with another right-hand type does not overlap the macro's `BitOr<Self>`.
+    let generated = tokens(&expanded(
+        "example:office@1.0.0",
+        &module(
+            "#[flags] pub struct Access { pub read: bool }",
+            "impl core::ops::BitOr<u32> for Access { type Output = Self; fn bitor(self, other: u32) -> Self { self } }",
+        ),
+    ));
+    assert!(
+        generated.contains("impl :: core :: ops :: BitOr for Access"),
+        "{generated}"
+    );
+}
+
+/// A tuple or unit struct of another module with a flags struct's name is another type: the impls
+/// written for it in its module are its own, not the flags struct's, which the macro completes and
+/// checks as if they were not there. An impl in a third module that names the flags struct through
+/// a `use` is the flags struct's, whatever namesake another module declares.
+#[test]
+fn a_namesake_of_a_flags_struct_in_another_module_keeps_its_impls() {
+    let module = |legacy: &str| {
+        format!(
+            "mod office {{
+                pub mod rights {{
+                    #[flags]
+                    pub struct Access {{ pub read: bool, pub write: bool }}
+                    #[service]
+                    pub struct Guard;
+                    impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                }}
+                pub mod legacy {{
+                    pub struct Access(pub u32);
+                    {legacy}
+                }}
+            }}"
+        )
+    };
+    // A `Clone` of the namesake leaves the flags struct's `Clone` to the macro.
+    let generated = tokens(&expanded(
+        "example:office@1.0.0",
+        &module("impl Clone for Access { fn clone(&self) -> Self { Access(self.0) } }"),
+    ));
+    assert!(
+        generated.contains(
+            "# [derive (:: core :: clone :: Clone , :: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }"
+        ),
+        "{generated}"
+    );
+    // A `BitOr` or a `bits` of the namesake is not the flags struct's.
+    for legacy in [
+        "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { Access(self.0 | other.0) } }",
+        "impl Access { pub fn bits(&self) -> u32 { self.0 } }",
+    ] {
+        expanded("example:office@1.0.0", &module(legacy));
+    }
+    // An impl reached through a `use` in a third module is the flags struct's, whatever namesake
+    // another module declares: the `use` is followed before any fallback on the name.
+    let module = |ops: &str| {
+        format!(
+            "mod office {{
+                pub mod rights {{
+                    #[flags]
+                    pub struct Access {{ pub read: bool, pub write: bool }}
+                    #[service]
+                    pub struct Guard;
+                    impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                }}
+                pub mod legacy {{ pub type Access = u32; }}
+                pub mod ops {{
+                    use super::rights::Access;
+                    {ops}
+                }}
+            }}"
+        )
+    };
+    let generated = tokens(&expanded(
+        "example:office@1.0.0",
+        &module("impl Clone for Access { fn clone(&self) -> Self { *self } }"),
+    ));
+    assert!(
+        generated.contains(
+            "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }"
+        ),
+        "{generated}"
+    );
+    for (ops, message) in [
+        (
+            "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }",
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            "impl Access { pub fn bits(&self) -> u32 { 0 } }",
+            "`Access::bits` takes a name the macro gives a #[flags] struct",
+        ),
+    ] {
+        let error = refused("example:office@1.0.0", &module(ops));
+        assert!(error.contains(message), "{ops}: {error}");
+    }
+}
+
+/// An impl names the type through a `use` the macro follows to a `crate::` path, binding the name
+/// or a module of its path, through a module a glob import brings in, `pinned::Balance` after
+/// `use super::*;`, or through an alias of the type's own name, `pub type Access =
+/// super::rights::Access;`: the macro cannot place the `crate::` path such a `use` leads to, so the
+/// name counts by its uniqueness among the types of the Orb's modules that may enter the WIT, as a
+/// name a glob import the macro cannot follow brings does, whatever type of another shape a module
+/// declares under the name, and such an alias stands for the type it names, as a `use` does. A
+/// glob import from a module of the Orb is followed to the type that module declares, whatever
+/// namesake a third module declares. A `crate::` path written on the impl itself leaves the Orb
+/// module, as before: it may name a namesake outside the Orb, whose impl is not the type's.
+#[test]
+fn an_impl_names_the_type_through_crate_a_glob_or_an_alias() {
+    let office = |ops: &str, legacy: &str| {
+        format!(
+            "mod office {{
+                pub mod rights {{
+                    #[flags]
+                    pub struct Access {{ pub read: bool, pub write: bool }}
+                    #[service]
+                    pub struct Guard;
+                    impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+                }}
+                pub mod ops {{
+                    {ops}
+                }}
+                {legacy}
+            }}"
+        )
+    };
+    let clone = "impl Clone for Access { fn clone(&self) -> Self { *self } }";
+    let bitor = "impl core::ops::BitOr for Access { type Output = Self; fn bitor(self, other: Self) -> Self { self } }";
+    let bits = "impl Access { pub fn bits(&self) -> u32 { 0 } }";
+    let without_clone = "# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }";
+    for (ops, legacy) in [
+        (format!("use crate::office::rights::Access; {clone}"), ""),
+        (
+            "use super::*; impl Clone for rights::Access { fn clone(&self) -> Self { *self } }"
+                .to_owned(),
+            "",
+        ),
+        (
+            format!("pub type Access = super::rights::Access; {clone}"),
+            "",
+        ),
+        (
+            format!("use super::rights::*; {clone}"),
+            "pub mod legacy { pub struct Access(pub u32); }",
+        ),
+        (
+            "use crate::office::rights; impl Clone for rights::Access { fn clone(&self) -> Self { *self } }"
+                .to_owned(),
+            "",
+        ),
+        (
+            format!("use crate::office::rights::*; {clone}"),
+            "pub mod legacy { pub struct Access(pub u32); }",
+        ),
+    ] {
+        let generated = tokens(&expanded("example:office@1.0.0", &office(&ops, legacy)));
+        assert!(generated.contains(without_clone), "{ops}\n{generated}");
+    }
+    let generated = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(
+            "impl Clone for crate::elsewhere::Access { fn clone(&self) -> Self { todo!() } }",
+            "",
+        ),
+    ));
+    assert!(
+        generated.contains(
+            "# [derive (:: core :: clone :: Clone , :: core :: marker :: Copy , :: core :: fmt :: Debug)] pub struct Access { pub read : bool , pub write : bool }"
+        ),
+        "{generated}"
+    );
+    for (ops, message) in [
+        (
+            format!("use crate::office::rights::Access; {bitor}"),
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            format!("use crate::office::rights::Access; {bits}"),
+            "`Access::bits` takes a name the macro gives a #[flags] struct",
+        ),
+        (
+            format!("pub type Access = super::rights::Access; {bitor}"),
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+        (
+            format!(
+                "use crate::office::rights; {}",
+                bitor.replace("for Access", "for rights::Access")
+            ),
+            "`Access` is a #[flags] struct, for which the macro implements `BitOr`",
+        ),
+    ] {
+        let error = refused("example:office@1.0.0", &office(&ops, ""));
+        assert!(error.contains(message), "{ops}: {error}");
+    }
+    // A state's `Default` written so is the author's.
+    let ledger = |items: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                pub struct Balance {{ pub total: i64 }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+                {items}
+            }}"
+        )
+    };
+    let default = "impl Default for Balance { fn default() -> Self { Balance { total: 7 } } }";
+    let written = "impl :: core :: default :: Default for";
+    for items in [
+        format!("pub mod defaults {{ use crate::ledger::Balance; {default} }}"),
+        format!("pub mod api {{ pub type Balance = super::Balance; {default} }}"),
+    ] {
+        let generated = tokens(&expanded("example:ledger@1.0.0", &ledger(&items)));
+        assert!(!generated.contains(written), "{items}\n{generated}");
+    }
+    let generated = tokens(&expanded(
+        "example:ledger@1.0.0",
+        &ledger("impl Default for crate::elsewhere::Balance { fn default() -> Self { todo!() } }"),
+    ));
+    assert!(generated.contains(written), "{generated}");
+    for uses in ["use super::*;", "use crate::ledger::pinned;"] {
+        let generated = tokens(&expanded(
+            "example:ledger@1.0.0",
+            &format!(
+                "mod ledger {{
+                    pub mod pinned {{
+                        #[state]
+                        pub struct Balance {{ pub total: i64 }}
+                        #[service]
+                        pub struct Pinned;
+                        impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+                    }}
+                    pub mod defaults {{
+                        {uses}
+                        impl Default for pinned::Balance {{ fn default() -> Self {{ pinned::Balance {{ total: 7 }} }} }}
+                    }}
+                }}"
+            ),
+        ));
+        assert!(!generated.contains(written), "{uses}\n{generated}");
+    }
+    // A type holding a resource handle has the `Clone` a type holding it derives when the macro
+    // sees it implemented, through such a `use` too.
+    expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            #[wit_resource]
+            pub struct Pen { pub ink: u32 }
+            impl Pen { pub fn ink(&self) -> u32 { self.ink } }
+            pub struct Lease { pub pen: Pen }
+            #[derive(Clone)]
+            pub struct Desk { pub lease: Lease }
+            pub mod hands {
+                use crate::walk::Lease;
+                impl Clone for Lease { fn clone(&self) -> Self { todo!() } }
+            }
+            #[service]
+            pub struct Walker;
+            impl Walker { pub fn lend() -> Desk { todo!() } }
+        }",
+    );
+}
+
+/// The macro reads a type that enters the WIT before the compiler evaluates `#[cfg(..)]` and
+/// `#[cfg_attr(..)]`: a field, a case or a case's payload under `#[cfg(..)]`, which the WIT would
+/// hold in every configuration, is refused, on a flags as on a record, an enum or a variant, and
+/// so is a `#[cfg_attr(..)]` wrapping a derive, a helper or a `#[cfg(..)]`, on a flags too, whose
+/// derives the macro completes. Kept out of the WIT, the same type is the author's, as written.
+#[test]
+fn what_the_macro_cannot_evaluate_is_refused() {
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod office {{
+                {types}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    for (types, returned, message) in [
+        (
+            "#[flags] pub struct Access { pub read: bool, #[cfg(feature = \"sharing\")] pub share: bool }",
+            "Access",
+            "`#[cfg(..)]` on the field `Access::share`: `Access` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the field in every configuration; remove the attribute, or keep `Access` out of the WIT",
+        ),
+        (
+            "#[flags] #[cfg_attr(test, derive(Debug))] pub struct Access { pub read: bool }",
+            "Access",
+            "`Access` enters the WIT as a flags, which the macro completes before the compiler evaluates `#[cfg_attr(..)]`: write the attribute without it, or keep `Access` out of the WIT",
+        ),
+        (
+            "#[flags] pub struct Access { pub read: bool, #[cfg_attr(test, cfg(feature = \"sharing\"))] pub share: bool }",
+            "Access",
+            "`Access` enters the WIT as a flags, which the macro completes before the compiler evaluates `#[cfg_attr(..)]`",
+        ),
+        (
+            "pub struct Grant { pub who: String, #[cfg(feature = \"audit\")] pub reason: String }",
+            "Grant",
+            "`#[cfg(..)]` on the field `Grant::reason`: `Grant` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the field in every configuration",
+        ),
+        (
+            "pub enum Level { Read, #[cfg(feature = \"admin\")] Admin }",
+            "Level",
+            "`#[cfg(..)]` on the case `Level::Admin`: `Level` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the case in every configuration",
+        ),
+        (
+            "pub enum Holder { Person(#[cfg(feature = \"named\")] String), Nobody }",
+            "Holder",
+            "`#[cfg(..)]` on the payload of `Holder::Person`: `Holder` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the payload in every configuration",
+        ),
+        (
+            "pub struct Grant { #[cfg_attr(feature = \"audit\", allow(unused), cfg_attr(test, serde(skip)))] pub who: String }",
+            "Grant",
+            "`Grant` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`",
+        ),
+    ] {
+        let error = refused("example:office@1.0.0", &module(types, returned));
+        assert!(error.contains(message), "{types}: {error}");
+        expanded("example:office@1.0.0", &module(types, "u32"));
+    }
+}
+
+/// The macro writes the WIT and the bindings' `with` before the compiler evaluates `#[cfg(..)]`,
+/// and a flags struct stays the author's: under `#[cfg(..)]`, the WIT would hold the flags and the
+/// bindings name the struct where the compiler drops it, so a `#[flags]` struct under `#[cfg(..)]`
+/// that enters the WIT is refused. The same struct without the attribute enters the WIT, and kept
+/// out of the WIT, the struct is the author's, as written.
+#[test]
+fn a_flags_struct_under_cfg_is_refused() {
+    let module = |cfg: &str, returned: &str| {
+        format!(
+            "mod office {{
+                {cfg}
+                #[flags]
+                pub struct Access {{ pub read: bool, pub share: bool }}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    let cfg = "#[cfg(feature = \"sharing\")]";
+    let error = refused("example:office@1.0.0", &module(cfg, "Access"));
+    assert!(
+        error.contains("`#[cfg(..)]` on the flags `Access`: `Access` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the flags and the bindings would name the struct in every configuration; remove the attribute, or keep `Access` out of the WIT"),
+        "{error}"
+    );
+    let entered = tokens(&expanded("example:office@1.0.0", &module("", "Access")));
+    assert!(
+        entered.contains(
+            "\"example:office/permits@1.0.0/access\" : super :: super :: super :: super :: Access"
+        ),
+        "{entered}"
+    );
+    let kept = tokens(&expanded("example:office@1.0.0", &module(cfg, "u32")));
+    assert!(
+        kept.contains(
+            "# [cfg (feature = \"sharing\")] pub struct Access { pub read : bool , pub share : bool }"
+        ),
+        "{kept}"
+    );
+}
+
+/// A `#[cfg_attr(..)]` wrapping only Rust's own attributes that the generated type never takes,
+/// such as `allow`, `doc` or `deprecated`, changes nothing the macro writes: it may sit on a type
+/// that enters the WIT, its fields and its cases, and a flags struct keeps it as written.
+#[test]
+fn a_cfg_attr_wrapping_only_what_the_generated_type_never_takes_expands() {
+    let module = expanded(
+        "example:office@1.0.0",
+        "mod office {
+            #[flags]
+            #[cfg_attr(docsrs, doc = \"With every feature.\")]
+            pub struct Access { #[cfg_attr(test, allow(dead_code))] pub read: bool }
+            #[cfg_attr(test, deprecated, cfg_attr(docsrs, doc(hidden)))]
+            pub struct Grant { #[cfg_attr(test, allow(dead_code))] pub who: String, pub access: Access }
+            pub enum Level { #[cfg_attr(test, allow(unused))] Read, Write }
+            #[service]
+            pub struct Permits;
+            impl Permits { pub fn issue(level: Level) -> Grant { todo!() } }
+        }",
+    );
+    let text = resolved(&module);
+    for expected in [
+        "  flags access {\n    read,\n  }\n",
+        "  record grant {\n    who: string,\n    access: access,\n  }\n",
+        "  enum level {\n    read,\n    write,\n  }\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let generated = tokens(&module);
+    assert!(
+        generated.contains(
+            "pub struct Access { # [cfg_attr (test , allow (dead_code))] pub read : bool }"
+        ),
+        "{generated}"
+    );
+}
+
+/// The macro writes the WIT, and the generated type replacing a record, an enum or a variant that
+/// enters it, before the compiler evaluates `#[cfg(..)]`: the type would stay in the WIT and in the
+/// generated code in every configuration, the attribute doing nothing, so a `#[cfg(..)]` on a type
+/// that enters the WIT is refused. The same type without the attribute enters the WIT, and kept out
+/// of the WIT, the type is the author's, as written, `#[cfg(..)]` included.
+#[test]
+fn a_type_entering_the_wit_under_cfg_is_refused() {
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod office {{
+                {types}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    for (kind, name, item, entered, kept) in [
+        (
+            "record",
+            "Grant",
+            "pub struct Grant { pub who: String }",
+            "  record grant {\n    who: string,\n  }\n",
+            "# [cfg (feature = \"audit\")] pub struct Grant { pub who : String }",
+        ),
+        (
+            "enum",
+            "Level",
+            "pub enum Level { Read, Write }",
+            "  enum level {\n    read,\n    write,\n  }\n",
+            "# [cfg (feature = \"audit\")] pub enum Level { Read , Write }",
+        ),
+        (
+            "variant",
+            "Holder",
+            "pub enum Holder { Person(String), Nobody }",
+            "  variant holder {\n    person(string),\n    nobody,\n  }\n",
+            "# [cfg (feature = \"audit\")] pub enum Holder { Person (String) , Nobody }",
+        ),
+    ] {
+        let conditional = format!("#[cfg(feature = \"audit\")] {item}");
+        let error = refused("example:office@1.0.0", &module(&conditional, name));
+        let message = format!(
+            "`#[cfg(..)]` on the {kind} `{name}`: `{name}` enters the WIT, which the macro writes before the compiler evaluates the attribute, so the WIT would hold the {kind} and the generated type would replace `{name}` in every configuration; remove the attribute, or keep `{name}` out of the WIT"
+        );
+        assert!(error.contains(&message), "{item}: {error}");
+        let text = resolved(&expanded("example:office@1.0.0", &module(item, name)));
+        assert!(text.contains(entered), "{entered}\n{text}");
+        let generated = tokens(&expanded(
+            "example:office@1.0.0",
+            &module(&conditional, "u32"),
+        ));
+        assert!(generated.contains(kept), "{kept}\n{generated}");
+    }
+}
+
+/// A `#[cfg(..)]` as an author writes it on an item, plainly or under `#[cfg_attr(..)]`, which
+/// keeps the item in some configurations only, with how the errors name it.
+const CONDITIONS: [(&str, &str); 2] = [
+    ("#[cfg(feature = \"audit\")]", "`#[cfg(..)]`"),
+    (
+        "#[cfg_attr(test, cfg(feature = \"audit\"))]",
+        "`#[cfg_attr(..)]` wrapping `#[cfg(..)]`",
+    ),
+];
+
+/// The conditions an item takes refused, by whether the macro evaluates a plain `#[cfg(..)]` on it
+/// itself (`cfg`): on a service, its `impl` blocks and their functions, a hook and a sub-module
+/// holding one of these it does, so only the one under `#[cfg_attr(..)]` is refused there, and
+/// otherwise both are.
+fn refused_conditions(evaluated: bool) -> impl Iterator<Item = (&'static str, &'static str)> {
+    CONDITIONS.into_iter().skip(usize::from(evaluated))
+}
+
+/// What the error asks for: the plain form where the macro evaluates it, else no attribute.
+fn instead(evaluated: bool) -> &'static str {
+    if evaluated {
+        "write the condition as a plain `#[cfg(..)]`, which the macro evaluates"
+    } else {
+        "remove the attribute"
+    }
+}
+
+/// The macro writes the code serving a struct it marks before the compiler evaluates
+/// `#[cfg(..)]`, and that code names the struct in every configuration: the kernel's callbacks
+/// build and read a state and open and close a resource of the root, a bridge calls the functions
+/// of a service and of a WIT resource, and a declared hook's export and `run` serve its struct.
+/// Where the attribute is off, the compiler would find the struct gone, so a `#[cfg(..)]` on a
+/// marked struct is refused, before or after the marker, written plainly or under
+/// `#[cfg_attr(..)]`, and the same module without it expands. On a service and on a hook the
+/// macro evaluates a plain `#[cfg(..)]` itself (`cfg`), so only one under `#[cfg_attr(..)]` is
+/// refused there, pointing to the plain form.
+#[test]
+fn a_marked_struct_under_cfg_is_refused() {
+    let module = |items: &str| {
+        format!(
+            "mod office {{
+                {items}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+            }}"
+        )
+    };
+    for (items, what, name, does, evaluated) in [
+        (
+            "{cfg} #[state] pub struct Tally { pub count: u32 }",
+            "state",
+            "Tally",
+            "builds and reads it",
+            false,
+        ),
+        (
+            "{cfg} #[resource] pub struct Pool { pub size: u32 }
+            impl Pool { #[open] pub fn open() -> Self { Pool { size: 0 } } }",
+            "resource",
+            "Pool",
+            "opens and closes it",
+            false,
+        ),
+        (
+            "{cfg} #[wit_resource] pub struct Badge { holder: String }
+            impl Badge {
+                #[constructor]
+                pub fn new(holder: String) -> Self { Badge { holder } }
+                pub fn holder(&self) -> String { self.holder.clone() }
+            }",
+            "resource",
+            "Badge",
+            "calls its functions",
+            false,
+        ),
+        (
+            "#[service] {cfg} pub struct Ledger;
+            impl Ledger { pub fn count() -> u32 { 0 } }",
+            "service",
+            "Ledger",
+            "calls its functions",
+            true,
+        ),
+        (
+            "{cfg} #[hook(composition = series, input = Grant)] pub struct Granted;
+            pub struct Grant { pub who: String }",
+            "hook",
+            "Granted",
+            "runs it",
+            true,
+        ),
+    ] {
+        for (condition, written) in refused_conditions(evaluated) {
+            let conditional = module(&items.replace("{cfg}", condition));
+            let error = refused("example:office@1.0.0", &conditional);
+            let message = format!(
+                "{written} on the {what} `{name}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{name}` in every configuration; {}",
+                instead(evaluated)
+            );
+            assert!(error.contains(&message), "{condition} {items}: {error}");
+        }
+        expanded("example:office@1.0.0", &module(&items.replace("{cfg}", "")));
+    }
+}
+
+/// The macro writes the code calling a function it reads before the compiler evaluates
+/// `#[cfg(..)]`, and that code names the function in every configuration: a bridge calls the
+/// `pub fn` of a service, derived or implemented, and of a WIT resource, and its constructor, the
+/// kernel's callbacks a function marked `#[validate]`, `#[open]` or `#[close]`, and a hook's
+/// export a contribution. Where the attribute is off, the compiler would find the function gone,
+/// or a WIT resource's bridge calling itself, so a `#[cfg(..)]` on such a function, or on the
+/// `impl` block holding it, is refused, written plainly or under `#[cfg_attr(..)]`, and the same
+/// module without it expands. On a service's `pub fn`, the `impl` block holding it and a
+/// contribution the macro evaluates a plain `#[cfg(..)]` itself (`cfg`), so only one under
+/// `#[cfg_attr(..)]` is refused there, pointing to the plain form. A function the macro does not
+/// read keeps its `#[cfg(..)]`.
+#[test]
+fn a_function_under_cfg_is_refused() {
+    let office = |items: &str| {
+        format!(
+            "mod office {{
+                {items}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+            }}"
+        )
+    };
+    let keeper = consumed("cfg-keeper", LEDGER_WIT);
+    let blocker = consumed("cfg-blocker", ADMISSION_WIT);
+    for (package, dir, module, what, name, evaluated) in [
+        (
+            "example:office@1.0.0",
+            None,
+            office("impl Permits { {cfg} pub fn audit() -> u32 { 1 } }"),
+            "function",
+            "Permits::audit",
+            true,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office("{cfg} impl Permits { fn helper() {} pub fn audit() -> u32 { 1 } }"),
+            "`impl` block holding",
+            "Permits::audit",
+            true,
+        ),
+        (
+            "example:keeper@1.0.0",
+            Some(&keeper),
+            KEEPER.replace("pub fn total", "{cfg} pub fn total"),
+            "function",
+            "Keeper::total",
+            true,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[wit_resource] pub struct Badge { holder: String }
+                impl Badge {
+                    #[constructor]
+                    pub fn new(holder: String) -> Self { Badge { holder } }
+                    {cfg} pub fn holder(&self) -> String { self.holder.clone() }
+                }",
+            ),
+            "function",
+            "Badge::holder",
+            false,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[wit_resource] pub struct Badge { holder: String }
+                impl Badge { #[constructor] pub fn new(holder: String) -> Self { Badge { holder } } }
+                {cfg} impl Badge { pub fn holder(&self) -> String { self.holder.clone() } }",
+            ),
+            "`impl` block holding",
+            "Badge::holder",
+            false,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[wit_resource] pub struct Badge { holder: String }
+                impl Badge {
+                    {cfg} #[constructor]
+                    pub fn new(holder: String) -> Self { Badge { holder } }
+                }",
+            ),
+            "function",
+            "Badge::new",
+            false,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[state] pub struct Tally { pub count: u32 }
+                impl Tally {
+                    #[validate] {cfg}
+                    pub fn check(&self) -> Result<(), String> { Ok(()) }
+                }",
+            ),
+            "function",
+            "Tally::check",
+            false,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[resource] pub struct Pool { pub size: u32 }
+                impl Pool { {cfg} #[open] pub fn open() -> Self { Pool { size: 0 } } }",
+            ),
+            "function",
+            "Pool::open",
+            false,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[resource] pub struct Pool { pub size: u32 }
+                {cfg} impl Pool {
+                    #[open] pub fn open() -> Self { Pool { size: 0 } }
+                    #[close] pub fn close(self) {}
+                }",
+            ),
+            "`impl` block holding",
+            "Pool::open",
+            false,
+        ),
+        (
+            "example:blocker@1.0.0",
+            Some(&blocker),
+            "mod blocker {
+                {cfg}
+                #[hook(\"example:admission/guard@1.0.0\", priority = -7)]
+                pub fn block(input: guard::Admission) -> guard::Admission { input }
+            }"
+            .to_owned(),
+            "contribution",
+            "block",
+            true,
+        ),
+    ] {
+        let with = || options(package, dir.map(std::path::PathBuf::as_path));
+        for (condition, written) in refused_conditions(evaluated) {
+            let error = refused_with(with(), &module.replace("{cfg}", condition));
+            let message = format!(
+                "{written} on the {what} `{name}`: the macro writes the code that calls it before the compiler evaluates the attribute, so that code would name `{name}` in every configuration; {}",
+                instead(evaluated)
+            );
+            assert!(error.contains(&message), "{condition} {module}: {error}");
+        }
+        expanded_with(with(), &module.replace("{cfg}", ""));
+    }
+    let kept = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(
+            "impl Permits { #[cfg(test)] fn helper() -> u32 { 2 } }
+            #[cfg(test)] impl Permits { fn other() {} }",
+        ),
+    ));
+    for expected in [
+        "# [cfg (test)] fn helper () -> u32 { 2 }",
+        "# [cfg (test)] impl Permits { fn other () { } }",
+    ] {
+        assert!(kept.contains(expected), "{expected}\n{kept}");
+    }
+}
+
+/// A `#[cfg(..)]` on a sub-module drops every item of the module where it is off, while the code
+/// the macro writes for a struct it marks or a contribution counts on the item in every
+/// configuration, as under a `#[cfg(..)]` of the item's own: the export of a service, a hook or a
+/// contribution, which the bindings require, is written in the item's module and goes with it,
+/// and the code written elsewhere names a state, a resource or a WIT resource through the module.
+/// So a `#[cfg(..)]` on a sub-module holding such an item, in the module itself or below it, is
+/// refused, written plainly, under `#[cfg_attr(..)]` or inside the module, and the same module
+/// without it expands. On a sub-module holding a service or a hook the macro evaluates a plain
+/// `#[cfg(..)]` itself (`cfg`), so only one under `#[cfg_attr(..)]` is refused there, pointing to
+/// the plain form. A sub-module holding nothing the macro marks keeps its `#[cfg(..)]`.
+#[test]
+fn a_sub_module_under_cfg_holding_a_marked_item_is_refused() {
+    let office = |items: &str| {
+        format!(
+            "mod office {{
+                #[service]
+                pub struct Desk;
+                impl Desk {{ pub fn open() -> u32 {{ 1 }} }}
+                {items}
+            }}"
+        )
+    };
+    let blocker = consumed("cfg-module-blocker", ADMISSION_WIT);
+    for (package, dir, module, what, name, does, evaluated) in [
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "{cfg} pub mod audit {
+                    #[service]
+                    pub struct Permits;
+                    impl Permits { pub fn check() -> u32 { 0 } }
+                }",
+            ),
+            "module `audit` holding the service",
+            "Permits",
+            "calls its functions",
+            true,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "{cfg} pub mod audit {
+                    pub mod checks {
+                        #[service]
+                        pub struct Permits;
+                        impl Permits { pub fn check() -> u32 { 0 } }
+                    }
+                }",
+            ),
+            "module `audit` holding the service",
+            "Permits",
+            "calls its functions",
+            true,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office("{cfg} pub mod kept { #[state] pub struct Tally { pub count: u32 } }"),
+            "module `kept` holding the state",
+            "Tally",
+            "builds and reads it",
+            false,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "{cfg} pub mod pools {
+                    #[resource] pub struct Pool { pub size: u32 }
+                    impl Pool { #[open] pub fn open() -> Self { Pool { size: 0 } } }
+                }",
+            ),
+            "module `pools` holding the resource",
+            "Pool",
+            "opens and closes it",
+            false,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "{cfg} pub mod badges {
+                    #[wit_resource(service = Desk)] pub struct Badge { holder: String }
+                    impl Badge {
+                        #[constructor]
+                        pub fn new(holder: String) -> Self { Badge { holder } }
+                        pub fn holder(&self) -> String { self.holder.clone() }
+                    }
+                }",
+            ),
+            "module `badges` holding the resource",
+            "Badge",
+            "calls its functions",
+            false,
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "{cfg} pub mod grants {
+                    #[hook(composition = series, input = Grant)] pub struct Granted;
+                    pub struct Grant { pub who: String }
+                }",
+            ),
+            "module `grants` holding the hook",
+            "Granted",
+            "runs it",
+            true,
+        ),
+        (
+            "example:blocker@1.0.0",
+            Some(&blocker),
+            office(
+                "{cfg} pub mod blocks {
+                    #[hook(\"example:admission/guard@1.0.0\", priority = -7)]
+                    pub fn block(input: super::guard::Admission) -> super::guard::Admission { input }
+                }",
+            ),
+            "module `blocks` holding the contribution",
+            "block",
+            "calls it",
+            true,
+        ),
+    ] {
+        let with = || options(package, dir.map(std::path::PathBuf::as_path));
+        for (condition, written) in refused_conditions(evaluated) {
+            let error = refused_with(with(), &module.replace("{cfg}", condition));
+            let message = format!(
+                "{written} on the {what} `{name}`: the macro writes the code that {does} before the compiler evaluates the attribute, so that code would name `{name}` in every configuration; {}",
+                instead(evaluated)
+            );
+            assert!(error.contains(&message), "{condition} {module}: {error}");
+        }
+        expanded_with(with(), &module.replace("{cfg}", ""));
+    }
+    let inner = office(
+        "pub mod audit {
+            #![cfg_attr(test, cfg(feature = \"audit\"))]
+            #[service]
+            pub struct Permits;
+            impl Permits { pub fn check() -> u32 { 0 } }
+        }",
+    );
+    let error = refused("example:office@1.0.0", &inner);
+    assert!(
+        error.contains("`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the module `audit` holding the service `Permits`: the macro writes the code that calls its functions before the compiler evaluates the attribute, so that code would name `Permits` in every configuration; write the condition as a plain `#[cfg(..)]`, which the macro evaluates"),
+        "{error}"
+    );
+    let kept = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(
+            "#[cfg(feature = \"audit\")] pub mod extra {
+                pub struct Note { pub text: String }
+                pub fn two() -> u32 { 2 }
+            }
+            #[cfg(test)] mod tests { #[test] fn one() {} }",
+        ),
+    ));
+    for expected in [
+        "# [cfg (feature = \"audit\")] pub mod extra {",
+        "# [cfg (test)] mod tests {",
+    ] {
+        assert!(kept.contains(expected), "{expected}\n{kept}");
+    }
+}
+
+/// The code the macro writes calling a function it reads passes each parameter it read, before
+/// the compiler evaluates `#[cfg(..)]`: where the attribute is off, the compiler drops the
+/// parameter and the call passes one too many. So a `#[cfg(..)]` on a parameter, `self` included,
+/// of a service's `pub fn`, derived or implemented, of a WIT resource's function or constructor,
+/// of a function marked `#[validate]`, `#[open]` or `#[close]`, or of a contribution, is refused,
+/// written plainly or under `#[cfg_attr(..)]`, and the same module without it expands. A function
+/// the macro does not read keeps its parameter's `#[cfg(..)]`, and so does a
+/// `#[cfg(test)] mod tests` holding only tests and impls.
+#[test]
+fn a_parameter_under_cfg_is_refused() {
+    let office = |items: &str| {
+        format!(
+            "mod office {{
+                {items}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check() -> u32 {{ 0 }} }}
+            }}"
+        )
+    };
+    let badge = |functions: &str| {
+        office(&format!(
+            "#[wit_resource] pub struct Badge {{ holder: String }}
+            impl Badge {{ {functions} }}"
+        ))
+    };
+    let keeper = consumed("cfg-param-keeper", LEDGER_WIT);
+    let blocker = consumed("cfg-param-blocker", ADMISSION_WIT);
+    let constructor = "#[constructor] pub fn new(holder: String) -> Self { Badge { holder } }";
+    for (package, dir, module, what, name, param) in [
+        (
+            "example:office@1.0.0",
+            None,
+            office("impl Permits { pub fn audit(level: u32, {cfg} extra: u32) -> u32 { level } }"),
+            "function",
+            "Permits::audit",
+            "extra",
+        ),
+        (
+            "example:keeper@1.0.0",
+            Some(&keeper),
+            KEEPER.replace("add(entry", "add({cfg} entry"),
+            "function",
+            "Keeper::add",
+            "entry",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            badge("#[constructor] pub fn new({cfg} holder: String) -> Self { Badge { holder } }"),
+            "function",
+            "Badge::new",
+            "holder",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            badge(&format!(
+                "{constructor} pub fn holder({{cfg}} &self) -> String {{ self.holder.clone() }}"
+            )),
+            "function",
+            "Badge::holder",
+            "self",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            badge(&format!(
+                "{constructor} pub fn signed(&self, {{cfg}} by: String) -> String {{ by }}"
+            )),
+            "function",
+            "Badge::signed",
+            "by",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[state] pub struct Tally { pub count: u32 }
+                impl Tally {
+                    #[validate]
+                    pub fn check({cfg} &self) -> Result<(), String> { Ok(()) }
+                }",
+            ),
+            "function",
+            "Tally::check",
+            "self",
+        ),
+        (
+            "example:office@1.0.0",
+            None,
+            office(
+                "#[resource] pub struct Pool { pub size: u32 }
+                impl Pool {
+                    #[open] pub fn open() -> Self { Pool { size: 0 } }
+                    #[close] pub fn close({cfg} self) {}
+                }",
+            ),
+            "function",
+            "Pool::close",
+            "self",
+        ),
+        (
+            "example:blocker@1.0.0",
+            Some(&blocker),
+            "mod blocker {
+                #[hook(\"example:admission/guard@1.0.0\", priority = -7)]
+                pub fn block({cfg} input: guard::Admission) -> guard::Admission { input }
+            }"
+            .to_owned(),
+            "contribution",
+            "block",
+            "input",
+        ),
+    ] {
+        let with = || options(package, dir.map(std::path::PathBuf::as_path));
+        for (condition, written) in CONDITIONS {
+            let error = refused_with(with(), &module.replace("{cfg}", condition));
+            let message = format!(
+                "{written} on the parameter `{param}` of the {what} `{name}`: the macro writes the code that calls it before the compiler evaluates the attribute, so that code would pass `{param}` in every configuration; remove the attribute"
+            );
+            assert!(error.contains(&message), "{condition} {module}: {error}");
+        }
+        expanded_with(with(), &module.replace("{cfg}", ""));
+    }
+    let kept = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(
+            "impl Permits { fn helper(level: u32, #[cfg(test)] extra: u32) -> u32 { level } }
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+                impl Permits { pub fn probe(#[cfg(test)] extra: u32) -> u32 { extra } }
+                #[test]
+                fn one() {}
+            }",
+        ),
+    ));
+    for expected in [
+        "fn helper (level : u32 , # [cfg (test)] extra : u32)",
+        "# [cfg (test)] mod tests {",
+        "pub fn probe (# [cfg (test)] extra : u32)",
+    ] {
+        assert!(kept.contains(expected), "{expected}\n{kept}");
+    }
+}
+
+/// The bindings name a flags struct that enters the WIT through every module of its path, from the
+/// `with` the macro writes before the compiler evaluates `#[cfg(..)]`: where the attribute on one
+/// of those modules is off, the compiler drops the struct with the module, and that path names
+/// nothing. So a `#[cfg(..)]` on a sub-module holding such a struct, in the module itself or below
+/// it, is refused, written plainly, under `#[cfg_attr(..)]` or inside the module, and the same
+/// module without it expands. A sub-module holding a flags struct that stays out of the WIT keeps
+/// its `#[cfg(..)]`, and so does a `#[cfg(test)] mod tests` holding only tests and impls.
+#[test]
+fn a_sub_module_under_cfg_holding_a_flags_struct_is_refused() {
+    let office = |items: &str, path: &str| {
+        format!(
+            "mod office {{
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn check(access: {path}::Access) -> bool {{ access.read }} }}
+                {items}
+            }}"
+        )
+    };
+    for (module, holding) in [
+        (
+            office(
+                "{cfg} pub mod rights { #[flags] pub struct Access { pub read: bool } }",
+                "rights",
+            ),
+            "rights",
+        ),
+        (
+            office(
+                "{cfg} pub mod grants {
+                    pub mod rights { #[flags] pub struct Access { pub read: bool } }
+                }",
+                "grants::rights",
+            ),
+            "grants",
+        ),
+        (
+            office(
+                "pub mod grants {
+                    {cfg} pub mod rights { #[flags] pub struct Access { pub read: bool } }
+                }",
+                "grants::rights",
+            ),
+            "rights",
+        ),
+    ] {
+        for (condition, written) in CONDITIONS {
+            let error = refused("example:office@1.0.0", &module.replace("{cfg}", condition));
+            let message = format!(
+                "{written} on the module `{holding}` holding the flags `Access`: the macro writes the code that maps the WIT flags onto it before the compiler evaluates the attribute, so that code would name `Access` in every configuration; remove the attribute"
+            );
+            assert!(error.contains(&message), "{condition} {module}: {error}");
+        }
+        expanded("example:office@1.0.0", &module.replace("{cfg}", ""));
+    }
+    let inner = office(
+        "pub mod rights {
+            #![cfg(feature = \"sharing\")]
+            #[flags]
+            pub struct Access { pub read: bool }
+        }",
+        "rights",
+    );
+    let error = refused("example:office@1.0.0", &inner);
+    assert!(
+        error.contains("`#[cfg(..)]` on the module `rights` holding the flags `Access`: the macro writes the code that maps the WIT flags onto it before the compiler evaluates the attribute, so that code would name `Access` in every configuration; remove the attribute"),
+        "{error}"
+    );
+    let kept = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(
+            "pub mod rights { #[flags] pub struct Access { pub read: bool } }
+            #[cfg(feature = \"sharing\")]
+            pub mod spare { #[flags] pub struct Spare { pub seen: bool } }
+            #[cfg(test)]
+            mod tests {
+                use super::rights::Access;
+                impl Access { fn none() -> Self { Access { read: false } } }
+                #[test]
+                fn one() {}
+            }",
+            "rights",
+        ),
+    ));
+    for expected in [
+        "# [cfg (feature = \"sharing\")] pub mod spare {",
+        "# [cfg (test)] mod tests {",
+    ] {
+        assert!(kept.contains(expected), "{expected}\n{kept}");
     }
 }
 
@@ -2329,6 +3952,111 @@ fn the_types_a_state_out_of_the_wit_reaches_get_serde_derives() {
     }
     assert!(
         !generated.contains(&format!("{derived} pub struct Other")),
+        "{generated}"
+    );
+}
+
+/// The serde derives the macro adds to a state kept out of the WIT, and to the types it reaches,
+/// are those the type does not have yet: a derive the macro follows to `serde`, under another name
+/// too, `Ser` after `use serde::{Serialize as Ser};`, or an impl of `serde`'s trait the Orb's
+/// modules write by hand, in the type's module or another, gives the type the trait, and the macro
+/// adds no second one. Another crate's trait of either name, `rkyv::Serialize`, derived or
+/// implemented, is no `serde` trait, so the macro still adds `serde`'s, and neither is a trait of
+/// the Orb's own named so, `pub trait Serialize` declared in the module, implemented under
+/// `#[cfg(..)]` too.
+#[test]
+fn the_serde_derives_a_state_gets_follow_renames_and_hand_impls() {
+    let module = |items: &str| {
+        format!(
+            "mod ledger {{
+                use serde::{{Serialize as Ser, Deserialize as De}};
+                #[state]
+                pub struct Balance {{ pub total: i64, pub notes: Vec<Note>, pub mood: Mood }}
+                pub struct Note {{ pub text: String }}
+                pub enum Mood {{ Calm, Loud }}
+                {items}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    let serialize = "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() }";
+    let deserialize = "fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> { todo!() }";
+    for (items, expected) in [
+        (
+            "#[derive(Default, Ser, De)] pub struct Unused;".to_owned(),
+            [
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Note",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Mood",
+            ],
+        ),
+        (
+            format!(
+                "impl serde::Serialize for Balance {{ {serialize} }}
+                impl<'de> De<'de> for Note {{ {deserialize} }}
+                pub mod json {{
+                    use serde::ser::Serialize;
+                    impl Serialize for super::Mood {{ {serialize} }}
+                }}"
+            ),
+            [
+                "# [derive (:: serde :: Deserialize)] pub struct Balance",
+                "# [derive (:: serde :: Serialize)] pub struct Note",
+                "# [derive (:: serde :: Deserialize)] pub enum Mood",
+            ],
+        ),
+        (
+            format!(
+                "impl<S> rkyv::Serialize<S> for Balance {{}}
+                impl<'de> ::serde::de::Deserialize<'de> for Balance {{ {deserialize} }}"
+            ),
+            [
+                "# [derive (:: serde :: Serialize)] pub struct Balance",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Note",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Mood",
+            ],
+        ),
+        (
+            "pub trait Serialize { fn bytes(&self) -> u32; }
+            impl Serialize for Balance { fn bytes(&self) -> u32 { 0 } }
+            #[cfg(test)]
+            impl Serialize for Note { fn bytes(&self) -> u32 { 0 } }"
+                .to_owned(),
+            [
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Note",
+                "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub enum Mood",
+            ],
+        ),
+    ] {
+        let generated = tokens(&expanded("example:ledger@1.0.0", &module(&items)));
+        for expected in expected {
+            assert!(generated.contains(expected), "{expected}\n{generated}");
+        }
+    }
+    let renamed = module("").replace(
+        "pub struct Balance",
+        "#[derive(Default, Ser, De)] pub struct Balance",
+    );
+    let renamed = renamed.replace("pub struct Note", "#[derive(Ser)] pub struct Note");
+    let renamed = renamed.replace(
+        "pub enum Mood",
+        "#[derive(rkyv::Serialize, De)] pub enum Mood",
+    );
+    let generated = tokens(&expanded("example:ledger@1.0.0", &renamed));
+    for expected in [
+        "# [derive (Default , Ser , De)] pub struct Balance",
+        "# [derive (Ser)] # [derive (:: serde :: Deserialize)] pub struct Note",
+        "# [derive (rkyv :: Serialize , De)] # [derive (:: serde :: Serialize)] pub enum Mood",
+    ] {
+        assert!(generated.contains(expected), "{expected}\n{generated}");
+    }
+    assert!(
+        !generated.contains(
+            "# [derive (:: serde :: Serialize , :: serde :: Deserialize)] pub struct Balance"
+        ),
         "{generated}"
     );
 }
@@ -3039,7 +4767,8 @@ fn a_glob_import_from_a_module_of_the_orb_is_followed() {
 /// crate as well, `super::Serialize` from the Orb module, `crate::prelude::Serialize` or a name a
 /// crate's glob may bring, as on a path from `serde`. Where the bindings derive none, such a path
 /// is carried when it names the derive from the bindings' module and refused as any other when it
-/// does not.
+/// does not. Another crate's derive of either name, `rkyv::Serialize`, is that crate's, carried
+/// with a state too, renamed or not, with the helper attribute it reads.
 #[test]
 fn a_serde_derive_the_bindings_cover_is_theirs_under_any_path() {
     let module = |imports: &str, state: &str| {
@@ -3081,6 +4810,29 @@ fn a_serde_derive_the_bindings_cover_is_theirs_under_any_path() {
         ),
         "{}",
         tokens(&stateless)
+    );
+    let rkyv = expanded(
+        "example:walk@1.0.0",
+        &format!(
+            "mod walk {{
+                use rkyv::Serialize as Rk;
+                {state}
+                #[derive(rkyv::Archive, Rk, rkyv::Deserialize, Hash)]
+                #[rkyv(compare(PartialEq))]
+                pub struct Point {{ pub x: i32, pub y: i32 }}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> Point {{ todo!() }} }}
+            }}"
+        ),
+    );
+    assert_eq!(
+        type_attributes(&rkyv).as_deref(),
+        Some(
+            "additional_type_attributes : { \"example:walk/walker@1.0.0/point\" : [# [derive (:: rkyv :: Archive , :: rkyv :: Serialize , :: rkyv :: Deserialize , :: core :: hash :: Hash)] # [rkyv (compare (PartialEq))]] } ,"
+        ),
+        "{}",
+        tokens(&rkyv)
     );
     for (imports, message) in [
         (
@@ -3153,11 +4905,13 @@ fn a_derived_hook_input_keeps_its_derives() {
 }
 
 /// What the generated type cannot take is refused on the author's item: a derive of another crate
-/// implementing a trait the bindings implement, a derive of the standard library the type's
-/// contents rule out, `Default` included on a record whose every value holds a resource handle,
-/// serde's derives on a type holding one anywhere, a derive the macro cannot name from the
-/// bindings' module, a helper attribute on a case's payload, and `#[cfg_attr(..)]`, under which a
-/// derive would come and go. Kept out of the WIT, the same type is the author's, as written.
+/// implementing a trait the bindings implement, with the helper attributes no other derive of the
+/// type reads, which go with it, a derive of the standard library the type's contents rule out,
+/// `Default` included on a record whose every value holds a resource handle, serde's derives on a
+/// type holding one anywhere, under a path the bindings would take over in an Orb with a state
+/// too, a derive the macro cannot name from the bindings' module, a helper attribute on a case's
+/// payload, and a `#[cfg_attr(..)]` wrapping a derive or a helper, which would come and go. Kept
+/// out of the WIT, the same type is the author's, as written.
 #[test]
 fn what_the_generated_type_cannot_take_is_refused() {
     let module = |types: &str, returned: &str| {
@@ -3194,6 +4948,16 @@ fn what_the_generated_type_cannot_take_is_refused() {
             "implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle",
         ),
         (
+            "#[derive(educe::Educe)] #[educe(Hash, Debug(name(Spot)))] pub struct Point { pub x: i32 }",
+            "Point",
+            "`educe::Educe` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type; remove `Debug` from `#[educe(..)]`, or keep `Point` out of the WIT",
+        ),
+        (
+            "#[derive(derivative::Derivative)] #[derivative(Clone(bound = \"\"))] pub struct Point { pub x: i32 }",
+            "Point",
+            "`derivative::Derivative` on `Point`: `Point` enters the WIT and the generated type replacing it implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle; remove `Clone` from `#[derivative(..)]`, or keep `Point` out of the WIT",
+        ),
+        (
             "#[derive(more::Ord)] pub enum Heading { North, East }",
             "Heading",
             "implements `Ord` already, as the bindings derive it for every enum",
@@ -3206,7 +4970,13 @@ fn what_the_generated_type_cannot_take_is_refused() {
         (
             "#[derive(thiserror::Error)] pub struct Fault { pub code: u32 }",
             "Result<(), Fault>",
-            "implements `Error` already, as the bindings implement it for the error of a function's result",
+            "implements `Error` already, as the bindings implement it for the error of a function's result; remove the derive, or keep `Fault` out of the WIT",
+        ),
+        (
+            "#[derive(Hash, thiserror::Error)]
+             pub enum Fault { #[error(\"lost\")] Lost, #[error(\"stuck\")] Stuck }",
+            "Result<u32, Fault>",
+            "`thiserror::Error` on `Fault`: `Fault` enters the WIT and the generated type replacing it implements `Error` already, as the bindings implement it for the error of a function's result; remove the derive and the attributes it reads, `#[error(..)]`, or keep `Fault` out of the WIT",
         ),
         (
             "#[derive(Clone)] pub struct Lease { pub pen: Pen }",
@@ -3249,6 +5019,71 @@ fn what_the_generated_type_cannot_take_is_refused() {
             "`serde::Serialize` on `Page`: `Page` enters the WIT and holds a resource handle, which implements no `Serialize`",
         ),
         (
+            "#[state] pub struct Count { pub steps: u32 } #[derive(Serialize)] pub struct Lease { pub pen: Pen }",
+            "Lease",
+            "`Serialize` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Serialize`",
+        ),
+        (
+            "#[state] pub struct Count { pub steps: u32 } use super::Deserialize; #[derive(Deserialize)] pub struct Lease { pub pen: Pen }",
+            "Lease",
+            "`Deserialize` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Deserialize`",
+        ),
+        (
+            "#[derive(PartialEq, Eq)] pub struct Point { pub x: f64 }",
+            "Point",
+            "`Eq` on `Point`: `Point` enters the WIT and holds an `f64`, which implements no `Eq`, so the generated type replacing it cannot derive `Eq`; remove the derive, or keep `Point` out of the WIT",
+        ),
+        (
+            "#[derive(Hash)] pub struct Point { pub x: Option<f32> }",
+            "Point",
+            "`Hash` on `Point`: `Point` enters the WIT and holds an `f32`, which implements no `Hash`",
+        ),
+        (
+            "#[derive(PartialOrd, Ord)] pub enum Move { Jump((u32, f64)), Rest }",
+            "Move",
+            "`Ord` on `Move`: `Move` enters the WIT and holds an `f64`, which implements no `Ord`",
+        ),
+        (
+            "#[derive(Default)] pub struct Page { pub checked: Result<u32, String> }",
+            "Page",
+            "`Default` on `Page`: `Page` enters the WIT and holds a `Result`, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `Page` out of the WIT",
+        ),
+        (
+            "pub struct Slot { pub pen: Pen } #[derive(PartialEq)] pub struct Page { pub slot: Slot }",
+            "Page",
+            "`PartialEq` on `Page`: `Page` enters the WIT and holds a resource handle, which implements no `PartialEq`",
+        ),
+        (
+            "pub struct Note { pub text: String } #[derive(Copy)] pub struct Page { pub note: Note }",
+            "Page",
+            "`Copy` on `Page`: `Page` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`",
+        ),
+        (
+            "#[derive(educe::Educe)] #[educe(Clone)] pub struct Lease { pub pen: Pen }",
+            "Lease",
+            "`educe::Educe` on `Lease`: `Lease` enters the WIT and holds a resource handle, which implements no `Clone`, so the generated type replacing it cannot derive `Clone`; remove `Clone` from `#[educe(..)]`, or keep `Lease` out of the WIT",
+        ),
+        (
+            "#[derive(educe::Educe)] #[educe(Copy)] pub struct Note { pub text: String }",
+            "Note",
+            "`educe::Educe` on `Note`: `Note` enters the WIT and holds a string or a list, so the generated type replacing it cannot be `Copy`; remove `Copy` from `#[educe(..)]`",
+        ),
+        (
+            "#[derive(educe::Educe)] #[educe(Eq)] pub struct Point { pub x: f64 }",
+            "Point",
+            "`educe::Educe` on `Point`: `Point` enters the WIT and holds an `f64`, which implements no `Eq`, so the generated type replacing it cannot derive `Eq`; remove `Eq` from `#[educe(..)]`, or keep `Point` out of the WIT",
+        ),
+        (
+            "#[derive(educe::Educe, smart_default::SmartDefault)] #[educe(Eq)] pub struct Point { #[default(1.5)] pub x: f64 }",
+            "Point",
+            "`educe::Educe` on `Point`: `Point` enters the WIT and holds an `f64`, which implements no `Eq`, so the generated type replacing it cannot derive `Eq`; remove `Eq` from `#[educe(..)]`, or keep `Point` out of the WIT",
+        ),
+        (
+            "#[derive(smart_default::SmartDefault)] pub struct Lease { pub pen: Pen }",
+            "Lease",
+            "`smart_default::SmartDefault` on `Lease`: `Lease` enters the WIT and every value of it holds a resource handle, which implements no `Default`, so the generated type replacing it cannot derive `Default`; remove the derive, or keep `Lease` out of the WIT",
+        ),
+        (
             "#[derive(EnumIter)] pub enum Heading { North, East }",
             "Heading",
             "`EnumIter` on `Heading`: `Heading` enters the WIT and the generated type replacing it is declared in the bindings' module, which `EnumIter` does not reach: this module imports no `EnumIter` by name, unless a glob import brings it; import it with `use`, or name it from its crate, such as `::name::EnumIter`",
@@ -3269,11 +5104,6 @@ fn what_the_generated_type_cannot_take_is_refused() {
             "`Point` enters the WIT and the generated type replaces it, which takes the author's derives and the attributes they read as written, never under `#[cfg_attr(..)]`",
         ),
         (
-            "pub struct Point { #[cfg_attr(test, allow(dead_code))] pub x: i32 }",
-            "Point",
-            "never under `#[cfg_attr(..)]`",
-        ),
-        (
             "pub enum Heading { #[cfg_attr(test, default)] North, East }",
             "Heading",
             "never under `#[cfg_attr(..)]`",
@@ -3283,12 +5113,1131 @@ fn what_the_generated_type_cannot_take_is_refused() {
         assert!(error.contains(message), "{types}: {error}");
         expanded("example:walk@1.0.0", &module(types, "u32"));
     }
+    // A derive implementing, through its helper, only traits the bindings leave to it is carried.
+    let generated = tokens(&expanded(
+        "example:walk@1.0.0",
+        &module(
+            "#[derive(educe::Educe)] #[educe(Hash)] pub struct Point { pub x: i32 }",
+            "Point",
+        ),
+    ));
+    assert!(
+        generated.contains("[# [derive (:: educe :: Educe)] # [educe (Hash)]]"),
+        "{generated}"
+    );
+    // A member carrying the helper attribute a derive is known to read is the derive's, which may
+    // give it its own value or leave it out: `#[default(..)]` of `SmartDefault` on a handle,
+    // `#[educe(..)]` of `Educe` on an `f64`.
+    for (types, returned, expected) in [
+        (
+            "#[derive(smart_default::SmartDefault)] pub struct Lease { #[default(crate::walk::pen())] pub pen: Pen }",
+            "Lease",
+            "\"example:walk/walker@1.0.0/lease\" : [# [derive (:: smart_default :: SmartDefault)]] } , additional_member_attributes : { \"example:walk/walker@1.0.0/lease.pen\" : [# [default (crate :: walk :: pen ())]] } ,",
+        ),
+        (
+            "#[derive(educe::Educe)] #[educe(Hash)] pub struct Point { #[educe(Hash(ignore))] pub x: f64 }",
+            "Point",
+            "\"example:walk/walker@1.0.0/point\" : [# [derive (:: educe :: Educe)] # [educe (Hash)]] } , additional_member_attributes : { \"example:walk/walker@1.0.0/point.x\" : [# [educe (Hash (ignore))]] } ,",
+        ),
+    ] {
+        let generated = tokens(&expanded("example:walk@1.0.0", &module(types, returned)));
+        assert!(generated.contains(expected), "{types}: {generated}");
+    }
+}
+
+const BOOK_KINDS_WIT: &str = "package example:ledger@1.0.0;
+interface book {
+  record entry { label: string, amount: s64 }
+  enum side { credit, debit }
+  flags marks { urgent, checked }
+  add: func(entry: entry, side: side, marks: marks) -> u32;
+}
+";
+
+/// A derive of the standard library is decided trait by trait from the type's fields, as the
+/// bindings would decide it inside their module: a handle, a string or a list held through a
+/// consumed type or a type of the module rules out what it rules out in a field, unless the macro
+/// sees the trait implemented for that type, by the bindings, by its derives or by hand; a trait
+/// such a type lacks otherwise is left to the author, who may implement it by hand where the macro
+/// does not read; and a trait every field has is carried, as is `Default` over options, lists and
+/// the cases of a variant, which `Default` leaves empty. A derive implementing a trait under
+/// another name follows the same rule, but for a member whose helper attributes it reads, which it
+/// may give its own value.
+#[test]
+fn a_standard_derive_is_decided_from_the_fields() {
+    let dir = consumed("notes", BOOK_KINDS_WIT);
+    let importing = || Options {
+        imports: vec![literal("example:ledger/book@1.0.0")],
+        ..options("example:notes@1.0.0", Some(&dir))
+    };
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod notes {{
+                #[flags]
+                pub struct Access {{ pub read: bool }}
+                impl PartialEq for Access {{
+                    fn eq(&self, other: &Self) -> bool {{ self.read == other.read }}
+                }}
+                pub enum Heading {{ North, East }}
+                pub struct Spot {{ pub x: i32 }}
+                {types}
+                #[service]
+                pub struct Shelf;
+                impl Shelf {{ pub fn last() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    for (types, message) in [
+        (
+            "#[derive(Clone, Copy)] pub struct Note { pub entry: book::Entry }",
+            "`Copy` on `Note`: `Note` enters the WIT and holds `Entry`, a record of example:ledger/book@1.0.0, which holds a string or a list, so the generated type replacing it cannot derive `Copy`; remove the derive, or keep `Note` out of the WIT",
+        ),
+        (
+            "#[derive(Clone, Copy)] pub struct Note { pub entries: Option<(book::Entry, u32)> }",
+            "`Copy` on `Note`: `Note` enters the WIT and holds `Entry`, a record of example:ledger/book@1.0.0, which holds a string or a list",
+        ),
+    ] {
+        let error = refused_with(importing(), &module(types, "Note"));
+        assert!(error.contains(message), "{types}: {error}");
+        expanded_with(importing(), &module(types, "u32"));
+    }
+    for (types, carried) in [
+        // A record of integers and strings carries its comparisons and `Hash`.
+        (
+            "#[derive(PartialEq, Eq, Hash)] pub struct Note { pub text: String, pub count: u32, pub tags: Vec<String> }",
+            ":: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash",
+        ),
+        (
+            "#[derive(PartialEq, PartialOrd)] pub struct Note { pub heading: Heading, pub x: f32 }",
+            ":: core :: cmp :: PartialEq , :: core :: cmp :: PartialOrd",
+        ),
+        (
+            "#[derive(PartialEq, Eq, PartialOrd, Ord)] pub struct Note { pub side: book::Side }",
+            ":: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: cmp :: PartialOrd , :: core :: cmp :: Ord",
+        ),
+        (
+            "#[derive(PartialEq, Eq, Hash)] pub struct Note { pub marks: book::Marks }",
+            ":: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash",
+        ),
+        (
+            "#[derive(Default)] pub struct Note { pub entry: Option<book::Entry>, pub spots: Vec<Spot> }",
+            ":: core :: default :: Default",
+        ),
+        (
+            "#[derive(Default)] pub enum Note { Entry(book::Entry), Spot(Spot), #[default] Blank }",
+            ":: core :: default :: Default",
+        ),
+        (
+            "#[derive(PartialEq)] pub struct Note { pub access: Access }",
+            ":: core :: cmp :: PartialEq",
+        ),
+        (
+            "#[derive(smart_default::SmartDefault)] pub struct Note { #[default(Ok(1))] pub checked: Result<u32, String> }",
+            ":: smart_default :: SmartDefault",
+        ),
+        // A trait the author implements by hand applies to the generated type replacing the type,
+        // and a state has the `Default` the macro writes for it.
+        (
+            "impl Default for Spot { fn default() -> Self { Spot { x: 1 } } } #[derive(Default)] pub struct Note { pub at: Spot }",
+            ":: core :: default :: Default",
+        ),
+        (
+            "#[state] pub struct Position { pub x: i32 } #[derive(Default)] pub struct Note { pub position: Position }",
+            ":: core :: default :: Default",
+        ),
+        // A trait a type held in a field lacks may come from a hand impl the macro does not see:
+        // one written through `crate::`, one on a consumed type, or one outside the Orb module.
+        (
+            "impl PartialEq for crate::notes::Spot { fn eq(&self, other: &Self) -> bool { self.x == other.x } } #[derive(PartialEq)] pub struct Note { pub at: Spot }",
+            ":: core :: cmp :: PartialEq",
+        ),
+        (
+            "impl PartialEq for book::Entry { fn eq(&self, other: &Self) -> bool { self.label == other.label } } #[derive(Clone, PartialEq)] pub struct Note { pub entry: book::Entry, pub qty: u32 }",
+            ":: core :: cmp :: PartialEq",
+        ),
+        (
+            "#[derive(PartialEq)] pub struct Note { pub at: Spot }",
+            ":: core :: cmp :: PartialEq",
+        ),
+        (
+            "#[derive(Hash)] pub struct Note { pub side: book::Side }",
+            ":: core :: hash :: Hash",
+        ),
+    ] {
+        let module = expanded_with(importing(), &module(types, "Note"));
+        let expected = format!("\"example:notes/shelf@1.0.0/note\" : [# [derive ({carried})]");
+        assert!(
+            type_attributes(&module).is_some_and(|attributes| attributes.contains(&expected)),
+            "{types}: {}",
+            tokens(&module)
+        );
+    }
+    // A type of the module carries what its own derives give it, and so does one holding it.
+    let module = expanded_with(
+        importing(),
+        &module(
+            "#[derive(PartialEq, Eq, Hash)] pub struct Point { pub at: Spot }",
+            "Point",
+        )
+        .replace(
+            "pub struct Spot { pub x: i32 }",
+            "#[derive(PartialEq, Eq, Hash)] pub struct Spot { pub x: i32 }",
+        ),
+    );
+    assert_eq!(
+        type_attributes(&module).as_deref(),
+        Some(concat!(
+            "additional_type_attributes : { ",
+            "\"example:notes/shelf@1.0.0/spot\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] , ",
+            "\"example:notes/shelf@1.0.0/point\" : [# [derive (:: core :: cmp :: PartialEq , :: core :: cmp :: Eq , :: core :: hash :: Hash)]] } ,",
+        )),
+        "{}",
+        tokens(&module)
+    );
+}
+
+/// The bindings implement `Debug` for every type they generate, `Clone` and `Copy` as far as its
+/// contents allow, the comparisons for an enum, and `Display` and `Error` for the error of a
+/// function's result, and they derive `serde`'s traits on it in an Orb with a state; the macro
+/// implements `BitOr` for a flags struct. An impl of one of those traits that the Orb's modules
+/// write for such a type, under `#[cfg(..)]` too, or a derive implementing `BitOr` on a flags
+/// struct, would implement it twice, so it is refused, saying what implements it already; so is an
+/// impl of the trait with `Self`, the type itself, placed from the impl's module, or a type
+/// parameter as its type argument, `PartialEq<Self>`, which the derived `PartialEq` is. The same
+/// module without it expands, and so do an impl of a trait the bindings do not implement for that
+/// type, one of the trait with another right-hand type, `PartialEq<u8>` or another module's
+/// namesake, which coexists with the derived one, an impl whose trait the
+/// macro cannot follow to a crate, one of a trait of the Orb's own that takes a prelude's or
+/// `serde`'s name, `pub trait Clone`, declared in the module or brought in by a glob import from
+/// another module of the Orb, and one for a type the macro places only by its name, one a glob
+/// import from outside the Orb brings into another module, which may be another type's.
+#[test]
+fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
+    let module = |items: &str| {
+        format!(
+            "mod walk {{
+                use std::fmt;
+                #[wit_resource]
+                pub struct Pen {{ pub ink: u32 }}
+                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
+                pub struct Point {{ pub x: i32 }}
+                pub struct Lease {{ pub pen: Pen }}
+                pub enum Fault {{ Lost, Stuck }}
+                pub enum Heading {{ North, East }}
+                #[flags]
+                pub struct Access {{ pub read: bool }}
+                {items}
+                #[service]
+                pub struct Walker;
+                impl Walker {{
+                    pub fn walk(access: Access, heading: Heading) -> Result<Point, Fault> {{ todo!() }}
+                    pub fn lend() -> Lease {{ todo!() }}
+                }}
+            }}"
+        )
+    };
+    let fmt = "fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { todo!() }";
+    let serialize = "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() }";
+    let state = "#[state] pub struct Count { pub steps: u32 }";
+    for (source, message) in [
+        (
+            module(&format!("impl fmt::Display for Fault {{ {fmt} }}")),
+            "`impl fmt::Display for Fault`: `Fault` enters the WIT and the generated type replacing it implements `Display` already, as the bindings implement it for the error of a function's result; remove the impl, or keep `Fault` out of the WIT",
+        ),
+        (
+            module("impl std::error::Error for Fault {}"),
+            "`impl std::error::Error for Fault`: `Fault` enters the WIT and the generated type replacing it implements `Error` already, as the bindings implement it for the error of a function's result",
+        ),
+        (
+            module(&format!(
+                "use core::fmt::Debug; impl Debug for Point {{ {fmt} }}"
+            )),
+            "`impl Debug for Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type",
+        ),
+        (
+            module("impl Clone for Point { fn clone(&self) -> Self { todo!() } }"),
+            "`impl Clone for Point`: `Point` enters the WIT and the generated type replacing it implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle",
+        ),
+        (
+            module(
+                "impl PartialEq<Heading> for Heading { fn eq(&self, other: &Heading) -> bool { todo!() } }",
+            ),
+            "`impl PartialEq<Heading> for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
+        ),
+        (
+            module(
+                "pub mod ops { use super::Point; impl core::fmt::Debug for Point { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } } }",
+            ),
+            "`impl core::fmt::Debug for Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type",
+        ),
+        (
+            module(
+                "#[cfg(test)]
+                mod tests {
+                    use super::*;
+                    impl PartialEq for Heading { fn eq(&self, other: &Self) -> bool { todo!() } }
+                }",
+            ),
+            "`impl PartialEq for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
+        ),
+        (
+            module(
+                "impl PartialEq<Self> for Heading { fn eq(&self, other: &Self) -> bool { todo!() } }",
+            ),
+            "`impl PartialEq<Self> for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
+        ),
+        (
+            module(
+                "impl<T> PartialEq<T> for Heading { fn eq(&self, other: &T) -> bool { todo!() } }",
+            ),
+            "`impl PartialEq<T> for Heading`: `Heading` enters the WIT and the generated type replacing it implements `PartialEq` already, as the bindings derive it for every enum",
+        ),
+        (
+            module(&format!(
+                "{state} impl serde::Serialize for Point {{ {serialize} }}"
+            )),
+            "`impl serde::Serialize for Point`: `Point` enters the WIT and the generated type replacing it implements `Serialize` already, as the bindings derive it for a type that enters the WIT of an Orb with a state; remove the impl, or keep `Point` out of the WIT",
+        ),
+        (
+            module("").replace("#[flags]", "#[flags] #[derive(derive_more::BitOr)]"),
+            "`derive_more::BitOr` on `Access`: `Access` is a #[flags] struct, for which the macro implements `BitOr`, as its bindings combine flags with `|`; remove the derive",
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &source);
+        assert!(error.contains(message), "{source}: {error}");
+    }
+    for items in [
+        String::new(),
+        format!("impl fmt::Display for Point {{ {fmt} }}"),
+        "impl PartialEq for Point { fn eq(&self, other: &Self) -> bool { todo!() } }".to_owned(),
+        "impl core::cmp::PartialEq<u8> for Heading { fn eq(&self, other: &u8) -> bool { todo!() } }".to_owned(),
+        "impl PartialOrd<u8> for Heading { fn partial_cmp(&self, other: &u8) -> Option<core::cmp::Ordering> { todo!() } }
+        impl PartialEq<u8> for Heading { fn eq(&self, other: &u8) -> bool { todo!() } }".to_owned(),
+        "impl Clone for Lease { fn clone(&self) -> Self { todo!() } }".to_owned(),
+        format!("impl serde::Serialize for Point {{ {serialize} }}"),
+        "impl crate::walk::Display for Fault {} pub trait Display {}".to_owned(),
+        format!("use pretty::*; impl Display for Fault {{ {fmt} }}"),
+        format!("{state} impl rkyv::Serialize<u32> for Point {{}}"),
+        "pub trait Clone { fn dup(&self) -> u32; } impl Clone for Point { fn dup(&self) -> u32 { 0 } }".to_owned(),
+        "pub trait Ord { fn rank(&self) -> u32; } impl Ord for Heading { fn rank(&self) -> u32 { 0 } }".to_owned(),
+        "pub mod traits { pub trait PartialEq { fn same(&self) -> bool; } }
+        use traits::*;
+        impl PartialEq for Heading { fn same(&self) -> bool { true } }".to_owned(),
+        format!("{state} pub trait Serialize {{ fn bytes(&self) -> u32; }} impl Serialize for Point {{ fn bytes(&self) -> u32 {{ 0 }} }}"),
+        "pub mod ops { use crate::geometry::*; impl core::fmt::Debug for Point { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } } }".to_owned(),
+        "pub mod legacy { pub struct Heading(pub u8); }
+        impl PartialEq<legacy::Heading> for Heading { fn eq(&self, other: &legacy::Heading) -> bool { todo!() } }".to_owned(),
+    ] {
+        expanded("example:walk@1.0.0", &module(&items));
+    }
+}
+
+/// The macro reads the trait impls of the Orb's modules before the compiler evaluates
+/// `#[cfg(..)]`, and leaves to them what the code it writes needs: the `Clone` of a flags struct,
+/// which its `Copy` needs, and what the bindings of a record holding the struct need of it, the
+/// `Default` of a state, a `serde` trait of a state kept out of the WIT or of a type its fields
+/// reach, and a trait a type's derive needs of a type it holds. An impl under `#[cfg(..)]`, written
+/// plainly or under `#[cfg_attr(..)]`, or in a module under one, such as `#[cfg(test)] mod tests`,
+/// gives the trait in some configurations only, so it is refused, unless other impls, or a derive
+/// under `#[cfg_attr(..)]`, cover the others, as a `#[cfg(not(..))]` impl beside a `#[cfg(..)]` one
+/// does. The same impls without the attribute expand, and so does an impl under `#[cfg(..)]` of a
+/// trait the generated code does not need: the `Debug` or the `Copy` of a flags struct no record
+/// holds, or a test's own `PartialEq`.
+#[test]
+fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
+    let office = |items: &str| {
+        format!(
+            "mod office {{
+                #[flags]
+                pub struct Access {{ pub read: bool, pub write: bool }}
+                pub struct Grant {{ pub access: Access, pub level: u32 }}
+                pub struct Note {{ pub text: String }}
+                {items}
+                #[service]
+                pub struct Permits;
+                impl Permits {{ pub fn invert(grant: Grant, note: Note) -> Access {{ todo!() }} }}
+            }}"
+        )
+    };
+    let walk = |items: &str| {
+        format!(
+            "mod walk {{
+                #[wit_resource]
+                pub struct Pen {{ pub ink: u32 }}
+                impl Pen {{ pub fn ink(&self) -> u32 {{ self.ink }} }}
+                pub struct Slot {{ pub pen: Pen }}
+                #[derive(PartialEq)]
+                pub struct Page {{ pub slot: Slot }}
+                {items}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn turn() -> Page {{ todo!() }} }}
+            }}"
+        )
+    };
+    let ledger = |items: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                pub struct Balance {{ pub total: i64 }}
+                {items}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    let compared = |items: &str| {
+        office(items).replace("pub struct Grant", "#[derive(PartialEq)] pub struct Grant")
+    };
+    let clone = "impl Clone for Access { fn clone(&self) -> Self { *self } }";
+    let debug = "impl core::fmt::Debug for Access { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } }";
+    let equal = "impl PartialEq for Access { fn eq(&self, other: &Self) -> bool { todo!() } }";
+    let compare = "impl PartialEq for Slot { fn eq(&self, other: &Self) -> bool { todo!() } }";
+    let default = "impl Default for Balance { fn default() -> Self { Balance { total: 100 } } }";
+    let serialize = "impl serde::Serialize for Balance { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() } }";
+    for (build, hand, place, owner, name) in [
+        (
+            &office as &dyn Fn(&str) -> String,
+            clone,
+            "`impl Clone for Access`",
+            "Access",
+            "Clone",
+        ),
+        (
+            &office,
+            debug,
+            "`impl core::fmt::Debug for Access`",
+            "Access",
+            "Debug",
+        ),
+        (
+            &compared,
+            equal,
+            "`impl PartialEq for Access`",
+            "Access",
+            "PartialEq",
+        ),
+        (
+            &walk,
+            compare,
+            "`impl PartialEq for Slot`",
+            "Slot",
+            "PartialEq",
+        ),
+        (
+            &ledger,
+            default,
+            "`impl Default for Balance`",
+            "Balance",
+            "Default",
+        ),
+        (
+            &ledger,
+            serialize,
+            "`impl serde::Serialize for Balance`",
+            "Balance",
+            "Serialize",
+        ),
+    ] {
+        for (condition, written) in CONDITIONS {
+            let error = refused(
+                "example:office@1.0.0",
+                &build(&format!("{condition} {hand}")),
+            );
+            let message = format!(
+                "{written} on {place}: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `{owner}` to implement `{name}` in every configuration; remove the attribute, or implement `{name}` for the configurations it turns off too, under `#[cfg(not(..))]`"
+            );
+            assert!(error.contains(&message), "{condition} {hand}: {error}");
+        }
+        expanded("example:office@1.0.0", &build(hand));
+        for (condition, opposite) in [
+            (
+                "#[cfg(feature = \"audit\")]",
+                "#[cfg(not(feature = \"audit\"))]",
+            ),
+            (
+                "#[cfg_attr(test, cfg(feature = \"audit\"))]",
+                "#[cfg_attr(test, cfg(not(feature = \"audit\")))]",
+            ),
+            (
+                "#[cfg(all(unix, feature = \"audit\"))]",
+                "#[cfg(any(not(unix), not(feature = \"audit\")))]",
+            ),
+        ] {
+            expanded(
+                "example:office@1.0.0",
+                &build(&format!("{condition} {hand} {opposite} {hand}")),
+            );
+        }
+    }
+    let error = refused(
+        "example:office@1.0.0",
+        &office(&format!(
+            "#[cfg(test)] mod tests {{ use super::Access; {clone} }}"
+        )),
+    );
+    assert!(
+        error.contains("`#[cfg(..)]` on the module `tests` holding `impl Clone for Access`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Access` to implement `Clone` in every configuration"),
+        "{error}"
+    );
+    let error = refused(
+        "example:office@1.0.0",
+        &ledger(&format!(
+            "#[cfg(feature = \"seeded\")] {default} #[cfg(test)] {default}"
+        )),
+    );
+    assert!(
+        error.contains("`#[cfg(..)]` on `impl Default for Balance`"),
+        "{error}"
+    );
+    // A derive under `#[cfg_attr(..)]` covers the configurations an impl leaves out.
+    let paired = tokens(&expanded(
+        "example:office@1.0.0",
+        &ledger(&format!("#[cfg(feature = \"compact\")] {serialize}")).replace(
+            "pub struct Balance",
+            "#[cfg_attr(not(feature = \"compact\"), derive(serde::Serialize))] pub struct Balance",
+        ),
+    ));
+    assert!(
+        paired.contains("# [derive (:: serde :: Deserialize)] pub struct Balance"),
+        "{paired}"
+    );
+    let not_cloned = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(&format!("#[cfg(test)] {clone} #[cfg(not(test))] {clone}")),
+    ));
+    assert!(
+        not_cloned.contains("# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)]"),
+        "{not_cloned}"
+    );
+    // What the generated code does not need stays the author's, under `#[cfg(..)]`.
+    expanded(
+        "example:office@1.0.0",
+        &office(
+            "#[cfg(test)]
+            mod tests {
+                use super::*;
+                impl PartialEq for Access { fn eq(&self, other: &Self) -> bool { todo!() } }
+                impl PartialEq for Note { fn eq(&self, other: &Self) -> bool { todo!() } }
+                impl Default for Note { fn default() -> Self { todo!() } }
+            }",
+        ),
+    );
+    let unheld = office(&format!(
+        "#[cfg(feature = \"audit\")] {debug} #[cfg(feature = \"audit\")] impl Copy for Access {{}}"
+    ))
+    .replace("grant: Grant", "access: Access");
+    expanded("example:office@1.0.0", &unheld);
+    // A type a state's fields reach is serialized with the state, and gets the serde derives the
+    // macro writes for it but where impls give the trait.
+    let reached = |items: &str| {
+        ledger(&format!("pub struct Note {{ pub text: String }} {items}"))
+            .replace("pub total: i64", "pub total: i64, pub notes: Vec<Note>")
+    };
+    let note = "impl serde::Serialize for Note { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() } }";
+    let error = refused(
+        "example:office@1.0.0",
+        &reached(&format!("#[cfg(feature = \"compact\")] {note}")),
+    );
+    assert!(
+        error.contains("`#[cfg(..)]` on `impl serde::Serialize for Note`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Note` to implement `Serialize` in every configuration"),
+        "{error}"
+    );
+    let paired = tokens(&expanded(
+        "example:office@1.0.0",
+        &reached(&format!(
+            "#[cfg(feature = \"compact\")] {note} #[cfg(not(feature = \"compact\"))] {note}"
+        )),
+    ));
+    assert!(
+        paired.contains("# [derive (:: serde :: Deserialize)] pub struct Note"),
+        "{paired}"
+    );
+    expanded(
+        "example:office@1.0.0",
+        &reached(&format!("#[cfg(feature = \"compact\")] {note}")).replace(
+            "pub struct Note",
+            "#[cfg_attr(not(feature = \"compact\"), derive(serde::Serialize))] pub struct Note",
+        ),
+    );
+}
+
+/// Two modules of one name, which `#[cfg(..)]`s select, are two modules: the macro reads the
+/// impls and the attributes of each, and puts a type it reads back in the type's own. A state's
+/// `Default` or a flags struct's `Clone` written in a `#[cfg(x)]` module and again in a
+/// `#[cfg(not(x))]` one of the same name gives the trait in every configuration, as the same
+/// impls side by side do; a sub-module of the second, beside a state kept out of the WIT or a
+/// type that enters it, and a type kept out of the WIT in either stay where they are written; and
+/// the second, holding a sub-module that holds a flags struct, is refused at its `#[cfg(..)]`, as
+/// any module holding one is.
+#[test]
+fn modules_of_one_name_under_cfg_are_each_read_as_their_own() {
+    let ledger = |items: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                pub struct Balance {{ pub total: i64 }}
+                {items}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    let office = |items: &str| {
+        format!(
+            "mod office {{
+                #[flags]
+                pub struct Access {{ pub read: bool }}
+                {items}
+                #[service]
+                pub struct Guard;
+                impl Guard {{ pub fn check(access: Access) -> bool {{ access.read }} }}
+            }}"
+        )
+    };
+    let default = |total: u32| {
+        format!(
+            "impl Default for super::Balance {{ fn default() -> Self {{ super::Balance {{ total: {total} }} }} }}"
+        )
+    };
+    let seeded = tokens(&expanded(
+        "example:ledger@1.0.0",
+        &ledger(&format!(
+            "#[cfg(feature = \"seeded\")] mod seed {{ {} }}
+             #[cfg(not(feature = \"seeded\"))] mod seed {{ {} }}",
+            default(1),
+            default(0)
+        )),
+    ));
+    assert!(
+        !seeded.contains("impl :: core :: default :: Default for Balance"),
+        "{seeded}"
+    );
+    let clone = "impl Clone for super::Access { fn clone(&self) -> Self { *self } }";
+    let cloned = tokens(&expanded(
+        "example:office@1.0.0",
+        &office(&format!(
+            "#[cfg(feature = \"audit\")] mod hands {{ {clone} }}
+             #[cfg(not(feature = \"audit\"))] mod hands {{ {clone} }}"
+        )),
+    ));
+    assert!(
+        cloned.contains("# [derive (:: core :: marker :: Copy , :: core :: fmt :: Debug)]"),
+        "{cloned}"
+    );
+    let audit = "#[cfg(feature = \"audit\")] mod audit { pub struct Entry { pub at: u64 } }
+        #[cfg(not(feature = \"audit\"))] mod audit { pub struct Entry { pub at: u32 } mod sink {} }";
+    for module in [ledger(audit), office(audit)] {
+        let kept = tokens(&expanded("example:ledger@1.0.0", &module));
+        for written in [
+            "# [cfg (feature = \"audit\")] mod audit { pub struct Entry { pub at : u64 } }",
+            "# [cfg (not (feature = \"audit\"))] mod audit { pub struct Entry { pub at : u32 } mod sink { } }",
+        ] {
+            assert!(kept.contains(written), "{written}\n{kept}");
+        }
+    }
+    let error = refused(
+        "example:office@1.0.0",
+        "mod office {
+            #[cfg(feature = \"audit\")]
+            mod rights {}
+            #[cfg(not(feature = \"audit\"))]
+            pub mod rights {
+                pub mod grants {
+                    #[flags]
+                    pub struct Access { pub read: bool }
+                }
+            }
+            #[service]
+            pub struct Guard;
+            impl Guard { pub fn check(access: rights::grants::Access) -> bool { access.read } }
+        }",
+    );
+    assert!(
+        error.contains("`#[cfg(..)]` on the module `rights` holding the flags `Access`: the macro writes the code that maps the WIT flags onto it before the compiler evaluates the attribute"),
+        "{error}"
+    );
+}
+
+/// The values written for a configuration name that takes one at a time, `target_endian =
+/// "little"` and `target_endian = "big"`, may be all it takes, so the macro cannot be sure a
+/// configuration sets none of them: impls split across them give the trait, as a `#[cfg(x)]` one
+/// beside a `#[cfg(not(x))]` one does. One value alone leaves the others out, the features and the
+/// target features a configuration sets are any of them, together or none, and an impl that needs
+/// another option too leaves out the configurations without it, so those are refused.
+#[test]
+fn impls_split_across_the_values_of_one_name_give_the_trait() {
+    let ledger = |items: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                pub struct Balance {{ pub total: i64 }}
+                {items}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    let default = "impl Default for Balance { fn default() -> Self { Balance { total: 100 } } }";
+    for split in [
+        "#[cfg(target_endian = \"little\")] {default} #[cfg(target_endian = \"big\")] {default}",
+        "#[cfg(target_pointer_width = \"32\")] {default} #[cfg(target_pointer_width = \"64\")] {default}",
+        "#[cfg(any(target_endian = \"little\", feature = \"audit\"))] {default}
+         #[cfg(all(target_endian = \"big\", not(feature = \"audit\")))] {default}",
+    ] {
+        let expanded = tokens(&expanded(
+            "example:ledger@1.0.0",
+            &ledger(&split.replace("{default}", default)),
+        ));
+        assert!(
+            !expanded.contains("impl :: core :: default :: Default for Balance"),
+            "{split}: {expanded}"
+        );
+    }
+    for split in [
+        "#[cfg(target_endian = \"little\")] {default}",
+        "#[cfg(all(target_pointer_width = \"32\", feature = \"audit\"))] {default}
+         #[cfg(target_pointer_width = \"64\")] {default}",
+        "#[cfg(feature = \"audit\")] {default} #[cfg(feature = \"seeded\")] {default}",
+        "#[cfg(target_feature = \"simd128\")] {default} #[cfg(target_feature = \"atomics\")] {default}",
+    ] {
+        let error = refused(
+            "example:ledger@1.0.0",
+            &ledger(&split.replace("{default}", default)),
+        );
+        assert!(
+            error.contains("`#[cfg(..)]` on `impl Default for Balance`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Balance` to implement `Default` in every configuration"),
+            "{split}: {error}"
+        );
+    }
+}
+
+/// A derive under a `#[cfg_attr(..)]` inside another applies where both predicates hold, so it
+/// covers what impls under `#[cfg(..)]` leave out of a state's `Default` or serde traits only
+/// there: `#[cfg_attr(feature = "a", cfg_attr(feature = "b", derive(Default)))]` beside an impl
+/// under `#[cfg(not(feature = "a"))]` leaves out the configurations with `a` and without `b`, and is
+/// refused, while an impl under `#[cfg(not(all(feature = "a", feature = "b")))]` covers them.
+#[test]
+fn a_derive_under_nested_cfg_attr_covers_where_both_predicates_hold() {
+    let ledger = |trait_name: &str, condition: &str, body: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                #[cfg_attr(feature = \"a\", cfg_attr(feature = \"b\", derive({trait_name})))]
+                pub struct Balance {{ pub total: i64 }}
+                #[cfg({condition})]
+                impl {trait_name} for Balance {{ {body} }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ amount }} }}
+            }}"
+        )
+    };
+    let default = "fn default() -> Self { Balance { total: 100 } }";
+    let serialize = "fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() }";
+    for (trait_name, body) in [("Default", default), ("serde::Serialize", serialize)] {
+        let error = refused(
+            "example:ledger@1.0.0",
+            &ledger(trait_name, "not(feature = \"a\")", body),
+        );
+        assert!(
+            error.contains(&format!("`#[cfg(..)]` on `impl {trait_name} for Balance`: the macro reads the impl before the compiler evaluates the attribute and counts on it")),
+            "{trait_name}: {error}"
+        );
+        expanded(
+            "example:ledger@1.0.0",
+            &ledger(
+                trait_name,
+                "not(all(feature = \"a\", feature = \"b\"))",
+                body,
+            ),
+        );
+    }
+}
+
+/// The bindings' module reads the helper attributes the generated type takes, so one it would not
+/// know there is refused on the author's type: one whose arguments name what the type's module
+/// declares or imports, which a path from `crate::` names from anywhere; an attribute macro the
+/// module imports, which no derive reads; and one no derive the generated type takes reads, as
+/// when a glob import's `Debug` is read as the standard library's, which the bindings implement.
+/// Kept out of the WIT, the same type is the author's, as written.
+#[test]
+fn a_helper_attribute_the_bindings_module_cannot_read_is_refused() {
+    let module = |types: &str, returned: &str| {
+        format!(
+            "mod walk {{
+                {types}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    let carried = expanded(
+        "example:walk@1.0.0",
+        &module(
+            "const PAGE: u32 = 20;
+             #[derive(smart_default::SmartDefault)]
+             pub struct Page { #[default(crate::walk::PAGE)] pub size: u32 }",
+            "Page",
+        ),
+    );
+    assert!(
+        tokens(&carried).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/page.size\" : [# [default (crate :: walk :: PAGE)]] } ,"
+        ),
+        "{}",
+        tokens(&carried)
+    );
+    // A type of the module that enters the WIT is declared in the bindings' module too, under the
+    // same name, where the owner's interface defines or uses it: an attribute naming it reads there.
+    let carried = expanded(
+        "example:walk@1.0.0",
+        &module(
+            "pub enum Mode { Fast, Slow }
+             #[derive(smart_default::SmartDefault)]
+             pub struct Page { #[default(Mode::Slow)] pub mode: Mode, pub size: u32 }",
+            "Page",
+        ),
+    );
+    assert!(
+        tokens(&carried).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/page.mode\" : [# [default (Mode :: Slow)]] } ,"
+        ),
+        "{}",
+        tokens(&carried)
+    );
+    // So is one another interface defines and the owner's interface `use`s for a function or a
+    // type of its own, which the bindings' module declares as an alias.
+    let carried = expanded(
+        "example:walk@1.0.0",
+        "mod walk {
+            pub enum Mode { Fast, Slow }
+            #[service]
+            pub struct Settings;
+            impl Settings { pub fn current() -> Mode { todo!() } }
+            #[derive(smart_default::SmartDefault)]
+            pub struct Page { #[default(Mode::Slow as u32)] pub level: u32 }
+            #[service]
+            pub struct Walker;
+            impl Walker {
+                pub fn speed(mode: Mode) -> u32 { 0 }
+                pub fn walk(page: Page) -> u32 { 0 }
+            }
+        }",
+    );
+    assert!(
+        tokens(&carried).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/page.level\" : [# [default (Mode :: Slow as u32)]] } ,"
+        ),
+        "{}",
+        tokens(&carried)
+    );
+    // A derive's helper attribute resolves in the macro namespace, so an item of its name the
+    // module imports, a module here, shadows nothing: the derive that reads it by name takes it.
+    let carried = expanded(
+        "example:walk@1.0.0",
+        &module(
+            "use core::default;
+             #[derive(Default)]
+             pub enum Mode { #[default] Fast, Slow }",
+            "Mode",
+        ),
+    );
+    assert!(
+        tokens(&carried).contains(
+            "additional_member_attributes : { \"example:walk/walker@1.0.0/mode.fast\" : [# [default]] } ,"
+        ),
+        "{}",
+        tokens(&carried)
+    );
+    for (types, message) in [
+        (
+            "const PAGE: u32 = 20;
+             #[derive(smart_default::SmartDefault)]
+             pub struct Page { #[default(PAGE)] pub size: u32 }",
+            "`#[default(..)]` on `Page` names `PAGE` from this module: `Page` enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach `PAGE`; name it from `crate::` or from its crate, `::name::..`, or keep `Page` out of the WIT",
+        ),
+        (
+            "use crate::limits::PAGE;
+             #[derive(smart_default::SmartDefault)]
+             pub struct Page { #[default(PAGE)] pub size: u32 }",
+            "`#[default(..)]` on `Page` names `PAGE` from this module",
+        ),
+        (
+            "use serde_with::skip_serializing_none;
+             #[skip_serializing_none]
+             #[derive(serde::Serialize)]
+             pub struct Page { pub size: Option<u32> }",
+            "`#[skip_serializing_none]` on `Page`: `Page` enters the WIT and the generated type replacing it takes its derives and the helper attributes they read, which come with the derives, while this module imports `skip_serializing_none`, an attribute macro, which the generated type cannot take; remove it, or keep `Page` out of the WIT",
+        ),
+        (
+            "use derive_more::*;
+             #[derive(Debug)]
+             pub struct Page { #[debug(skip)] pub size: u32 }",
+            "`#[debug(..)]` on `Page`: `Page` enters the WIT and the generated type replacing it takes no derive that reads this attribute: a derive of the standard library reads none but `#[default]`, for `Default`, and a derive of what the bindings implement themselves is left to them; remove the attribute, or keep `Page` out of the WIT",
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &module(types, "Page"));
+        assert!(error.contains(message), "{types}: {error}");
+        expanded("example:walk@1.0.0", &module(types, "u32"));
+    }
+}
+
+/// A known derive reads some of its helper attributes as code, in the bindings' module: a string
+/// it parses as code, derivative's `value` or smart_default's `_code`, or the names thiserror's
+/// string captures, `{PAGE}`, and, under a glob import the macro cannot follow, `use super::*;` in
+/// the Orb module, the tokens of smart_default's `#[default(..)]` and the format arguments of
+/// thiserror's `#[error(..)]` and derive_more's `#[display(..)]`, which the glob may bring a name
+/// to. A name there that the bindings' module does not reach is refused, with the `crate::`
+/// advice; the `crate::` form expands, and so do a field of the type, a name of the prelude, a
+/// primitive type and a lowercase name before `::`, which may be a crate's. Elsewhere a word may be
+/// the derive's own syntax, as `ignore` in `#[from(ignore)]`, which stays as written.
+#[test]
+fn a_helper_attribute_naming_what_a_glob_or_a_string_brings_is_refused() {
+    let module = |items: &str, returned: &str| {
+        format!(
+            "mod walk {{
+                use super::*;
+                {items}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    let limit = |attribute: &str| {
+        format!("#[derive(thiserror::Error)] {attribute} pub struct Limit {{ pub limit: u32 }}")
+    };
+    let display = |attribute: &str| {
+        format!("#[derive(derive_more::Display)] {attribute} pub struct Limit {{ pub limit: u32 }}")
+    };
+    let page = |attribute: &str| {
+        format!(
+            "#[derive(smart_default::SmartDefault)] pub struct Page {{ {attribute} pub size: u32 }}"
+        )
+    };
+    let derivative = |value: &str| {
+        format!(
+            "#[derive(derivative::Derivative)]
+            #[derivative(Default)]
+            pub struct Page {{ #[derivative(Default(value = \"{value}\"))] pub size: u32 }}"
+        )
+    };
+    let advice = "enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach";
+    for (refused_items, returned, shown, name, expanding) in [
+        (
+            limit("#[error(\"limit {} of {}\", limit, PAGE)]"),
+            "Limit",
+            "#[error(..)]",
+            "PAGE",
+            vec![
+                limit("#[error(\"limit {} of {}\", limit, crate::PAGE)]"),
+                limit("#[error(\"limit {} of {:?}\", limit, None::<u32>)]"),
+            ],
+        ),
+        (
+            limit("#[error(\"limit {limit} of {PAGE}\")]"),
+            "Limit",
+            "#[error(..)]",
+            "PAGE",
+            vec![
+                limit("#[error(\"limit {limit} of {}\", crate::PAGE)]"),
+                limit("#[error(\"limit {limit:?} of {{PAGE}}\")]"),
+            ],
+        ),
+        (
+            format!(
+                "const PAGE: u32 = 20; {}",
+                limit("#[error(\"limit {limit} of {PAGE}\")]")
+            ),
+            "Limit",
+            "#[error(..)]",
+            "PAGE",
+            vec![format!(
+                "const PAGE: u32 = 20; {}",
+                limit("#[error(\"limit {limit} of {}\", crate::walk::PAGE)]")
+            )],
+        ),
+        (
+            display("#[display(\"{} of {}\", limit, PAGE)]"),
+            "Limit",
+            "#[display(..)]",
+            "PAGE",
+            vec![
+                display("#[display(\"{} of {}\", limit, crate::PAGE)]"),
+                display("#[display(\"{} of {}\", limit, u32::MAX)]"),
+            ],
+        ),
+        (
+            page("#[default(PAGE)]"),
+            "Page",
+            "#[default(..)]",
+            "PAGE",
+            vec![
+                page("#[default(crate::PAGE)]"),
+                page("#[default(Some(20).unwrap_or_default())]"),
+                page("#[default(limits::PAGE)]"),
+            ],
+        ),
+        (
+            page("#[default(Limits::PAGE)]"),
+            "Page",
+            "#[default(..)]",
+            "Limits::PAGE",
+            vec![page("#[default(crate::Limits::PAGE)]")],
+        ),
+        (
+            derivative("PAGE"),
+            "Page",
+            "#[derivative(..)]",
+            "PAGE",
+            vec![
+                derivative("crate::PAGE"),
+                derivative("u32::MAX"),
+                derivative("Default::default()"),
+            ],
+        ),
+        (
+            format!("const PAGE: u32 = 20; {}", derivative("PAGE")),
+            "Page",
+            "#[derivative(..)]",
+            "PAGE",
+            vec![format!(
+                "const PAGE: u32 = 20; {}",
+                derivative("crate::walk::PAGE")
+            )],
+        ),
+        (
+            page("#[default(_code = \"PAGE * 2\")]"),
+            "Page",
+            "#[default(..)]",
+            "PAGE",
+            vec![page("#[default(_code = \"crate::PAGE * 2\")]")],
+        ),
+        (
+            format!(
+                "const PAGE: u32 = 20; {}",
+                page("#[default(_code = \"PAGE * 2\")]")
+            ),
+            "Page",
+            "#[default(..)]",
+            "PAGE",
+            vec![format!(
+                "const PAGE: u32 = 20; {}",
+                page("#[default(_code = \"crate::walk::PAGE * 2\")]")
+            )],
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &module(&refused_items, returned));
+        let owner = returned;
+        let message = format!(
+            "`{shown}` on `{owner}` names `{name}` from this module: `{owner}` {advice} `{name}`; name it from `crate::` or from its crate, `::name::..`, or keep `{owner}` out of the WIT"
+        );
+        assert!(error.contains(&message), "{refused_items}: {error}");
+        for items in expanding {
+            expanded("example:walk@1.0.0", &module(&items, returned));
+        }
+    }
+    // A word of the derive's own syntax names nothing, under the same glob.
+    expanded(
+        "example:walk@1.0.0",
+        &module(
+            "#[derive(derive_more::From)]
+            pub enum Value { Int(i32), #[from(ignore)] Other(i32) }",
+            "Value",
+        ),
+    );
+}
+
+/// Under a glob import the macro cannot follow, what a known derive reads as code names from the
+/// glob only the names that start a path from its scope. A format argument's `name =`, which the
+/// string captures as `{max}`, a struct literal's field, a name the code binds itself, in a
+/// closure's parameters or in the pattern of a `let`, a `for` or a match arm, and an attribute or
+/// a macro's arguments, which are their own syntax, are no such path, so each expands, as does
+/// code declaring an item, whose names the macro does not follow; a path beside them is refused as
+/// before.
+#[test]
+fn a_helper_argument_naming_no_path_from_its_scope_expands_under_a_glob() {
+    let module = |items: &str, returned: &str| {
+        format!(
+            "mod walk {{
+                use super::*;
+                {items}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    let limit = |attribute: &str| {
+        format!("#[derive(thiserror::Error)] {attribute} pub struct Limit {{ pub limit: u32 }}")
+    };
+    let page = |attribute: &str| {
+        format!(
+            "#[derive(smart_default::SmartDefault)] pub struct Page {{ {attribute} pub size: u32 }}"
+        )
+    };
+    let limits = |attribute: &str| {
+        format!(
+            "pub struct Limits {{ pub max: u32 }}
+            #[derive(smart_default::SmartDefault)]
+            pub struct Page {{ {attribute} pub limits: Limits }}"
+        )
+    };
+    let advice = "enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach";
+    for (refused_items, returned, shown, expanding) in [
+        (
+            limit("#[error(\"limit {limit} of {max}\", max = PAGE)]"),
+            "Limit",
+            "#[error(..)]",
+            vec![
+                limit("#[error(\"limit {limit} (at most {max})\", max = u32::MAX)]"),
+                limit("#[error(\"limit {limit} of {max}\", max = crate::PAGE)]"),
+            ],
+        ),
+        (
+            page("#[default((|n: u32| n + PAGE)(1))]"),
+            "Page",
+            "#[default(..)]",
+            vec![
+                page("#[default((|n: u32| n + 1)(1))]"),
+                page("#[default({ let n = 2; n * 2 })]"),
+                page("#[default({ let mut sum = 0; for n in 1..3 { sum += n; } sum })]"),
+                page("#[default(match Some(2) { Some(n) if n > 1 => n, _ => 0 })]"),
+                page("#[default({ #[allow(unused_mut)] let mut n = 2; n })]"),
+                page("#[default(stringify!(PAGE).len() as u32)]"),
+                page("#[default({ const N: u32 = 2; N })]"),
+            ],
+        ),
+        (
+            limits("#[default(Limits { max: PAGE })]"),
+            "Page",
+            "#[default(..)]",
+            vec![limits("#[default(Limits { max: 10 })]")],
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &module(&refused_items, returned));
+        let owner = returned;
+        let message = format!(
+            "`{shown}` on `{owner}` names `PAGE` from this module: `{owner}` {advice} `PAGE`; name it from `crate::` or from its crate, `::name::..`, or keep `{owner}` out of the WIT"
+        );
+        assert!(error.contains(&message), "{refused_items}: {error}");
+        for items in expanding {
+            expanded("example:walk@1.0.0", &module(&items, returned));
+        }
+    }
 }
 
 /// A state starts from its `Default`: the macro implements it field by field unless the author
 /// gives it, by an `impl Default` anywhere in the Orb module or by a derive, which stays on a
 /// state out of the WIT and goes to the generated type replacing a state that enters it; the serde
-/// derives the author already wrote are not added again.
+/// derives the author already wrote are not added again. A derive implementing `Default` under
+/// another name, `SmartDefault` or `Derivative` with `#[derivative(Default)]`, is the state's
+/// `Default` too.
 #[test]
 fn the_author_may_give_a_state_its_default_and_its_derives() {
     let generated_default = "impl :: core :: default :: Default for Balance {";
@@ -3350,6 +6299,34 @@ fn the_author_may_give_a_state_its_default_and_its_derives() {
             "{entered}"
         );
     }
+    // So does a derive that implements `Default` under another name, in or out of the WIT.
+    for (attributes, carried) in [
+        (
+            "#[derive(smart_default::SmartDefault)]",
+            "[# [derive (:: smart_default :: SmartDefault)]]",
+        ),
+        (
+            "#[derive(derivative::Derivative)] #[derivative(Default(bound = \"\"))]",
+            "[# [derive (:: derivative :: Derivative)] # [derivative (Default (bound = \"\"))]]",
+        ),
+    ] {
+        let kept = tokens(&expanded(
+            "example:ledger@1.0.0",
+            &state(attributes, "", "i64"),
+        ));
+        assert!(!kept.contains(generated_default), "{kept}");
+        let entered = tokens(&expanded(
+            "example:ledger@1.0.0",
+            &state(attributes, "", "Balance"),
+        ));
+        assert!(!entered.contains(generated_default), "{entered}");
+        assert!(
+            entered.contains(&format!(
+                "additional_type_attributes : {{ \"example:ledger/pinned@1.0.0/balance\" : {carried} }} ,"
+            )),
+            "{entered}"
+        );
+    }
     // Two states of one name are told apart by the path the `impl` names.
     for (place, skipped, kept) in [
         (
@@ -3381,6 +6358,253 @@ fn the_author_may_give_a_state_its_default_and_its_derives() {
             "{generated}"
         );
     }
+}
+
+/// The `Default` the macro writes for a state follows each field's `#[cfg(..)]`, as a derived one
+/// does: the field's initializer carries the attribute, and none of the field's others, so the
+/// value holds the fields the struct holds in every configuration.
+#[test]
+fn the_default_the_macro_writes_follows_the_fields_cfg() {
+    let generated = tokens(&expanded(
+        "example:ledger@1.0.0",
+        "mod ledger {
+            #[state]
+            pub struct Balance {
+                /// What the balance holds.
+                pub total: i64,
+                #[cfg(feature = \"audit\")]
+                #[serde(default)]
+                pub audited: u32,
+            }
+            #[service]
+            pub struct Pinned;
+            impl Pinned { pub fn add(amount: i64) -> i64 { todo!() } }
+        }",
+    ));
+    assert!(
+        generated.contains("impl :: core :: default :: Default for Balance { fn default () -> Self { Self { total : :: core :: default :: Default :: default () , # [cfg (feature = \"audit\")] audited : :: core :: default :: Default :: default () } } }"),
+        "{generated}"
+    );
+}
+
+/// The `Default` the macro writes for a state is written before the compiler evaluates
+/// `#[cfg_attr(..)]`, and follows only a plain `#[cfg(..)]` on a field: a field under
+/// `#[cfg_attr(.., cfg(..))]` would be named in every configuration, so it is refused there. A
+/// `Default` the author derives or implements follows the attribute, and the same state without it
+/// expands.
+#[test]
+fn the_default_the_macro_writes_refuses_a_field_under_cfg_attr_cfg() {
+    let module = |default: &str, condition: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                {default}
+                pub struct Balance {{
+                    pub total: i64,
+                    {condition}
+                    pub audited: u32,
+                }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
+            }}"
+        )
+    };
+    let condition = "#[cfg_attr(test, cfg(feature = \"audit\"))]";
+    let error = refused("example:ledger@1.0.0", &module("", condition));
+    assert!(
+        error.contains("`#[cfg_attr(..)]` wrapping `#[cfg(..)]` on the field `Balance::audited`: the macro writes the `Default` of the state `Balance` before the compiler evaluates the attribute, so that `Default` would name `Balance::audited` in every configuration; write the condition as a plain `#[cfg(..)]`, which the macro carries onto the field's initializer, or derive or implement `Default`"),
+        "{error}"
+    );
+    expanded(
+        "example:ledger@1.0.0",
+        &module("#[derive(Default)]", condition),
+    );
+    let authored = module("", condition).replace(
+        "#[service]",
+        "impl Default for Balance { fn default() -> Self { todo!() } }
+        #[service]",
+    );
+    expanded("example:ledger@1.0.0", &authored);
+    expanded("example:ledger@1.0.0", &module("", ""));
+}
+
+/// The macro writes the `Default` of a state whose `Default` the author neither derives nor
+/// implements, before the compiler evaluates `#[cfg_attr(..)]`: a derive of `Default` under one,
+/// directly, under another name or through another `#[cfg_attr(..)]`, would give the state a
+/// second `Default` where the attribute applies, so it is refused. A `#[cfg_attr(..)]` deriving
+/// another trait expands, and so do a derive under one beside an `impl Default` the author writes
+/// for the other configurations, and the same state without the attribute.
+#[test]
+fn the_default_the_macro_writes_refuses_a_derive_of_default_under_cfg_attr() {
+    let module = |attributes: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                {attributes}
+                pub struct Balance {{ pub total: i64 }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
+            }}"
+        )
+    };
+    for attributes in [
+        "#[cfg_attr(feature = \"audit\", derive(Default))]",
+        "#[cfg_attr(test, derive(Debug, Default))]",
+        "#[cfg_attr(test, cfg_attr(feature = \"audit\", derive(Default)))]",
+        "#[cfg_attr(feature = \"audit\", derive(smart_default::SmartDefault))]",
+        "#[cfg_attr(feature = \"audit\", derive(educe::Educe), educe(Debug, Default))]",
+    ] {
+        let error = refused("example:ledger@1.0.0", &module(attributes));
+        assert!(
+            error.contains("`#[cfg_attr(..)]` deriving `Default` on the state `Balance`: the macro writes the `Default` of the state `Balance` before the compiler evaluates the attribute, so `Balance` would implement `Default` twice where the attribute applies; derive `Default` without `#[cfg_attr(..)]`, or implement it"),
+            "{attributes}: {error}"
+        );
+    }
+    expanded(
+        "example:ledger@1.0.0",
+        &module("#[cfg_attr(feature = \"audit\", derive(Debug))]"),
+    );
+    let paired = module("#[cfg_attr(feature = \"audit\", derive(Default))]").replace(
+        "#[service]",
+        "#[cfg(not(feature = \"audit\"))]
+        impl Default for Balance { fn default() -> Self { Balance { total: 7 } } }
+        #[service]",
+    );
+    expanded("example:ledger@1.0.0", &paired);
+    expanded("example:ledger@1.0.0", &module(""));
+}
+
+/// The macro derives `serde`'s `Serialize` and `Deserialize` for a state kept out of the WIT, those
+/// the author does not derive, before the compiler evaluates `#[cfg_attr(..)]`: a derive of either
+/// under one, directly or through another `#[cfg_attr(..)]`, through any path the macro follows to
+/// `serde`, or a `Serialize` or `Deserialize` it cannot follow to a crate, brought by a glob import
+/// or from above the Orb module, which it takes for `serde`'s as on a type entering the WIT, would
+/// give the state a second implementation where the attribute applies, so it is refused, whoever
+/// gives the state its `Default`. Another crate's derive of either name, `rkyv::Serialize`, and a
+/// `#[cfg_attr(..)]` deriving another trait expand, and so does the same state without the
+/// attribute.
+#[test]
+fn a_serde_derive_under_cfg_attr_on_a_state_out_of_the_wit_is_refused() {
+    let module = |uses: &str, attributes: &str| {
+        format!(
+            "mod ledger {{
+                {uses}
+                #[state]
+                {attributes}
+                pub struct Balance {{ pub total: i64 }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
+            }}"
+        )
+    };
+    let named = "use serde::Serialize;";
+    for (uses, attributes, name) in [
+        (
+            named,
+            "#[cfg_attr(feature = \"audit\", derive(serde::Serialize))]",
+            "Serialize",
+        ),
+        (
+            named,
+            "#[cfg_attr(test, derive(Debug, serde::Deserialize))]",
+            "Deserialize",
+        ),
+        (
+            named,
+            "#[cfg_attr(test, cfg_attr(feature = \"audit\", derive(::serde::Serialize)))]",
+            "Serialize",
+        ),
+        (
+            named,
+            "#[cfg_attr(feature = \"audit\", derive(Serialize))]",
+            "Serialize",
+        ),
+        (
+            named,
+            "#[cfg_attr(feature = \"audit\", derive(serde_derive::Deserialize))]",
+            "Deserialize",
+        ),
+        (
+            named,
+            "#[cfg_attr(feature = \"audit\", derive(crate::prelude::Serialize))]",
+            "Serialize",
+        ),
+        (
+            named,
+            "#[derive(Default)] #[cfg_attr(feature = \"audit\", derive(serde::Serialize))]",
+            "Serialize",
+        ),
+        (
+            named,
+            "#[derive(serde::Serialize)] #[cfg_attr(feature = \"audit\", derive(serde::Deserialize))]",
+            "Deserialize",
+        ),
+        (
+            "use serde::*;",
+            "#[cfg_attr(feature = \"audit\", derive(Serialize))]",
+            "Serialize",
+        ),
+        (
+            "",
+            "#[cfg_attr(feature = \"audit\", derive(super::Deserialize))]",
+            "Deserialize",
+        ),
+    ] {
+        let error = refused("example:ledger@1.0.0", &module(uses, attributes));
+        assert!(
+            error.contains(&format!("`#[cfg_attr(..)]` deriving `{name}` on the state `Balance`: the macro derives `serde`'s `{name}` for the state `Balance` before the compiler evaluates the attribute, so `Balance` would implement `{name}` twice where the attribute applies; derive `{name}` without `#[cfg_attr(..)]`, or remove the derive, which the macro writes in every configuration")),
+            "{uses} {attributes}: {error}"
+        );
+    }
+    for attributes in [
+        "#[cfg_attr(feature = \"audit\", derive(rkyv::Serialize))]",
+        "#[cfg_attr(feature = \"audit\", derive(Debug))]",
+        "",
+    ] {
+        expanded("example:ledger@1.0.0", &module(named, attributes));
+    }
+}
+
+/// The macro derives `serde`'s traits as well for every type of the module that a state kept out
+/// of the WIT reaches through its fields, directly or through other types, and that stays out too:
+/// a derive of either under `#[cfg_attr(..)]` on such a struct or enum is refused as on the state.
+/// The same derive on a type no state reaches, which the macro gives no `serde`, expands, and so
+/// do the same types without the attribute.
+#[test]
+fn a_serde_derive_under_cfg_attr_on_a_type_a_state_reaches_is_refused() {
+    let module = |note: &str, mood: &str, other: &str| {
+        format!(
+            "mod ledger {{
+                #[state]
+                pub struct Balance {{ pub total: i64, pub notes: Vec<Note> }}
+                {note}
+                pub struct Note {{ pub text: String, pub mood: Mood }}
+                {mood}
+                pub enum Mood {{ Calm, Loud }}
+                {other}
+                pub struct Other {{ pub n: u32 }}
+                #[service]
+                pub struct Pinned;
+                impl Pinned {{ pub fn add(amount: i64) -> i64 {{ todo!() }} }}
+            }}"
+        )
+    };
+    let attribute = "#[cfg_attr(feature = \"note\", derive(serde::Serialize))]";
+    for (source, owner) in [
+        (module(attribute, "", ""), "Note"),
+        (module("", attribute, ""), "Mood"),
+    ] {
+        let error = refused("example:ledger@1.0.0", &source);
+        assert!(
+            error.contains(&format!("`#[cfg_attr(..)]` deriving `Serialize` on `{owner}`: the macro derives `serde`'s `Serialize` for `{owner}`, which a state's fields reach, before the compiler evaluates the attribute, so `{owner}` would implement `Serialize` twice where the attribute applies; derive `Serialize` without `#[cfg_attr(..)]`, or remove the derive, which the macro writes in every configuration")),
+            "{owner}: {error}"
+        );
+    }
+    expanded("example:ledger@1.0.0", &module("", "", attribute));
+    expanded("example:ledger@1.0.0", &module("", "", ""));
 }
 
 const GATE: &str = "mod gate {
@@ -3959,6 +7183,269 @@ fn sub_modules_are_refused_when_ill_formed() {
     );
 }
 
+/// A name resolves in the module that writes it first: a record named like a resource of another
+/// module is the record where its own module names it, in a parameter, a result or a hook's
+/// input, so the two are refused for sharing a name that enters the WIT, not read as the resource.
+#[test]
+fn a_name_resolves_in_the_module_that_writes_it_first() {
+    let desk = |record: &str, tickets: &str| {
+        format!(
+            "mod desk {{
+                pub mod tickets {{
+                    pub struct {record} {{ pub id: u32 }}
+                    #[service]
+                    pub struct Tickets;
+                    {tickets}
+                }}
+                pub mod sessions {{
+                    #[wit_resource]
+                    pub struct Token;
+                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                    #[service]
+                    pub struct Sessions;
+                    impl Sessions {{ pub fn open() -> Token {{ Token }} }}
+                }}
+            }}"
+        )
+    };
+    for tickets in [
+        "impl Tickets { pub fn check(token: Token) -> u32 { token.id } }",
+        "impl Tickets { pub fn issue() -> Token { Token { id: 1 } } }",
+        "#[hook(composition = series, input = Token)]
+        pub struct Guard;
+        impl Tickets { pub fn count() -> u32 { 0 } }",
+    ] {
+        let error = refused("example:desk@1.0.0", &desk("Token", tickets));
+        assert!(
+            error.contains("`Token` is declared in `tickets` and in `sessions`; a name that enters the WIT is one across the Orb module"),
+            "{tickets}: {error}"
+        );
+        expanded(
+            "example:desk@1.0.0",
+            &desk("Stamp", &tickets.replace("Token", "Stamp")),
+        );
+    }
+}
+
+/// A type of any shape takes its name in the module declaring it before a resource of another
+/// module: a tuple struct, a unit struct, a type alias or a union named like the resource is
+/// refused as a type of the module that cannot enter the WIT, whichever interface the resource
+/// belongs to. An alias whose path ends in its own name stands for that path, as a `use` of it
+/// does, so an alias of the resource is the resource.
+#[test]
+fn a_type_the_module_declares_takes_its_name_before_a_resource() {
+    let desk = |declared: &str, owner: &str| {
+        format!(
+            "mod desk {{
+                pub mod tickets {{
+                    {declared}
+                    #[service]
+                    pub struct Tickets;
+                    impl Tickets {{ pub fn check(token: Token) -> u32 {{ 0 }} }}
+                }}
+                pub mod sessions {{
+                    #[wit_resource(service = {owner})]
+                    pub struct Token;
+                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                    #[service]
+                    pub struct Sessions;
+                    impl Sessions {{ pub fn count() -> u32 {{ 0 }} }}
+                }}
+            }}"
+        )
+    };
+    for declared in [
+        "pub struct Token(pub u32);",
+        "pub struct Token;",
+        "pub type Token = u32;",
+        "pub union Token { pub id: u32 }",
+    ] {
+        for owner in ["Sessions", "Tickets"] {
+            let error = refused("example:desk@1.0.0", &desk(declared, owner));
+            assert!(
+                error.contains("`Token` is used by a service method or a hook but is not a struct or enum of this module"),
+                "{declared}, a resource of `{owner}`: {error}"
+            );
+        }
+    }
+    let alias = "pub type Token = super::sessions::Token;";
+    let error = refused("example:desk@1.0.0", &desk(alias, "Sessions"));
+    assert!(
+        error.contains("`Tickets::check` takes `Token`, a resource of the interface `sessions`"),
+        "{error}"
+    );
+    expanded("example:desk@1.0.0", &desk(alias, "Tickets"));
+}
+
+/// A path into another module of the Orb names its type there, as in Rust: `super::sessions::Token`
+/// or `super::model::Entry`, or `sessions::Token` after `use super::sessions;` or
+/// `use super::sessions as s;`, written in a module declaring a `Token` or an `Entry` of its own,
+/// in a signature or in a record's field, is the other module's resource or record, which the bare
+/// name would not be, so the function takes the resource or returns the record as it would after a
+/// `use` of the type.
+#[test]
+fn a_path_into_another_module_names_its_type_there() {
+    let desk = |uses: &str, token: &str| {
+        format!(
+            "mod desk {{
+                pub mod tickets {{
+                    {uses}
+                    pub struct Token(pub u32);
+                    #[service]
+                    pub struct Tickets;
+                    impl Tickets {{ pub fn check(token: {token}) -> u32 {{ 0 }} }}
+                }}
+                pub mod sessions {{
+                    #[wit_resource(service = Tickets)]
+                    pub struct Token;
+                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                    #[service]
+                    pub struct Sessions;
+                    impl Sessions {{ pub fn count() -> u32 {{ 0 }} }}
+                }}
+            }}"
+        )
+    };
+    for (uses, token) in [
+        ("", "super::sessions::Token"),
+        ("use super::sessions;", "sessions::Token"),
+        ("use super::sessions as s;", "s::Token"),
+    ] {
+        let text = resolved(&expanded("example:desk@1.0.0", &desk(uses, token)));
+        assert!(
+            text.contains("  check: func(token: token) -> u32;\n"),
+            "{uses} {token}\n{text}"
+        );
+    }
+    let books = |api: &str| {
+        format!(
+            "mod books {{
+                pub mod model {{ pub struct Entry {{ pub id: u32 }} }}
+                pub mod api {{
+                    pub struct Entry(pub u32);
+                    {api}
+                    #[service]
+                    pub struct Shelf;
+                }}
+            }}"
+        )
+    };
+    let entry = "  record entry {\n    id: u32,\n  }\n";
+    let text = resolved(&expanded(
+        "example:books@1.0.0",
+        &books("impl Shelf { pub fn first() -> super::model::Entry { todo!() } }"),
+    ));
+    for expected in [entry, "  first: func() -> entry;\n"] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    let text = resolved(&expanded(
+        "example:books@1.0.0",
+        &books(
+            "pub struct Stack { pub top: super::model::Entry }
+            impl Shelf { pub fn first() -> Stack { todo!() } }",
+        ),
+    ));
+    for expected in [
+        entry,
+        "  record stack {\n    top: entry,\n  }\n",
+        "  first: func() -> stack;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+}
+
+/// A type the module declares takes its name there wherever the module writes it, as in Rust: a
+/// tuple struct named like another module's record, in a parameter or in a record's field, is
+/// refused as a type of the module that cannot enter the WIT, not read as that record, and so is
+/// one in a field named like another module's resource. A module that declares no type of the
+/// name, importing it, still takes the other module's type.
+#[test]
+fn a_type_the_module_declares_takes_its_name_before_another_modules_record() {
+    let desk = |tickets: &str, shelves: &str| {
+        format!(
+            "mod desk {{
+                pub mod tickets {{
+                    {tickets}
+                    #[service]
+                    pub struct Tickets;
+                }}
+                pub mod shelves {{
+                    {shelves}
+                    #[service]
+                    pub struct Shelves;
+                    impl Shelves {{ pub fn count() -> u32 {{ 0 }} }}
+                }}
+            }}"
+        )
+    };
+    let record = "pub struct Token { pub id: u32 }";
+    let resource = "#[wit_resource(service = Tickets)]
+        pub struct Token { id: u32 }
+        impl Token { pub fn id(&self) -> u32 { self.id } }";
+    let parameter = "impl Tickets { pub fn check(token: Token) -> u32 { 0 } }";
+    let field = "pub struct Pass { pub token: Token }
+        impl Tickets { pub fn check(pass: Pass) -> bool { true } }";
+    for (uses, shelves) in [(parameter, record), (field, record), (field, resource)] {
+        let error = refused(
+            "example:desk@1.0.0",
+            &desk(&format!("pub struct Token(pub u32);\n{uses}"), shelves),
+        );
+        assert!(
+            error.contains("`Token` is used by a service method or a hook but is not a struct or enum of this module"),
+            "{uses}\n{shelves}: {error}"
+        );
+        expanded(
+            "example:desk@1.0.0",
+            &desk(&format!("use super::shelves::Token;\n{uses}"), shelves),
+        );
+    }
+    let text = wit(&expanded(
+        "example:desk@1.0.0",
+        &desk(&format!("use super::shelves::Token;\n{parameter}"), record),
+    ));
+    for expected in [
+        "  record token {\n    id: u32,\n  }\n",
+        "  check: func(token: token) -> u32;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+}
+
+/// Two resources of one name in other modules are as ambiguous as two records: a function of a
+/// third module taking that name is refused, whichever of the two the module imports, and expands
+/// once one of them takes another name.
+#[test]
+fn two_resources_of_one_name_in_other_modules_are_ambiguous() {
+    let desk = |second: &str| {
+        format!(
+            "mod desk {{
+                pub mod a {{
+                    #[wit_resource(service = Tickets)]
+                    pub struct Token;
+                    impl Token {{ pub fn id(&self) -> u32 {{ 0 }} }}
+                }}
+                pub mod b {{
+                    #[wit_resource(service = Tickets)]
+                    pub struct {second};
+                    impl {second} {{ pub fn id(&self) -> u32 {{ 1 }} }}
+                }}
+                pub mod c {{
+                    use super::a::Token;
+                    #[service]
+                    pub struct Tickets;
+                    impl Tickets {{ pub fn check(token: Token) -> u32 {{ token.id() }} }}
+                }}
+            }}"
+        )
+    };
+    let error = refused("example:desk@1.0.0", &desk("Token"));
+    assert!(
+        error.contains("`Token` is declared in several modules of the Orb; a module uses its own `Token`, or the types take different names"),
+        "{error}"
+    );
+    expanded("example:desk@1.0.0", &desk("Pass"));
+}
+
 /// Documentation over several lines, a block comment or a `#[doc]` string, is carried line by
 /// line into the WIT, each line after its own `///`, so no line of it becomes WIT; a character
 /// the WIT lexer refuses is an error on the attribute.
@@ -4154,6 +7641,57 @@ fn the_state_derives_leave_out_the_types_that_cannot_carry_them() {
     );
 }
 
+/// The bindings give a consumed package's flags type no serde implementation, nor a consumed type
+/// holding one, and, in an Orb without a state, where they derive serde's traits on no type, no
+/// consumed type at all: serde's derives on a type of the module holding such a type are refused
+/// at the derive. With a state, one holding a consumed record serde writes leaves them to the
+/// bindings.
+#[test]
+fn a_serde_derive_on_a_type_holding_a_consumed_type_without_serde_is_refused() {
+    let dir = consumed("badge", ACCESS_WIT);
+    let imports = || Options {
+        imports: vec![literal("example:access/grants@1.0.0")],
+        ..options("example:keeper@1.0.0", Some(&dir))
+    };
+    let module = |state: &str, derive: &str, field: &str| {
+        format!(
+            "mod vault {{
+                {state}
+                {derive}
+                pub struct Badge {{ {field} }}
+                #[service]
+                pub struct Keeper;
+                impl Keeper {{ pub fn issue() -> Badge {{ todo!() }} }}
+            }}"
+        )
+    };
+    let state = "#[state] pub struct Count { pub total: u32 }";
+    let flags =
+        "a consumed package's flags type, which the bindings give no `serde` implementation";
+    let stateless = "a type of a consumed package, which the bindings give no `serde` implementation in an Orb without a state";
+    for (state, field, held) in [
+        (state, "pub permissions: grants::Permissions", Some(flags)),
+        (state, "pub grant: Option<grants::Grant>", Some(flags)),
+        (state, "pub plain: grants::Plain", None),
+        ("", "pub permissions: grants::Permissions", Some(stateless)),
+        ("", "pub plain: grants::Plain", Some(stateless)),
+        ("", "pub all: Vec<grants::Plain>", Some(stateless)),
+    ] {
+        let derived = module(state, "#[derive(serde::Serialize)]", field);
+        let Some(held) = held else {
+            let module = orb_with(imports(), &derived).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(type_attributes(&module), None, "{}", tokens(&module));
+            continue;
+        };
+        let error = refused_with(imports(), &derived);
+        assert!(
+            error.contains(&format!("`serde::Serialize` on `Badge`: `Badge` enters the WIT and holds {held}, so the generated type replacing it cannot derive `Serialize`; remove the derive, or keep `Badge` out of the WIT")),
+            "{state} {field}: {error}"
+        );
+        orb_with(imports(), &module(state, "", field)).unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
 /// A freestanding (`no_std`) guest gets the runtime prelude once, inside its module, and a refused
 /// module still brings it next to the error, so the crate reports the macro's error alone, not the
 /// allocator and the panic handler it lacks without the module. A std guest never gets it.
@@ -4217,8 +7755,9 @@ world first {
 
 /// A contract `cargo tembra build` wrote for an Orb with kernel state holds the kernel's package in
 /// `deps/`: an Orb with a state of its own consuming it reads that package once, the bundled copy
-/// left out of its inline WIT, whatever the copy's comments say; a copy defining the package
-/// otherwise is an error naming its file.
+/// left out of its inline WIT. The copy is the bundled file line for line, whatever its line
+/// endings, as `Contract::from_dir` reads it; a copy that differs, if only in its comments, is an
+/// error naming its file.
 #[test]
 fn a_consumed_contract_may_bring_the_kernel_package() {
     const GUEST: &str = tembra_contracts::guest::SOURCE;
@@ -4241,12 +7780,10 @@ fn a_consumed_contract_may_bring_the_kernel_package() {
             fourth,
         )
     };
-    let commented = GUEST
-        .replace("/// ", "/// (another text) ")
-        .replace('\n', "\r\n");
+    let checked_out = GUEST.replace('\n', "\r\n");
     for (name, guest) in [
         ("first-deps", GUEST),
-        ("first-comments", commented.as_str()),
+        ("first-line-endings", checked_out.as_str()),
     ] {
         let module = with_deps(name, guest).unwrap_or_else(|error| panic!("{name}: {error}"));
         let generated = tokens(&module);
@@ -4259,18 +7796,23 @@ fn a_consumed_contract_may_bring_the_kernel_package() {
             "{name}: {generated}"
         );
     }
-    let error = with_deps(
-        "first-different",
-        &GUEST.replacen("read: func() -> string;", "read: func() -> u32;", 1),
-    )
-    .map(|_| ())
-    .unwrap_err()
-    .to_string();
-    assert!(
-        error.contains("deps/tembra-guest.wit:")
-            && error.contains("this copy of tembra:guest@1.0.0, the kernel's package, defines it otherwise than the one bundled with this macro"),
-        "{error}"
-    );
+    for (name, guest) in [
+        (
+            "first-comments",
+            GUEST.replace("/// ", "/// (another text) "),
+        ),
+        (
+            "first-different",
+            GUEST.replacen("read: func() -> string;", "read: func() -> u32;", 1),
+        ),
+    ] {
+        let error = with_deps(name, &guest).map(|_| ()).unwrap_err().to_string();
+        assert!(
+            error.contains("deps/tembra-guest.wit:")
+                && error.contains("this copy of tembra:guest@1.0.0, the kernel's package, differs from the one bundled with this macro"),
+            "{name}: {error}"
+        );
+    }
     // Without the package in the consumed directory, the inline WIT brings the bundled one.
     let dir = consumed("first-alone", LEDGER_WIT);
     let module = orb_with(
@@ -5835,55 +9377,41 @@ fn a_type_of_an_implemented_interface_gets_its_codec_from_the_wit() {
     );
 }
 
-/// A nested option is refused natively wherever a method reaches it, in its own types too: the
-/// boundary's JSON writes `None` and `Some(None)` alike, as `null`, which is why the portable
-/// profile refuses it and `cargo tembra build` refuses such a module. The WIT keeps it.
+/// A nested option is refused wherever a method reaches it, in its own types too, for both
+/// targets: the boundary's JSON writes `None` and `Some(None)` alike, as `null`, which is why the
+/// runtime refuses it in a signature, and the macro refuses it where it is written, so the native
+/// side never sees one.
 #[test]
-fn the_native_side_refuses_a_nested_option() {
-    let nested = "a nested option, which the boundary's JSON cannot carry: it writes `None` and `Some(None)` alike, as `null`, so the portable profile refuses it, as `cargo tembra build` does";
-    for (items, function, message) in [
-        (
-            "",
-            "pub fn add(count: Option<Option<u32>>) -> u32 { 0 }",
-            format!("`Ledger::add` takes `Option<Option<u32>>`, {nested}"),
-        ),
+fn a_nested_option_is_refused_wherever_a_method_reaches_it() {
+    for (items, function) in [
+        ("", "pub fn add(count: Option<Option<u32>>) -> u32 { 0 }"),
         (
             "",
             "pub fn list() -> Vec<Option<Option<String>>> { Vec::new() }",
-            format!(
-                "`Ledger::list` returns `Vec<Option<Option<String>>>`, which holds `Option<Option<String>>`, {nested}"
-            ),
         ),
         (
             "pub struct Entry { pub count: Option<Option<u32>> }",
             "pub fn add(entry: Entry) -> u32 { 0 }",
-            format!("the field `count` of `Entry` is `Option<Option<u32>>`, {nested}"),
         ),
         (
             "pub enum Shape { Dot, Line(Option<Option<u32>>) }",
             "pub fn draw(shape: Shape) {}",
-            format!("the case `Shape::Line` carries `Option<Option<u32>>`, {nested}"),
         ),
         (
             "pub enum Shape { Dot, Line { length: (u32, Option<Option<u32>>) } }",
             "pub fn draw(shape: Shape) {}",
-            format!(
-                "the field `length` of `Shape::Line` is `(u32, Option<Option<u32>>)`, which holds `Option<Option<u32>>`, {nested}"
-            ),
         ),
     ] {
-        let module = expanded(
+        let error = refused(
             PACKAGE,
             &format!(
                 "mod book {{ {items} #[service] pub struct Ledger; impl Ledger {{ {function} }} }}"
             ),
         );
-        assert_eq!(
-            native(&module, &[]),
-            format!(":: core :: compile_error ! (\"{message}\") ;"),
-            "{message}"
+        assert!(
+            error.contains("`Option<Option<T>>` is an option of an option, which the runtime refuses in a signature: use an enum of the module with a case for each"),
+            "{items} {function}: {error}"
         );
-        assert!(wit(&module).contains("option<option<"), "{message}");
     }
 }
 
@@ -6959,4 +10487,126 @@ fn the_contract_is_written_into_the_crate_compiled_for_itself_alone() {
     assert_eq!(deps, ["tembra-guest.wit"]);
     tembra_contracts::Contract::from_dir(&contract, Some("tally")).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A module that reads its consumed directory from every place the expansion reads it: an
+/// implemented interface and an imported one, a hook it contributes to, an interface imported by
+/// key, a type of an import in a derived signature and in a state, whose serde derives make the
+/// expansion read the WIT as the bindings do, and a WASI import, which nests the bundled packages.
+#[test]
+fn an_expansion_reads_the_consumed_directory_and_the_bundled_packages_once() {
+    let dir = consumed(
+        "once",
+        "package example:ledger@1.0.0;
+
+interface book {
+  record entry { label: string, amount: s64 }
+  add: func(entry: entry) -> u32;
+}
+
+interface guard {
+  record admission { value: s32, blocked: bool }
+  apply: func(input: admission) -> admission;
+}
+
+interface reports {
+  record report { total: s64 }
+  latest: func() -> report;
+}
+
+interface counter {
+  add: func(amount: u32) -> u32;
+}
+",
+    );
+    let options = Options {
+        imports: vec![
+            literal("example:ledger/reports@1.0.0"),
+            literal("wasi:random/random@0.3.0"),
+        ],
+        keyed: vec![literal("example:ledger/counter@1.0.0")],
+        ..options("example:keeper@1.0.0", Some(&dir))
+    };
+    let directories = super::wit::DIRECTORY_PARSES.get();
+    let bundled = super::wasi::BUNDLED_PARSES.get();
+    let module = expanded_with(
+        options,
+        "mod keeper {
+            #[state(service = Keeper)]
+            pub struct Kept { pub total: i64, pub last: Option<reports::Report> }
+            #[service(\"example:ledger/book@1.0.0\")]
+            pub struct Keeper;
+            impl Keeper { pub fn add(entry: book::Entry) -> u32 { 0 } }
+            #[hook(\"example:ledger/guard@1.0.0\", priority = 1)]
+            pub fn admit(input: guard::Admission) -> guard::Admission { input }
+            #[service]
+            pub struct Report;
+            impl Report {
+                pub fn latest() -> reports::Report { reports::latest() }
+                pub async fn bump(key: String) -> Result<u32, String> {
+                    Ok(counter_ref::get(vec![key]).await?.add(1))
+                }
+                pub fn draw(length: u64) -> Vec<u8> { random::get_random_bytes(length) }
+            }
+        }",
+    );
+    let text = wit(&module);
+    for expected in [
+        "  use example:ledger/reports@1.0.0.{report};\n",
+        "  import example:ledger/reports@1.0.0;\n",
+        "  import wasi:random/random@0.3.0;\n",
+        "  import counter-ref;\n",
+        "  import example:ledger/guard@1.0.0;\n  export example:ledger/guard@1.0.0;\n",
+        "  export example:ledger/book@1.0.0;\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    assert!(
+        tokens(&module)
+            .contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize]")
+    );
+    assert_eq!(
+        (
+            super::wit::DIRECTORY_PARSES.get() - directories,
+            super::wasi::BUNDLED_PARSES.get() - bundled,
+        ),
+        (1, 1),
+        "the consumed directory and the bundled WASI packages are read once each"
+    );
+}
+
+/// A module whose expansion reads the bundled WASI packages in every place that reads them: a WASI
+/// import, which nests the packages it needs in the inline WIT, a state holding a WASI record,
+/// which the expansion looks up in the bundled packages, and the state's serde derives, which make
+/// the expansion read the WIT as the bindings do, the packages the inline WIT nests included. A
+/// test build counts a parse of the bundled packages wherever the expansion parses them, the WIT the
+/// bindings read included.
+#[test]
+fn every_reader_of_the_bundled_packages_takes_them_parsed_once() {
+    let options = Options {
+        imports: vec![literal("wasi:clocks/system-clock@0.3.0")],
+        ..options("example:watch@1.0.0", None)
+    };
+    let bundled = super::wasi::BUNDLED_PARSES.get();
+    let module = expanded_with(
+        options,
+        "mod watch {
+            #[state(service = Clock)]
+            pub struct Seen { pub last: Option<system_clock::Instant> }
+            #[service]
+            pub struct Clock;
+            impl Clock {
+                pub fn seconds() -> i64 { system_clock::now().seconds }
+            }
+        }",
+    );
+    assert!(
+        tokens(&module)
+            .contains("additional_derives : [:: serde :: Serialize , :: serde :: Deserialize]")
+    );
+    assert_eq!(
+        super::wasi::BUNDLED_PARSES.get() - bundled,
+        1,
+        "the bundled WASI packages are parsed once"
+    );
 }

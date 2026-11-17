@@ -546,7 +546,7 @@ impl Environments {
 /// call fails terminally.
 pub(crate) async fn run(
     engine: Engine,
-    component: Component,
+    component: Arc<Component>,
     wasi: (WasiCtxBuilder, bool),
     grants: Arc<crate::Grants>,
     layout: Layout,
@@ -580,7 +580,7 @@ pub(crate) async fn run(
 async fn live(
     (engine, component, wasi, grants, layout): (
         Engine,
-        Component,
+        Arc<Component>,
         (WasiCtxBuilder, bool),
         Arc<crate::Grants>,
         Layout,
