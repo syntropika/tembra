@@ -4773,14 +4773,14 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
 /// The macro reads the trait impls of the Orb's modules before the compiler evaluates
 /// `#[cfg(..)]`, and leaves to them what the code it writes needs: the `Clone` of a flags struct,
 /// which its `Copy` needs, and what the bindings of a record holding the struct need of it, the
-/// `Default` of a state, a `serde` trait of a state kept out of the WIT, and a trait a type's derive
-/// needs of a type it holds. An impl under `#[cfg(..)]`, written plainly or under
-/// `#[cfg_attr(..)]`, or in a module under one, such as `#[cfg(test)] mod tests`, gives the trait in
-/// some configurations only, so it is refused, unless other impls, or a derive under
-/// `#[cfg_attr(..)]`, cover the others, as a `#[cfg(not(..))]` impl beside a `#[cfg(..)]` one does.
-/// The same impls without the attribute expand, and so does an impl under `#[cfg(..)]` of a trait
-/// the generated code does not need: the `Debug` or the `Copy` of a flags struct no record holds,
-/// or a `serde` trait of a type a state reaches, which the `#[serde(..)]` of its fields decide.
+/// `Default` of a state, a `serde` trait of a state kept out of the WIT or of a type its fields
+/// reach, and a trait a type's derive needs of a type it holds. An impl under `#[cfg(..)]`, written
+/// plainly or under `#[cfg_attr(..)]`, or in a module under one, such as `#[cfg(test)] mod tests`,
+/// gives the trait in some configurations only, so it is refused, unless other impls, or a derive
+/// under `#[cfg_attr(..)]`, cover the others, as a `#[cfg(not(..))]` impl beside a `#[cfg(..)]` one
+/// does. The same impls without the attribute expand, and so does an impl under `#[cfg(..)]` of a
+/// trait the generated code does not need: the `Debug` or the `Copy` of a flags struct no record
+/// holds, or a test's own `PartialEq`.
 #[test]
 fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
     let office = |items: &str| {
@@ -4967,13 +4967,38 @@ fn a_hand_impl_under_cfg_the_generated_code_counts_on_is_refused() {
     ))
     .replace("grant: Grant", "access: Access");
     expanded("example:office@1.0.0", &unheld);
-    let reached = ledger(
-        "pub struct Note { pub text: String }
-        #[cfg(feature = \"compact\")]
-        impl serde::Serialize for Note { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() } }",
-    )
-    .replace("pub total: i64", "pub total: i64, pub notes: Vec<Note>");
-    expanded("example:office@1.0.0", &reached);
+    // A type a state's fields reach is serialized with the state, and gets the serde derives the
+    // macro writes for it but where impls give the trait.
+    let reached = |items: &str| {
+        ledger(&format!("pub struct Note {{ pub text: String }} {items}"))
+            .replace("pub total: i64", "pub total: i64, pub notes: Vec<Note>")
+    };
+    let note = "impl serde::Serialize for Note { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { todo!() } }";
+    let error = refused(
+        "example:office@1.0.0",
+        &reached(&format!("#[cfg(feature = \"compact\")] {note}")),
+    );
+    assert!(
+        error.contains("`#[cfg(..)]` on `impl serde::Serialize for Note`: the macro reads the impl before the compiler evaluates the attribute and counts on it, while the code it writes needs `Note` to implement `Serialize` in every configuration"),
+        "{error}"
+    );
+    let paired = tokens(&expanded(
+        "example:office@1.0.0",
+        &reached(&format!(
+            "#[cfg(feature = \"compact\")] {note} #[cfg(not(feature = \"compact\"))] {note}"
+        )),
+    ));
+    assert!(
+        paired.contains("# [derive (:: serde :: Deserialize)] pub struct Note"),
+        "{paired}"
+    );
+    expanded(
+        "example:office@1.0.0",
+        &reached(&format!("#[cfg(feature = \"compact\")] {note}")).replace(
+            "pub struct Note",
+            "#[cfg_attr(not(feature = \"compact\"), derive(serde::Serialize))] pub struct Note",
+        ),
+    );
 }
 
 /// Two modules of one name, which `#[cfg(..)]`s select, are two modules: the macro reads the

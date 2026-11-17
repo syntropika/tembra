@@ -1955,15 +1955,12 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
             })
             .collect();
             // The macro reads those impls before the compiler evaluates `#[cfg(..)]`, so those it
-            // leaves a state's trait to give it in every configuration, with a derive under
-            // `#[cfg_attr(..)]` too (`uncovered`): the code it writes serializes the state. What
-            // a type the state reaches needs depends on the `#[serde(..)]` of the fields reaching
-            // it, which the macro leaves to the compiler.
-            let state = states
-                .iter()
-                .any(|state| state.ident == ident && state.scope == scope);
+            // leaves a trait to give it in every configuration, with a derive under
+            // `#[cfg_attr(..)]` too (`uncovered`): the code it writes serializes the state, and
+            // the derives it writes on the type holding this one, the state or another type its
+            // fields reach, need the trait of this one.
             for name in ["Serialize", "Deserialize"] {
-                if !state || derived.iter().any(|has| has == name) {
+                if derived.iter().any(|has| has == name) {
                     continue;
                 }
                 let hands: Vec<(usize, syn::ItemImpl)> = by_hand
@@ -1998,6 +1995,9 @@ fn expand(options: Options, module: ItemMod) -> syn::Result<proc_macro2::TokenSt
                 Some((attribute, name))
             });
             if let Some((attribute, name)) = twice {
+                let state = states
+                    .iter()
+                    .any(|state| state.ident == ident && state.scope == scope);
                 let (owner, reached) = if state {
                     (format!("the state `{ident}`"), "")
                 } else {
