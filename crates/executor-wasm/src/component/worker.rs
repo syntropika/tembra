@@ -2562,12 +2562,16 @@ async fn invoke(
         };
         Ok::<_, wasmtime::Error>(value)
     });
-    let value = tokio::time::timeout(
-        std::time::Duration::from_millis(engine.limits.timeout_ms),
-        call,
-    )
-    .await
-    .map_err(|_| wasmtime::Error::msg("component call timed out"))???;
+    let timeout = std::time::Duration::from_millis(engine.limits.timeout_ms);
+    let started = tokio::time::Instant::now();
+    // A result after the deadline is a timeout too. The timer can run late on a busy machine,
+    // and `timeout` still returns a result that is ready by then. A dependency's later deadline
+    // makes such results: a stream import's producer times out, its stream ends, and the
+    // importer answers.
+    let value = match tokio::time::timeout(timeout, call).await {
+        Ok(value) if started.elapsed() <= timeout => value,
+        _ => return Err(wasmtime::Error::msg("component call timed out")),
+    }??;
     let value = match value {
         Ok(value) => value,
         Err(error) => return Ok(Err(error)),
