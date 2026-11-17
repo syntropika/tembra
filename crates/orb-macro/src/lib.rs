@@ -4431,7 +4431,9 @@ fn known_trait(
 /// type would implement it twice. `hands` are the impls, each with the module it is written in,
 /// whose trait the macro follows from there (`known_trait`); one of the trait with another
 /// right-hand type, `PartialEq<u8>`, is another impl, which coexists with the derived `PartialEq`
-/// (`overlaps`).
+/// (`overlaps`). An impl for a type the macro places only by the uniqueness of its name, one a
+/// glob import from a module it does not read brings into another module (`type_module`), may be
+/// another type's: it is left to the compiler.
 fn clashing(
     shape: &Shape,
     generated: &wit::Generated,
@@ -4445,6 +4447,14 @@ fn clashing(
         let Some((_, path, _)) = &block.trait_ else {
             continue;
         };
+        let Type::Path(self_ty) = &*block.self_ty else {
+            continue;
+        };
+        let placed = type_module(&self_ty.path, *scope, uses, modules)
+            .is_some_and(|(module, name)| module == shape.scope && name == *owner);
+        if !placed {
+            continue;
+        }
         let Some(name) = known_trait(path, *scope, uses, modules, owner) else {
             continue;
         };

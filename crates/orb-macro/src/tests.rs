@@ -4848,9 +4848,10 @@ fn a_standard_derive_is_decided_from_the_fields() {
 /// `PartialEq<Self>`, which the derived `PartialEq` is. The same module without it expands, and so
 /// do an impl of a trait the bindings do not implement for that type, one of the trait with another
 /// right-hand type, `PartialEq<u8>`, which coexists with the derived one, an impl whose trait the
-/// macro cannot follow to a crate, and one of a trait of the Orb's own that takes a prelude's or
+/// macro cannot follow to a crate, one of a trait of the Orb's own that takes a prelude's or
 /// `serde`'s name, `pub trait Clone`, declared in the module or brought in by a glob import from
-/// another module of the Orb.
+/// another module of the Orb, and one for a type the macro places only by its name, one a glob
+/// import from outside the Orb brings into another module, which may be another type's.
 #[test]
 fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
     let module = |items: &str| {
@@ -4897,6 +4898,12 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
         (
             module("impl Clone for Point { fn clone(&self) -> Self { todo!() } }"),
             "`impl Clone for Point`: `Point` enters the WIT and the generated type replacing it implements `Clone` already, as the bindings derive it for a record or a variant that holds no resource handle",
+        ),
+        (
+            module(
+                "pub mod ops { use super::Point; impl core::fmt::Debug for Point { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } } }",
+            ),
+            "`impl core::fmt::Debug for Point`: `Point` enters the WIT and the generated type replacing it implements `Debug` already, as the bindings implement `Debug` for every type",
         ),
         (
             module(
@@ -4952,6 +4959,7 @@ fn a_hand_impl_of_what_the_generated_code_implements_is_refused() {
         use traits::*;
         impl PartialEq for Heading { fn same(&self) -> bool { true } }".to_owned(),
         format!("{state} pub trait Serialize {{ fn bytes(&self) -> u32; }} impl Serialize for Point {{ fn bytes(&self) -> u32 {{ 0 }} }}"),
+        "pub mod ops { use crate::geometry::*; impl core::fmt::Debug for Point { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { todo!() } } }".to_owned(),
     ] {
         expanded("example:walk@1.0.0", &module(&items));
     }
