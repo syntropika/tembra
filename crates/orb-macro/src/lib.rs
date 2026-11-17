@@ -5259,13 +5259,16 @@ fn bound(name: &Ident, scope: usize, uses: &[Uses], modules: &[Vec<Ident>]) -> O
 /// continues a path, reads a field or is a lifetime, a name before `=` is a key, the name of a
 /// derive of the standard library, which the arguments give as a keyword or as a derive, reaches
 /// the prelude's from every module, and one of `defined`, a type of the module that the bindings'
-/// module declares under the same name, reaches that declaration. With `code`, the fields of the
-/// type, the arguments are what a known derive reads as code (`read_as_code`): a field, which the
-/// derive binds, names that field, and a name nothing in the module binds is one a glob import the
-/// macro cannot follow may bring (`through_globs`), but for a keyword, a macro's name, derive_more's
-/// `_0` for an unnamed field, a name of the standard prelude or a primitive type, which every
-/// module reaches, and a lowercase name before `::`, which may be a crate's. A type that enters the
-/// WIT has no generic parameter to name.
+/// module declares under the same name, reaches that declaration. With `code`, the names bound
+/// where the code runs, the arguments are what a known derive reads as code (`read_as_code`): a
+/// name of `code`, a field of the type, which the derive binds, or one the code binds itself
+/// (`locals`), names that binding; a name before a lone `:` is a struct literal's field,
+/// `Limits { max: 10 }`; an attribute, `#[allow(..)]`, and a macro's arguments are their own
+/// syntax, read as any argument is; and a name nothing in the module binds is one a glob import
+/// the macro cannot follow may bring (`through_globs`), but for a keyword, a macro's name,
+/// derive_more's `_0` for an unnamed field, a name of the standard prelude or a primitive type,
+/// which every module reaches, and a lowercase name before `::`, which may be a crate's. A type
+/// that enters the WIT has no generic parameter to name.
 fn from_module(
     arguments: proc_macro2::TokenStream,
     scope: usize,
@@ -5284,6 +5287,16 @@ fn from_module(
     for (index, tree) in trees.iter().enumerate() {
         let ident = match tree {
             TokenTree::Group(group) => {
+                let called = index > 1
+                    && punct(index - 1, '!')
+                    && match &trees[index - 2] {
+                        TokenTree::Ident(name) => {
+                            !RUST_KEYWORDS.contains(&name.to_string().as_str())
+                        }
+                        _ => false,
+                    };
+                let own = called || (index > 0 && punct(index - 1, '#'));
+                let code = code.filter(|_| !own);
                 match from_module(group.stream(), scope, uses, modules, defined, code) {
                     Some(path) => return Some(path),
                     None => continue,
@@ -5296,18 +5309,21 @@ fn from_module(
             && (punct(index - 1, '.')
                 || punct(index - 1, '\'')
                 || (index > 1 && colons(index - 2)));
-        let key = match trees.get(index + 1) {
+        let followed = |char: char| match trees.get(index + 1) {
             Some(TokenTree::Punct(punct)) => {
-                punct.as_char() == '=' && punct.spacing() == Spacing::Alone
+                punct.as_char() == char && punct.spacing() == Spacing::Alone
             }
             _ => false,
         };
+        let key = followed('=');
+        let field = code.is_some() && followed(':');
         let name = ident.to_string();
         if continued
             || key
+            || field
             || STANDARD_DERIVES.iter().any(|(derive, _)| *derive == name)
             || defined.contains(&name)
-            || code.is_some_and(|fields| fields.contains(&name))
+            || code.is_some_and(|bound| bound.contains(&name))
         {
             continue;
         }
@@ -5336,6 +5352,134 @@ fn from_module(
         }
     }
     None
+}
+
+/// The names code binds itself, at any depth, which a name it reads may be rather than one from
+/// its scope: those in the parameters of a closure, `|n: u32|`, and in the pattern of a `let`, a
+/// `for` or a match arm, where the macro cannot tell a binding from a constant or a unit struct,
+/// so it takes every name there; `None` for code declaring an item, `const N: u32 = 2;`, whose
+/// names the macro does not follow.
+fn locals(code: proc_macro2::TokenStream) -> Option<BTreeSet<String>> {
+    use proc_macro2::{Delimiter, Spacing, TokenTree};
+    let trees: Vec<TokenTree> = code.into_iter().collect();
+    let punct = |index: usize, char: char| match trees.get(index) {
+        Some(TokenTree::Punct(punct)) => punct.as_char() == char,
+        _ => false,
+    };
+    // A punctuation joined to the next, as the first `:` of `::` or the `=` of `=>`.
+    let joint = |index: usize| match trees.get(index) {
+        Some(TokenTree::Punct(punct)) => punct.spacing() == Spacing::Joint,
+        _ => false,
+    };
+    // A `:` or an `=` on its own, not a part of `::`, `==` or `..=`.
+    let alone = |index: usize, char: char| {
+        punct(index, char) && !joint(index) && !(index > 0 && joint(index - 1))
+    };
+    let word = |index: usize, word: &str| match trees.get(index) {
+        Some(TokenTree::Ident(ident)) => ident == word,
+        _ => false,
+    };
+    let arrow = |index: usize| punct(index, '=') && joint(index) && punct(index + 1, '>');
+    // The first index from `start` that `end` takes, or the end of the trees.
+    let until = |start: usize, end: &dyn Fn(usize) -> bool| {
+        (start..trees.len())
+            .find(|&index| end(index))
+            .unwrap_or(trees.len())
+    };
+    let mut bound = BTreeSet::new();
+    // Match arms: each binds the names of its pattern, before `=>` and a guard's `if`, and ends
+    // with a block or at `,`.
+    if (0..trees.len()).any(arrow) {
+        let mut start = 0;
+        while start < trees.len() {
+            let end = until(start, &arrow);
+            let guard = until(start, &|index| word(index, "if")).min(end);
+            idents(&trees[start..guard], &mut bound);
+            start = match trees.get(end + 2) {
+                Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace => end + 3,
+                _ => until(end + 2, &|index| punct(index, ',')),
+            };
+            if punct(start, ',') {
+                start += 1;
+            }
+        }
+    }
+    let mut index = 0;
+    while index < trees.len() {
+        match &trees[index] {
+            TokenTree::Group(group) => bound.extend(locals(group.stream())?),
+            TokenTree::Ident(ident) => {
+                let named = matches!(trees.get(index + 1), Some(TokenTree::Ident(_)));
+                match ident.to_string().as_str() {
+                    "use" | "impl" | "trait" | "mod" | "extern" | "type" | "macro_rules" => {
+                        return None;
+                    }
+                    "fn" | "const" | "static" | "struct" | "enum" | "union" if named => {
+                        return None;
+                    }
+                    "let" => {
+                        let end = until(index + 1, &|index| {
+                            alone(index, '=') || alone(index, ':') || punct(index, ';')
+                        });
+                        idents(&trees[index + 1..end], &mut bound);
+                    }
+                    "for" => {
+                        let end = until(index + 1, &|index| word(index, "in"));
+                        idents(&trees[index + 1..end], &mut bound);
+                    }
+                    _ => {}
+                }
+            }
+            // `||` is an operator or a closure without parameters.
+            TokenTree::Punct(bar)
+                if bar.as_char() == '|' && joint(index) && punct(index + 1, '|') =>
+            {
+                index += 2;
+                continue;
+            }
+            // A closure's parameters, between `|`s where an expression starts: first, after a
+            // punctuation or after `move`, `async`, `return`, `break` or `yield`; elsewhere `|` is
+            // an operator.
+            TokenTree::Punct(bar)
+                if bar.as_char() == '|'
+                    && (index == 0
+                        || matches!(trees[index - 1], TokenTree::Punct(_))
+                        || ["move", "async", "return", "break", "yield"]
+                            .iter()
+                            .any(|keyword| word(index - 1, keyword))) =>
+            {
+                let end = until(index + 1, &|index| punct(index, '|'));
+                let mut start = index + 1;
+                while start < end {
+                    let next = until(start, &|index| punct(index, ',')).min(end);
+                    let typed = until(start, &|index| alone(index, ':')).min(next);
+                    idents(&trees[start..typed], &mut bound);
+                    start = next + 1;
+                }
+                index = end + 1;
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    Some(bound)
+}
+
+/// Every name in `trees`, at any depth, into `names`.
+fn idents(trees: &[proc_macro2::TokenTree], names: &mut BTreeSet<String>) {
+    for tree in trees {
+        match tree {
+            proc_macro2::TokenTree::Ident(ident) => {
+                names.insert(ident.to_string());
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                let trees: Vec<_> = group.stream().into_iter().collect();
+                idents(&trees, names);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The names the standard prelude brings into every module, the bindings' module among them, with
@@ -5408,15 +5552,16 @@ const STANDARD_NAMES: &[&str] = &[
 /// What a known derive reads as code in the arguments of the helper attribute `name`, which then
 /// names from the bindings' module: the tokens of smart_default's `#[default(..)]` or
 /// `#[default = ..]`, the format arguments after the string of thiserror's `#[error(..)]` and of
-/// derive_more's `#[display(..)]` and `#[debug(..)]`, and, written in strings, the names the string
-/// of thiserror's `#[error(..)]` captures, `{PAGE}`, derivative's `value = ".."`, and serde's
-/// `default`, `with`, `serialize_with`, `deserialize_with` and `skip_serializing_if`. Elsewhere a
-/// word may be the derive's own syntax, as `ignore` in `#[from(ignore)]`.
+/// derive_more's `#[display(..)]` and `#[debug(..)]`, and, written in strings, derivative's
+/// `value = ".."`, serde's `default`, `with`, `serialize_with`, `deserialize_with` and
+/// `skip_serializing_if`, and the names the string of thiserror's `#[error(..)]` captures,
+/// `{PAGE}`, but for one a named argument after it gives, `max = ..` for `{max}`. Elsewhere a word
+/// may be the derive's own syntax, as `ignore` in `#[from(ignore)]`.
 fn read_as_code(
     name: &Ident,
     arguments: proc_macro2::TokenStream,
 ) -> Vec<proc_macro2::TokenStream> {
-    use proc_macro2::TokenTree;
+    use proc_macro2::{Spacing, TokenTree};
     if name == "default" {
         return vec![arguments];
     }
@@ -5452,9 +5597,26 @@ fn read_as_code(
     let Some((position, format)) = format else {
         return Vec::new();
     };
-    let mut code = vec![trees[position + 1..].iter().cloned().collect()];
+    let arguments = &trees[position + 1..];
+    let mut code = vec![arguments.iter().cloned().collect()];
     if name == "error" {
-        code.push(captures(&format));
+        let named: BTreeSet<String> = arguments
+            .windows(3)
+            .filter_map(|window| match window {
+                [
+                    TokenTree::Punct(comma),
+                    TokenTree::Ident(name),
+                    TokenTree::Punct(equals),
+                ] if comma.as_char() == ','
+                    && equals.as_char() == '='
+                    && equals.spacing() == Spacing::Alone =>
+                {
+                    Some(name.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        code.push(captures(&format, &named));
     }
     code
 }
@@ -5487,8 +5649,9 @@ fn strings(arguments: proc_macro2::TokenStream, keys: &[&str]) -> Vec<proc_macro
 }
 
 /// The names a format string captures from its scope, `{PAGE}` or `{PAGE:?}`, as tokens: what is
-/// neither a position, `{}` or `{0}`, nor a brace a doubled `{{` escapes.
-fn captures(format: &str) -> proc_macro2::TokenStream {
+/// neither a position, `{}` or `{0}`, nor one of the arguments `named`, `max = ..` for `{max}`,
+/// nor a brace a doubled `{{` escapes.
+fn captures(format: &str, named: &BTreeSet<String>) -> proc_macro2::TokenStream {
     let mut names = proc_macro2::TokenStream::new();
     let mut rest = format;
     while let Some(open) = rest.find('{') {
@@ -5498,7 +5661,9 @@ fn captures(format: &str) -> proc_macro2::TokenStream {
             continue;
         }
         let end = rest.find(['}', ':']).unwrap_or(rest.len());
-        if let Ok(name) = syn::parse_str::<Ident>(rest[..end].trim()) {
+        if let Ok(name) = syn::parse_str::<Ident>(rest[..end].trim())
+            && !named.contains(&name.to_string())
+        {
             names.extend(quote! { #name , });
         }
         rest = &rest[end..];
@@ -5539,7 +5704,8 @@ fn unread(carried: &Carried, others: &[Reads]) -> String {
 /// declares or imports, or start from that module, but for the types of the module the bindings'
 /// module declares beside the generated type under the same name, `defined`: in the tokens, and
 /// in what a known derive reads as code, strings included, where a name a glob import the macro
-/// cannot follow may bring is refused too (`from_module`).
+/// cannot follow may bring is refused too (`from_module`), but for a name the code binds itself,
+/// and in no code declaring an item (`locals`).
 fn readable(
     shape: &Shape,
     readers: &[Reads],
@@ -5589,7 +5755,9 @@ fn readable(
         let named = from_module(arguments.clone(), shape.scope, uses, modules, defined, None)
             .or_else(|| {
                 read_as_code(name, arguments).into_iter().find_map(|code| {
-                    from_module(code, shape.scope, uses, modules, defined, Some(&fields))
+                    let mut bound = locals(code.clone())?;
+                    bound.extend(fields.iter().cloned());
+                    from_module(code, shape.scope, uses, modules, defined, Some(&bound))
                 })
             });
         if let Some(path) = named {

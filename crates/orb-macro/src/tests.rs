@@ -5471,6 +5471,85 @@ fn a_helper_attribute_naming_what_a_glob_or_a_string_brings_is_refused() {
     );
 }
 
+/// Under a glob import the macro cannot follow, what a known derive reads as code names from the
+/// glob only the names that start a path from its scope. A format argument's `name =`, which the
+/// string captures as `{max}`, a struct literal's field, a name the code binds itself, in a
+/// closure's parameters or in the pattern of a `let`, a `for` or a match arm, and an attribute or
+/// a macro's arguments, which are their own syntax, are no such path, so each expands, as does
+/// code declaring an item, whose names the macro does not follow; a path beside them is refused as
+/// before.
+#[test]
+fn a_helper_argument_naming_no_path_from_its_scope_expands_under_a_glob() {
+    let module = |items: &str, returned: &str| {
+        format!(
+            "mod walk {{
+                use super::*;
+                {items}
+                #[service]
+                pub struct Walker;
+                impl Walker {{ pub fn walk() -> {returned} {{ todo!() }} }}
+            }}"
+        )
+    };
+    let limit = |attribute: &str| {
+        format!("#[derive(thiserror::Error)] {attribute} pub struct Limit {{ pub limit: u32 }}")
+    };
+    let page = |attribute: &str| {
+        format!(
+            "#[derive(smart_default::SmartDefault)] pub struct Page {{ {attribute} pub size: u32 }}"
+        )
+    };
+    let limits = |attribute: &str| {
+        format!(
+            "pub struct Limits {{ pub max: u32 }}
+            #[derive(smart_default::SmartDefault)]
+            pub struct Page {{ {attribute} pub limits: Limits }}"
+        )
+    };
+    let advice = "enters the WIT and the generated type replacing it is declared in the bindings' module, which reads the attribute and does not reach";
+    for (refused_items, returned, shown, expanding) in [
+        (
+            limit("#[error(\"limit {limit} of {max}\", max = PAGE)]"),
+            "Limit",
+            "#[error(..)]",
+            vec![
+                limit("#[error(\"limit {limit} (at most {max})\", max = u32::MAX)]"),
+                limit("#[error(\"limit {limit} of {max}\", max = crate::PAGE)]"),
+            ],
+        ),
+        (
+            page("#[default((|n: u32| n + PAGE)(1))]"),
+            "Page",
+            "#[default(..)]",
+            vec![
+                page("#[default((|n: u32| n + 1)(1))]"),
+                page("#[default({ let n = 2; n * 2 })]"),
+                page("#[default({ let mut sum = 0; for n in 1..3 { sum += n; } sum })]"),
+                page("#[default(match Some(2) { Some(n) if n > 1 => n, _ => 0 })]"),
+                page("#[default({ #[allow(unused_mut)] let mut n = 2; n })]"),
+                page("#[default(stringify!(PAGE).len() as u32)]"),
+                page("#[default({ const N: u32 = 2; N })]"),
+            ],
+        ),
+        (
+            limits("#[default(Limits { max: PAGE })]"),
+            "Page",
+            "#[default(..)]",
+            vec![limits("#[default(Limits { max: 10 })]")],
+        ),
+    ] {
+        let error = refused("example:walk@1.0.0", &module(&refused_items, returned));
+        let owner = returned;
+        let message = format!(
+            "`{shown}` on `{owner}` names `PAGE` from this module: `{owner}` {advice} `PAGE`; name it from `crate::` or from its crate, `::name::..`, or keep `{owner}` out of the WIT"
+        );
+        assert!(error.contains(&message), "{refused_items}: {error}");
+        for items in expanding {
+            expanded("example:walk@1.0.0", &module(&items, returned));
+        }
+    }
+}
+
 /// A state starts from its `Default`: the macro implements it field by field unless the author
 /// gives it, by an `impl Default` anywhere in the Orb module or by a derive, which stays on a
 /// state out of the WIT and goes to the generated type replacing a state that enters it; the serde
