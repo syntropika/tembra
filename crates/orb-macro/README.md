@@ -1430,6 +1430,104 @@ linked, naming the item, until the native side covers them, and so is an `Option
 which the boundary's JSON cannot tell from `None`; a component build of the same module is
 unaffected.
 
+## Moving a hand-written service to the macro
+
+A native service written by hand with the runtime's builder, `Service::new(name, factory)` and its
+`method(..)`s, keeps working as it is. Its names are the author's, often a service named like its
+Orb and snake_case methods, and its JSON is whatever serde writes for its types. Moved to the
+macro, as a `#[service]` struct with an `impl` block of `pub fn`, the service gets a WIT contract,
+which compiled and TypeScript callers read, and its callers name, pass and receive other things:
+
+- The service is named `<orb>::<interface identity>`: `<orb>` is the name the host installs the Orb
+  under, from `[package.metadata.tembra]` or `orb_named(..)`, and the interface is the struct's
+  name in kebab-case, in the Orb's package, unless `#[service("..")]` names the one it implements.
+  `Plotter` of `example:calculator@1.0.0`, in an Orb installed as `calculator`, is
+  `calculator::example:calculator/plotter@1.0.0`, the name a caller gives `Host::get` in place of
+  the one the author chose.
+- A method is named by its WIT name, the kebab-case form of its Rust name, for local callers too:
+  `give_up` is `give-up`. The service's client keeps the Rust name, `give_up`.
+- A local caller passes the arguments as a tuple of the parameters in WIT order, `()` without
+  parameters, where each hand-written method chose its own argument type, such as `(T,)`, `()`,
+  `[Value; 0]` or a struct of every argument. A portable caller sends them as a JSON array in WIT
+  order, `[]` or `null` without parameters. A struct a method took whole is a record parameter,
+  sent as `[{..}]`, unless its fields become the parameters.
+- The fields of a record and the flags of a flags are keyed by the lowerCamelCase form of their WIT
+  names, `dashedLine` for `dashed_line`, and an enum's cases are their WIT names, `north` for
+  `North`, where serde writes the Rust names.
+- A variant and a `Result` cross as `{"tag": .., "val": ..}`, without `val` for a case or a side
+  that carries nothing, where serde writes an externally tagged `{"Rect": ..}` or `{"Ok": ..}`, or
+  the tag of an internally tagged enum beside its fields. A case with named fields carries a record
+  of its own, `<enum>-<case>`: the case `Rect { width, height }` of `Shape` carries a `shape-rect`.
+- WIT has no generics, so a type that enters the WIT takes no type parameter. A record generic over
+  what it holds, such as a page of any item, is written as a concrete record for each use, such as
+  a page of notes whose items are a `Vec<Note>`; a type parameter reads as a type the module does
+  not declare, a compile error.
+- Free JSON, `serde_json::Value`, stays the author's type in the methods and crosses as a WIT
+  `string` that holds its JSON text: a portable caller sends and receives the text, where the
+  hand-written method took and gave the JSON itself. A local caller passes the value as before.
+- A newtype, `struct Id(String)`, crosses as its field, as serde writes it, and is read back
+  through its `TryFrom` natively and its `From` in a component: one that only a refusing `TryFrom`
+  makes is native only, see [what the macro reads](#what-the-macro-reads).
+
+The rest is as in [using the Orb natively](#using-the-orb-natively): a method whose error fails the
+call returns `tembra::Result<T>`, an object's environment comes from a `#[create]`, and a method
+that takes or returns host values is `#[local]`; each makes the module native only.
+
+The native fixture's `calculator` shows the changes. Its plotter draws shapes:
+
+```rust,ignore
+#[tembra::orb(package = "example:calculator@1.0.0", context)]
+pub mod calculator {
+    pub enum Shape {
+        Dot,
+        Square(u32),
+        Rect { width: u32, height: u32 },
+    }
+
+    #[service]
+    pub struct Plotter;
+
+    impl Plotter {
+        /// The area of a shape, or why it has none.
+        pub fn area(shape: Shape) -> Result<u64, String> {
+            /* .. */
+        }
+    }
+}
+```
+
+Its tests name, send and receive what the right column holds, where a hand-written service would
+take and give what serde writes, in the left column:
+
+| By hand, with serde                      | With the macro                                      |
+| ---------------------------------------- | --------------------------------------------------- |
+| a service `calculator`                   | `calculator::example:calculator/plotter@1.0.0`      |
+| a method `give_up`                       | `give-up`                                           |
+| `"North"`                                | `"north"`                                           |
+| `{"Square": 4}`                          | `{"tag": "square", "val": 4}`                       |
+| `{"Rect": {"width": 2, "height": 3}}`    | `{"tag": "rect", "val": {"width": 2, "height": 3}}` |
+| `"Dot"`                                  | `{"tag": "dot"}`                                    |
+| `{"Ok": 6}`                              | `{"tag": "ok", "val": 6}`                           |
+| `{"filled": false, "dashed_line": true}` | `{"filled": false, "dashedLine": true}`             |
+| `[1, 2]` as free JSON                    | `"[1,2]"`                                           |
+
+```rust,ignore
+// In a native host, under a root context.
+let plotter = Rc::new(host.get(
+    "calculator::example:calculator/plotter@1.0.0",
+    vec!["main".into()],
+    "host",
+)?);
+let rect = Shape::Rect { width: 2, height: 3 };
+let area = plotter.call::<_, Result<u64, String>>(&context, "area", (rect,)).await?;
+assert_eq!(area, Ok(6));
+let rect = json!([{ "tag": "rect", "val": { "width": 2, "height": 3 } }]);
+let area = plotter.call_portable::<_, Value>(&context, "area", rect).await?;
+assert_eq!(area, json!({ "tag": "ok", "val": 6 }));
+let client = calculator::PlotterClient::new(plotter);
+assert_eq!(client.area(&context, Shape::Rect { width: 2, height: 2 }).await?, Ok(4));
+```
+
 ## Items under `#[cfg]`
 
 An attribute macro reads the module before the compiler evaluates the `#[cfg(..)]`s in it. On the
