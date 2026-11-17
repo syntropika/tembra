@@ -14,12 +14,22 @@
 //! completes an import: the functions of an imported interface are `async` natively, so an
 //! interface whose functions are all `async func`, whose bindings are `async` in a component too,
 //! is imported natively, and one with a synchronous function stays component-only.
-use super::{Kind, Refused, decode, encode, refused, wit_kind};
-use crate::{Analysis, hook_path, import_module, keyed, rust_ident, type_ident, wit};
+//!
+//! `Providers` also names the Orb that declares each hook the module contributes to: the Orb
+//! requires the hook of it, with the signature of the hook's callback, and adds the contribution
+//! with `Orb::contribute_portable`, whose callback reads the hook's input with the codec, runs the
+//! author's function in the Orb's root, as a component's contribution runs, and writes its answer.
+use super::{
+    Kind, Refused, Scopes, Uncovered, argument, boundary, decode, encode, kind, refused, spelled,
+    wit_kind,
+};
+use crate::{Analysis, Contribution, hook_path, import_module, keyed, rust_ident, type_ident, wit};
+use heck::ToSnakeCase;
 use proc_macro2::{Span, TokenStream};
-use quote::quote;
+use quote::{format_ident, quote};
 use std::collections::BTreeSet;
-use syn::{Ident, LitStr};
+use syn::{Ident, LitStr, spanned::Spanned};
+use tembra_contracts::Contract;
 use wit_parser::FunctionKind;
 
 /// An interface the module imports from another Orb, which the native side serves.
@@ -72,21 +82,7 @@ pub(super) fn imports(analysis: &Analysis) -> Result<Vec<Import<'_>>, Refused> {
         return Ok(Vec::new());
     }
     // What each provider must offer, from the module's contract, as its plan requires it.
-    let file = format!("{}.wit", analysis.world);
-    let world = wit::escaped(&analysis.world);
-    let contract = match &analysis.wit_dir {
-        Some(dir) => {
-            tembra_contracts::Contract::from_source_in(dir, &file, &analysis.wit, Some(&world))
-        }
-        None => tembra_contracts::Contract::from_source(&file, &analysis.wit, Some(&world)),
-    };
-    let unresolved = |error: tembra_contracts::Error| {
-        refused(
-            Span::call_site(),
-            &format!("the derived WIT does not resolve as a contract: {error}"),
-        )
-    };
-    let contract = contract.map_err(unresolved)?;
+    let contract = contract(analysis)?;
     imports
         .into_iter()
         .map(|(field, interface, view)| {
@@ -105,6 +101,206 @@ pub(super) fn imports(analysis: &Analysis) -> Result<Vec<Import<'_>>, Refused> {
             Ok(import)
         })
         .collect()
+}
+
+/// The module's contract: its WIT, with the consumed packages, as `cargo tembra build` and the
+/// kernel read it.
+fn contract(analysis: &Analysis) -> Result<Contract, Refused> {
+    let file = format!("{}.wit", analysis.world);
+    let world = wit::escaped(&analysis.world);
+    match &analysis.wit_dir {
+        Some(dir) => Contract::from_source_in(dir, &file, &analysis.wit, Some(&world)),
+        None => Contract::from_source(&file, &analysis.wit, Some(&world)),
+    }
+    .map_err(unresolved)
+}
+
+/// The refusal of a contract the derived WIT does not resolve as.
+fn unresolved(error: tembra_contracts::Error) -> Refused {
+    refused(
+        Span::call_site(),
+        &format!("the derived WIT does not resolve as a contract: {error}"),
+    )
+}
+
+/// A hook the module contributes to, which the native side adds to the Orb.
+pub(super) struct Contributed<'a> {
+    /// The field of `Providers` naming the Orb that declares the hook, and the module the Orb
+    /// module names the hook by, `guard`.
+    pub field: Ident,
+    pub contribution: &'a Contribution,
+    /// The signature of the hook's callback, which the Orb requires of the hook.
+    signature: String,
+}
+
+/// The hooks the module contributes to, each with the signature of its callback; or the refusal
+/// of the first contribution taking or returning what the codec does not cover.
+pub(super) fn contributions(analysis: &Analysis) -> Result<Vec<Contributed<'_>>, Refused> {
+    for contribution in &analysis.contributions {
+        let owner = &contribution.ident;
+        let place = |role: &str, ty: &syn::Type, uncovered: Uncovered| {
+            refused(
+                ty.span(),
+                &format!(
+                    "`{owner}` {role} `{}`{}",
+                    spelled(ty),
+                    uncovered.described(ty)
+                ),
+            )
+        };
+        let (_, input) = &contribution.param;
+        argument(input, contribution.scope, analysis)
+            .map_err(|uncovered| place("takes", input, uncovered))?;
+        if let Some(result) = &contribution.result {
+            kind(result, contribution.scope, analysis)
+                .map_err(|uncovered| place("returns", result, uncovered))?;
+        }
+    }
+    if analysis.contributions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let contract = contract(analysis)?;
+    analysis
+        .contributions
+        .iter()
+        .map(|contribution| {
+            let hook = &contribution.hook;
+            let callback = &analysis.callbacks[hook];
+            let [_, _, field] = hook_path(hook);
+            Ok(Contributed {
+                field,
+                contribution,
+                signature: contract
+                    .function_signature(hook, &callback.name, true)
+                    .map_err(unresolved)?,
+            })
+        })
+        .collect()
+}
+
+/// The function adding a contribution to the Orb, `__tembra_contribution_admit` for `admit`.
+pub(super) fn contribution_ident(contribution: &Contribution) -> Ident {
+    format_ident!(
+        "__tembra_contribution_{}",
+        contribution.ident.to_string().to_snake_case()
+    )
+}
+
+/// The function adding a contribution to the Orb, in the contribution's module, which `orb(..)`
+/// calls with the Orb that declares the hook, `target`: `Orb::contribute_portable` with the hook,
+/// the signature of its callback and the priority of the attribute. The callback reads the hook's
+/// input with the codec, refusing it as the call's arguments, runs the author's function and
+/// writes its answer as the plan composes it: none for a function without a result, the value of
+/// an `Option` when it has one and none when it has none, and the value otherwise. It runs in the
+/// Orb's root, as a component's contribution does: in the scope of the call, which the native
+/// `context` reads, with the `context` option, of the Orb's root resources, with some, and of its
+/// imports, `imported`, but on no object, so it reaches no state.
+pub(super) fn contribution(
+    contributed: &Contributed<'_>,
+    analysis: &Analysis,
+    imported: bool,
+) -> TokenStream {
+    let contribution = contributed.contribution;
+    let scope = contribution.scope;
+    let root = crate::supers(analysis.modules[scope].len());
+    let boundary = boundary(scope, analysis);
+    let scopes = Scopes {
+        context: analysis
+            .options
+            .context
+            .then(|| quote! { self::#root context::__scoped }),
+        state: None,
+        resources: (!analysis.resources.is_empty())
+            .then(|| quote! { self::#root __tembra_resource::scoped }),
+        imports: imported.then(|| quote! { self::#root __tembra_import::scoped }),
+    };
+    let ident = &contribution.ident;
+    let (param, input) = &contribution.param;
+    let read = decode(
+        &argument(input, scope, analysis)
+            .unwrap_or_else(|_| unreachable!("a contribution's input is covered")),
+        quote! { value },
+        &boundary,
+    );
+    let answer = match &contribution.result {
+        None => quote! {
+            #ident(#param);
+            ::core::result::Result::Ok(::core::option::Option::None)
+        },
+        Some(result) => {
+            let written = match kind(result, scope, analysis)
+                .unwrap_or_else(|_| unreachable!("a contribution's result is covered"))
+            {
+                Kind::Option(inner) => {
+                    let item = encode(&inner, quote! { item }, &boundary);
+                    quote! {
+                        match value {
+                            ::core::option::Option::None => {
+                                ::core::result::Result::Ok(::core::option::Option::None)
+                            }
+                            ::core::option::Option::Some(item) => {
+                                #item.map(::core::option::Option::Some)
+                            }
+                        }
+                    }
+                }
+                kind => {
+                    let value = encode(&kind, quote! { value }, &boundary);
+                    quote! { #value.map(::core::option::Option::Some) }
+                }
+            };
+            quote! {
+                let value = #ident(#param);
+                let write = |value: #result| -> ::core::result::Result<
+                    ::core::option::Option<::tembra::serde_json::Value>,
+                    ::std::string::String,
+                > { #written };
+                write(value).map_err(|message| {
+                    ::tembra::Error::invalid(::tembra::core::Reason::Result, message)
+                })
+            }
+        }
+    };
+    let future = scopes.around(quote! {
+        async move {
+            __tembra_context.check()?;
+            let read = |value: ::tembra::serde_json::Value| -> ::core::result::Result<
+                #input,
+                ::std::string::String,
+            > { #read };
+            let #param = read(__tembra_input).map_err(|message| {
+                ::tembra::Error::invalid(::tembra::core::Reason::Arguments, message)
+            })?;
+            #answer
+        }
+    });
+    let handle = scopes.handle(quote! {
+        |__tembra_context: ::tembra::Context, __tembra_input: ::tembra::serde_json::Value| #future
+    });
+    let function = contribution_ident(contribution);
+    let hook = &contribution.hook;
+    let signature = &contributed.signature;
+    let priority = contribution.priority;
+    let resources = scopes.resources.is_some().then(|| {
+        quote! { , resources: &::std::rc::Rc<self::#root __tembra_resource::Resources> }
+    });
+    let imports = imported.then(|| {
+        quote! { , imports: &::std::rc::Rc<self::#root __tembra_import::Imports> }
+    });
+    let doc = format!(
+        " The contribution of `{ident}` to the hook `{hook}`, which `orb(..)` adds to the native Orb, with the Orb that declares the hook, `target`."
+    );
+    quote! {
+        #[doc = #doc]
+        pub(crate) fn #function(
+            orb: ::tembra::Orb,
+            target: &str
+            #resources
+            #imports
+        ) -> ::tembra::Orb {
+            orb.contribute_portable(target, #hook, #signature, #priority, #handle)
+        }
+    }
 }
 
 /// Whether the native side serves the import of `identity`, as the attribute writes it, `literal`,
@@ -174,8 +370,20 @@ fn served(
     Ok(())
 }
 
-/// `Providers`, the argument of `orb(..)` naming the Orb that answers each import.
-pub(super) fn providers(imports: &[Import<'_>]) -> TokenStream {
+/// `Providers`, the argument of `orb(..)` naming the Orb that answers each import, and the Orb
+/// that declares each hook the module contributes to.
+pub(super) fn providers(imports: &[Import<'_>], contributions: &[Contributed<'_>]) -> TokenStream {
+    let hooks = contributions.iter().map(|contributed| {
+        let field = &contributed.field;
+        let doc = format!(
+            " The Orb that declares the hook `{}`, which this Orb contributes to.",
+            contributed.contribution.hook
+        );
+        quote! {
+            #[doc = #doc]
+            pub #field: ::tembra::Provider,
+        }
+    });
     let fields = imports.iter().map(|import| {
         let field = &import.field;
         let doc = match import.view {
@@ -195,18 +403,37 @@ pub(super) fn providers(imports: &[Import<'_>]) -> TokenStream {
     });
     quote! {
         /// The Orbs that answer what this Orb consumes from others, for `orb(..)`: one for each
-        /// interface it imports, under the name of the interface's module.
+        /// interface it imports and for each hook it contributes to, under the name of the module
+        /// the Orb module names it by.
         pub struct Providers {
             #(#fields)*
+            #(#hooks)*
         }
     }
 }
 
 /// `__tembra_providers`, in the Orb module: what the Orb requires of each provider, one
 /// requirement per Orb, as the plan of a compiled Orb requires the providers an installation
-/// selects: the signature of each interface imported from it and the functions of the interface.
-/// Two imports from one Orb name one API version of it.
-pub(super) fn requirements(imports: &[Import<'_>]) -> TokenStream {
+/// selects: the signature of each interface imported from it and the functions of the interface,
+/// and each hook it contributes to with the signature of the hook's callback. Two imports or hooks
+/// from one Orb name one API version of it.
+pub(super) fn requirements(
+    imports: &[Import<'_>],
+    contributions: &[Contributed<'_>],
+) -> TokenStream {
+    let hooks = contributions.iter().map(|contributed| {
+        let field = &contributed.field;
+        let hook = &contributed.contribution.hook;
+        let signature = &contributed.signature;
+        quote! {
+            let requirement = entry(&mut requirements, &providers.#field)?;
+            requirement.hooks.insert(::std::string::String::from(#hook));
+            requirement.hook_signatures.insert(
+                ::std::string::String::from(#hook),
+                ::std::string::String::from(#signature),
+            );
+        }
+    });
     let required = imports.iter().map(|import| {
         let field = &import.field;
         let interface = import.interface;
@@ -237,6 +464,7 @@ pub(super) fn requirements(imports: &[Import<'_>]) -> TokenStream {
             ) -> ::tembra::Result<::std::vec::Vec<::tembra::core::Requirement>> {
                 let mut requirements = ::std::collections::BTreeMap::new();
                 #({ #required })*
+                #({ #hooks })*
                 ::core::result::Result::Ok(requirements.into_values().collect())
             }
 

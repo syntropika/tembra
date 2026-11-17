@@ -1,11 +1,14 @@
 //! A compiled consumer calls the native Orb that `#[tembra::orb]` generates: its values cross the
 //! consumer's canonical ABI and the provider's codec both ways, as the boundary's JSON, and it
-//! holds the Orb's WIT resources through ordinary handles.
+//! holds the Orb's WIT resources through ordinary handles. The other way round, a native Orb of
+//! the macro calls a compiled provider through its import, and contributes to the hook a compiled
+//! Orb declares.
 //!
-//! Each consumer is a real component encoded from a small core module, so it runs without a guest
-//! toolchain: each function of its `relay` interface forwards its flat arguments to the same
-//! function of the provider's `plotter` and returns what that one returns, and its `holder`
-//! constructs, calls and drops one of the provider's accumulators.
+//! Each compiled Orb is a real component encoded from a small core module, so it runs without a
+//! guest toolchain: each function of the consumer's `relay` interface forwards its flat arguments
+//! to the same function of the provider's `plotter` and returns what that one returns, and its
+//! `holder` constructs, calls and drops one of the provider's accumulators; the meter answers its
+//! async functions at once, and the gate runs its hook over each value it admits.
 use futures::{FutureExt, executor::LocalPool};
 use serde_json::{Value, json};
 use std::rc::Rc;
@@ -13,7 +16,7 @@ use tembra::{Host, Provider};
 use tembra_executor_wasm::{Engine, Install, Limits};
 use tembra_orb_native_fixture::{
     calculator::{self, accumulators::Accumulators},
-    metering,
+    filter, metering,
 };
 
 #[path = "support/components.rs"]
@@ -363,6 +366,96 @@ fn a_native_consumer_calls_a_compiled_provider_through_its_import() {
         assert_eq!(fed, json!(total));
     }
     readings.release().unwrap();
+    pool.run_until(host.close()).unwrap();
+    assert_eq!(engine.instances(), 0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+}
+
+const GUARD: &str = "example:gate/guard@1.0.0";
+const ADMISSIONS: &str = "gate::example:gate/admissions@1.0.0";
+
+/// The gate's WIT, whose hook the native fixture's `filter` contributes to, with a world that
+/// declares the hook and exports the gate's service.
+fn gate_wit() -> String {
+    format!(
+        "{}
+world gate {{
+  import guard;
+  export guard;
+  export admissions;
+}}
+",
+        include_str!("../../orb-macro/native-fixture/wit/deps/gate/gate.wit")
+    )
+}
+
+/// A compiled gate: the export of its declared hook traps, because contributions answer it, and
+/// `admit` hands a fresh admission of its value to the hook's import, which runs the plan, and
+/// returns what the plan composed. The admission crosses in memory, at offset 16.
+const GATE_MODULE: &str = r#"(module
+  (import "example:gate/guard@1.0.0" "apply" (func $run (param i32 i32 i32)))
+  (memory (export "memory") 1)
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 1024)
+  (func (export "example:gate/guard@1.0.0#apply") (param i32 i32) (result i32) unreachable)
+  (func (export "example:gate/admissions@1.0.0#admit") (param i32) (result i32)
+    local.get 0 i32.const 0 i32.const 16 call $run
+    i32.const 16))"#;
+
+/// A native contribution that `#[tembra::orb]` generates joins the hook a compiled Orb declares:
+/// the kernel admits its requirement against the signature it computes for the gate's hook, and
+/// each run of the plan reads the admission with the contribution's codec, runs the author's
+/// function in the contributor's root, under the principal of the call and on no object, as in a
+/// component, and writes its answer back to the gate.
+#[test]
+fn a_native_contribution_joins_the_hook_a_compiled_orb_declares() {
+    let engine = Engine::new(Limits::default()).unwrap();
+    let artifact = components::encode(
+        &gate_wit(),
+        "gate",
+        GATE_MODULE,
+        "gate",
+        &tembra_contracts::ComponentRoles {
+            hooks: [(
+                GUARD.to_owned(),
+                tembra_contracts::HookComposition::Waterfall,
+            )]
+            .into(),
+            ..Default::default()
+        },
+    );
+    let gate = engine.load(&artifact, Install::default()).unwrap();
+    let contributor = filter::orb(filter::Providers {
+        guard: Provider::new("gate", 1),
+    })
+    .unwrap();
+    let mut pool = LocalPool::new();
+    let host = Host::new(pool.spawner());
+    host.install(vec![gate, contributor]).unwrap();
+    let admissions = Rc::new(host.get(ADMISSIONS, vec!["main".into()], "alice").unwrap());
+    pool.run_until(admissions.ready()).unwrap();
+    filter::seen();
+    for (value, admitted) in [
+        (5, json!({ "value": 5, "blocked": false })),
+        (-3, json!({ "value": -3, "blocked": true })),
+    ] {
+        let called = admissions.clone();
+        let answer = pool
+            .run_until(host.root("alice", move |context| {
+                async move {
+                    called
+                        .call_portable::<_, Value>(&context, "admit", json!([value]))
+                        .await
+                }
+                .boxed_local()
+            }))
+            .unwrap();
+        assert_eq!(answer, admitted, "{value}");
+    }
+    assert_eq!(
+        filter::seen(),
+        ["5 for alice on []@host", "-3 for alice on []@host"]
+    );
+    admissions.release().unwrap();
     pool.run_until(host.close()).unwrap();
     assert_eq!(engine.instances(), 0);
     assert!(host.errors().is_empty(), "{:?}", host.errors());

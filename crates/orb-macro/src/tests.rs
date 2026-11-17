@@ -5304,12 +5304,11 @@ fn the_orbs_create_declares_its_root_resources_natively() {
 
 /// What the native side does not cover yet is a compile error inside the facade's wrapper, so a
 /// component build of the module is unaffected: a WASI import, an import, plain or by key, of an
-/// interface with a synchronous function, which works in a component build only, and a hook
-/// contributed to or declared, each named.
+/// interface with a synchronous function, and a hook declaration, whose `run` is synchronous, both
+/// of which work in a component build only, each named.
 #[test]
 fn the_native_side_refuses_what_it_does_not_cover_yet() {
     let service = "#[service] pub struct Ledger; impl Ledger { pub fn count() -> u32 { 0 } }";
-    let dir = consumed("native-hook", ADMISSION_WIT);
     let pace = consumed("native-pace", PACE_WIT);
     let synchronous = "works in a component build only: its function `now` is synchronous, and natively a method has no fiber to suspend while the kernel completes the call, so a native Orb imports only interfaces whose functions are `async func`";
     for (options, module, message) in [
@@ -5338,18 +5337,11 @@ fn the_native_side_refuses_what_it_does_not_cover_yet() {
             format!("the import of example:pace/beat@1.0.0 by key {synchronous}"),
         ),
         (
-            options(PACKAGE, Some(&dir)),
-            format!(
-                "mod book {{ #[hook(\"example:admission/guard@1.0.0\", priority = 1)] pub fn admit(input: guard::Admission) -> guard::Admission {{ input }} {service} }}"
-            ),
-            "the contribution to the hook example:admission/guard@1.0.0 is not supported natively yet".to_owned(),
-        ),
-        (
             options(PACKAGE, None),
             format!(
                 "mod book {{ #[hook(composition = series, input = Admission)] pub struct Guard; pub struct Admission {{ pub value: i32 }} {service} }}"
             ),
-            "the declaration of the hook example:book/guard@1.0.0 is not supported natively yet".to_owned(),
+            "the declaration of the hook example:book/guard@1.0.0 works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook".to_owned(),
         ),
     ] {
         let module =
@@ -5360,6 +5352,58 @@ fn the_native_side_refuses_what_it_does_not_cover_yet() {
             "{message}"
         );
         assert!(wit(&module).starts_with("package "), "{message}");
+    }
+}
+
+/// A contribution to a hook is added to the native Orb: `Providers` names the Orb that declares
+/// the hook, of which the Orb requires the hook with the signature of its callback, and a function
+/// in the contribution's module adds it with `contribute_portable`, after the services. Its
+/// callback reads the hook's input with the codec, runs the author's function in the Orb's root,
+/// with the Orb's resources and the call's context, and writes its answer: the value of a
+/// waterfall's result, and the value of a bail's option, or none.
+#[test]
+fn a_contribution_joins_the_hook_natively() {
+    let dir = consumed("native-contribution", ADMISSION_WIT);
+    let module = orb_with(
+        Options {
+            context: true,
+            ..options(PACKAGE, Some(&dir))
+        },
+        "mod book {
+            #[resource]
+            pub struct Counts(u32);
+            impl Counts {
+                #[open]
+                fn open() -> Self { Counts(0) }
+            }
+            pub mod filters {
+                use super::guard;
+                /// Block negative values.
+                #[hook(\"example:admission/guard@1.0.0\", priority = -7)]
+                pub fn admit(input: guard::Admission) -> guard::Admission { input }
+            }
+        }",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let root = native(&module, &[]);
+    for expected in [
+        "pub fn orb (providers : Providers) -> :: tembra :: Result < :: tembra :: Orb > { orb_named (\"book\" , 1u32 , providers) }",
+        "pub struct Providers { # [doc = \" The Orb that declares the hook `example:admission/guard@1.0.0`, which this Orb contributes to.\"] pub guard : :: tembra :: Provider , }",
+        "let requirement = entry (& mut requirements , & providers . guard) ? ; requirement . hooks . insert (:: std :: string :: String :: from (\"example:admission/guard@1.0.0\")) ;",
+        "let orb = self :: filters :: __tembra_contribution_admit (orb , & providers . guard . name , & resources) ; :: core :: result :: Result :: Ok (orb)",
+        "impl __TembraBoundary for exports :: example :: admission :: guard :: Admission {",
+    ] {
+        assert!(root.contains(expected), "{expected}\n{root}");
+    }
+    assert!(!root.contains("__tembra_import"), "{root}");
+    let filters = native(&module, &["filters"]);
+    for expected in [
+        "pub (crate) fn __tembra_contribution_admit (orb : :: tembra :: Orb , target : & str , resources : & :: std :: rc :: Rc < self :: super :: __tembra_resource :: Resources >) -> :: tembra :: Orb { orb . contribute_portable (target , \"example:admission/guard@1.0.0\" ,",
+        ", - 7i32 , { let __tembra_resources = :: std :: rc :: Rc :: clone (resources) ; move | __tembra_context : :: tembra :: Context , __tembra_input : :: tembra :: serde_json :: Value | self :: super :: context :: __scoped (__tembra_context . clone () , self :: super :: __tembra_resource :: scoped (:: std :: rc :: Rc :: clone (& __tembra_resources) , async move { __tembra_context . check () ? ;",
+        "let input = read (__tembra_input) . map_err (| message | { :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Arguments , message) }) ? ; let value = admit (input) ;",
+        "write (value) . map_err (| message | { :: tembra :: Error :: invalid (:: tembra :: core :: Reason :: Result , message) })",
+    ] {
+        assert!(filters.contains(expected), "{expected}\n{filters}");
     }
 }
 

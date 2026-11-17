@@ -2332,17 +2332,24 @@ fn analyze(options: Options, mut module: ItemMod) -> syn::Result<Analysis> {
         &interface_names,
         &implemented,
     )?;
-    // The data types of the implemented interfaces and of the imported ones, for the native
-    // codecs: the world exports an implemented interface, so the bindings generate its types under
-    // `exports`, and imports the others, whose types they generate at the root, an interface
-    // imported by key too, whose view `use`s them.
+    // The data types of the implemented interfaces, of the imported ones and of the hooks the
+    // module contributes to, for the native codecs: the world exports an implemented interface and
+    // a contributed hook, so the bindings generate their types under `exports`, and imports the
+    // others, whose types they generate at the root, an interface imported by key too, whose view
+    // `use`s them.
     let consumed_types = match &wit_dir {
-        Some(dir) if !implemented.is_empty() || !imported.is_empty() || !views.is_empty() => {
+        Some(dir)
+            if !implemented.is_empty()
+                || !imported.is_empty()
+                || !views.is_empty()
+                || !hooks.is_empty() =>
+        {
             wit::ConsumedTypes::read(
                 dir,
                 implemented
                     .iter()
                     .map(|identity| (identity.as_str(), true))
+                    .chain(hooks.keys().map(|hook| (hook.as_str(), true)))
                     .chain(imported.iter().map(|identity| (identity.as_str(), false)))
                     .chain(views.iter().map(|view| (view.target.as_str(), false))),
             )?

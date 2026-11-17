@@ -21,9 +21,9 @@
 //! create declares each `#[resource]` of its root, into a table `orb()` builds for the Orb, and
 //! every method runs in the scope of its Orb, whose resources their `with` reaches natively. An
 //! import of another Orb's interface whose functions are all `async func` calls the provider the
-//! host names through the kernel, see `providers`. What the native side does not cover yet is a
-//! compile error inside the same wrapper, naming the item; a component build of the module is
-//! unaffected.
+//! host names through the kernel, and a contribution joins the plan of the hook of the Orb the
+//! host names, see `providers`. What the native side does not cover yet is a compile error inside
+//! the same wrapper, naming the item; a component build of the module is unaffected.
 use crate::{
     Analysis, Function, Newtype, Payload, Resource, Service, Shape, ShapeKind, WitResource,
     camel_ident, foreign::Role, metadata::Metadata, rust_ident, wit,
@@ -63,12 +63,14 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         nested: Vec::new(),
         served: BTreeSet::new(),
     };
-    // The interfaces the module imports from other Orbs, which `orb(..)` takes the providers of.
-    let imports = match providers::imports(analysis).and_then(|imports| {
+    // The interfaces the module imports from other Orbs and the hooks it contributes to, which
+    // `orb(..)` takes the providers of.
+    let consumed = providers::imports(analysis).and_then(|imports| {
         covered(analysis)?;
-        Ok(imports)
-    }) {
-        Ok(imports) => imports,
+        Ok((imports, providers::contributions(analysis)?))
+    });
+    let (imports, contributions) = match consumed {
+        Ok(consumed) => consumed,
         Err(refused) => return refusal(refused),
     };
     let imported = !imports.is_empty();
@@ -98,6 +100,24 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
             .entry(service.scope)
             .or_default()
             .extend([items, client(service, analysis)]);
+    }
+    // Each contribution, which `orb(..)` adds to the Orb after its services, with the Orb that
+    // declares the hook, from its module.
+    let mut contributed = Vec::new();
+    for hook in &contributions {
+        let scope = hook.contribution.scope;
+        let path = &analysis.modules[scope];
+        let function = providers::contribution_ident(hook.contribution);
+        let field = &hook.field;
+        let table = resources.then(|| quote! { , &resources });
+        let imports = imported.then(|| quote! { , &imports });
+        contributed.push(quote! {
+            self::#(#path::)* #function(orb, &providers.#field.name #table #imports)
+        });
+        by_scope
+            .entry(scope)
+            .or_default()
+            .push(providers::contribution(hook, analysis, imported));
     }
     // The JSON of each type of the module that enters the WIT, and of each newtype the WIT spells
     // as its field, in the type's module, once the methods that take or return it are covered, and
@@ -157,21 +177,27 @@ pub(crate) fn emit(analysis: &Analysis, metadata: &Metadata) -> Native {
         resources,
         &imports,
         &calls,
+        &contributed,
     );
     let boundary =
         (!analysis.shapes.is_empty() || !analysis.newtypes.is_empty() || !consumed.is_empty())
             .then(boundary_trait);
-    // The providers `orb(..)` takes, the table of the imports and the module of each, in place of
-    // the bindings'.
+    // The providers `orb(..)` takes and what the Orb requires of them, and the table of the
+    // imports and the module of each, in place of the bindings'.
+    let provided = (imported || !contributions.is_empty()).then(|| {
+        let providers = providers::providers(&imports, &contributions);
+        let requirements = providers::requirements(&imports, &contributions);
+        quote! { #providers #requirements }
+    });
     let imported = imported.then(|| {
-        let providers = providers::providers(&imports);
-        let requirements = providers::requirements(&imports);
         let table = providers::table(&imports);
         let modules = providers::modules(&imports, analysis);
-        quote! { #providers #requirements #table #modules }
+        quote! { #table #modules }
     });
     Native {
-        root: wrapped(quote! { #orb #imported #boundary #(#root)* #(#consumed)* #context }),
+        root: wrapped(
+            quote! { #orb #provided #imported #boundary #(#root)* #(#consumed)* #context },
+        ),
         nested: by_scope
             .into_iter()
             .map(|(scope, items)| (scope, wrapped(quote! { #(#items)* })))
@@ -199,7 +225,9 @@ fn wrapped(items: TokenStream) -> TokenStream {
 /// which the Orb's create fills, declaring each before the root runs, and which every service
 /// takes, as one `Rc`. With `imports`, they take `providers` last, the Orb requires each provider,
 /// and `orb_named` builds the table of the Orb's imports, which every service takes too, as one
-/// `Rc`, and whose plain imports the Orb's create declares first.
+/// `Rc`, and whose plain imports the Orb's create declares first. With `contributions`, the calls
+/// adding each to the Orb, which it makes after the services, they take `providers` too, and the
+/// Orb requires each hook of the Orb that declares it.
 ///
 /// Cargo does not rebuild a crate when only `[package.metadata.tembra]` changes, so the generated
 /// code includes the manifest, which makes the compiler track the file: the next build then reads
@@ -213,6 +241,7 @@ fn orb(
     resources: bool,
     imports: &[providers::Import<'_>],
     calls: &[TokenStream],
+    contributions: &[TokenStream],
 ) -> TokenStream {
     let name = &metadata.name;
     let version = metadata.api_version;
@@ -228,20 +257,21 @@ fn orb(
         named.push_str(lent);
     }
     let imported = !imports.is_empty();
-    if imported {
-        let provided = " `providers` name the Orb that answers each interface it imports.";
+    let consumes = imported || !contributions.is_empty();
+    if consumes {
+        let provided = " `providers` name the Orbs it consumes from: the one answering each interface it imports, and the one declaring each hook it contributes to.";
         doc.push_str(provided);
         named.push_str(provided);
     }
     let parameters = inputs
         .map(|path| quote! { inputs: #path })
         .into_iter()
-        .chain(imported.then(|| quote! { providers: Providers }));
+        .chain(consumes.then(|| quote! { providers: Providers }));
     let parameter = quote! { #(#parameters),* };
     let named_parameter = inputs.map(|path| quote! { , inputs: #path });
-    let named_providers = imported.then(|| quote! { , providers: Providers });
+    let named_providers = consumes.then(|| quote! { , providers: Providers });
     let argument = inputs.map(|_| quote! { , inputs });
-    let provided = imported.then(|| quote! { , providers });
+    let provided = consumes.then(|| quote! { , providers });
     let shared = shared.then(|| quote! { let inputs = ::std::rc::Rc::new(inputs); });
     let table = resources.then(|| {
         quote! {
@@ -252,23 +282,23 @@ fn orb(
     });
     // The Orb requires each provider, and its services and its create share the table of its
     // imports, whose plain ones the create declares before anything else.
-    let (imports_table, built) = if imported {
-        (
-            Some(quote! {
-                let imports = ::std::rc::Rc::new(self::__tembra_import::Imports::new(&providers));
-            }),
-            quote! {
-                {
-                    let mut orb = ::tembra::Orb::new(name, api_version);
-                    for requirement in self::__tembra_providers::requirements(&providers)? {
-                        orb = orb.requires(requirement);
-                    }
-                    orb
+    let imports_table = imported.then(|| {
+        quote! {
+            let imports = ::std::rc::Rc::new(self::__tembra_import::Imports::new(&providers));
+        }
+    });
+    let built = if consumes {
+        quote! {
+            {
+                let mut orb = ::tembra::Orb::new(name, api_version);
+                for requirement in self::__tembra_providers::requirements(&providers)? {
+                    orb = orb.requires(requirement);
                 }
-            },
-        )
+                orb
+            }
+        }
     } else {
-        (None, quote! { ::tembra::Orb::new(name, api_version) })
+        quote! { ::tembra::Orb::new(name, api_version) }
     };
     let declared = imports.iter().any(|import| import.view.is_none());
     let create = if declared {
@@ -318,6 +348,16 @@ fn orb(
             (None, false) => None,
         }
     };
+    // The contributions come after the services, each added to the Orb built so far.
+    let built = if contributions.is_empty() {
+        quote! { ::core::result::Result::Ok(#built #create #(.service(#calls))*) }
+    } else {
+        quote! {
+            let orb = #built #create #(.service(#calls))*;
+            #(let orb = #contributions;)*
+            ::core::result::Result::Ok(orb)
+        }
+    };
     quote! {
         const _: &[u8] = ::core::include_bytes!(::core::concat!(
             ::core::env!("CARGO_MANIFEST_DIR"),
@@ -339,9 +379,7 @@ fn orb(
             #shared
             #table
             #imports_table
-            ::core::result::Result::Ok(
-                #built #create #(.service(#calls))*
-            )
+            #built
         }
     }
 }
@@ -436,15 +474,19 @@ fn context_module() -> TokenStream {
                     .expect("the kernel's context is read inside a method of the Orb")
             }
 
-            /// The address of the object running the current call.
+            /// The address of the object running the current call, or an empty key and the
+            /// principal `host` in a hook contribution, which runs in the Orb's root, as in a
+            /// component.
             pub fn object() -> Address {
-                let address = current()
-                    .context
-                    .address()
-                    .expect("the object running a call has an address");
-                Address {
-                    key: address.key,
-                    principal: address.principal,
+                match current().context.address() {
+                    ::core::result::Result::Ok(address) => Address {
+                        key: address.key,
+                        principal: address.principal,
+                    },
+                    ::core::result::Result::Err(_) => Address {
+                        key: ::std::vec::Vec::new(),
+                        principal: ::std::string::String::from("host"),
+                    },
                 }
             }
 
@@ -827,24 +869,16 @@ fn refused(span: Span, message: &str) -> Refused {
     Refused(quote_spanned! { span => ::core::compile_error!(#message); })
 }
 
-/// Whether the native side covers the module's hooks; the first it does not is refused. Each has
-/// its item of the plan, which lifts the refusal. `providers::imports` refuses the imports it does
-/// not cover first.
+/// Whether the native side covers the module's hook declarations: a declared hook's `run` is
+/// synchronous, and natively a method has no fiber to suspend while the kernel runs the hook, so a
+/// declaration works in a component build only. `providers::imports` refuses the imports it does
+/// not cover first, and `providers::contributions` the contributions.
 fn covered(analysis: &Analysis) -> Result<(), Refused> {
-    if let Some(contribution) = analysis.contributions.first() {
-        return Err(refused(
-            contribution.ident.span(),
-            &format!(
-                "the contribution to the hook {} is not supported natively yet",
-                contribution.hook
-            ),
-        ));
-    }
     if let Some(declaration) = analysis.declared.first() {
         return Err(refused(
             declaration.ident.span(),
             &format!(
-                "the declaration of the hook {} is not supported natively yet",
+                "the declaration of the hook {} works in a component build only: its `run` is synchronous, and natively a method has no fiber to suspend while the kernel runs the hook's contributions, so a native Orb declares no hook",
                 declaration.hook
             ),
         ));
@@ -1914,26 +1948,26 @@ fn named<'a>(
 ) -> Result<Kind<'a>, Uncovered<'a>> {
     let reason = if let Some(named) = analysis.consumed_modules.named(ty, scope) {
         let identity = &named.interface.identity;
-        // A type of an interface the module implements or imports, by name or by key, is the
-        // bindings' type, which the codec reads from the interface's WIT.
+        // A type of an interface the module implements or imports, by name or by key, or of a hook
+        // it contributes to, is the bindings' type, which the codec reads from the interface's WIT.
         let defined = matches!(
             named.interface.role,
-            Role::Implemented | Role::Imported | Role::Keyed
+            Role::Implemented | Role::Imported | Role::Keyed | Role::Contributed
         )
         .then(|| analysis.consumed_types.named(identity, named.ident))
         .flatten();
         match defined {
             Some(defined) => {
                 let depth = analysis.modules[scope].len();
-                let role = if named.interface.role == Role::Implemented {
-                    "implemented"
-                } else {
-                    "imported"
+                let interface = match named.interface.role {
+                    Role::Implemented => "the implemented interface",
+                    Role::Contributed => "the hook",
+                    _ => "the imported interface",
                 };
                 match wit_kind(defined, &analysis.consumed_types, depth) {
                     Ok(kind) => return Ok(kind),
                     Err(what) => format!(
-                        "a type of the {role} interface {identity} that is or holds {what}, which the native side does not cover yet"
+                        "a type of {interface} {identity} that is or holds {what}, which the native side does not cover yet"
                     ),
                 }
             }

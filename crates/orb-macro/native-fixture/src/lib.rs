@@ -7,8 +7,9 @@
 //! `notebook` takes host values, which only a native host can lend, `library` shares its root's
 //! value among its objects, and `worker` only runs its root and a resource of it. The module
 //! `metering` imports the meter interface of the package in `wit/deps/`, which `meters`
-//! implements, and its `orb(..)` takes the provider of each import. The manifest names every Orb
-//! of the crate `calculator` at API version 2, which `orb()` reports.
+//! implements, and its `orb(..)` takes the provider of each import; `filter` contributes to the
+//! hook of a gate there, and its `orb(..)` takes the gate. The manifest names every Orb of the
+//! crate `calculator` at API version 2, which `orb()` reports.
 //!
 //! A host that leaves a provider out of `metering::Providers` does not compile:
 //!
@@ -1211,5 +1212,46 @@ pub mod metering {
             assert_eq!(added, total, "one call at a time feeds a meter");
             Ok(total)
         }
+    }
+}
+
+/// Contributes to the hook a gate of the package in `wit/deps/` declares, which the host names:
+/// natively, `filter::orb(..)` takes the gate in `filter::Providers`. An Orb needs no service to
+/// contribute.
+#[tembra::orb(package = "example:filter@1.0.0", wit = "wit", context)]
+pub mod filter {
+    use std::cell::RefCell;
+
+    std::thread_local! {
+        /// What the contribution saw, in order: each value, with the principal of the call that
+        /// ran the hook and the object the contribution ran on.
+        static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// What the contribution saw since the last call, in order.
+    pub fn seen() -> Vec<String> {
+        SEEN.with(RefCell::take)
+    }
+
+    /// Block negative values; let the others continue down the hook unchanged.
+    #[hook("example:gate/guard@1.0.0", priority = -7)]
+    pub fn block_negative(input: guard::Admission) -> guard::Admission {
+        let object = context::object();
+        SEEN.with(|seen| {
+            seen.borrow_mut().push(format!(
+                "{} for {} on [{}]@{}",
+                input.value,
+                context::principal(),
+                object.key.join("/"),
+                object.principal
+            ))
+        });
+        if input.value < 0 {
+            return guard::Admission {
+                value: input.value,
+                blocked: true,
+            };
+        }
+        input
     }
 }

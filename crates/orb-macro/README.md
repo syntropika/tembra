@@ -1269,11 +1269,25 @@ the context of the method running, and reads the result back. A plain import rea
 component's root does; the view of an import by key acquires the object of a key under the
 principal of the call, whose root holds it. A call that fails, or whose arguments or result the
 codec refuses, ends the method that made it with that error, where it traps a component. As the
-`context` functions, the imported functions serve the methods of the Orb and the futures they
-await, and panic elsewhere. A native method has no fiber of its own to suspend while the kernel
-completes a call, as a component's call has, so a synchronous imported function cannot wait for its
-answer: an import of an interface with a synchronous function, plain or by key, is a compile error
-where the runtime is linked, and works in a component build of the same module.
+`context` functions, the imported functions serve the methods and the contributions of the Orb and
+the futures they await, and panic elsewhere. A native method has no fiber of its own to suspend
+while the kernel completes a call, as a component's call has, so a synchronous imported function
+cannot wait for its answer: an import of an interface with a synchronous function, plain or by key,
+is a compile error where the runtime is linked, and works in a component build of the same module.
+
+A [contribution to a hook](#contributing-to-a-hook) serves a native host too. `Providers` names the
+Orb that declares each hook the module contributes to, under the name of the hook's module,
+`guard`, and the Orb requires the hook of it, with the signature of its callback, as the plan of a
+compiled contributor does. `orb(..)` adds each contribution with its priority, after the services:
+the kernel runs it in the hook's plan, whether a native or a compiled Orb declares the hook, and
+it reads the hook's input with the codec, runs the author's function and writes its answer back.
+It runs in the Orb's root, as a component's contribution does: with the root's resources, its
+imports and the call's `context`, whose `object()` is an empty key and the principal `host`, and
+with no state. The runtime's contributions come with the facade's `hooks` feature, which a host
+that installs such an Orb enables. A [hook declaration](#declaring-a-hook) is a compile error where
+the runtime is linked: its `run` is synchronous, and natively a method has no fiber to suspend
+while the kernel runs the hook's contributions, so the declaration works in a component build of
+the module only.
 
 The bindings of the kernel's `tembra:guest` package, which a module with a state, a root resource
 or the `context` option imports, are a module named `tembra` inside the Orb module, which hides the
@@ -1282,12 +1296,13 @@ facade there: such a module names the facade `::tembra`, as in `::tembra::Result
 
 Today the native side covers services whose functions take and return numbers, `bool`, `String`,
 `char`, free JSON, records, enums, variants, flags, newtypes, `Result`s, and `Vec`, `Option` and
-tuples of them, the types of an implemented or imported interface among them, WIT resources as
-above, states, the resources of the Orb's root and the imports of interfaces of `async func`s. A
-type of a consumed interface that holds a resource, an import of an interface with a resource, a
-WASI import and a hook are compile errors where the runtime is linked, naming the item, until the
-native side covers them, and so is an `Option` of an `Option`, which the boundary's JSON cannot
-tell from `None`; a component build of the same module is unaffected.
+tuples of them, the types of an implemented or imported interface or of a hook among them, WIT
+resources as above, states, the resources of the Orb's root, the imports of interfaces of
+`async func`s and contributions to hooks. A type of a consumed interface that holds a resource, an
+import of an interface with a resource and a WASI import are compile errors where the runtime is
+linked, naming the item, until the native side covers them, and so is an `Option` of an `Option`,
+which the boundary's JSON cannot tell from `None`; a component build of the same module is
+unaffected.
 
 ## Items under `#[cfg]`
 
